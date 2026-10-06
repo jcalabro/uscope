@@ -99,6 +99,7 @@ const fn honestly_unavailable(reason: &VariableUnavailableReason) -> bool {
             | VariableUnavailableReason::UnavailableAtInstruction
             | VariableUnavailableReason::Unsupported(_)
             | VariableUnavailableReason::RegisterNotSaved(_)
+            | VariableUnavailableReason::EntryValue(_)
     )
 }
 
@@ -405,6 +406,21 @@ enum OracleValue {
     OptimizedOut,
     Error,
     Other,
+    /// A structure's members by path, depth first, each judged by its own
+    /// bits.
+    Struct(Vec<(String, Self)>),
+}
+
+impl OracleValue {
+    /// What gdb could read of the value: a structure is readable when any
+    /// member is.
+    fn readable(&self) -> bool {
+        match self {
+            Self::OptimizedOut | Self::Error => false,
+            Self::Integer(_) | Self::Float(_) | Self::Other => true,
+            Self::Struct(members) => members.iter().any(|(_, member)| member.readable()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -425,7 +441,7 @@ fn parse_oracle(path: &Path) -> BTreeMap<u64, Vec<OracleFrame>> {
         )
     });
     let mut lines = text.lines();
-    assert_eq!(lines.next(), Some("uscope-frame-variables-oracle-v1"));
+    assert_eq!(lines.next(), Some("uscope-frame-variables-oracle-v2"));
     let mut threads: BTreeMap<u64, Vec<OracleFrame>> = BTreeMap::new();
     let mut thread = None;
     for line in lines {
@@ -448,25 +464,39 @@ fn parse_oracle(path: &Path) -> BTreeMap<u64, Vec<OracleFrame>> {
                     });
             }
             ["var", name, _kind, state, value] => {
-                let value = match *state {
-                    "int" => OracleValue::Integer(value.parse().expect("integer value")),
-                    "float" => OracleValue::Float(value.parse().expect("float value")),
-                    "optimized-out" => OracleValue::OptimizedOut,
-                    "error" => OracleValue::Error,
-                    "other" => OracleValue::Other,
-                    other => panic!("unknown oracle state {other:?}"),
-                };
                 threads
                     .get_mut(&thread.expect("variable follows a thread"))
                     .and_then(|frames| frames.last_mut())
                     .expect("variable follows a frame")
                     .variables
-                    .push(((*name).to_owned(), value));
+                    .push(((*name).to_owned(), oracle_value(state, value)));
+            }
+            ["member", path, state, value] => {
+                let variable = threads
+                    .get_mut(&thread.expect("member follows a thread"))
+                    .and_then(|frames| frames.last_mut())
+                    .and_then(|frame| frame.variables.last_mut());
+                let Some((_, OracleValue::Struct(members))) = variable else {
+                    panic!("member {path} does not follow a structure");
+                };
+                members.push(((*path).to_owned(), oracle_value(state, value)));
             }
             other => panic!("malformed oracle line {other:?} in {}", path.display()),
         }
     }
     threads
+}
+
+fn oracle_value(state: &str, value: &str) -> OracleValue {
+    match state {
+        "int" => OracleValue::Integer(value.parse().expect("integer value")),
+        "float" => OracleValue::Float(value.parse().expect("float value")),
+        "optimized-out" => OracleValue::OptimizedOut,
+        "error" => OracleValue::Error,
+        "other" => OracleValue::Other,
+        "struct" => OracleValue::Struct(Vec::new()),
+        other => panic!("unknown oracle state {other:?}"),
+    }
 }
 
 /// Decodes a value the way the oracle records it, or `None` for one the
@@ -558,44 +588,77 @@ async fn compare_frame(
             .operation(name, scenario.handle().variable(name.clone()))
             .await;
         let context = format!("{context}: {name}");
-        match (&variable.state, expected) {
-            (VariableState::Available { value, .. }, expected) => {
-                match (oracle_view(value), expected) {
-                    (Some(ours), OracleValue::Integer(_) | OracleValue::Float(_)) => {
-                        assert_eq!(&ours, expected, "{context}");
-                        agreement.equal += 1;
-                    }
-                    (_, OracleValue::OptimizedOut | OracleValue::Error) => {
-                        panic!("{context}: gdb cannot read {value:?}")
-                    }
-                    // Pointers and aggregates have no numeric view to compare.
-                    _ => {}
-                }
+        let (VariableState::Available { .. }, OracleValue::Struct(members)) =
+            (&variable.state, expected)
+        else {
+            compare_value(&variable.state, expected, &context, agreement);
+            continue;
+        };
+        for (path, expected) in members {
+            // A nested structure's own members follow it.
+            if matches!(expected, OracleValue::Struct(_)) {
+                continue;
             }
-            (
-                VariableState::Unavailable(reason),
-                OracleValue::OptimizedOut | OracleValue::Error,
-            ) => {
-                assert!(honestly_unavailable(reason), "{context}: {reason}");
-            }
-            (VariableState::Unavailable(reason), _) => {
-                assert!(
-                    matches!(
-                        reason,
-                        VariableUnavailableReason::RegisterNotSaved(_)
-                            | VariableUnavailableReason::Unsupported(_)
-                    ),
-                    "{context}: gdb reads {expected:?}, but ours is unavailable: {reason}"
-                );
-                agreement.declined += 1;
-            }
-            (state, expected) => panic!("{context}: ours is {state:?}, gdb's is {expected:?}"),
+            let member = scenario
+                .operation(
+                    path,
+                    scenario
+                        .handle()
+                        .inspect(&uscope::Expression::parse(path).expect("member path")),
+                )
+                .await;
+            compare_value(
+                &member.state,
+                expected,
+                &format!("{context}: {path}"),
+                agreement,
+            );
         }
     }
 }
 
+/// Compares one value, judging a structure ours cannot read by whether gdb
+/// can read any of it.
+fn compare_value(
+    state: &VariableState,
+    expected: &OracleValue,
+    context: &str,
+    agreement: &mut Agreement,
+) {
+    match (state, expected) {
+        (VariableState::Available { value, .. }, expected) => {
+            match (oracle_view(value), expected) {
+                (Some(ours), OracleValue::Integer(_) | OracleValue::Float(_)) => {
+                    assert_eq!(&ours, expected, "{context}");
+                    agreement.equal += 1;
+                }
+                (_, OracleValue::OptimizedOut | OracleValue::Error) => {
+                    panic!("{context}: gdb cannot read {value:?}")
+                }
+                // Pointers and aggregates have no numeric view to compare.
+                _ => {}
+            }
+        }
+        (VariableState::Unavailable(reason), expected) if !expected.readable() => {
+            assert!(honestly_unavailable(reason), "{context}: {reason}");
+        }
+        (VariableState::Unavailable(reason), _) => {
+            assert!(
+                matches!(
+                    reason,
+                    VariableUnavailableReason::RegisterNotSaved(_)
+                        | VariableUnavailableReason::Unsupported(_)
+                ),
+                "{context}: gdb reads {expected:?}, but ours is unavailable: {reason}"
+            );
+            agreement.declined += 1;
+        }
+        (state, expected) => panic!("{context}: ours is {state:?}, gdb's is {expected:?}"),
+    }
+}
+
 /// Cores whose every thread and frame gdb described, with their executables.
-const ORACLE_CORES: [&str; 20] = [
+const ORACLE_CORES: [&str; 23] = [
     "frames-gcc-o0.core",
     "frames-gcc-o2.core",
     "frames-gcc-o2-nopie.core",
@@ -616,6 +679,9 @@ const ORACLE_CORES: [&str; 20] = [
     "vdso-gcc-o2-time.core",
     "vdso-clang-o2-nopie-clock.core",
     "vdso-clang-o2-nopie-time.core",
+    "locations-gcc-o2.core",
+    "locations-gcc-o2-nopie.core",
+    "locations-clang-o2.core",
 ];
 
 #[tokio::test]

@@ -542,6 +542,16 @@ async fn check_containers_but(
         if optimized && matches!(value.state, VariableState::Unavailable(_)) {
             continue;
         }
+        // Or keep it where it has no address, which a view may need.
+        if optimized
+            && let VariableState::Available {
+                presentation: Some(presentation),
+                ..
+            } = &value.state
+            && matches!(presentation.problem, Some(uscope::ViewProblem::Refused(_)))
+        {
+            continue;
+        }
         check_marker(&scenario, marker, &value, &mut seen, &mut failures).await;
     }
     assert!(failures.is_empty(), "{fixture}:\n{}", failures.join("\n"));

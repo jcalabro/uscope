@@ -11,6 +11,7 @@ mod flight_recorder;
 mod globals;
 mod identities;
 mod libraries;
+mod locations;
 mod metadata;
 mod signals;
 mod stepping;

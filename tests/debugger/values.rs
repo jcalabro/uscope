@@ -450,8 +450,10 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
             let slice = scenario
                 .operation("inspect Rust slice", scenario.handle().variable("slice"))
                 .await;
+            // Optimized code keeps the slice's pointer and length in two
+            // registers.
+            assert_slice_values(&scenario, &slice, None, &[20, 22], fixture).await;
             if fixture == "variables-rust-o0" {
-                assert_slice_values(&scenario, &slice, None, &[20, 22], fixture).await;
                 let indexed = scenario
                     .operation(
                         "inspect one Rust slice element directly",
@@ -495,13 +497,11 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
             } else {
                 assert!(
                     matches!(
-                        slice.type_info.as_ref().map(|info| &info.kind),
-                        Some(uscope::TypeKind::Slice { .. })
-                    ) && matches!(
                         slice.state,
-                        VariableState::Unavailable(uscope::VariableUnavailableReason::Unsupported(
-                            uscope::UnsupportedVariableFeature::CompositeLocation
-                        ))
+                        VariableState::Available {
+                            source: uscope::VariableValueSource::Composite,
+                            ..
+                        }
                     ),
                     "{fixture}: {slice:?}"
                 );

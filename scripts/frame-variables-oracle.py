@@ -8,12 +8,16 @@
 #   thread  <lwp>
 #   frame   <level>  <function or empty>  <scope|noscope>
 #   var     <name>   <argument|local>  <state>  [value]
+#   member  <path>   <state>  [value]
 #
 # A frame's variables are those of its innermost block outward to its
 # function, innermost first, so the first of several equal names is the one
 # a lookup finds. A state is `int` (a decimal integer, pointer, enumerator,
 # boolean, or character), `float` (Python's repr of the value), `optimized-out`,
-# `error`, or `other` for values the tests do not compare.
+# `error`, `struct` for a C or C++ structure, whose members follow, or `other`
+# for values the tests do not compare. gdb calls a structure optimized out
+# when any of its bits are, so each member is judged by its own: a member's
+# path is an expression naming it from the variable, such as `pair.first`.
 
 import os
 
@@ -28,21 +32,38 @@ SCALAR_CODES = {
 }
 
 
-def describe(symbol, frame):
+# Zig describes itself as C, so a frame's language is its source's.
+C_SOURCES = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp")
+
+
+def describe(value, c_source):
+    """A value's state and text, and its members' lines, if it has any."""
     try:
-        value = symbol.value(frame)
-        if value.is_optimized_out:
-            return ("optimized-out", "")
         code = value.type.strip_typedefs().code
+        if code == gdb.TYPE_CODE_STRUCT and c_source:
+            return ("struct", "", list(members(value)))
+        if value.is_optimized_out:
+            return ("optimized-out", "", [])
         if code in SCALAR_CODES:
-            return ("int", str(int(value)))
+            return ("int", str(int(value)), [])
         if code == gdb.TYPE_CODE_FLT:
-            return ("float", repr(float(value)))
+            return ("float", repr(float(value)), [])
         # Reading the value proves it is readable.
         value.fetch_lazy()
-        return ("other", "")
+        return ("other", "", [])
     except gdb.error:
-        return ("error", "")
+        return ("error", "", [])
+
+
+def members(value):
+    """(path, state, text) for each named member of a structure, depth first."""
+    for field in value.type.strip_typedefs().fields():
+        if not field.name or field.is_base_class or not hasattr(field, "bitpos"):
+            continue
+        state, text, nested = describe(value[field], True)
+        yield (field.name, state, text)
+        for path, state, text in nested:
+            yield (f"{field.name}.{path}", state, text)
 
 
 def frame_lines(frame, level):
@@ -52,13 +73,22 @@ def frame_lines(frame, level):
     except RuntimeError:
         return [f"frame\t{level}\t{name}\tnoscope"]
     lines = [f"frame\t{level}\t{name}\tscope"]
+    symtab = frame.find_sal().symtab
+    c_source = symtab is not None and symtab.filename.endswith(C_SOURCES)
     while block is not None:
         for symbol in block:
             if not (symbol.is_argument or symbol.is_variable):
                 continue
             kind = "argument" if symbol.is_argument else "local"
-            state, value = describe(symbol, frame)
-            lines.append(f"var\t{symbol.name}\t{kind}\t{state}\t{value}")
+            try:
+                value = symbol.value(frame)
+            except gdb.error:
+                lines.append(f"var\t{symbol.name}\t{kind}\terror\t")
+                continue
+            state, text, nested = describe(value, c_source)
+            lines.append(f"var\t{symbol.name}\t{kind}\t{state}\t{text}")
+            for path, state, text in nested:
+                lines.append(f"member\t{symbol.name}.{path}\t{state}\t{text}")
         if block.function is not None:
             break
         block = block.superblock
@@ -67,7 +97,7 @@ def frame_lines(frame, level):
 
 def main():
     gdb.execute("set pagination off")
-    lines = ["uscope-frame-variables-oracle-v1"]
+    lines = ["uscope-frame-variables-oracle-v2"]
     threads = sorted(gdb.selected_inferior().threads(), key=lambda thread: thread.ptid[1])
     for thread in threads:
         thread.switch()

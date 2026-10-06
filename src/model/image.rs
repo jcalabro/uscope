@@ -1023,6 +1023,15 @@ impl ModuleImage {
             })
     }
 
+    /// Every linker symbol with the supplied name.
+    pub fn symbols_named(&self, name: &str) -> impl Iterator<Item = &SymbolInfo> {
+        self.symbols_by_name
+            .get(name)
+            .into_iter()
+            .flat_map(|symbols| symbols.iter())
+            .filter_map(|symbol| self.symbol(*symbol))
+    }
+
     /// Finds the single linker symbol with the supplied name.
     pub fn symbol_named(&self, name: &str) -> Result<&SymbolInfo> {
         let matches = self

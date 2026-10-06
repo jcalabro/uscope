@@ -107,6 +107,9 @@ marks! {
     IllTypedRefused,
     /// An evaluated value's bytes were in the register the debugger said.
     RegisterTrue,
+    /// A value the debugger recovered from a caller's call was what the
+    /// register it names held when the function was entered.
+    EntryValueTrue,
     /// The client changed a breakpoint's hit condition or condition.
     BreakpointAmended,
     /// A breakpoint counted a hit that did not stop.

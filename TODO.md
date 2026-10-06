@@ -2,7 +2,6 @@
 
 ## Debugger
 
-- Composite DWARF locations and the rest of the DWARF expression language.
 - Unwind through signal trampolines: evaluate CFI expression rules and present the signal frame.
 - Synthesize `name@plt` symbols for PLT stubs.
 - Break on symbol names in modules without DWARF.
@@ -10,6 +9,7 @@
 - Separate debug information: `.gnu_debuglink`, build-id directories, and debuginfod.
 - Write registers, for assigning `$rax` and DAP's `goto` (VS Code's Jump to Cursor).
 - Step into a chosen call on a line (DAP `stepInTargets`) and show a function's return value after `finish`.
+- Show the frames of tail calls in backtraces, as the chains entry values follow find them.
 - Model function types, so function pointers show their signature.
 - Accept C base type names in casts, such as `(unsigned char)x`, when the program's debug information lacks them.
 - Follow fork children, and offer them to DAP clients as child sessions (`startDebugging`).

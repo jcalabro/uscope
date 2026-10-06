@@ -14,11 +14,13 @@ use crate::inspection::InspectionBudget;
 use crate::model::{TextCompletion, TextSummary, ValueStorage};
 use crate::{
     BaseTypeEncoding, GoKind, InspectionExhaustion, RecordMember, RecordMemberLayout,
-    SourceLanguage, TypeId, TypeKind, VariableValue, VirtualAddress,
+    SourceLanguage, TypeId, TypeKind, VariableUnavailableReason, VariableValue, VirtualAddress,
 };
 
 use super::codec::{decode_address, unsigned_value};
+use super::evaluate::EvaluateError;
 use super::shape::ValueShape;
+use super::storage;
 use super::{DwarfVariableInfo, VariableRuntime};
 
 const PAGE_SIZE: u64 = 4096;
@@ -141,6 +143,17 @@ impl TextReader<'_> {
                 (last <= *end).then(|| Ok(raw[first..last].to_vec()))
             }
             ValueStorage::ImplicitPointer { .. } => None,
+            ValueStorage::Composite(_) => {
+                let selected =
+                    storage::offset(storage.clone(), i64::try_from(offset).ok()?).ok()?;
+                match storage::read(&selected, size, self.runtime, self.budget) {
+                    Ok((_, raw)) => Some(Ok(raw.to_vec())),
+                    Err(EvaluateError::Unavailable(
+                        VariableUnavailableReason::InspectionLimit(exhaustion),
+                    )) => Some(Err(Stopped::Limited(exhaustion))),
+                    Err(_) => None,
+                }
+            }
         }
     }
 }
@@ -418,6 +431,14 @@ mod tests {
             size: usize,
         ) -> Result<Arc<[u8]>, VariableRuntimeError> {
             Ok(vec![b'x'; size].into())
+        }
+
+        fn entry_value(
+            &mut self,
+            _: crate::debug_info::EntryParameter,
+            _: &mut InspectionBudget,
+        ) -> Result<u64, VariableRuntimeError> {
+            Err(VariableRuntimeError::Fatal("no caller".into()))
         }
     }
 
