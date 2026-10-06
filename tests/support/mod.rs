@@ -793,3 +793,33 @@ async fn execution_end(
         }
     }
 }
+
+/// The name `/proc/<pid>/maps` gives the vDSO, which uscope's module takes.
+pub const VDSO: &str = "[vdso]";
+
+/// Where the kernel mapped a process's vDSO, read from `/proc`.
+pub fn vdso_mapping(process: ProcessId) -> std::ops::Range<u64> {
+    let maps = std::fs::read_to_string(format!("/proc/{process}/maps")).expect("read maps");
+    let (start, end) = maps
+        .lines()
+        .find(|line| line.ends_with(VDSO))
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|range| range.split_once('-'))
+        .unwrap_or_else(|| panic!("process {process} maps no vDSO:\n{maps}"));
+    u64::from_str_radix(start, 16).expect("vDSO start")
+        ..u64::from_str_radix(end, 16).expect("vDSO end")
+}
+
+/// The process's loaded vDSO module.
+pub fn vdso_module(modules: &LoadedModuleSnapshot) -> uscope::LoadedModuleRecord {
+    let mut found = modules
+        .modules
+        .iter()
+        .filter(|record| record.path.as_os_str() == VDSO);
+    let vdso = found
+        .next()
+        .unwrap_or_else(|| panic!("no vDSO module in {modules:#?}"))
+        .clone();
+    assert!(found.next().is_none(), "two vDSO modules in {modules:#?}");
+    vdso
+}

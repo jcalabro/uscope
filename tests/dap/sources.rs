@@ -387,3 +387,72 @@ fn library_sources_come_and_go_with_their_library() {
     }
     dap.finish();
 }
+
+/// The vDSO is a module like any library, named as the kernel names it.
+/// Its frames are named by its symbols, or else by address and module, and
+/// the walk continues out of them into the program's source.
+#[test]
+fn vdso_frames_belong_to_a_module_named_as_the_kernel_names_it() {
+    for (mode, caller) in [("clock", "vdso_clock"), ("time", "vdso_time")] {
+        let mut dap = Dap::start(format!("vdso {mode}"));
+        let started = dap.launch(
+            Profile::VsCode,
+            &fixture("vdso-gcc-o0"),
+            json!({"args": [mode]}),
+            &Configuration::default(),
+        );
+        let stop = dap.stopped(started.mark);
+        assert_eq!(stop.reason, "exception", "{mode}");
+        let announced = dap.event(started.mark, "module", |body| {
+            body["module"]["name"] == "[vdso]"
+        });
+        assert_eq!(announced["reason"], "new", "{mode}");
+        let modules = dap.request("modules", json!({}));
+        let vdso = modules["modules"]
+            .as_array()
+            .expect("modules")
+            .iter()
+            .find(|module| module["name"] == "[vdso]")
+            .cloned()
+            .unwrap_or_else(|| panic!("{mode}: {modules:#}"));
+        assert_eq!(vdso["id"], announced["module"]["id"], "{mode}");
+        assert_eq!(
+            vdso["symbolStatus"], "symbols only, no debug information",
+            "{mode}"
+        );
+
+        let trace = dap.request("stackTrace", json!({"threadId": stop.thread}));
+        let frames = trace["stackFrames"].as_array().expect("frames");
+        let innermost = &frames[0];
+        assert_eq!(innermost["moduleId"], vdso["id"], "{mode}: {innermost:#}");
+        let address = innermost["instructionPointerReference"]
+            .as_str()
+            .expect("an instruction");
+        let (start, end) = vdso["addressRange"]
+            .as_str()
+            .and_then(|range| range.split_once('-'))
+            .expect("an address range");
+        let number = |text: &str| u64::from_str_radix(&text[2..], 16).expect("hexadecimal");
+        assert!(
+            (number(start)..number(end)).contains(&number(address)),
+            "{mode}: {address} outside {vdso:#}"
+        );
+        let name = innermost["name"].as_str().expect("a name");
+        if mode == "clock" {
+            assert_eq!(name, format!("{address} in [vdso]"));
+        } else {
+            assert!(
+                name.starts_with("time+0x") || name.starts_with("__vdso_time+0x"),
+                "{name}"
+            );
+        }
+        assert!(
+            frames.iter().any(|frame| frame["name"] == caller
+                && frame["source"]["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("vdso.c"))),
+            "{mode}: {trace:#}"
+        );
+        dap.finish();
+    }
+}

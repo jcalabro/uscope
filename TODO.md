@@ -4,7 +4,6 @@
 
 - Conditions and hit conditions on watchpoints (DAP refuses them on data breakpoints today).
 - Composite DWARF locations and the rest of the DWARF expression language.
-- Register the vDSO as a memory-backed module, so backtraces unwind through it and name its frames.
 - Unwind through signal trampolines: evaluate CFI expression rules and present the signal frame.
 - Synthesize `name@plt` symbols for PLT stubs.
 - Break on symbol names in modules without DWARF.

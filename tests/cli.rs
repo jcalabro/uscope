@@ -2631,3 +2631,57 @@ fn expressions_print_compute_and_point_at_their_errors() {
         );
     }
 }
+
+/// Code in the vDSO is shown as code in any library is: named by a symbol
+/// when one covers it, and always by the module the kernel names `[vdso]`.
+#[test]
+fn vdso_code_is_shown_in_the_module_the_kernel_names() {
+    let core = batch(
+        &["--core", "build/test-programs/vdso-gcc-o0-clock.core"],
+        &["info core", "bt", "where"],
+    );
+    let lines = core.lines().collect::<Vec<_>>();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(" [vdso] module ") && line.ends_with(" read from the dump")),
+        "{core}"
+    );
+    let innermost = lines
+        .iter()
+        .position(|line| line.starts_with("#0 "))
+        .unwrap_or_else(|| panic!("{core}"));
+    assert!(
+        lines[innermost].ends_with(" in <unknown> from [vdso]"),
+        "{core}"
+    );
+    assert!(
+        lines[innermost + 1].contains(" in clock_gettime+0x")
+            && lines[innermost + 1].contains(" from libc.so"),
+        "{core}"
+    );
+    assert!(
+        lines[innermost + 2].contains(" in vdso_clock at "),
+        "{core}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("<unknown> at 0x") && line.ends_with(" from [vdso]")),
+        "{core}"
+    );
+
+    let live = batch(
+        &["build/test-programs/vdso-gcc-o0", "--", "time"],
+        &["run", "bt"],
+    );
+    let innermost = live
+        .lines()
+        .find(|line| line.starts_with("#0 "))
+        .unwrap_or_else(|| panic!("{live}"));
+    assert!(
+        (innermost.contains(" in time+0x") || innermost.contains(" in __vdso_time+0x"))
+            && innermost.ends_with(" from [vdso]"),
+        "{live}"
+    );
+}

@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use support::Scenario;
 use uscope::{
-    Backtrace, CoreDumpOptions, EmbeddedSymbolTable, Error, ImageAddress, LoadedModuleSnapshot,
-    ModuleImage, StackFrame, StopReason, SymbolBinding, SymbolExtentProvenance, SymbolInfo,
-    SymbolKind, SymbolLocation, UnwindTermination, VirtualAddress,
+    Backtrace, CoreDumpOptions, CoreModuleState, EmbeddedSymbolTable, Error, ImageAddress,
+    LoadedModuleSnapshot, ModuleIdentity, ModuleImage, StackFrame, StopReason, SymbolBinding,
+    SymbolExtentProvenance, SymbolInfo, SymbolKind, SymbolLocation, UnwindTermination,
+    VirtualAddress,
 };
 
 /// Each executable of the ELF symbol fixture and the library it loads. The
@@ -499,8 +500,8 @@ struct GdbFrame {
     has_source: bool,
 }
 
-fn gdb_backtrace(executable: &str) -> Vec<GdbFrame> {
-    let path = Scenario::fixture(&format!("{executable}.core.gdb-backtrace"));
+fn gdb_backtrace(core: &str) -> Vec<GdbFrame> {
+    let path = Scenario::fixture(&format!("{core}.gdb-backtrace"));
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     text.lines()
@@ -514,9 +515,12 @@ fn gdb_backtrace(executable: &str) -> Vec<GdbFrame> {
                 ),
                 _ => (None, rest),
             };
+            // A versioned name, such as clock_gettime@GLIBC_2.2.5, names
+            // its symbol without the version.
+            let name = rest.split(" (").next().expect("frame name");
             GdbFrame {
                 address,
-                name: rest.split(" (").next().expect("frame name").to_owned(),
+                name: name.split('@').next().expect("symbol name").to_owned(),
                 has_source: line.contains(") at "),
             }
         })
@@ -542,42 +546,93 @@ async fn cores_agree_with_gdb_and_readelf() {
             .await;
         assert_eq!(location.module, modules.named(library).0);
         assert_eq!(location.image.symbol, trace.frames[0].symbol);
-        let gdb = gdb_backtrace(executable);
-        assert_eq!(trace.frames.len(), gdb.len(), "{executable}: {gdb:#?}");
-
-        for (frame, gdb) in trace.frames.iter().zip(&gdb) {
-            let context = format!("{executable}: frame #{} {gdb:?}", frame.level);
-            if let Some(address) = gdb.address {
-                assert_eq!(frame.instruction.get(), address, "{context}");
-            }
-            if gdb.has_source {
-                let function = frame.function.as_ref().expect("debug-info frame");
-                assert_eq!(function.name.as_ref(), gdb.name, "{context}");
-                continue;
-            }
-            assert!(frame.function.is_none(), "{context}");
-            if gdb.name == "??" {
-                assert!(frame.symbol.is_none(), "{context}: {frame:#?}");
-                continue;
-            }
-            let symbol = frame_symbol(frame, &context);
-            let image = &modules.images[&frame.module.expect("symbolized module")];
-            let chosen = image.symbol(symbol.symbol).expect("catalog symbol");
-            assert!(
-                image
-                    .symbols()
-                    .iter()
-                    .any(|alias| alias.name.as_ref() == gdb.name
-                        && alias.address == chosen.address),
-                "{context}: gdb's {} is not an alias of {}",
-                gdb.name,
-                chosen.name
-            );
-        }
+        let gdb = gdb_backtrace(&format!("{executable}.core"));
+        assert_agrees_with_gdb(&trace, &modules, &gdb, executable);
         assert_catalogs_match_oracles(&modules, executable, library);
         let context = format!("{executable} (core)");
         assert_descriptions(&scenario, &modules, executable, library, index, &context).await;
         scenario.shutdown().await;
+    }
+}
+
+/// No file backs the vDSO, so a core that faulted in it reads its image from
+/// the dumped memory, at the address the auxiliary vector records. gdb's
+/// backtrace of the same core places and names every frame alike, the
+/// vDSO's unexported helper as unnamed.
+#[tokio::test]
+async fn vdso_cores_agree_with_gdb() {
+    for variant in ["gcc-o0", "gcc-o2", "clang-o2-nopie"] {
+        for mode in ["clock", "time"] {
+            let core = format!("vdso-{variant}-{mode}.core");
+            let scenario =
+                Scenario::open_core(&core, &CoreDumpOptions::new(Scenario::fixture(&core)));
+            let modules = Modules::load(&scenario).await;
+            let trace = scenario
+                .operation("backtrace", scenario.handle().backtrace())
+                .await;
+            assert_frame_symbols_are_consistent(&trace, &modules, &core);
+            let vdso = trace.frames[0].module.expect("the fault's module");
+            assert_eq!(modules.file_name(vdso), support::VDSO, "{core}");
+            assert_agrees_with_gdb(&trace, &modules, &gdb_backtrace(&core), &core);
+            assert_eq!(trace.termination, UnwindTermination::Complete, "{core}");
+
+            let info = scenario.handle().core_dump().expect("a core session");
+            let recorded = info
+                .modules
+                .iter()
+                .find(|module| module.recorded_path.as_os_str() == support::VDSO)
+                .unwrap_or_else(|| panic!("{core}: no vDSO in {info:#?}"));
+            assert!(
+                matches!(
+                    &recorded.state,
+                    CoreModuleState::Loaded { module, identity: ModuleIdentity::DumpedMemory }
+                        if module.module.id == vdso
+                            && module.module.load_bias == recorded.start.get()
+                ),
+                "{core}: {recorded:#?}"
+            );
+            assert_eq!(
+                recorded.build_id.as_ref().map(|build_id| build_id.len()),
+                Some(20),
+                "{core}: {recorded:#?}"
+            );
+            scenario.shutdown().await;
+        }
+    }
+}
+
+/// Checks a backtrace against gdb's of the same core: the same frames at
+/// the same addresses, debug-info frames named alike, and symbol frames
+/// named alike or by another symbol at the same address.
+fn assert_agrees_with_gdb(trace: &Backtrace, modules: &Modules, gdb: &[GdbFrame], context: &str) {
+    assert_eq!(trace.frames.len(), gdb.len(), "{context}: {gdb:#?}");
+    for (frame, gdb) in trace.frames.iter().zip(gdb) {
+        let context = format!("{context}: frame #{} {gdb:?}", frame.level);
+        if let Some(address) = gdb.address {
+            assert_eq!(frame.instruction.get(), address, "{context}");
+        }
+        if gdb.has_source {
+            let function = frame.function.as_ref().expect("debug-info frame");
+            assert_eq!(function.name.as_ref(), gdb.name, "{context}");
+            continue;
+        }
+        assert!(frame.function.is_none(), "{context}");
+        if gdb.name == "??" {
+            assert!(frame.symbol.is_none(), "{context}: {frame:#?}");
+            continue;
+        }
+        let symbol = frame_symbol(frame, &context);
+        let image = &modules.images[&frame.module.expect("symbolized module")];
+        let chosen = image.symbol(symbol.symbol).expect("catalog symbol");
+        assert!(
+            image
+                .symbols()
+                .iter()
+                .any(|alias| alias.name.as_ref() == gdb.name && alias.address == chosen.address),
+            "{context}: gdb's {} is not an alias of {}",
+            gdb.name,
+            chosen.name
+        );
     }
 }
 

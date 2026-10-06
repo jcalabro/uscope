@@ -245,3 +245,113 @@ async fn backtraces_unwind_through_shared_libraries_and_libc() {
         scenario.shutdown().await;
     }
 }
+
+/// The kernel maps the vDSO from no file, so its module is read from the
+/// process's memory. Its call-frame information carries the walk out of it
+/// and restores the registers its callers keep values in, and its symbol
+/// table names the code it exports; gdb names the same frames.
+#[tokio::test]
+async fn backtraces_unwind_through_the_vdso() {
+    for variant in ["gcc-o0", "gcc-o2", "clang-o2-nopie"] {
+        let fixture = format!("vdso-{variant}");
+        // clock_gettime faults in an unexported helper that libc calls;
+        // time is the vDSO's own, called straight from the program.
+        for (mode, caller) in [("clock", "vdso_clock"), ("time", "vdso_time")] {
+            let context = format!("{fixture} {mode}");
+            let mut scenario = Scenario::launch(&fixture);
+            let reason = scenario
+                .run_with_to_stop(LaunchOptions {
+                    arguments: vec![mode.into()],
+                    ..LaunchOptions::default()
+                })
+                .await;
+            assert!(
+                matches!(&reason, StopReason::Exception(exception) if exception.code == 11),
+                "{context}: {reason:?}"
+            );
+            let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior
+            else {
+                panic!("{context}: the inferior is stopped");
+            };
+            let modules = scenario
+                .operation("modules", scenario.handle().loaded_modules())
+                .await;
+            let vdso = support::vdso_module(&modules);
+            // The kernel links its vDSO at zero.
+            let mapping = support::vdso_mapping(process_id);
+            assert_eq!(vdso.module.load_bias, mapping.start, "{context}");
+
+            let trace = scenario
+                .operation("backtrace", scenario.handle().backtrace())
+                .await;
+            let frames = frame_modules(&trace, &modules);
+            assert!(
+                mapping.contains(&trace.frames[0].instruction.get()),
+                "{context}: {trace:#?}"
+            );
+            assert_eq!(frames[0].0, support::VDSO, "{context}: {frames:#?}");
+            let level = position_of(&frames, &fixture, caller);
+            let innermost = trace.frames[0].symbol.as_ref();
+            if mode == "clock" {
+                // No symbol covers the helper, and none is guessed.
+                assert!(innermost.is_none(), "{context}: {innermost:?}");
+                assert_eq!(level, 2, "{context}: {frames:#?}");
+                assert!(frames[1].0.starts_with("libc.so"), "{context}: {frames:#?}");
+                let wrapper = trace.frames[1].symbol.as_ref().expect("a libc symbol");
+                assert!(
+                    wrapper.name.ends_with("clock_gettime"),
+                    "{context}: {wrapper:?}"
+                );
+            } else {
+                // `time` and `__vdso_time` name the same code.
+                let symbol = innermost.expect("a vDSO symbol");
+                assert!(
+                    ["time", "__vdso_time"].contains(&symbol.name.as_ref()) && symbol.offset > 0,
+                    "{context}: {symbol:?}"
+                );
+                assert_eq!(level, 1, "{context}: {frames:#?}");
+            }
+            assert_eq!(
+                frames[level + 1],
+                (fixture.clone(), Some("main".to_owned())),
+                "{context}: {frames:#?}"
+            );
+            assert_eq!(
+                trace
+                    .frames
+                    .last()
+                    .and_then(|frame| frame.symbol.as_ref())
+                    .map(|symbol| symbol.name.as_ref()),
+                Some("_start"),
+                "{context}: {frames:#?}"
+            );
+            assert_eq!(
+                trace.termination,
+                UnwindTermination::Complete,
+                "{context}: {frames:#?}"
+            );
+
+            // The stop is located in the vDSO, which has no source.
+            let location = scenario
+                .operation("location", scenario.handle().current_location())
+                .await;
+            assert_eq!(location.module, vdso.module.id, "{context}");
+            assert_eq!(location.image.symbol, trace.frames[0].symbol, "{context}");
+            assert!(location.image.source.is_none(), "{context}");
+
+            // Optimized callers keep `depth` in a register the vDSO and libc
+            // saved and restore through their call-frame information.
+            scenario
+                .operation(
+                    "select caller",
+                    scenario.handle().select_frame(trace.frames[level].id),
+                )
+                .await;
+            let depth = scenario
+                .operation("depth", scenario.handle().variable("depth"))
+                .await;
+            assert_signed(&depth.state, 42, &context);
+            scenario.shutdown().await;
+        }
+    }
+}

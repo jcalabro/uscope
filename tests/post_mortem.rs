@@ -626,14 +626,19 @@ async fn unverifiable_modules_require_permission_and_expose_only_registers() {
         &options("crash-gcc-o0-memoryless.core", None, true),
     );
     let info = core_info(&scenario);
-    assert!(info.modules.len() >= 4, "{info:#?}");
-    assert!(info.modules.iter().all(|module| matches!(
+    assert!(file_images(&info).count() >= 4, "{info:#?}");
+    assert!(file_images(&info).all(|module| matches!(
         &module.state,
         CoreModuleState::Loaded {
             identity: ModuleIdentity::Unverified,
             ..
         }
     )));
+    // Dumps save the vDSO whatever their filter, and it needs no file.
+    assert_eq!(
+        loaded_identity(&info, "[vdso]"),
+        &ModuleIdentity::DumpedMemory
+    );
     let (_, snapshot) = stopped(&mut scenario).await;
     assert_eq!(snapshot.threads.len(), 4);
 
@@ -1330,8 +1335,7 @@ async fn foreign_modules() -> Vec<(PathBuf, PathBuf)> {
     );
     let info = core_info(&scenario);
     scenario.shutdown().await;
-    info.modules
-        .iter()
+    file_images(&info)
         .map(|module| {
             let recorded = PathBuf::clone(&module.recorded_path);
             let original = if recorded
@@ -1361,6 +1365,13 @@ fn named(modules: &[(PathBuf, PathBuf)], prefix: &str) -> (PathBuf, PathBuf) {
         })
         .unwrap_or_else(|| panic!("no {prefix} module in {modules:#?}"))
         .clone()
+}
+
+/// The recorded images files back: all but the vDSO.
+fn file_images(info: &CoreDumpInfo) -> impl Iterator<Item = &uscope::CoreModule> {
+    info.modules
+        .iter()
+        .filter(|module| module.recorded_path.as_os_str() != support::VDSO)
 }
 
 /// Copies `source` to where `recorded` lies under `root`.
@@ -1447,8 +1458,8 @@ async fn cores_from_other_machines_load_every_module_from_a_sysroot() {
     let scenario = Scenario::open_core("sysroot", &options);
     let info = core_info(&scenario);
     let canonical_root = root.path().canonicalize().expect("canonical sysroot");
-    assert_eq!(info.modules.len(), modules.len());
-    for module in info.modules.iter() {
+    assert_eq!(file_images(&info).count(), modules.len());
+    for module in file_images(&info) {
         let CoreModuleState::Loaded {
             module: loaded,
             identity,
@@ -1505,7 +1516,7 @@ async fn a_sysroot_copy_of_this_machine_serves_tls_through_its_c_library() {
     let info = core_info(&recorded);
     recorded.shutdown().await;
     let root = ScratchDir::new("host-sysroot");
-    for module in info.modules.iter() {
+    for module in file_images(&info) {
         place(root.path(), &module.recorded_path, &module.recorded_path);
     }
 
@@ -1898,4 +1909,78 @@ async fn core_tls_is_located_by_libthread_db_and_by_the_c_librarys_own_descripto
     );
     assert_eq!(tls_values(&thread_tls(&foreign_scenario).await), expected);
     foreign_scenario.shutdown().await;
+}
+
+/// The dump holds the only copy of the vDSO, which no file backs. A dump
+/// that lost its memory, or holds something other than its image there,
+/// lists the vDSO as missing and leaves its frames unnamed rather than
+/// guessed.
+#[tokio::test]
+async fn vdso_images_the_dump_lost_are_missing_rather_than_guessed() {
+    const FIXTURE: &str = "vdso-gcc-o0-time.core";
+    let vdso = |info: &CoreDumpInfo| {
+        info.modules
+            .iter()
+            .find(|module| module.recorded_path.as_os_str() == support::VDSO)
+            .unwrap_or_else(|| panic!("no vDSO in {info:#?}"))
+            .clone()
+    };
+    let reference = open_core(FIXTURE);
+    let start = vdso(&core_info(&reference)).start.get();
+    let (trace, _) = named_frames(&reference).await;
+    let fault = trace.frames[0].instruction;
+    reference.shutdown().await;
+
+    let edits: [(&str, SegmentEdit); 3] = [
+        ("unsaved", |bytes, header| {
+            bytes[header + PHDR_FILESZ..header + PHDR_FILESZ + 8]
+                .copy_from_slice(&0_u64.to_le_bytes());
+        }),
+        ("truncated", |bytes, header| {
+            let past_end = u64::try_from(bytes.len()).unwrap() + 4096;
+            bytes[header + PHDR_OFFSET..header + PHDR_OFFSET + 8]
+                .copy_from_slice(&past_end.to_le_bytes());
+        }),
+        // Saved bytes that are not an ELF image.
+        ("overwritten", |bytes, header| {
+            let offset = u64::from_le_bytes(
+                bytes[header + PHDR_OFFSET..header + PHDR_OFFSET + 8]
+                    .try_into()
+                    .unwrap(),
+            );
+            bytes[usize::try_from(offset).unwrap()] = 0;
+        }),
+    ];
+    for (name, edit) in edits {
+        let (_scratch, path) = edited(name, FIXTURE, "edited.core", |bytes| {
+            let (header, _, _) = load_headers(bytes)
+                .into_iter()
+                .find(|&(_, segment, _)| segment == start)
+                .expect("a load segment holds the vDSO");
+            edit(bytes, header);
+        });
+        let scenario = Scenario::open_core(name, &CoreDumpOptions::new(path));
+        let info = core_info(&scenario);
+        let missing = vdso(&info);
+        assert_eq!(missing.state, CoreModuleState::Missing, "{name}");
+        assert_eq!(missing.start.get(), start, "{name}");
+        // The modules files back are unaffected.
+        assert!(
+            loaded_identity(&info, "vdso-gcc-o0").is_verified(),
+            "{name}: {info:#?}"
+        );
+        let (trace, frames) = named_frames(&scenario).await;
+        assert!(
+            trace.frames.len() == 1 && trace.frames[0].instruction == fault,
+            "{name}: {trace:#?}"
+        );
+        assert_eq!(frames[0].0, "?", "{name}");
+        assert!(trace.frames[0].symbol.is_none(), "{name}");
+        assert_eq!(
+            trace.termination,
+            UnwindTermination::ModuleNotFound { address: fault },
+            "{name}"
+        );
+        scenario.shutdown().await;
+    }
 }

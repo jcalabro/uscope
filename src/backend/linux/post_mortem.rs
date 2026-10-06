@@ -22,6 +22,7 @@ use super::core_dump::{
 };
 use super::core_files::{ModuleFile, ModuleLocator, hex, open_explicit};
 use super::thread_db::{self, ProcessServices};
+use super::vdso::{AT_SYSINFO_EHDR, VDSO_NAME, read_memory_image};
 use super::{
     Controller, ControllerChannels, ExecutableSource, ExpectedStop, FileIdentity, Fxsave, Inferior,
     InferiorOrigin, InspectionOps, LinuxError, MemoryAccessError, NativeThreadState, PublicStop,
@@ -408,12 +409,19 @@ struct LibraryImage {
     debug: crate::debug_info::DebugInfo,
 }
 
+/// A loaded image no file backs, read from the dump's memory.
+struct MemoryModule {
+    loaded: LoadedModule,
+    debug: crate::debug_info::DebugInfo,
+}
+
 /// Every recorded image resolved to a file, or explicitly missing.
 struct ResolvedModules {
     main_image: ImageMappings,
     main_file: ImageFile,
     main_debug: crate::debug_info::DebugInfo,
     libraries: Vec<LibraryImage>,
+    vdso: Option<MemoryModule>,
     modules: Vec<CoreModule>,
 }
 
@@ -596,13 +604,87 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
             debug,
         });
     }
+    let number = u32::try_from(libraries.len() + 1)
+        .map_err(|_| backend_error(LinuxError::ModuleIdExhausted))?;
+    let vdso = resolve_vdso(core, number)?.and_then(|(module, vdso)| {
+        modules.push(module);
+        vdso
+    });
     Ok(ResolvedModules {
         main_image,
         main_file,
         main_debug,
         libraries,
+        vdso,
         modules,
     })
+}
+
+/// The vDSO, which no file backs: the dump saved its image with the rest
+/// of the process's memory, at the address the auxiliary vector records. A
+/// dump without that memory or with a malformed image lists it as missing.
+fn resolve_vdso(
+    core: &CoreDump,
+    number: u32,
+) -> Result<Option<(CoreModule, Option<MemoryModule>)>> {
+    let Some(start) = core.auxv_value(AT_SYSINFO_EHDR).filter(|&start| start != 0) else {
+        return Ok(None);
+    };
+    let mut failure = None;
+    let read = read_memory_image(start, u64::MAX, |address, buffer| {
+        match core.read_saved(address, buffer) {
+            Ok(()) => true,
+            Err(CoreMemoryError::Unavailable) => false,
+            Err(CoreMemoryError::Io(error)) => {
+                failure = Some(error);
+                false
+            }
+        }
+    });
+    if let Some(error) = failure {
+        return Err(error.into());
+    }
+    let path = Arc::new(PathBuf::from(VDSO_NAME));
+    let recorded = |build_id: Option<&[u8]>, state| CoreModule {
+        recorded_path: Arc::clone(&path),
+        start: VirtualAddress::new(start),
+        build_id: build_id.map(Into::into),
+        state,
+    };
+    #[cfg(debug_assertions)]
+    if let Err(error) = &read {
+        record!("the dumped vDSO at {start:#x} is unusable: {error}");
+    }
+    let Ok(image) = read else {
+        return Ok(Some((recorded(None, CoreModuleState::Missing), None)));
+    };
+    // The vDSO's one note segment mixes 8- and 4-byte aligned notes, which
+    // only its note sections describe.
+    let build_id = object::File::parse(image.data.as_slice())
+        .ok()
+        .and_then(|object| object.build_id().ok().flatten());
+    let image_id = ModuleImageId::new(number);
+    let Ok(debug) =
+        crate::debug_info::load_module_bytes(Path::new(VDSO_NAME), &image.data, image_id)
+    else {
+        return Ok(Some((recorded(build_id, CoreModuleState::Missing), None)));
+    };
+    let loaded = LoadedModule {
+        id: ModuleId::new(number),
+        image: image_id,
+        load_bias: image.load_bias,
+    };
+    let state = CoreModuleState::Loaded {
+        module: LoadedModuleRecord {
+            module: loaded,
+            path: Arc::clone(&path),
+        },
+        identity: ModuleIdentity::DumpedMemory,
+    };
+    Ok(Some((
+        recorded(build_id, state),
+        Some(MemoryModule { loaded, debug }),
+    )))
 }
 
 /// Opens a core dump, verifies and loads its modules, and starts a controller
@@ -620,6 +702,7 @@ pub fn open_core(
         main_file,
         main_debug,
         libraries,
+        vdso,
         modules,
         ..
     } = resolved;
@@ -645,6 +728,11 @@ pub fn open_core(
         image: Arc::clone(&library.debug.image),
     }))
     .collect();
+    let loaded = libraries
+        .into_iter()
+        .map(|library| (library.loaded, library.debug))
+        .chain(vdso.map(|vdso| (vdso.loaded, vdso.debug)))
+        .collect::<Vec<_>>();
     let target = CoreTarget {
         memory: CoreMemory::new(Arc::new(core), backings),
         symbol_modules,
@@ -674,7 +762,7 @@ pub fn open_core(
             let initialized = controller.initialize_post_mortem(
                 process.pid,
                 main_loaded,
-                libraries,
+                loaded,
                 &StopReason::CoreDump { exception },
             );
             #[cfg(debug_assertions)]
@@ -710,7 +798,7 @@ impl Controller<CoreTarget> {
         &mut self,
         process: u32,
         main: LoadedModule,
-        libraries: Vec<LibraryImage>,
+        modules: Vec<(LoadedModule, crate::debug_info::DebugInfo)>,
         reason: &StopReason,
     ) -> Result<()> {
         let tgid = Pid::from_raw(
@@ -740,15 +828,15 @@ impl Controller<CoreTarget> {
             .expect("main module is registered");
         main_module.loaded = main;
         main_module.link_map = link_maps.get(&main.load_bias).copied();
-        for library in libraries {
+        for (loaded, debug) in modules {
             self.modules.insert(
-                library.loaded.id,
+                loaded.id,
                 RuntimeModule {
-                    loaded: library.loaded,
-                    image: library.debug.image,
-                    unwind: library.debug.unwind,
-                    variables: library.debug.variables,
-                    link_map: link_maps.get(&library.loaded.load_bias).copied(),
+                    loaded,
+                    image: debug.image,
+                    unwind: debug.unwind,
+                    variables: debug.variables,
+                    link_map: link_maps.get(&loaded.load_bias).copied(),
                 },
             );
         }

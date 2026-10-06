@@ -23,7 +23,7 @@ use crate::protocol::{LaunchOptions, StopId};
 use crate::{Result, VirtualAddress};
 
 use super::memory::MemoryAccessError;
-use super::modules::ModuleMapping;
+use super::modules::{ModuleMapping, ProcessMappings};
 use super::native::{InspectionOps, LinuxTraceOps};
 use super::registers::Fxsave;
 use super::signals::{Signal, WaitEvent};
@@ -237,7 +237,7 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
         bias
     }
 
-    fn module_mappings(&self, pid: Pid) -> Result<Vec<ModuleMapping>> {
+    fn module_mappings(&self, pid: Pid) -> Result<ProcessMappings> {
         self.0.module_mappings(pid)
     }
 
