@@ -341,14 +341,11 @@ impl Session {
             for id in self.data.forget(&[entry.watchpoint.id]) {
                 self.data_removed(id).await?;
                 self.client
-                    .event(
-                        "output",
-                        json!({"category": "console", "output": format!(
-                            "data breakpoint {id} on {} was removed: {}\n",
-                            crate::cli::format::watch_subject(&entry.watchpoint),
-                            invalidation_text(entry.reason)
-                        )}),
-                    )
+                    .console(format!(
+                        "data breakpoint {id} on {} was removed: {}",
+                        crate::cli::format::watch_subject(&entry.watchpoint),
+                        invalidation_text(entry.reason)
+                    ))
                     .await?;
             }
         }
