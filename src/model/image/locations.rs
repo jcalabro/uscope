@@ -15,7 +15,9 @@ use std::sync::Arc;
 use crate::type_identity::{NameSyntax, functions};
 use crate::{Error, Result};
 
-use super::{CodeRole, FunctionId, FunctionInfo, ModuleImage, SourceFileId};
+use super::{
+    CodeRole, FunctionId, FunctionInfo, LineNumber, ModuleImage, SourceFileId, SourceLanguage,
+};
 
 /// A unit of code that a language names by an import path and, in its
 /// own source, by a shorter name, such as a Go package.
@@ -246,5 +248,48 @@ impl ModuleImage {
     fn locatable(&self, function: &FunctionInfo) -> bool {
         function.role != CodeRole::Wrapper
             && self.instances_for_function(function.id).next().is_some()
+    }
+
+    /// Whether a line breakpoint in a file stays at the line it asks for:
+    /// the file's functions are Go, whose compiler marks a statement on
+    /// every line that has code, so a line without one has no code to
+    /// stop at and moving to another line would stop somewhere else.
+    #[must_use]
+    pub fn keeps_line_breakpoints(&self, file: SourceFileId) -> bool {
+        self.functions.iter().any(|function| {
+            function.language == SourceLanguage::Go
+                && function
+                    .declaration
+                    .as_ref()
+                    .is_some_and(|declaration| declaration.file == file)
+        })
+    }
+
+    /// The nearest lines of a file before and after `line` that have
+    /// statements.
+    #[must_use]
+    pub fn nearest_statement_lines(
+        &self,
+        file: SourceFileId,
+        line: LineNumber,
+    ) -> (Option<LineNumber>, Option<LineNumber>) {
+        let before = self
+            .statements_by_source_line
+            .range(..(file, line))
+            .next_back()
+            .filter(|((other, _), _)| *other == file)
+            .map(|((_, line), _)| *line);
+        let after = line
+            .get()
+            .checked_add(1)
+            .and_then(LineNumber::new)
+            .and_then(|next| {
+                self.statements_by_source_line
+                    .range((file, next)..)
+                    .next()
+                    .filter(|((other, _), _)| *other == file)
+                    .map(|((_, line), _)| *line)
+            });
+        (before, after)
     }
 }

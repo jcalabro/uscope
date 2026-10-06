@@ -106,7 +106,9 @@ can also be named as Go source names them:
 A name that matches functions of more than one package, or more than one
 function of a package, is refused with each candidate's qualified name, so
 `break main` asks for `main.main` or `runtime.main`. Wrappers the compiler
-generates, such as ABI wrappers, are never chosen.
+generates, such as ABI wrappers, are never chosen. A Go `file:line` with no
+statement is refused with the nearest lines that have one; in other
+languages, as in gdb, it moves to the next line with code in its function.
 
 A hit condition is an operator and a count: `==3` stops at the third hit only,
 `>=5` at the fifth and later, `%10` at every tenth, and `!=`, `<`, `<=`, and `>`

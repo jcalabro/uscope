@@ -956,7 +956,7 @@ impl ModuleImage {
     /// gdb does: the line itself when it has statements, otherwise the next
     /// line that does, provided a function whose statements begin at or
     /// before the request contains it. A line between functions never moves
-    /// into the next one.
+    /// into the next one, and a line of a Go file never moves at all.
     #[must_use]
     pub fn breakpoint_line(&self, file: SourceFileId, line: LineNumber) -> Option<LineNumber> {
         let ((_, next), addresses) = self
@@ -966,6 +966,9 @@ impl ModuleImage {
             .filter(|((next_file, _), _)| *next_file == file)?;
         if *next == line {
             return Some(line);
+        }
+        if self.keeps_line_breakpoints(file) {
+            return None;
         }
         let encloses_request = |instance: &CodeInstanceInfo| {
             self.statements.iter().any(|row| {
