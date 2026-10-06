@@ -487,13 +487,7 @@ async fn a_skipped_hit_before_a_deep_callees_epilogue_is_transparent_to_next() {
         StopReason::Breakpoint { .. }
     ));
     scenario.remove_all_breakpoints().await;
-    let source =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/rt/rt.c"))
-            .expect("read rt.c");
-    let calls_main = 1 + source
-        .lines()
-        .position(|line| line.contains("rt_exit_group(main("))
-        .expect("rt_start calls main") as u64;
+    let calls_main = support::source_line("tests/golden/rt/rt.c", "rt_exit_group(main(");
     while line(&scenario).await != calls_main {
         scenario.step_to_stop(StepKind::OverSource).await;
     }

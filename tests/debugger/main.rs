@@ -34,7 +34,7 @@ use uscope::{
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use support::{Scenario, frame_modules, position_of, register_u64};
+use support::{Scenario, frame_modules, position_of, register_u64, source_line};
 use tokio::time::{Duration, timeout};
 
 fn available_value(state: &VariableState) -> &uscope::VariableValue {
@@ -248,18 +248,6 @@ fn location_line(location: &uscope::ExecutionLocation) -> Option<u64> {
         .source
         .as_ref()
         .map(|source| source.line.get())
-}
-
-/// The one-based line of `path`, relative to the repository, that contains
-/// `marker`.
-fn source_line(path: &str, marker: &str) -> u64 {
-    let text = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
-        .unwrap_or_else(|error| panic!("read {path}: {error}"));
-    let index = text
-        .lines()
-        .position(|line| line.contains(marker))
-        .unwrap_or_else(|| panic!("{path} has no line containing {marker:?}"));
-    u64::try_from(index + 1).expect("line fits u64")
 }
 
 #[derive(Clone, Copy)]

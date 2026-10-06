@@ -745,6 +745,18 @@ pub fn position_of(frames: &[(String, Option<String>)], module: &str, function: 
         .unwrap_or_else(|| panic!("no {module}:{function} frame in {frames:#?}"))
 }
 
+/// The one-based line of `path`, relative to the repository, that contains
+/// `marker`.
+pub fn source_line(path: &str, marker: &str) -> u64 {
+    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+        .unwrap_or_else(|error| panic!("read {path}: {error}"));
+    let index = text
+        .lines()
+        .position(|line| line.contains(marker))
+        .unwrap_or_else(|| panic!("{path} has no line containing {marker:?}"));
+    u64::try_from(index + 1).expect("line fits u64")
+}
+
 /// Randomizes the address space of every process this thread starts from
 /// now on, as an ordinary shell does; `nix develop` turns that off.
 pub fn randomize_addresses() {
