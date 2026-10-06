@@ -249,6 +249,7 @@ impl<P: InspectionOps> Controller<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::linux::core_dump::elf_build_id;
     use object::{Object as _, ObjectSegment as _};
 
     #[test]
@@ -335,7 +336,11 @@ mod tests {
             .unwrap();
         assert!(loadable < sections, "{loadable:#x} {sections:#x}");
         assert!(object.section_by_name(".eh_frame").is_some());
-        assert!(object.build_id().unwrap().is_some());
+        // Its one note segment, aligned to 8 bytes, also holds notes aligned
+        // to 4, so the segment finds the build-id the note sections name.
+        let build_id = object.build_id().unwrap();
+        assert!(build_id.is_some());
+        assert_eq!(elf_build_id(image.data.as_slice()), build_id);
     }
 
     /// Edits a copy of an image, given the offsets of its loadable segment's
