@@ -12,6 +12,7 @@ use crate::{
 use std::cell::RefCell;
 use tokio::sync::broadcast;
 
+use super::activation::StackView;
 use super::classify::{WatchStatus, classify_stop_evidence};
 use super::frames::{default_inline_visible_count, frame_lookup_address};
 use super::memory::{MemoryAccessError, read_logical_memory_with};
@@ -4675,7 +4676,7 @@ fn lost_frame_harness() -> WatchHarness {
                 }),
                 code_instance: Some(CodeInstanceId::new(0)),
                 physical_instance: Some(CodeInstanceId::new(0)),
-                activation: Some(VirtualAddress::new(0x7000)),
+                activation: Some(StackView::thread(pid).activation(VirtualAddress::new(0x7000))),
                 plan_addresses: BTreeSet::from([site]),
                 ..StepStart::default()
             },
@@ -4828,7 +4829,7 @@ fn a_step_whose_thread_exits_while_an_edit_drops_the_other_reason_ends_in_its_ex
         stepping,
         StepKind::OverSource,
         StepStart {
-            activation: Some(VirtualAddress::new(0x7000)),
+            activation: Some(StackView::thread(stepping).activation(VirtualAddress::new(0x7000))),
             ..StepStart::default()
         },
     );
@@ -4911,7 +4912,10 @@ fn an_activation_missing_from_a_wholly_unwound_stack_has_returned() {
     registers.rsp = 0x0ff8;
     // Above every frame of this stack: another stack's activation, as a
     // raw-cloned thread computes from its creator's frame pointer.
-    let elsewhere = VirtualAddress::new(0x9000);
+    let elsewhere = harness
+        .controller
+        .stack_view(harness.threads[0])
+        .activation(VirtualAddress::new(0x9000));
     assert!(
         harness
             .controller

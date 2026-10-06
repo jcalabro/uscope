@@ -980,7 +980,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let registers = self.ptrace.registers(pid)?;
         let guard = SignalGuard {
             address: VirtualAddress::new(registers.rip),
-            stack: registers.rsp,
+            stack: self.stack_position(pid, &registers),
         };
         let execution = self.active_execution()?;
         self.install_additional_plan_breakpoints(execution, &BTreeSet::from([guard.address]))?;
@@ -1031,7 +1031,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Ok(false);
         };
-        if self.ptrace.registers(pid)?.rsp != guard.stack {
+        if self.stack_position(pid, &self.ptrace.registers(pid)?) != guard.stack {
             // The handler itself ran the interrupted code. A site only the
             // guard owns is passed; a planned one is evaluated as usual.
             if planned {

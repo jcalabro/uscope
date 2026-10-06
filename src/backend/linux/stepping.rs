@@ -15,6 +15,7 @@ use crate::{
     SourceLocation, StackFrameId, VirtualAddress,
 };
 
+use super::activation::{Activation, StackPosition};
 use super::breakpoints::install_plan_breakpoint;
 use super::frames::{
     DwarfCallerProvider, code_instance_is_active, frame_lookup_address, make_presentation,
@@ -296,13 +297,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         };
         let registers = self.ptrace.registers(pid)?;
-        let Ok(current) = self.top_activation(pid, &registers) else {
+        let Ok(cfa) = self.top_cfa(pid, &registers) else {
             return Ok(());
         };
-        if current >= caller {
+        if !self.stack_view(pid).activation(cfa).is_callee_of(caller) {
             return Ok(());
         }
-        let Some(slot) = current.get().checked_sub(8) else {
+        let Some(slot) = cfa.get().checked_sub(8) else {
             return Ok(());
         };
         let (Ok(return_address), Ok(stacked)) = (
@@ -368,7 +369,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         };
         let registers = self.ptrace.registers(pid)?;
-        if !x86_64_activation_has_returned(registers.rsp, activation) {
+        if !activation.has_returned(self.stack_position(pid, &registers)) {
             return Ok(());
         }
         // Without unwind information where it returned, the step keeps its
@@ -404,7 +405,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let registers = self.ptrace.registers(pid)?;
         if self
             .top_activation(pid, &registers)
-            .is_ok_and(|current| current < caller)
+            .is_ok_and(|current| current.is_callee_of(caller))
         {
             return Ok(());
         }
@@ -455,10 +456,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(false);
         };
         let registers = self.ptrace.registers(pid)?;
-        Ok(x86_64_activation_has_returned(registers.rsp, activation)
-            && self
-                .image_location(VirtualAddress::new(registers.rip))
-                .is_none_or(|location| undescribed(&location)))
+        Ok(
+            activation.has_returned(self.stack_position(pid, &registers))
+                && self
+                    .image_location(VirtualAddress::new(registers.rip))
+                    .is_none_or(|location| undescribed(&location)),
+        )
     }
 
     /// At a DWARF `epilogue_begin` row, guards the caller's return address and
@@ -498,7 +501,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             && kind == StepKind::OverSource
             && self
                 .top_activation(pid, &registers)
-                .is_ok_and(|current| current < activation)
+                .is_ok_and(|current| current.is_callee_of(activation))
         {
             return Ok(false);
         }
@@ -619,7 +622,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
 
         let registers = self.ptrace.registers(pid)?;
-        if x86_64_activation_has_returned(registers.rsp, activation) {
+        if activation.has_returned(self.stack_position(pid, &registers)) {
             return Ok(false);
         }
         let Some(starting_activation_location) =
@@ -637,7 +640,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             .module_image
             .code_instance(start_instance)
             .is_some_and(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }));
-        let entered_nested_callee = selected_is_inline && current_activation < activation;
+        let entered_nested_callee =
+            selected_is_inline && current_activation.is_callee_of(activation);
         let guarded_activation = if tail_replacement {
             activation
         } else if entered_nested_callee {
@@ -646,7 +650,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(false);
         };
 
-        let Some(return_slot) = guarded_activation.get().checked_sub(8) else {
+        let Some(return_slot) = self
+            .stack_view(pid)
+            .cfa_of(guarded_activation)
+            .and_then(|cfa| cfa.get().checked_sub(8))
+        else {
             return Ok(false);
         };
         let (Ok(cfi_return), Ok(stack_return)) = (
@@ -763,12 +771,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         address: VirtualAddress,
     ) -> Result<()> {
         let registers = self.ptrace.registers(pid)?;
+        let position = self.stack_position(pid, &registers);
         let Some(start) = self.active_step_mut() else {
             return Ok(());
         };
         if let Some(traversal) = start.return_traversal.as_mut()
             && traversal.return_address == address
-            && x86_64_activation_has_returned(registers.rsp, traversal.guarded_activation)
+            && traversal.guarded_activation.has_returned(position)
         {
             traversal.retire_return_after_repair = true;
         }
@@ -795,8 +804,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         if kind == StepKind::OverInstruction {
             // A stepped-over call completes when it returns to its caller's
             // stack, not when recursion reaches the same return address.
+            let position = self.stack_position(pid, &registers);
             return Ok(start.call_return.is_none_or(|(address, stack)| {
-                registers.rip == address.get() && registers.rsp == stack
+                registers.rip == address.get() && position == stack
             }));
         }
 
@@ -853,7 +863,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     // when its return address could not be independently
                     // proven for accelerated traversal.
                     if location.physical_instance != start.physical_instance
-                        && !x86_64_activation_has_returned(registers.rsp, activation)
+                        && !activation.has_returned(self.stack_position(pid, &registers))
                     {
                         return Ok(false);
                     }
@@ -888,7 +898,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             {
                 return Some(false);
             }
-            if !x86_64_activation_has_returned(registers.rsp, traversal.guarded_activation) {
+            if !traversal
+                .guarded_activation
+                .has_returned(self.stack_position(pid, registers))
+            {
                 return Some(false);
             }
             if start.activation == Some(traversal.guarded_activation) {
@@ -915,11 +928,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         &self,
         pid: Pid,
         registers: &libc::user_regs_struct,
-        caller: VirtualAddress,
+        caller: Activation,
         kind: StepKind,
     ) -> bool {
         let current = self.top_activation(pid, registers).ok();
-        current.is_some_and(|current| current >= caller)
+        current.is_some_and(|current| current == caller || caller.is_callee_of(current))
             && self
                 .image_location(VirtualAddress::new(registers.rip))
                 .is_some_and(|location| {
@@ -934,7 +947,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         &self,
         pid: Pid,
         registers: &libc::user_regs_struct,
-        activation: VirtualAddress,
+        activation: Activation,
     ) -> Result<bool> {
         Ok(self
             .location_for_activation(pid, registers, activation)?
@@ -998,7 +1011,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             None => {
                 current_physical.is_some()
                     && current_physical != start.physical_instance
-                    && registers.rsp < start.stack_pointer
+                    && start.stack_pointer.is_some_and(|start| {
+                        self.stack_position(pid, registers).is_deeper_than(start)
+                    })
             }
         };
         // A recommended entry row may carry no source attribution. Source
@@ -1123,7 +1138,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .as_ref()
                 .and_then(|location| location.physical_instance),
             activation,
-            stack_pointer: registers.rsp,
+            stack_pointer: Some(self.stack_position(pid, &registers)),
             plan_addresses,
             call_return,
             ..StepStart::default()
@@ -1137,7 +1152,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior: &Inferior,
         pid: Pid,
         registers: &libc::user_regs_struct,
-    ) -> Result<Option<(VirtualAddress, u64)>> {
+    ) -> Result<Option<(VirtualAddress, StackPosition)>> {
         let mut decoder = decoder_for(self.module_image.target(), AssemblySyntax::Intel)?;
         let read = read_logical_memory(
             &self.ptrace,
@@ -1158,7 +1173,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         .checked_add(u64::try_from(length).expect("instruction length fits u64"))
                         .ok_or(Error::AddressOverflow)?,
                 ),
-                registers.rsp,
+                self.stack_position(pid, registers),
             )),
             _ => None,
         })
@@ -1211,11 +1226,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ));
             }
             let caller_unavailable = |reason| backend_error(LinuxError::CallerUnavailable(reason));
-            let activation = resolved.cfa.clone().map_err(|_| {
-                caller_unavailable(crate::UnwindTermination::InvalidCaller {
-                    description: "the frame's call-frame address is unavailable".into(),
-                })
-            })?;
+            let activation = self
+                .stack_view(pid)
+                .activation(resolved.cfa.clone().map_err(|_| {
+                    caller_unavailable(crate::UnwindTermination::InvalidCaller {
+                        description: "the frame's call-frame address is unavailable".into(),
+                    })
+                })?);
             let stack = self.physical_stack(inferior, pid, resolved.activation + 2)?;
             let return_address = stack
                 .frames
@@ -1231,17 +1248,23 @@ impl<P: LinuxTraceOps> Controller<P> {
             code_instance: Some(code_instance),
             physical_instance: location.physical_instance,
             activation: Some(activation),
-            stack_pointer: registers.rsp,
+            stack_pointer: Some(self.stack_position(pid, registers)),
             plan_addresses,
             ..StepStart::default()
         })
     }
 
+    /// The innermost activation of a stopped thread.
     pub(super) fn top_activation(
         &self,
         pid: Pid,
         native: &libc::user_regs_struct,
-    ) -> Result<VirtualAddress> {
+    ) -> Result<Activation> {
+        Ok(self.stack_view(pid).activation(self.top_cfa(pid, native)?))
+    }
+
+    /// The canonical frame address of a stopped thread's innermost frame.
+    fn top_cfa(&self, pid: Pid, native: &libc::user_regs_struct) -> Result<VirtualAddress> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         self.main_image_unwinder(inferior, pid, native)
             .frame_cfa(&innermost_frame(native))
@@ -1252,15 +1275,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         &self,
         pid: Pid,
         native: &libc::user_regs_struct,
-        activation: VirtualAddress,
+        activation: Activation,
     ) -> Result<Option<ImageLocation>> {
-        // On x86-64's downward-growing ordinary stack, a live activation's
-        // CFA remains above RSP. Once RSP reaches that CFA, the return has
-        // already restored the caller's stack. Recognize that transition
-        // before asking the main-module-only unwinder to interpret libc code.
-        if x86_64_activation_has_returned(native.rsp, activation) {
+        // A live activation's CFA remains beyond the stack pointer. Once the
+        // stack pointer reaches it, the return has already restored the
+        // caller's stack. Recognize that transition before asking the
+        // main-module-only unwinder to interpret libc code.
+        if activation.has_returned(self.stack_position(pid, native)) {
             return Ok(None);
         }
+        let view = self.stack_view(pid);
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let mut context = innermost_frame(native);
         let mut provider = self.main_image_unwinder(inferior, pid, native);
@@ -1268,10 +1292,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         for level in 0..DEFAULT_MAX_FRAMES {
             // Each frame is known by its own CFA, so the starting activation
             // is recognized even when its return address cannot be read.
-            let cfa = provider
-                .frame_cfa(&context)
-                .map_err(|reason| backend_error(LinuxError::CallerUnavailable(reason)))?;
-            if cfa == activation {
+            let frame = view.activation(
+                provider
+                    .frame_cfa(&context)
+                    .map_err(|reason| backend_error(LinuxError::CallerUnavailable(reason)))?,
+            );
+            if frame == activation {
                 let level = u32::try_from(level).expect("frame limit fits u32");
                 let location = frame_lookup_address(level, &context)
                     .and_then(|address| inferior.loaded_module.image_address(address).ok())
@@ -1280,9 +1306,8 @@ impl<P: LinuxTraceOps> Controller<P> {
 
                 return Ok(location);
             }
-            // This backend only supports x86-64's downward-growing ordinary stack. Once
-            // unwinding passes the starting CFA, that activation has returned.
-            if cfa > activation {
+            // Once unwinding passes the starting activation, it has returned.
+            if activation.is_callee_of(frame) {
                 return Ok(None);
             }
             context = match provider.caller(&context) {
@@ -1375,13 +1400,6 @@ const fn innermost_frame(native: &libc::user_regs_struct) -> FrameContext {
 /// library, holds `location`.
 const fn undescribed(location: &ImageLocation) -> bool {
     location.physical_instance.is_none() && location.source.is_none()
-}
-
-pub(super) const fn x86_64_activation_has_returned(
-    stack_pointer: u64,
-    activation_cfa: VirtualAddress,
-) -> bool {
-    stack_pointer >= activation_cfa.get()
 }
 
 /// Whether unwinding found no caller the debugger can trust.
