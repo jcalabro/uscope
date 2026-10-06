@@ -138,6 +138,24 @@ fn variables_show_values_and_types_and_expand_aggregates() {
     for child in fields.iter().chain(&elements) {
         assert_evaluates(&mut dap, &frame, child);
     }
+    // A client paging by kind gets only rows of that kind.
+    let mut filtered = |reference: &Value, filter: &str| {
+        dap.request(
+            "variables",
+            json!({"variablesReference": reference, "filter": filter}),
+        )["variables"]
+            .as_array()
+            .expect("variables")
+            .len()
+    };
+    assert_eq!(filtered(&array["variablesReference"], "indexed"), 2);
+    assert_eq!(filtered(&array["variablesReference"], "named"), 0);
+    assert_eq!(filtered(&pair["variablesReference"], "named"), 2);
+    assert_eq!(filtered(&pair["variablesReference"], "indexed"), 0);
+    assert_eq!(
+        filtered(&scopes["Locals"]["variablesReference"], "indexed"),
+        0
+    );
     dap.finish();
 }
 
@@ -756,40 +774,6 @@ fn hexadecimal_is_a_session_default_each_request_may_override() {
     assert!(
         dap.request_error("uscope/setValueFormat", json!({"hex": "yes"}))
             .contains("hex")
-    );
-    dap.finish();
-}
-
-#[test]
-fn variables_filtered_by_kind_return_only_children_of_that_kind() {
-    let mut dap = Dap::start("filters");
-    let stop = stopped_at(
-        &mut dap,
-        "variables-gcc-o0",
-        "c/variables.c",
-        "return **pointer_pointer",
-    );
-    let frame = frames(&mut dap, stop.thread)[0].clone();
-    let scopes = scopes(&mut dap, &frame);
-    let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
-    let filtered = |dap: &mut Dap, reference: &Value, filter: &str| {
-        dap.request(
-            "variables",
-            json!({"variablesReference": reference, "filter": filter}),
-        )["variables"]
-            .as_array()
-            .expect("variables")
-            .len()
-    };
-    let array = named(&locals, "array")["variablesReference"].clone();
-    let pair = named(&locals, "pair")["variablesReference"].clone();
-    assert_eq!(filtered(&mut dap, &array, "indexed"), 2);
-    assert_eq!(filtered(&mut dap, &array, "named"), 0);
-    assert_eq!(filtered(&mut dap, &pair, "named"), 2);
-    assert_eq!(filtered(&mut dap, &pair, "indexed"), 0);
-    assert_eq!(
-        filtered(&mut dap, &scopes["Locals"]["variablesReference"], "indexed"),
-        0
     );
     dap.finish();
 }

@@ -8,8 +8,6 @@
 //! disconnects, checks that the adapter exited cleanly, and that the
 //! program it launched is gone.
 
-#![allow(dead_code, reason = "each scenario file uses a subset of the harness")]
-
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
@@ -187,25 +185,13 @@ struct Checks {
 impl Dap {
     /// Starts `uscope dap` with no session yet.
     pub fn start(name: impl Into<String>) -> Self {
-        Self::start_with(name, &[])
+        Self::start_in(name, &[])
     }
 
-    /// Starts `uscope dap` with extra command-line arguments.
-    pub fn start_with(name: impl Into<String>, arguments: &[&str]) -> Self {
-        Self::start_in(name, arguments, &[])
-    }
-
-    /// Starts `uscope dap` with extra arguments and environment variables.
-    pub fn start_in(
-        name: impl Into<String>,
-        arguments: &[&str],
-        environment: &[(&str, &str)],
-    ) -> Self {
+    /// Starts `uscope dap` with extra environment variables.
+    pub fn start_in(name: impl Into<String>, environment: &[(&str, &str)]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
-        command
-            .arg("dap")
-            .args(arguments)
-            .envs(environment.iter().copied());
+        command.arg("dap").envs(environment.iter().copied());
         let recording = flight_recordings::watch_adapter(&mut command);
         let mut dap = Self::spawn(name, &mut command);
         dap.recording = recording;
@@ -817,8 +803,7 @@ impl Dap {
         panic!("{}: {problem}\n{}", self.name, self.transcript())
     }
 
-    /// The transcript so far.
-    pub fn transcript(&self) -> String {
+    fn transcript(&self) -> String {
         self.transcript.lock().expect("transcript").join("\n")
     }
 
@@ -1099,7 +1084,7 @@ impl Dap {
 
     /// Waits for the adapter to close its output, as it does when its
     /// session ends.
-    pub fn wait_for_end(&mut self) {
+    fn wait_for_end(&mut self) {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         loop {
             match self

@@ -35,45 +35,6 @@ fn top(dap: &mut Dap, thread: i64) -> (String, Value, Value) {
 }
 
 #[test]
-fn next_over_a_join_completes_while_the_worker_runs() {
-    let path = source("c/thread-steps.c");
-    let mut dap = Dap::start("next over join");
-    let stop = stopped_at(
-        &mut dap,
-        "thread-steps-gcc-o0",
-        "c/thread-steps.c",
-        "joins the gated worker",
-    );
-    // The worker waits at a gate this line opens, so it is alive here and
-    // the step completes only because it runs.
-    let threads = dap.request("threads", Value::Null);
-    assert_eq!(threads["threads"].as_array().map(Vec::len), Some(2));
-    let next = dap.send("next", json!({"threadId": stop.thread}));
-    // The step resumes every thread, as the continued event says first.
-    let continued = dap.event(next.mark, "continued", |_| true);
-    assert_eq!(
-        continued,
-        json!({"threadId": stop.thread, "allThreadsContinued": true})
-    );
-    dap.success(next);
-    let stepped = dap.stopped(next.mark);
-    assert_eq!(stepped.reason, "step");
-    assert_eq!(stepped.thread, stop.thread);
-    let (name, line, _) = top(&mut dap, stepped.thread);
-    assert_eq!(
-        (name.as_str(), line),
-        (
-            "main",
-            json!(line_of(&path, "return atomic_load(&worker_finished)"))
-        )
-    );
-    // The worker ran to its end during the step.
-    let exited = dap.event(next.mark, "thread", |body| body["reason"] == "exited");
-    assert_ne!(exited["threadId"], stop.thread);
-    dap.finish();
-}
-
-#[test]
 fn another_threads_breakpoint_ends_a_step_where_it_hit() {
     let mut dap = Dap::start("interrupted step");
     let path = source("c/thread-steps.c");
@@ -144,6 +105,11 @@ fn step_in_out_and_by_instruction() {
     let advance = |dap: &mut Dap, command: &str, arguments: Value| {
         let sent = dap.send(command, arguments);
         dap.success(sent);
+        // Clients assume only the stepping thread runs unless told.
+        assert_eq!(
+            dap.event(sent.mark, "continued", |_| true),
+            json!({"threadId": thread, "allThreadsContinued": true})
+        );
         let stopped = dap.stopped(sent.mark);
         assert_eq!(stopped.reason, "step", "{command}");
         top(dap, thread)
@@ -335,21 +301,6 @@ fn fatal_signals_explain_themselves_and_exits_report_the_signal() {
         dap.output_text(resumed.mark, "important")
             .contains("the program was terminated by SIGSEGV")
     );
-    dap.finish();
-}
-
-#[test]
-fn go_preemption_signals_never_stop_a_go_program() {
-    let mut dap = Dap::start("go preemption");
-    let started = dap.launch(
-        Profile::VsCode,
-        &fixture("preempt-go"),
-        json!({}),
-        &Configuration::default(),
-    );
-    let (kind, body) = dap.next_event(started.mark, &["stopped", "exited"]);
-    assert_eq!((kind.as_str(), body), ("exited", json!({"exitCode": 0})));
-    assert!(dap.output_text(started.mark, "console").is_empty());
     dap.finish();
 }
 

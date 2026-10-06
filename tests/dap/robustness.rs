@@ -241,7 +241,7 @@ fn missed_events_are_recovered_from_the_debuggers_state() {
     // at every stop, the threads the client was told of are the threads
     // there are. A stop waits for every exiting thread to be gone, so no
     // thread starts or exits while the program is stopped.
-    let mut dap = Dap::start_in("lagged threads", &[], &[("USCOPE_EVENT_CAPACITY", "1")]);
+    let mut dap = Dap::start_in("lagged threads", &[("USCOPE_EVENT_CAPACITY", "1")]);
     let started = dap.launch(
         Profile::Helix,
         &fixture("thread-stress"),
@@ -290,7 +290,7 @@ fn missed_events_are_recovered_from_the_debuggers_state() {
 
     // Libraries load and unload in bursts too: at every stop, the modules
     // the client was told of are the modules loaded.
-    let mut dap = Dap::start_in("lagged modules", &[], &[("USCOPE_EVENT_CAPACITY", "1")]);
+    let mut dap = Dap::start_in("lagged modules", &[("USCOPE_EVENT_CAPACITY", "1")]);
     let started = dap.launch(
         Profile::VsCode,
         &fixture("globals-shared"),

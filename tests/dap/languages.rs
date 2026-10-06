@@ -1,17 +1,10 @@
 //! Values in every supported language as a client sees them.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use crate::dap::{Configuration, Dap, Profile, fixture};
-
-fn language_source(path: &str) -> PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(path)
-}
+use crate::dap::{Configuration, Dap, Profile, fixture, source};
 
 /// Launches a program to its first stop, returning the stopped thread and
 /// its innermost frame.
@@ -72,7 +65,7 @@ fn scalars_read_alike_in_cpp_rust_zig_and_go() {
         "doublePrecision",
         "localSigned",
     ];
-    for (program, source, line, names) in [
+    for (program, path, line, names) in [
         ("variables-cpp-gcc-o0", "cpp/variables.cpp", 27, snake),
         ("variables-cpp-clang-o0", "cpp/variables.cpp", 27, snake),
         ("variables-rust-o0", "rust/variables.rs", 33, snake),
@@ -84,7 +77,7 @@ fn scalars_read_alike_in_cpp_rust_zig_and_go() {
             &mut dap,
             program,
             &Configuration {
-                sources: vec![(language_source(source), vec![line])],
+                sources: vec![(source(path), vec![line])],
                 ..Configuration::default()
             },
         );

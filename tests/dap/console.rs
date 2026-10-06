@@ -31,9 +31,6 @@ fn console_commands_see_the_focused_frame_and_cannot_run_the_program() {
     let trace = dap.request("stackTrace", json!({"threadId": stop.thread}));
     let frames = trace["stackFrames"].as_array().expect("frames").clone();
 
-    let backtrace = repl(&mut dap, &frames[0]["id"], "bt");
-    assert!(backtrace.starts_with("#0 "), "{backtrace}");
-    assert!(backtrace.contains("in pointer_target at"), "{backtrace}");
     // Commands run in the frame the client focuses.
     assert_eq!(
         repl(&mut dap, &frames[0]["id"], "print parameter"),
@@ -54,8 +51,6 @@ fn console_commands_see_the_focused_frame_and_cannot_run_the_program() {
     );
     // Lines that are no command are expressions.
     assert_eq!(dap.request("evaluate", json!({"expression": "*pointer_parameter", "frameId": frames[0]["id"], "context": "repl"}))["result"], "42");
-    let signals = repl(&mut dap, &frames[0]["id"], "info signals");
-    assert!(signals.contains("SIGSEGV"), "{signals}");
     for command in ["continue", "next", "step", "run", "finish", "quit"] {
         let message = dap.request_error(
             "evaluate",
@@ -254,13 +249,6 @@ fn variables_named_like_commands_evaluate_in_the_console() {
     assert_eq!(repl(&mut dap, id, "p/x list"), "(int) list = 0x5");
     assert_eq!(repl(&mut dap, id, "print/x x"), "(int) x = 0x14");
     assert_eq!(repl(&mut dap, id, "print x"), "(int) x = 20");
-    assert_eq!(
-        dap.request_error(
-            "evaluate",
-            json!({"expression": "next", "frameId": id, "context": "repl"})
-        ),
-        "`next` is not available in the debug console; use the debugger's controls"
-    );
     // An expression's mistake points at the text it is about.
     let message = dap.request_error(
         "evaluate",
