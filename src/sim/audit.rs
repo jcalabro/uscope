@@ -11,7 +11,7 @@ use super::hits::Published;
 use super::kernel::{ExitStatus, Kernel, Tid, WaitStatus};
 use super::marks::{Mark, Marks};
 use super::report::Failure;
-use crate::DebuggerEvent;
+use crate::{ConditionOwner, DebuggerEvent};
 
 pub struct Auditor {
     events: broadcast::Receiver<DebuggerEvent>,
@@ -136,25 +136,43 @@ impl Auditor {
                         )));
                     }
                 }
-                DebuggerEvent::LogMessage { breakpoint, .. } => {
-                    *self
-                        .published
-                        .borrow_mut()
-                        .logged
-                        .entry(breakpoint.get())
-                        .or_default() += 1;
-                }
-                DebuggerEvent::ConditionFailed { breakpoint, .. } => {
-                    *self
-                        .published
-                        .borrow_mut()
-                        .condition_failures
-                        .entry(breakpoint.get())
-                        .or_default() += 1;
+                DebuggerEvent::LogMessage { .. } | DebuggerEvent::ConditionFailed { .. } => {
+                    self.count_hit_event(&event)?;
                 }
                 _ => {}
             }
         }
+    }
+
+    /// Counts a message a hit logged or a condition that failed to evaluate.
+    fn count_hit_event(&self, event: &DebuggerEvent) -> Result<(), Failure> {
+        let mut published = self.published.borrow_mut();
+        match event {
+            DebuggerEvent::LogMessage { breakpoint, .. } => {
+                *published.logged.entry(breakpoint.get()).or_default() += 1;
+            }
+            DebuggerEvent::ConditionFailed {
+                owner: ConditionOwner::Breakpoint(breakpoint),
+                ..
+            } => {
+                *published
+                    .condition_failures
+                    .entry(breakpoint.get())
+                    .or_default() += 1;
+            }
+            // The client's watch conditions are constants.
+            DebuggerEvent::ConditionFailed {
+                owner: ConditionOwner::Watchpoint(watchpoint),
+                error,
+                ..
+            } => {
+                return Err(failure(format!(
+                    "watchpoint {watchpoint}'s constant condition failed to evaluate: {error}"
+                )));
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 

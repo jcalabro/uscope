@@ -417,6 +417,13 @@ numeric_id!(
     "Identifies one watchpoint within a debug session."
 );
 
+/// The breakpoint or watchpoint whose condition an event concerns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionOwner {
+    Breakpoint(BreakpointId),
+    Watchpoint(WatchpointId),
+}
+
 /// The memory accesses that trigger a watchpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WatchAccess {
@@ -575,6 +582,29 @@ pub struct Watchpoint {
     pub scope: WatchScope,
     /// The naturally aligned hardware spans that exactly cover the bytes.
     pub coverage: Arc<[crate::AddressRange<VirtualAddress>]>,
+    /// Which hits stop execution; `None` stops at every hit.
+    pub hit_condition: Option<HitCondition>,
+    /// A condition the accessing thread's innermost frame must meet, after
+    /// the access, for a hit that its hit condition allows to stop.
+    pub condition: Option<crate::Condition>,
+    /// How many accesses the watchpoint reported, including those its
+    /// conditions did not stop at: every access for [`WatchAccess::Write`]
+    /// and [`WatchAccess::ReadWrite`], and every store that changed the
+    /// bytes last observed for [`WatchAccess::Change`].
+    ///
+    /// As with [`Breakpoint::hit_count`], hits that do not stop publish
+    /// nothing, so the count is exact at every published stop.
+    pub hit_count: u64,
+}
+
+/// What a watchpoint does at a hit besides counting it: it stops when the
+/// hit meets the hit condition and the condition.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatchpointOptions {
+    /// Which hits may stop; `None` lets every hit stop.
+    pub hit_condition: Option<HitCondition>,
+    /// A condition the accessing thread's innermost frame must meet.
+    pub condition: Option<crate::Condition>,
 }
 
 /// One watchpoint reported by one thread's access.
@@ -592,6 +622,10 @@ pub struct WatchpointHit {
     pub watchpoint: WatchpointId,
     /// The thread whose instruction made the access.
     pub thread: ThreadId,
+    /// The watchpoint's hit count including this hit, which is this hit's
+    /// number. Other threads' hits counted before the stop was published
+    /// can make [`Watchpoint::hit_count`] larger.
+    pub hit_count: u64,
     /// The watched bytes last observed by the debugger, when readable.
     pub previous: Option<Arc<[u8]>>,
     /// The watched bytes once every thread stopped, when readable.
@@ -1137,13 +1171,13 @@ pub enum DebuggerEvent {
         breakpoint: BreakpointId,
         parts: Arc<[LogPart]>,
     },
-    /// A breakpoint's condition could not be evaluated at a hit, which
-    /// therefore stops as if the condition were met.
+    /// A breakpoint's or watchpoint's condition could not be evaluated at a
+    /// hit, which therefore stops as if the condition were met.
     ConditionFailed {
         revision: u64,
         process_id: ProcessId,
         thread_id: ThreadId,
-        breakpoint: BreakpointId,
+        owner: ConditionOwner,
         error: Arc<str>,
     },
     /// The set of logical breakpoints changed.
@@ -1221,6 +1255,17 @@ pub enum Request {
     AddWatchpoint {
         spec: WatchpointSpec,
         access: WatchAccess,
+        options: WatchpointOptions,
+        reply: Reply<Watchpoint>,
+    },
+    SetWatchpointHitCondition {
+        id: WatchpointId,
+        hit_condition: Option<HitCondition>,
+        reply: Reply<Watchpoint>,
+    },
+    SetWatchpointCondition {
+        id: WatchpointId,
+        condition: Option<crate::Condition>,
         reply: Reply<Watchpoint>,
     },
     RemoveWatchpoint {
@@ -1473,6 +1518,8 @@ impl Request {
             Self::AddWatchpoint { spec, access, .. } => {
                 format!("add watchpoint {spec:?} {access:?}")
             }
+            Self::SetWatchpointCondition { id, .. } => format!("set condition of {id:?}"),
+            Self::SetWatchpointHitCondition { id, .. } => format!("set hit condition of {id:?}"),
             Self::RemoveWatchpoint { id, .. } => format!("remove watchpoint {id:?}"),
             Self::WriteMemory {
                 stop_id,

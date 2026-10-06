@@ -647,6 +647,64 @@ async function dataBreakpointsAndTheirModes() {
     await finish();
 }
 
+/**
+ * A data breakpoint's condition and hit count choose which changes stop,
+ * and editing them keeps the data breakpoint and its count. VS Code edits
+ * them only from its breakpoint widget, so the scenario sends the requests
+ * VS Code sends after a "Break on Value Change" and each edit.
+ */
+async function dataBreakpointConditions() {
+    const breakpoint = new vscode.FunctionBreakpoint('caller');
+    vscode.debug.addBreakpoints([breakpoint]);
+    const { session, frame } = await launchToStop({
+        name: 'vscode-data-conditions', program: fixture('hit-counts-gcc-o0'),
+    }, 'function breakpoint');
+    await remove(breakpoint);
+    const { dataId } = await session.customRequest('dataBreakpointInfo', { name: 'last_call', frameId: frame.frameId });
+    const set = async (options) => (await session.customRequest('setDataBreakpoints', {
+        breakpoints: [{ dataId, accessType: 'write', ...options }],
+    })).breakpoints[0];
+    // Continues to the next change, and returns how VS Code describes it
+    // and the call the focused frame made.
+    const next = async (id) => {
+        const stopped = event('stopped', (body) => body.reason === 'data breakpoint');
+        await vscode.commands.executeCommand('workbench.action.debug.continue');
+        const { body } = (await stopped).message;
+        assert.deepStrictEqual(body.hitBreakpointIds, [id]);
+        const at = await focus();
+        const call = await session.customRequest('evaluate', { expression: 'call', frameId: at.frameId, context: 'watch' });
+        return [body.description, call.result];
+    };
+
+    const first = await set({ condition: 'call % 10 == 0' });
+    assert.strictEqual(first.verified, true);
+    assert.deepStrictEqual(await next(first.id), ['last_call changed from 9 to 10', '10']);
+    // Edited, it keeps its id, and its hit count counts every change since
+    // it was set.
+    const edited = await set({ condition: 'call % 10 == 5', hitCondition: '>=12' });
+    assert.deepStrictEqual([edited.id, edited.verified], [first.id, true]);
+    assert.deepStrictEqual(await next(first.id), ['last_call changed from 14 to 15', '15']);
+
+    // A condition that cannot be evaluated stops at the next change and says why.
+    await set({ condition: 'no_such_value > 1' });
+    const explained = event('output', (body) => /could not be evaluated/.test(body.output));
+    assert.deepStrictEqual(await next(first.id), ['last_call changed from 15 to 16', '16']);
+    assert.strictEqual(
+        (await explained).message.body.output,
+        `data breakpoint ${first.id} stopped because its condition could not be evaluated: `
+            + 'no variable is named `no_such_value` here\n',
+    );
+
+    // Conditions that do not parse leave it unverified and unarmed.
+    const refused = await set({ condition: 'call = 3' });
+    assert.strictEqual(refused.verified, false);
+    assert.match(refused.message, /cannot assign; compare with `==`/);
+    const bare = await set({ hitCondition: '5' });
+    assert.strictEqual(bare.verified, false);
+    assert.match(bare.message, /a bare count is ambiguous; write ==5 .* or >=5/);
+    await finish();
+}
+
 /** A crash stops at the signal, explains it, and ends the program when continued. */
 async function crashAtASignal() {
     const exception = answer('exceptionInfo');
@@ -914,7 +972,7 @@ exports.run = async function run() {
             createALaunchJson, findTheAdapterFromTheSetting, logTheProtocolToAFile, launchStepInspectAndRestart,
             stepIntoByInstructionAndRunToCursor, conditionsHitCountsLogpointsAndRefusals,
             consoleWatchHoverHexadecimalAndInlineValues, completionsAndLocations, dataBreakpointsAndTheirModes,
-            crashAtASignal,
+            dataBreakpointConditions, crashAtASignal,
             pauseAndThreads, librariesAndTheirSources, runInTheIntegratedTerminal, attachToAProcess,
             pickAProcess, openACoreDump, refuseBadConfigurationsAndOfferPrograms,
         ]) {

@@ -12,7 +12,8 @@ Adapter Protocol, from VS Code, Neovim, Helix, Zed, and Emacs.
   [expression](docs/expressions.md) conditions and hit conditions, including
   in shared libraries that load later.
 - **Hardware watchpoints** that stop on a value change, on every store, or on
-  any access, scoped to the lifetime of the storage they watch.
+  any access, with conditions and hit conditions, scoped to the lifetime of
+  the storage they watch.
 - **Execution control**: continue, `step`, `next`, `stepi`, `nexti`, and
   `finish`, through inlined calls, across all threads (all-stop).
 - **Stacks**: backtraces through every loaded module, with frame selection

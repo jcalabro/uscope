@@ -806,9 +806,10 @@ impl Controller<CoreTarget> {
                 | Request::SetBreakpointCondition { reply, .. } => reject(reply),
                 Request::RemoveAllBreakpoints { reply } => reject(reply),
                 Request::ResolveWatchTarget { reply, .. } => reject(reply),
-                Request::AddWatchpoint { reply, .. } | Request::RemoveWatchpoint { reply, .. } => {
-                    reject(reply);
-                }
+                Request::AddWatchpoint { reply, .. }
+                | Request::RemoveWatchpoint { reply, .. }
+                | Request::SetWatchpointHitCondition { reply, .. }
+                | Request::SetWatchpointCondition { reply, .. } => reject(reply),
                 Request::RemoveAllWatchpoints { reply } => reject(reply),
                 Request::Launch { reply, .. }
                 | Request::Continue { reply, .. }

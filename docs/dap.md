@@ -22,6 +22,7 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
   - Conditions and logpoints in the [expression language](expressions.md): a logpoint's `{expression}` parts are evaluated at each hit. A condition that does not parse, or that assigns, leaves its breakpoint unverified with the reason; one that fails when evaluated stops the program and says why.
   - Hit counts are an operator and a count: `==5`, `>=5`, `%3`. A bare `5` is refused, since clients disagree about whether it means the fifth hit only or every hit from the fifth.
   - Data breakpoints (hardware watchpoints) on variables, expressions, and addresses. A `write` data breakpoint stops when a store changes the value, as clients present it ("Break on Value Change"); its *On Every Store* mode (`breakpointModes`) stops at every store, even of the value already held. `readWrite` stops at every load and store. A watched local ends with its frame, and the client is told. Data breakpoints set before a program is loaded are refused.
+  - Conditions and hit counts on data breakpoints, as on breakpoints. A condition is evaluated in the accessing thread's frame after the access, and every reported access is a hit. A data breakpoint re-sent with new conditions keeps its id and its count; one whose conditions do not parse is unverified and no longer watches.
   - Breakpoints can be edited while the program runs. Breakpoints the debug console makes or deletes are reported to the client, as are the client's data breakpoints it deletes.
 - **Execution.** Continue, pause, step over, into, and out, by line or by instruction. The debugger is all-stop: every thread stops and resumes together, unless a request names a single thread (`singleThread`). A program that executes itself again is followed with its breakpoints.
 - **Inspection.**
@@ -46,7 +47,6 @@ The adapter does not advertise these:
 - Jumping to a line (`gotoTargets`, VS Code's *Jump to Cursor*) and assigning registers, which need writable registers.
 - Stepping into a chosen call on a line (`stepInTargets`), restarting a frame (`restartFrame`), and stepping backwards.
 - Showing the value a function returned after stepping out of it.
-- Conditions and hit counts on data breakpoints, which are refused with a reason.
 - Following the children of `fork`: they are released and run on their own.
 - Terminating single threads, and leaving a process suspended when detaching from it.
 - Sending source contents: every source has a path, and the client reads it.

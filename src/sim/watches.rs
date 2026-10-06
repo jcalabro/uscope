@@ -6,11 +6,19 @@
 //! each such thread; one on changes reports the threads that stored once
 //! the watched bytes differ from those at the last stop, and none when a
 //! store left them as they were or another thread undid it.
+//!
+//! Every access a watchpoint on stores or on any access reports is a hit,
+//! and every hit of one on changes is a store, so the hits it counted since
+//! the last stop are exactly, or at most, the accesses made since. A
+//! watchpoint with a hit condition or a condition reports only the hits its
+//! policies let stop, so the client knows of no access it must report.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::hits::{Known, Policy};
 use super::kernel::{Kernel, Tid};
-use crate::{StopReason, WatchAccess};
+use super::marks::Mark;
+use crate::{StopReason, WatchAccess, WatchpointHit};
 
 /// A watchpoint the client was told exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,18 +29,23 @@ pub struct Intent {
     pub access: WatchAccess,
     /// The hardware spans covering it, as start and end.
     pub spans: Vec<(u64, u64)>,
+    /// What it was asked to do at its hits since the last stop, oldest
+    /// first: a change while the program runs applies from a hit the
+    /// client cannot know.
+    pub policies: Vec<Policy>,
 }
 
-/// What the check found worth counting.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Found {
-    /// A reported hit.
-    pub hit: bool,
-    /// A hit reported for a thread other than the process's first.
-    pub other_thread: bool,
-    /// A store that left watched bytes as they were, which a watchpoint on
-    /// stores reports and one on changes does not.
-    pub unchanged: bool,
+impl Intent {
+    /// Whether it reports every access its kind watches.
+    pub fn unconditional(&self) -> bool {
+        self.policies.iter().all(|policy| policy.unconditional())
+    }
+
+    /// Whether it reports every access, rather than only those that change
+    /// the bytes or that its conditions let stop.
+    pub fn reports_every_access(&self) -> bool {
+        self.access != WatchAccess::Change && self.unconditional()
+    }
 }
 
 /// The bytes of `intent` in `tgid`'s memory now.
@@ -44,15 +57,31 @@ pub fn bytes(kernel: &Kernel, tgid: Tid, intent: &Intent) -> Option<Vec<u8>> {
         .peek_bytes(intent.address, usize::try_from(intent.size).ok()?)
 }
 
-/// Judges the stop the controller just published for `tgid`.
-pub fn judge(
-    kernel: &Kernel,
-    tgid: Tid,
-    reasons: &BTreeMap<Tid, StopReason>,
-    intents: &[Intent],
-    baselines: &BTreeMap<u64, Vec<u8>>,
-) -> Result<Found, String> {
-    let mut found = Found::default();
+/// A stop the controller just published, and what it is judged against.
+pub struct Stop<'a> {
+    pub kernel: &'a Kernel,
+    pub tgid: Tid,
+    /// Each stopped thread's own reason.
+    pub reasons: &'a BTreeMap<Tid, StopReason>,
+    pub intents: &'a [Intent],
+    /// The watched bytes at the last stop.
+    pub baselines: &'a BTreeMap<u64, Vec<u8>>,
+    /// The hits each watchpoint had counted at the last stop.
+    pub last_counts: &'a BTreeMap<u64, u64>,
+    /// The hits each watchpoint has counted.
+    pub counts: &'a BTreeMap<u64, u64>,
+}
+
+/// Judges a stop, returning the marks it reached.
+pub fn judge(stop: &Stop<'_>) -> Result<Vec<Mark>, String> {
+    let kernel = stop.kernel;
+    let mut marks = Vec::new();
+    let mut reach = |mark| {
+        if !marks.contains(&mark) {
+            marks.push(mark);
+        }
+    };
+    let mut stopped = BTreeMap::<u64, BTreeSet<u64>>::new();
     let accessors = |watch: u64| {
         kernel
             .watching
@@ -66,18 +95,18 @@ pub fn judge(
         if kernel
             .threads
             .get(&tid)
-            .is_none_or(|thread| thread.tgid != tgid)
+            .is_none_or(|thread| thread.tgid != stop.tgid)
         {
             continue;
         }
         let accessed = kernel.watching.log.get(&tid).cloned().unwrap_or_default();
-        let reported = match reasons.get(&tid) {
+        let reported = match stop.reasons.get(&tid) {
             Some(StopReason::Watchpoint { hits }) => hits.to_vec(),
             _ => Vec::new(),
         };
         for hit in &reported {
             let id = hit.watchpoint.get();
-            let Some(intent) = intents.iter().find(|intent| intent.id == id) else {
+            let Some(intent) = stop.intents.iter().find(|intent| intent.id == id) else {
                 continue;
             };
             if !accessed.contains(&id) {
@@ -86,48 +115,133 @@ pub fn judge(
                      since the last stop"
                 ));
             }
-            let now = bytes(kernel, tgid, intent);
-            let before = baselines.get(&id).cloned();
-            if hit.current.as_deref() != now.as_deref()
-                || hit.previous.as_deref() != before.as_deref()
-            {
-                return Err(format!(
-                    "thread {tid}'s hit on watchpoint {id} shows {:02x?} becoming {:02x?}; the \
-                     bytes were {before:02x?} at the last stop and are {now:02x?}",
-                    hit.previous, hit.current
-                ));
+            if judge_hit(stop, tid, hit, intent)? {
+                reach(Mark::WatchConditionHeld);
             }
-            if intent.access == WatchAccess::Change && now == before {
-                return Err(format!(
-                    "thread {tid} reported a change of watchpoint {id}, whose bytes are as \
-                     they were at the last stop, {now:02x?}"
-                ));
+            stopped.entry(id).or_default().insert(hit.hit_count);
+            reach(Mark::WatchHit);
+            if tid != stop.tgid {
+                reach(Mark::WatchHitOnAnotherThread);
             }
-            found.hit = true;
-            found.other_thread |= tid != tgid;
         }
         for &id in &accessed {
-            let Some(intent) = intents.iter().find(|intent| intent.id == id) else {
+            let Some(intent) = stop.intents.iter().find(|intent| intent.id == id) else {
                 continue;
             };
             let hit = reported.iter().any(|hit| hit.watchpoint.get() == id);
-            let changed = bytes(kernel, tgid, intent) != baselines.get(&id).cloned();
-            let required = match intent.access {
-                WatchAccess::Write | WatchAccess::ReadWrite | WatchAccess::Read => true,
-                // The thread that stored is the one to report only when no
-                // other stored meanwhile.
-                WatchAccess::Change => changed && accessors(id) == BTreeSet::from([tid]),
-            };
+            let changed = bytes(kernel, stop.tgid, intent) != stop.baselines.get(&id).cloned();
+            let required = intent.unconditional()
+                && match intent.access {
+                    WatchAccess::Write | WatchAccess::ReadWrite | WatchAccess::Read => true,
+                    // The thread that stored is the one to report only when
+                    // no other stored meanwhile.
+                    WatchAccess::Change => changed && accessors(id) == BTreeSet::from([tid]),
+                };
             if required && !hit {
                 return Err(format!(
                     "thread {tid} accessed watchpoint {id} ({}), but the stop reports no hit \
                      for it: {:?}",
                     intent.access,
-                    reasons.get(&tid)
+                    stop.reasons.get(&tid)
                 ));
             }
-            found.unchanged |= kernel.watching.unchanged.contains(&id);
+            if kernel.watching.unchanged.contains(&id) {
+                reach(Mark::UnchangedStore);
+            }
         }
     }
-    Ok(found)
+    if judge_counts(stop, &stopped)? {
+        reach(Mark::WatchHitDeclined);
+    }
+    Ok(marks)
+}
+
+/// Judges one hit thread `tid` reported on `intent`: the bytes it shows,
+/// its number, and that a policy lets it stop. Returns whether the client
+/// knew that every policy made it stop although not every hit stops.
+fn judge_hit(
+    stop: &Stop<'_>,
+    tid: Tid,
+    hit: &WatchpointHit,
+    intent: &Intent,
+) -> Result<bool, String> {
+    let id = intent.id;
+    let now = bytes(stop.kernel, stop.tgid, intent);
+    let before = stop.baselines.get(&id).cloned();
+    // A declined hit's bytes are what the next hit reports from, so those
+    // of a watch with conditions are any it held since.
+    let held =
+        |previous: Option<&[u8]>| {
+            previous == before.as_deref()
+                || !intent.unconditional()
+                    && stop.kernel.watching.stored.get(&id).is_some_and(|stored| {
+                        stored.iter().any(|bytes| Some(&bytes[..]) == previous)
+                    })
+        };
+    if hit.current.as_deref() != now.as_deref() || !held(hit.previous.as_deref()) {
+        return Err(format!(
+            "thread {tid}'s hit on watchpoint {id} shows {:02x?} becoming {:02x?}; the bytes \
+             were {before:02x?} at the last stop and are {now:02x?}",
+            hit.previous, hit.current
+        ));
+    }
+    if intent.access == WatchAccess::Change && hit.previous == hit.current {
+        return Err(format!(
+            "thread {tid} reported a change of watchpoint {id}, whose bytes are as they were, \
+             {now:02x?}"
+        ));
+    }
+    let (counted_before, counted) = (count_of(stop.last_counts, id), count_of(stop.counts, id));
+    if !(counted_before + 1..=counted).contains(&hit.hit_count) {
+        return Err(format!(
+            "thread {tid} reported hit {} of watchpoint {id}, which counted hits {}..={counted} \
+             since the last stop",
+            hit.hit_count,
+            counted_before + 1
+        ));
+    }
+    if !intent
+        .policies
+        .iter()
+        .any(|policy| policy.may_stop(hit.hit_count))
+    {
+        return Err(format!(
+            "thread {tid} stopped at hit {} of watchpoint {id}, which none of {:?} lets stop",
+            hit.hit_count, intent.policies
+        ));
+    }
+    Ok(!intent.unconditional()
+        && intent
+            .policies
+            .iter()
+            .all(|policy| policy.condition != Known::Unknown && policy.must_stop(hit.hit_count)))
+}
+
+/// Judges the hits each watchpoint counted since the last stop against the
+/// accesses threads made to it, given the hits that `stopped` threads.
+/// Returns whether one counted a hit that did not stop.
+fn judge_counts(stop: &Stop<'_>, stopped: &BTreeMap<u64, BTreeSet<u64>>) -> Result<bool, String> {
+    let mut declined = false;
+    for intent in stop.intents {
+        let id = intent.id;
+        let (counted_before, counted) = (count_of(stop.last_counts, id), count_of(stop.counts, id));
+        let accesses = count_of(&stop.kernel.watching.counts, id);
+        let hits = counted.checked_sub(counted_before).ok_or_else(|| {
+            format!("watchpoint {id}'s hit count went down from {counted_before} to {counted}")
+        })?;
+        let exact = intent.access != WatchAccess::Change;
+        if hits > accesses || (exact && hits != accesses) {
+            return Err(format!(
+                "watchpoint {id} ({}) counted {hits} hits since the last stop, but threads made \
+                 {accesses} accesses to it",
+                intent.access
+            ));
+        }
+        declined |= hits > stopped.get(&id).map_or(0, |hits| hits.len() as u64);
+    }
+    Ok(declined)
+}
+
+fn count_of(counts: &BTreeMap<u64, u64>, id: u64) -> u64 {
+    counts.get(&id).copied().unwrap_or(0)
 }

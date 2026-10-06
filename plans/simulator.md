@@ -303,7 +303,8 @@ see or change it (`kernel/shadow.rs`, `kernel/watching.rs`):
   activation.
 - Per thread since the last stop, the accesses to watched ranges, whether
   an armed slot covered each, and whether a store left the bytes as they
-  were.
+  were; per watch, how many instructions accessed it and the bytes each
+  store left.
 - Every execution of the program's own instruction where a user
   breakpoint is certainly enabled.
 
@@ -518,12 +519,21 @@ failed request about it.
 
 **Watch accounting** (`watches.rs`): no thread accesses a watched range
 unless an armed slot covers the access, and none runs on from an access to
-a watch on stores or on any access without a stop published since. At each
-new stop, a thread that accessed a watch on stores or on any access reports
-a hit on it; a watch on changes reports the thread that stored when it
-alone stored and the bytes differ from those at the last stop, and no
-thread when they are as they were. Every hit shows the bytes at the last
-stop and now, and a thread reports no hit on a watch it did not access.
+a watch on stores or on any access without a stop published since, unless
+the watch has a hit condition or a condition. At each new stop, a thread
+that accessed an unconditional watch on stores or on any access reports a
+hit on it; an unconditional watch on changes reports the thread that stored
+when it alone stored and the bytes differ from those at the last stop, and
+no thread when they are as they were. Every hit shows the bytes now, and
+those at the last stop, or for a watch with conditions, which reports from
+the bytes a declined hit left, those any store since left; a change hit's
+two differ. A thread reports no hit on a watch it did not access. Each
+instruction that accesses a watch is one hit: between two stops a watch on
+stores or on any access counts exactly as many hits as instructions
+accessed it, and a watch on changes at most as many. A hit's number lies in
+those counted since the last stop, and some policy since lets it stop,
+judged as breakpoint conditions are. The client's watch conditions are
+constants, so none may fail to evaluate.
 
 **Semantic** (`semantics.rs`, judged by the world after each poll, against
 shadow state and facts). At each new stop the client reads the selected

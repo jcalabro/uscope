@@ -1243,9 +1243,9 @@ impl Session {
                     .console(crate::cli::format::log_message(&parts))
                     .await?;
             }
-            DebuggerEvent::ConditionFailed {
-                breakpoint, error, ..
-            } => self.condition_failed(breakpoint, &error).await?,
+            DebuggerEvent::ConditionFailed { owner, error, .. } => {
+                self.condition_failed(owner, &error).await?;
+            }
             DebuggerEvent::WatchpointsInvalidated { invalidated, .. } => {
                 self.data_invalidated(&invalidated).await?;
             }
@@ -1270,20 +1270,35 @@ impl Session {
             .await
     }
 
-    /// Explains a stop that a breakpoint's unevaluable condition caused.
+    /// Explains a stop that a breakpoint's or data breakpoint's unevaluable
+    /// condition caused, naming it by the client's id where it has one.
     async fn condition_failed(
         &self,
-        breakpoint: uscope::BreakpointId,
+        owner: uscope::ConditionOwner,
         error: &str,
     ) -> Result<(), Closed> {
-        let id = self
-            .breakpoints
-            .entries()
-            .find(|(_, entry)| entry.breakpoint() == Some(breakpoint))
-            .map_or_else(|| breakpoint.to_string(), |(_, entry)| entry.id.to_string());
+        let subject = match owner {
+            uscope::ConditionOwner::Breakpoint(breakpoint) => {
+                let id = self
+                    .breakpoints
+                    .entries()
+                    .find(|(_, entry)| entry.breakpoint() == Some(breakpoint))
+                    .map_or_else(|| breakpoint.to_string(), |(_, entry)| entry.id.to_string());
+                format!("breakpoint {id}")
+            }
+            uscope::ConditionOwner::Watchpoint(watchpoint) => self
+                .data
+                .entries
+                .iter()
+                .find(|entry| entry.watchpoint == Ok(watchpoint))
+                .map_or_else(
+                    || format!("watchpoint {watchpoint}"),
+                    |entry| format!("data breakpoint {}", entry.id),
+                ),
+        };
         self.client
             .important(format!(
-                "breakpoint {id} stopped because its condition could not be evaluated: {error}"
+                "{subject} stopped because its condition could not be evaluated: {error}"
             ))
             .await
     }

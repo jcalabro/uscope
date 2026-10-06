@@ -13,7 +13,7 @@ use uscope::{
 };
 
 use super::format::{self, plural};
-use super::terminal::Role;
+use super::terminal::{Renderer, Role};
 use super::value;
 use super::{Cli, Control};
 
@@ -177,42 +177,42 @@ pub const COMMANDS: &[CommandSpec] = &[
         "ignore",
         [],
         "ignore <id> <count>",
-        "Skip a breakpoint's next count hits, then stop at every hit; 0 stops at the next"
+        "Skip a breakpoint's, or watchpoint wID's, next count hits, then stop at every hit; 0 stops at the next"
     ),
     command!(
         Hits,
         "hits",
         [],
         "hits <id> <hit-condition|always>",
-        "Choose which hits of a breakpoint stop, such as >=5, ==3, or %10"
+        "Choose which hits of a breakpoint, or watchpoint wID, stop, such as >=5, ==3, or %10"
     ),
     command!(
         Condition,
         "condition",
         [],
         "condition <id> [expression...]",
-        "Stop at a breakpoint only where an expression such as x > 3 && p->next != NULL holds; without one, always"
+        "Stop at a breakpoint, or watchpoint wID, only where an expression such as x > 3 && p->next != NULL holds; without one, always"
     ),
     command!(
         Watch,
         "watch",
         [],
-        "watch [-w] <expression|0xaddress:byte-count>",
-        "Stop when a store changes watched memory; with -w, at every store, even of the same value"
+        "watch [-w] <expression|0xaddress:byte-count> [if condition...]",
+        "Stop when a store changes watched memory; with -w, at every store, even of the same value; with if, only where the condition holds"
     ),
     command!(
         AccessWatch,
         "awatch",
         [],
-        "awatch <expression|0xaddress:byte-count>",
-        "Stop when watched memory is read or written"
+        "awatch <expression|0xaddress:byte-count> [if condition...]",
+        "Stop when watched memory is read or written, and with if, the condition holds"
     ),
     command!(
         ReadWatch,
         "rwatch",
         [],
-        "rwatch <expression|0xaddress:byte-count>",
-        "Stop when watched memory is read"
+        "rwatch <expression|0xaddress:byte-count> [if condition...]",
+        "Stop when watched memory is read, and with if, the condition holds"
     ),
     command!(
         Watchpoints,
@@ -464,11 +464,8 @@ impl Cli {
             Command::Hits => self.hits(arguments[0], arguments[1], spec).await?,
             Command::Condition => self.condition(arguments[0], &arguments[1..], spec).await?,
             Command::Watch => self.watch_stores(&arguments, spec).await?,
-            Command::AccessWatch => {
-                self.watch(arguments[0], WatchAccess::ReadWrite, spec)
-                    .await?
-            }
-            Command::ReadWatch => self.watch(arguments[0], WatchAccess::Read, spec).await?,
+            Command::AccessWatch => self.watch(&arguments, WatchAccess::ReadWrite, spec).await?,
+            Command::ReadWatch => self.watch(&arguments, WatchAccess::Read, spec).await?,
             Command::Watchpoints => self.list_watchpoints().await?,
             Command::Unwatch => self.delete_watchpoints(arguments[0], spec).await?,
             Command::Run => {
@@ -599,33 +596,55 @@ impl Cli {
     }
 
     async fn hits(&self, id: &str, condition: &str, spec: &CommandSpec) -> Result<String> {
-        let id = parse_breakpoint_id(id, spec)?;
         let condition = match condition {
             "always" => None,
             condition => Some(condition.parse()?),
         };
-        Ok(format::breakpoint_hit_condition(
-            &self
-                .debugger
-                .set_breakpoint_hit_condition(id, condition)
-                .await?,
-            self.renderers.stdout,
-        ))
+        let renderer = self.renderers.stdout;
+        Ok(match parse_counted_id(id, spec)? {
+            CountedId::Breakpoint(id) => format::breakpoint_hit_condition(
+                &self
+                    .debugger
+                    .set_breakpoint_hit_condition(id, condition)
+                    .await?,
+                renderer,
+            ),
+            CountedId::Watchpoint(id) => format::watchpoint_hit_condition(
+                &self
+                    .debugger
+                    .set_watchpoint_hit_condition(id, condition)
+                    .await?,
+                renderer,
+            ),
+        })
     }
 
-    /// Sets or removes a breakpoint's condition, as gdb's `condition` does.
+    /// Sets or removes a breakpoint's or watchpoint's condition, as gdb's
+    /// `condition` does.
     async fn condition(&self, id: &str, words: &[&str], spec: &CommandSpec) -> Result<String> {
-        let id = parse_breakpoint_id(id, spec)?;
+        let id = parse_counted_id(id, spec)?;
         let condition = if words.is_empty() {
             None
         } else {
             Some(uscope::Condition::parse(&words.join(" "))?)
         };
+        let renderer = self.renderers.stdout;
+        let id = match id {
+            CountedId::Breakpoint(id) => id,
+            CountedId::Watchpoint(id) => {
+                return Ok(format::watchpoint_condition(
+                    &self
+                        .debugger
+                        .set_watchpoint_condition(id, condition)
+                        .await?,
+                    renderer,
+                ));
+            }
+        };
         let breakpoint = self
             .debugger
             .set_breakpoint_condition(id, condition)
             .await?;
-        let renderer = self.renderers.stdout;
         Ok(breakpoint.condition.as_ref().map_or_else(
             || {
                 format!(
@@ -643,23 +662,29 @@ impl Cli {
         ))
     }
 
-    /// Skips a breakpoint's next `count` hits like gdb's `ignore`: the hit
-    /// condition becomes `>=` the hit after them.
+    /// Skips a breakpoint's or watchpoint's next `count` hits like gdb's
+    /// `ignore`: the hit condition becomes `>=` the hit after them.
     async fn ignore(&self, id: &str, count: &str, spec: &CommandSpec) -> Result<String> {
-        let id = parse_breakpoint_id(id, spec)?;
+        let id = parse_counted_id(id, spec)?;
         let count = parse_count(count).ok_or_else(|| spec.usage_error())?;
+        let renderer = self.renderers.stdout;
         let condition = if count == 0 {
             None
         } else {
-            let hits = self
-                .debugger
-                .snapshot()
-                .await?
-                .breakpoints
-                .iter()
-                .find(|breakpoint| breakpoint.id == id)
-                .ok_or_else(|| anyhow!("breakpoint {id} was not found"))?
-                .hit_count;
+            let snapshot = self.debugger.snapshot().await?;
+            let hits = match id {
+                CountedId::Breakpoint(id) => snapshot
+                    .breakpoints
+                    .iter()
+                    .find(|breakpoint| breakpoint.id == id)
+                    .map(|breakpoint| breakpoint.hit_count),
+                CountedId::Watchpoint(id) => snapshot
+                    .watchpoints
+                    .iter()
+                    .find(|watchpoint| watchpoint.id == id)
+                    .map(|watchpoint| watchpoint.hit_count),
+            }
+            .ok_or_else(|| anyhow!("{} was not found", id.describe(Renderer::new(false))))?;
             let first_stop = hits
                 .checked_add(count)
                 .and_then(|skipped| skipped.checked_add(1))
@@ -669,20 +694,24 @@ impl Cli {
                 first_stop,
             )?)
         };
-        let breakpoint = self
-            .debugger
-            .set_breakpoint_hit_condition(id, condition)
-            .await?;
-        let renderer = self.renderers.stdout;
+        match id {
+            CountedId::Breakpoint(id) => {
+                self.debugger
+                    .set_breakpoint_hit_condition(id, condition)
+                    .await?;
+            }
+            CountedId::Watchpoint(id) => {
+                self.debugger
+                    .set_watchpoint_hit_condition(id, condition)
+                    .await?;
+            }
+        }
         Ok(if count == 0 {
-            format!(
-                "breakpoint {} stops at its next hit",
-                renderer.paint(Role::Metadata, breakpoint.id)
-            )
+            format!("{} stops at its next hit", id.describe(renderer))
         } else {
             format!(
-                "breakpoint {} ignores its next {}",
-                renderer.paint(Role::Metadata, breakpoint.id),
+                "{} ignores its next {}",
+                id.describe(renderer),
                 plural(count, "hit")
             )
         })
@@ -741,12 +770,10 @@ impl Cli {
                 ..
             }) => lines.push(format::signal_received(thread_id, &exception, renderer)),
             Ok(DebuggerEvent::LogMessage { parts, .. }) => lines.push(format::log_message(&parts)),
-            Ok(DebuggerEvent::ConditionFailed {
-                breakpoint, error, ..
-            }) => lines.push(format!(
-                "{}: the condition of breakpoint {} could not be evaluated: {error}",
+            Ok(DebuggerEvent::ConditionFailed { owner, error, .. }) => lines.push(format!(
+                "{}: the condition of {} could not be evaluated: {error}",
                 renderer.paint(Role::Warning, "warning"),
-                renderer.paint(Role::Metadata, breakpoint)
+                renderer.paint(Role::Metadata, format::condition_owner(owner))
             )),
             _ => {}
         };
@@ -794,20 +821,30 @@ impl Cli {
     /// with `-w` for every store.
     async fn watch_stores(&self, arguments: &[&str], spec: &CommandSpec) -> Result<String> {
         match arguments {
-            ["-w", target] => self.watch(target, WatchAccess::Write, spec).await,
-            [target] if !target.starts_with('-') => {
-                self.watch(target, WatchAccess::Change, spec).await
+            ["-w", rest @ ..] => self.watch(rest, WatchAccess::Write, spec).await,
+            [target, ..] if !target.starts_with('-') => {
+                self.watch(arguments, WatchAccess::Change, spec).await
             }
             _ => Err(spec.usage_error()),
         }
     }
 
+    /// Watches a target, the first of `arguments`, which may be followed by
+    /// `if` and a condition, as in gdb.
     async fn watch(
         &self,
-        argument: &str,
+        arguments: &[&str],
         access: WatchAccess,
         spec: &CommandSpec,
     ) -> Result<String> {
+        let (argument, condition) = match arguments {
+            [target] => (*target, None),
+            [target, "if", condition @ ..] if !condition.is_empty() => (
+                *target,
+                Some(uscope::Condition::parse(&condition.join(" "))?),
+            ),
+            _ => return Err(spec.usage_error()),
+        };
         if !self
             .debugger
             .watchpoint_capabilities()
@@ -816,12 +853,18 @@ impl Cli {
         {
             return Err(uscope::Error::UnsupportedWatchAccess(access).into());
         }
+        let options = uscope::WatchpointOptions {
+            condition,
+            ..uscope::WatchpointOptions::default()
+        };
         let watchpoint = if let Some(location) = parse_watch_location(argument, spec)? {
-            self.debugger.add_watchpoint(location, access).await?
+            self.debugger
+                .add_watchpoint_with(location, access, options)
+                .await?
         } else {
             let expression = parse_expression(argument)?;
             self.debugger
-                .watch(&expression, access)
+                .watch_with(&expression, access, options)
                 .await
                 .map_err(|error| expression_error(argument, error))?
         };
@@ -1461,10 +1504,38 @@ fn parse_memory_byte_count(value: Option<&str>, spec: &CommandSpec) -> Result<u6
         .ok_or_else(|| spec.usage_error())
 }
 
-fn parse_breakpoint_id(argument: &str, spec: &CommandSpec) -> Result<BreakpointId> {
+/// A breakpoint, or a watchpoint written `w` and its id, whose hits
+/// `condition`, `hits`, and `ignore` choose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CountedId {
+    Breakpoint(BreakpointId),
+    Watchpoint(WatchpointId),
+}
+
+impl CountedId {
+    fn describe(self, renderer: Renderer) -> String {
+        match self {
+            Self::Breakpoint(id) => format!("breakpoint {}", renderer.paint(Role::Metadata, id)),
+            Self::Watchpoint(id) => format!("watchpoint {}", renderer.paint(Role::Metadata, id)),
+        }
+    }
+}
+
+fn parse_counted_id(argument: &str, spec: &CommandSpec) -> Result<CountedId> {
     argument
-        .parse()
-        .map(BreakpointId::new)
+        .strip_prefix('w')
+        .map_or_else(
+            || {
+                argument
+                    .parse()
+                    .map(|id| CountedId::Breakpoint(BreakpointId::new(id)))
+            },
+            |digits| {
+                digits
+                    .parse()
+                    .map(|id| CountedId::Watchpoint(WatchpointId::new(id)))
+            },
+        )
         .map_err(|_| spec.usage_error())
 }
 

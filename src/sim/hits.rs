@@ -42,18 +42,23 @@ impl Policy {
             .is_none_or(|condition| condition.is_met(hit))
     }
 
-    fn must_stop(self, hit: u64) -> bool {
+    pub(super) fn must_stop(self, hit: u64) -> bool {
         self.allows(hit) && self.holds() && !self.logs
     }
 
     /// A condition that fails to evaluate stops even a breakpoint that logs.
-    fn may_stop(self, hit: u64) -> bool {
+    pub(super) fn may_stop(self, hit: u64) -> bool {
         self.allows(hit)
             && match self.condition {
                 Known::Absent | Known::Holds => !self.logs,
                 Known::Fails => false,
                 Known::Unknown => true,
             }
+    }
+
+    /// Whether every hit must stop, whatever its number.
+    pub(super) const fn unconditional(self) -> bool {
+        self.hit_condition.is_none() && self.holds() && !self.logs
     }
 
     fn must_log(self, hit: u64) -> bool {
