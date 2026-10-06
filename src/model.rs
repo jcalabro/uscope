@@ -2932,6 +2932,12 @@ impl ModuleImage {
         self.address_range.contains(address)
     }
 
+    /// Returns the image addresses this module's loadable segments span.
+    #[must_use]
+    pub const fn address_range(&self) -> AddressRange<ImageAddress> {
+        self.address_range
+    }
+
     /// Returns all functions described by this image.
     #[must_use]
     pub fn functions(&self) -> &[FunctionInfo] {
