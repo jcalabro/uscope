@@ -1721,6 +1721,29 @@ fn a_goroutine_is_selected_or_inspected_by_its_id() {
 }
 
 #[test]
+fn a_cores_goroutines_show_their_labels_and_the_runtimes_their_entries() {
+    let stdout = batch(
+        &[
+            "--core",
+            "build/test-programs/panic-go-o0.core",
+            "build/test-programs/panic-go-o0",
+        ],
+        &["goroutines -a"],
+    );
+    assert!(
+        stdout.lines().any(|line| line.contains("] main.worker at ")
+            && line.ends_with(r#"— chan receive {job: resize, tenant: "a b"}"#)),
+        "{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "  [2] runtime.forcegchelper — force gc (idle)"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn backtraces_say_whose_stack_each_run_of_frames_is_on() {
     let stdout = batch(
         &["build/test-programs/stacks-go-o0"],

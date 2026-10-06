@@ -226,6 +226,7 @@ impl<P: InspectionOps> Controller<P> {
             }),
             parent: task.parent.map(id),
             internal: task.internal,
+            labels: task.labels.clone().into(),
         }
     }
 

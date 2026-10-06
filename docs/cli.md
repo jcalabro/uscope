@@ -264,7 +264,10 @@ program wrote has it, past the
 runtime's machinery, as the runtime's own goroutine dump shows it: a worker
 waiting on a channel is at its receive, not in `runtime.gopark`. Each line
 gives the goroutine's id, that place, what it does in the runtime's words,
-such as `chan receive`, and the thread it is on. Selecting a goroutine,
+such as `chan receive`, its profiler labels, as in `{job: resize}`, and the
+thread it is on. A goroutine of only the runtime's code is named by the
+function it began in. A core dump's goroutines are listed as a live
+program's are. Selecting a goroutine,
 parked or running, points `backtrace`, `frame`, `print`, `registers`, and
 the other inspecting commands at it, and `$task` in an expression is its id.
 `goroutine` *id* *command* runs one of those commands in the goroutine and

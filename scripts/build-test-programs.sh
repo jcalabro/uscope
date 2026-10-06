@@ -484,7 +484,8 @@ require_dwarf_operation() {
 # Records a post-mortem core of a fixture with gdb's gcore. The fixture must
 # stop with the expected signal first, so a fixture that stops crashing fails
 # the build instead of silently producing a different core. FILTER becomes the
-# inferior's coredump_filter, which gcore honors like the kernel.
+# inferior's coredump_filter, which gcore honors like the kernel. gdb's log,
+# with everything the fixture printed, is kept as CORE.log.
 core_signature() {
     local signal="$1"
     local filter="$2"
@@ -559,6 +560,7 @@ generate_core() {
         exit 1
     fi
     mv "$temporary" "$core"
+    printf '%s\n' "$log" >"${core}.log"
     rebuilt_outputs["$core"]=true
     printf '%s\n' "$signature" >"${stamp}.tmp"
     mv "${stamp}.tmp" "$stamp"
@@ -1258,6 +1260,9 @@ build_go_fixture "$go_fixtures_dir/spin" "$output_dir/spin-go-o0" \
 build_go_fixture "$go_fixtures_dir/spin" "$output_dir/spin-go-o2"
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/panic" "$output_dir/panic-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/panic" "$output_dir/panic-go-o2"
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-nodwarf" \
     -buildmode=pie "-gcflags=all=-N -l" -ldflags=-w
 build_zig_fixture "$zig_fixtures_dir/crash.zig" "$output_dir/crash-zig-o0" \
@@ -1353,6 +1358,13 @@ generate_foreign_core
 # arenas would make a full core enormous, and frame 0 needs only registers.
 generate_core "$output_dir/crash-rust-nodebug.core" 11 "$default_core_filter" \
     "$output_dir/crash-rust-nodebug" "$output_dir/crash-rust-nodebug"
+# A Go program that panics with GOTRACEBACK=crash prints every goroutine,
+# which the core's log keeps, and aborts.
+for variant in o0 o2; do
+    program="$output_dir/panic-go-${variant}"
+    generate_core "${program}.core" 6 "$default_core_filter" "$program" \
+        env GOTRACEBACK=crash "$program"
+done
 generate_core "$output_dir/crash-go-nodwarf.core" 11 "$headers_only_core_filter" \
     "$output_dir/crash-go-nodwarf" "$output_dir/crash-go-nodwarf"
 

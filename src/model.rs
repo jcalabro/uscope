@@ -298,6 +298,9 @@ pub struct TaskSnapshot {
     /// Whether the runtime runs the task for its own work, such as a
     /// garbage collector's worker, rather than the program's.
     pub internal: bool,
+    /// The key-value labels the program gave the task, such as Go's
+    /// profiler labels.
+    pub labels: Arc<[(Arc<str>, Arc<str>)]>,
 }
 
 /// Whose stack a frame is on.

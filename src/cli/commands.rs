@@ -858,7 +858,7 @@ impl Cli {
         if grouped {
             let mut groups: Vec<(String, Vec<u64>)> = Vec::new();
             for (task, trace) in &shown {
-                let place = format::task_place(trace, &traces.images, renderer);
+                let place = format::task_place(task, trace, &traces.images, renderer);
                 match groups.iter_mut().find(|(known, _)| *known == place) {
                     Some((_, numbers)) => numbers.push(task.id.number),
                     None => groups.push((place, vec![task.id.number])),
@@ -871,7 +871,7 @@ impl Cli {
             );
         } else {
             for (task, trace) in &shown {
-                let place = format::task_place(trace, &traces.images, renderer);
+                let place = format::task_place(task, trace, &traces.images, renderer);
                 lines.push(format::task(
                     task,
                     &place,
@@ -921,7 +921,7 @@ impl Cli {
                 .iter()
                 .find(|(task, _)| traces.is_selected(task))
                 .ok_or_else(|| anyhow!("no {name} is selected"))?;
-            let place = format::task_place(trace, &traces.images, renderer);
+            let place = format::task_place(task, trace, &traces.images, renderer);
             return Ok(format::task(task, &place, true, renderer));
         };
         let number = argument
