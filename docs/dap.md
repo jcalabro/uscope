@@ -13,7 +13,7 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
 
 ## What it supports
 
-- **Starting.** Launch a program with its arguments, environment, and working directory, optionally stopping at its first instruction. As under gdb, it runs without address randomization, so a rerun shows the same addresses. Attach to a running process, or open a core dump with its module search paths. Loading debug information reports progress to a client that shows it.
+- **Starting.** Launch a program with its arguments, environment, and working directory, optionally stopping at its first instruction. As under gdb, it runs without address randomization, so a rerun shows the same addresses. Attach to a running process, or open a core dump with its module search paths. Loading debug information reports progress.
 - **Program I/O.** Output appears in the debug console and input is empty, or the program runs in the client's integrated or external terminal (`"console"`), which owns its input and output.
 - **Breakpoints.**
   - Source, function, and instruction breakpoints. A source breakpoint is placed at its line's first statement; a column within the line is not used.
@@ -21,29 +21,29 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
   - Functions without debug information, such as libc's, break at their symbol.
   - Conditions and logpoints in the [expression language](expressions.md): a logpoint's `{expression}` parts are evaluated at each hit. A condition that does not parse, or that assigns, leaves its breakpoint unverified with the reason; one that fails when evaluated stops the program and says why.
   - Hit counts are an operator and a count: `==5`, `>=5`, `%3`. A bare `5` is refused, since clients disagree about whether it means the fifth hit only or every hit from the fifth.
-  - Data breakpoints (hardware watchpoints) on variables, expressions, and addresses. A `write` data breakpoint stops when a store changes the value, as clients present it ("Break on Value Change"); in its *On Every Store* mode (`breakpointModes`), it stops at every store, even of the value already held. `readWrite` stops at every load and store. A watched local ends with its frame, and the client is told. Data breakpoints set before a program is loaded wait unverified.
-  - Breakpoints can be edited while the program runs. Breakpoints made or deleted in the debug console are reported to the client, as are the client's data breakpoints the console deletes.
+  - Data breakpoints (hardware watchpoints) on variables, expressions, and addresses. A `write` data breakpoint stops when a store changes the value, as clients present it ("Break on Value Change"); its *On Every Store* mode (`breakpointModes`) stops at every store, even of the value already held. `readWrite` stops at every load and store. A watched local ends with its frame, and the client is told. Data breakpoints set before a program is loaded are refused.
+  - Breakpoints can be edited while the program runs. Breakpoints the debug console makes or deletes are reported to the client, as are the client's data breakpoints it deletes.
 - **Execution.** Continue, pause, step over, into, and out, by line or by instruction. The debugger is all-stop: every thread stops and resumes together, unless a request names a single thread (`singleThread`). A program that executes itself again is followed with its breakpoints.
 - **Inspection.**
   - Threads with names, and stack traces through libraries and inlined calls, with the frames' parameters, lines, and modules when a client asks.
-  - Arguments, locals, statics, and registers, with the text of strings. Each row's `evaluateName` reaches exactly that variable: a static that a local shadows is named from the outermost scope, such as `::count`, or with its file, such as `` ::`main.c::count` ``, and a variable an inner block hides has no name, since no expression reaches it. A register's row is named `$rax` and is read-only.
-  - Standard library and user containers presented by [views](views.md): a vector's elements as indexed variables, paged by the client's `filter`, `start`, and `count`, and its fields and `[raw]`, the value as stored, as named ones.
+  - Arguments, locals, statics, and registers, with the text of strings. Each row's `evaluateName` reaches exactly that variable: a static that a local shadows is named from the outermost scope, such as `::count`, or with its file, such as `` ::`main.c::count` ``, and a variable an inner block hides has none. A register's row is named `$rax` and is read-only.
+  - Containers presented by [views](views.md): a vector's elements as indexed variables, paged by the client's `filter`, `start`, and `count`, and its fields and `[raw]`, the value as stored, as named ones.
   - Hover, watch, clipboard, and debug console evaluation in the [expression language](expressions.md).
-  - Integers in hexadecimal, as a request's `format` asks, or for the whole session with the `uscope/setValueFormat` request (`{"hex": true}`), which has the client read its values again.
+  - Integers in hexadecimal, per request with `format` or for the session with the `uscope/setValueFormat` request (`{"hex": true}`).
   - Each variable's declaration (`declarationLocationReference`), and the function a function pointer points to (`valueLocationReference`), through the `locations` request.
   - Changing values with `setVariable` and `setExpression`.
   - Memory reads and writes, and disassembly.
   - Modules with their address ranges and symbol files, and loaded sources. Once a client asks for the loaded sources, `loadedSource` events keep its list current as libraries load and unload.
 - **Signals.** Exception filters choose which signals stop the program (`fatal`, `interrupt`, `routine`, `other`), and `exceptionInfo` explains a stop. The `signals` setting overrides the policy of individual signals.
-- **Debug console.** A line is an [expression](expressions.md) evaluated in the focused frame: `count * 2`, `p->items[i]`, `(u8)flags`, `$rip`, or an assignment such as `x = 5` or `total += 1`, after which the client reads its variables again. A line that starts with the name of a uscope command runs the command instead, such as `info breakpoints`, `print/x mask`, `whatis p`, `ptype struct node`, `disassemble`, `x 0x7ffd1000 16`, or `handle SIGUSR1 nostop`, unless the frame has a variable of that name: in a frame with a local `list`, the lines `list` and `list + 1` read the variable, while `print list` always evaluates and `list` alone lists source only where no variable is named `list`. A mistake in an expression is shown pointing at the text it is about. Commands that run the program are refused; use the client's controls. Completion offers commands, their arguments, the frame's variables, the program's globals, members after `.` and `->`, and registers after `$`.
-- **Session control.** `restart` relaunches a launched program and keeps its breakpoints. An attached process or a core dump has no program to run again, so the adapter tells the client it does not restart them (a `capabilities` event): the client restarts the session itself, and the disconnect that begins a restart detaches from an attached process, even when it asks to terminate it, so that the client can attach to it again. `terminate` asks the program to exit, and `cancel` cancels slow requests.
+- **Debug console.** A line is an [expression](expressions.md) evaluated in the focused frame, such as `p->items[i]`, `(u8)flags`, `$rip`, or an assignment like `x = 5`, after which the client reads its variables again. A line that starts with a uscope command's name runs the command, such as `info breakpoints`, `print/x mask`, `ptype struct node`, `x 0x7ffd1000 16`, or `handle SIGUSR1 nostop`, unless the frame has a variable of that name: with a local `list`, the lines `list` and `list + 1` read the variable, while `print list` always runs the command. Commands that run the program are refused; use the client's controls. A mistake in an expression points at the text it is about. Completion offers commands and their arguments, the frame's variables, globals, members after `.` and `->`, and registers after `$`.
+- **Session control.** `restart` relaunches a launched program and keeps its breakpoints. An attached process or a core dump cannot be restarted, which the adapter tells the client with a `capabilities` event; the client restarts the session itself, and the disconnect that begins that restart detaches from an attached process even when it asks to terminate it. `terminate` asks the program to exit, and `cancel` cancels slow requests.
 - **Numbering.** Lines and columns follow the client's `linesStartAt1` and `columnsStartAt1`.
 
 ### What it does not support
 
-These need debugger features uscope does not have yet, so the adapter does not advertise them:
+The adapter does not advertise these:
 
-- Jumping to a line (`gotoTargets`, VS Code's *Jump to Cursor*), and assigning registers, which both need writable registers.
+- Jumping to a line (`gotoTargets`, VS Code's *Jump to Cursor*) and assigning registers, which need writable registers.
 - Stepping into a chosen call on a line (`stepInTargets`), restarting a frame (`restartFrame`), and stepping backwards.
 - Showing the value a function returned after stepping out of it.
 - Conditions and hit counts on data breakpoints, which are refused with a reason.
@@ -203,7 +203,7 @@ Its `get_dap_binary` returns the command `uscope` with the argument `dap`. A `.z
 
 ## Testing with real clients
 
-The test suite drives the real adapter as each supported client does. It checks every message against the protocol's schema and the ordering rules strict clients rely on. It also replays traffic recorded from VS Code and nvim-dap (`tests/dap/traffic`), and compares stepping with gdb's adapter. Two recipes drive the real clients and record their traffic:
+The test suite drives the real adapter as VS Code, nvim-dap, Helix, and dape do, checks every message against the protocol's schema and the ordering rules strict clients rely on, replays traffic recorded from VS Code and nvim-dap (`tests/dap/traffic`), and compares stepping with gdb's adapter. Two recipes drive the real clients and record their traffic:
 
 ```sh
 just uat-vscode                  # a VS Code window drives the adapter (needs a display)
@@ -212,17 +212,7 @@ just uat-vscode tests/dap/traffic   # refresh the recorded VS Code traffic
 just uat-nvim ~/src/nvim-dap tests/dap/traffic
 ```
 
-The VS Code run takes about ten seconds. It uses VS Code's own commands wherever a user has one, and checks what VS Code asks the adapter and is answered:
-
-- Starting: creating a launch.json, the `uscope.path` and `uscope.logFile` settings, the programs offered to launch, and configurations refused with their reasons (a missing program, invalid arguments, a process or core dump that does not exist).
-- Breakpoints: conditions, hit counts, logpoints, function breakpoints, breakpoints added while running, breakpoints in a library that loads later, and those refused with their reasons.
-- Execution: stepping in, over, and out, by instruction from the disassembly view, run to cursor, pause, threads, a crash and its exception, restarting a launched program, an attached process, and a core dump.
-- Inspection: the debug console's expressions, assignments, commands, and mistakes, the watch view, hovers, hexadecimal display, inline values, completions, function pointer links, data breakpoints and their modes, and loaded sources.
-- I/O: a program in the integrated terminal, attaching through the process picker.
-
-The replay tests use the `vscode-launch`, `vscode-terminal`, `vscode-attach`, and `vscode-core` recordings; the run writes one for every session.
-
-Before a release, check by hand in VS Code what those runs cannot see:
+The VS Code run takes about ten seconds and uses VS Code's own commands wherever a user has one; `editors/vscode/test/uat.js` says what it covers. Before a release, check by hand in VS Code what those runs cannot see:
 
 - Breakpoints in the gutter turn solid once their library loads, and hollow with a reason when they cannot resolve.
 - The Variables view pages through a large array, and expands pointers, records, and registers.
@@ -233,5 +223,3 @@ Before a release, check by hand in VS Code what those runs cannot see:
 - *Copy Value* copies what the Variables view shows.
 - A core dump opens with its module warnings in the debug console.
 - Console commands complete with Tab and print the same output as the CLI.
-
-The same configurations work in nvim-dap, Zed, Helix, and dape as above.
