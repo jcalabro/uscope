@@ -10,6 +10,16 @@
 
 use serde::Deserialize;
 
+/// A variable that is, at some addresses, a register's value on entry
+/// to its function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryValue {
+    pub name: String,
+    pub addresses: std::ops::Range<u64>,
+    /// The register, as the simulated CPU names it.
+    pub register: String,
+}
+
 /// One variant's facts, as the file holds them.
 #[derive(Deserialize)]
 pub(super) struct VariantFacts {
@@ -19,6 +29,7 @@ pub(super) struct VariantFacts {
     functions: Vec<(String, u64, u64)>,
     lines: Vec<(u64, String, i64, bool)>,
     epilogues: Vec<u64>,
+    entry_values: Vec<(String, u64, u64, String)>,
 }
 
 /// One program's facts file.
@@ -72,6 +83,9 @@ pub struct Facts {
     pub ranges: Vec<Range>,
     /// Where rows mark the beginning of a function's epilogue.
     pub epilogues: std::collections::BTreeSet<u64>,
+    /// Where location lists say a variable is exactly what a register held
+    /// when its function was entered.
+    pub entry_values: Vec<EntryValue>,
 }
 
 impl Facts {
@@ -160,6 +174,15 @@ impl Facts {
             functions,
             ranges,
             epilogues: variant.epilogues.into_iter().collect(),
+            entry_values: variant
+                .entry_values
+                .into_iter()
+                .map(|(name, start, end, register)| EntryValue {
+                    name,
+                    addresses: start..end,
+                    register,
+                })
+                .collect(),
         })
     }
 
@@ -183,6 +206,20 @@ impl Facts {
     pub fn starts_row(&self, address: u64) -> bool {
         self.range(address)
             .is_some_and(|range| range.start == address)
+    }
+
+    /// The register whose value on entry to its function a variable named
+    /// `name` is at `address`, unless variables of that name there say
+    /// different things.
+    #[must_use]
+    pub fn entry_register(&self, name: &str, address: u64) -> Option<&str> {
+        let mut registers = self
+            .entry_values
+            .iter()
+            .filter(|value| value.name == name && value.addresses.contains(&address))
+            .map(|value| value.register.as_str());
+        let register = registers.next()?;
+        registers.all(|other| other == register).then_some(register)
     }
 
     /// The function containing `address`.
@@ -241,6 +278,7 @@ mod tests {
                 (0x44, "a.c".into(), -1, false),
             ],
             epilogues: Vec::new(),
+            entry_values: Vec::new(),
         })
         .expect("valid facts");
         let line = |address| facts.range(address).and_then(|range| range.line);

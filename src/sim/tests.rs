@@ -153,16 +153,21 @@ fn some_failure_saying(sabotage: Sabotage, check: &str, saying: &str, allowed: &
     panic!("no sabotaged run failed {check} saying {saying:?}");
 }
 
+/// The checks that read variables, any of which may catch a misreported
+/// stack first.
+const STACK_CHECKS: &[&str] = &[
+    "variables",
+    "expressions",
+    "breakpoint conditions",
+    "entry values",
+];
+
 /// A kernel that misreports small numbers on the stack shows variables
-/// with wrong values, which the variables oracle catches. Expressions and
-/// breakpoint conditions read the same values, and may catch it first.
+/// with wrong values, which the variables oracle catches. The other
+/// checks read the same values, and may catch it first.
 #[test]
 fn skewed_stack_words_fail_the_variables_oracle() {
-    some_failure_with(
-        Sabotage::SkewSmallStackWords,
-        "variables",
-        &["variables", "expressions", "breakpoint conditions"],
-    );
+    some_failure_with(Sabotage::SkewSmallStackWords, "variables", STACK_CHECKS);
 }
 
 /// The same misreported values make a marker's condition, or what it
@@ -176,9 +181,17 @@ fn skewed_stack_words_fail_the_expressions_oracle() {
             Sabotage::SkewSmallStackWords,
             "expressions",
             saying,
-            &["variables", "expressions", "breakpoint conditions"],
+            STACK_CHECKS,
         );
     }
+}
+
+/// The same misreported values change the registers a caller saved there,
+/// from which the debugger recovers what the caller passed, which the
+/// entry values oracle catches.
+#[test]
+fn skewed_stack_words_fail_the_entry_values_oracle() {
+    some_failure_with(Sabotage::SkewSmallStackWords, "entry values", STACK_CHECKS);
 }
 
 /// The same misreported values make conditions the client knows hold or
@@ -188,7 +201,7 @@ fn skewed_stack_words_fail_breakpoint_conditions() {
     some_failure_with(
         Sabotage::SkewSmallStackWords,
         "breakpoint conditions",
-        &["variables", "expressions", "breakpoint conditions"],
+        STACK_CHECKS,
     );
 }
 
@@ -206,7 +219,7 @@ fn flickering_stack_words_fail_the_expressions_oracle() {
             Sabotage::FlickeringStackWords,
             "expressions",
             saying,
-            &["variables", "expressions", "breakpoint conditions"],
+            STACK_CHECKS,
         );
     }
 }
@@ -224,6 +237,7 @@ fn skewed_registers_fail_the_expressions_oracle() {
             "variables",
             "expressions",
             "breakpoint conditions",
+            "entry values",
             "backtrace",
             "stepping",
         ],
