@@ -104,6 +104,7 @@ pub use protocol::{
 pub use source_map::SourcePathMap;
 pub use view::summary::{
     float as float_text, integer as integer_text, quoted as quoted_text, scalar as scalar_text,
+    value as value_summary,
 };
 pub use view::syntax::Error as ViewFileError;
 

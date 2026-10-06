@@ -169,6 +169,47 @@ impl World {
         )
     }
 
+    /// Gives a record its base classes, each at a byte offset.
+    pub fn set_bases(&mut self, record: TypeReference, bases: &[(TypeReference, u64)]) {
+        let bases: Vec<crate::BaseClass> = bases
+            .iter()
+            .map(|(ty, offset)| crate::BaseClass {
+                type_ref: *ty,
+                layout: RecordMemberLayout::ByteOffset(*offset),
+                accessibility: crate::Accessibility::Public,
+                virtuality: crate::BaseClassVirtuality::None,
+            })
+            .collect();
+        let index = usize::try_from(record.id.get()).expect("small ids");
+        let TypeKind::Record {
+            bases: existing, ..
+        } = &mut self.types[index].kind
+        else {
+            panic!("only records have bases");
+        };
+        *existing = bases.into();
+    }
+
+    /// Every path from `from` through its bases to a base of type `target`,
+    /// as the offset it is at.
+    fn base_offsets(&self, from: TypeReference, target: TypeReference, at: u64) -> Vec<u64> {
+        let TypeKind::Record { bases, .. } = &self.info(from).kind else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        for base in bases.iter() {
+            let RecordMemberLayout::ByteOffset(offset) = base.layout else {
+                panic!("the world lays bases out at byte offsets");
+            };
+            if base.type_ref == target {
+                found.push(at + offset);
+            } else {
+                found.extend(self.base_offsets(base.type_ref, target, at + offset));
+            }
+        }
+        found
+    }
+
     /// Gives a record made without members its members, for a record that
     /// points to its own type.
     pub fn set_members(&mut self, record: TypeReference, members: &[(&str, TypeReference, u64)]) {
@@ -322,6 +363,7 @@ impl World {
                 crate::ArgumentOrigin::Dwarf
             },
             arguments: arguments.into(),
+            pack: None,
             go: None,
         }));
     }
@@ -337,6 +379,16 @@ impl World {
             kind,
             runtime_type: None,
         });
+    }
+
+    /// Marks where an identified type's template parameter pack begins.
+    pub fn pack(&mut self, ty: TypeReference, start: usize) {
+        let index = usize::try_from(ty.id.get()).expect("small ids");
+        let identity = self.types[index]
+            .identity
+            .as_mut()
+            .expect("an identified type");
+        Arc::make_mut(identity).pack = Some(start);
     }
 
     pub fn typedef(&mut self, name: &str, target: TypeReference) -> TypeReference {
@@ -853,6 +905,31 @@ impl Scope for World {
                 *element,
                 1,
             )),
+            (StepKind::Base(target), TypeKind::Record { .. }) => {
+                match self.base_offsets(from, target, 0).as_slice() {
+                    [offset] => Ok(planned(
+                        Step::Member {
+                            offset: *offset,
+                            ty: target,
+                        },
+                        target,
+                        0,
+                    )),
+                    [] => Err(type_error(format!(
+                        "`{}` is not a base class of `{}`",
+                        self.info(target).name,
+                        info.name
+                    ))),
+                    _ => Err(Refusal::new(
+                        ErrorKind::AmbiguousName,
+                        format!(
+                            "`{}` has several `{}` base class subobjects",
+                            info.name,
+                            self.info(target).name
+                        ),
+                    )),
+                }
+            }
             (step, _) => Err(type_error(format!(
                 "`{}` does not take {step:?}",
                 info.name
@@ -1260,5 +1337,21 @@ pub fn memory() -> World {
     world.variable("twice", int, &2_i32.to_le_bytes());
     let light = world.enumeration("Light", uint, &[("RED", 10), ("AMBER", 11)]);
     world.variable("light", light, &11_u32.to_le_bytes());
+    // C++ classes: a Tile is a Named and a Shape, and a Twice holds two
+    // Shapes, its own and its Tile's.
+    let shape = world.record("Shape", 4, &[("id", int, 0)]);
+    let named = world.record("Named", 8, &[("tag", long, 0)]);
+    let tile = world.record("Tile", 16, &[("row", int, 12)]);
+    world.set_bases(tile, &[(named, 0), (shape, 8)]);
+    let twice = world.record("Twice", 24, &[]);
+    world.set_bases(twice, &[(shape, 0), (tile, 8)]);
+    let mut bytes = 2_i64.to_le_bytes().to_vec();
+    bytes.extend(7_i32.to_le_bytes());
+    bytes.extend(9_i32.to_le_bytes());
+    world.variable("tile", tile, &bytes);
+    let mut twice_bytes = 1_i32.to_le_bytes().to_vec();
+    twice_bytes.resize(8, 0);
+    twice_bytes.extend(bytes);
+    world.variable("twice_shaped", twice, &twice_bytes);
     world
 }

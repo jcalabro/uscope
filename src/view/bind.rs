@@ -20,8 +20,8 @@ use crate::{BaseTypeEncoding, TypeArgument, TypeInfo, TypeKind, TypeReference};
 
 use super::pattern::{Captured, Captures};
 use super::syntax::{
-    ArgumentPattern, Clause, Count, Expr, Generator, Item, Pattern, Piece, Shape, Statement,
-    TypeExpr, View,
+    ArgumentPattern, Clause, Count, DynamicType, Expr, Generator, Item, Pattern, Piece, Shape,
+    Statement, TypeExpr, View,
 };
 
 /// Something a view's expression names, which its machine reaches at a
@@ -167,6 +167,25 @@ pub enum BoundShape<St> {
         condition: ViewProgram<St>,
         then: Box<Self>,
         otherwise: Box<Self>,
+    },
+    /// A record whose members are its children, before the view's fields.
+    Record(Vec<BoundField<St>>),
+    /// What a pointer points to, as a type that may be chosen at run time.
+    Dynamic {
+        pointer: ViewProgram<St>,
+        ty: BoundDynamic<St>,
+    },
+}
+
+/// The type a `dynamic` shape presents its pointer's target as.
+#[derive(Debug, Clone)]
+pub enum BoundDynamic<St> {
+    Fixed(TypeReference),
+    /// A type's arguments, of which `index` chooses one; a value argument
+    /// is `None`.
+    Argument {
+        types: Arc<[Option<TypeReference>]>,
+        index: ViewProgram<St>,
     },
 }
 
@@ -677,7 +696,83 @@ fn bind_shape<S: Scope>(
             then: Box::new(bind_shape(then, scope)?),
             otherwise: Box::new(bind_shape(otherwise, scope)?),
         },
+        Shape::Record(members) => BoundShape::Record(
+            members
+                .iter()
+                .map(|(name, value)| {
+                    Ok(BoundField {
+                        name: name.as_str().into(),
+                        program: bind_part(value, scope, Mode::Read)?,
+                    })
+                })
+                .collect::<Result<_, Rejection>>()?,
+        ),
+        Shape::Dynamic { pointer, ty } => BoundShape::Dynamic {
+            pointer: bind_pointer(pointer, scope)?,
+            ty: bind_dynamic_type(ty, pointer.line, scope)?,
+        },
     })
+}
+
+/// Binds an expression whose value must be a pointer.
+fn bind_pointer<S: Scope>(
+    expr: &Expr,
+    scope: &ViewScope<'_, S>,
+) -> Result<ViewProgram<S::Step>, Rejection> {
+    let program =
+        bind_value(&expr.expression, scope).map_err(|error| rejection(scope, expr, &error))?;
+    if matches!(category(scope, program.result()), Category::Pointer(_)) {
+        Ok(program)
+    } else {
+        Err(Rejection {
+            line: expr.line,
+            part: expr.text().to_owned(),
+            reason: "is not a pointer".to_owned(),
+        })
+    }
+}
+
+/// The type of a `dynamic` shape: one type, or the arguments of a type
+/// for its index to choose among.
+fn bind_dynamic_type<S: Scope>(
+    ty: &DynamicType,
+    line: u32,
+    scope: &ViewScope<'_, S>,
+) -> Result<BoundDynamic<S::Step>, Rejection> {
+    let rejected = |part: &str, reason: String| Rejection {
+        line,
+        part: part.to_owned(),
+        reason,
+    };
+    match ty {
+        DynamicType::Fixed(ty) => resolve_type(ty, scope)
+            .map(BoundDynamic::Fixed)
+            .map_err(|reason| rejected("dynamic", reason)),
+        DynamicType::Argument { of, index } => {
+            let of = resolve_type(of, scope).map_err(|reason| rejected("dynamic", reason))?;
+            let info = representation(scope, of)
+                .map_err(|reason| rejected("dynamic", reason.to_string()))?
+                .1;
+            let types = info
+                .identity
+                .as_ref()
+                .map(|identity| {
+                    identity
+                        .arguments
+                        .iter()
+                        .map(|argument| match argument {
+                            TypeArgument::Type(reference) => Some(*reference),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(BoundDynamic::Argument {
+                types,
+                index: bind_integer(index, scope)?,
+            })
+        }
+    }
 }
 
 /// Binds a count and its clauses, leaving the clauses' variables in scope

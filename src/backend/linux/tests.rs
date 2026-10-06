@@ -644,6 +644,7 @@ fn launch_controller() -> LaunchHarness {
             statements: Vec::new(),
             lines: Vec::new(),
             sections: Vec::new(),
+            vtables: Vec::new(),
         },
     ));
     let (controller, event_receiver) = test_controller(
@@ -1064,6 +1065,7 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
             statements: Vec::new(),
             lines: Vec::new(),
             sections: Vec::new(),
+            vtables: Vec::new(),
         },
     ))
 }

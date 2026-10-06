@@ -228,7 +228,9 @@ fn integer(value: IntegerValue) -> Exact {
 /// A provider's refusal of a step, as an expression error.
 fn refusal(error: &Error) -> Refusal {
     let kind = match error {
+        Error::AmbiguousBase { .. } => ErrorKind::AmbiguousName,
         Error::MemberNotFound { .. }
+        | Error::BaseNotFound { .. }
         | Error::AmbiguousMember { .. }
         | Error::MemberAccessOnNonRecord { .. }
         | Error::IndexAccessOnNonIndexable { .. }
@@ -251,10 +253,37 @@ pub(super) fn plan_in<P: InspectionOps>(
         .values()
         .find(|module| module.loaded.image == from.image)
         .ok_or_else(|| Refusal::new(ErrorKind::Unsupported, "the type's module is not loaded"))?;
+    let image = &module.image;
+    let base_name;
+    let is_target;
     let step = match step {
         StepKind::Deref => Step::Deref,
         StepKind::Member(name) => Step::Member(name),
         StepKind::Index { available } => Step::Index { available },
+        StepKind::Base(target) => {
+            if target.image != from.image {
+                return Err(Refusal::new(
+                    ErrorKind::Type,
+                    "a base class is in the same module as the class",
+                ));
+            }
+            base_name = image
+                .type_info(target)
+                .map_or_else(|| Arc::from("?"), |info| Arc::clone(&info.name));
+            is_target = move |id| {
+                image.same_type(
+                    TypeReference {
+                        image: target.image,
+                        id,
+                    },
+                    target,
+                )
+            };
+            Step::Base(crate::debug_info::BaseTarget {
+                name: &base_name,
+                is_target: &is_target,
+            })
+        }
     };
     let planned = module
         .variables
@@ -513,6 +542,9 @@ pub(super) struct StopMachine<'a, 'b, P: InspectionOps> {
     /// Whether a run-control request waiting ends the work, which then
     /// runs again after it; false for work run control itself does.
     pub(super) interruptible: bool,
+    /// Whether values present as the types they dynamically are; false for
+    /// a base-class subobject, which is part of an object, not one.
+    pub(super) dynamic: bool,
 }
 
 /// How many units of work a frame's machines do between checks for waiting
@@ -534,6 +566,7 @@ impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
             budget,
             depth: 0,
             interruptible,
+            dynamic: true,
         }
     }
 

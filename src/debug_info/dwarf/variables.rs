@@ -165,6 +165,9 @@ pub(super) struct LoadedVariables {
     pub info: Arc<dyn VariableInfo>,
     pub globals: Vec<GlobalVariableInfo>,
     pub types: Arc<[crate::TypeNode]>,
+    /// Rust trait objects' vtables, by address, with the concrete type each
+    /// is for.
+    pub vtables: Vec<(ImageAddress, TypeReference)>,
 }
 
 #[expect(
@@ -183,6 +186,7 @@ pub(super) fn load_variable_info<'data>(
     let units = catalog.units.as_slice();
     let mut objects = Vec::new();
     let mut functions = Vec::new();
+    let mut vtables = Vec::new();
     let mut order = 0_u64;
     let evaluation_units = load_evaluation_units(units)?;
     let mut types = TypeArenaBuilder::new(
@@ -330,6 +334,29 @@ pub(super) fn load_variable_info<'data>(
                 scope
             };
 
+            if depth == 1
+                && entry.tag() == gimli::DW_TAG_variable
+                && let Some((address, ty)) = rust_vtable(dwarf, unit_index, unit, entry, &mut types)
+            {
+                vtables.push((address, ty));
+            }
+            // A Go interface may hold a value of any type the runtime
+            // describes, which no data need mention.
+            if depth == 1
+                && types::is_type_die_tag(entry.tag())
+                && entry
+                    .attr_value(identity::DW_AT_GO_RUNTIME_TYPE)
+                    .and_then(|value| match value {
+                        gimli::AttributeValue::Addr(offset) => Some(offset),
+                        value => value.udata_value(),
+                    })
+                    .is_some_and(|offset| offset != 0)
+            {
+                types.resolve(DieKey {
+                    unit: unit_index,
+                    offset: entry.offset().0,
+                });
+            }
             let kind = match entry.tag() {
                 gimli::DW_TAG_variable => Some(VariableKind::Local),
                 gimli::DW_TAG_formal_parameter => Some(VariableKind::Parameter),
@@ -499,7 +526,56 @@ pub(super) fn load_variable_info<'data>(
         }),
         globals,
         types: finalized_types,
+        vtables: vtables
+            .into_iter()
+            .map(|(address, id)| {
+                (
+                    ImageAddress::new(address),
+                    TypeReference {
+                        image: image_id,
+                        id,
+                    },
+                )
+            })
+            .collect(),
     })
+}
+
+/// A Rust trait object's vtable, `<C as Trait>::{vtable}`: a variable at a
+/// fixed address, whose type names `C` as its containing type.
+fn rust_vtable<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    unit_index: usize,
+    unit: &gimli::Unit<Reader<'data>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    types: &mut TypeArenaBuilder<'_, 'data>,
+) -> Option<(u64, TypeId)> {
+    let name = die::copy_name(dwarf, unit, entry).ok()??;
+    if !name.ends_with("::{vtable}") {
+        return None;
+    }
+    let gimli::AttributeValue::Exprloc(expression) = entry.attr_value(gimli::DW_AT_location)?
+    else {
+        return None;
+    };
+    let mut operations = expression.operations(unit.encoding());
+    let address = match operations.next().ok()?? {
+        gimli::Operation::Address { address } => address,
+        gimli::Operation::AddressIndex { index } => dwarf.address(unit, index).ok()?,
+        _ => return None,
+    };
+    if operations.next().ok()?.is_some() {
+        return None;
+    }
+    let vtable_type = types.reference(unit_index, entry.attr_value(gimli::DW_AT_type))?;
+    let vtable_entry = types.units[vtable_type.unit]
+        .entry(gimli::UnitOffset(vtable_type.offset))
+        .ok()?;
+    let concrete = types.reference(
+        vtable_type.unit,
+        vtable_entry.attr_value(gimli::DW_AT_containing_type),
+    )?;
+    Some((address, types.resolve(concrete)))
 }
 
 impl VariableInfo for DwarfVariableInfo {

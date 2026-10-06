@@ -4,11 +4,29 @@
 //! for N of the character c, and `problem:` says the view must refuse the
 //! value, and why.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CString, OsString};
+use std::fmt::Debug;
 use std::hint::black_box;
 use std::mem::ManuallyDrop;
 use std::path::PathBuf;
+use std::rc::{Rc, Weak};
+use std::sync::{Arc, Mutex};
+
+/// A sum type with a variant of named fields, which only the debugger reads.
+#[expect(dead_code, reason = "the debugger reads it")]
+enum Shape {
+    Square { side: u32 },
+    Circle(u32),
+}
+
+#[derive(Debug)]
+#[expect(dead_code, reason = "the debugger reads it")]
+struct Point {
+    x: i32,
+    y: i32,
+}
 
 #[inline(never)]
 fn barrier(fixture: *const u8) {
@@ -34,8 +52,8 @@ fn main() {
     ring.push_front(2);
     ring.push_front(1);
     // Zero-sized elements, for which std stores no capacity.
-    let units: Vec<()> = vec![(); 3]; // VIEW: units => len=3 [{}, {}, {}]
-    let mut unit_ring: VecDeque<()> = VecDeque::new(); // VIEW: unit_ring => len=2 [{}, {}]
+    let units: Vec<()> = vec![(); 3]; // VIEW: units => len=3 [(), (), ()]
+    let mut unit_ring: VecDeque<()> = VecDeque::new(); // VIEW: unit_ring => len=2 [(), ()]
     unit_ring.push_back(());
     unit_ring.push_front(());
     let mut hashed: HashMap<i32, i32> = HashMap::new(); // VIEW: hashed => len=2 {1: 10, 2: 20} (any order)
@@ -66,6 +84,26 @@ fn main() {
     // SAFETY: the vector is never read or dropped; the debugger reads it.
     let dangling = ManuallyDrop::new(unsafe { Vec::from_raw_parts(0x10 as *mut i32, 2, 2) }); // VIEW: dangling.value.0 => len=2 [<unavailable>, …]
 
+    // Pointers, cells, sums, and trait objects.
+    let boxed: Box<i32> = Box::new(42); // VIEW: boxed => 42
+    let rc = Rc::new(7_u64); // VIEW: rc => 7
+    let rc_too = Rc::clone(&rc); // VIEW: rc_too => children: strong = 2, weak = 1, [raw]
+    let rc_weak = Rc::downgrade(&rc); // VIEW: rc_weak => 7
+    let no_weak: Weak<u64> = Weak::new(); // VIEW: no_weak => dangling
+    let dropped = Rc::downgrade(&Rc::new(1_u8)); // VIEW: dropped => dropped
+    let arc = Arc::new(String::from("shared")); // VIEW: arc => "shared"
+    let arc_weak = Arc::downgrade(&arc); // VIEW: arc_weak => children: capacity = 6, strong = 1, weak = 1, [raw]
+    let cell = Cell::new(5_i32); // VIEW: cell => 5
+    let ref_cell = RefCell::new(vec![1, 2]); // VIEW: ref_cell => children: [0] = 1, [1] = 2, borrow = 1, [raw]
+    let borrowed = ref_cell.borrow();
+    let mutex = Mutex::new(9_u8); // VIEW: mutex => children: locked = false, poisoned = false, [raw]
+    let some: Option<i32> = Some(4); // VIEW: some => Some(4)
+    let nothing: Option<i32> = None; // VIEW: nothing => None
+    let ok: Result<u32, String> = Ok(7); // VIEW: ok => Ok(7)
+    let failed: Result<u32, String> = Err(String::from("no")); // VIEW: failed => Err("no")
+    let shape = Shape::Square { side: 4 }; // VIEW: shape => Square {side: 4}
+    let dynamic: Box<dyn Debug> = Box::new(Point { x: 1, y: 2 }); // VIEW: dynamic => Point {x: 1, y: 2}
+
     black_box((
         &text,
         &empty_text,
@@ -91,6 +129,24 @@ fn main() {
         &no_text,
         &past_capacity,
         &dangling,
+        &boxed,
+        &rc,
+        &rc_too,
+        &rc_weak,
+        &no_weak,
+        &dropped,
+        &arc,
+        &arc_weak,
+        &cell,
+        &ref_cell,
+        &borrowed,
+        &mutex,
+        &some,
+        &nothing,
+        &ok,
+        &failed,
+        &shape,
+        &dynamic,
     ));
     barrier(std::ptr::from_ref(&text).cast());
     std::process::exit(i32::from(ints.len() + many.len() != 303));

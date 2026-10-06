@@ -11,13 +11,17 @@
 #include <forward_list>
 #include <list>
 #include <map>
+#include <memory>
 #include <new>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <tuple>
 #include <unordered_set>
+#include <variant>
 #include <vector>
 
 extern "C" __attribute__((noinline)) void barrier(void *fixture) {
@@ -35,6 +39,32 @@ template <typename T> union Corrupt {
 template <typename T> static void keep(T &value) {
     __asm__ volatile("" : : "r"(&value) : "memory");
 }
+
+// Polymorphic classes, whose values views present as their dynamic types.
+struct Shape {
+    virtual ~Shape() = default;
+    virtual int area() const = 0;
+    int id = 7;
+};
+struct Square : Shape {
+    int side = 3;
+    int area() const override { return side * side; }
+};
+struct Named {
+    virtual ~Named() = default;
+    long tag = 2;
+};
+// Its Square is not at its start, so a Shape pointer to one points into it.
+struct Tile : Named, Square {
+    int row = 9;
+};
+
+// Making one throws, and copying one is not trivial, which leaves a variant
+// being given one holding nothing.
+struct Fragile {
+    explicit Fragile(int) { throw 1; }
+    Fragile(const Fragile &) {}
+};
 
 // Where a list node's links are, in each library: libstdc++'s nodes begin
 // with their next link, libc++'s with their previous one.
@@ -112,6 +142,40 @@ int main() {
     std::deque<std::string> word_queue = {"x"};   // VIEW: word_queue => len=1 ["x"]
     std::deque<int> no_queue;                     // VIEW: no_queue => len=0 []
 
+    std::unique_ptr<int> owned = std::make_unique<int>(42); // VIEW: owned => 42
+    std::unique_ptr<int> no_owned;                // VIEW: no_owned => nullptr
+    std::unique_ptr<int[]> owned_array(new int[3]{1, 2, 3}); // VIEW: owned_array => stored
+    std::shared_ptr<int> shared = std::make_shared<int>(7); // VIEW: shared => 7
+    std::shared_ptr<int> shared_too = shared;     // VIEW: shared_too => children: strong = 2, weak = 1, [raw]
+    std::weak_ptr<int> weak = shared;             // VIEW: weak => 7
+    std::weak_ptr<int> expired = std::make_shared<int>(1); // VIEW: expired => expired
+    std::shared_ptr<int> no_shared;               // VIEW: no_shared => nullptr
+    std::optional<int> some = 5;                  // VIEW: some => 5
+    std::optional<int> nothing;                   // VIEW: nothing => nullopt
+    std::optional<std::string> some_text = "hi";  // VIEW: some_text => "hi"
+    std::variant<int, std::string> alternative = std::string("v"); // VIEW: alternative => "v"
+    std::variant<int, std::string> first_alternative = 3; // VIEW: first_alternative => 3
+    std::variant<int, Fragile> valueless = 1;    // VIEW: valueless => valueless
+    try {
+        valueless.emplace<1>(0);
+    } catch (int) {
+    }
+    // A variant whose index names no alternative. Its index follows its
+    // storage, as big as its largest alternative, a string.
+    std::variant<int, std::string> bad_index = 1; // VIEW: bad_index => problem: the type has no type argument 5
+    reinterpret_cast<unsigned char *>(&bad_index)[sizeof(std::string)] = 5;
+    std::tuple<> no_elements;                     // VIEW: no_elements => ()
+    std::tuple<int> single{1};                    // VIEW: single => (1)
+    std::tuple<int, std::string> couple{1, "a"};  // VIEW: couple => (1, "a")
+    std::tuple<int, char, double> triple{1, 'c', 2.5}; // VIEW: triple => (1, 99 'c', 2.5)
+    std::tuple<int, int, int, int> quadruple{1, 2, 3, 4}; // VIEW: quadruple => children: 0 = 1, 1 = 2, 2 = 3, 3 = 4, [raw]
+    std::tuple<int, int, int, int, int> quintuple{1, 2, 3, 4, 5}; // VIEW: quintuple => (1, 2, 3, 4, 5)
+    std::tuple<int, int, int, int, int, int> sextuple{1, 2, 3, 4, 5, 6}; // VIEW: sextuple => (1, 2, 3, 4, 5, 6)
+    std::tuple<int, int, int, int, int, int, int> septuple{}; // VIEW: septuple => stored
+    std::unique_ptr<Shape> shape = std::make_unique<Square>(); // VIEW: shape => Square {id: 7, side: 3}
+    Tile tile;
+    Shape *inner_shape = &tile;                   // VIEW: *inner_shape => Tile {tag: 2, id: 7, side: 3, row: 9}
+
     // A list whose last node leads back to its second: walking it would
     // show the second and third elements again.
     std::list<int> looped = {7, 8, 9};            // VIEW: looped => problem: cycle at element 3
@@ -135,7 +199,14 @@ int main() {
     keep(hashed_set), keep(hashed_multiset), keep(no_hashed), keep(linked), keep(linked_words);
     keep(no_links), keep(forward), keep(no_forward), keep(queue), keep(word_queue);
     keep(no_queue), keep(looped), keep(overcounted);
+    keep(owned), keep(no_owned), keep(owned_array), keep(shared), keep(shared_too), keep(weak);
+    keep(expired), keep(no_shared), keep(some), keep(nothing), keep(some_text), keep(alternative);
+    keep(first_alternative), keep(valueless), keep(bad_index), keep(no_elements), keep(single);
+    keep(couple), keep(triple), keep(quadruple), keep(quintuple), keep(sextuple), keep(septuple);
+    keep(shape), keep(tile), keep(inner_shape);
     barrier(&text);
+    // The corrupted variant holds its int again, for its destructor.
+    reinterpret_cast<unsigned char *>(&bad_index)[sizeof(std::string)] = 0;
     // The corrupted lists are never destroyed.
     new (&looped) std::list<int>();
     new (&overcounted) std::list<int>();

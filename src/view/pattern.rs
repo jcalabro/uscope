@@ -119,7 +119,12 @@ fn arguments_match(
     let Some(arguments) = &pattern.arguments else {
         return true;
     };
-    arguments.len() <= identity.arguments.len()
+    // Trailing arguments may be left out, as C++ fills them with defaults,
+    // but a pattern that reaches a parameter pack spells all of it:
+    // `std::tuple<A, B>` names only pairs.
+    let whole = identity.pack.is_some_and(|start| arguments.len() >= start);
+    (arguments.len() == identity.arguments.len() || !whole)
+        && arguments.len() <= identity.arguments.len()
         && arguments
             .iter()
             .zip(identity.arguments.iter())

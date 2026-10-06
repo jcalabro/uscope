@@ -26,6 +26,9 @@ enum Expected {
     Count(u64),
     /// The view refuses the value, saying this.
     Problem(String),
+    /// The presented value's children, each `name = summary`, `[i] =
+    /// summary`, or `key: summary`, and `[raw]`.
+    Children(String),
     /// No view presents the value, and it holds no text.
     Stored,
 }
@@ -67,6 +70,9 @@ fn expectation(text: &str) -> Expected {
     }
     if let Some(problem) = text.strip_prefix("problem: ") {
         return Expected::Problem(problem.to_owned());
+    }
+    if let Some(children) = text.strip_prefix("children: ") {
+        return Expected::Children(children.to_owned());
     }
     if let Some(count) = text.strip_prefix("count: ") {
         return Expected::Count(count.parse().expect("a count"));
@@ -335,6 +341,49 @@ async fn check_name(
     }
 }
 
+/// Checks every child of a presented value, as a `children:` marker lists
+/// them.
+async fn check_listed_children(
+    scenario: &Scenario,
+    marker: &Marker,
+    presentation: &uscope::Presentation,
+    expected: &str,
+    failures: &mut Vec<String>,
+) {
+    let ValueChildren::Available(reference) = &presentation.children else {
+        failures.push(format!("line {}: no children", marker.line));
+        return;
+    };
+    let Some(children) =
+        first_children(scenario, marker, reference, reference.total(), failures).await
+    else {
+        return;
+    };
+    let rendered = children
+        .iter()
+        .map(|child| {
+            let value = uscope::value_summary(Some(&child.type_info), &child.state);
+            match &child.relationship {
+                ValueChildRelationship::Element { index } => format!("[{index}] = {value}"),
+                ValueChildRelationship::Entry { key, .. } => format!(
+                    "{}: {value}",
+                    uscope::value_summary(Some(&key.type_info), &key.state)
+                ),
+                ValueChildRelationship::Field { name } => format!("{name} = {value}"),
+                ValueChildRelationship::Raw => "[raw]".to_owned(),
+                other => format!("{other:?} = {value}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if rendered != expected {
+        failures.push(format!(
+            "line {}: `{}`'s children\n    expected {expected}\n    actual   {rendered}",
+            marker.line, marker.expression
+        ));
+    }
+}
+
 /// Checks what one marker says its expression shows.
 async fn check_marker(
     scenario: &Scenario,
@@ -401,6 +450,9 @@ async fn check_marker(
             summary(value)
         )),
         (Expected::Stored, _) => unreachable!("checked above"),
+        (Expected::Children(expected), _) => {
+            check_listed_children(scenario, marker, presentation, expected, failures).await;
+        }
         (Expected::Count(expected), _) => {
             if presentation.count != Some(PresentedCount::Exact(*expected)) {
                 failures.push(format!(
@@ -521,8 +573,20 @@ async fn cpp_containers_present_as_their_views_say_across_the_library_matrix() {
         ("containers-cpp-clang-o2", true, &[]),
         // The old ABI's list keeps no count to be wrong.
         ("containers-cpp-gcc-oldabi", false, &["overcounted"]),
-        ("containers-cpp-libcxx-o0", false, &[]),
-        ("containers-cpp-libcxx-o2", true, &[]),
+        // Without -fstandalone-debug, libc++'s control blocks are
+        // undescribed, so a shared_ptr shows no counts and a weak_ptr cannot
+        // say whether its object exists.
+        (
+            "containers-cpp-libcxx-o0",
+            false,
+            &["shared_too", "weak", "expired"],
+        ),
+        (
+            "containers-cpp-libcxx-o2",
+            true,
+            &["shared_too", "weak", "expired"],
+        ),
+        ("containers-cpp-libcxx-standalone", false, &[]),
     ] {
         seen.extend(
             check_containers_but(fixture, "cpp/containers.cpp", "barrier", optimized, skipped)
@@ -564,7 +628,7 @@ async fn zig_containers_present_as_their_views_say() {
 }
 
 #[tokio::test]
-async fn go_maps_present_as_their_views_say() {
+async fn go_containers_present_as_their_views_say() {
     let mut seen = BTreeSet::new();
     for (fixture, optimized) in [("containers-go-o0", false), ("containers-go-o2", true)] {
         seen.extend(
@@ -765,7 +829,7 @@ view rust nowhere {
     assert_eq!(
         errors.iter().map(ToString::to_string).collect::<Vec<_>>(),
         [
-            "session.views:10:10: expected a shape: `text`, `value`, `empty`, `sequence`, `map`, or `if`, found `nothing`"
+            "session.views:10:10: expected a shape: `text`, `value`, `empty`, `sequence`, `map`, `record`, `dynamic`, or `if`, found `nothing`"
         ]
     );
     let ints = evaluate(&scenario, "ints").await;
@@ -802,10 +866,10 @@ view rust nowhere {
             other => format!("{other:?}"),
         })
         .collect::<Vec<_>>();
-    // The vector's own presentation, `empty`, has no elements: its children
-    // are its `[raw]`, then the path's field and `[raw]`.
-    assert_eq!(names, ["[raw]", "length", "[raw]"]);
-    let length = &page.children[1];
+    // The vector's own presentation, `empty`, has no elements, and its
+    // `[raw]` is its own: the path's children are its field and `[raw]`.
+    assert_eq!(names, ["length", "[raw]"]);
+    let length = &page.children[0];
     assert!(
         matches!(
             length.state,

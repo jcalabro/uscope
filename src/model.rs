@@ -680,6 +680,9 @@ pub struct TypeIdentity {
     pub base: Arc<str>,
     /// Template or generic arguments by position, with packs flattened.
     pub arguments: Arc<[TypeArgument]>,
+    /// Where a C++ template parameter pack's arguments begin among
+    /// `arguments`, when the type has a pack, even an empty one.
+    pub pack: Option<usize>,
     /// Where the arguments came from.
     pub origin: ArgumentOrigin,
     /// What Go's runtime records about the type, for Go types.
@@ -1108,8 +1111,10 @@ pub struct ValueChildrenReference {
 /// fields, then a `[raw]` child.
 #[derive(Clone)]
 pub struct ViewChildren {
-    /// The bound view, which only the backend that bound it reads.
-    pub(crate) bound: Arc<dyn std::any::Any + Send + Sync>,
+    /// The bound view, which only the backend that bound it reads; `None`
+    /// for what the debugger presents without a view, such as a sum type's
+    /// active variant, which has no fields.
+    pub(crate) bound: Option<Arc<dyn std::any::Any + Send + Sync>>,
     /// How many elements precede the fields.
     pub(crate) elements: u64,
     /// How many fields precede the `[raw]` child.
@@ -1131,7 +1136,12 @@ impl fmt::Debug for ViewChildren {
 
 impl PartialEq for ViewChildren {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.bound, &other.bound)
+        let same_view = match (&self.bound, &other.bound) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        };
+        same_view
             && self.elements == other.elements
             && self.fields == other.fields
             && self.inner == other.inner
@@ -1732,12 +1742,18 @@ pub enum PresentedShape {
     Text,
     /// Another value, standing for this one.
     Value,
+    /// This value as the type it dynamically is, such as a C++ object of a
+    /// derived class, a Rust trait object, or a Go interface's value.
+    Dynamic,
     /// Nothing, described by the summary, such as `None`.
     Empty,
     /// Elements, which are children.
     Sequence,
     /// Entries, each a key and a value, which are children.
     Map,
+    /// Members a view names, which are children, as a C++ `std::tuple`'s
+    /// elements are.
+    Record,
     /// The view failed, for the reason in `problem`, so the value shows as
     /// it is stored.
     Raw,
@@ -2810,6 +2826,9 @@ pub struct ModuleMetadata {
     pub statements: Vec<StatementRow>,
     pub lines: Vec<LineEntry>,
     pub sections: Vec<SectionInfo>,
+    /// Rust trait objects' vtables, by address, with the concrete type each
+    /// is for.
+    pub vtables: Vec<(ImageAddress, TypeReference)>,
 }
 
 #[derive(Debug)]
@@ -3193,6 +3212,8 @@ pub struct ModuleImage {
     /// Known instruction starts in address order, one per address.
     instruction_starts: Arc<[(ImageAddress, crate::BoundaryEvidence)]>,
     type_index: crate::type_identity::TypeIndex,
+    /// Rust trait objects' vtables, with the concrete type each is for.
+    vtables: std::collections::BTreeMap<ImageAddress, TypeReference>,
 }
 
 impl ModuleImage {
@@ -3294,6 +3315,7 @@ impl ModuleImage {
             section_range_index,
             instruction_starts,
             type_index,
+            vtables: metadata.vtables.iter().copied().collect(),
         }
     }
 
@@ -3554,6 +3576,45 @@ impl ModuleImage {
     ) -> Vec<TypeReference> {
         self.type_index
             .instances(language, path, base, &self.types.as_ref())
+    }
+
+    /// The concrete type a Rust trait object's vtable at `address` is for.
+    #[must_use]
+    pub fn trait_object_type(&self, address: ImageAddress) -> Option<TypeReference> {
+        self.vtables.get(&address).copied()
+    }
+
+    /// The C++ class whose vtable group, `vtable for X`, holds `address`:
+    /// the class's name, and where the group begins.
+    #[must_use]
+    pub fn vtable_class(&self, address: ImageAddress) -> Option<(String, ImageAddress)> {
+        let location = self.symbolize_data(address)?;
+        let symbol = self.symbol(location.symbol)?;
+        let name = crate::demangle::demangle(&symbol.name)?;
+        let class = name
+            .strip_prefix("vtable for ")
+            .or_else(|| name.strip_prefix("{vtable(")?.strip_suffix(")}"))?;
+        Some((class.to_owned(), symbol.address))
+    }
+
+    /// The type Go's runtime describes at `offset` from `runtime.types`, as
+    /// its `DW_AT_go_runtime_type` says: the first in identifier order when
+    /// several, such as a named type and its typedef, say so.
+    #[must_use]
+    pub fn go_runtime_type(&self, offset: u64) -> Option<TypeReference> {
+        self.types.iter().find_map(|node| match node {
+            TypeNode::Resolved(info)
+                if info
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| identity.go)
+                    .and_then(|go| go.runtime_type)
+                    == Some(offset) =>
+            {
+                Some(info.reference)
+            }
+            _ => None,
+        })
     }
 
     /// The types whose identity has this base, whatever their language,
@@ -4170,6 +4231,7 @@ mod tests {
                 statements: Vec::new(),
                 lines: Vec::new(),
                 sections: Vec::new(),
+                vtables: Vec::new(),
             },
         )
     }
@@ -4268,6 +4330,7 @@ mod tests {
                 statements: Vec::new(),
                 lines: Vec::new(),
                 sections: Vec::new(),
+                vtables: Vec::new(),
             },
         )
         .with_id(image_id);
@@ -4387,6 +4450,7 @@ mod tests {
                 statements: Vec::new(),
                 lines: Vec::new(),
                 sections: Vec::new(),
+                vtables: Vec::new(),
             },
         )
     }
@@ -4473,6 +4537,7 @@ mod tests {
                     section(0, ".text", 0x10, 0x70, true),
                     section(1, ".data", 0x80, 0x90, false),
                 ],
+                vtables: Vec::new(),
             },
         );
         let starts = |start, end| {
@@ -4621,6 +4686,7 @@ mod tests {
                 statements: boundary_test_rows(),
                 lines: Vec::new(),
                 sections: Vec::new(),
+                vtables: Vec::new(),
             },
         )
     }
@@ -4888,6 +4954,7 @@ mod tests {
                 statements: Vec::new(),
                 lines: Vec::new(),
                 sections,
+                vtables: Vec::new(),
             },
         )
     }

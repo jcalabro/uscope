@@ -33,6 +33,10 @@ pub struct Item<'a> {
     pub name: &'a str,
     /// How to evaluate the value again, when it can be.
     pub path: Option<uscope::Expression>,
+    /// Whether the value is `[raw]`, the value as stored, which its path
+    /// would evaluate as its view presents it: its own children are reached
+    /// through the path, but it is not named by it.
+    pub raw: bool,
     pub type_info: Option<&'a TypeInfo>,
     pub state: &'a VariableState,
 }
@@ -68,7 +72,7 @@ pub fn variable(
     let path = item.path;
     let named = path.is_some();
     let whole = path.as_ref().is_some_and(uscope::Expression::is_name);
-    if let Some(path) = &path {
+    if let Some(path) = path.as_ref().filter(|_| !item.raw) {
         variable.insert("evaluateName".to_owned(), path.to_string().into());
     }
     let mut reference = 0;

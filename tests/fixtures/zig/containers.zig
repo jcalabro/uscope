@@ -1,4 +1,5 @@
-//! Standard library containers, which the built-in views present. Each
+//! Standard library containers, which the built-in views present, and sum
+//! types, which the debugger presents without a view. Each
 //! `VIEW:` marker says what its expression must show, evaluated in main()
 //! where barrier() is called; `problem:` says the view must refuse the
 //! value, and why.
@@ -7,6 +8,14 @@ const std = @import("std");
 
 noinline fn barrier(fixture: *const anyopaque) void {
     std.mem.doNotOptimizeAway(fixture);
+}
+
+const Shape = union(enum) { circle: u32, square: struct { side: u16 }, none };
+const Failure = error{ Oops, Bad };
+
+noinline fn fallible(fail: bool) Failure!u32 {
+    if (fail) return Failure.Bad;
+    return 7;
 }
 
 pub fn main() !void {
@@ -53,6 +62,20 @@ pub fn main() !void {
     past_capacity.items = @constCast(storage[0..4]);
     past_capacity.capacity = 2;
 
+    // Optionals, error unions, and tagged unions, which the debugger
+    // presents as the variant each holds.
+    var some: ?u32 = 5; // VIEW: some => 5
+    var none: ?u32 = null; // VIEW: none => null
+    var value: u64 = 9;
+    // A nullable pointer is a pointer.
+    var some_pointer: ?*u64 = &value; // VIEW: some_pointer => stored
+    var no_pointer: ?*u64 = null; // VIEW: no_pointer => stored
+    var success: Failure!u32 = fallible(false); // VIEW: success => 7
+    var failure: Failure!u32 = fallible(true); // VIEW: failure => error.Bad
+    var circle: Shape = .{ .circle = 3 }; // VIEW: circle => circle(3)
+    var square: Shape = .{ .square = .{ .side = 4 } }; // VIEW: square => square {side: 4}
+    var nothing: Shape = .none; // VIEW: nothing => none
+
     std.mem.doNotOptimizeAway(&ints);
     std.mem.doNotOptimizeAway(&no_ints);
     std.mem.doNotOptimizeAway(&bytes);
@@ -66,5 +89,14 @@ pub fn main() !void {
     std.mem.doNotOptimizeAway(&ordered);
     std.mem.doNotOptimizeAway(&strings);
     std.mem.doNotOptimizeAway(&no_ordered);
+    std.mem.doNotOptimizeAway(&some);
+    std.mem.doNotOptimizeAway(&none);
+    std.mem.doNotOptimizeAway(&some_pointer);
+    std.mem.doNotOptimizeAway(&no_pointer);
+    std.mem.doNotOptimizeAway(&success);
+    std.mem.doNotOptimizeAway(&failure);
+    std.mem.doNotOptimizeAway(&circle);
+    std.mem.doNotOptimizeAway(&square);
+    std.mem.doNotOptimizeAway(&nothing);
     barrier(&ints);
 }

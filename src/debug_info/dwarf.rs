@@ -255,6 +255,7 @@ fn load_debug_info(
                 symbol_sources: symbols.sources,
                 globals: variables.globals,
                 types: variables.types,
+                vtables: variables.vtables,
                 source_files,
                 statements,
                 lines,
@@ -862,17 +863,24 @@ fn load_function_metadata(
         if function_ids.contains_key(&definition) {
             continue;
         }
-        let Some(name) =
-            inherited_value(definition, &raw, &by_key, |function| function.name.clone())?
-        else {
+        let linkage_name = inherited_value(definition, &raw, &by_key, |function| {
+            function.linkage_name.clone()
+        })?;
+        // Clang names the thunks a multiply inherited virtual function
+        // needs only by their linkage names.
+        let name = inherited_value(definition, &raw, &by_key, |function| function.name.clone())?
+            .or_else(|| {
+                linkage_name
+                    .as_deref()
+                    .and_then(crate::demangle::demangle)
+                    .map(Arc::from)
+            });
+        let Some(name) = name else {
             if concrete.contains(&definition) {
                 return Err(DwarfError::MissingFunctionName);
             }
             continue;
         };
-        let linkage_name = inherited_value(definition, &raw, &by_key, |function| {
-            function.linkage_name.clone()
-        })?;
         let declaration = inherited_value(definition, &raw, &by_key, |function| {
             function.declaration.clone()
         })?;

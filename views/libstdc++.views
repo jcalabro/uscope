@@ -157,3 +157,129 @@ view c++ std::deque<T, _> {
     check block > 0 && blocks >= 0 && size >= 0
     show sequence(size) for i in range(size) => nodes[(skipped + i) / block][(skipped + i) % block]
 }
+
+# A unique_ptr's pointer is the first element of the tuple that holds it
+# and its deleter. Arrays, unique_ptr<T[]>, have no size to show.
+view c++ std::unique_ptr<T, _> {
+    check sizeof(T) > 0
+    type Pointer = arg(typeof(_M_t._M_t), 0)
+    type Head = std::_Head_base<0, Pointer>
+    let pointer = ((Head)_M_t._M_t)._M_head_impl
+    show if pointer == 0 { empty("nullptr") } else { value(*pointer) }
+}
+
+# A shared_ptr's control block counts its owners and, while it has any,
+# one weak reference for all of them.
+view c++ std::shared_ptr<T> {
+    check sizeof(T) > 0
+    let counts = _M_refcount._M_pi
+    let strong = counts == 0 ? 0 : counts->_M_use_count
+    show if _M_ptr == 0 { empty("nullptr") } else { value(*_M_ptr) }
+    field strong = strong
+    field weak = counts == 0 ? 0 : counts->_M_weak_count - (strong > 0 ? 1 : 0)
+}
+
+# A weak_ptr whose owners are gone points at a destroyed object.
+view c++ std::weak_ptr<T> {
+    check sizeof(T) > 0
+    let counts = _M_refcount._M_pi
+    let strong = counts == 0 ? 0 : counts->_M_use_count
+    show if counts == 0 || _M_ptr == 0 {
+        empty("nullptr")
+    } else if strong == 0 {
+        empty("expired")
+    } else {
+        value(*_M_ptr)
+    }
+    field strong = strong
+    field weak = counts == 0 ? 0 : counts->_M_weak_count - (strong > 0 ? 1 : 0)
+}
+
+view c++ std::optional<T> {
+    show if _M_payload._M_engaged { value(_M_payload._M_payload._M_value) } else { empty("nullopt") }
+}
+
+# Every alternative is at the start of the union _M_u; _M_index says which
+# one it holds, or all ones when it holds none.
+view c++ std::variant {
+    type Index = typeof(_M_index)
+    show if _M_index == (Index)-1 {
+        empty("valueless")
+    } else {
+        dynamic(&_M_u, arg(typeof(self), _M_index))
+    }
+}
+
+# A tuple is a chain of _Tuple_impl bases, the Nth holding element N in its
+# _Head_base<N, T> base. These views name tuples of up to six elements. An
+# empty tuple holds nothing, in libstdc++ or libc++.
+view c++ std::tuple<> {
+    show record {}
+}
+
+view c++ std::tuple<A> {
+    type H0 = std::_Head_base<0, A>
+    show record { 0 = ((H0)self)._M_head_impl }
+}
+
+view c++ std::tuple<A, B> {
+    type H0 = std::_Head_base<0, A>
+    type H1 = std::_Head_base<1, B>
+    show record { 0 = ((H0)self)._M_head_impl, 1 = ((H1)self)._M_head_impl }
+}
+
+view c++ std::tuple<A, B, C> {
+    type H0 = std::_Head_base<0, A>
+    type H1 = std::_Head_base<1, B>
+    type H2 = std::_Head_base<2, C>
+    show record {
+        0 = ((H0)self)._M_head_impl,
+        1 = ((H1)self)._M_head_impl,
+        2 = ((H2)self)._M_head_impl,
+    }
+}
+
+view c++ std::tuple<A, B, C, D> {
+    type H0 = std::_Head_base<0, A>
+    type H1 = std::_Head_base<1, B>
+    type H2 = std::_Head_base<2, C>
+    type H3 = std::_Head_base<3, D>
+    show record {
+        0 = ((H0)self)._M_head_impl,
+        1 = ((H1)self)._M_head_impl,
+        2 = ((H2)self)._M_head_impl,
+        3 = ((H3)self)._M_head_impl,
+    }
+}
+
+view c++ std::tuple<A, B, C, D, E> {
+    type H0 = std::_Head_base<0, A>
+    type H1 = std::_Head_base<1, B>
+    type H2 = std::_Head_base<2, C>
+    type H3 = std::_Head_base<3, D>
+    type H4 = std::_Head_base<4, E>
+    show record {
+        0 = ((H0)self)._M_head_impl,
+        1 = ((H1)self)._M_head_impl,
+        2 = ((H2)self)._M_head_impl,
+        3 = ((H3)self)._M_head_impl,
+        4 = ((H4)self)._M_head_impl,
+    }
+}
+
+view c++ std::tuple<A, B, C, D, E, F> {
+    type H0 = std::_Head_base<0, A>
+    type H1 = std::_Head_base<1, B>
+    type H2 = std::_Head_base<2, C>
+    type H3 = std::_Head_base<3, D>
+    type H4 = std::_Head_base<4, E>
+    type H5 = std::_Head_base<5, F>
+    show record {
+        0 = ((H0)self)._M_head_impl,
+        1 = ((H1)self)._M_head_impl,
+        2 = ((H2)self)._M_head_impl,
+        3 = ((H3)self)._M_head_impl,
+        4 = ((H4)self)._M_head_impl,
+        5 = ((H5)self)._M_head_impl,
+    }
+}

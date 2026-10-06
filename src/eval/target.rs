@@ -81,6 +81,8 @@ pub enum StepKind<'a> {
     Member(&'a str),
     /// To an element of an array or slice, holding `available` indices.
     Index { available: usize },
+    /// To the one base class subobject of a record of the given type.
+    Base(TypeReference),
 }
 
 /// A step a scope planned from types alone.

@@ -593,6 +593,15 @@ impl TypeIndex {
             .collect()
     }
 
+    /// A type's identity as one string, which every type the same as it
+    /// shares.
+    pub fn key(&self, reference: TypeReference) -> Option<&Arc<str>> {
+        if self.image != Some(reference.image) {
+            return None;
+        }
+        self.keys.get(reference.id.index())
+    }
+
     /// Whether two types of this image have the same identity, as one type
     /// defined in several units does.
     pub fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
@@ -812,6 +821,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 origin: ArgumentOrigin::Dwarf,
+                pack: None,
                 go: None,
             })),
         };
@@ -855,6 +865,7 @@ mod tests {
                 base: base.into(),
                 arguments: arguments.into(),
                 origin: ArgumentOrigin::Dwarf,
+                pack: None,
                 go: None,
             }))
         };

@@ -29,6 +29,10 @@ world of C types:
   holding 1, then 2, 3, and 4;
 - the C++ `app::Handle<int>`, `{void *cell}`, whose `cell` points at an
   `app::Cell<int>`, `{int value}`, as `handle` holding 5;
+- the C++ `app::Either<int, char*>`, `{char *storage; int index}`, which
+  holds the argument `index` chooses in `storage`, as `number` holding the
+  int 7, `pointer` holding the pointer 0x90000, and `neither` whose index
+  is 5;
 - `list`, a linked list `{node *head; unsigned long count}` of `node {int
   value; node *next}`, as `three` holding 1, 2, and 3, `circle` holding 4,
   5, and 6 in a ring, `looped` whose third node leads back to its second,
@@ -112,6 +116,9 @@ whatever the compiler called the type: `pair<int const, …>` and
   expressions may name, or a value, which they may use as a number.
 - An integer matches an argument of that value, and a pattern matches a
   type argument.
+- A pattern that reaches a C++ parameter pack spells all of it:
+  `std::tuple<A, B>` names only tuples of two, and `std::tuple`, with no
+  arguments, every tuple.
 - In Go, `map<K, V>`, `chan<T>`, and `interface` name every map, channel,
   and interface, by the kind Go's debug information gives the type,
   whatever the type's name: `go map<K, V>` presents `map[string]int` and a
@@ -230,6 +237,13 @@ handle => children: offset = 0, [raw]
   may be `_` to leave the count to the generators.
 - `map(COUNT) GENERATORS => KEY : VALUE` is a map of `COUNT` entries, each
   a key and a value.
+- `record { NAME = EXPR, … }` is a record of the members it names, which
+  are its children before the view's fields. Members named by their
+  positions, from 0, make it a tuple.
+- `dynamic(PTR, TYPE)` is what `PTR` points to, as a value of `TYPE`,
+  presented as any value of that type is. `TYPE` may be `arg(TYPE, EXPR)`,
+  the type's argument at a position the program's data holds, as a
+  `std::variant`'s index does; a position that names no type is a problem.
 - `if COND { SHAPE } else { SHAPE }` chooses a shape, and may begin a
   statement of its own.
 
@@ -260,6 +274,31 @@ view c tagged {
 ---
 nothing => tagged 0: 0
 something => tagged 1: 7
+```
+
+```uscope-view-example
+uscope-views 1
+view c++ app::detail::Pair<T, N> {
+    show record { first = first, rest = items[0] }
+}
+view c tagged {
+    show record { 0 = kind, 1 = value }
+}
+---
+p => {first: 1, rest: 2}
+p => children: first = 1, rest = 2, [raw]
+something => (1, 7)
+```
+
+```uscope-view-example
+uscope-views 1
+view c++ app::Either<_, _> {
+    show dynamic(&storage, arg(typeof(self), index))
+}
+---
+number => 7
+pointer => 0x90000
+neither => problem: the type has no type argument 5
 ```
 
 ## Generators
@@ -399,15 +438,34 @@ The views built into uscope cover:
   and long; `std::string_view`, `std::vector` (not `std::vector<bool>`),
   `std::array`, `std::span`, `std::deque`, `std::list`, `std::forward_list`,
   `std::map`, `std::multimap`, `std::set`, `std::multiset`, and the
-  `unordered_` maps and sets.
+  `unordered_` maps and sets; `std::unique_ptr` (not of an array),
+  `std::shared_ptr` and `std::weak_ptr` with their counts, `std::optional`,
+  `std::variant`, and tuples of up to six elements. libc++ describes a
+  `shared_ptr`'s counts only when built with `-fstandalone-debug`; without
+  them a `shared_ptr` shows no counts, and a `weak_ptr`, which cannot say
+  whether its object still exists, shows as stored.
 - Rust: `String`, `PathBuf`, `OsString`, `CString`, `Vec`, `VecDeque`,
-  `HashMap`, and `HashSet`. `&str`, `Box<str>`, and slices are text and
-  elements without a view.
-- Go: maps, including a nil map, which shows as `nil`.
+  `HashMap`, `HashSet`, `Box`, `Rc`, `Arc`, both `Weak`s, `Cell`, `RefCell`,
+  and `Mutex`. `&str`, `Box<str>`, and slices are text and elements without
+  a view.
+- Go: maps and channels, including nil ones, which show as `nil`.
 - Zig: `std.ArrayList` and the managed list, `std.HashMap`, its unmanaged
   map, and `std.ArrayHashMapUnmanaged`.
 
 Their files are in `views/`, one per library.
+
+Some values need no view, because their debug information says what they
+are:
+
+- A Rust enum, and a Zig optional, error union, or tagged union, shows as
+  the variant it holds: `Some(4)`, `Err("no")`, `Square {side: 4}`, or a
+  Zig optional's or error union's payload itself, `null`, or `error.Bad`.
+- A C++ object of a class with virtual functions shows as the object it
+  is part of, `Square {id: 7, side: 3}`, when its vtable pointer is one
+  the program's symbols name. A Rust trait object shows as the value its
+  vtable is for, and a Go interface as its dynamic type and value, `int
+  42`, `main.Point {X: 1, Y: 2}`, or `*errors.errorString *{s: "bad"}`.
+  A value whose table is not one the program names shows as stored.
 
 ## Using views
 
@@ -422,7 +480,8 @@ Their files are in `views/`, one per library.
   null pointer shows only its address.
 - An element of a value presented as a sequence is `v[i]`, and the count
   of a sequence or map is `len(v)`, in any expression: `break f if
-  len(queue) > 100`. An element in memory can be assigned and its address
+  len(queue) > 100`. A Go channel is indexed this way too, though it is
+  stored as a pointer, because Go never indexes one as a pointer. An element in memory can be assigned and its address
   taken. A map is not indexed by position; its entries are found by key in
   a later version.
 - A debug adapter client sees a presented value's elements or entries as

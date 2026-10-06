@@ -15,7 +15,9 @@ use crate::{
     ViewProblem,
 };
 
-use super::bind::{BoundScan, BoundShape, BoundView, TextSource, ViewObject, ViewProgram};
+use super::bind::{
+    BoundDynamic, BoundScan, BoundShape, BoundView, TextSource, ViewObject, ViewProgram,
+};
 use super::scan::{Checkpoints, Scanner, Var};
 use super::summary;
 
@@ -78,6 +80,9 @@ pub struct Presented {
     pub inner: Option<InspectedValue>,
     /// Why the summary stopped short of every element.
     pub partial: Option<ViewProblem>,
+    /// How many members a record has, which are children before the
+    /// view's fields.
+    pub members: u64,
 }
 
 /// One child of a presented value.
@@ -419,6 +424,38 @@ fn run_value<M: Machine>(
     }
 }
 
+/// Where the value a `dynamic` shape presents is: what its pointer points
+/// to, as the type it names or the type argument its index chooses.
+fn dynamic_place<M: Machine>(
+    pointer: &ViewProgram<M::Step>,
+    ty: &BoundDynamic<M::Step>,
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<M::Place, Failure> {
+    let Value::Pointer(address) = interp::value(pointer, machine)? else {
+        return Err(internal("a dynamic value's pointer is not a pointer"));
+    };
+    let ty = match ty {
+        BoundDynamic::Fixed(ty) => *ty,
+        BoundDynamic::Argument { types, index } => {
+            let index = count(index, machine, "type argument's position")?;
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| types.get(index).copied().flatten())
+                .ok_or_else(|| {
+                    Failure::Problem(ViewProblem::Refused(
+                        format!("the type has no type argument {index}").into(),
+                    ))
+                })?
+        }
+    };
+    if address == 0 {
+        return Err(Failure::Problem(ViewProblem::Unavailable(
+            VariableUnavailableReason::ValueAccess(ValueAccessUnavailableReason::NullPointer),
+        )));
+    }
+    Ok(machine.place_at(address, ty)?)
+}
+
 /// An element, key, or value, with the generators' variables in the
 /// machine. One the view cannot compute, such as one past the address
 /// space, is that element's problem, not the sequence's.
@@ -544,6 +581,7 @@ pub fn present<M: Machine>(
                 text: Some(text),
                 inner: None,
                 partial: None,
+                members: 0,
             }
         }
         BoundShape::Value(program) => {
@@ -555,6 +593,7 @@ pub fn present<M: Machine>(
                 summary: summary::value(inner.type_info.as_ref(), &inner.state),
                 inner: Some(inner),
                 partial: None,
+                members: 0,
             }
         }
         BoundShape::Empty(text) => Presented {
@@ -564,9 +603,43 @@ pub fn present<M: Machine>(
             summary: text.to_string(),
             inner: None,
             partial: None,
+            members: 0,
         },
         BoundShape::Sequence { scan, .. } | BoundShape::Map { scan, .. } => {
             preview(shape, scan, &mut machine, checkpoints)?
+        }
+        BoundShape::Record(members) => {
+            let mut parts = Vec::new();
+            for member in members.iter().take(summary::MAX_ELEMENTS) {
+                machine.set_variables(&[]);
+                let value = element(&member.program, &mut machine)?;
+                parts.push((
+                    Arc::clone(&member.name),
+                    summary::value(value.type_info.as_ref(), &value.state),
+                ));
+            }
+            Presented {
+                shape: PresentedShape::Record,
+                count: None,
+                text: None,
+                summary: summary::record(&parts, parts.len() == members.len()),
+                inner: None,
+                partial: None,
+                members: members.len() as u64,
+            }
+        }
+        BoundShape::Dynamic { pointer, ty } => {
+            let place = dynamic_place(pointer, ty, &mut machine)?;
+            let inner = machine.present(&place)?;
+            Presented {
+                shape: PresentedShape::Value,
+                count: None,
+                text: None,
+                summary: summary::value(inner.type_info.as_ref(), &inner.state),
+                inner: Some(inner),
+                partial: None,
+                members: 0,
+            }
         }
         BoundShape::If { .. } => unreachable!("`if` is resolved"),
     };
@@ -698,6 +771,7 @@ fn preview<M: Machine>(
         },
         inner: None,
         partial,
+        members: 0,
     })
 }
 
@@ -716,10 +790,15 @@ pub fn children<M: Machine>(
     let mut machine = ViewMachine::new(machine, bound, this);
     checks(bound, &mut machine)?;
     let shape = resolve(&bound.shape, &mut machine)?;
-    let fields = bound.fields.len() as u64;
+    // A record's members come before the view's fields.
+    let members = match shape {
+        BoundShape::Record(members) => members.as_slice(),
+        _ => &[],
+    };
+    let named = (members.len() + bound.fields.len()) as u64;
     let end = offset
         .saturating_add(limit)
-        .min(elements.saturating_add(fields).saturating_add(1));
+        .min(elements.saturating_add(named).saturating_add(1));
     let mut children = Vec::new();
     if offset < elements
         && let Some(scan) = scan_of(shape)
@@ -757,10 +836,15 @@ pub fn children<M: Machine>(
         }
     }
     for index in offset.max(elements)..end {
-        let child = if let Some(field) = bound
-            .fields
-            .get(usize::try_from(index - elements).unwrap_or(usize::MAX))
-        {
+        let position = usize::try_from(index - elements).unwrap_or(usize::MAX);
+        let child = if let Some(member) = members.get(position) {
+            // A member the program cannot provide is that member's problem.
+            machine.set_variables(&[]);
+            Child::Field(
+                Arc::clone(&member.name),
+                element(&member.program, &mut machine)?,
+            )
+        } else if let Some(field) = bound.fields.get(position.saturating_sub(members.len())) {
             machine.set_variables(&[]);
             Child::Field(
                 Arc::clone(&field.name),
@@ -850,6 +934,17 @@ pub fn length<M: Machine>(
                 "the value it presents has no length".into(),
             ))),
         },
+        BoundShape::Dynamic { pointer, ty } => {
+            let place = dynamic_place(pointer, ty, &mut machine)?;
+            machine.presented_length(&place)?.ok_or_else(|| {
+                Failure::Problem(ViewProblem::Refused(
+                    "the value it presents has no length".into(),
+                ))
+            })
+        }
+        BoundShape::Record(_) => Err(Failure::Problem(ViewProblem::Refused(
+            "a record has no length".into(),
+        ))),
         BoundShape::If { .. } => unreachable!("`if` is resolved"),
     }
 }
