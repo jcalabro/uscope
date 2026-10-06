@@ -39,8 +39,9 @@ world of C types:
   and `short` claiming 5 elements of its 3;
 - `tree`, a binary tree `{tnode *root; unsigned long count}` of `tnode {int
   key; int value; tnode *left; tnode *right}`, as `balanced` holding the
-  keys 1, 2, and 3 with the values 10, 20, and 30, and `deep`, a chain of
-  200 left children;
+  keys 1, 2, and 3 with the values 10, 20, and 30, `tangled`, whose
+  rightmost node leads back to its root, and `deep`, a chain of 200 left
+  children;
 - `table`, an open-addressed table `{slot *slots; unsigned long cap;
   unsigned long n}` of `slot {int used; int key; int value}`, as `sparse`
   using two of its four slots, for the keys 5 and 6;
@@ -469,6 +470,7 @@ view c tree {
 ---
 looped => problem: cycle at element 3: it leads back to a node already visited
 short => problem: the view declares 5 elements and generates 3
+tangled => problem: cycle at element 3: it leads back to a node already visited
 deep => problem: the tree is deeper than 128 levels
 ```
 
