@@ -162,7 +162,7 @@ fn resolve_frame_base(
     }
 }
 
-pub(super) fn evaluate_frame_base(
+fn evaluate_frame_base(
     expression: &Expression,
     endian: RunTimeEndian,
     units: &[EvaluationUnit],
