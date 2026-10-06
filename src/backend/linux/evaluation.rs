@@ -796,6 +796,13 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 source: VariableValueSource::Constant,
                 ..
             } => Err(not_in_memory("a constant")),
+            // Pieces describe where a value's parts are, not where it is.
+            ValueStorage::Bytes {
+                source: VariableValueSource::Pieces,
+                ..
+            } => Err(Stop::missing(VariableState::Unavailable(
+                crate::UnsupportedVariableFeature::CompositeLocation.into(),
+            ))),
             ValueStorage::Bytes { .. } => Err(not_in_memory("computed")),
             ValueStorage::ImplicitPointer { .. } => {
                 Err(not_in_memory("optimized into its referent"))
@@ -990,6 +997,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 start: 0,
                 end: bytes.len(),
                 address: None,
+                unavailable: Arc::from([]),
             },
         };
         let value = self.materialize(module, &located)?;

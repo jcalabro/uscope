@@ -20,8 +20,7 @@ use super::location::{EvaluationUnit, Expression, LocationDescription, LocationS
 use super::shape::ValueShapeError;
 use super::types::DynamicAggregateLayoutKey;
 use super::{
-    ConstantValue, InspectionBudget, MAX_EVALUATION_ITERATIONS, MAX_LOCATION_PIECES, Metadata,
-    MetadataAbsence,
+    ConstantValue, InspectionBudget, MAX_EVALUATION_ITERATIONS, Metadata, MetadataAbsence,
 };
 
 pub(super) enum FrameBaseCache {
@@ -421,8 +420,9 @@ fn evaluation_value(
         .map_err(|error| EvaluateError::Malformed(evaluation_error(error)))
 }
 
-pub(super) fn materialize_pieces(
-    pieces: &[gimli::Piece<Reader<'_>>],
+/// The bytes of a value one piece describes whole.
+pub(super) fn materialize_piece(
+    piece: &gimli::Piece<Reader<'_>>,
     byte_size: u64,
     scalar_type: Option<&BaseType>,
     endian: RunTimeEndian,
@@ -430,22 +430,8 @@ pub(super) fn materialize_pieces(
     runtime: &mut dyn VariableRuntime,
     budget: &mut InspectionBudget,
 ) -> std::result::Result<(VariableValueSource, Arc<[u8]>), EvaluateError> {
-    if pieces.len() > MAX_LOCATION_PIECES {
-        return Err(VariableUnavailableReason::EvaluationLimit.into());
-    }
-    let expected_bits = byte_size
-        .checked_mul(8)
-        .ok_or_else(|| EvaluateError::Malformed("scalar bit size overflow".into()))?;
-    if let Some(reason) = incomplete_piece_reason(pieces, expected_bits)? {
-        return Err(reason.into());
-    }
-    let [piece] = pieces else {
-        return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
-    };
-    if piece.size_in_bits.is_some_and(|size| size != expected_bits) || piece.bit_offset.is_some() {
-        return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
-    }
-    let size = usize::try_from(byte_size).expect("supported value size fits usize");
+    let size =
+        usize::try_from(byte_size).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
     match piece.location {
         Location::Empty => Err(VariableUnavailableReason::OptimizedOut(
             crate::OptimizedOutReason::EmptyLocation,
@@ -492,55 +478,6 @@ pub(super) fn materialize_pieces(
             Err(crate::UnsupportedVariableFeature::ImplicitPointer.into())
         }
     }
-}
-
-pub(super) fn incomplete_piece_reason(
-    pieces: &[gimli::Piece<Reader<'_>>],
-    expected_bits: u64,
-) -> std::result::Result<Option<VariableUnavailableReason>, EvaluateError> {
-    if pieces.is_empty() {
-        return Err(EvaluateError::Malformed(
-            "DWARF location expression produced no pieces".into(),
-        ));
-    }
-    let mut offset = 0_u64;
-    let mut undefined = Vec::new();
-    for piece in pieces {
-        let size = match piece.size_in_bits {
-            Some(size) => size,
-            None if pieces.len() == 1 => expected_bits,
-            None => {
-                return Err(EvaluateError::Malformed(
-                    "one of multiple DWARF location pieces has no size".into(),
-                ));
-            }
-        };
-        let end = offset.checked_add(size).ok_or_else(|| {
-            EvaluateError::Malformed("DWARF location piece range overflows".into())
-        })?;
-        if end > expected_bits {
-            return Err(EvaluateError::Malformed(
-                "DWARF location pieces exceed the declared value size".into(),
-            ));
-        }
-        if matches!(piece.location, Location::Empty) {
-            undefined.push(crate::ValueBitRange { offset, size });
-        }
-        offset = end;
-    }
-    if undefined.is_empty() {
-        return Ok(None);
-    }
-    if undefined.len() == 1 && undefined[0].offset == 0 && undefined[0].size == expected_bits {
-        return Ok(Some(VariableUnavailableReason::OptimizedOut(
-            crate::OptimizedOutReason::EmptyLocation,
-        )));
-    }
-    Ok(Some(VariableUnavailableReason::OptimizedOut(
-        crate::OptimizedOutReason::UndefinedPieces {
-            ranges: undefined.into(),
-        },
-    )))
 }
 
 fn object_bytes(

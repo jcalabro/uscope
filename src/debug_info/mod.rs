@@ -202,6 +202,9 @@ pub trait VariableRuntime {
         offset: u64,
     ) -> std::result::Result<VirtualAddress, VariableUnavailableReason>;
     fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>>;
+    /// Where `address` is in this module's image, or `None` when the
+    /// module does not map it, such as code another module holds.
+    fn image_address(&self, address: VirtualAddress) -> Option<ImageAddress>;
     fn read_memory(
         &mut self,
         address: VirtualAddress,

@@ -22,7 +22,7 @@ use super::codec::{
 use super::die::checked_reference_chain;
 use super::evaluate::{
     EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, dwarf_value_bytes, evaluate,
-    incomplete_piece_reason, materialize_constant, materialize_pieces,
+    materialize_constant, materialize_piece,
 };
 use super::globals::{DefinitionIndex, DefinitionResolution};
 use super::inspect::{
@@ -318,6 +318,10 @@ impl VariableRuntime for Runtime {
         Ok(VirtualAddress::new(address.get()))
     }
 
+    fn image_address(&self, address: VirtualAddress) -> Option<ImageAddress> {
+        Some(ImageAddress::new(address.get()))
+    }
+
     fn read_memory(
         &mut self,
         _address: VirtualAddress,
@@ -492,8 +496,8 @@ fn implicit_and_computed_values_materialize_with_source_provenance() {
     let mut runtime = Runtime::new([]);
     let implicit = expression(&[gimli::DW_OP_implicit_value.0, 4, 0xd6, 0xff, 0xff, 0xff]);
     let pieces = run(&implicit, &units([]), &mut runtime).expect("implicit scalar expression");
-    let materialized = materialize_pieces(
-        &pieces,
+    let materialized = materialize_piece(
+        &pieces[0],
         4,
         Some(&scalar_type(BaseTypeEncoding::Signed, 4)),
         RunTimeEndian::Little,
@@ -515,57 +519,79 @@ fn implicit_and_computed_values_materialize_with_source_provenance() {
 }
 
 #[test]
-fn undefined_location_pieces_report_exact_destination_ranges() {
-    let pieces = [
-        gimli::Piece::<Reader<'_>> {
-            location: Location::Value {
-                value: Value::Generic(0x12),
-            },
-            size_in_bits: Some(8),
-            bit_offset: None,
+fn undefined_pieces_are_unavailable_rather_than_filled() {
+    let value = |value| gimli::Piece::<Reader<'_>> {
+        location: Location::Value {
+            value: Value::Generic(value),
         },
-        gimli::Piece::<Reader<'_>> {
-            location: Location::Empty,
-            size_in_bits: Some(16),
-            bit_offset: None,
-        },
-        gimli::Piece::<Reader<'_>> {
-            location: Location::Value {
-                value: Value::Generic(0x34),
-            },
-            size_in_bits: Some(8),
-            bit_offset: None,
-        },
-    ];
-
+        size_in_bits: Some(8),
+        bit_offset: None,
+    };
+    let empty = |size| gimli::Piece::<Reader<'_>> {
+        location: Location::Empty,
+        size_in_bits: Some(size),
+        bit_offset: None,
+    };
+    let pieces = [value(0x12), empty(16), value(0x34)];
+    let mut runtime = Runtime::new([]);
+    let mut budget = InspectionBudget::default();
+    let assembled =
+        super::pieces::assemble(&pieces, 4, RunTimeEndian::Little, &mut runtime, &mut budget);
+    let Ok(crate::model::ValueStorage::Bytes {
+        raw, unavailable, ..
+    }) = &assembled
+    else {
+        panic!("a partly defined value is captured: {assembled:?}");
+    };
+    assert_eq!((raw[0], raw[3]), (0x12, 0x34));
     assert_eq!(
-        incomplete_piece_reason(&pieces, 32),
-        Ok(Some(VariableUnavailableReason::OptimizedOut(
+        super::pieces::unavailable_within(unavailable, 0, 4),
+        Some(VariableUnavailableReason::OptimizedOut(
             crate::OptimizedOutReason::UndefinedPieces {
                 ranges: Arc::from([crate::ValueBitRange {
                     offset: 8,
                     size: 16,
                 }]),
             },
-        )))
+        ))
     );
     assert!(matches!(
-        incomplete_piece_reason(&pieces, 24),
+        super::pieces::assemble(&pieces, 3, RunTimeEndian::Little, &mut runtime, &mut budget),
         Err(EvaluateError::Malformed(_))
     ));
+    assert_eq!(
+        super::pieces::assemble(
+            &[empty(32)],
+            8,
+            RunTimeEndian::Little,
+            &mut runtime,
+            &mut budget
+        ),
+        Err(EvaluateError::Unavailable(
+            VariableUnavailableReason::OptimizedOut(crate::OptimizedOutReason::EmptyLocation)
+        ))
+    );
 }
 
 #[test]
 fn an_empty_location_expression_describes_an_optimized_out_value() {
     let empty = expression(&[]);
-    let pieces =
-        run(&empty, &units([]), &mut Runtime::new([])).expect("an empty expression is valid");
+    let mut runtime = Runtime::new([]);
+    let pieces = run(&empty, &units([]), &mut runtime).expect("an empty expression is valid");
 
     assert_eq!(
-        incomplete_piece_reason(&pieces, 64),
-        Ok(Some(VariableUnavailableReason::OptimizedOut(
-            crate::OptimizedOutReason::EmptyLocation
-        )))
+        materialize_piece(
+            &pieces[0],
+            8,
+            None,
+            RunTimeEndian::Little,
+            target(ByteOrder::Little),
+            &mut runtime,
+            &mut InspectionBudget::default(),
+        ),
+        Err(EvaluateError::Unavailable(
+            VariableUnavailableReason::OptimizedOut(crate::OptimizedOutReason::EmptyLocation)
+        ))
     );
 }
 

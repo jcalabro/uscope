@@ -9,7 +9,7 @@ use crate::debug_info::{VariableContext, VariableRegister, VariableRuntime, Vari
 use crate::inspection::{InspectionBudget, MAX_INSPECTION_LIMITS};
 use crate::protocol::{GlobalVariableQuery, StopId, VariableQuery};
 use crate::{
-    CodeInstanceId, Error, GlobalVariablePage, GlobalVariableReference, ImageAddress,
+    AddressRange, CodeInstanceId, Error, GlobalVariablePage, GlobalVariableReference, ImageAddress,
     InspectedValue, LoadedGlobalVariableInfo, LoadedModule, MemoryReadCompletion, RegisterSnapshot,
     Result, StackFrameId, TlsUnavailableReason, VariableSnapshot, VariableState,
     VariableUnavailableReason, VirtualAddress,
@@ -101,6 +101,7 @@ impl<P: InspectionOps> Controller<P> {
             pid: root.reader(),
             thread: root.thread(),
             loaded_module: module.loaded,
+            image_range: module.image.address_range(),
             breakpoints: &inferior.breakpoints,
             registers: &frame.registers,
             floating: None,
@@ -535,6 +536,8 @@ pub(super) struct LinuxVariableRuntime<'a, P> {
     /// parked task.
     pub(super) thread: Option<Pid>,
     pub(super) loaded_module: LoadedModule,
+    /// The image addresses the module's segments span.
+    pub(super) image_range: AddressRange<ImageAddress>,
     pub(super) breakpoints: &'a BTreeMap<VirtualAddress, BreakpointSite>,
     pub(super) registers: &'a FrameRegisters,
     pub(super) floating: Option<std::result::Result<Fxsave, Arc<str>>>,
@@ -609,6 +612,13 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
         self.loaded_module
             .virtual_address(address)
             .map_err(|error| error.to_string().into())
+    }
+
+    fn image_address(&self, address: VirtualAddress) -> Option<ImageAddress> {
+        self.loaded_module
+            .image_address(address)
+            .ok()
+            .filter(|address| self.image_range.contains(*address))
     }
 
     fn read_memory(

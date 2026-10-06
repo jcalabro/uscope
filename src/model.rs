@@ -445,6 +445,9 @@ pub enum BaseTypeEncoding {
     Unsigned,
     UnsignedCharacter,
     Floating,
+    /// A complex number: two floats, each half its size, the real part
+    /// first.
+    ComplexFloating,
 }
 
 /// A resolved scalar type independent of its debug-information encoding.
@@ -765,6 +768,10 @@ pub enum TypeKind {
     },
     /// A deliberately unspecified type such as C `void`.
     Unspecified,
+    /// A function value, such as Go's `func`: null, or a pointer to a
+    /// context whose first word is the code it calls and whose rest holds
+    /// what a closure captured.
+    Function,
     /// A valid type whose value shape is not implemented yet.
     Opaque {
         /// A stable description of the unsupported DWARF type tag.
@@ -1005,6 +1012,11 @@ pub enum ScalarValue {
     Unsigned(u128),
     /// A binary floating-point value retained as exact target bits.
     Floating(FloatValue),
+    /// A complex number, its parts retained as exact target bits.
+    Complex {
+        real: FloatValue,
+        imaginary: FloatValue,
+    },
 }
 
 /// A decoded thin pointer or reference representation.
@@ -1024,11 +1036,20 @@ pub enum VariableValue {
     Enumeration {
         /// The exact target value.
         value: IntegerValue,
-        /// Exact symbolic matches in producer/source order.
+        /// Exact symbolic matches in producer/source order, or, when none
+        /// equals the value, the flag constants whose bitwise OR it is.
         matches: Arc<[Enumerator]>,
     },
     /// A concrete thin pointer or reference address.
     Address(AddressValue),
+    /// A function value. A closure's captured variables are its children.
+    Function {
+        /// The code it calls, or `None` for a null (Go's nil) function.
+        code: Option<VirtualAddress>,
+        /// The function that code begins, when the debug information
+        /// describes one there.
+        function: Option<Arc<str>>,
+    },
     /// An optimized pointer with no concrete address representation.
     ImplicitPointer,
     /// An array whose elements are available through explicit child pages.
@@ -1232,12 +1253,23 @@ pub enum ValueStorage {
         start: usize,
         end: usize,
         address: Option<VirtualAddress>,
+        /// The bits of `raw` the program does not hold, such as the missing
+        /// pieces of a value assembled from pieces, which no read may use.
+        unavailable: Arc<[UnavailableBits]>,
     },
     /// A DWARF implicit pointer that must be resolved at the originating frame.
     ImplicitPointer {
         debug_info_offset: u64,
         byte_offset: i64,
     },
+}
+
+/// Bits of captured bytes that hold nothing of the value, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableBits {
+    /// Where, counted from the first bit of the captured bytes.
+    pub range: ValueBitRange,
+    pub reason: VariableUnavailableReason,
 }
 
 /// Opaque capability for expanding one aggregate at one exact stopped state.
@@ -1378,6 +1410,9 @@ pub enum VariableValueSource {
     Computed,
     /// Optimization retained a referent value but eliminated the pointer's address.
     ImplicitPointer,
+    /// Pieces in registers, memory, or debug information, which together
+    /// have no one address.
+    Pieces,
 }
 
 /// Why an otherwise available pointer or reference cannot be dereferenced.
@@ -1585,6 +1620,9 @@ pub enum ValueAccessUnavailableReason {
     NonIntegralBitField,
     /// The selected member belongs to a different active variant.
     InactiveVariant(Option<Arc<str>>),
+    /// Debug information does not describe what the closure a function
+    /// value calls captured, or describes it malformedly.
+    UndescribedClosure,
     /// An implicit-pointer view falls outside its referenced source object.
     ImplicitPointerOutOfBounds {
         /// Signed byte offset into the referenced object.
@@ -1733,6 +1771,9 @@ impl fmt::Display for VariableUnavailableReason {
             }
             Self::ValueAccess(ValueAccessUnavailableReason::NonIntegralBitField) => {
                 formatter.write_str("non-integral bit-fields are unsupported")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::UndescribedClosure) => {
+                formatter.write_str("debug information does not describe what the closure captured")
             }
             Self::ValueAccess(ValueAccessUnavailableReason::InactiveVariant(name)) => {
                 if let Some(name) = name {
@@ -2073,6 +2114,11 @@ pub struct InspectedValue {
 pub enum VariableKind {
     /// A formal parameter of the selected function or inline instance.
     Parameter,
+    /// A result of the selected function or inline instance that the
+    /// debug information names as a variable, such as Go's named results
+    /// and its unnamed `~r0`. It holds the value returned once the
+    /// function sets it, at the latest as it returns.
+    Result,
     /// A local variable declared within the selected function.
     Local,
     /// A data object with static storage described by a module image.
@@ -2181,8 +2227,70 @@ pub struct Variable {
     pub declaration: Option<SourceLocation>,
     /// Its resolved type, when valid and supported.
     pub type_info: Option<TypeInfo>,
+    /// Why a generic value has the type of the shape its code was compiled
+    /// for, such as Go's `go.shape.int`, rather than its own type.
+    pub unresolved_shape: Option<ShapeUnresolvedReason>,
     /// Its current availability and value.
     pub state: VariableState,
+}
+
+/// Why the type argument a generic value has could not be found, so the
+/// value shows the shape its code was compiled for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ShapeUnresolvedReason {
+    /// The function has no dictionary of type arguments here.
+    NoDictionary,
+    /// The dictionary, or its entry for the type, cannot be read.
+    DictionaryUnavailable(VariableUnavailableReason),
+    /// Optimized code describes its dictionary in the slot where the
+    /// function may spill it, which holds a stale value until it does.
+    UnreliableDictionary,
+    /// The table of the runtime's type descriptors, Go's
+    /// `runtime.firstmoduledata`, is not described or cannot be read.
+    ModuleDataUnavailable(VariableUnavailableReason),
+    /// The dictionary names a type descriptor outside this module's.
+    ForeignType,
+    /// No type in the debug information has the dictionary's descriptor.
+    UndescribedType,
+    /// The type the dictionary names is laid out unlike the shape.
+    MismatchedShape,
+    /// The debug information describing the dictionary or the table is
+    /// malformed.
+    Malformed(Arc<str>),
+}
+
+impl fmt::Display for ShapeUnresolvedReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoDictionary => formatter.write_str("the function has no type dictionary here"),
+            Self::DictionaryUnavailable(reason) => {
+                write!(formatter, "the type dictionary is unavailable: {reason}")
+            }
+            Self::UnreliableDictionary => formatter.write_str(
+                "optimized code may not have stored its type dictionary where described",
+            ),
+            Self::ModuleDataUnavailable(reason) => {
+                write!(
+                    formatter,
+                    "the runtime's type table is unavailable: {reason}"
+                )
+            }
+            Self::ForeignType => {
+                formatter.write_str("the type argument is described by another module")
+            }
+            Self::UndescribedType => {
+                formatter.write_str("no debug information describes the type argument")
+            }
+            Self::MismatchedShape => {
+                formatter.write_str("the type argument is laid out unlike its shape")
+            }
+            Self::Malformed(description) => write!(
+                formatter,
+                "the type dictionary's debug information is malformed: {description}"
+            ),
+        }
+    }
 }
 
 /// One value produced by explicitly dereferencing a pointer or reference.

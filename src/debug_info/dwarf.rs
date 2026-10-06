@@ -273,7 +273,11 @@ fn load_debug_info(
         &catalog,
         target,
         image_id,
-        &function_metadata.instance_ids,
+        variables::CodeMetadata {
+            instance_ids: &function_metadata.instance_ids,
+            lines: &lines,
+            instances: &function_metadata.code_instances,
+        },
         &mut source_files,
         &mut source_file_ids,
     )?;

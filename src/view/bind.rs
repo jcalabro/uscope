@@ -1257,7 +1257,9 @@ fn is_text_unit<S: Scope>(scope: &ViewScope<'_, S>, ty: &Ty) -> bool {
                 ..
             })) if base.byte_size == 1 && !matches!(
                 base.encoding,
-                BaseTypeEncoding::Boolean | BaseTypeEncoding::Floating
+                BaseTypeEncoding::Boolean
+                    | BaseTypeEncoding::Floating
+                    | BaseTypeEncoding::ComplexFloating
             )
         ),
         _ => false,
