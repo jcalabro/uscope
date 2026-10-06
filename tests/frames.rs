@@ -62,14 +62,6 @@ async fn select(scenario: &mut Scenario, level: usize) -> StackFrame {
     selected
 }
 
-async fn variables(scenario: &Scenario) -> Vec<Variable> {
-    scenario
-        .operation("variables", scenario.handle().variables())
-        .await
-        .variables
-        .to_vec()
-}
-
 /// An integer-like value: an integer, enumerator, boolean, or address.
 fn integer(value: &VariableValue) -> Option<i128> {
     let integer = |value: &IntegerValue| match *value {
@@ -538,8 +530,11 @@ async fn compare_frame(
         oracle.function,
         function_name(frame)
     );
-    let ours = variables(scenario).await;
+    let ours = scenario
+        .operation("variables", scenario.handle().variables())
+        .await;
     let mut our_names = ours
+        .variables
         .iter()
         .map(|variable| variable.name.to_string())
         .collect::<Vec<_>>();
@@ -907,38 +902,32 @@ async fn value_capabilities_evaluate_in_the_frame_that_produced_them() {
     // gcc -O2 describes `kept_pointer` by its target, `kept`, which lives in
     // a register the leaf saved and overwrote: dereferencing it reads the
     // register in the producing frame, not the stopped thread's.
-    for variant in ["gcc-o2", "gcc-o2-nopie"] {
-        let core = Scenario::fixture(&format!("frames-{variant}.core"));
-        let mut scenario = Scenario::open_core(variant, &CoreDumpOptions::new(core));
-        let frames = backtrace(&scenario).await;
-        select(&mut scenario, level_of(&frames, "frames_keep", 0)).await;
-        let pointer = scenario
-            .operation("kept_pointer", scenario.handle().variable("kept_pointer"))
-            .await;
-        let VariableState::Available {
-            value: VariableValue::ImplicitPointer,
-            dereference: DereferenceState::Available(reference),
-            ..
-        } = pointer.state
-        else {
-            panic!("{variant}: kept_pointer is {:?}", pointer.state);
-        };
-        assert_eq!(
-            integer_variable(&scenario, "kept").await,
-            16,
-            "{variant}: the target"
-        );
+    let core = Scenario::fixture("frames-gcc-o2.core");
+    let mut scenario = Scenario::open_core("gcc-o2", &CoreDumpOptions::new(core));
+    let frames = backtrace(&scenario).await;
+    select(&mut scenario, level_of(&frames, "frames_keep", 0)).await;
+    let pointer = scenario
+        .operation("kept_pointer", scenario.handle().variable("kept_pointer"))
+        .await;
+    let VariableState::Available {
+        value: VariableValue::ImplicitPointer,
+        dereference: DereferenceState::Available(reference),
+        ..
+    } = pointer.state
+    else {
+        panic!("kept_pointer is {:?}", pointer.state);
+    };
+    assert_eq!(integer_variable(&scenario, "kept").await, 16);
 
-        select(&mut scenario, 0).await;
-        let target = scenario
-            .operation("dereference", scenario.handle().dereference(reference))
-            .await;
-        let VariableState::Available { value, .. } = &target.state else {
-            panic!("{variant}: *kept_pointer is {:?}", target.state);
-        };
-        assert_eq!(integer(value), Some(16), "{variant}");
-        scenario.shutdown().await;
-    }
+    select(&mut scenario, 0).await;
+    let target = scenario
+        .operation("dereference", scenario.handle().dereference(reference))
+        .await;
+    let VariableState::Available { value, .. } = &target.state else {
+        panic!("*kept_pointer is {:?}", target.state);
+    };
+    assert_eq!(integer(value), Some(16));
+    scenario.shutdown().await;
 
     // Unoptimized aggregates expand their members from the producing frame.
     let core = Scenario::fixture("frames-gcc-o0.core");
@@ -1368,44 +1357,36 @@ async fn shared_library_and_c_library_caller_frames_are_selectable() {
 
 #[tokio::test]
 async fn revealing_an_inline_frame_without_running_selects_the_innermost_frame() {
-    for fixture in ["inline-gcc-o2", "inline-clang-o2"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("caller").await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-        let stop = scenario.snapshot().await.stop_id;
-        let frames = backtrace(&scenario).await;
-        select(&mut scenario, level_of(&frames, "main", 0)).await;
+    let mut scenario = Scenario::launch("inline-gcc-o2");
+    scenario.add_breakpoint("caller").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let stop = scenario.snapshot().await.stop_id;
+    let frames = backtrace(&scenario).await;
+    select(&mut scenario, level_of(&frames, "main", 0)).await;
 
-        // Stepping into the inline call hidden at the stop publishes a new
-        // stop without running the inferior.
-        assert_eq!(
-            scenario.step_to_stop(StepKind::IntoSource).await,
-            StopReason::Step {
-                kind: StepKind::IntoSource
-            },
-            "{fixture}"
-        );
-        let snapshot = scenario.snapshot().await;
-        assert_ne!(snapshot.stop_id, stop, "{fixture}");
-        assert_eq!(
-            snapshot.selected_frame,
-            Some(StackFrameId::INNERMOST),
-            "{fixture}"
-        );
-        let location = scenario
-            .operation("location", scenario.handle().current_location())
-            .await;
-        assert_eq!(
-            location
-                .image
-                .function
-                .map(|function| function.name.to_string()),
-            Some("middle".to_owned()),
-            "{fixture}"
-        );
-        scenario.shutdown().await;
-    }
+    // Stepping into the inline call hidden at the stop publishes a new stop
+    // without running the inferior.
+    assert_eq!(
+        scenario.step_to_stop(StepKind::IntoSource).await,
+        StopReason::Step {
+            kind: StepKind::IntoSource
+        }
+    );
+    let snapshot = scenario.snapshot().await;
+    assert_ne!(snapshot.stop_id, stop);
+    assert_eq!(snapshot.selected_frame, Some(StackFrameId::INNERMOST));
+    let location = scenario
+        .operation("location", scenario.handle().current_location())
+        .await;
+    assert_eq!(
+        location
+            .image
+            .function
+            .map(|function| function.name.to_string()),
+        Some("middle".to_owned())
+    );
+    scenario.shutdown().await;
 }

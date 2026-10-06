@@ -35,7 +35,6 @@ fn options(core_name: &str, executable: Option<&str>, allow: bool) -> CoreDumpOp
     }
 }
 
-/// A fresh directory for one test's modified copies of read-only fixtures.
 fn crash_source_line(needle: &str) -> u64 {
     let source = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/crash/main.c"),
@@ -818,16 +817,27 @@ async fn missing_files_are_reported_and_leave_their_images_unavailable() {
     explicit.shutdown().await;
 }
 
-/// Edits a copy of a core's ELF header or program headers. The copy lives
-/// until the returned directory is dropped.
-fn edited_core(test: &str, source: &str, edit: impl FnOnce(&mut Vec<u8>)) -> (ScratchDir, PathBuf) {
-    let mut bytes = fs::read(core(source)).expect("read core fixture");
+/// Writes an edited copy of a fixture, named `name`, which lives until the
+/// returned directory is dropped.
+fn edited(
+    test: &str,
+    fixture: &str,
+    name: &str,
+    edit: impl FnOnce(&mut Vec<u8>),
+) -> (ScratchDir, PathBuf) {
+    let mut bytes = fs::read(Scenario::fixture(fixture)).expect("read fixture");
     edit(&mut bytes);
     let directory = ScratchDir::new(&format!("post-mortem-{test}"));
-    let path = directory.path().join("edited.core");
-    fs::write(&path, bytes).expect("write edited core");
+    let path = directory.path().join(name);
+    fs::write(&path, bytes).expect("write edited fixture");
     (directory, path)
 }
+
+/// Offsets of fields in an ELF64 program header.
+const PHDR_OFFSET: usize = 8;
+const PHDR_VADDR: usize = 16;
+const PHDR_FILESZ: usize = 32;
+const PHDR_MEMSZ: usize = 40;
 
 /// Returns the file offset of each `PT_LOAD` header and the address range it maps.
 fn load_headers(bytes: &[u8]) -> Vec<(usize, u64, u64)> {
@@ -872,8 +882,8 @@ fn note_segment(bytes: &[u8]) -> (usize, usize) {
 /// The offset of the general registers in `NT_PRSTATUS`.
 const PRSTATUS_REGISTERS: usize = 112;
 
-/// The file offset of the first `NT_PRSTATUS` descriptor, the faulting
-/// thread's.
+/// The file offset of the faulting thread's `NT_PRSTATUS` descriptor, the
+/// first.
 fn first_prstatus(bytes: &[u8]) -> usize {
     let (start, size) = note_segment(bytes);
     let word = |offset: usize| {
@@ -894,10 +904,8 @@ fn first_prstatus(bytes: &[u8]) -> usize {
     panic!("the core has no NT_PRSTATUS note");
 }
 
-const PHDR_OFFSET: usize = 8;
 /// Rewrites one program header, given the file offset of that header.
 type SegmentEdit = fn(&mut Vec<u8>, usize);
-const PHDR_FILESZ: usize = 32;
 
 #[tokio::test]
 async fn unsaved_and_truncated_memory_stays_unavailable_rather_than_guessed() {
@@ -925,7 +933,7 @@ async fn unsaved_and_truncated_memory_stays_unavailable_rather_than_guessed() {
         }),
     ];
     for (name, edit) in edits {
-        let (_scratch, path) = edited_core(name, "crash-gcc-o0-segv.core", |bytes| {
+        let (_scratch, path) = edited(name, "crash-gcc-o0-segv.core", "edited.core", |bytes| {
             let (header, _, _) = load_headers(bytes)
                 .into_iter()
                 .find(|&(_, start, end)| (start..end).contains(&stack))
@@ -1026,14 +1034,20 @@ async fn modified_file_pages_missing_from_a_dump_are_never_read_from_the_file() 
     // header records that the producer saved those bytes, so the file cannot
     // stand in for them. gcore writes notes last, so the segment's data is
     // moved to end at the counter instead of truncating the file itself.
-    let (_scratch, path) = edited_core("truncated-data", "crash-gcc-o0-segv.core", |bytes| {
-        let (header, start, _) = load_headers(bytes)
-            .into_iter()
-            .find(|&(_, start, end)| (start..end).contains(&counter.get()))
-            .expect("a load segment holds the counter");
-        let cut = u64::try_from(bytes.len()).unwrap() - (counter.get() - start);
-        bytes[header + PHDR_OFFSET..header + PHDR_OFFSET + 8].copy_from_slice(&cut.to_le_bytes());
-    });
+    let (_scratch, path) = edited(
+        "truncated-data",
+        "crash-gcc-o0-segv.core",
+        "edited.core",
+        |bytes| {
+            let (header, start, _) = load_headers(bytes)
+                .into_iter()
+                .find(|&(_, start, end)| (start..end).contains(&counter.get()))
+                .expect("a load segment holds the counter");
+            let cut = u64::try_from(bytes.len()).unwrap() - (counter.get() - start);
+            bytes[header + PHDR_OFFSET..header + PHDR_OFFSET + 8]
+                .copy_from_slice(&cut.to_le_bytes());
+        },
+    );
     let truncated = Scenario::open_core("truncated data", &CoreDumpOptions::new(path));
     assert_eq!(
         loaded_identity(&core_info(&truncated), "crash-gcc-o0"),
@@ -1045,19 +1059,6 @@ async fn modified_file_pages_missing_from_a_dump_are_never_read_from_the_file() 
     );
     assert_eq!(complete_read(&truncated, counter, 4).await, None);
     truncated.shutdown().await;
-}
-
-const PHDR_VADDR: usize = 16;
-
-/// Writes a copy of the gcc -O0 crash executable with edited program headers.
-/// The copy lives until the returned directory is dropped.
-fn edited_executable(test: &str, edit: impl FnOnce(&mut Vec<u8>)) -> (ScratchDir, PathBuf) {
-    let mut bytes = fs::read(Scenario::fixture("crash-gcc-o0")).expect("read executable");
-    edit(&mut bytes);
-    let directory = ScratchDir::new(&format!("post-mortem-{test}"));
-    let path = directory.path().join("crash-gcc-o0");
-    fs::write(&path, bytes).expect("write edited executable");
-    (directory, path)
 }
 
 fn with_executable(executable: &Path, allow: bool) -> CoreDumpOptions {
@@ -1081,12 +1082,13 @@ async fn allowed_mismatches_keep_the_recorded_placement_or_refuse_to_relocate() 
 
     // A segment extending past the end of the file proves a different file,
     // but the recorded mapping still places it.
-    let (_oversized_scratch, oversized) = edited_executable("oversized", |bytes| {
-        let (header, _, _) = *load_headers(bytes).last().expect("a load segment");
-        let past_end = u64::try_from(bytes.len()).unwrap() + 1;
-        bytes[header + PHDR_FILESZ..header + PHDR_FILESZ + 8]
-            .copy_from_slice(&past_end.to_le_bytes());
-    });
+    let (_oversized_scratch, oversized) =
+        edited("oversized", "crash-gcc-o0", "crash-gcc-o0", |bytes| {
+            let (header, _, _) = *load_headers(bytes).last().expect("a load segment");
+            let past_end = u64::try_from(bytes.len()).unwrap() + 1;
+            bytes[header + PHDR_FILESZ..header + PHDR_FILESZ + 8]
+                .copy_from_slice(&past_end.to_le_bytes());
+        });
     assert!(matches!(
         Debugger::open_core(&with_executable(&oversized, false)),
         Err(Error::CoreModuleMismatch { detail, .. }) if detail.contains("outside")
@@ -1107,17 +1109,18 @@ async fn allowed_mismatches_keep_the_recorded_placement_or_refuse_to_relocate() 
 
     // Linked above the recorded image, the file has no load bias that places
     // it there. Relocating it anywhere would be a guess.
-    let (_unplaceable_scratch, unplaceable) = edited_executable("unplaceable", |bytes| {
-        for (header, _, _) in load_headers(bytes) {
-            let address = u64::from_le_bytes(
+    let (_unplaceable_scratch, unplaceable) =
+        edited("unplaceable", "crash-gcc-o0", "crash-gcc-o0", |bytes| {
+            for (header, _, _) in load_headers(bytes) {
+                let address = u64::from_le_bytes(
+                    bytes[header + PHDR_VADDR..header + PHDR_VADDR + 8]
+                        .try_into()
+                        .unwrap(),
+                );
                 bytes[header + PHDR_VADDR..header + PHDR_VADDR + 8]
-                    .try_into()
-                    .unwrap(),
-            );
-            bytes[header + PHDR_VADDR..header + PHDR_VADDR + 8]
-                .copy_from_slice(&(address + 0x7f00_0000_0000).to_le_bytes());
-        }
-    });
+                    .copy_from_slice(&(address + 0x7f00_0000_0000).to_le_bytes());
+            }
+        });
     assert!(matches!(
         Debugger::open_core(&with_executable(&unplaceable, false)),
         Err(Error::CoreModuleMismatch { .. })
@@ -1174,24 +1177,39 @@ async fn invalid_core_files_fail_with_typed_errors() {
 
     invalid(
         open(
-            edited_core("machine", "crash-gcc-o0-segv.core", |bytes| {
-                bytes[18..20].copy_from_slice(&elf::EM_AARCH64.to_le_bytes());
-            })
+            edited(
+                "machine",
+                "crash-gcc-o0-segv.core",
+                "edited.core",
+                |bytes| {
+                    bytes[18..20].copy_from_slice(&elf::EM_AARCH64.to_le_bytes());
+                },
+            )
             .1,
         ),
         "only x86-64",
     );
     invalid(
         open(
-            edited_core("overlap", "crash-gcc-o0-segv.core", |bytes| {
-                let headers = load_headers(bytes);
-                let (_, second_start, _) = headers[1];
-                let (first, _, _) = headers[0];
-                // Grow the first segment's memory size over the second.
-                let start = u64::from_le_bytes(bytes[first + 16..first + 24].try_into().unwrap());
-                let size = second_start - start + 4096;
-                bytes[first + 40..first + 48].copy_from_slice(&size.to_le_bytes());
-            })
+            edited(
+                "overlap",
+                "crash-gcc-o0-segv.core",
+                "edited.core",
+                |bytes| {
+                    let headers = load_headers(bytes);
+                    let (_, second_start, _) = headers[1];
+                    let (first, _, _) = headers[0];
+                    // Grow the first segment's memory size over the second.
+                    let start = u64::from_le_bytes(
+                        bytes[first + PHDR_VADDR..first + PHDR_VADDR + 8]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    let size = second_start - start + 4096;
+                    bytes[first + PHDR_MEMSZ..first + PHDR_MEMSZ + 8]
+                        .copy_from_slice(&size.to_le_bytes());
+                },
+            )
             .1,
         ),
         "overlap",
@@ -1901,11 +1919,15 @@ async fn core_tls_is_located_by_libthread_db_and_by_the_c_librarys_own_descripto
     // A thread whose thread pointer is unset has no TLS, which each way
     // reports in its own words; forcing the descriptors bypasses
     // libthread_db entirely.
-    let (_directory, path) =
-        edited_core("unset-thread-pointer", "crash-gcc-o0-segv.core", |bytes| {
+    let (_directory, path) = edited(
+        "unset-thread-pointer",
+        "crash-gcc-o0-segv.core",
+        "edited.core",
+        |bytes| {
             let fs_base = first_prstatus(bytes) + PRSTATUS_REGISTERS + 21 * 8;
             bytes[fs_base..fs_base + 8].fill(0);
-        });
+        },
+    );
     let unset = Scenario::open_core("unset thread pointer", &CoreDumpOptions::new(path));
     let reason = || async {
         match variable(&unset, "crash_tls").await.state {
