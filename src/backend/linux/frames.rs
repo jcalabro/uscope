@@ -277,12 +277,9 @@ impl<P: InspectionOps> Controller<P> {
             let Some(pid) = root.thread() else {
                 return Some(Ok(Crossing::Stay));
             };
-            Some(
-                self.with_runtime_stop(inferior, runtime, |stop| {
-                    runtime.model.cross(stop, debug_thread_id(pid), registers)
-                })
-                .unwrap_or_else(|error| Err(error.to_string().into())),
-            )
+            Some(self.with_runtime_stop(inferior, runtime, pid, |stop| {
+                runtime.model.cross(stop, debug_thread_id(pid), registers)
+            }))
         };
         let mut provider = RoleCallerProvider {
             dwarf: DwarfCallerProvider {
@@ -333,10 +330,9 @@ impl<P: InspectionOps> Controller<P> {
         runtimes
             .iter()
             .filter_map(|runtime| {
-                self.with_runtime_stop(inferior, runtime, |stop| {
+                self.with_runtime_stop(inferior, runtime, pid, |stop| {
                     runtime.model.thread_stacks(stop, debug_thread_id(pid))
                 })
-                .ok()?
                 .ok()
             })
             .flatten()
@@ -553,15 +549,17 @@ impl<P: InspectionOps> Controller<P> {
 }
 
 impl<P: InspectionOps> Controller<P> {
+    /// Selects a frame of a thread or task; each context keeps its own.
     pub(super) fn select_frame(
         &mut self,
         stop_id: StopId,
-        pid: Pid,
+        context: ExecutionContext,
         frame: StackFrameId,
     ) -> Result<StackFrame> {
-        let inferior = self.stopped_inferior(stop_id, pid)?;
+        let root = self.stack_root(stop_id, context)?;
+        let inferior = self.stopped_root(stop_id, &root)?;
         let selected = self
-            .resolve_frame(inferior, &StackRoot::of_thread(pid), frame)?
+            .resolve_frame(inferior, &root, frame)?
             .frame
             .ok_or(Error::AmbiguousInlineFrame)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
@@ -570,24 +568,33 @@ impl<P: InspectionOps> Controller<P> {
             .as_mut()
             .expect("public stop was validated")
             .selected_frames
-            .insert(pid, frame);
+            .insert(context, frame);
         self.bump_revision();
         Ok(selected)
     }
 
-    pub(super) fn select_thread(&mut self, stop_id: StopId, pid: Pid) -> Result<()> {
+    /// Selects the thread or task that implicit inspection follows: a
+    /// stopped thread, or a task on one, or a parked task.
+    pub(super) fn select_context(
+        &mut self,
+        stop_id: StopId,
+        context: ExecutionContext,
+    ) -> Result<()> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        let presentation = self.presentation_for_stopped_thread(pid)?;
+        let root = self.stack_root(stop_id, context)?;
+        let thread = root.thread();
+        let presentation = self.root_presentation(&root)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        inferior
+        let stop = inferior
             .public_stop
             .as_mut()
-            .expect("public stop was validated")
-            .presentations
-            .insert(pid, presentation);
-        inferior.selected_thread = Some(pid);
+            .expect("public stop was validated");
+        if let (Some(pid), Some(presentation)) = (thread, presentation) {
+            stop.presentations.insert(pid, presentation);
+        }
+        stop.selected = context;
+        stop.selected_thread = thread;
         self.bump_revision();
         Ok(())
     }

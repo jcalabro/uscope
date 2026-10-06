@@ -27,7 +27,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_process(inferior, requested_process)?;
         validate_public_stop(inferior, Some(stop_id))?;
-        let pid = inferior.selected_thread.ok_or(Error::NotStopped)?;
+        let pid = inferior
+            .public_stop
+            .as_ref()
+            .ok_or(Error::NotStopped)?
+            .reader();
         self.write_memory_as(pid, address, bytes)
     }
 

@@ -561,9 +561,15 @@ struct PublicStop {
     triggering_thread: Pid,
     reason: StopReason,
     presentations: BTreeMap<Pid, FramePresentation>,
-    /// Frames selected by clients; an absent thread has its innermost
+    /// The thread or task that implicit inspection follows: the triggering
+    /// thread until a client selects another.
+    selected: ExecutionContext,
+    /// The thread the selected context runs on: none for a parked task, or
+    /// once the thread exits.
+    selected_thread: Option<Pid>,
+    /// Frames selected by clients; an absent context has its innermost
     /// frame selected.
-    selected_frames: BTreeMap<Pid, StackFrameId>,
+    selected_frames: BTreeMap<ExecutionContext, StackFrameId>,
     /// What each thread runs for a language runtime, read once asked for.
     activities: RefCell<BTreeMap<Pid, Option<crate::ThreadActivity>>>,
 }
@@ -625,7 +631,6 @@ struct Inferior {
     repairs: VecDeque<RepairGroup>,
     barrier: Option<StopBarrier>,
     public_stop: Option<PublicStop>,
-    selected_thread: Option<Pid>,
     next_execution: u64,
     exec_unsupported: bool,
     /// The loader's breakpoint, once the loader is known.
@@ -674,7 +679,6 @@ impl Inferior {
             repairs: VecDeque::new(),
             barrier: None,
             public_stop: None,
-            selected_thread: None,
             next_execution: 0,
             exec_unsupported: false,
             loader_site: None,
@@ -756,11 +760,11 @@ impl Inferior {
                 interrupted = true;
             }
         }
-        if self.selected_thread == Some(pid) {
-            self.selected_thread = None;
-        }
         if let Some(stop) = self.public_stop.as_mut() {
             stop.presentations.remove(&pid);
+            if stop.selected_thread == Some(pid) {
+                stop.selected_thread = None;
+            }
         }
         // A barrier is presented from its triggering thread, which must live.
         // An internal stop still has nothing to present. A leader that
@@ -1603,9 +1607,7 @@ impl<P: InspectionOps> Controller<P> {
                 context,
                 reply,
             } => {
-                let result = self
-                    .context_thread(stop_id, context)
-                    .and_then(|pid| self.select_thread(stop_id, pid));
+                let result = self.select_context(stop_id, context);
                 let _ = reply.send(result);
             }
             Request::SelectFrame {
@@ -1614,9 +1616,7 @@ impl<P: InspectionOps> Controller<P> {
                 frame,
                 reply,
             } => {
-                let result = self
-                    .context_thread(stop_id, context)
-                    .and_then(|pid| self.select_frame(stop_id, pid, frame));
+                let result = self.select_frame(stop_id, context, frame);
                 let _ = reply.send(result);
             }
             Request::ResolveWatchTarget {
@@ -1927,19 +1927,12 @@ impl<P: InspectionOps> Controller<P> {
             revision: self.revision,
             inferior: state,
             stop_id: inferior.public_stop.as_ref().map(|stop| stop.id),
-            selected: inferior
-                .selected_thread
-                .map(|pid| ExecutionContext::Thread(debug_thread_id(pid))),
-            selected_frame: inferior
-                .public_stop
-                .as_ref()
-                .map(|stop| selected_frame(inferior, stop)),
+            selected: inferior.public_stop.as_ref().map(|stop| stop.selected),
+            selected_frame: inferior.public_stop.as_ref().map(selected_frame),
             threads,
-            presentation: inferior.selected_thread.and_then(|pid| {
-                inferior
-                    .public_stop
-                    .as_ref()
-                    .and_then(|stop| stop.presentations.get(&pid))
+            presentation: inferior.public_stop.as_ref().and_then(|stop| {
+                stop.selected_thread
+                    .and_then(|pid| stop.presentations.get(&pid))
                     .cloned()
             }),
             breakpoints: Arc::from(&*self.breakpoints),
@@ -1961,22 +1954,45 @@ impl<P: InspectionOps> Controller<P> {
         Ok(crate::StoppedSelection {
             process: process_id(inferior.tgid),
             stop: stop.id,
-            execution: ExecutionContext::Thread(debug_thread_id(
-                inferior.selected_thread.unwrap_or(stop.triggering_thread),
-            )),
-            frame: selected_frame(inferior, stop),
+            execution: stop.selected,
+            frame: selected_frame(stop),
         })
     }
 }
 
-/// The frame selected in the stop's selected thread: the innermost until a
+/// The frame selected in the stop's selected context: the innermost until a
 /// client selects another.
-fn selected_frame(inferior: &Inferior, stop: &PublicStop) -> StackFrameId {
-    let thread = inferior.selected_thread.unwrap_or(stop.triggering_thread);
+fn selected_frame(stop: &PublicStop) -> StackFrameId {
     stop.selected_frames
-        .get(&thread)
+        .get(&stop.selected)
         .copied()
         .unwrap_or(StackFrameId::INNERMOST)
+}
+
+impl PublicStop {
+    fn new(
+        id: StopId,
+        triggering_thread: Pid,
+        reason: StopReason,
+        presentations: BTreeMap<Pid, FramePresentation>,
+    ) -> Self {
+        Self {
+            id,
+            triggering_thread,
+            reason,
+            presentations,
+            selected: ExecutionContext::Thread(debug_thread_id(triggering_thread)),
+            selected_thread: Some(triggering_thread),
+            selected_frames: BTreeMap::new(),
+            activities: RefCell::default(),
+        }
+    }
+
+    /// A stopped thread through which the process's memory is read: the
+    /// selected context's, or the triggering thread for a parked task.
+    fn reader(&self) -> Pid {
+        self.selected_thread.unwrap_or(self.triggering_thread)
+    }
 }
 
 impl<P: InspectionOps> Controller<P> {

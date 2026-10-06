@@ -110,11 +110,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             .expect("public stop was validated");
         stop.id = next_stop_id;
         stop.triggering_thread = pid;
+        stop.selected = crate::ExecutionContext::Thread(debug_thread_id(pid));
+        stop.selected_thread = Some(pid);
         stop.selected_frames.clear();
         stop.reason = StopReason::Step { kind };
         stop.presentations.insert(pid, presentation);
         inferior.thread_mut(pid)?.reason = Some(StopReason::Step { kind });
-        inferior.selected_thread = Some(pid);
 
         self.bump_revision();
         let stopped = DebuggerEvent::InferiorStopped {

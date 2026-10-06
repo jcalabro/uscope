@@ -947,13 +947,23 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         self.view_entry_place(bound, from, key)
     }
 
-    // Nothing says which task a thread runs yet, so `$task` is refused
-    // rather than guessed.
     fn task(&mut self) -> std::result::Result<u64, Stop> {
-        Err(Stop::Refused(Refusal::new(
-            ErrorKind::Unsupported,
-            "uscope does not yet know which task a thread runs",
-        )))
+        let frame = self.frame;
+        let refused = |reason: &str| Stop::Refused(Refusal::new(ErrorKind::Unsupported, reason));
+        if let crate::ExecutionContext::Task(task) = frame.root.context {
+            return Ok(task.number);
+        }
+        match frame
+            .controller
+            .thread_activity(frame.inferior, frame.root.reader())
+        {
+            Some(crate::ThreadActivity::Task { task, .. }) => Ok(task.number),
+            Some(crate::ThreadActivity::Idle) => Err(Stop::missing(VariableState::Unavailable(
+                VariableUnavailableReason::NoTask,
+            ))),
+            Some(crate::ThreadActivity::Unknown(reason)) => Err(refused(&reason)),
+            None => Err(refused("the program has no tasks")),
+        }
     }
 
     fn register(&mut self, register: &Register) -> std::result::Result<u128, Stop> {
