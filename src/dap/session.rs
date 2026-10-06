@@ -2117,7 +2117,7 @@ fn capabilities() -> Value {
         "supportsBreakpointLocationsRequest": true,
         "supportsValueFormattingOptions": true,
         "supportsCompletionsRequest": true,
-        "completionTriggerCharacters": [" ", "."],
+        "completionTriggerCharacters": [" ", ".", ">", "$"],
         "supportsANSIStyling": true,
         "supportsDelayedStackTraceLoading": true,
     })

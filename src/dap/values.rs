@@ -60,6 +60,10 @@ impl Code {
         Self { modules }
     }
 
+    /// Each module's load bias and image.
+    pub fn modules(&self) -> &[(u64, Arc<ModuleImage>)] {
+        &self.modules
+    }
 
     /// The image and image address of the function an address enters, when
     /// it is a function's first instruction rather than any other address.

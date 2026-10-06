@@ -5,6 +5,7 @@
 //! client of [`uscope::DebuggerHandle`].
 
 mod breakpoints;
+mod complete;
 mod config;
 mod handles;
 mod inspect;

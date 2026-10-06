@@ -249,3 +249,78 @@ fn clients_counting_lines_and_columns_from_zero_see_every_position_one_less() {
         ones.iter().map(|position| position - 1).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn completions_inside_expressions_offer_members_registers_and_globals() {
+    let path = source("c/command-names.c");
+    let mut dap = Dap::start("expression completions");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("command-names"),
+        json!({}),
+        &Configuration {
+            sources: vec![(path.clone(), vec![line_of(&path, "volatile int sink")])],
+            ..Configuration::default()
+        },
+    );
+    let stop = dap.stopped(started.mark);
+    let frame =
+        dap.request("stackTrace", json!({"threadId": stop.thread}))["stackFrames"][0]["id"].clone();
+    let complete = |dap: &mut Dap, text: &str| {
+        let body = dap.request(
+            "completions",
+            json!({"text": text, "column": text.chars().count() + 1, "frameId": frame}),
+        );
+        body["targets"]
+            .as_array()
+            .expect("targets")
+            .iter()
+            .map(|target| {
+                (
+                    target["label"].as_str().expect("label").to_owned(),
+                    target["type"].as_str().expect("type").to_owned(),
+                    target["start"].as_u64().expect("start"),
+                    target["length"].as_u64().expect("length"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let labels = |targets: &[(String, String, u64, u64)]| {
+        targets
+            .iter()
+            .map(|(label, ..)| label.clone())
+            .collect::<Vec<_>>()
+    };
+    // Members, through a pointer or not, after the operator that selects
+    // them, replacing only the member's part.
+    for text in ["origin.", "where->", "where.", "1 + origin.", "(*where)."] {
+        let targets = complete(&mut dap, text);
+        assert_eq!(labels(&targets), ["x", "y"], "{text}");
+        let start = u64::try_from(text.chars().count()).expect("small") + 1;
+        assert!(
+            targets
+                .iter()
+                .all(|(_, kind, at, length)| kind == "field" && *at == start && *length == 0),
+            "{text}: {targets:?}"
+        );
+    }
+    assert_eq!(complete(&mut dap, "where->z"), []);
+    assert_eq!(labels(&complete(&mut dap, "origin.y + where->x")), ["x"]);
+    // A comparison is no member access.
+    assert_eq!(complete(&mut dap, "x >"), []);
+    // Values without members offer none.
+    assert_eq!(complete(&mut dap, "x."), []);
+    assert_eq!(complete(&mut dap, "missing."), []);
+    // Registers after `$`.
+    let registers = labels(&complete(&mut dap, "$r"));
+    for register in ["rax", "rip", "rsp"] {
+        assert!(registers.contains(&register.to_owned()), "{registers:?}");
+    }
+    assert!(registers.iter().all(|register| register.starts_with('r')));
+    // Names: the frame's variables and the program's globals.
+    let names = complete(&mut dap, "x + cou");
+    assert_eq!(names, [("counter".to_owned(), "variable".to_owned(), 5, 3)]);
+    let names = labels(&complete(&mut dap, "print sh"));
+    assert_eq!(names, ["shadowed"]);
+    dap.finish();
+}
