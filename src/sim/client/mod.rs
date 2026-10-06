@@ -266,7 +266,11 @@ impl Client {
     async fn state(&self) -> Result<Option<StateSnapshot>, Failure> {
         match self.handle.snapshot().await {
             Ok(snapshot) => Ok(Some(snapshot)),
-            Err(Error::RequestQueueClosed) if self.attached_program_ending() => {
+            // A request sent just before the controller exited is dropped
+            // unanswered.
+            Err(Error::RequestQueueClosed | Error::RequestCancelled)
+                if self.attached_program_ending() =>
+            {
                 self.note("the debugger detached and exited");
                 Ok(None)
             }
