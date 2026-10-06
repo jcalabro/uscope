@@ -159,6 +159,10 @@ pub enum Crossing {
     Outermost,
 }
 
+/// What each runtime a model knows calls its tasks, singular and plural,
+/// so that clients can speak of them as the runtime's users do.
+pub const TASK_NOUNS: [(&str, &str); 1] = [go::TASK_NOUN];
+
 /// How a runtime uses the process's signals, by Linux signal number.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeSignals {
@@ -201,6 +205,8 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     ) -> Result<Crossing, Arc<str>>;
     /// How the runtime uses signals.
     fn signals(&self) -> RuntimeSignals;
+    /// What the runtime calls one of its tasks.
+    fn task_noun(&self) -> &'static str;
 }
 
 /// The runtime a module carries, bound against its debug information, or

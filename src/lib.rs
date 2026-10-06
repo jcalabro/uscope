@@ -101,6 +101,7 @@ pub use protocol::{
     WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions,
     WatchpointSpec,
 };
+pub use runtime_model::TASK_NOUNS;
 pub use source_map::SourcePathMap;
 pub use view::summary::{
     float as float_text, function as function_text, integer as integer_text, quoted as quoted_text,

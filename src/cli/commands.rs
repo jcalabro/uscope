@@ -69,8 +69,8 @@ pub enum Command {
     Registers,
     Threads,
     Thread,
-    Goroutines,
-    Goroutine,
+    Tasks,
+    Task,
     Clear,
     Help,
     Quit,
@@ -368,7 +368,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         "backtrace",
         ["bt"],
         "backtrace",
-        "Show the selected thread's stack"
+        "Show the selected thread's or task's stack"
     ),
     command!(
         Frame,
@@ -403,18 +403,18 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!(Threads, "threads", [], "threads", "List threads"),
     command!(Thread, "thread", [], "thread <id>", "Select a thread"),
     command!(
-        Goroutines,
-        "goroutines",
-        ["tasks"],
-        "goroutines [-a] [-g] [-t]",
-        "List goroutines: -a with the runtime's own, -g grouped, -t with stacks"
+        Tasks,
+        "tasks",
+        [],
+        "tasks [-a] [-g] [-t]",
+        "List tasks: -a with the runtime's own, -g grouped, -t with stacks"
     ),
     command!(
-        Goroutine,
-        "goroutine",
-        ["task"],
-        "goroutine [id] [command...]",
-        "Show the selected goroutine, select one, or run a command in one"
+        Task,
+        "task",
+        [],
+        "task [id] [command...]",
+        "Show the selected task, select one, or run a command in one"
     ),
     command!(
         Clear,
@@ -436,7 +436,19 @@ pub const COMMANDS: &[CommandSpec] = &[
 pub fn command_named(name: &str) -> Option<&'static CommandSpec> {
     COMMANDS
         .iter()
-        .find(|command| command.name == name || command.aliases.contains(&name))
+        .find(|command| aliases(command).any(|alias| alias == name) || command.name == name)
+}
+
+/// A command's other names, with each runtime's own name for its tasks for
+/// the commands about tasks: `goroutines` for `tasks` in Go.
+pub fn aliases(command: &CommandSpec) -> impl Iterator<Item = &'static str> {
+    let nouns = uscope::TASK_NOUNS.iter();
+    let runtime = match command.command {
+        Command::Tasks => nouns.map(|(_, plural)| *plural).collect(),
+        Command::Task => nouns.map(|(singular, _)| *singular).collect(),
+        _ => Vec::new(),
+    };
+    command.aliases.iter().copied().chain(runtime)
 }
 
 /// The command a line starts with, and the name it is written with, which
@@ -527,8 +539,8 @@ impl Cli {
             Command::Registers => format::registers(&debugger.registers().await?, renderer),
             Command::Threads => format::threads(&debugger.snapshot().await?, renderer),
             Command::Thread => self.select_thread(arguments[0]).await?,
-            Command::Goroutines => self.goroutines(line, &arguments, spec).await?,
-            Command::Goroutine => self.goroutine(line, &arguments).await?,
+            Command::Tasks => self.tasks(line, &arguments, spec).await?,
+            Command::Task => self.task(line, &arguments).await?,
             Command::Clear => return Ok(Control::ClearScreen),
             Command::Help => match first {
                 Some(name) => format::command_help(
@@ -820,12 +832,7 @@ impl Cli {
 
     /// Lists tasks: the program's, or with `-a` the runtime's own too; with
     /// `-g` grouped by where they are; with `-t` each with its stack.
-    async fn goroutines(
-        &self,
-        line: &str,
-        arguments: &[&str],
-        spec: &CommandSpec,
-    ) -> Result<String> {
+    async fn tasks(&self, line: &str, arguments: &[&str], spec: &CommandSpec) -> Result<String> {
         let (mut all, mut grouped, mut stacks) = (false, false, false);
         for argument in arguments {
             match *argument {
@@ -836,8 +843,8 @@ impl Cli {
             }
         }
         let name = line_command(line).map_or(spec.name, |(_, name)| name);
-        let noun = name.trim_end_matches('s');
         let traces = self.task_traces().await?;
+        let noun = traces.tasks.first().map_or("task", |(task, _)| task.noun);
         let renderer = self.renderers.stdout;
         let shown = traces
             .tasks
@@ -904,8 +911,8 @@ impl Cli {
 
     /// Shows the selected task, selects one, or runs an inspection command
     /// with one selected and then selects again what was.
-    async fn goroutine(&self, line: &str, arguments: &[&str]) -> Result<String> {
-        let name = line_command(line).map_or("goroutine", |(_, name)| name);
+    async fn task(&self, line: &str, arguments: &[&str]) -> Result<String> {
+        let name = line_command(line).map_or("task", |(_, name)| name);
         let renderer = self.renderers.stdout;
         let traces = self.task_traces().await?;
         let Some(&argument) = arguments.first() else {
@@ -1969,8 +1976,8 @@ mod tests {
     fn command_registry_has_unique_names_and_derives_arity_from_usage() {
         let mut names = std::collections::BTreeSet::new();
         for command in COMMANDS {
-            for name in std::iter::once(&command.name).chain(command.aliases) {
-                assert!(names.insert(*name), "duplicate command name {name}");
+            for name in std::iter::once(command.name).chain(aliases(command)) {
+                assert!(names.insert(name), "duplicate command name {name}");
                 assert_eq!(
                     command_named(name).map(|found| found.name),
                     Some(command.name)

@@ -564,12 +564,12 @@ fn help_lists_every_command_and_details_one_by_name_or_alias() {
         ],
     );
     for expected in [
-        "  break        b       Set a breakpoint",
-        "  finish       fin, f  Run until the selected frame returns",
-        "  continue     c       Continue execution",
-        "  delete       del, d  Delete logical breakpoints",
-        "  clear        cls     Clear and redraw the terminal",
-        "  help         h, ?    Show command help",
+        "  break        b           Set a breakpoint",
+        "  finish       fin, f      Run until the selected frame returns",
+        "  continue     c           Continue execution",
+        "  delete       del, d      Delete logical breakpoints",
+        "  clear        cls         Clear and redraw the terminal",
+        "  help         h, ?        Show command help",
         "  Clear and redraw the terminal\n  aliases: cls",
         "delete <id|all>",
         "aliases: del, d",

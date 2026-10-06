@@ -253,12 +253,14 @@ nearest preceding symbol.
 | --- | --- |
 | `threads` | List threads, with the goroutine each runs. |
 | `thread` *id* | Select a thread. |
-| `goroutines`, `tasks` [`-a`] [`-g`] [`-t`] | List goroutines: `-a` with the runtime's own, `-g` grouped by place, `-t` each with its stack. |
-| `goroutine`, `task` [*id* [*command*]] | Show the selected goroutine, select one, or run an inspecting command in one. |
+| `tasks` [`-a`] [`-g`] [`-t`] | List a runtime's tasks, Go's goroutines: `-a` with the runtime's own, `-g` grouped by place, `-t` each with its stack. |
+| `task` [*id* [*command*]] | Show the selected task, select one, or run an inspecting command in one. |
 | `handle` *signal* [`stop`\|`nostop`] [`print`\|`noprint`] [`pass`\|`nopass`] | Change how a signal is handled. `stop` implies `print`, and `noprint` implies `nostop`. |
 | `info signals` | List every signal's policy. |
 
-A goroutine is listed where the code the program wrote has it, past the
+Each runtime's own name for its tasks names these commands too:
+`goroutines` and `goroutine` in Go. A goroutine is listed where the code the
+program wrote has it, past the
 runtime's machinery, as the runtime's own goroutine dump shows it: a worker
 waiting on a channel is at its receive, not in `runtime.gopark`. Each line
 gives the goroutine's id, that place, what it does in the runtime's words,
