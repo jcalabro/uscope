@@ -1685,7 +1685,14 @@ async fn instruction_steps_and_breakpoint_repairs_cross_system_calls() {
         .expect("rax");
     assert_eq!(
         rax.bytes.as_deref(),
-        Some(&registers.thread.get().to_le_bytes()[..])
+        Some(
+            &registers
+                .context
+                .as_thread()
+                .expect("a thread")
+                .get()
+                .to_le_bytes()[..]
+        )
     );
     assert_eq!(
         scenario.resume_to_stop().await,

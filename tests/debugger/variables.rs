@@ -505,7 +505,7 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
         let trace = scenario
             .operation("unwind Zig thread", scenario.handle().backtrace())
             .await;
-        assert_eq!(trace.thread, thread.id);
+        assert_eq!(trace.context, thread.id.into());
         assert!(!trace.frames.is_empty());
         let Some(frame) = trace.frames.iter().find(|frame| {
             frame

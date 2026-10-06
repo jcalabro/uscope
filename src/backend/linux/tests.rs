@@ -5318,7 +5318,8 @@ fn nested_presentations_share_one_interval_between_looks_for_run_control() {
         cfa: Err(crate::VariableUnavailableReason::EvaluationLimit.into()),
         activation: 0,
     };
-    let frame = controller.frame_for(inferior, StopId::new(1), pid, &resolved);
+    let root = super::frames::StackRoot::of_thread(pid);
+    let frame = controller.frame_for(inferior, StopId::new(1), &root, &resolved);
     let (pause_reply, _paused) = tokio::sync::oneshot::channel();
     controller
         .message_sender

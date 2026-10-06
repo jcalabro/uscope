@@ -1293,7 +1293,7 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
     runtime.memory = Some(Arc::from([0_u8; 0x20]));
     let context = crate::debug_info::VariableContext {
         stop_id: crate::StopId::new(1),
-        thread: crate::ThreadId::new(1),
+        context: crate::ThreadId::new(1).into(),
         frame: crate::StackFrameId::new(0),
         module: crate::ModuleId::new(0),
         image: ModuleImageId::new(0),

@@ -154,15 +154,6 @@ fn debug_pid(thread: DebugThreadId) -> Result<Pid> {
         .ok_or(Error::UnknownThread(thread))
 }
 
-/// Converts a client-supplied execution context to the Linux TID that
-/// inspects it.
-fn context_pid(context: ExecutionContext) -> Result<Pid> {
-    match context {
-        ExecutionContext::Thread(thread) => debug_pid(thread),
-        ExecutionContext::Task(task) => Err(Error::UnknownTask(task)),
-    }
-}
-
 fn exception_info(signal: Signal) -> ExceptionInfo {
     ExceptionInfo::new(signal.code(), signal.to_string())
 }
@@ -1279,7 +1270,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 scope,
                 exception,
                 reply,
-            } => match context_pid(context) {
+            } => match self.context_thread(stop_id, context) {
                 Ok(pid) => self.step(
                     process_id, stop_id, pid, frame, kind, scope, exception, reply,
                 ),
@@ -1308,8 +1299,8 @@ impl<P: LinuxTraceOps> Controller<P> {
                 frame,
                 reply,
             } => {
-                let result = context_pid(context).and_then(|pid| {
-                    self.evaluate_assigning(stop_id, pid, frame, &expression, limits)
+                let result = self.stack_root(stop_id, context).and_then(|root| {
+                    self.evaluate_assigning(stop_id, &root, frame, &expression, limits)
                 });
                 let _ = reply.send(result);
             }
@@ -1375,7 +1366,8 @@ impl<P: InspectionOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(
-                    context_pid(context).and_then(|pid| self.disassemble(stop_id, pid, query)),
+                    self.context_thread(stop_id, context)
+                        .and_then(|pid| self.disassemble(stop_id, pid, query)),
                 );
             }
             Request::DescribeAddress {
@@ -1392,7 +1384,8 @@ impl<P: InspectionOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(
-                    context_pid(context).and_then(|pid| self.stopped_location(stop_id, pid, frame)),
+                    self.stack_root(stop_id, context)
+                        .and_then(|root| self.stopped_location(stop_id, &root, frame)),
                 );
             }
             Request::Snapshot { reply } => {
@@ -1406,8 +1399,10 @@ impl<P: InspectionOps> Controller<P> {
                 context,
                 reply,
             } => {
-                let _ =
-                    reply.send(context_pid(context).and_then(|pid| self.backtrace(stop_id, pid)));
+                let _ = reply.send(
+                    self.stack_root(stop_id, context)
+                        .and_then(|root| self.backtrace(stop_id, &root)),
+                );
             }
             Request::Registers {
                 stop_id,
@@ -1415,8 +1410,10 @@ impl<P: InspectionOps> Controller<P> {
                 frame,
                 reply,
             } => {
-                let _ = reply
-                    .send(context_pid(context).and_then(|pid| self.registers(stop_id, pid, frame)));
+                let _ = reply.send(
+                    self.stack_root(stop_id, context)
+                        .and_then(|root| self.registers(stop_id, &root, frame)),
+                );
             }
             Request::Variables {
                 query,
@@ -1426,8 +1423,9 @@ impl<P: InspectionOps> Controller<P> {
                 frame,
                 reply,
             } => {
-                let result = context_pid(context)
-                    .and_then(|pid| self.variables(stop_id, pid, frame, &query, limits));
+                let result = self
+                    .stack_root(stop_id, context)
+                    .and_then(|root| self.variables(stop_id, &root, frame, &query, limits));
                 if matches!(result, Err(Error::Interrupted)) {
                     self.serve_later(Request::Variables {
                         query,
@@ -1450,8 +1448,9 @@ impl<P: InspectionOps> Controller<P> {
                 frame,
                 reply,
             } => {
-                let result = context_pid(context)
-                    .and_then(|pid| self.evaluate(stop_id, pid, frame, &expression, mode, limits));
+                let result = self.stack_root(stop_id, context).and_then(|root| {
+                    self.evaluate(stop_id, &root, frame, &expression, mode, limits)
+                });
                 if matches!(result, Err(Error::Interrupted)) {
                     self.serve_later(Request::Evaluate {
                         expression,
@@ -1473,11 +1472,10 @@ impl<P: InspectionOps> Controller<P> {
                 frame,
                 reply,
             } => {
-                let _ =
-                    reply
-                        .send(context_pid(context).and_then(|pid| {
-                            self.expression_type(stop_id, pid, frame, &expression)
-                        }));
+                let _ = reply.send(
+                    self.stack_root(stop_id, context)
+                        .and_then(|root| self.expression_type(stop_id, &root, frame, &expression)),
+                );
             }
             Request::Dereference {
                 reference,
@@ -1537,8 +1535,9 @@ impl<P: InspectionOps> Controller<P> {
                 frame,
                 reply,
             } => {
-                let result = context_pid(context)
-                    .and_then(|pid| self.explain_view(stop_id, pid, frame, &expression));
+                let result = self
+                    .stack_root(stop_id, context)
+                    .and_then(|root| self.explain_view(stop_id, &root, frame, &expression));
                 if matches!(result, Err(Error::Interrupted)) {
                     self.serve_later(Request::ExplainView {
                         expression,
@@ -1558,8 +1557,9 @@ impl<P: InspectionOps> Controller<P> {
                 frame,
                 reply,
             } => {
-                let result = context_pid(context)
-                    .and_then(|pid| self.record_kernels(stop_id, pid, frame, &expression));
+                let result = self
+                    .stack_root(stop_id, context)
+                    .and_then(|root| self.record_kernels(stop_id, &root, frame, &expression));
                 if matches!(result, Err(Error::Interrupted)) {
                     self.serve_later(Request::RecordKernels {
                         expression,
@@ -1577,7 +1577,9 @@ impl<P: InspectionOps> Controller<P> {
                 context,
                 reply,
             } => {
-                let result = context_pid(context).and_then(|pid| self.select_thread(stop_id, pid));
+                let result = self
+                    .context_thread(stop_id, context)
+                    .and_then(|pid| self.select_thread(stop_id, pid));
                 let _ = reply.send(result);
             }
             Request::SelectFrame {
@@ -1586,8 +1588,9 @@ impl<P: InspectionOps> Controller<P> {
                 frame,
                 reply,
             } => {
-                let result =
-                    context_pid(context).and_then(|pid| self.select_frame(stop_id, pid, frame));
+                let result = self
+                    .context_thread(stop_id, context)
+                    .and_then(|pid| self.select_frame(stop_id, pid, frame));
                 let _ = reply.send(result);
             }
             Request::ResolveWatchTarget {
@@ -1598,7 +1601,7 @@ impl<P: InspectionOps> Controller<P> {
                 reply,
             } => {
                 let _ =
-                    reply.send(context_pid(context).and_then(|pid| {
+                    reply.send(self.context_thread(stop_id, context).and_then(|pid| {
                         self.resolve_watch_target(stop_id, pid, frame, &expression)
                     }));
             }

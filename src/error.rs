@@ -160,6 +160,13 @@ pub enum Error {
     UnknownThread(crate::ThreadId),
     #[error("task {0} is not a task of the inferior")]
     UnknownTask(crate::TaskId),
+    #[error("task {0} is parked, not running on a thread")]
+    TaskParked(crate::TaskId),
+    #[error("the frames of task {task} are unavailable: {reason}")]
+    TaskUnavailable {
+        task: crate::TaskId,
+        reason: Arc<str>,
+    },
     #[error("the requested stopped snapshot is no longer current")]
     StaleStop,
     #[error("an unclassifiable native stop cannot be resumed safely")]

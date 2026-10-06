@@ -3,17 +3,14 @@
 use std::sync::Arc;
 
 use nix::libc;
-use nix::unistd::Pid;
 
 use crate::backend::linux::core_dump;
 use crate::debug_info::{VariableRegister, VariableRuntimeError};
 use crate::unwind::RegisterFile;
 use crate::{
-    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
-    UnsupportedVariableFeature, VariableUnavailableReason,
+    ExecutionContext, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot,
+    RegisterValue, UnsupportedVariableFeature, VariableUnavailableReason,
 };
-
-use super::debug_thread_id;
 
 /// The general registers: DWARF number, name, and role, indexed by
 /// [`RegisterId`] in the order snapshots present them.
@@ -55,6 +52,34 @@ fn general_index(dwarf: u16) -> Option<usize> {
 }
 
 /// Every general register's value, indexed as [`GENERAL_REGISTERS`].
+/// The segment, thread-pointer, and system-call registers, after the
+/// general ones: each name, width, and whether every frame shares it.
+const SPECIAL_REGISTERS: [(&str, u16, bool); 9] = [
+    ("cs", 16, true),
+    ("ss", 16, true),
+    ("ds", 16, true),
+    ("es", 16, true),
+    ("fs", 16, true),
+    ("gs", 16, true),
+    ("fs_base", 64, true),
+    ("gs_base", 64, true),
+    ("orig_rax", 64, false),
+];
+
+const fn special_values(native: &libc::user_regs_struct) -> [u64; 9] {
+    [
+        native.cs,
+        native.ss,
+        native.ds,
+        native.es,
+        native.fs,
+        native.gs,
+        native.fs_base,
+        native.gs_base,
+        native.orig_rax,
+    ]
+}
+
 fn general_values(registers: &libc::user_regs_struct) -> [u64; 18] {
     let mut registers = *registers;
     std::array::from_fn(|index| {
@@ -179,57 +204,51 @@ pub(super) fn x86_64_xmm_variable_register(registers: &Fxsave, dwarf: u16) -> Va
 /// caller's. A caller's register that a callee may have overwritten without
 /// saving it has no value; the segment and thread-pointer registers are the
 /// same in every frame, and the system-call register belongs to the thread.
+/// A parked task has no thread, so only the registers its runtime saved,
+/// given as `caller`, have values.
 pub(super) fn x86_64_register_snapshot(
     revision: u64,
-    pid: Pid,
+    context: ExecutionContext,
     target: crate::TargetDescription,
-    native: &libc::user_regs_struct,
+    native: Option<&libc::user_regs_struct>,
     caller: Option<&RegisterFile>,
 ) -> RegisterSnapshot {
-    let special = [
-        ("cs", 16, true, native.cs),
-        ("ss", 16, true, native.ss),
-        ("ds", 16, true, native.ds),
-        ("es", 16, true, native.es),
-        ("fs", 16, true, native.fs),
-        ("gs", 16, true, native.gs),
-        ("fs_base", 64, true, native.fs_base),
-        ("gs_base", 64, true, native.gs_base),
-        ("orig_rax", 64, false, native.orig_rax),
-    ];
-    let registers =
-        general_values(native)
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| RegisterValue {
-                register: general_descriptor(index),
-                bytes: caller
-                    .map_or(Some(value), |file| file.get(GENERAL_REGISTERS[index].0))
-                    .map(|value| Arc::from(value.to_le_bytes())),
-            })
-            .chain(special.into_iter().enumerate().map(
-                |(offset, (name, bits, every_frame, value))| {
-                    let bytes = value.to_le_bytes();
-                    let byte_count = usize::from(bits / 8);
-                    RegisterValue {
-                        register: RegisterDescriptor {
-                            id: RegisterId::new(
-                                18 + u32::try_from(offset).expect("x86-64 register ID fits u32"),
-                            ),
-                            name: name.into(),
-                            bits,
-                            role: None,
-                        },
-                        bytes: (caller.is_none() || every_frame)
-                            .then(|| Arc::from(&bytes[..byte_count])),
-                    }
-                },
-            ))
-            .collect::<Vec<_>>()
-            .into();
+    let general = native.map(general_values);
+    let registers = (0..GENERAL_REGISTERS.len())
+        .map(|index| RegisterValue {
+            register: general_descriptor(index),
+            bytes: caller
+                .map_or_else(
+                    || general.map(|values| values[index]),
+                    |file| file.get(GENERAL_REGISTERS[index].0),
+                )
+                .map(|value| Arc::from(value.to_le_bytes())),
+        })
+        .chain(SPECIAL_REGISTERS.into_iter().enumerate().map(
+            |(offset, (name, bits, every_frame))| {
+                RegisterValue {
+                    register: RegisterDescriptor {
+                        id: RegisterId::new(
+                            18 + u32::try_from(offset).expect("x86-64 register ID fits u32"),
+                        ),
+                        name: name.into(),
+                        bits,
+                        role: None,
+                    },
+                    bytes: native
+                        .filter(|_| caller.is_none() || every_frame)
+                        .map(|native| {
+                            let value = special_values(native)[offset];
+                            Arc::from(&value.to_le_bytes()[..usize::from(bits / 8)])
+                        }),
+                }
+            },
+        ))
+        .collect::<Vec<_>>()
+        .into();
     RegisterSnapshot {
         revision,
-        thread: debug_thread_id(pid),
+        context,
         target,
         registers,
     }

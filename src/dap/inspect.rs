@@ -562,7 +562,7 @@ impl Session {
     async fn pointee_rows(
         &mut self,
         context: StopContext,
-        reference: uscope::DereferenceReference,
+        reference: Box<uscope::DereferenceReference>,
         name: &str,
         path: Option<uscope::Expression>,
         window: Window,

@@ -18,9 +18,9 @@ use crate::{
 use super::activation::{Activation, StackPosition};
 use super::breakpoints::install_plan_breakpoint;
 use super::frames::{
-    DwarfCallerProvider, code_instance_is_active, frame_lookup_address, make_presentation,
-    presentation_visible_count, selected_code_instance, source_for_code_instance,
-    source_line_changed, source_step_destination,
+    DwarfCallerProvider, StackRoot, code_instance_is_active, frame_lookup_address,
+    make_presentation, presentation_visible_count, selected_code_instance,
+    source_for_code_instance, source_line_changed, source_step_destination,
 };
 use super::memory::PtraceMemory;
 use super::native::LinuxTraceOps;
@@ -1189,7 +1189,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         frame: StackFrameId,
     ) -> Result<StepStart> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        let resolved = self.resolve_frame(inferior, pid, frame)?;
+        let resolved = self.resolve_frame(inferior, &StackRoot::of_thread(pid), frame)?;
         let selected = resolved.frame.as_ref().ok_or(Error::AmbiguousInlineFrame)?;
         // Source stepping plans are limited to code the main image describes.
         let Some((_, address)) = resolved
@@ -1230,7 +1230,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                         description: "the frame's call-frame address is unavailable".into(),
                     })
                 })?);
-            let stack = self.physical_stack(inferior, pid, resolved.activation + 2)?;
+            let stack = self.physical_stack(
+                inferior,
+                &StackRoot::of_thread(pid),
+                resolved.activation + 2,
+            )?;
             let return_address = stack
                 .frames
                 .get(resolved.activation + 1)

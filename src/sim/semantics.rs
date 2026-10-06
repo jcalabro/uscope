@@ -57,7 +57,11 @@ fn stopped(kernel: &Kernel, thread: crate::ThreadId) -> Option<&Thread> {
 /// that is what the stack holds, but nothing past it, and not as a whole
 /// stack.
 pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwound>, String> {
-    let Some(thread) = stopped(kernel, backtrace.thread) else {
+    let Some(thread) = backtrace
+        .context
+        .as_thread()
+        .and_then(|thread| stopped(kernel, thread))
+    else {
         return Ok(None);
     };
     let process = kernel
@@ -737,7 +741,13 @@ fn stored(
             ..
         },
         Some(thread),
-    ) = (state, stopped(kernel, snapshot.thread))
+    ) = (
+        state,
+        snapshot
+            .context
+            .as_thread()
+            .and_then(|thread| stopped(kernel, thread)),
+    )
     else {
         return Ok(None);
     };
@@ -790,7 +800,7 @@ fn marker_at<'m>(
     source: &str,
     markers: &'m [Marker],
 ) -> Option<&'m Marker> {
-    let thread = stopped(kernel, snapshot.thread)?;
+    let thread = stopped(kernel, snapshot.context.as_thread()?)?;
     let facts = &variant.facts;
     let line = thread
         .registers
@@ -860,7 +870,7 @@ mod tests {
 
     fn backtrace_of(tid: Tid, frames: &[u64], termination: UnwindTermination) -> Backtrace {
         Backtrace {
-            thread: ThreadId::new(u64::try_from(tid).expect("a positive tid")),
+            context: ThreadId::new(u64::try_from(tid).expect("a positive tid")).into(),
             frames: frames
                 .iter()
                 .enumerate()

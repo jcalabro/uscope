@@ -2,7 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use uscope::{TaskSnapshot, TaskStack, TaskState, ThreadActivity, ThreadId};
+use uscope::{
+    Backtrace, ExecutionContext, InferiorState, StackFrameId, StopContext, TaskSnapshot, TaskStack,
+    TaskState, ThreadActivity, ThreadId, VariableState,
+};
 
 use crate::truth::GoSession;
 
@@ -136,4 +139,140 @@ async fn check_threads(session: &mut GoSession, tasks: &[TaskSnapshot], main: u6
         assert_eq!(running, on_threads, "{fixture}");
         assert!(running.contains(&main), "{fixture}");
     }
+}
+
+#[tokio::test]
+async fn parked_goroutines_show_the_frames_the_runtime_dumps() {
+    for fixture in BUILDS {
+        let mut session = GoSession::launch(fixture).await;
+        let truth = session.checkpoint("parked");
+        let (tasks, _) = session.tasks(64).await;
+        let InferiorState::Stopped { stop_id, .. } = session.scenario.snapshot().await.inferior
+        else {
+            panic!("{fixture}: not stopped");
+        };
+        let image = session.scenario.handle().module_image();
+        let mut workers = 0;
+        let mut compared = 0;
+        for task in tasks.iter().filter(|task| task.thread.is_none()) {
+            let Some(dumped) = truth.tasks.get(&task.id.number) else {
+                continue;
+            };
+            let context = ExecutionContext::Task(task.id);
+            let view = |frame| StopContext {
+                stop: stop_id,
+                execution: context,
+                frame,
+            };
+            let trace = session
+                .scenario
+                .operation(
+                    "task backtrace",
+                    session
+                        .scenario
+                        .handle()
+                        .at(view(StackFrameId::INNERMOST))
+                        .backtrace(),
+                )
+                .await;
+            assert_eq!(trace.context, context, "{fixture}");
+            check_saved_registers(&session, view(StackFrameId::INNERMOST), &trace).await;
+            let shown = trace
+                .frames
+                .iter()
+                .filter_map(|frame| {
+                    let name = frame.function.as_ref()?.name.to_string();
+                    let source = frame.source.as_ref()?;
+                    let file = image.source_file(source.file)?.path.display().to_string();
+                    (!runtime_hides(&name)).then(|| (name, format!("{file}:{}", source.line)))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(shown, dumped.frames, "{fixture}: {task:#?}\n{trace:#?}");
+            compared += 1;
+
+            // A parked worker's arguments are on its own stack.
+            let worker = trace.frames.iter().find(|frame| {
+                frame
+                    .function
+                    .as_ref()
+                    .is_some_and(|function| function.name.as_ref() == "main.worker")
+            });
+            if fixture.ends_with("o0")
+                && let Some(frame) = worker
+            {
+                check_worker_arguments(&session, view(frame.id)).await;
+                workers += 1;
+            }
+        }
+        let parked = truth
+            .tasks
+            .values()
+            .filter(|task| !matches!(task.status.as_str(), "running" | "syscall"))
+            .count();
+        assert_eq!(compared, parked, "{fixture}");
+        if fixture.ends_with("o0") {
+            assert_eq!(workers, 4, "{fixture}");
+        }
+        session.scenario.shutdown().await;
+    }
+}
+
+/// A parked task has the registers its runtime saved, and none a thread
+/// would give it.
+async fn check_saved_registers(session: &GoSession, view: StopContext, trace: &Backtrace) {
+    let fixture = &session.fixture;
+    let registers = session
+        .scenario
+        .operation(
+            "task registers",
+            session.scenario.handle().at(view).registers(),
+        )
+        .await;
+    assert_eq!(registers.context, view.execution, "{fixture}");
+    let register = |name: &str| {
+        registers
+            .registers
+            .iter()
+            .find(|register| register.register.name.as_ref() == name)
+            .and_then(|register| register.bytes.as_deref())
+            .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("a word")))
+    };
+    assert_eq!(
+        register("rip"),
+        Some(trace.frames[0].instruction.get()),
+        "{fixture}: {registers:#?}"
+    );
+    assert!(register("rsp").is_some(), "{fixture}: {registers:#?}");
+    for name in ["rax", "fs_base", "orig_rax"] {
+        assert_eq!(register(name), None, "{fixture}: {registers:#?}");
+    }
+}
+
+async fn check_worker_arguments(session: &GoSession, view: StopContext) {
+    let fixture = &session.fixture;
+    let variables = session
+        .scenario
+        .operation(
+            "task variables",
+            session.scenario.handle().at(view).variables(),
+        )
+        .await;
+    assert_eq!(variables.context, view.execution, "{fixture}");
+    let names = variables
+        .variables
+        .iter()
+        .filter(|variable| matches!(variable.state, VariableState::Available { .. }))
+        .map(|variable| variable.name.as_ref())
+        .collect::<BTreeSet<_>>();
+    for name in ["jobs", "results", "group"] {
+        assert!(names.contains(name), "{fixture}: {variables:#?}");
+    }
+}
+
+/// Whether the runtime leaves a function out of a goroutine dump: its own
+/// code, and the wrappers the compiler writes.
+fn runtime_hides(function: &str) -> bool {
+    function.starts_with("runtime.")
+        || function.starts_with("internal/runtime/")
+        || function.contains(".gowrap")
 }
