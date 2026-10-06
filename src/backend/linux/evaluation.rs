@@ -163,12 +163,116 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
             })
             .as_ref()
     }
+}
 
-    const fn reference(module: &RuntimeModule, id: crate::TypeId) -> TypeReference {
-        TypeReference {
+impl<P: InspectionOps> Frame<'_, P> {
+    /// The global `name` names in exactly one loaded module.
+    fn lookup_global(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Option<Lookup<StopObject>>, Refusal> {
+        let mut globals = Vec::new();
+        let mut candidates = BTreeSet::new();
+        for module in self.modules() {
+            match module.image.global_named(name) {
+                Ok(global) => globals.push((module, global.id)),
+                Err(Error::VariableNotFound(_)) => {}
+                Err(Error::AmbiguousGlobalVariable {
+                    candidates: found, ..
+                }) => {
+                    for candidate in found {
+                        let file = candidate
+                            .declaration_path
+                            .as_ref()
+                            .and_then(|path| path.file_name())
+                            .map(|file| file.to_string_lossy().into_owned());
+                        candidates.insert(file.map_or_else(
+                            || candidate.qualified_name.to_string(),
+                            |file| format!("{file}::{}", candidate.qualified_name),
+                        ));
+                    }
+                }
+                Err(error) => return Err(refusal(&error)),
+            }
+        }
+        match (globals.as_slice(), candidates.is_empty()) {
+            ([(module, id)], true) => {
+                let key = module
+                    .variables
+                    .global_object(*id)
+                    .map_err(|error| refusal(&error))?;
+                Ok(Some(object(module, key, false)))
+            }
+            ([], true) => Ok(None),
+            _ => {
+                for (module, id) in &globals {
+                    if let Some(global) = module.image.global(*id) {
+                        let file = module
+                            .image
+                            .path()
+                            .file_name()
+                            .map(|file| file.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        candidates.insert(format!("{file}::{}", global.qualified_name));
+                    }
+                }
+                Ok(Some(Lookup::Ambiguous(candidates.into_iter().collect())))
+            }
+        }
+    }
+
+    /// The enumerator `name` names, by its own name or qualified by its
+    /// enumeration's, in the frame's module before others.
+    fn lookup_enumerator(&self, name: &str) -> Option<Lookup<StopObject>> {
+        for module in self.modules() {
+            let mut found = Vec::new();
+            for node in module.image.types() {
+                let TypeNode::Resolved(info) = node else {
+                    continue;
+                };
+                let TypeKind::Enumeration { enumerators, .. } = &info.kind else {
+                    continue;
+                };
+                for enumerator in enumerators.iter() {
+                    let qualified = format!("{}::{}", info.name, enumerator.name);
+                    if enumerator.name.as_ref() == name || qualified == name {
+                        found.push((qualified, integer(enumerator.value), info.reference));
+                    }
+                }
+            }
+            found.sort_by(|left, right| left.0.cmp(&right.0));
+            found.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+            match found.as_slice() {
+                [] => {}
+                [(_, value, ty)] => {
+                    return Some(Lookup::Enumerator {
+                        value: *value,
+                        ty: *ty,
+                    });
+                }
+                _ => {
+                    return Some(Lookup::Ambiguous(
+                        found.into_iter().map(|(qualified, ..)| qualified).collect(),
+                    ));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// A data object of `module`, as a name lookup finds it.
+fn object(module: &RuntimeModule, key: ObjectKey, local: bool) -> Lookup<StopObject> {
+    Lookup::Object {
+        object: StopObject {
+            module: module.loaded.id,
+            key,
+            local,
+        },
+        ty: module.variables.object_type(key).map(|id| TypeReference {
             image: module.loaded.image,
             id,
-        }
+        }),
     }
 }
 
@@ -369,10 +473,6 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
     type Object = StopObject;
     type Step = StopStep;
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "locals, globals, and enumerators are looked up in one order"
-    )]
     fn lookup(
         &self,
         name: &str,
@@ -380,19 +480,7 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
     ) -> std::result::Result<Lookup<StopObject>, Refusal> {
         if !outermost && let Some((module, address, selected)) = self.code {
             match module.variables.visible_object(address, selected, name) {
-                Ok(key) => {
-                    return Ok(Lookup::Object {
-                        object: StopObject {
-                            module: module.loaded.id,
-                            key,
-                            local: true,
-                        },
-                        ty: module
-                            .variables
-                            .object_type(key)
-                            .map(|id| Self::reference(module, id)),
-                    });
-                }
+                Ok(key) => return Ok(object(module, key, true)),
                 Err(Error::VariableNotFound(_)) => {}
                 Err(Error::AmbiguousVariable(_)) => {
                     return Ok(Lookup::Ambiguous(vec![name.to_owned()]));
@@ -400,102 +488,10 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
                 Err(error) => return Err(refusal(&error)),
             }
         }
-
-        let mut globals = Vec::new();
-        let mut candidates = BTreeSet::new();
-        for module in self.modules() {
-            match module.image.global_named(name) {
-                Ok(global) => globals.push((module, global.id)),
-                Err(Error::VariableNotFound(_)) => {}
-                Err(Error::AmbiguousGlobalVariable {
-                    candidates: found, ..
-                }) => {
-                    for candidate in found {
-                        let file = candidate
-                            .declaration_path
-                            .as_ref()
-                            .and_then(|path| path.file_name())
-                            .map(|file| file.to_string_lossy().into_owned());
-                        candidates.insert(file.map_or_else(
-                            || candidate.qualified_name.to_string(),
-                            |file| format!("{file}::{}", candidate.qualified_name),
-                        ));
-                    }
-                }
-                Err(error) => return Err(refusal(&error)),
-            }
+        if let Some(global) = self.lookup_global(name)? {
+            return Ok(global);
         }
-        match (globals.as_slice(), candidates.is_empty()) {
-            ([(module, id)], true) => {
-                let key = module
-                    .variables
-                    .global_object(*id)
-                    .map_err(|error| refusal(&error))?;
-                return Ok(Lookup::Object {
-                    object: StopObject {
-                        module: module.loaded.id,
-                        key,
-                        local: false,
-                    },
-                    ty: module
-                        .variables
-                        .object_type(key)
-                        .map(|id| Self::reference(module, id)),
-                });
-            }
-            ([], true) => {}
-            _ => {
-                for (module, id) in &globals {
-                    if let Some(global) = module.image.global(*id) {
-                        let file = module
-                            .image
-                            .path()
-                            .file_name()
-                            .map(|file| file.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        candidates.insert(format!("{file}::{}", global.qualified_name));
-                    }
-                }
-                return Ok(Lookup::Ambiguous(candidates.into_iter().collect()));
-            }
-        }
-
-        // Enumerators, by their own name or qualified by their
-        // enumeration's, in the frame's module before others.
-        for module in self.modules() {
-            let mut found = Vec::new();
-            for node in module.image.types() {
-                let TypeNode::Resolved(info) = node else {
-                    continue;
-                };
-                let TypeKind::Enumeration { enumerators, .. } = &info.kind else {
-                    continue;
-                };
-                for enumerator in enumerators.iter() {
-                    let qualified = format!("{}::{}", info.name, enumerator.name);
-                    if enumerator.name.as_ref() == name || qualified == name {
-                        found.push((qualified, integer(enumerator.value), info.reference));
-                    }
-                }
-            }
-            found.sort_by(|left, right| left.0.cmp(&right.0));
-            found.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
-            match found.as_slice() {
-                [] => {}
-                [(_, value, ty)] => {
-                    return Ok(Lookup::Enumerator {
-                        value: *value,
-                        ty: *ty,
-                    });
-                }
-                _ => {
-                    return Ok(Lookup::Ambiguous(
-                        found.into_iter().map(|(qualified, ..)| qualified).collect(),
-                    ));
-                }
-            }
-        }
-        Ok(Lookup::NotFound)
+        Ok(self.lookup_enumerator(name).unwrap_or(Lookup::NotFound))
     }
 
     /// The types a name means, in the frame's module first.

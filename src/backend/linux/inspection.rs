@@ -12,7 +12,7 @@ use crate::{
     CallFrameUnavailableReason, CodeInstanceId, Error, GlobalVariablePage, GlobalVariableReference,
     ImageAddress, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, MemoryReadCompletion,
     RegisterSnapshot, Result, StackFrameId, TlsUnavailableReason, UnwindTermination,
-    VariableSnapshot, VariableUnavailableReason, VirtualAddress,
+    VariableSnapshot, VariableState, VariableUnavailableReason, VirtualAddress,
 };
 
 use super::evaluation::StopMachine;
@@ -260,10 +260,6 @@ impl<P: InspectionOps> Controller<P> {
 
     /// The elements `start..end` of an inspected array or slice, by source
     /// index.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "range validation and selection preserve one atomic inspection budget"
-    )]
     pub(super) fn range_page(
         &self,
         stop_id: StopId,
@@ -273,101 +269,77 @@ impl<P: InspectionOps> Controller<P> {
         budget: &mut InspectionBudget,
     ) -> Result<crate::ValueChildPage> {
         let length = validate_range_length(start, end)?;
-        let type_name = inspected
-            .type_info
-            .as_ref()
-            .map_or_else(|| Arc::from("<unknown>"), |info| Arc::clone(&info.name));
+        let empty = |offset, total| crate::ValueChildPage {
+            stop_id,
+            offset,
+            total,
+            children: Arc::from([]),
+            completion: budget.completion(),
+            usage: budget.usage(),
+        };
+        let invalid = |why: String| Err(Error::InvalidValueRange(why.into()));
         let (lower_bound, count, reference) = match &inspected.state {
-            crate::VariableState::Available {
+            VariableState::Available {
                 value: crate::VariableValue::Array { dimensions, .. },
                 children: crate::ValueChildren::Available(reference),
                 ..
             } => {
                 let [dimension] = dimensions.as_ref() else {
-                    return Err(Error::InvalidValueRange(
-                        "ranges currently require a one-dimensional array".into(),
-                    ));
+                    return invalid("ranges currently require a one-dimensional array".into());
                 };
-                (
-                    dimension.lower_bound,
-                    dimension.count,
-                    Arc::clone(reference),
-                )
+                (dimension.lower_bound, dimension.count, reference)
             }
-            crate::VariableState::Available {
+            VariableState::Available {
                 value: crate::VariableValue::Slice { length, .. },
                 children: crate::ValueChildren::Available(reference),
                 ..
-            } => (0, *length, Arc::clone(reference)),
-            crate::VariableState::Available { .. } => {
-                return Err(Error::IndexAccessOnNonIndexable { type_name });
-            }
-            crate::VariableState::Unavailable(VariableUnavailableReason::InspectionLimit(_)) => {
-                return Ok(crate::ValueChildPage {
-                    stop_id,
-                    offset: 0,
-                    total: 0,
-                    children: Arc::from([]),
-                    completion: budget.completion(),
-                    usage: budget.usage(),
+            } => (0, *length, reference),
+            VariableState::Available { .. } => {
+                return Err(Error::IndexAccessOnNonIndexable {
+                    type_name: inspected
+                        .type_info
+                        .as_ref()
+                        .map_or_else(|| Arc::from("<unknown>"), |info| Arc::clone(&info.name)),
                 });
             }
-            crate::VariableState::Unavailable(reason) => {
-                return Err(Error::InvalidValueRange(
-                    format!("the selected aggregate is unavailable: {reason}").into(),
+            VariableState::Unavailable(VariableUnavailableReason::InspectionLimit(_)) => {
+                return Ok(empty(0, 0));
+            }
+            VariableState::Unavailable(reason) => {
+                return invalid(format!("the selected aggregate is unavailable: {reason}"));
+            }
+            VariableState::Malformed(reason) => {
+                return invalid(format!(
+                    "the selected aggregate is malformed: {}",
+                    reason.description
                 ));
             }
-            crate::VariableState::Malformed(reason) => {
-                return Err(Error::InvalidValueRange(
-                    format!(
-                        "the selected aggregate is malformed: {}",
-                        reason.description
-                    )
-                    .into(),
-                ));
-            }
-            crate::VariableState::Invalid { reason, .. } => {
-                return Err(Error::InvalidValueRange(
-                    format!("the selected aggregate has an invalid value: {reason}").into(),
+            VariableState::Invalid { reason, .. } => {
+                return invalid(format!(
+                    "the selected aggregate has an invalid value: {reason}"
                 ));
             }
         };
-        let relative_start = start
-            .checked_sub(lower_bound)
-            .and_then(|index| u64::try_from(index).ok());
-        let relative_end = end
-            .checked_sub(lower_bound)
-            .and_then(|index| u64::try_from(index).ok());
-        let (Some(offset), Some(relative_end)) = (relative_start, relative_end) else {
-            return Err(Error::ValueIndexOutOfBounds {
-                index: start,
-                lower_bound,
-                count,
-            });
+        // Once `start` is in bounds, `end`, which is not below it, can only
+        // be past the last element.
+        let relative = |index: i128| {
+            index
+                .checked_sub(lower_bound)
+                .and_then(|index| u64::try_from(index).ok())
+                .filter(|index| *index <= count)
         };
-        if offset > count || relative_end > count {
-            return Err(Error::ValueIndexOutOfBounds {
-                index: if offset > count {
-                    start
-                } else {
-                    end.checked_sub(1).unwrap_or(end)
-                },
-                lower_bound,
-                count,
-            });
-        }
+        let out_of_bounds = |index| Error::ValueIndexOutOfBounds {
+            index,
+            lower_bound,
+            count,
+        };
+        let offset = relative(start).ok_or_else(|| out_of_bounds(start))?;
+        relative(end).ok_or_else(|| out_of_bounds(end.checked_sub(1).unwrap_or(end)))?;
         if length == 0 {
-            return Ok(crate::ValueChildPage {
-                stop_id,
-                offset,
-                total: count,
-                children: Arc::from([]),
-                completion: budget.completion(),
-                usage: budget.usage(),
-            });
+            return Ok(empty(offset, count));
         }
         self.value_children_with_budget(
-            &reference,
+            reference,
             &crate::ValueChildQuery {
                 offset,
                 limit: u32::try_from(length).expect("validated range length fits u32"),
