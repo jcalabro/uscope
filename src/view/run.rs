@@ -16,7 +16,8 @@ use crate::{
 };
 
 use super::bind::{
-    BoundDynamic, BoundScan, BoundShape, BoundView, TextSource, ViewObject, ViewProgram,
+    BoundDynamic, BoundField, BoundFormat, BoundScan, BoundShape, BoundView, TextSource,
+    ViewObject, ViewProgram,
 };
 use super::scan::{Checkpoints, Scanner, Var};
 use super::summary;
@@ -80,9 +81,9 @@ pub struct Presented {
     pub inner: Option<InspectedValue>,
     /// Why the summary stopped short of every element.
     pub partial: Option<ViewProblem>,
-    /// How many members a record has, which are children before the
-    /// view's fields.
-    pub members: u64,
+    /// How many named children it has: a record's members and the
+    /// view's fields, less those it hides, which come after its elements.
+    pub named: u64,
 }
 
 /// One child of a presented value.
@@ -170,7 +171,8 @@ impl<M: Machine> Machine for ViewMachine<'_, M> {
     fn locate(&mut self, object: &Self::Object) -> Result<Self::Place, Stop> {
         match object {
             ViewObject::This => Ok(self.this.clone()),
-            ViewObject::Member(step) => {
+            // A global's step reaches it from anywhere.
+            ViewObject::Member(step) | ViewObject::Global(step) => {
                 let this = self.this.clone();
                 self.base.step(&this, step, &[])
             }
@@ -269,10 +271,12 @@ impl<M: Machine> Machine for ViewMachine<'_, M> {
                     "the generator's variable is out of scope",
                 ))
             }),
-            ViewObject::This | ViewObject::Member(_) => Err(Stop::Refused(Refusal::new(
-                crate::ExpressionErrorKind::Unsupported,
-                "a place is not a bound value",
-            ))),
+            ViewObject::This | ViewObject::Member(_) | ViewObject::Global(_) => {
+                Err(Stop::Refused(Refusal::new(
+                    crate::ExpressionErrorKind::Unsupported,
+                    "a place is not a bound value",
+                )))
+            }
         }
     }
 }
@@ -368,7 +372,121 @@ fn resolve<'b, M: Machine>(
             otherwise
         };
     }
+    // A `match` that names no value it has is that value's problem.
+    if let BoundShape::Unmatched { text, program } = shape {
+        let value = interp::value(program, machine)?;
+        return Err(Failure::Problem(ViewProblem::Refused(
+            format!(
+                "`{text}` is {}, which no arm of the match names",
+                side_text(&value)
+            )
+            .into(),
+        )));
+    }
     Ok(shape)
+}
+
+/// A child a view names: a member of its record or a field, of the view
+/// or of an `extend` of it.
+struct Named<'b, St> {
+    owner: &'b BoundView<St>,
+    field: &'b BoundField<St>,
+}
+
+/// The named children of a view's value, in order: its record's members,
+/// its fields, and its extensions' fields, less those any of them hides.
+fn named<'b, St>(bound: &'b BoundView<St>, shape: &'b BoundShape<St>) -> Vec<Named<'b, St>> {
+    let hidden = |name: &Arc<str>| {
+        std::iter::once(bound)
+            .chain(bound.extensions.iter().map(AsRef::as_ref))
+            .any(|view| view.hidden.iter().any(|(hidden, _)| hidden == name))
+    };
+    let members = match shape {
+        BoundShape::Record(members) => members.as_slice(),
+        _ => &[],
+    };
+    members
+        .iter()
+        .chain(&bound.fields)
+        .map(|field| Named {
+            owner: bound,
+            field,
+        })
+        .chain(bound.extensions.iter().flat_map(|extension| {
+            extension.fields.iter().map(move |field| Named {
+                owner: extension,
+                field,
+            })
+        }))
+        .filter(|named| !hidden(&named.field.name))
+        .collect()
+}
+
+/// How a view, or the last `extend` of it that says, formats `name`.
+fn format_of<St>(bound: &BoundView<St>, name: &str) -> Option<BoundFormat> {
+    bound
+        .extensions
+        .iter()
+        .rev()
+        .map(AsRef::as_ref)
+        .chain(std::iter::once(bound))
+        .find_map(|view| {
+            view.formats
+                .iter()
+                .rev()
+                .find(|(formatted, ..)| formatted.as_ref() == name)
+                .map(|(_, format, _)| *format)
+        })
+}
+
+/// A named child's value, computed in its own view's scope, as its format
+/// writes it.
+fn named_value<M: Machine>(
+    bound: &BoundView<M::Step>,
+    named: &Named<'_, M::Step>,
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<InspectedValue, Failure> {
+    let value = if std::ptr::eq(named.owner, bound) {
+        machine.set_variables(&[]);
+        element(&named.field.program, machine)?
+    } else {
+        let this = machine.this.clone();
+        let mut extension = ViewMachine::new(&mut *machine.base, named.owner, this);
+        element(&named.field.program, &mut extension)?
+    };
+    formatted(bound, &named.field.name, value, machine)
+}
+
+/// `value` as the format a view gives `name` writes it, when it gives one
+/// that suits the value.
+fn formatted<M: Machine>(
+    bound: &BoundView<M::Step>,
+    name: &str,
+    mut value: InspectedValue,
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<InspectedValue, Failure> {
+    let Some(format) = format_of(bound, name) else {
+        return Ok(value);
+    };
+    let Some(summary) = super::format::write(format, &value, machine)? else {
+        return Ok(value);
+    };
+    if let VariableState::Available {
+        presentation,
+        children,
+        ..
+    } = &mut value.state
+    {
+        *presentation = Some(Arc::new(crate::Presentation {
+            view: super::name_of(&bound.view),
+            shape: PresentedShape::Formatted,
+            count: None,
+            summary: summary.into(),
+            children: children.clone(),
+            problem: None,
+        }));
+    }
+    Ok(value)
 }
 
 /// A sequence's or map's generators and declared count, in either shape.
@@ -581,11 +699,12 @@ pub fn present<M: Machine>(
                 text: Some(text),
                 inner: None,
                 partial: None,
-                members: 0,
+                named: 0,
             }
         }
         BoundShape::Value(program) => {
             let inner = run_value(program, &mut machine)?;
+            let inner = formatted(bound, "self", inner, &mut machine)?;
             Presented {
                 shape: PresentedShape::Value,
                 count: None,
@@ -593,7 +712,7 @@ pub fn present<M: Machine>(
                 summary: summary::value(inner.type_info.as_ref(), &inner.state),
                 inner: Some(inner),
                 partial: None,
-                members: 0,
+                named: 0,
             }
         }
         BoundShape::Empty(text) => Presented {
@@ -603,18 +722,27 @@ pub fn present<M: Machine>(
             summary: text.to_string(),
             inner: None,
             partial: None,
-            members: 0,
+            named: 0,
         },
         BoundShape::Sequence { scan, .. } | BoundShape::Map { scan, .. } => {
             preview(shape, scan, &mut machine, checkpoints)?
         }
         BoundShape::Record(members) => {
+            // The summary shows the record's members the view does not
+            // hide, as their formats write them.
+            let shown = named(bound, shape)
+                .into_iter()
+                .filter(|named| {
+                    members
+                        .iter()
+                        .any(|member| std::ptr::eq(member, named.field))
+                })
+                .collect::<Vec<_>>();
             let mut parts = Vec::new();
-            for member in members.iter().take(summary::MAX_ELEMENTS) {
-                machine.set_variables(&[]);
-                let value = element(&member.program, &mut machine)?;
+            for named in shown.iter().take(summary::MAX_ELEMENTS) {
+                let value = named_value(bound, named, &mut machine)?;
                 parts.push((
-                    Arc::clone(&member.name),
+                    Arc::clone(&named.field.name),
                     summary::value(value.type_info.as_ref(), &value.state),
                 ));
             }
@@ -622,10 +750,10 @@ pub fn present<M: Machine>(
                 shape: PresentedShape::Record,
                 count: None,
                 text: None,
-                summary: summary::record(&parts, parts.len() == members.len()),
+                summary: summary::record(&parts, parts.len() == shown.len()),
                 inner: None,
                 partial: None,
-                members: members.len() as u64,
+                named: 0,
             }
         }
         BoundShape::Dynamic { pointer, ty } => {
@@ -638,11 +766,14 @@ pub fn present<M: Machine>(
                 summary: summary::value(inner.type_info.as_ref(), &inner.state),
                 inner: Some(inner),
                 partial: None,
-                members: 0,
+                named: 0,
             }
         }
-        BoundShape::If { .. } => unreachable!("`if` is resolved"),
+        BoundShape::If { .. } | BoundShape::Unmatched { .. } => {
+            unreachable!("`if` and `match` are resolved")
+        }
     };
+    presented.named = named(bound, shape).len() as u64;
     if let Some(pieces) = &bound.summary {
         let mut text = String::new();
         for piece in pieces {
@@ -771,7 +902,7 @@ fn preview<M: Machine>(
         },
         inner: None,
         partial,
-        members: 0,
+        named: 0,
     })
 }
 
@@ -791,14 +922,12 @@ pub fn children<M: Machine>(
     checks(bound, &mut machine)?;
     let shape = resolve(&bound.shape, &mut machine)?;
     // A record's members come before the view's fields.
-    let members = match shape {
-        BoundShape::Record(members) => members.as_slice(),
-        _ => &[],
-    };
-    let named = (members.len() + bound.fields.len()) as u64;
-    let end = offset
-        .saturating_add(limit)
-        .min(elements.saturating_add(named).saturating_add(1));
+    let named = named(bound, shape);
+    let end = offset.saturating_add(limit).min(
+        elements
+            .saturating_add(named.len() as u64)
+            .saturating_add(1),
+    );
     let mut children = Vec::new();
     if offset < elements
         && let Some(scan) = scan_of(shape)
@@ -837,21 +966,14 @@ pub fn children<M: Machine>(
     }
     for index in offset.max(elements)..end {
         let position = usize::try_from(index - elements).unwrap_or(usize::MAX);
-        let child = if let Some(member) = members.get(position) {
-            // A member the program cannot provide is that member's problem.
-            machine.set_variables(&[]);
-            Child::Field(
-                Arc::clone(&member.name),
-                element(&member.program, &mut machine)?,
-            )
-        } else if let Some(field) = bound.fields.get(position.saturating_sub(members.len())) {
-            machine.set_variables(&[]);
-            Child::Field(
-                Arc::clone(&field.name),
-                run_value(&field.program, &mut machine)?,
-            )
-        } else {
-            Child::Raw
+        // A member or field the program cannot provide is that child's
+        // problem.
+        let child = match named.get(position) {
+            Some(child) => Child::Field(
+                Arc::clone(&child.field.name),
+                named_value(bound, child, &mut machine)?,
+            ),
+            None => Child::Raw,
         };
         if out_of_budget(&child) {
             break;
@@ -945,7 +1067,9 @@ pub fn length<M: Machine>(
         BoundShape::Record(_) => Err(Failure::Problem(ViewProblem::Refused(
             "a record has no length".into(),
         ))),
-        BoundShape::If { .. } => unreachable!("`if` is resolved"),
+        BoundShape::If { .. } | BoundShape::Unmatched { .. } => {
+            unreachable!("`if` and `match` are resolved")
+        }
     }
 }
 

@@ -74,6 +74,8 @@ pub enum Step {
         element_size: u64,
         ty: TypeReference,
     },
+    /// To a variable, from anywhere: a view's `global(NAME)`.
+    Global(usize),
 }
 
 /// A world the evaluator binds and runs in.
@@ -965,6 +967,18 @@ impl Scope for World {
             .map(|info| info.reference)
             .collect()
     }
+
+    fn global_step(&self, name: &str) -> Result<Option<(Step, TypeReference)>, Refusal> {
+        let mut objects = (0..self.objects.len()).filter(|&index| self.objects[index].name == name);
+        match (objects.next(), objects.next()) {
+            (Some(index), None) => Ok(Some((Step::Global(index), self.objects[index].ty))),
+            (None, _) => Ok(None),
+            (Some(_), Some(_)) => Err(Refusal::new(
+                ErrorKind::AmbiguousName,
+                format!("several variables are named `{name}`"),
+            )),
+        }
+    }
 }
 
 impl Machine for World {
@@ -1038,6 +1052,7 @@ impl Machine for World {
             },
         };
         match step {
+            Step::Global(object) => self.locate(object),
             Step::Deref(target) => {
                 let bytes = self.bytes(from)?;
                 let address = match self.decode(from.ty(), &bytes) {

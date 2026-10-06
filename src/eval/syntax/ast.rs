@@ -372,6 +372,16 @@ pub enum NodeKind {
         ty: TypeName,
         member: String,
     },
+    /// `container_of(PTR, TYPE, member)`, a view's: a pointer to the
+    /// record of `TYPE` whose `member` PTR points to.
+    ContainerOf {
+        pointer: NodeId,
+        ty: TypeName,
+        member: String,
+    },
+    /// `global(NAME)`, a view's: a global of the module whose value it
+    /// presents.
+    Global(String),
     Len(NodeId),
     /// A call of a view's built-in function on one operand.
     Call {
@@ -393,12 +403,16 @@ impl NodeKind {
             | Self::Bool(_)
             | Self::Null
             | Self::SizeOf(SizeOf::Type(_))
-            | Self::OffsetOf { .. } => Vec::new(),
+            | Self::OffsetOf { .. }
+            | Self::Global(_) => Vec::new(),
             Self::Unary { operand, .. }
             | Self::Cast { operand, .. }
             | Self::SizeOf(SizeOf::Operand(operand))
             | Self::Len(operand)
             | Self::Call { operand, .. }
+            | Self::ContainerOf {
+                pointer: operand, ..
+            }
             | Self::Member { base: operand, .. } => vec![*operand],
             Self::Binary { left, right, .. } => vec![*left, *right],
             Self::Assign { target, value, .. } => vec![*target, *value],
@@ -416,7 +430,8 @@ impl NodeKind {
     fn same_leaf(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Name(left), Self::Name(right)) => left == right,
-            (Self::Register(left), Self::Register(right)) => left == right,
+            (Self::Register(left), Self::Register(right))
+            | (Self::Global(left), Self::Global(right)) => left == right,
             (
                 Self::Integer { value, suffix },
                 Self::Integer {
@@ -467,6 +482,14 @@ impl NodeKind {
                 Self::OffsetOf {
                     ty: other_ty,
                     member: other_member,
+                },
+            )
+            | (
+                Self::ContainerOf { ty, member, .. },
+                Self::ContainerOf {
+                    ty: other_ty,
+                    member: other_member,
+                    ..
                 },
             ) => same_type(ty, other_ty) && member == other_member,
             _ => false,

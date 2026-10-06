@@ -202,6 +202,49 @@ impl<P: InspectionOps> Scope for ModuleScope<'_, P> {
     fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
         self.module.image.types_with_base(base)
     }
+
+    fn global_step(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Option<(StopStep, TypeReference)>, Refusal> {
+        let global = match self.module.image.global_named(name) {
+            Ok(global) => global,
+            Err(Error::VariableNotFound(_)) => return Ok(None),
+            Err(error) => {
+                return Err(Refusal::new(
+                    crate::eval::error::ErrorKind::AmbiguousName,
+                    error.to_string(),
+                ));
+            }
+        };
+        let refuse = |error: Error| {
+            Refusal::new(
+                crate::eval::error::ErrorKind::Unsupported,
+                error.to_string(),
+            )
+        };
+        let key = self
+            .module
+            .variables
+            .global_object(global.id)
+            .map_err(refuse)?;
+        let ty = self.module.variables.object_type(key).map_err(|reason| {
+            Refusal::new(
+                crate::eval::error::ErrorKind::Unsupported,
+                format!("`{name}` has a malformed type: {reason}"),
+            )
+        })?;
+        Ok(Some((
+            StopStep::Global(super::evaluation::StopObject::global(
+                self.module.loaded.id,
+                key,
+            )),
+            TypeReference {
+                image: self.module.loaded.image,
+                id: ty,
+            },
+        )))
+    }
 }
 
 /// The program type of a sequence's elements, when every branch that
@@ -816,7 +859,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let name = crate::view::name_of(&bound.view);
         let (presentation, text) = match result {
             Ok(presented) => {
-                let fields = bound.fields.len() as u64 + presented.members;
+                let fields = presented.named;
                 let inner = presented
                     .inner
                     .as_ref()
