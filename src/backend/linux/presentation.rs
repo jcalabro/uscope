@@ -943,10 +943,13 @@ fn member_name(child: &ValueChild) -> Option<&str> {
     }
 }
 
+/// Children one value lends another, and how many.
+type Lent = (Arc<ValueChildrenReference>, u64);
+
 /// The children a value lends the value it stands for, and how many: a
 /// presented value's elements and fields, but not its `[raw]`, which is
 /// its own; or the members of one no view presents.
-fn lent(state: &VariableState) -> Option<(Arc<ValueChildrenReference>, u64)> {
+fn lent(state: &VariableState) -> Option<Lent> {
     match state {
         VariableState::Available {
             presentation: Some(presentation),
@@ -1193,7 +1196,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         };
         // An aggregate's children say where it is; another value, such as
         // a Go map's pointer, is where its state was read from.
-        let Some(raw) = self.place_of(type_info, &value.state) else {
+        let Some(raw) = self.presented_place(type_info, &value.state) else {
             return Ok(value);
         };
         let this = StopPlace::of(&raw);
@@ -1553,21 +1556,22 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 } else {
                     None
                 };
-                let shown = match pointee {
-                    Some(pointee) => pointee,
-                    None => match self.record_summary(&presented.state, 0)? {
-                        Some(fields) => fields,
-                        None => crate::view::summary::value(
-                            presented.type_info.as_ref(),
-                            &presented.state,
-                        ),
-                    },
+                let (shown, lent) = match pointee {
+                    Some((pointee, lent_by_pointee)) => {
+                        (pointee, lent_by_pointee.or_else(|| lent(&presented.state)))
+                    }
+                    None => (
+                        match self.record_summary(&presented.state, 0)? {
+                            Some(fields) => fields,
+                            None => crate::view::summary::value(
+                                presented.type_info.as_ref(),
+                                &presented.state,
+                            ),
+                        },
+                        lent(&presented.state),
+                    ),
                 };
-                (
-                    PresentedShape::Dynamic,
-                    format!("{name} {shown}"),
-                    lent(&presented.state),
-                )
+                (PresentedShape::Dynamic, format!("{name} {shown}"), lent)
             }
         };
         Ok(present_as(
@@ -1613,11 +1617,13 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
     }
 
     /// A pointer to a record as Go's debuggers show one an interface holds,
-    /// `*{name: value, …}`, or `nil`; `None` for any other value.
+    /// `*{name: value, …}`, or `nil`; `None` for any other value. A pointer
+    /// to a value a view presents is `*` and the view's summary, and lends
+    /// the view's children.
     fn pointee_summary(
         &mut self,
         state: &VariableState,
-    ) -> std::result::Result<Option<String>, Stop> {
+    ) -> std::result::Result<Option<(String, Option<Lent>)>, Stop> {
         let VariableState::Available {
             value: crate::VariableValue::Address(address),
             dereference:
@@ -1633,7 +1639,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             return Ok(None);
         };
         if address.address.get() == 0 {
-            return Ok(Some("nil".to_owned()));
+            return Ok(Some(("nil".to_owned(), None)));
         }
         let place = Located {
             ty: *target_type,
@@ -1641,9 +1647,21 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         };
         let module = self.module(*module)?;
         let pointee = self.materialize(module, &place)?;
+        let presented = self.nested(self.depth + 1).presented(pointee.clone())?;
+        if let VariableState::Available {
+            presentation: Some(presentation),
+            ..
+        } = &presented.state
+            && presentation.shape != PresentedShape::Raw
+        {
+            return Ok(Some((
+                format!("*{}", presentation.summary),
+                lent(&presented.state),
+            )));
+        }
         Ok(self
             .record_summary(&pointee.state, 0)?
-            .map(|fields| format!("*{fields}")))
+            .map(|fields| (format!("*{fields}"), None)))
     }
 
     /// The `name: value` parts of a record's members, its bases' first.
@@ -1729,24 +1747,47 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         result
     }
 
+    /// Where the value a view presents is: a slice's descriptor, though its
+    /// children are its elements, or anything else's place.
+    fn presented_place(
+        &self,
+        type_info: &TypeInfo,
+        state: &VariableState,
+    ) -> Option<Arc<ValueChildrenReference>> {
+        match state {
+            VariableState::Available {
+                value: crate::VariableValue::Slice { .. },
+                ..
+            } => self.storage_of(type_info, state),
+            state => self.place_of(type_info, state),
+        }
+    }
+
     /// Where a value of `type_info` is, as a capability over its storage.
     fn place_of(
         &self,
         type_info: &TypeInfo,
         state: &VariableState,
     ) -> Option<Arc<ValueChildrenReference>> {
-        let VariableState::Available {
-            source,
-            raw,
-            children,
-            ..
-        } = state
-        else {
+        let VariableState::Available { children, .. } = state else {
             return None;
         };
         if let ValueChildren::Available(reference) = children {
             return Some(Arc::clone(reference));
         }
+        self.storage_of(type_info, state)
+    }
+
+    /// Where a value of `type_info` was read from, as a capability over that
+    /// storage, whatever its children say.
+    fn storage_of(
+        &self,
+        type_info: &TypeInfo,
+        state: &VariableState,
+    ) -> Option<Arc<ValueChildrenReference>> {
+        let VariableState::Available { source, raw, .. } = state else {
+            return None;
+        };
         let storage = match (source, raw) {
             (crate::VariableValueSource::Memory(address), _) => ValueStorage::Memory(*address),
             (source, Some(raw)) => ValueStorage::Bytes {

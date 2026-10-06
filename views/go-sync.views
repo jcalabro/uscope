@@ -1,0 +1,73 @@
+uscope-views 1
+
+# Go's sync and sync/atomic packages. Verified against Go 1.27.1, by
+# tests/fixtures/go/stdlib.
+
+# A mutex's state word holds its locked, woken, and starving bits, then the
+# count of goroutines waiting for it (internal/sync/mutex.go).
+view go sync.Mutex {
+    let state = mu.state
+    show match state {
+        0 => empty("unlocked")
+        1 => empty("locked")
+        _ => record {
+            locked = state & 1 != 0,
+            waiters = state >> 3,
+            woken = state & 2 != 0,
+            starving = state & 4 != 0
+        }
+    }
+}
+
+# A read-write mutex counts its readers in readerCount, less 1 << 30 while
+# a writer holds it or waits for the readers holding it, readerWait of
+# them, to leave; the readers counted beyond those wait for the writer.
+# Writers wait for one another on w (rwmutex.go).
+view go sync.RWMutex {
+    let readers = readerCount.v
+    let writer = readers < 0
+    let holding = writer ? readerWait.v : readers
+    show if readers == 0 && w.mu.state == 0 {
+        empty("unlocked")
+    } else {
+        record {
+            writer = writer,
+            readers = holding,
+            waiting_readers = writer ? readers + (1 << 30) - holding : 0,
+            waiting_writers = w.mu.state >> 3
+        }
+    }
+}
+
+# Atomic values are the values they hold.
+view go `sync/atomic`.Int32 {
+    show value(v)
+}
+
+view go `sync/atomic`.Int64 {
+    show value(v)
+}
+
+view go `sync/atomic`.Uint32 {
+    show value(v)
+}
+
+view go `sync/atomic`.Uint64 {
+    show value(v)
+}
+
+view go `sync/atomic`.Uintptr {
+    show value(v)
+}
+
+view go `sync/atomic`.Bool {
+    show value(v != 0)
+}
+
+view go `sync/atomic`.Pointer[T] {
+    show value((T*)v)
+}
+
+view go `sync/atomic`.Value {
+    show value(v)
+}
