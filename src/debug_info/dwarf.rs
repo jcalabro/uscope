@@ -202,6 +202,7 @@ fn load_debug_info(
 
     let mut function_metadata =
         load_function_metadata(&dwarf, &catalog, &mut source_files, &mut source_file_ids)?;
+    super::roles::mark_abi_wrappers(&mut function_metadata.functions, &source_files);
 
     for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
         load_lines(
@@ -825,6 +826,8 @@ struct RawFunction {
     specification: Option<DieKey>,
     name: Option<Arc<str>>,
     linkage_name: Option<Arc<str>>,
+    /// Whether the DIE says the code only forwards to another function.
+    trampoline: bool,
     declaration: Option<SourceLocation>,
     call_site: Option<SourceLocation>,
     ranges: Vec<AddressRange<ImageAddress>>,
@@ -886,7 +889,10 @@ fn load_function_metadata(
         let id = FunctionId::new(
             u32::try_from(functions.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
         );
-        let role = super::roles::symbol_role(linkage_name.as_deref().unwrap_or(&name));
+        let role = super::roles::function_role(
+            linkage_name.as_deref().unwrap_or(&name),
+            origin.trampoline,
+        );
 
         functions.push(FunctionInfo {
             id,
@@ -1006,6 +1012,9 @@ fn collect_function_dies(
                     )?,
                     name: string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?,
                     linkage_name: string_attribute(dwarf, unit, entry, gimli::DW_AT_linkage_name)?,
+                    trampoline: entry
+                        .attr_value(gimli::DW_AT_trampoline)
+                        .is_some_and(|value| value != gimli::AttributeValue::Flag(false)),
                     declaration: entry_source_location(
                         dwarf,
                         unit,
