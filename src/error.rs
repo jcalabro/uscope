@@ -51,8 +51,16 @@ pub enum Error {
     Expression(crate::ExpressionError),
     #[error("record type '{type_name}' has no member named '{member}'")]
     MemberNotFound { member: String, type_name: Arc<str> },
-    #[error("member '{member}' is ambiguous in record type '{type_name}'")]
-    AmbiguousMember { member: String, type_name: Arc<str> },
+    #[error(
+        "member '{member}' is ambiguous in record type '{type_name}'{}",
+        candidates_text(candidates)
+    )]
+    AmbiguousMember {
+        member: String,
+        type_name: Arc<str>,
+        /// The selections that reach each candidate, when they are known.
+        candidates: Vec<String>,
+    },
     #[error("'{base}' is not a base class of '{type_name}'")]
     BaseNotFound { base: Arc<str>, type_name: Arc<str> },
     #[error("'{type_name}' has several '{base}' base class subobjects")]
@@ -285,4 +293,16 @@ fn missing_source_detail(tried: &[PathBuf]) -> String {
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
     format!(", nor do its mapped paths {}", paths.join(", "))
+}
+
+/// The selections an ambiguous member's candidates are reached by.
+fn candidates_text(candidates: &[String]) -> String {
+    if candidates.is_empty() {
+        return String::new();
+    }
+    let candidates = candidates
+        .iter()
+        .map(|candidate| format!("`{candidate}`"))
+        .collect::<Vec<_>>();
+    format!("; select one of {}", candidates.join(", "))
 }

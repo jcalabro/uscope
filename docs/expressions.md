@@ -160,7 +160,10 @@ selects through one pointer; `->` selects through a pointer as in C;
 `t.0` selects a tuple's field. A member of an anonymous struct or union, or
 of a base class, is selected by its own name, as C and C++ select it: a
 record's own members hide its bases', and a name that two paths reach in
-different objects is ambiguous. `a[start..end]` is a half-open range
+different objects is ambiguous. A member of a Go embedded field is promoted
+as Go promotes it: `n.W` selects the `W` of the shallowest embedded field
+that has one, through an embedded pointer too, and several at that depth
+are ambiguous, the error naming each. `a[start..end]` is a half-open range
 of an array or slice, and must be the whole expression; `a[start:end]`
 slices (see Slices), and `m[key]` indexes a map (see Maps). `len(x)` is a
 length, `cap(x)` a capacity, and `sizeof(x)` a size. The language does not
