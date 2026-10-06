@@ -41,7 +41,7 @@ struct KernelRecord<'a> {
 /// record is named `MODULE.views[N]`, counting records from 0.
 #[must_use]
 pub fn view_set(module: &str, bytes: &[u8]) -> ViewSet {
-    let (files, kernels, mut errors) = records(module, bytes);
+    let (files, kernels, errors) = records(module, bytes);
     let mut set = ViewSet::new(
         files
             .iter()
@@ -53,8 +53,8 @@ pub fn view_set(module: &str, bytes: &[u8]) -> ViewSet {
             [(kernel.name, kernel.source, kernel.module)],
         );
     }
-    errors.extend(set.errors().iter().cloned());
-    set.set_errors(errors);
+    // The records' own errors come first.
+    set.errors.splice(0..0, errors);
     set
 }
 
