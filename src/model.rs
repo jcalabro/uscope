@@ -278,6 +278,8 @@ pub struct TaskLocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskSnapshot {
     pub id: TaskId,
+    /// What its runtime calls a task, such as Go's "goroutine".
+    pub noun: &'static str,
     pub state: TaskState,
     /// The runtime's own words for what the task does or waits for, such
     /// as Go's "chan receive".

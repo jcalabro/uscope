@@ -212,6 +212,7 @@ impl<P: InspectionOps> Controller<P> {
         let code = |code: CodeAddress| self.task_location(inferior, code);
         TaskSnapshot {
             id: id(task.number),
+            noun: runtime.model.task_noun(),
             state: task.state.clone(),
             detail: task.detail.clone(),
             thread: task.thread,

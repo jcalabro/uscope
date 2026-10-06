@@ -17,7 +17,7 @@ use uscope::{
     WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
 
-use super::commands::{COMMANDS, CommandSpec};
+use super::commands::{COMMANDS, CommandSpec, aliases};
 use super::terminal::{Renderer, Role};
 use super::value::{self, bound_output};
 
@@ -67,12 +67,12 @@ pub fn help(renderer: Renderer) -> String {
     let name_width = COMMANDS.iter().map(|command| command.name.len()).max();
     let alias_width = COMMANDS
         .iter()
-        .map(|command| command.aliases.join(", ").len())
+        .map(|command| alias_list(command).len())
         .max();
     let (name_width, alias_width) = (name_width.unwrap_or(0), alias_width.unwrap_or(0));
     let mut output = "commands:".to_owned();
     for command in COMMANDS {
-        let aliases = command.aliases.join(", ");
+        let aliases = alias_list(command);
         let rendered_aliases = if aliases.is_empty() {
             String::new()
         } else {
@@ -92,14 +92,20 @@ pub fn help(renderer: Renderer) -> String {
     output
 }
 
+/// A command's other names, joined.
+fn alias_list(command: &CommandSpec) -> String {
+    aliases(command).collect::<Vec<_>>().join(", ")
+}
+
 pub fn command_help(command: &CommandSpec, renderer: Renderer) -> String {
     let mut output = format!("  {}", command.summary);
-    if !command.aliases.is_empty() {
+    let aliases = alias_list(command);
+    if !aliases.is_empty() {
         write!(
             output,
             "\n  {}: {}",
             renderer.paint(Role::Muted, "aliases"),
-            renderer.paint(Role::Alias, command.aliases.join(", "))
+            renderer.paint(Role::Alias, aliases)
         )
         .expect("writing to a String cannot fail");
     }
@@ -1396,15 +1402,12 @@ pub fn backtrace(
     for frame in trace.frames.iter() {
         if switches && segment != Some(frame.segment) {
             segment = Some(frame.segment);
-            let owner = match frame.segment {
-                StackSegment::Thread => "the thread's stack",
-                StackSegment::Task => "the task's stack",
-                StackSegment::System => "the runtime's stack",
-                StackSegment::Signal => "the signal stack",
-            };
             lines.push(
                 renderer
-                    .paint(Role::Metadata, format_args!("    on {owner}:"))
+                    .paint(
+                        Role::Metadata,
+                        format_args!("    on {}:", stack_owner(frame.segment)),
+                    )
                     .to_string(),
             );
         }
@@ -1422,6 +1425,16 @@ pub fn backtrace(
         trace.termination
     ));
     lines.join("\n")
+}
+
+/// Whose stack a run of frames is on.
+pub const fn stack_owner(segment: StackSegment) -> &'static str {
+    match segment {
+        StackSegment::Thread => "the thread's stack",
+        StackSegment::Task => "the task's stack",
+        StackSegment::System => "the runtime's stack",
+        StackSegment::Signal => "the signal stack",
+    }
 }
 
 /// Renders one backtrace frame: its level, instruction, code, and source
@@ -1782,8 +1795,8 @@ mod tests {
                 .split_whitespace()
                 .map(|word| word.trim_end_matches(','))
                 .collect::<Vec<_>>();
-            for alias in command.aliases {
-                assert!(words.contains(alias), "{alias} in {row}");
+            for alias in aliases(command) {
+                assert!(words.contains(&alias), "{alias} in {row}");
             }
             let detail = command_help(command, renderer);
             assert!(detail.contains(command.summary));

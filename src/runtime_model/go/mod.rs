@@ -27,6 +27,8 @@ const RBP: u16 = 6;
 const RSP: u16 = 7;
 const R12: u16 = 12;
 const RIP: u16 = 16;
+/// What Go calls its tasks.
+pub(super) const TASK_NOUN: (&str, &str) = ("goroutine", "goroutines");
 /// Linux's signal for urgent socket data, which the runtime preempts with.
 const SIGURG: i32 = 23;
 /// The first release whose runtime the model can read at all.
@@ -371,6 +373,10 @@ impl RuntimeModel for GoRuntime {
             }
         }
         Ok(stacks)
+    }
+
+    fn task_noun(&self) -> &'static str {
+        TASK_NOUN.0
     }
 
     /// The runtime preempts a goroutine with SIGURG, and rechecks that it
