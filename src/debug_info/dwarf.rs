@@ -1765,65 +1765,49 @@ mod tests {
     }
 
     #[test]
-    fn analyzed_entry_ignores_later_rows_for_the_signature_line() {
-        let statements = [
-            analyzed_entry_row(0x100, 10, 0, 0),
-            analyzed_entry_row(0x110, 10, 0, 1),
-            analyzed_entry_row(0x120, 11, 0, 2),
-        ];
-
-        assert_eq!(
-            first_distinct_source_statement(
-                &StatementIndex::new(&statements),
-                AddressRange {
-                    start: ImageAddress::new(0x100),
-                    end: ImageAddress::new(0x130),
-                },
-                ImageAddress::new(0x100),
+    fn analyzed_entry_skips_the_signature_line_within_one_sequence() {
+        let row = analyzed_entry_row;
+        for (rows, expected) in [
+            (
+                [
+                    row(0x100, 10, 0, 0),
+                    row(0x110, 10, 0, 1),
+                    row(0x120, 11, 0, 2),
+                ],
+                Some(0x120),
             ),
-            Some(ImageAddress::new(0x120))
-        );
-    }
-
-    #[test]
-    fn analyzed_entry_stays_within_one_line_program_sequence() {
-        // A foreign sequence overlapping the entry address makes attribution
-        // ambiguous: no candidate may be derived from mixed sequences.
-        let ambiguous = [
-            analyzed_entry_row(0x100, 10, 0, 0),
-            analyzed_entry_row(0x100, 50, 1, 0),
-            analyzed_entry_row(0x120, 11, 0, 1),
-        ];
-        assert_eq!(
-            first_distinct_source_statement(
-                &StatementIndex::new(&ambiguous),
-                AddressRange {
-                    start: ImageAddress::new(0x100),
-                    end: ImageAddress::new(0x130),
-                },
-                ImageAddress::new(0x100),
+            // A foreign sequence at the entry address makes attribution
+            // ambiguous.
+            (
+                [
+                    row(0x100, 10, 0, 0),
+                    row(0x100, 50, 1, 0),
+                    row(0x120, 11, 0, 1),
+                ],
+                None,
             ),
-            None
-        );
-
-        // A foreign sequence that only overlaps the body must not supply the
-        // candidate address for the entry's sequence.
-        let foreign_candidate = [
-            analyzed_entry_row(0x100, 10, 0, 0),
-            analyzed_entry_row(0x110, 50, 1, 0),
-            analyzed_entry_row(0x120, 11, 0, 1),
-        ];
-        assert_eq!(
-            first_distinct_source_statement(
-                &StatementIndex::new(&foreign_candidate),
-                AddressRange {
-                    start: ImageAddress::new(0x100),
-                    end: ImageAddress::new(0x130),
-                },
-                ImageAddress::new(0x100),
+            // A foreign sequence within the body supplies no candidate.
+            (
+                [
+                    row(0x100, 10, 0, 0),
+                    row(0x110, 50, 1, 0),
+                    row(0x120, 11, 0, 1),
+                ],
+                Some(0x120),
             ),
-            Some(ImageAddress::new(0x120))
-        );
+        ] {
+            assert_eq!(
+                first_distinct_source_statement(
+                    &StatementIndex::new(&rows),
+                    AddressRange {
+                        start: ImageAddress::new(0x100),
+                        end: ImageAddress::new(0x130),
+                    },
+                    ImageAddress::new(0x100),
+                ),
+                expected.map(ImageAddress::new)
+            );
+        }
     }
 
     impl MemoryReader for TestMemory {
@@ -1836,111 +1820,59 @@ mod tests {
     fn register_rules_distinguish_locations_values_and_frozen_registers() {
         let current = RegisterFile::new([(1, 100), (2, 200), (3, 300)]);
         let mut caller = current.clone();
-        let cfa = VirtualAddress::new(0x1000);
         let mut memory = TestMemory {
             values: std::iter::once((VirtualAddress::new(0xff8), 0xfeed)).collect(),
         };
-
-        apply_register_rule(
-            &mut caller,
-            &current,
-            &mut memory,
-            cfa,
-            1,
-            &RegisterRule::Constant(999),
-        )
-        .unwrap();
-        apply_register_rule(
-            &mut caller,
-            &current,
-            &mut memory,
-            cfa,
-            4,
-            &RegisterRule::Register(Register(1)),
-        )
-        .unwrap();
-        apply_register_rule(
-            &mut caller,
-            &current,
-            &mut memory,
-            cfa,
-            5,
-            &RegisterRule::Offset(-8),
-        )
-        .unwrap();
-        apply_register_rule(
-            &mut caller,
-            &current,
-            &mut memory,
-            cfa,
-            6,
-            &RegisterRule::ValOffset(-8),
-        )
-        .unwrap();
-        apply_register_rule(
-            &mut caller,
-            &current,
-            &mut memory,
-            cfa,
-            3,
-            &RegisterRule::Undefined,
-        )
-        .unwrap();
-
+        let mut apply = |caller: &mut RegisterFile, cfa, register, rule| {
+            apply_register_rule(
+                caller,
+                &current,
+                &mut memory,
+                VirtualAddress::new(cfa),
+                register,
+                &rule,
+            )
+        };
+        for (register, rule) in [
+            (1, RegisterRule::Constant(999)),
+            (4, RegisterRule::Register(Register(1))),
+            (5, RegisterRule::Offset(-8)),
+            (6, RegisterRule::ValOffset(-8)),
+            (3, RegisterRule::Undefined),
+        ] {
+            apply(&mut caller, 0x1000, register, rule).unwrap();
+        }
         assert_eq!(caller.get(1), Some(999));
         assert_eq!(caller.get(4), Some(100), "rule read mutated caller state");
         assert_eq!(caller.get(5), Some(0xfeed));
         assert_eq!(caller.get(6), Some(0xff8));
         assert_eq!(caller.get(3), None);
-    }
 
-    #[test]
-    fn register_rule_failures_are_typed() {
-        let current = RegisterFile::new([]);
-        let mut caller = current.clone();
-        let mut memory = TestMemory {
-            values: BTreeMap::new(),
-        };
-
-        assert_eq!(
-            apply_register_rule(
-                &mut caller,
-                &current,
-                &mut memory,
-                VirtualAddress::new(0),
-                1,
-                &RegisterRule::Offset(-1),
+        for (cfa, rule, failure) in [
+            (
+                0,
+                RegisterRule::Offset(-1),
+                UnwindTermination::InvalidCaller {
+                    description: "saved-register address overflow".into(),
+                },
             ),
-            Err(UnwindTermination::InvalidCaller {
-                description: "saved-register address overflow".into()
-            })
-        );
-        assert_eq!(
-            apply_register_rule(
-                &mut caller,
-                &current,
-                &mut memory,
-                VirtualAddress::new(0x1000),
-                1,
-                &RegisterRule::Offset(0),
+            (
+                0x1000,
+                RegisterRule::Offset(0),
+                UnwindTermination::MemoryReadFailed {
+                    address: VirtualAddress::new(0x1000),
+                },
             ),
-            Err(UnwindTermination::MemoryReadFailed {
-                address: VirtualAddress::new(0x1000)
-            })
-        );
-        assert_eq!(
-            apply_register_rule(
-                &mut caller,
-                &current,
-                &mut memory,
-                VirtualAddress::new(0),
-                1,
-                &RegisterRule::Register(Register(9)),
+            (
+                0,
+                RegisterRule::Register(Register(9)),
+                UnwindTermination::RegisterUnavailable {
+                    register: "DWARF register 9".into(),
+                },
             ),
-            Err(UnwindTermination::RegisterUnavailable {
-                register: "DWARF register 9".into()
-            })
-        );
+        ] {
+            assert_eq!(apply(&mut caller, cfa, 1, rule), Err(failure));
+        }
     }
 
     #[test]
