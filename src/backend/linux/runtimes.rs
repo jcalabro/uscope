@@ -21,6 +21,7 @@ use crate::{
 use super::frames::{RootOrigin, StackRoot};
 use super::memory::read_logical_memory;
 use super::native::InspectionOps;
+use super::signals::Signal;
 use super::{
     BreakpointSite, Controller, Inferior, debug_pid, debug_thread_id, validate_public_stop,
 };
@@ -299,6 +300,21 @@ impl<P: InspectionOps> Controller<P> {
             }
         }
         found
+    }
+}
+
+impl<P: InspectionOps> Controller<P> {
+    /// Whether a runtime in the process tolerates `signal` arriving late.
+    pub(super) fn defers(&self, signal: Signal) -> bool {
+        self.inferior.as_ref().is_some_and(|inferior| {
+            self.runtimes(inferior).iter().any(|runtime| {
+                runtime
+                    .model
+                    .signals()
+                    .deferrable
+                    .contains(&signal.number())
+            })
+        })
     }
 }
 

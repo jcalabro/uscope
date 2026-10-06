@@ -159,6 +159,16 @@ pub enum Crossing {
     Outermost,
 }
 
+/// How a runtime uses the process's signals, by Linux signal number.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeSignals {
+    /// Signals the runtime tolerates arriving late. One that arrives while
+    /// the debugger runs a thread alone for an instruction waits for the
+    /// thread's next continue, rather than running a handler that may wait
+    /// for threads the debugger holds.
+    pub deferrable: &'static [i32],
+}
+
 /// What a language runtime tells the debugger at a stop.
 pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     /// The runtime's tasks from `start`, an index into its own order, at
@@ -189,6 +199,8 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         thread: ThreadId,
         frame: &RegisterFile,
     ) -> Result<Crossing, Arc<str>>;
+    /// How the runtime uses signals.
+    fn signals(&self) -> RuntimeSignals;
 }
 
 /// The runtime a module carries, bound against its debug information, or

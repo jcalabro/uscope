@@ -11,8 +11,8 @@ use std::sync::{Arc, OnceLock};
 use layout::{Goroutines, Layout, Missing, Threads};
 
 use super::{
-    CodeAddress, Crossing, Partial, RuntimeImage, RuntimeModel, RuntimeStop, RuntimeTask,
-    TaskContext, TaskPage, ThreadActivity,
+    CodeAddress, Crossing, Partial, RuntimeImage, RuntimeModel, RuntimeSignals, RuntimeStop,
+    RuntimeTask, TaskContext, TaskPage, ThreadActivity,
 };
 use crate::unwind::RegisterFile;
 use crate::{AddressRange, ImageAddress, StackSegment, TaskState, ThreadId, VirtualAddress};
@@ -27,6 +27,8 @@ const RBP: u16 = 6;
 const RSP: u16 = 7;
 const R12: u16 = 12;
 const RIP: u16 = 16;
+/// Linux's signal for urgent socket data, which the runtime preempts with.
+const SIGURG: i32 = 23;
 /// The first release whose runtime the model can read at all.
 const OLDEST: (u64, u64) = (1, 20);
 /// The most goroutines one list reads, so a corrupted `allglen` cannot
@@ -381,6 +383,14 @@ impl RuntimeModel for GoRuntime {
     /// (`runtime/traceback.go`): on a thread's system stack, with a
     /// goroutine on the thread, the frames go on at the registers the
     /// goroutine saved in `g.sched` when it switched.
+    /// The runtime preempts a goroutine with SIGURG, and rechecks that it
+    /// still wants to whenever one arrives.
+    fn signals(&self) -> RuntimeSignals {
+        RuntimeSignals {
+            deferrable: &[SIGURG],
+        }
+    }
+
     fn cross(
         &self,
         stop: &dyn RuntimeStop,

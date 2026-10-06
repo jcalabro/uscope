@@ -856,6 +856,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         survivor.state = NativeThreadState::Stopped;
         survivor.expected = ExpectedStop::None;
         survivor.pending_signal = None;
+        survivor.held_signal = None;
         survivor.stopped_at_breakpoint = None;
         survivor.trapped_at = None;
         survivor.awaiting_breakpoint = None;
@@ -1409,6 +1410,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         for (&pid, thread) in &inferior.threads {
             let signal = thread
                 .pending_signal
+                .or(thread.held_signal)
                 .map(|pending| pending.signal)
                 .filter(|signal| self.signals.get(*signal).pass);
             record(self.ptrace.detach(pid, signal).map(drop));

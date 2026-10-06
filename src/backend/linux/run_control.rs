@@ -503,12 +503,22 @@ impl<P: LinuxTraceOps> Controller<P> {
         expected: ExpectedStop,
     ) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let holds = inferior.holds_signals(&expected);
         let thread = inferior.thread_mut(pid)?;
         // A pending signal is delivered only if its policy passes it.
-        let signal = deliver_signal
+        let mut signal = deliver_signal
             .then(|| thread.pending_signal.map(|pending| pending.signal))
             .flatten()
             .filter(|signal| self.signals.get(*signal).pass);
+        // A held signal arrives with the thread's next continue that holds
+        // none, unless another signal arrives then.
+        if matches!(resume, Resume::Continue) && signal.is_none() && !holds {
+            signal = thread
+                .held_signal
+                .take()
+                .map(|held| held.signal)
+                .filter(|signal| self.signals.get(*signal).pass);
+        }
         let result = match resume {
             Resume::Continue => self.ptrace.continue_execution(pid, signal),
             Resume::Step => self.ptrace.step(pid, signal),
@@ -873,8 +883,19 @@ impl<P: LinuxTraceOps> Controller<P> {
                 exception: pending_exception_info(pending),
             });
         }
-        let delivered = policy.pass.then_some(pending);
         let expected = inferior.thread(pid)?.expected.clone();
+        let mut delivered = policy.pass.then_some(pending);
+        if let Some(pending) = delivered
+            .filter(|pending| inferior.holds_signals(&expected) && self.defers(pending.signal))
+        {
+            record!("hold {} in {pid}", pending.signal);
+            self.inferior
+                .as_mut()
+                .ok_or(Error::NotRunning)?
+                .thread_mut(pid)?
+                .held_signal = Some(pending);
+            delivered = None;
+        }
         match expected {
             ExpectedStop::BreakpointRepair { address } => {
                 self.signal_during_repair(pid, address, delivered)
