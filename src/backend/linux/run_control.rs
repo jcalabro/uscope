@@ -1286,6 +1286,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             reason: reason.clone(),
             presentations: BTreeMap::from([(triggering_thread, presentation)]),
             selected_frames: BTreeMap::new(),
+            activities: std::cell::RefCell::default(),
         });
         inferior.selected_thread = Some(triggering_thread);
         let execution = inferior.active.take().map(|active| active.id);

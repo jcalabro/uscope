@@ -21,6 +21,7 @@ pub mod flight_recorder;
 mod inspection;
 pub(crate) mod model;
 mod protocol;
+mod runtime_model;
 #[cfg(any(test, feature = "sim"))]
 #[doc(hidden)]
 pub mod sim;
@@ -78,7 +79,8 @@ pub use model::{
     SectionLocation, SourceContext, SourceFile, SourceFileId, SourceLanguage, SourceLine,
     SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolBinding,
     SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolLocation,
-    SymbolTableSources, TargetDescription, TaskId, TextCompletion, TextSummary, ThreadId,
+    SymbolTableSources, TargetDescription, TaskCursor, TaskId, TaskLocation, TaskPage,
+    TaskSnapshot, TaskStack, TaskState, TextCompletion, TextSummary, ThreadActivity, ThreadId,
     TlsUnavailableReason, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier,
     TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
     ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
@@ -1077,6 +1079,21 @@ impl DebuggerHandle {
     /// Returns an immutable snapshot of the debugger's current state.
     pub async fn snapshot(&self) -> Result<StateSnapshot> {
         self.request(|reply| Request::Snapshot { reply }).await
+    }
+
+    /// One page of the tasks every language runtime in the stopped process
+    /// schedules, such as Go's goroutines, beginning at `from` or at the
+    /// first. A page holds at most `limit` tasks, and says why it may be
+    /// incomplete.
+    pub async fn tasks(&self, from: Option<TaskCursor>, limit: usize) -> Result<TaskPage> {
+        let selection = self.stopped_selection().await?;
+        self.request(|reply| Request::Tasks {
+            stop_id: selection.stop,
+            from,
+            limit,
+            reply,
+        })
+        .await
     }
 
     /// Reconstructs the selected thread's stack frames.

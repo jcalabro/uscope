@@ -229,6 +229,100 @@ impl std::fmt::Display for TaskId {
     }
 }
 
+/// What a language runtime's task is doing at a stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskState {
+    /// On a thread, running or in a system call.
+    Running,
+    /// Ready to run, waiting for a thread.
+    Runnable,
+    /// Waiting for an event, such as a channel or a lock.
+    Blocked,
+    /// The runtime's state for the task could not be read, for this reason.
+    Unknown(Arc<str>),
+}
+
+/// A place in a task's code: where it runs or will resume, the call that
+/// created it, or the function it began in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskLocation {
+    pub address: VirtualAddress,
+    /// The loaded module whose image holds the address.
+    pub module: Option<ModuleId>,
+    /// The function holding the address, or the call at it for a return
+    /// address.
+    pub function: Option<Arc<str>>,
+    pub source: Option<SourceLocation>,
+}
+
+/// One task of a language runtime at a stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSnapshot {
+    pub id: TaskId,
+    pub state: TaskState,
+    /// The runtime's own words for what the task does or waits for, such
+    /// as Go's "chan receive".
+    pub detail: Option<Arc<str>>,
+    /// The thread running the task, or its runtime's code for it, as while
+    /// it is being parked.
+    pub thread: Option<ThreadId>,
+    /// Where a task that is not on a thread will resume.
+    pub resume: Option<TaskLocation>,
+    /// The call that created the task.
+    pub creation: Option<TaskLocation>,
+    /// The function the task began in.
+    pub entry: Option<TaskLocation>,
+    /// The task that created this one.
+    pub parent: Option<TaskId>,
+    /// Whether the runtime runs the task for its own work, such as a
+    /// garbage collector's worker, rather than the program's.
+    pub internal: bool,
+}
+
+/// Which stack a thread running a task is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStack {
+    /// The task's own stack.
+    Own,
+    /// The runtime's scheduler stack, running the runtime's code for the
+    /// task.
+    System,
+    /// The runtime's signal-handling stack.
+    Signal,
+}
+
+/// What a stopped thread runs for a language runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadActivity {
+    /// A task, or the runtime's code on its behalf.
+    Task { task: TaskId, stack: TaskStack },
+    /// The runtime's scheduler with no task, or code no runtime knows, such
+    /// as a thread C created.
+    Idle,
+    /// The runtime's state for the thread could not be read, for this
+    /// reason.
+    Unknown(Arc<str>),
+}
+
+/// Where a page of tasks continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskCursor {
+    pub(crate) runtime: usize,
+    pub(crate) position: u64,
+}
+
+/// One page of the tasks of every runtime in a stopped process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskPage {
+    pub tasks: Arc<[TaskSnapshot]>,
+    /// Where the next page begins, or `None` after the last.
+    pub next: Option<TaskCursor>,
+    /// Why the page may be missing tasks or describe some wrongly, such
+    /// as a task whose memory could not be read. A page with none is
+    /// complete.
+    pub gaps: Arc<[Arc<str>]>,
+}
+
 /// Where a request inspects or controls execution: an operating-system
 /// thread, or a language runtime's task, which runs on some thread or is
 /// parked with its registers saved in memory.
