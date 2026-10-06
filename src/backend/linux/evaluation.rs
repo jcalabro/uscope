@@ -371,15 +371,23 @@ fn refusal(error: &Error) -> Refusal {
     Refusal::new(kind, error.to_string())
 }
 
+/// The loaded module that defines `ty`.
+fn type_module<P: InspectionOps>(
+    controller: &Controller<P>,
+    ty: TypeReference,
+) -> std::result::Result<&RuntimeModule, Refusal> {
+    controller
+        .module_of(ty)
+        .ok_or_else(|| Refusal::new(ErrorKind::Unsupported, "the type's module is not loaded"))
+}
+
 /// Plans one step from a value of `from` in the image of its module.
 pub(super) fn plan_in<P: InspectionOps>(
     controller: &Controller<P>,
     from: TypeReference,
     step: StepKind<'_>,
 ) -> std::result::Result<Planned<StopStep>, Refusal> {
-    let module = controller
-        .module_of(from)
-        .ok_or_else(|| Refusal::new(ErrorKind::Unsupported, "the type's module is not loaded"))?;
+    let module = type_module(controller, from)?;
     let image = &module.image;
     let base_name;
     let is_target;
@@ -742,12 +750,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         address: u64,
         ty: TypeReference,
     ) -> std::result::Result<StopPlace, Stop> {
-        let module = self.frame.controller.module_of(ty).ok_or_else(|| {
-            Stop::Refused(Refusal::new(
-                ErrorKind::Unsupported,
-                "the type's module is not loaded",
-            ))
-        })?;
+        let module = type_module(self.frame.controller, ty).map_err(Stop::Refused)?;
         Ok(StopPlace {
             module: module.loaded.id,
             located: Located {
@@ -871,12 +874,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         ty: TypeReference,
         bytes: &[u8],
     ) -> std::result::Result<InspectedValue, Stop> {
-        let module = self.frame.controller.module_of(ty).ok_or_else(|| {
-            Stop::Refused(Refusal::new(
-                ErrorKind::Unsupported,
-                "the type's module is not loaded",
-            ))
-        })?;
+        let module = type_module(self.frame.controller, ty).map_err(Stop::Refused)?;
         let located = Located {
             ty: ty.id,
             storage: ValueStorage::Bytes {
