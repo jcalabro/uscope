@@ -228,8 +228,11 @@ compile() {
     local variant
     for variant in "${variants[@]}"; do
         read -r variant_name compiler flags <<<"$variant"
+        # The Nix shell's compile flags include a -frandom-seed derived from
+        # the checkout's path, which gcc records in the debug information.
+        # The programs are freestanding and need none of those flags.
         # shellcheck disable=SC2086
-        NIX_HARDENING_ENABLE= "$compiler" $common_flags $flags \
+        NIX_HARDENING_ENABLE= NIX_CFLAGS_COMPILE= "$compiler" $common_flags $flags \
             "-ffile-prefix-map=${PWD}=${source_root}" \
             -o "$(binary_of "$name" "$variant_name")" "${sources[@]}"
     done
