@@ -14,10 +14,6 @@ mod debug_info;
 mod demangle;
 mod disassembly;
 mod error;
-#[allow(
-    dead_code,
-    reason = "the evaluator is wired in by a later phase of plans/expressions.md"
-)]
 mod eval;
 #[cfg(debug_assertions)]
 #[doc(hidden)]
