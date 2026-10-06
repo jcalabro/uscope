@@ -465,3 +465,50 @@ fn conditions_and_hit_counts_choose_which_changes_stop_and_are_amended_in_place(
     );
     dap.finish();
 }
+
+/// Debug registers are scarce, so a data breakpoint whose new conditions
+/// leave it unarmed releases its register before new ones are armed.
+#[test]
+fn conditions_that_unarm_a_data_breakpoint_free_its_register_for_new_ones() {
+    let mut dap = Dap::start("data breakpoint registers");
+    let (_, frame) = stopped_in(&mut dap, "hit-counts-gcc-o0", "caller");
+    let reference = dap.request(
+        "evaluate",
+        json!({"expression": "last_call", "frameId": frame["id"], "context": "watch"}),
+    )["memoryReference"]
+        .as_str()
+        .expect("last_call is in memory")
+        .to_owned();
+    let address = u64::from_str_radix(reference.trim_start_matches("0x"), 16).expect("hex");
+    // Each byte takes a register of its own.
+    let mut bytes = (0..5)
+        .map(|offset| {
+            let info = dap.request(
+                "dataBreakpointInfo",
+                json!({"name": format!("{:#x}", address + offset), "asAddress": true, "bytes": 1}),
+            );
+            json!({"dataId": info["dataId"], "accessType": "write"})
+        })
+        .collect::<Vec<_>>();
+    let set = dap.request("setDataBreakpoints", json!({"breakpoints": bytes[..4]}));
+    assert!(
+        breakpoints(&set)
+            .iter()
+            .all(|row| row["verified"] == json!(true)),
+        "{set}"
+    );
+    let id = breakpoints(&set)[0]["id"].clone();
+
+    // The new data breakpoint comes first.
+    bytes[0]["condition"] = json!("last_call = 3");
+    bytes.rotate_right(1);
+    let set = dap.request("setDataBreakpoints", json!({"breakpoints": bytes}));
+    let rows = breakpoints(&set);
+    assert_eq!(rows[1]["id"], id);
+    assert_eq!(
+        (&rows[0]["verified"], &rows[1]["verified"]),
+        (&json!(true), &json!(false)),
+        "{set}"
+    );
+    dap.finish();
+}
