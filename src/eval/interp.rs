@@ -7,11 +7,11 @@
 use std::cmp::Ordering;
 
 use super::error::{ErrorKind, ExpressionError};
-use super::ir::{Comparison, Constant, Conversion, Length, Node, Op, Program};
+use super::ir::{Capacity, Comparison, Constant, Conversion, Length, Node, Op, Program};
 use super::number::{Bits, Exact, Float, FloatFormat, IntType, Integer, NumberError};
 use super::syntax::Span;
 use super::syntax::ast::BinaryOp;
-use super::target::{Machine, Refusal, Stop};
+use super::target::{Key, Machine, Refusal, Stop};
 use super::types::{Category, Ty, category, size_of, type_info};
 use crate::{
     ByteOrder, DereferenceState, InspectedValue, ScalarValue, TextCompletion,
@@ -83,7 +83,7 @@ pub fn run<M: Machine>(
     let mut interpreter = Interpreter { machine };
     let root = &program.root;
     let result = if let Op::Range { base, start, end } = &root.op {
-        interpreter.range(base, start, end)
+        interpreter.range(base, start.as_deref(), end.as_deref(), root.span)
     } else if let Op::Assign { target, value } = &root.op {
         interpreter.assign(target, value, root.span)
     } else {
@@ -247,6 +247,27 @@ impl<M: Machine> Interpreter<'_, M> {
                 let base = self.place(base)?;
                 Value::Place(Self::at(span, self.machine.step(&base, step, &values))?)
             }
+            Op::Entry { base, step, key } => {
+                let key = self.key(key)?;
+                let map = self.place(base)?;
+                match Self::at(span, self.machine.entry(&map, step, &key))? {
+                    Some(place) => Value::Place(place),
+                    None => {
+                        return Err(Self::error(
+                            span,
+                            ErrorKind::MissingKey,
+                            format!(
+                                "`{}` holds no key {key}",
+                                super::types::type_name(self.machine, &base.ty)
+                            ),
+                        ));
+                    }
+                }
+            }
+            Op::Task => Value::Int(Integer::Exact(Exact::from(u128::from(Self::at(
+                span,
+                self.machine.task(),
+            )?)))),
             Op::At { address, pointee } => {
                 let address = self.pointee_address(address, span)?;
                 Value::Place(Self::at(span, self.machine.place_at(address, *pointee))?)
@@ -413,13 +434,45 @@ impl<M: Machine> Interpreter<'_, M> {
                         .map_err(|error| Self::arithmetic(span, error))?,
                 ))
             }
+            Op::Length {
+                operand,
+                how: Length::Bytes,
+            } => {
+                let Value::Text(bytes) = self.eval(operand)? else {
+                    unreachable!("the binder measures strings as strings")
+                };
+                Value::Int(Integer::Exact(Exact::from(bytes.len() as u128)))
+            }
             Op::Length { operand, how } => {
                 let place = self.place(operand)?;
                 let length = match how {
                     Length::Slice => Self::at(span, self.machine.length(&place))?,
-                    Length::Text => self.text_length(&place, operand.span)?,
+                    _ => self.text_length(&place, operand.span)?,
                 };
                 Value::Int(Integer::Exact(Exact::from(u128::from(length))))
+            }
+            Op::Capacity { operand, how } => {
+                let place = self.place(operand)?;
+                let capacity = match how {
+                    Capacity::Slice => Self::at(span, self.machine.capacity(&place))?,
+                    Capacity::Presented => {
+                        Self::at(operand.span, self.machine.presented_capacity(&place))?
+                            .ok_or_else(|| {
+                                Self::error(
+                                    operand.span,
+                                    ErrorKind::Type,
+                                    format!(
+                                        "no view of `{}` gives it a capacity",
+                                        super::types::type_name(self.machine, &operand.ty)
+                                    ),
+                                )
+                            })?
+                    }
+                };
+                Value::Int(Integer::Exact(Exact::from(u128::from(capacity))))
+            }
+            Op::TextSlice { base, start, end } => {
+                self.text_slice(base, start.as_deref(), end.as_deref(), span)?
             }
             Op::Fit(operand) => self.fit(&node.ty, operand)?,
             Op::Range { .. } | Op::Assign { .. } => {
@@ -627,6 +680,17 @@ impl<M: Machine> Interpreter<'_, M> {
                 let left = self.truth(left)?;
                 Some(left.cmp(&self.truth(right)?))
             }
+            Comparison::Texts => {
+                let (Value::Text(left), Value::Text(right)) = (self.eval(left)?, self.eval(right)?)
+                else {
+                    unreachable!("the binder compares strings with strings")
+                };
+                Some(if left == right {
+                    Ordering::Equal
+                } else {
+                    Ordering::Less
+                })
+            }
             Comparison::Text => {
                 let place = self.place(left)?;
                 let Value::Text(literal) = self.eval(right)? else {
@@ -818,17 +882,142 @@ impl<M: Machine> Interpreter<'_, M> {
         })
     }
 
+    /// The elements `start..end` of an array or slice, checked against
+    /// its bounds when its value says what they are; a bound left out is
+    /// the first element, or the end.
     fn range(
         &mut self,
         base: &Node<M::Object, M::Step>,
-        start: &Node<M::Object, M::Step>,
-        end: &Node<M::Object, M::Step>,
+        start: Option<&Node<M::Object, M::Step>>,
+        end: Option<&Node<M::Object, M::Step>>,
+        span: Span,
     ) -> Result<Outcome<M::Place>, Halt> {
-        let start = self.index(start)?;
-        let end = self.index(end)?;
+        let start = start.map(|start| self.index(start)).transpose()?;
+        let end = end.map(|end| self.index(end)).transpose()?;
         let place = self.place(base)?;
-        let base = Self::at(base.span, self.machine.present(&place))?;
-        Ok(Outcome::Range { base, start, end })
+        let presented = Self::at(base.span, self.machine.present(&place))?;
+        let bounds = match &presented.state {
+            VariableState::Available {
+                value: VariableValue::Array { dimensions },
+                ..
+            } => dimensions
+                .first()
+                .map(|dimension| (dimension.lower_bound, dimension.count)),
+            VariableState::Available {
+                value: VariableValue::Slice { length, .. },
+                ..
+            } => Some((0, *length)),
+            _ => None,
+        };
+        let (start, end) = match bounds {
+            Some((lower, count)) => {
+                let upper = lower + i128::from(count);
+                let (start, end) = (start.unwrap_or(lower), end.unwrap_or(upper));
+                if start < lower || start > end || end > upper {
+                    return Err(Self::error(
+                        span,
+                        ErrorKind::Bounds,
+                        format!("{start}..{end} is outside {lower}..{upper}"),
+                    ));
+                }
+                (start, end)
+            }
+            // A value that could not be read, or is not one dimension, is
+            // the page's to report.
+            None => (start.unwrap_or(0), end.unwrap_or(0)),
+        };
+        Ok(Outcome::Range {
+            base: presented,
+            start,
+            end,
+        })
+    }
+
+    /// The bytes of text between two bounds, as a string; a bound left out
+    /// is the start, or the end.
+    fn text_slice(
+        &mut self,
+        base: &Node<M::Object, M::Step>,
+        start: Option<&Node<M::Object, M::Step>>,
+        end: Option<&Node<M::Object, M::Step>>,
+        span: Span,
+    ) -> Evaluated<M::Place> {
+        let start = start.map(|start| self.index(start)).transpose()?;
+        let end = end.map(|end| self.index(end)).transpose()?;
+        // A string the expression computed is sliced as it is; the
+        // program's text is read where it is.
+        let (computed, stored) = match self.eval(base)? {
+            Value::Text(bytes) => (Some(bytes), None),
+            Value::Place(place) => {
+                let stored =
+                    Self::at(base.span, self.machine.text_span(&place))?.ok_or_else(|| {
+                        Self::error(base.span, ErrorKind::Type, "the value holds no text")
+                    })?;
+                (None, Some(stored))
+            }
+            _ => unreachable!("the binder slices text and places only"),
+        };
+        let length = match (&computed, &stored) {
+            (Some(bytes), _) => bytes.len() as u64,
+            (_, Some(stored)) => stored.length,
+            _ => unreachable!("text is computed or stored"),
+        };
+        let (start, end) = (
+            start.unwrap_or(0),
+            end.unwrap_or_else(|| i128::from(length)),
+        );
+        if start < 0 || start > end || end > i128::from(length) {
+            return Err(Self::error(
+                span,
+                ErrorKind::Bounds,
+                format!("{start}..{end} is outside the text's {length} bytes"),
+            ));
+        }
+        let (first, last) = (
+            usize::try_from(start).unwrap_or(usize::MAX),
+            usize::try_from(end).unwrap_or(usize::MAX),
+        );
+        Ok(Value::Text(match (computed, stored) {
+            (Some(bytes), _) => bytes[first..last].to_vec(),
+            (_, Some(stored)) => {
+                let address = stored
+                    .address
+                    .checked_add(u64::try_from(start).unwrap_or(u64::MAX))
+                    .ok_or_else(|| {
+                        Self::error(span, ErrorKind::Arithmetic, "the text is outside memory")
+                    })?;
+                Self::at(span, self.machine.read(address, last - first))?
+            }
+            _ => unreachable!("text is computed or stored"),
+        }))
+    }
+
+    /// A map's key, from its bound value or the text a place holds.
+    fn key(&mut self, node: &Node<M::Object, M::Step>) -> Result<Key, Halt> {
+        Ok(match self.eval(node)? {
+            Value::Int(integer) => Key::Integer(integer.value()),
+            Value::Float(value) => Key::Float(value),
+            Value::Bool(value) => Key::Bool(value),
+            Value::Pointer(address) => Key::Address(address),
+            Value::Text(bytes) => Key::Text(bytes),
+            Value::Place(place) => {
+                let Some(text) = Self::at(node.span, self.machine.text(&place))? else {
+                    return Err(Self::error(
+                        node.span,
+                        ErrorKind::Type,
+                        "the key holds no text, and is no number, truth value, or pointer",
+                    ));
+                };
+                if text.completion != TextCompletion::Complete {
+                    return Err(Halt::Missing {
+                        state: Box::new(unavailable(Self::incomplete(text.completion))),
+                        cause: node.span,
+                    });
+                }
+                Key::Text(text.bytes.to_vec())
+            }
+            Value::Raw(_) => unreachable!("the binder loads raw keys"),
+        })
     }
 
     /// Presents a result as inspection presents values.
@@ -845,6 +1034,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 let loaded = self.read_raw(ty, address, span)?;
                 return self.present_computed(ty, &loaded, Some(address), span);
             }
+            Value::Text(bytes) => return Ok(self.present_text(ty, bytes)),
             value => value,
         };
         self.present_computed(ty, &value, None, span)
@@ -907,6 +1097,28 @@ impl<M: Machine> Interpreter<'_, M> {
         Ok(self
             .machine
             .finish(Some(type_info(self.machine, ty)), state))
+    }
+
+    /// A string the expression computed, as text.
+    fn present_text(&self, ty: &Ty, bytes: Vec<u8>) -> InspectedValue {
+        let text = crate::TextSummary {
+            bytes: bytes.clone().into(),
+            completion: TextCompletion::Complete,
+        };
+        let state = VariableState::Available {
+            source: VariableValueSource::Computed,
+            value: VariableValue::Slice {
+                length: bytes.len() as u64,
+                capacity: None,
+            },
+            raw: Some(bytes.into()),
+            dereference: DereferenceState::NotApplicable,
+            children: ValueChildren::NotApplicable,
+            text: Some(std::sync::Arc::new(text)),
+            presentation: None,
+        };
+        self.machine
+            .finish(Some(type_info(self.machine, ty)), state)
     }
 
     /// A value's bytes in target order, `size` long.

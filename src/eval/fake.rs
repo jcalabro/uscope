@@ -12,7 +12,8 @@ use std::sync::Arc;
 use super::error::ErrorKind;
 use super::number::Exact;
 use super::target::{
-    Lookup, Machine, Planned, Refusal, Register, Scope, StepKind, Stop, TypeLookup, TypeQuery,
+    Key, Lookup, Machine, Planned, Refusal, Register, Scope, StepKind, Stop, TextSpan, TypeLookup,
+    TypeQuery,
 };
 use super::types::{TypeSource, c_type_key_of_name};
 use crate::{
@@ -80,6 +81,11 @@ pub enum Step {
     },
     /// To a variable, from anywhere: a view's `global(NAME)`.
     Global(usize),
+    /// To the value for a key of a map, `{K *keys; V *values; u64 n}`.
+    Entry {
+        key: TypeReference,
+        value: TypeReference,
+    },
 }
 
 /// A world the evaluator binds and runs in.
@@ -99,6 +105,11 @@ pub struct World {
     pub reads: Vec<(u64, usize)>,
     /// Units of work left, when limited.
     pub work: Option<u64>,
+    /// Maps, `{K *keys; V *values; u64 n}`, with their key and value types.
+    maps: Vec<(TypeReference, TypeReference, TypeReference)>,
+    /// The id of the task the stopped thread runs, when the program has
+    /// tasks.
+    pub task: Option<u64>,
 }
 
 impl World {
@@ -303,6 +314,50 @@ impl World {
                 text: false,
             },
         )
+    }
+
+    /// A slice whose descriptor records its capacity after its length, as
+    /// Go's does.
+    pub fn slice_with_capacity(&mut self, element: TypeReference) -> TypeReference {
+        let name = format!("[]{} with room", self.info(element).name);
+        self.add(
+            &name,
+            Some(24),
+            TypeKind::Slice {
+                element,
+                has_capacity: true,
+                text: false,
+            },
+        )
+    }
+
+    /// A map `{K *keys; V *values; u64 n}`, which a view would present.
+    pub fn map_type(
+        &mut self,
+        name: &str,
+        key: TypeReference,
+        value: TypeReference,
+    ) -> TypeReference {
+        let u64 = self.base("u64", BaseTypeEncoding::Unsigned, 8);
+        let keys = self.pointer(Some(key));
+        let values = self.pointer(Some(value));
+        let map = self.record(
+            name,
+            24,
+            &[("keys", keys, 0), ("values", values, 8), ("n", u64, 16)],
+        );
+        self.maps.push((map, key, value));
+        map
+    }
+
+    /// A map's bytes, with its keys and values allocated.
+    pub fn map_bytes(&mut self, keys: &[u8], values: &[u8], count: u64) -> Vec<u8> {
+        let keys = self.allocate(keys);
+        let values = self.allocate(values);
+        let mut bytes = keys.to_le_bytes().to_vec();
+        bytes.extend(values.to_le_bytes());
+        bytes.extend(count.to_le_bytes());
+        bytes
     }
 
     pub fn enumeration(
@@ -653,6 +708,15 @@ impl World {
             TypeKind::Array { dimensions, .. } => VariableValue::Array {
                 dimensions: Arc::clone(dimensions),
             },
+            TypeKind::Slice { has_capacity, .. } if bytes.len() >= 16 => {
+                let word = |at: usize| {
+                    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
+                };
+                VariableValue::Slice {
+                    length: word(8),
+                    capacity: (*has_capacity && bytes.len() >= 24).then(|| word(16)),
+                }
+            }
             _ => VariableValue::Record,
         }
     }
@@ -720,6 +784,25 @@ impl World {
             bytes: bytes.into(),
             completion: TextCompletion::Truncated { length: None },
         }
+    }
+}
+
+impl World {
+    /// The step to the value for a key of a map.
+    fn plan_entry(&self, info: &TypeInfo) -> Result<Planned<Step>, Refusal> {
+        let (_, key, value) = self
+            .maps
+            .iter()
+            .find(|(map, ..)| *map == info.reference)
+            .ok_or_else(|| type_error(format!("`{}` is no map", info.name)))?;
+        Ok(Planned {
+            step: Step::Entry {
+                key: *key,
+                value: *value,
+            },
+            result: Some(*value),
+            consumed: 1,
+        })
     }
 }
 
@@ -932,6 +1015,7 @@ impl Scope for World {
                     )),
                 }
             }
+            (StepKind::Entry, TypeKind::Record { .. }) => self.plan_entry(info),
             (step, _) => Err(type_error(format!(
                 "`{}` does not take {step:?}",
                 info.name
@@ -1056,6 +1140,10 @@ impl Machine for World {
             },
         };
         match step {
+            Step::Entry { .. } => Err(Stop::Refused(Refusal::new(
+                ErrorKind::Type,
+                "a map's entries are found by key",
+            ))),
             Step::Global(object) => self.locate(object),
             Step::Deref(target) => {
                 let bytes = self.bytes(from)?;
@@ -1170,6 +1258,78 @@ impl Machine for World {
         Ok(u64::from_le_bytes(
             descriptor[8..16].try_into().expect("eight bytes"),
         ))
+    }
+
+    fn capacity(&mut self, at: &Place) -> Result<u64, Stop> {
+        let descriptor = self.bytes(at)?;
+        Ok(u64::from_le_bytes(
+            descriptor[16..24].try_into().expect("eight bytes"),
+        ))
+    }
+
+    fn text_span(&mut self, at: &Place) -> Result<Option<TextSpan>, Stop> {
+        let TypeKind::Pointer {
+            target: Some(target),
+            ..
+        } = self.representation(at.ty()).kind.clone()
+        else {
+            return Ok(None);
+        };
+        if !self.is_char(target) {
+            return Ok(None);
+        }
+        let VariableValue::Address(address) = self.load(at)? else {
+            unreachable!("pointers decode to addresses")
+        };
+        let address = address.address.get();
+        let text = self.c_string(address, TextSummary::MAX_BYTES);
+        Ok(Some(TextSpan {
+            address,
+            length: text.bytes.len() as u64,
+        }))
+    }
+
+    fn entry(&mut self, from: &Place, step: &Step, key: &Key) -> Result<Option<Place>, Stop> {
+        let Step::Entry {
+            key: key_type,
+            value,
+        } = step
+        else {
+            panic!("the world finds entries through entry steps");
+        };
+        let bytes = self.bytes(from)?;
+        let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().expect("a word"));
+        let (keys, values, count) = (word(0), word(8), word(16));
+        let (key_size, value_size) = (self.size(*key_type) as u64, self.size(*value) as u64);
+        for index in 0..count {
+            // A key is presented with its text, as the debugger presents
+            // a string.
+            let place = Place::Memory {
+                address: keys + index * key_size,
+                ty: *key_type,
+            };
+            let mut candidate = self.present(&place)?;
+            let read = self.text(&place)?;
+            if let VariableState::Available { text, .. } = &mut candidate.state {
+                *text = read.map(Arc::new);
+            }
+            if key.matches(&candidate)? {
+                return Ok(Some(Place::Memory {
+                    address: values + index * value_size,
+                    ty: *value,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn task(&mut self) -> Result<u64, Stop> {
+        self.task.ok_or_else(|| {
+            Stop::Refused(Refusal::new(
+                ErrorKind::Unsupported,
+                "the program has no tasks",
+            ))
+        })
     }
 
     fn register(&mut self, register: &Register) -> Result<u128, Stop> {
@@ -1372,5 +1532,46 @@ pub fn memory() -> World {
     twice_bytes.resize(8, 0);
     twice_bytes.extend(bytes);
     world.variable("twice_shaped", twice, &twice_bytes);
+
+    containers(&mut world, int, char_pointer);
+    world.task = Some(7);
     world
+}
+
+/// A slice with room for two more, and maps by integer and by text.
+fn containers(world: &mut World, int: TypeReference, char_pointer: TypeReference) {
+    let spare = world.slice_with_capacity(int);
+    let room: Vec<u8> = [1_i32, 2, 3, 0, 0]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let room = world.allocate(&room);
+    let mut descriptor = room.to_le_bytes().to_vec();
+    descriptor.extend_from_slice(&3_u64.to_le_bytes());
+    descriptor.extend_from_slice(&5_u64.to_le_bytes());
+    world.variable("spare", spare, &descriptor);
+    let squares = world.map_type("Squares", int, int);
+    let keys: Vec<u8> = [1_i32, 2, 3]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let values: Vec<u8> = [1_i32, 4, 9]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let bytes = world.map_bytes(&keys, &values, 3);
+    world.variable("squares", squares, &bytes);
+    let ages = world.map_type("Ages", char_pointer, int);
+    let ann = world.allocate(b"ann\0");
+    let bob = world.allocate(b"bob\0");
+    let keys: Vec<u8> = [ann, bob]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let values: Vec<u8> = [30_i32, 41]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let bytes = world.map_bytes(&keys, &values, 2);
+    world.variable("ages", ages, &bytes);
 }

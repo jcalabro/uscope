@@ -276,6 +276,26 @@ fn element_type(shape: &BoundShape<StopStep>) -> Option<TypeReference> {
     }
 }
 
+/// The program type of a map's values, when every branch that presents
+/// one agrees and its values are places.
+fn entry_type(shape: &BoundShape<StopStep>) -> Option<TypeReference> {
+    match shape {
+        BoundShape::Map { value, .. } => match value.result() {
+            Ty::Program(reference) if value.is_place() => Some(*reference),
+            _ => None,
+        },
+        BoundShape::If {
+            then, otherwise, ..
+        } => match (entry_type(then), entry_type(otherwise)) {
+            (Some(left), Some(right)) if left == right => Some(left),
+            (Some(found), None) if !otherwise.has_elements() => Some(found),
+            (None, Some(found)) if !then.has_elements() => Some(found),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Each view a choice tried, with why it did not bind.
 fn candidates(choice: &Choice<StopStep>) -> Vec<crate::ViewCandidate> {
     choice
@@ -516,6 +536,21 @@ impl<P: InspectionOps> Controller<P> {
         Some(Planned {
             step: StopStep::Element(bound),
             result: Some(element),
+            consumed: 1,
+        })
+    }
+
+    /// The step from a value of `from` to the value its view presents as a
+    /// map holds for a key, for `m[key]`.
+    pub(super) fn view_entry(&self, from: TypeReference) -> Option<Planned<StopStep>> {
+        if !self.views.enabled {
+            return None;
+        }
+        let bound = self.view_choice(from).bound.clone()?;
+        let value = entry_type(&bound.shape)?;
+        Some(Planned {
+            step: StopStep::Entry(bound),
+            result: Some(value),
             consumed: 1,
         })
     }
@@ -1792,6 +1827,70 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 )
             })
             .map_err(|failure| view_stop(failure, bound, ErrorKind::Unsupported))
+    }
+
+    /// The place of the value the map at `from` holds for `key`, as a view
+    /// presents the map, for `m[key]`.
+    pub(super) fn view_entry_place(
+        &mut self,
+        bound: &Arc<ViewBound>,
+        from: &StopPlace,
+        key: &crate::eval::target::Key,
+    ) -> std::result::Result<Option<StopPlace>, Stop> {
+        let controller = self.frame.controller;
+        let stop = self.frame.stop_id;
+        let scan = scan_key(bound, self.module(from.module)?.loaded.image, from);
+        let mut machine = self.nested(self.depth);
+        controller
+            .views
+            .scan(stop, scan, |checkpoints| {
+                crate::view::run::entry_place(bound, &mut machine, from.clone(), key, checkpoints)
+            })
+            .map_err(|failure| view_stop(failure, bound, ErrorKind::Type))
+    }
+
+    /// The view that presents the value at `at`, when views are on.
+    fn view_of(&self, at: &StopPlace) -> std::result::Result<Option<Arc<ViewBound>>, Stop> {
+        let controller = self.frame.controller;
+        if !controller.views.enabled {
+            return Ok(None);
+        }
+        let ty = TypeReference {
+            image: self.module(at.module)?.loaded.image,
+            id: at.located.ty,
+        };
+        Ok(controller.view_choice(ty).bound.clone())
+    }
+
+    /// How many elements the value at `at` has room for, as the
+    /// `capacity` field of its view says, for `cap(v)`.
+    pub(super) fn view_capacity(
+        &mut self,
+        at: &StopPlace,
+    ) -> std::result::Result<Option<u64>, Stop> {
+        let Some(bound) = self.view_of(at)? else {
+            return Ok(None);
+        };
+        let mut machine = self.nested(self.depth);
+        crate::view::run::capacity(&bound, &mut machine, at.clone())
+            .map_err(|failure| view_stop(failure, &bound, ErrorKind::Type))
+    }
+
+    /// Where the text a view presents the value at `at` as is, for slicing
+    /// it: `None` when no view presents it as text.
+    pub(super) fn view_text_span(
+        &mut self,
+        at: &StopPlace,
+    ) -> std::result::Result<Option<(u64, Option<u64>)>, Stop> {
+        let Some(bound) = self.view_of(at)? else {
+            return Ok(None);
+        };
+        if !bound.shape.has_text() {
+            return Ok(None);
+        }
+        let mut machine = self.nested(self.depth);
+        crate::view::run::text_span(&bound, &mut machine, at.clone())
+            .map_err(|failure| view_stop(failure, &bound, ErrorKind::Type))
     }
 
     /// How many elements the value at `at` holds, or the length of its

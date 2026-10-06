@@ -5,10 +5,13 @@ use std::fmt;
 
 use super::error::ErrorKind;
 use super::interp::Value;
-use super::number::Exact;
+use super::number::{Exact, Float};
 use super::syntax::ast::Tag;
 use super::types::TypeSource;
-use crate::{InspectedValue, TextSummary, TypeInfo, TypeReference, VariableState, VariableValue};
+use crate::{
+    InspectedValue, ScalarValue, TextCompletion, TextSummary, TypeInfo, TypeReference,
+    VariableState, VariableUnavailableReason, VariableValue,
+};
 
 /// Why the debugger refuses part of an expression, without where; the
 /// evaluator adds the span.
@@ -83,6 +86,9 @@ pub enum StepKind<'a> {
     Index { available: usize },
     /// To the one base class subobject of a record of the given type.
     Base(TypeReference),
+    /// To the value a map holds for a key, as the view that presents the
+    /// map gives its entries.
+    Entry,
 }
 
 /// A step a scope planned from types alone.
@@ -163,6 +169,117 @@ pub trait Scope: TypeSource {
     }
 }
 
+/// A key a map is indexed by: the value written in its brackets.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Key {
+    Integer(Exact),
+    Float(Float),
+    Bool(bool),
+    Address(u64),
+    Text(Vec<u8>),
+}
+
+impl Key {
+    /// Whether a map's key, as inspection presents it, equals this one as
+    /// `==` would compare them. A key the program state cannot provide
+    /// stops the search; one of a type this key cannot equal is refused.
+    pub fn matches(&self, key: &InspectedValue) -> Result<bool, Stop> {
+        let mismatch = || {
+            let name = key
+                .type_info
+                .as_ref()
+                .map_or_else(|| "?".to_owned(), |info| info.name.to_string());
+            Stop::Refused(Refusal::new(
+                ErrorKind::Type,
+                format!(
+                    "the map's keys are `{name}`, which {} cannot equal",
+                    self.describe()
+                ),
+            ))
+        };
+        let VariableState::Available { value, text, .. } = &key.state else {
+            return Err(Stop::missing(key.state.clone()));
+        };
+        let exact = match value {
+            VariableValue::Scalar(ScalarValue::Signed(value)) => Some(Exact::from(*value)),
+            VariableValue::Scalar(ScalarValue::Unsigned(value)) => Some(Exact::from(*value)),
+            VariableValue::Enumeration { value, .. } => Some(Exact::from(*value)),
+            _ => None,
+        };
+        let float = match value {
+            VariableValue::Scalar(ScalarValue::Floating(value)) => Some(Float::from_value(*value)),
+            _ => None,
+        };
+        let equal =
+            |ordering: Option<std::cmp::Ordering>| ordering == Some(std::cmp::Ordering::Equal);
+        match self {
+            Self::Integer(wanted) => match (exact, float) {
+                (Some(exact), _) => Ok(exact == *wanted),
+                (_, Some(float)) => Ok(equal(float.compare_exact(*wanted))),
+                _ => Err(mismatch()),
+            },
+            Self::Float(wanted) => match (exact, float) {
+                (Some(exact), _) => Ok(equal(wanted.compare_exact(exact))),
+                (_, Some(float)) => Ok(equal(float.compare(*wanted))),
+                _ => Err(mismatch()),
+            },
+            Self::Bool(wanted) => match value {
+                VariableValue::Scalar(ScalarValue::Boolean(value)) => Ok(value == wanted),
+                _ => Err(mismatch()),
+            },
+            Self::Address(wanted) => match value {
+                VariableValue::Address(address) => Ok(address.address.get() == *wanted),
+                _ => Err(mismatch()),
+            },
+            Self::Text(wanted) => {
+                let Some(text) = text else {
+                    return Err(mismatch());
+                };
+                let read = text.bytes.as_ref();
+                match text.completion {
+                    TextCompletion::Complete => Ok(read == wanted.as_slice()),
+                    // Text known to differ before what could not be read
+                    // differs.
+                    _ if !wanted.starts_with(read) => Ok(false),
+                    _ => Err(Stop::missing(VariableState::Unavailable(
+                        VariableUnavailableReason::EvaluationLimit,
+                    ))),
+                }
+            }
+        }
+    }
+
+    /// The key as a message describes it.
+    fn describe(&self) -> String {
+        match self {
+            Self::Integer(value) => format!("the integer {value}"),
+            Self::Float(value) => format!("the float {value}"),
+            Self::Bool(value) => format!("`{value}`"),
+            Self::Address(value) => format!("the address {value:#x}"),
+            Self::Text(_) => "a string".to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for Key {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Integer(value) => write!(formatter, "{value}"),
+            Self::Float(value) => write!(formatter, "{value}"),
+            Self::Bool(value) => write!(formatter, "{value}"),
+            Self::Address(value) => write!(formatter, "{value:#x}"),
+            Self::Text(bytes) => write!(formatter, "{:?}", String::from_utf8_lossy(bytes)),
+        }
+    }
+}
+
+/// Where the bytes of text are: its first byte's address, and how many.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextSpan {
+    pub address: u64,
+    pub length: u64,
+}
+
 /// Why running stopped short of a value.
 #[derive(Debug)]
 pub enum Stop {
@@ -230,6 +347,15 @@ pub trait Machine: TypeSource {
     /// A slice's run-time length.
     fn length(&mut self, at: &Self::Place) -> Result<u64, Stop>;
 
+    /// The capacity a slice's descriptor records.
+    fn capacity(&mut self, at: &Self::Place) -> Result<u64, Stop> {
+        let _ = at;
+        Err(Stop::Refused(Refusal::new(
+            ErrorKind::Type,
+            "the slice records no capacity",
+        )))
+    }
+
     /// A register's value, zero-extended.
     fn register(&mut self, register: &Register) -> Result<u128, Stop>;
 
@@ -257,6 +383,46 @@ pub trait Machine: TypeSource {
     fn presented_length(&mut self, at: &Self::Place) -> Result<Option<u64>, Stop> {
         let _ = at;
         Ok(None)
+    }
+
+    /// How many elements a value has room for, as the `capacity` field of
+    /// the view that presents it says; `None` when no view gives it one.
+    fn presented_capacity(&mut self, at: &Self::Place) -> Result<Option<u64>, Stop> {
+        let _ = at;
+        Ok(None)
+    }
+
+    /// Where the bytes of the text a place holds are, or `None` when it
+    /// holds no text.
+    fn text_span(&mut self, at: &Self::Place) -> Result<Option<TextSpan>, Stop> {
+        let _ = at;
+        Ok(None)
+    }
+
+    /// The place of the value a map at `from` holds for `key`, through a
+    /// step a scope planned with [`StepKind::Entry`], or `None` when the
+    /// map holds no such key.
+    fn entry(
+        &mut self,
+        from: &Self::Place,
+        step: &Self::Step,
+        key: &Key,
+    ) -> Result<Option<Self::Place>, Stop> {
+        let _ = (from, step, key);
+        Err(Stop::Refused(Refusal::new(
+            ErrorKind::Unsupported,
+            "this machine indexes no maps",
+        )))
+    }
+
+    /// The id of the task the stopped thread runs, such as a goroutine's:
+    /// unavailable when the thread runs none, and refused where the program
+    /// has no tasks or the debugger cannot tell.
+    fn task(&mut self) -> Result<u64, Stop> {
+        Err(Stop::Refused(Refusal::new(
+            ErrorKind::Unsupported,
+            "no task is known here",
+        )))
     }
 
     /// The value a scope bound to `object` with [`Lookup::Bound`].

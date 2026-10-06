@@ -17,7 +17,8 @@ use crate::eval::number::Exact;
 use crate::eval::syntax::ast::Tag;
 use crate::eval::syntax::{Expression, Span};
 use crate::eval::target::{
-    Lookup, Machine, Planned, Refusal, Register, Scope, StepKind, Stop, TypeLookup, TypeQuery,
+    Key, Lookup, Machine, Planned, Refusal, Register, Scope, StepKind, Stop, TextSpan, TypeLookup,
+    TypeQuery,
 };
 use crate::eval::types::{TypeSource, type_info};
 use crate::inspection::InspectionBudget;
@@ -26,9 +27,9 @@ use crate::protocol::StopId;
 use crate::{
     AddressValue, ByteOrder, CodeInstanceId, DereferenceReference, DereferenceState,
     DereferenceUnavailableReason, Error, ImageAddress, InspectedValue, ModuleId, RecordKind,
-    RegisterSnapshot, Result, StackFrameId, TextSummary, TypeInfo, TypeKind, TypeNode,
-    TypeReference, ValueChildren, VariableState, VariableUnavailableReason, VariableValue,
-    VariableValueSource, VirtualAddress,
+    RegisterSnapshot, Result, StackFrameId, TextCompletion, TextSummary, TypeInfo, TypeKind,
+    TypeNode, TypeReference, ValueChildren, VariableState, VariableUnavailableReason,
+    VariableValue, VariableValueSource, VirtualAddress,
 };
 
 use super::frames::{FrameRegisters, ResolvedFrame};
@@ -66,6 +67,8 @@ pub(super) enum StopStep {
     Provider { module: ModuleId, step: PlannedStep },
     /// To an element of a value a view presents as a sequence.
     Element(Arc<ViewBound>),
+    /// To the value for a key of a value a view presents as a map.
+    Entry(Arc<ViewBound>),
     /// To a global, from anywhere: a view's `global(NAME)`.
     Global(StopObject),
 }
@@ -78,6 +81,7 @@ impl fmt::Debug for StopStep {
         match self {
             Self::Provider { module, .. } => write!(formatter, "StopStep({module:?})"),
             Self::Element(bound) => write!(formatter, "StopStep(element of {})", bound.view.header),
+            Self::Entry(bound) => write!(formatter, "StopStep(entry of {})", bound.view.header),
             Self::Global(object) => write!(formatter, "StopStep(global {object:?})"),
         }
     }
@@ -385,6 +389,12 @@ pub(super) fn plan_in<P: InspectionOps>(
         StepKind::Deref => Step::Deref,
         StepKind::Member(name) => Step::Member(name),
         StepKind::Index { available } => Step::Index { available },
+        StepKind::Entry => {
+            return Err(Refusal::new(
+                ErrorKind::Type,
+                "only a value a view presents as a map is indexed by key",
+            ));
+        }
         StepKind::Base(target) => {
             if target.image != from.image {
                 return Err(Refusal::new(
@@ -529,6 +539,7 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
             (Err(_), StepKind::Index { .. }) => {
                 self.controller.view_index(from).map_or(planned, Ok)
             }
+            (Err(_), StepKind::Entry) => self.controller.view_entry(from).map_or(planned, Ok),
             _ => planned,
         }
     }
@@ -696,7 +707,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             StopStep::Provider { step, .. } => step
                 .check_indices(indices)
                 .map_err(|error| Stop::Refused(refusal(&error))),
-            StopStep::Element(_) | StopStep::Global(_) => Ok(()),
+            StopStep::Element(_) | StopStep::Entry(_) | StopStep::Global(_) => Ok(()),
         }
     }
 
@@ -718,6 +729,12 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 return self.view_element(bound, from, *index);
             }
             StopStep::Global(object) => return self.locate(object),
+            StopStep::Entry(_) => {
+                return Err(Stop::Refused(Refusal::new(
+                    ErrorKind::Type,
+                    "a map's entries are found by key",
+                )));
+            }
         };
         let module = self.module(module_id)?;
         let address = self.address(module);
@@ -834,6 +851,98 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
 
     fn presented_length(&mut self, at: &StopPlace) -> std::result::Result<Option<u64>, Stop> {
         self.view_length(at)
+    }
+
+    fn capacity(&mut self, at: &StopPlace) -> std::result::Result<u64, Stop> {
+        match self.load(at)? {
+            VariableValue::Slice {
+                capacity: Some(capacity),
+                ..
+            } => Ok(capacity),
+            _ => Err(Stop::Refused(Refusal::new(
+                ErrorKind::Type,
+                "the value is not a slice with a capacity",
+            ))),
+        }
+    }
+
+    fn presented_capacity(&mut self, at: &StopPlace) -> std::result::Result<Option<u64>, Stop> {
+        self.view_capacity(at)
+    }
+
+    fn text_span(&mut self, at: &StopPlace) -> std::result::Result<Option<TextSpan>, Stop> {
+        // A view that presents the value as text says where it is, and
+        // otherwise the debug information does.
+        let found = if let Some(found) = self.view_text_span(at)? {
+            Some(found)
+        } else {
+            let module = self.module(at.module)?;
+            let context = self.context(module);
+            let mut runtime = self.frame.runtime(module);
+            module
+                .variables
+                .text_span(&at.located, context, &mut runtime, self.budget)
+                .map_err(Stop::Failed)?
+                .map_err(Stop::missing)?
+                .map(|location| (location.address.get(), location.length))
+        };
+        let Some((address, length)) = found else {
+            return Ok(None);
+        };
+        // Text that ends at a NUL is as long as reading it finds.
+        let length = match length {
+            Some(length) => length,
+            None => match self.text(at)? {
+                Some(TextSummary {
+                    bytes,
+                    completion: TextCompletion::Complete,
+                }) => bytes.len() as u64,
+                Some(TextSummary { completion, .. }) => {
+                    return Err(Stop::missing(VariableState::Unavailable(
+                        match completion {
+                            TextCompletion::Unreadable { address } => {
+                                VariableUnavailableReason::MemoryInaccessible {
+                                    address,
+                                    requested: 1,
+                                    completed: 0,
+                                    next_address: address,
+                                }
+                            }
+                            TextCompletion::Limited { exhaustion, .. } => {
+                                VariableUnavailableReason::InspectionLimit(exhaustion)
+                            }
+                            _ => VariableUnavailableReason::EvaluationLimit,
+                        },
+                    )));
+                }
+                None => return Ok(None),
+            },
+        };
+        Ok(Some(TextSpan { address, length }))
+    }
+
+    fn entry(
+        &mut self,
+        from: &StopPlace,
+        step: &StopStep,
+        key: &Key,
+    ) -> std::result::Result<Option<StopPlace>, Stop> {
+        let StopStep::Entry(bound) = step else {
+            return Err(Stop::Refused(Refusal::new(
+                ErrorKind::Type,
+                "only a value a view presents as a map is indexed by key",
+            )));
+        };
+        self.view_entry_place(bound, from, key)
+    }
+
+    // Nothing says which task a thread runs yet, so `$task` is refused
+    // rather than guessed.
+    fn task(&mut self) -> std::result::Result<u64, Stop> {
+        Err(Stop::Refused(Refusal::new(
+            ErrorKind::Unsupported,
+            "uscope does not yet know which task a thread runs",
+        )))
     }
 
     fn register(&mut self, register: &Register) -> std::result::Result<u128, Stop> {
