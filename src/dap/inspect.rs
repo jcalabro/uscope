@@ -10,6 +10,7 @@ use uscope::{
     ValueChildQuery, VariableKind, VariableState,
 };
 
+use super::complete::Completing;
 use super::handles::{Exhausted, Location, Variables};
 use super::protocol::{
     CompletionsArguments, ErrorBody, EvaluateArguments, ExceptionInfoArguments, LocationsArguments,
@@ -23,6 +24,8 @@ use super::values::{self, Item, Options};
 const MAX_CHILDREN: u64 = 1024;
 /// The most children one debugger request reads.
 const PAGE: u64 = 256;
+/// The most completions one request offers.
+const MAX_COMPLETIONS: usize = 1000;
 
 impl Session {
     pub(super) async fn threads(&self) -> Result<Value, ErrorBody> {
@@ -1075,6 +1078,9 @@ impl Session {
         Ok(Value::Object(body))
     }
 
+    /// Completes the debug console's line: a command as its first word, a
+    /// command's subcommand or signal, or a name, member, or register
+    /// inside an expression.
     pub(super) async fn completions(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<CompletionsArguments>(arguments, "completions arguments")?;
         // Columns count characters; a column past the text completes all of it.
@@ -1084,31 +1090,13 @@ impl Session {
         } else {
             column
         };
-        let typed = arguments.text.chars().take(offset).collect::<String>();
-        let word_start = typed
-            .rfind(|character: char| character.is_whitespace())
-            .map_or(0, |index| index + 1);
-        let word = &typed[word_start..];
-        let first_word = !typed[..word_start]
-            .chars()
-            .any(|character| !character.is_whitespace());
-        let command = typed.split_whitespace().next().unwrap_or_default();
-        let mut candidates = Vec::new();
-        if first_word {
-            for spec in crate::cli::commands::COMMANDS {
-                candidates.push((spec.name.to_owned(), "keyword"));
-            }
-        } else if command == "info" {
-            for subcommand in ["breakpoints", "watchpoints", "signals", "core", "symbol"] {
-                candidates.push((subcommand.to_owned(), "value"));
-            }
-        } else if command == "handle" {
-            for code in uscope::signal_codes() {
-                if let Some(name) = uscope::signal_name(code) {
-                    candidates.push((name, "value"));
-                }
-            }
-        }
+        let typed = arguments
+            .text
+            .char_indices()
+            .nth(offset)
+            .map_or(arguments.text.as_str(), |(index, _)| {
+                &arguments.text[..index]
+            });
         let context = match arguments.frame_id {
             Some(frame) => self.references.frame_context(frame),
             None => self.stop.as_ref().map(|stop| StopContext {
@@ -1117,31 +1105,169 @@ impl Session {
                 frame: StackFrameId::INNERMOST,
             }),
         };
-        if command != "info"
-            && command != "handle"
-            && let Some(context) = context
-            && let Ok(snapshot) = self.frame_variables(context).await
-        {
-            for variable in snapshot.variables.iter() {
-                candidates.push((variable.name.to_string(), "variable"));
-            }
-        }
-        let start = u64::try_from(typed[..word_start].chars().count()).unwrap_or(0)
+        let (completing, partial, start) = super::complete::completing(typed);
+        let command = typed.split_whitespace().next().unwrap_or_default();
+        let candidates = self
+            .completion_candidates(completing, partial, command, context)
+            .await;
+        let start = u64::try_from(typed[..start].chars().count()).unwrap_or(0)
             + u64::from(self.support().columns_start_at1);
+        let length = partial.chars().count();
         let mut seen = std::collections::BTreeSet::new();
         let targets = candidates
             .into_iter()
-            .filter(|(label, _)| label.starts_with(word) && seen.insert(label.clone()))
+            .filter(|(label, _)| label.starts_with(partial) && seen.insert(label.clone()))
+            .take(MAX_COMPLETIONS)
             .map(|(label, kind)| {
                 json!({
                     "label": label,
                     "type": kind,
                     "start": start,
-                    "length": word.chars().count(),
+                    "length": length,
                 })
             })
             .collect::<Vec<_>>();
         Ok(json!({"targets": targets}))
+    }
+
+    /// What may complete the part being completed, before filtering by it.
+    async fn completion_candidates(
+        &mut self,
+        completing: Completing<'_>,
+        partial: &str,
+        command: &str,
+        context: Option<StopContext>,
+    ) -> Vec<(String, &'static str)> {
+        let mut candidates = Vec::new();
+        match completing {
+            Completing::Name { first: false } if command == "info" => {
+                for subcommand in ["breakpoints", "watchpoints", "signals", "core", "symbol"] {
+                    candidates.push((subcommand.to_owned(), "value"));
+                }
+            }
+            Completing::Name { first: false } if command == "handle" => {
+                for code in uscope::signal_codes() {
+                    if let Some(name) = uscope::signal_name(code) {
+                        candidates.push((name, "value"));
+                    }
+                }
+            }
+            Completing::Name { first } => {
+                if first {
+                    for spec in crate::cli::commands::COMMANDS {
+                        candidates.push((spec.name.to_owned(), "keyword"));
+                    }
+                }
+                if let Some(context) = context
+                    && let Ok(snapshot) = self.frame_variables(context).await
+                {
+                    for variable in snapshot.variables.iter() {
+                        candidates.push((variable.name.to_string(), "variable"));
+                    }
+                }
+                for (_, image) in self.code().modules() {
+                    for global in image.globals() {
+                        if global.name == global.qualified_name {
+                            candidates.push((global.name.to_string(), "variable"));
+                        } else if global.qualified_name.starts_with(partial) {
+                            candidates.push((global.qualified_name.to_string(), "variable"));
+                        }
+                    }
+                }
+            }
+            Completing::Qualified { qualifier } => {
+                let prefix = if qualifier.is_empty() {
+                    String::new()
+                } else {
+                    format!("{qualifier}::")
+                };
+                for (_, image) in self.code().modules() {
+                    for global in image.globals() {
+                        if let Some(rest) = global.qualified_name.strip_prefix(prefix.as_str()) {
+                            candidates.push((rest.to_owned(), "variable"));
+                        }
+                    }
+                }
+            }
+            Completing::Member { base } => {
+                if let Some(context) = context {
+                    for member in self.member_names(context, base).await {
+                        candidates.push((member, "field"));
+                    }
+                }
+            }
+            Completing::Register => {
+                if let Some(context) = context
+                    && let Ok(handle) = self.target_handle()
+                    && let Ok(registers) = handle.at(context).registers().await
+                {
+                    for register in registers.registers.iter() {
+                        candidates.push((register.register.name.to_string(), "variable"));
+                    }
+                }
+            }
+            Completing::Nothing => {}
+        }
+        candidates
+    }
+
+    /// The names of the members of the value an expression names, or of
+    /// what it points to. None when it names no aggregate.
+    async fn member_names(&self, context: StopContext, base: &str) -> Vec<String> {
+        let (Ok(handle), Ok(expression)) = (self.target_handle(), uscope::Expression::parse(base))
+        else {
+            return Vec::new();
+        };
+        let Ok(uscope::Evaluation::Value { value, .. }) = handle
+            .at(context)
+            .evaluate_with(
+                &expression,
+                uscope::EvaluationMode::Read,
+                InspectionLimits::default(),
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut state = value.state;
+        if let VariableState::Available {
+            children: uscope::ValueChildren::NotApplicable,
+            dereference: uscope::DereferenceState::Available(reference),
+            ..
+        } = &state
+            && let Ok(pointee) = handle.dereference(reference.clone()).await
+        {
+            state = pointee.state;
+        }
+        let VariableState::Available {
+            children: uscope::ValueChildren::Available(children),
+            ..
+        } = state
+        else {
+            return Vec::new();
+        };
+        let Ok(page) = handle
+            .value_children(
+                children,
+                ValueChildQuery {
+                    offset: 0,
+                    limit: u32::try_from(PAGE).expect("pages are small"),
+                },
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        page.children
+            .iter()
+            .filter(|child| values::shown(child))
+            .filter_map(|child| match &child.relationship {
+                uscope::ValueChildRelationship::Member(member) => {
+                    member.name.as_deref().map(str::to_owned)
+                }
+                _ => None,
+            })
+            .collect()
     }
 }
 
