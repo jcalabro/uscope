@@ -3,11 +3,7 @@
 use nix::errno::Errno;
 use nix::libc;
 
-use super::signals::{SI_USER, SIGSTOP};
-use super::{
-    ENOSYS_RESULT, ExitStatus, Happening, Kernel, Options, Pending, SigInfo, State, Thread, Tid,
-    Tracing,
-};
+use super::{ENOSYS_RESULT, ExitStatus, Happening, Kernel, Thread, Tid};
 use crate::sim::cpu::{RAX, RDI, RDX, RSI, RSP};
 
 /// `r10`, a system call's fourth argument.
@@ -117,7 +113,8 @@ fn inside_call(kernel: &mut Kernel, tid: Tid) {
     set_result(kernel, tid, ENOSYS_RESULT);
 }
 
-const fn failure(errno: Errno) -> u64 {
+/// A failed system call's result, as `rax` holds it.
+pub(super) const fn failure(errno: Errno) -> u64 {
     (-(errno as i64)).cast_unsigned()
 }
 
@@ -152,62 +149,16 @@ fn clone(kernel: &mut Kernel, parent: Tid, flags: u64, stack: u64) {
         return;
     }
     let creator = &kernel.threads[&parent];
-    // K-CLONE-1, K-SEIZE-1: the thread of a creator tracing clones is
-    // traced too, and first stops for SIGSTOP, or for an interrupt when its
-    // creator was seized. Any other creator's thread runs untraced.
     let traced = creator.traced() && creator.options.trace_clone;
-    let seized = traced && creator.seized();
     let child = kernel.allocate_tid();
+    // The thread begins where its creator returns from the call, but none
+    // of its creator's calls is on its stack.
     let shadow = kernel.new_shadow();
     let creator = &kernel.threads[&parent];
-    let mut registers = creator.registers;
-    registers.general[RAX] = 0;
+    let mut thread = Thread::created(creator, child, creator.tgid, SYS_CLONE, traced, shadow);
     if stack != 0 {
-        registers.general[RSP] = stack;
+        thread.registers.general[RSP] = stack;
     }
-    let mut pending = Pending::default();
-    if traced && !seized {
-        pending.insert(SigInfo {
-            signal: SIGSTOP,
-            code: SI_USER,
-            pid: 0,
-            address: 0,
-        });
-    }
-    let thread = Thread {
-        tid: child,
-        tgid: creator.tgid,
-        tracing: if seized {
-            Tracing::Seized { interrupted: true }
-        } else if traced {
-            Tracing::Attached
-        } else {
-            Tracing::Untraced
-        },
-        registers,
-        // The child returns from the call it was created in.
-        orig_rax: SYS_CLONE,
-        returning: None,
-        state: State::Running,
-        options: if traced {
-            creator.options
-        } else {
-            Options::default()
-        },
-        pending,
-        single_step: false,
-        report: None,
-        trapped_at: None,
-        last_trap: None,
-        retired: 0,
-        // The thread begins where its creator returns from the call, but
-        // none of its creator's calls is on its stack.
-        shadow,
-        // K-DR-3: no slot armed, though DR7 reads as the creator's.
-        debug: creator.debug.inherited(),
-        // Perf breakpoints follow new threads.
-        debug_held: creator.debug_held,
-    };
     kernel.threads.insert(child, thread);
     kernel.happenings.push(Happening::Cloned { parent, child });
     let result = u64::try_from(child).expect("thread ids are positive");

@@ -2,9 +2,22 @@
 //! gate can require its seeds to reach every one. A sweep that never
 //! reaches what it claims to test passes for nothing.
 
-/// One interesting state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mark {
+/// Defines [`Mark`] and [`Mark::ALL`] from one list.
+macro_rules! marks {
+    ($($(#[$doc:meta])* $mark:ident,)*) => {
+        /// One interesting state.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Mark {
+            $($(#[$doc])* $mark,)*
+        }
+
+        impl Mark {
+            pub const ALL: [Self; [$(Mark::$mark),*].len()] = [$(Self::$mark),*];
+        }
+    };
+}
+
+marks! {
     /// A launch stopped at the program's first instruction.
     EntryStop,
     /// A breakpoint stopped the program.
@@ -154,82 +167,6 @@ pub enum Mark {
     ViewPaged,
     /// A cyclic list was refused as the cycle it is.
     ViewCycleRefused,
-}
-
-impl Mark {
-    pub const ALL: [Self; 71] = [
-        Self::EntryStop,
-        Self::BreakpointStop,
-        Self::StepStop,
-        Self::PauseStop,
-        Self::ProgramExited,
-        Self::KilledRunning,
-        Self::KilledStopped,
-        Self::Relaunched,
-        Self::EditWhileRunning,
-        Self::ReadOverTrap,
-        Self::StaleStopRefused,
-        Self::StepOutRefused,
-        Self::ClientLagged,
-        Self::QueueFull,
-        Self::ThreadCreated,
-        Self::ThreadExited,
-        Self::LeaderExitedAlone,
-        Self::LeaderExitReported,
-        Self::LeaderExitEndedExecution,
-        Self::GroupExitEndedStop,
-        Self::CoHit,
-        Self::ThreadContinued,
-        Self::ThreadSelected,
-        Self::PreemptedCall,
-        Self::ReapedInsideCall,
-        Self::KilledAtStep,
-        Self::KilledNearClone,
-        Self::KilledInsideCall,
-        Self::WholeBacktrace,
-        Self::TruncatedBacktrace,
-        Self::CorruptCaller,
-        Self::StepJudged,
-        Self::SourceStepExact,
-        Self::MarkerHeld,
-        Self::MarkerEvaluated,
-        Self::NameEvaluated,
-        Self::StorageTrue,
-        Self::AddressEvaluated,
-        Self::ArithmeticEvaluated,
-        Self::ExpectationHeld,
-        Self::CastEvaluated,
-        Self::IllTypedRefused,
-        Self::RegisterTrue,
-        Self::BreakpointAmended,
-        Self::HitDeclined,
-        Self::ConditionHeld,
-        Self::HitLogged,
-        Self::WatchAdded,
-        Self::WatchRefused,
-        Self::WatchpointStop,
-        Self::WatchHit,
-        Self::WatchHitOnAnotherThread,
-        Self::UnchangedStore,
-        Self::WatchArmFailed,
-        Self::RunRefusedUnarmed,
-        Self::Forked,
-        Self::ForkedFromThread,
-        Self::ForkChildReleased,
-        Self::ReleasedAfterParentExit,
-        Self::ChildReaped,
-        Self::OrphanReaped,
-        Self::KilledNearFork,
-        Self::Attached,
-        Self::SeizeRefused,
-        Self::InterruptWaited,
-        Self::SeizedChildStarted,
-        Self::Detached,
-        Self::FinishedAfterDetach,
-        Self::ViewPresented,
-        Self::ViewPaged,
-        Self::ViewCycleRefused,
-    ];
 }
 
 /// How many times a run reached each mark.

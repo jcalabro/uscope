@@ -292,6 +292,64 @@ impl Thread {
         }
     }
 
+    /// The thread `id` of `group` that `creator` made with system call
+    /// `call`, which returns zero in it. A creator that traces the creation
+    /// passes on its tracing and options: the new thread first stops for an
+    /// interrupt if the creator was seized (K-SEIZE-1), otherwise for a
+    /// SIGSTOP nobody sent (K-CLONE-1, K-FORK-1). Its debug registers are
+    /// disarmed, though DR7 reads as the creator's, and slots others hold
+    /// follow it, as perf's do (K-DR-3).
+    fn created(
+        creator: &Self,
+        id: Tid,
+        group: Tid,
+        call: u64,
+        traced: bool,
+        shadow: Shadow,
+    ) -> Self {
+        let seized = traced && creator.seized();
+        let mut registers = creator.registers;
+        registers.general[RAX] = 0;
+        let mut pending = Pending::default();
+        if traced && !seized {
+            pending.insert(SigInfo {
+                signal: signals::SIGSTOP,
+                code: signals::SI_USER,
+                pid: 0,
+                address: 0,
+            });
+        }
+        Self {
+            tid: id,
+            tgid: group,
+            tracing: if seized {
+                Tracing::Seized { interrupted: true }
+            } else if traced {
+                Tracing::Attached
+            } else {
+                Tracing::Untraced
+            },
+            registers,
+            orig_rax: call,
+            returning: None,
+            state: State::Running,
+            options: if traced {
+                creator.options
+            } else {
+                Options::default()
+            },
+            pending,
+            single_step: false,
+            report: None,
+            trapped_at: None,
+            last_trap: None,
+            retired: 0,
+            shadow,
+            debug: creator.debug.inherited(),
+            debug_held: creator.debug_held,
+        }
+    }
+
     /// Whether running the thread can change anything.
     #[must_use]
     pub const fn can_run(&self) -> bool {
@@ -1017,7 +1075,7 @@ impl Kernel {
     fn signal_stop(&mut self, tid: Tid, info: SigInfo) {
         let thread = self.threads.get_mut(&tid).expect("stopping thread exists");
         if !thread.traced() {
-            self.act_by_default(tid, info);
+            self.act_by_default(tid, info.signal);
             return;
         }
         thread.enter_stop(

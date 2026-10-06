@@ -17,11 +17,7 @@ impl Client {
     /// Takes a backtrace, which a stop whose inline frame is ambiguous
     /// cannot present.
     pub(super) async fn backtrace(&self) -> Result<(), Failure> {
-        let snapshot = self
-            .handle
-            .snapshot()
-            .await
-            .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+        let snapshot = self.snapshot().await?;
         match self.handle.backtrace().await {
             Ok(backtrace) => {
                 self.note(format!(
@@ -50,11 +46,7 @@ impl Client {
             StepKind::Out,
         ];
         let kind = *self.choices.borrow_mut().pick(Stream::Client, &kinds);
-        let before = self
-            .handle
-            .snapshot()
-            .await
-            .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+        let before = self.snapshot().await?;
         // A source step must know which frame it starts in, so one from a
         // stop whose inline frame is ambiguous is refused, not guessed.
         let ambiguous = kind != StepKind::Instruction
@@ -92,11 +84,7 @@ impl Client {
                     "step {kind:?} from an ambiguous inline frame returned {result:?}"
                 )));
             }
-            let after = self
-                .handle
-                .snapshot()
-                .await
-                .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+            let after = self.snapshot().await?;
             if after != before {
                 return Err(protocol(format!(
                     "a refused step changed the state from {before:?} to {after:?}"
@@ -117,11 +105,7 @@ impl Client {
             (Err(Error::EventStreamLagged(_)), _) => self.mark(Mark::ClientLagged),
             (Err(error), _) if self.refused_unarmed(&error).await? => {}
             (Err(error), Caller::Outermost(_) | Caller::Corrupt(_)) => {
-                let after = self
-                    .handle
-                    .snapshot()
-                    .await
-                    .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+                let after = self.snapshot().await?;
                 if after != before {
                     return Err(protocol(format!(
                         "a refused step out changed the state from {before:?} to {after:?}"
@@ -145,11 +129,7 @@ impl Client {
     /// Reads the variables of the selected frame, and the backtrace of its
     /// thread, which the variables oracle judges where a marker applies.
     pub(super) async fn inspect(&self, stop: StopId) -> Result<(), Failure> {
-        let snapshot = self
-            .handle
-            .snapshot()
-            .await
-            .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+        let snapshot = self.snapshot().await?;
         let backtrace = match self.handle.backtrace().await {
             Ok(backtrace) => backtrace,
             Err(Error::AmbiguousInlineFrame) if presented_ambiguously(&snapshot) => {
@@ -235,9 +215,7 @@ impl Client {
         }
         Ok(())
     }
-}
 
-impl Client {
     /// Evaluates each container the program defines, and reads the
     /// elements of each a view presents as a sequence or map in one page
     /// and in pages of a size it draws.
@@ -344,12 +322,13 @@ impl Client {
             .find(|frame| frame.id == variables.stack_frame)
             .and_then(|frame| frame.source.as_ref())
             .map(|source| source.line.get());
-        if let Some(condition) = line.and_then(|line| self.script.markers.get(&line)) {
+        if let Some(marker) = line.and_then(|line| self.script.markers.get(&line)) {
+            let condition = &marker.text;
             asked.push((Purpose::Marker { negated: false }, condition.clone()));
             asked.push((Purpose::Marker { negated: true }, format!("!({condition})")));
-        }
-        if let Some(expected) = line.and_then(|line| self.script.expectations.get(&line)) {
-            asked.push((Purpose::Expected, expected.clone()));
+            if let Some(expected) = &marker.expect {
+                asked.push((Purpose::Expected, expected.clone()));
+            }
         }
         // Only names shown once, which name one variable unambiguously.
         let unique = variables.variables.iter().filter(|variable| {

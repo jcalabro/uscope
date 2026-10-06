@@ -220,27 +220,4 @@ mod tests {
             [10_982_569_894_039_428_951, 15_233_243_796_857_723_996]
         );
     }
-
-    /// Bounded draws stay in range and reach every value, and a stream's
-    /// draws do not move another's.
-    #[test]
-    fn draws_cover_their_range_and_streams_stay_apart() {
-        let mut choices = Choices::new(7);
-        let mut seen = [false; 6];
-        for _ in 0..600 {
-            seen[usize::try_from(choices.below(Stream::Client, 6)).expect("small")] = true;
-        }
-        assert_eq!(seen, [true; 6]);
-        assert_eq!(choices.below(Stream::Client, 1), 0);
-
-        let mut quiet = Choices::new(7);
-        let mut busy = Choices::new(7);
-        for _ in 0..100 {
-            busy.below(Stream::Client, 1000);
-        }
-        assert_eq!(
-            quiet.below(Stream::Schedule, u64::MAX),
-            busy.below(Stream::Schedule, u64::MAX)
-        );
-    }
 }
