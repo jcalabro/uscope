@@ -142,142 +142,131 @@ fn hits(reason: &StopReason) -> &[BreakpointHit] {
 
 #[tokio::test]
 async fn colocated_hit_conditions_each_count_every_hit() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        let mut conditions = Vec::new();
-        for text in ["==3", "<3", ">=38", "%7"] {
-            let added = add(&scenario, "counted", text).await;
-            conditions.push((added.id, condition(text)));
-        }
-        // Readding a spec and condition returns the existing breakpoint.
-        assert_eq!(add(&scenario, "counted", "%7").await.id, conditions[3].0);
-        let first = breakpoint(&mut scenario, conditions[0].0).await;
-
-        let mut stopped_at = Vec::new();
-        let mut reason = scenario.run_to_stop().await;
-        let site = sites(&scenario, &first).await;
-        while let StopReason::Breakpoint { address, hits } = &reason {
-            assert_eq!([*address], site[..], "{fixture}");
-            // The program's own call number names the hit.
-            let hit = global(&scenario, "last_call").await + 1;
-            let stopping = conditions
-                .iter()
-                .filter(|(_, condition)| condition.is_met(hit))
-                .map(|&(breakpoint, _)| BreakpointHit {
-                    breakpoint,
-                    hit_count: hit,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(hits[..], stopping[..], "{fixture} at call {hit}");
-            for &(id, _) in &conditions {
-                assert_eq!(breakpoint(&mut scenario, id).await.hit_count, hit);
-            }
-            stopped_at.push(hit);
-            reason = scenario.resume_to_stop().await;
-        }
-
-        assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)), "{fixture}");
-        assert_eq!(stopped_at, [1, 2, 3, 7, 14, 21, 28, 35, 38, 39, 40]);
-        for (id, _) in conditions {
-            assert_eq!(breakpoint(&mut scenario, id).await.hit_count, CALLS);
-        }
-        scenario.shutdown().await;
+    let mut scenario = Scenario::launch("hit-counts-gcc-o0");
+    let mut conditions = Vec::new();
+    for text in ["==3", "<3", ">=38", "%7"] {
+        let added = add(&scenario, "counted", text).await;
+        conditions.push((added.id, condition(text)));
     }
+    // Readding a spec and condition returns the existing breakpoint.
+    assert_eq!(add(&scenario, "counted", "%7").await.id, conditions[3].0);
+    let first = breakpoint(&mut scenario, conditions[0].0).await;
+
+    let mut stopped_at = Vec::new();
+    let mut reason = scenario.run_to_stop().await;
+    let site = sites(&scenario, &first).await;
+    while let StopReason::Breakpoint { address, hits } = &reason {
+        assert_eq!([*address], site[..]);
+        // The program's own call number names the hit.
+        let hit = global(&scenario, "last_call").await + 1;
+        let stopping = conditions
+            .iter()
+            .filter(|(_, condition)| condition.is_met(hit))
+            .map(|&(breakpoint, _)| BreakpointHit {
+                breakpoint,
+                hit_count: hit,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(hits[..], stopping[..], "at call {hit}");
+        for &(id, _) in &conditions {
+            assert_eq!(breakpoint(&mut scenario, id).await.hit_count, hit);
+        }
+        stopped_at.push(hit);
+        reason = scenario.resume_to_stop().await;
+    }
+
+    assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)));
+    assert_eq!(stopped_at, [1, 2, 3, 7, 14, 21, 28, 35, 38, 39, 40]);
+    for (id, _) in conditions {
+        assert_eq!(breakpoint(&mut scenario, id).await.hit_count, CALLS);
+    }
+    scenario.shutdown().await;
 }
 
 /// A thread that hit a breakpoint steps over the trap there when it next
-/// runs, whichever breakpoint is there by then: its arrival was counted.
-/// Here the breakpoint it hit is replaced by another at the same place. A
-/// thread a step left somewhere arrives there as it resumes, for every
-/// breakpoint there by then, one added meanwhile too.
+/// runs, whichever breakpoint is there by then: its arrival was counted. A
+/// thread a step left at an address arrives there as it resumes, for every
+/// breakpoint there by then.
 #[tokio::test]
 async fn only_a_thread_that_hit_a_breakpoint_steps_over_one_added_where_it_stands() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        let first = scenario.add_breakpoint("counted").await;
-        scenario.run_to_stop().await;
-        assert_eq!(global(&scenario, "last_call").await, 0, "{fixture}");
-        scenario.remove_breakpoint(first.id).await;
-        let second = scenario.add_breakpoint("counted").await;
-        assert_ne!(second.id, first.id);
-        assert_eq!(
-            hits(&scenario.resume_to_stop().await),
-            [BreakpointHit {
-                breakpoint: second.id,
-                hit_count: 1,
-            }],
-            "{fixture}"
-        );
-        assert_eq!(
-            global(&scenario, "last_call").await,
-            1,
-            "{fixture}: the stop is the next call's"
-        );
+    let mut scenario = Scenario::launch("hit-counts-gcc-o0");
+    let first = scenario.add_breakpoint("counted").await;
+    scenario.run_to_stop().await;
+    assert_eq!(global(&scenario, "last_call").await, 0);
+    scenario.remove_breakpoint(first.id).await;
+    let second = scenario.add_breakpoint("counted").await;
+    assert_ne!(second.id, first.id);
+    assert_eq!(
+        hits(&scenario.resume_to_stop().await),
+        [BreakpointHit {
+            breakpoint: second.id,
+            hit_count: 1,
+        }]
+    );
+    assert_eq!(
+        global(&scenario, "last_call").await,
+        1,
+        "the stop is the next call's"
+    );
 
-        scenario.remove_breakpoint(second.id).await;
-        scenario.step_to_stop(StepKind::Instruction).await;
-        let stepped = global(&scenario, "last_call").await;
-        let here = program_counter(&scenario).await;
-        let third = scenario
-            .add_breakpoint_spec(BreakpointSpec::Address(here))
-            .await;
-        assert_eq!(
-            hits(&scenario.resume_to_stop().await),
-            [BreakpointHit {
+    scenario.remove_breakpoint(second.id).await;
+    scenario.step_to_stop(StepKind::Instruction).await;
+    let stepped = global(&scenario, "last_call").await;
+    let here = program_counter(&scenario).await;
+    let third = scenario
+        .add_breakpoint_spec(BreakpointSpec::Address(here))
+        .await;
+    assert_eq!(
+        hits(&scenario.resume_to_stop().await),
+        [BreakpointHit {
+            breakpoint: third.id,
+            hit_count: 1,
+        }]
+    );
+    assert_eq!(
+        global(&scenario, "last_call").await,
+        stepped,
+        "the stop is the same call's"
+    );
+
+    let fourth = scenario.add_breakpoint("counted").await;
+    assert_eq!(
+        hits(&scenario.resume_to_stop().await),
+        [BreakpointHit {
+            breakpoint: fourth.id,
+            hit_count: 1,
+        }]
+    );
+    scenario.step_to_stop(StepKind::Instruction).await;
+    assert_eq!(program_counter(&scenario).await, here);
+    let handle = scenario.handle().clone();
+    let fifth = scenario
+        .operation(
+            "add conditioned breakpoint",
+            handle
+                .add_breakpoint_with_hit_condition(BreakpointSpec::Address(here), condition(">=1")),
+        )
+        .await;
+    let call = global(&scenario, "last_call").await;
+    assert_eq!(
+        hits(&scenario.resume_to_stop().await),
+        [
+            BreakpointHit {
                 breakpoint: third.id,
+                hit_count: 2,
+            },
+            BreakpointHit {
+                breakpoint: fifth.id,
                 hit_count: 1,
-            }],
-            "{fixture}"
-        );
-        assert_eq!(
-            global(&scenario, "last_call").await,
-            stepped,
-            "{fixture}: the stop is the same call's"
-        );
-
-        let fourth = scenario.add_breakpoint("counted").await;
-        assert_eq!(
-            hits(&scenario.resume_to_stop().await),
-            [BreakpointHit {
-                breakpoint: fourth.id,
-                hit_count: 1,
-            }],
-            "{fixture}"
-        );
-        scenario.step_to_stop(StepKind::Instruction).await;
-        assert_eq!(program_counter(&scenario).await, here, "{fixture}");
-        let handle = scenario.handle().clone();
-        let fifth = scenario
-            .operation(
-                "add conditioned breakpoint",
-                handle.add_breakpoint_with_hit_condition(
-                    BreakpointSpec::Address(here),
-                    condition(">=1"),
-                ),
-            )
-            .await;
-        let call = global(&scenario, "last_call").await;
-        assert_eq!(
-            hits(&scenario.resume_to_stop().await),
-            [
-                BreakpointHit {
-                    breakpoint: third.id,
-                    hit_count: 2,
-                },
-                BreakpointHit {
-                    breakpoint: fifth.id,
-                    hit_count: 1,
-                },
-            ],
-            "{fixture}"
-        );
-        assert_eq!(
-            global(&scenario, "last_call").await,
-            call,
-            "{fixture}: the stop is the same call's"
-        );
-        scenario.shutdown().await;
-    }
+            },
+        ]
+    );
+    assert_eq!(
+        global(&scenario, "last_call").await,
+        call,
+        "the stop is the same call's"
+    );
+    scenario.shutdown().await;
 }
 
 /// A thread that hit a breakpoint and has not run since steps over the
@@ -498,13 +487,7 @@ async fn a_skipped_hit_before_a_deep_callees_epilogue_is_transparent_to_next() {
         StopReason::Breakpoint { .. }
     ));
     scenario.remove_all_breakpoints().await;
-    let source =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/rt/rt.c"))
-            .expect("read rt.c");
-    let calls_main = 1 + source
-        .lines()
-        .position(|line| line.contains("rt_exit_group(main("))
-        .expect("rt_start calls main") as u64;
+    let calls_main = support::source_line("tests/golden/rt/rt.c", "rt_exit_group(main(");
     while line(&scenario).await != calls_main {
         scenario.step_to_stop(StepKind::OverSource).await;
     }

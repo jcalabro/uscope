@@ -14,7 +14,17 @@ const QUIET: SignalPolicy = SignalPolicy {
 };
 
 #[tokio::test]
-async fn signals_follow_gdbs_default_policy() {
+async fn signals_are_named_and_follow_gdbs_default_policy() {
+    assert_eq!(uscope::signal_named("usr1"), Some(10));
+    assert_eq!(
+        uscope::signal_named("SIGPOLL"),
+        uscope::signal_named("SIGIO")
+    );
+    assert_eq!(uscope::signal_name(35).as_deref(), Some("SIG35"));
+    assert_eq!(uscope::signal_name(0), None);
+    assert_eq!(uscope::signal_named("SIGNOPE"), None);
+    assert_eq!(uscope::signal_codes().count(), 64);
+
     let mut scenario = Scenario::launch("signal-policy");
     let mut events = scenario.handle().subscribe();
     // SIGUSR1 and the real-time signal stop; SIGALRM, SIGURG, SIGCHLD, and
@@ -54,6 +64,16 @@ async fn signals_follow_gdbs_default_policy() {
 async fn policies_decide_what_stops_is_reported_and_is_delivered() {
     let mut scenario = Scenario::launch("signal-policy");
     let handle = scenario.handle().clone();
+    for signal in [0, 65] {
+        assert!(matches!(
+            handle.signal_policy(signal).await,
+            Err(Error::UnknownSignal(code)) if code == signal
+        ));
+        assert!(matches!(
+            handle.set_signal_policy(signal, QUIET).await,
+            Err(Error::UnknownSignal(code)) if code == signal
+        ));
+    }
     let reported = SignalPolicy {
         stop: false,
         print: true,
@@ -144,32 +164,6 @@ async fn policies_decide_what_stops_is_reported_and_is_delivered() {
     scenario.shutdown().await;
 }
 
-#[tokio::test]
-async fn signals_are_named_and_unknown_ones_rejected() {
-    assert_eq!(uscope::signal_named("usr1"), Some(10));
-    assert_eq!(
-        uscope::signal_named("SIGPOLL"),
-        uscope::signal_named("SIGIO")
-    );
-    assert_eq!(uscope::signal_name(35).as_deref(), Some("SIG35"));
-    assert_eq!(uscope::signal_name(0), None);
-    assert_eq!(uscope::signal_named("SIGNOPE"), None);
-    assert_eq!(uscope::signal_codes().count(), 64);
-
-    let scenario = Scenario::launch("signal-policy");
-    for signal in [0, 65] {
-        assert!(matches!(
-            scenario.handle().signal_policy(signal).await,
-            Err(Error::UnknownSignal(code)) if code == signal
-        ));
-        assert!(matches!(
-            scenario.handle().set_signal_policy(signal, QUIET).await,
-            Err(Error::UnknownSignal(code)) if code == signal
-        ));
-    }
-    scenario.shutdown().await;
-}
-
 async fn handled(scenario: &Scenario) -> i128 {
     let variable = scenario
         .operation("handled", scenario.handle().variable("handled"))
@@ -191,15 +185,6 @@ async fn function(scenario: &Scenario) -> Option<String> {
 
 #[tokio::test]
 async fn steps_run_signal_handlers_without_stopping_in_them() {
-    let source = fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/signal-steps.c"),
-    )
-    .expect("read signal-steps.c");
-    let call = source
-        .lines()
-        .position(|line| line.contains("the stepped call"))
-        .expect("stepped call")
-        + 1;
     let mut scenario = Scenario::launch("signal-steps");
     scenario
         .operation(
@@ -210,7 +195,7 @@ async fn steps_run_signal_handlers_without_stopping_in_them() {
     scenario
         .add_source_breakpoint(
             "signal-steps.c",
-            u64::try_from(call).expect("line fits u64"),
+            source_line("tests/fixtures/c/signal-steps.c", "the stepped call"),
         )
         .await;
     assert!(matches!(

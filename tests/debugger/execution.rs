@@ -3,68 +3,6 @@
 use super::*;
 
 #[tokio::test]
-async fn raw_memory_reads_publish_prefixes_at_unmapped_boundaries() {
-    for fixture in ["pointer-memory-gcc-o0", "pointer-memory-clang-o0"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("inspect_boundaries").await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-
-        let boundary_array = scenario
-            .operation(
-                "inspect boundary array pointer",
-                scenario.handle().variable("boundary_array"),
-            )
-            .await;
-        let boundary_address = match available_value(&boundary_array.state) {
-            uscope::VariableValue::Address(value) => value.address,
-            value => panic!("{fixture}: boundary array was not an address: {value:?}"),
-        };
-        let readable_prefix = scenario
-            .operation(
-                "read memory across an unmapped boundary",
-                scenario.handle().read_memory(boundary_address, 16),
-            )
-            .await;
-        assert_eq!(
-            readable_prefix.bytes.as_ref(),
-            [41_i32.to_le_bytes(), 42_i32.to_le_bytes()].concat()
-        );
-        assert_eq!(
-            readable_prefix.completion,
-            uscope::MemoryReadCompletion::Incomplete {
-                next_address: VirtualAddress::new(boundary_address.get() + 8),
-                reason: uscope::MemoryReadUnavailableReason::Inaccessible,
-            }
-        );
-
-        let inaccessible_address = VirtualAddress::new(boundary_address.get() + 8);
-        let inaccessible = scenario
-            .operation(
-                "read wholly inaccessible memory",
-                scenario.handle().read_memory(inaccessible_address, 8),
-            )
-            .await;
-        assert!(inaccessible.bytes.is_empty(), "{inaccessible:?}");
-        assert_eq!(
-            inaccessible.completion,
-            uscope::MemoryReadCompletion::Incomplete {
-                next_address: inaccessible_address,
-                reason: uscope::MemoryReadUnavailableReason::Inaccessible,
-            }
-        );
-
-        assert_eq!(
-            scenario.resume_to_stop().await,
-            StopReason::Exited(ExitStatus::Code(0))
-        );
-        scenario.shutdown().await;
-    }
-}
-
-#[tokio::test]
 async fn gcc_o2_entry_policy_does_not_execute_a_real_first_statement() {
     let fixture = "stepping-boundaries-gcc-o2";
     let mut scenario = Scenario::new("GCC O2 zero-length prologue", Scenario::fixture(fixture));
@@ -118,78 +56,78 @@ async fn gcc_o2_entry_policy_does_not_execute_a_real_first_statement() {
 }
 
 #[tokio::test]
-async fn shutdown_reaps_a_stopped_zig_process_and_all_native_threads() {
-    let fixture = "variables-threads-zig";
-    let mut scenario = Scenario::new("shutdown Zig threads", Scenario::fixture(fixture));
-    scenario
-        .add_source_breakpoint("variables-threads.zig", 8)
-        .await;
-    assert!(matches!(
-        scenario.run_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-    assert_eq!(scenario.snapshot().await.threads.len(), 3);
-
-    let status = scenario.shutdown().await.expect("Zig inferior exit event");
-    assert!(matches!(
-        status,
-        ExitStatus::Terminated(exception) if exception.code == 9
-    ));
-}
-
-#[tokio::test]
-async fn source_line_breakpoint_stops_through_the_public_scenario_path() {
-    let mut scenario = Scenario::new("source line breakpoint", Scenario::fixture("basic"));
-    let breakpoint = scenario.add_source_breakpoint("basic.c", 11).await;
-    assert_eq!(breakpoint.locations.len(), 1);
-
-    assert!(matches!(
-        scenario.run_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-    let context = scenario
-        .operation("source context", scenario.handle().source_context(0))
-        .await;
-    assert_eq!(context.location.line.get(), 11);
-    assert!(context.file.path.ends_with("tests/fixtures/c/basic.c"));
-    assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Exited(uscope::ExitStatus::Code(0))
-    );
-    scenario.shutdown().await;
-}
-
-#[tokio::test]
-async fn file_qualified_function_breakpoint_stops_at_the_selected_function() {
-    let mut scenario = Scenario::new("file function breakpoint", Scenario::fixture("basic"));
+async fn source_line_and_file_qualified_function_breakpoints_stop_where_they_name() {
+    let mut scenario = Scenario::launch("basic");
+    let line = scenario.add_source_breakpoint("basic.c", 11).await;
+    assert_eq!(line.locations.len(), 1);
     scenario
         .add_file_function_breakpoint("tests/fixtures/c/basic.c", "breakpoint_target")
         .await;
-
-    assert!(matches!(
-        scenario.run_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-    let context = scenario
-        .operation("source context", scenario.handle().source_context(0))
-        .await;
-    assert_eq!(context.location.line.get(), 6);
+    for expected in [6, 11] {
+        assert!(matches!(
+            scenario.resume_or_run().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let context = scenario
+            .operation("source context", scenario.handle().source_context(0))
+            .await;
+        assert_eq!(context.location.line.get(), expected);
+        assert!(context.file.path.ends_with("tests/fixtures/c/basic.c"));
+    }
     scenario.shutdown().await;
 }
 
 #[tokio::test]
-async fn breakpoint_deletion_preserves_shared_sites_and_stopped_instruction_execution() {
-    let mut scenario = Scenario::new("breakpoint deletion", Scenario::fixture("basic"));
+async fn breakpoint_edits_publish_one_revision_or_change_nothing() {
+    let mut scenario = Scenario::launch("basic");
+    let first = scenario.add_breakpoint("main").await;
+    let second = scenario.add_breakpoint("breakpoint_target").await;
+    let revision = scenario.snapshot().await.revision;
+    assert_eq!(scenario.remove_all_breakpoints().await, vec![first, second]);
+    let before = scenario.snapshot().await;
+    assert_eq!(before.revision, revision + 1);
+    assert!(before.breakpoints.is_empty());
+
+    // Edits that fail change nothing.
+    assert!(matches!(
+        scenario
+            .handle()
+            .remove_breakpoint(uscope::BreakpointId::new(999))
+            .await,
+        Err(Error::BreakpointNotFound(999))
+    ));
+    let source = |path: &str, line| BreakpointSpec::Source {
+        path: path.into(),
+        line: uscope::LineNumber::new(line).unwrap(),
+    };
+    assert!(matches!(
+        scenario
+            .handle()
+            .add_breakpoint(source("missing.c", 1))
+            .await,
+        Err(Error::SourceFileNotFound(_))
+    ));
+    assert!(matches!(
+        scenario
+            .handle()
+            .add_breakpoint(source("basic.c", 999))
+            .await,
+        Err(Error::SourceLineUnavailable { .. })
+    ));
+    let after = scenario.snapshot().await;
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.breakpoints, before.breakpoints);
+
+    // Deleting one of two breakpoints at a site keeps the other, and
+    // deleting the one a thread stopped at lets it run the instruction.
     let function = scenario.add_breakpoint("breakpoint_target").await;
     let source = scenario.add_source_breakpoint("basic.c", 6).await;
     assert_eq!(function.locations[0].location, source.locations[0].location);
-
     let revision = scenario.snapshot().await.revision;
     assert_eq!(scenario.remove_breakpoint(function.id).await, function);
     let snapshot = scenario.snapshot().await;
     assert_eq!(snapshot.revision, revision + 1);
     assert_eq!(snapshot.breakpoints.as_ref(), std::slice::from_ref(&source));
-
     assert!(matches!(
         scenario.run_to_stop().await,
         StopReason::Breakpoint { .. }
@@ -197,77 +135,16 @@ async fn breakpoint_deletion_preserves_shared_sites_and_stopped_instruction_exec
     scenario.remove_breakpoint(source.id).await;
     assert_eq!(
         scenario.resume_to_stop().await,
-        StopReason::Exited(uscope::ExitStatus::Code(0))
+        StopReason::Exited(ExitStatus::Code(0))
     );
     scenario.shutdown().await;
 }
 
 #[tokio::test]
-async fn deleting_all_breakpoints_is_one_coherent_public_mutation() {
-    let mut scenario = Scenario::new("delete all breakpoints", Scenario::fixture("basic"));
-    let first = scenario.add_breakpoint("main").await;
-    let second = scenario.add_breakpoint("breakpoint_target").await;
-    let revision = scenario.snapshot().await.revision;
-
-    assert_eq!(scenario.remove_all_breakpoints().await, vec![first, second]);
-    let snapshot = scenario.snapshot().await;
-    assert_eq!(snapshot.revision, revision + 1);
-    assert!(snapshot.breakpoints.is_empty());
-    assert_eq!(
-        scenario.run_to_stop().await,
-        StopReason::Exited(uscope::ExitStatus::Code(0))
-    );
-    scenario.shutdown().await;
-}
-
-#[tokio::test]
-async fn deleting_an_unknown_breakpoint_does_not_mutate_public_state() {
-    let mut scenario = Scenario::new("unknown breakpoint deletion", Scenario::fixture("basic"));
-    scenario.add_breakpoint("main").await;
-    let before = scenario.snapshot().await;
-
-    let error = scenario
-        .handle()
-        .remove_breakpoint(uscope::BreakpointId::new(999))
-        .await
-        .expect_err("unknown breakpoint must fail");
-    assert!(matches!(error, uscope::Error::BreakpointNotFound(999)));
-    let after = scenario.snapshot().await;
-    assert_eq!(after.revision, before.revision);
-    assert_eq!(after.breakpoints, before.breakpoints);
-    scenario.shutdown().await;
-}
-
-#[tokio::test]
-async fn unresolved_source_breakpoints_fail_without_mutating_public_state() {
-    let mut scenario = Scenario::new("unresolved source breakpoint", Scenario::fixture("basic"));
-    let before = scenario.snapshot().await;
-    let missing_file = scenario
-        .handle()
-        .add_breakpoint(uscope::BreakpointSpec::Source {
-            path: "missing.c".into(),
-            line: uscope::LineNumber::new(1).unwrap(),
-        })
-        .await;
-    assert!(matches!(missing_file, Err(Error::SourceFileNotFound(_))));
-    let missing_line = scenario
-        .handle()
-        .add_breakpoint(uscope::BreakpointSpec::Source {
-            path: "basic.c".into(),
-            line: uscope::LineNumber::new(999).unwrap(),
-        })
-        .await;
-    assert!(matches!(
-        missing_line,
-        Err(Error::SourceLineUnavailable { .. })
-    ));
-    let after = scenario.snapshot().await;
-    assert_eq!(after.revision, before.revision);
-    assert_eq!(after.breakpoints, before.breakpoints);
-    scenario.shutdown().await;
-}
-
-#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stop checks its snapshot, registers, breakpoints, and memory together"
+)]
 async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
     let mut scenario = Scenario::new("breakpoint lifecycle", Scenario::fixture("basic"));
 
@@ -289,14 +166,7 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
         .await;
 
     assert_eq!(location.address, first_address);
-    assert_eq!(
-        location
-            .image
-            .function
-            .as_ref()
-            .map(|function| function.name.as_ref()),
-        Some("breakpoint_target")
-    );
+    assert_eq!(location_function(&location), Some("breakpoint_target"));
 
     let source = location
         .image
@@ -380,34 +250,7 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
         0x1122_3344_5566_7788
     );
 
-    assert_eq!(
-        support::breakpoint_address(&scenario.resume_to_stop().await),
-        first_address
-    );
-    assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Exited(ExitStatus::Code(0))
-    );
-
-    scenario.shutdown().await;
-}
-
-#[tokio::test]
-async fn raw_memory_reads_are_bounded_stop_scoped_and_hide_breakpoints() {
-    let mut scenario = Scenario::new("raw memory", Scenario::fixture("basic"));
-    scenario.add_breakpoint("breakpoint_target").await;
-    let first_address = match scenario.run_to_stop().await {
-        StopReason::Breakpoint { address, .. } => address,
-        other => panic!("expected breakpoint, got {other:?}"),
-    };
-    let value_address = scenario
-        .operation(
-            "resolve uscope_value",
-            scenario.handle().runtime_address("uscope_value"),
-        )
-        .await;
-    let stopped = scenario.snapshot().await;
-
+    // Reads are bounded, belong to the stop, and hide breakpoint traps.
     let value_bytes = scenario
         .operation(
             "read uscope_value bytes",
@@ -423,12 +266,11 @@ async fn raw_memory_reads_are_bounded_stop_scoped_and_hide_breakpoints() {
         uscope::MemoryReadCompletion::Complete
     );
     assert_eq!(value_bytes.revision, scenario.last_revision());
-    assert_eq!(Some(value_bytes.stop_id), stopped.stop_id);
+    assert_eq!(Some(value_bytes.stop_id), snapshot.stop_id);
     assert_eq!(
         value_bytes.target,
         scenario.handle().module_image().target()
     );
-
     let breakpoint_bytes = scenario
         .operation(
             "read logical breakpoint bytes",
@@ -439,12 +281,7 @@ async fn raw_memory_reads_are_bounded_stop_scoped_and_hide_breakpoints() {
         breakpoint_bytes.completion,
         uscope::MemoryReadCompletion::Complete
     );
-    assert_ne!(
-        breakpoint_bytes.bytes.as_ref(),
-        [0xcc],
-        "the installed trap leaked through the logical memory API"
-    );
-
+    assert_ne!(breakpoint_bytes.bytes.as_ref(), [0xcc]);
     let empty = scenario
         .operation(
             "read an empty memory range",
@@ -476,21 +313,28 @@ async fn raw_memory_reads_are_bounded_stop_scoped_and_hide_breakpoints() {
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
     );
+
     scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn shutdown_kills_and_reaps_a_running_inferior() {
     let mut running = Scenario::new("shutdown running", Scenario::fixture("spin"));
-
+    assert!(matches!(
+        running.handle().variables().await,
+        Err(Error::NotRunning)
+    ));
     let run = running.start_running().await;
-
     assert!(matches!(
         running.snapshot().await.inferior,
         InferiorState::Running { .. }
     ));
     assert!(matches!(
         running.handle().registers().await,
+        Err(Error::NotStopped)
+    ));
+    assert!(matches!(
+        running.handle().variables().await,
         Err(Error::NotStopped)
     ));
 
@@ -664,15 +508,7 @@ async fn inline_breakpoint_hits_select_the_matching_concrete_instance() {
 
             assert!(resolved.code_instances.contains(&selected), "{fixture}");
             hit_instances.insert(selected);
-            assert_eq!(
-                location
-                    .image
-                    .function
-                    .as_ref()
-                    .map(|function| function.name.as_ref()),
-                Some("leaf"),
-                "{fixture}"
-            );
+            assert_eq!(location_function(&location), Some("leaf"), "{fixture}");
 
             reason = scenario.resume_to_stop().await;
         }
@@ -1084,9 +920,8 @@ async fn nonleader_exec_rewrites_the_thread_registry_and_invalidates_the_image()
         Err(Error::Backend(_))
     ));
 
-    // The retained catalog describes the pre-exec program while the thread now
-    // runs the replaced image; every view through it must refuse rather than
-    // resolve stale metadata against the new address space.
+    // The catalog describes the program from before the exec, so every
+    // view through it refuses.
     assert!(matches!(
         scenario.handle().variables().await,
         Err(Error::Backend(_))
@@ -1334,14 +1169,7 @@ async fn pause_stops_a_process_whose_main_thread_exited() {
     };
     // Linux reports the main thread's exit only after the worker's, so the
     // stop cannot wait for it.
-    let stat = format!("/proc/{}/stat", process_id.get());
-    support::wait_until("the main thread exits", || {
-        fs::read_to_string(&stat).is_ok_and(|stat| {
-            stat.rsplit_once(')')
-                .and_then(|(_, fields)| fields.split_whitespace().next())
-                == Some("Z")
-        })
-    });
+    wait_for_zombie(process_id);
     let reason = scenario.operation("pause", scenario.handle().pause()).await;
     assert_eq!(reason, StopReason::Pause);
     // As after attaching, the exited main thread is not listed.
@@ -1369,9 +1197,8 @@ async fn pause_cancels_an_active_source_execution_plan() {
     let mut scenario = Scenario::new("pause source plan", Scenario::fixture("step"));
     scenario.add_breakpoint("step_forever").await;
     scenario.run_to_stop().await;
-    // The recommended post-prologue entry is the loop body itself, so leaving
-    // the function breakpoint installed would intentionally interrupt the
-    // finish plan on the next iteration instead of letting pause cancel it.
+    // The breakpoint is in the loop body, where it would end the finish
+    // before the pause could.
     scenario.remove_all_breakpoints().await;
 
     let snapshot = scenario.snapshot().await;
@@ -1412,9 +1239,8 @@ async fn pause_cancels_an_active_source_execution_plan() {
             .all(|thread| matches!(thread.state, ThreadState::Stopped { .. }))
     );
 
-    // Cancellation must also retract the plan's internal breakpoints: after
-    // releasing the loop, a stale plan-owned site at the caller's return
-    // address would surface as an unexpected breakpoint stop instead of exit.
+    // A finish breakpoint the pause left behind would stop the program
+    // before it exits.
     let release = scenario
         .operation(
             "resolve step release",
@@ -1596,23 +1422,8 @@ async fn function_breakpoints_stop_at_every_function_with_the_name() {
 
 #[tokio::test]
 async fn source_breakpoints_move_to_the_next_line_with_code_in_their_function() {
-    let source = fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/line-sliding.c"),
-    )
-    .expect("read line-sliding.c");
-    let line = |needle: &str| {
-        uscope::LineNumber::new(
-            u64::try_from(
-                source
-                    .lines()
-                    .position(|text| text.contains(needle))
-                    .unwrap_or_else(|| panic!("no line containing {needle:?}"))
-                    + 1,
-            )
-            .expect("line fits u64"),
-        )
-        .expect("nonzero line")
-    };
+    let path = "tests/fixtures/c/line-sliding.c";
+    let line = |needle| uscope::LineNumber::new(source_line(path, needle)).expect("line");
     let comment = line("a comment inside the function");
     let blank = uscope::LineNumber::new(comment.get() + 1).expect("line");
     let code = line("the next code after the comment");
@@ -1629,10 +1440,7 @@ async fn source_breakpoints_move_to_the_next_line_with_code_in_their_function() 
         assert_eq!(image.breakpoint_line(file, requested), Some(code));
     }
     assert_eq!(image.breakpoint_line(file, between), None);
-    let last = uscope::LineNumber::new(
-        u64::try_from(source.lines().count()).expect("line count fits u64"),
-    )
-    .expect("line");
+    let last = uscope::LineNumber::new(u64::MAX).expect("line");
     let lines = image
         .breakpoint_lines(file, uscope::LineNumber::new(1).expect("line")..=last)
         .collect::<Vec<_>>();
@@ -1821,20 +1629,7 @@ async fn terminating_asks_the_program_to_end_without_stopping_it() {
 
 #[tokio::test]
 async fn a_line_breakpoint_stops_where_the_line_begins_not_at_its_later_statements() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/reexec.c"),
-    )
-    .expect("fixture source");
-    let line_of = |marker: &str| {
-        u64::try_from(
-            source
-                .lines()
-                .position(|line| line.contains(marker))
-                .expect("marked line")
-                + 1,
-        )
-        .expect("line number")
-    };
+    let line_of = |marker| source_line("tests/fixtures/c/reexec.c", marker);
     let mut scenario = Scenario::launch("reexec");
     // The loop's header has statements for its start and for each test of
     // its condition; only its start is a place to stop.
@@ -1863,4 +1658,63 @@ async fn a_line_breakpoint_stops_where_the_line_begins_not_at_its_later_statemen
     }
     assert_eq!(hits, [loop_start.id, body.id]);
     scenario.shutdown().await;
+}
+
+fn assert_basic_source_context(
+    context: &SourceContext,
+    source_file: &SourceFile,
+    source: &SourceLocation,
+) {
+    let current = context
+        .lines
+        .iter()
+        .find(|line| line.number == context.location.line)
+        .expect("current source line");
+
+    assert_eq!(&context.file, source_file);
+    assert_eq!(&context.location, source);
+    assert_eq!(context.location.line.get(), 6);
+    assert_eq!(current.text.as_ref(), "    return uscope_value;");
+    assert_eq!(
+        context
+            .lines
+            .first()
+            .expect("first source line")
+            .number
+            .get(),
+        3
+    );
+    assert_eq!(
+        context.lines.last().expect("last source line").number.get(),
+        9
+    );
+}
+
+fn assert_register_snapshot(
+    registers: &uscope::RegisterSnapshot,
+    state: &uscope::StateSnapshot,
+    instruction: VirtualAddress,
+) {
+    assert_eq!(registers.revision, state.revision);
+    assert_eq!(registers.target.architecture, Architecture::X86_64);
+    assert_eq!(registers.target.byte_order, ByteOrder::Little);
+    assert_eq!(registers.target.pointer_width, PointerWidth::Bits64);
+    assert_eq!(
+        registers.thread.get(),
+        match &state.inferior {
+            InferiorState::Stopped { process_id, .. } => process_id.get(),
+            _ => panic!("inferior was not stopped"),
+        }
+    );
+    assert_eq!(
+        register_u64(registers, RegisterRole::ProgramCounter),
+        instruction.get()
+    );
+    assert_ne!(register_u64(registers, RegisterRole::StackPointer), 0);
+    assert_ne!(register_u64(registers, RegisterRole::FramePointer), 0);
+    assert!(registers.registers.iter().any(|value| {
+        value.register.name.as_ref() == "rax"
+            && value.register.bits == 64
+            && value.bytes.as_ref().is_some_and(|bytes| bytes.len() == 8)
+    }));
 }

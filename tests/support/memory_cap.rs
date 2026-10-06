@@ -1,10 +1,7 @@
-//! Caps the live heap of a test process.
-//!
-//! A test that allocates without bound, such as a parser that stops consuming
-//! its input while it pushes tokens, would otherwise fill the machine's memory
-//! across every concurrent test process before any timeout ends it. Past the
-//! cap, an allocation fails, which aborts the process with Rust's
-//! allocation-failure message after this module names the cap.
+//! Caps the live heap of a test process, so that a test allocating without
+//! bound aborts before it and its concurrent siblings fill the machine's
+//! memory. Past the cap an allocation fails, which aborts the process after
+//! this module names the cap.
 
 #![allow(unsafe_code, reason = "a global allocator is an unsafe trait")]
 
@@ -12,8 +9,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// The most live heap one test process may hold. The heaviest test today
-/// peaks near 270 MB of resident memory.
+/// The most live heap one test process may hold, several times the heaviest
+/// test's.
 const CAP_BYTES: usize = 1 << 30;
 
 struct CappedAllocator {

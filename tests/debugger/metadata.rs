@@ -52,7 +52,12 @@ async fn discarded_functions_are_not_cataloged_at_their_tombstone_addresses() {
 }
 
 #[tokio::test]
-async fn normalized_type_graph_is_public_dense_and_closed_across_languages() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the compiler-language matrix checks its graphs and their semantics"
+)]
+async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
+    let mut images = BTreeMap::new();
     for fixture in [
         "variables-gcc-o0",
         "variables-clang-o0",
@@ -94,17 +99,11 @@ async fn normalized_type_graph_is_public_dense_and_closed_across_languages() {
                 }
             }
         }
+        images.insert(fixture, image);
     }
-}
 
-#[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one compiler-language matrix keeps the cross-language semantic contract visible"
-)]
-async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
     for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
-        let image = load_fixture_image(fixture).await;
+        let image = &images[fixture];
         let resolved = image
             .types()
             .iter()
@@ -149,7 +148,7 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
     }
 
     for fixture in ["variables-cpp-gcc-o0", "variables-cpp-clang-o0"] {
-        let image = load_fixture_image(fixture).await;
+        let image = &images[fixture];
         assert!(
             image.types().iter().any(|node| matches!(
                 node,
@@ -167,7 +166,7 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
     }
 
     for fixture in ["types-cpp-gcc-dwarf4", "types-cpp-gcc-dwarf5"] {
-        let image = load_fixture_image(fixture).await;
+        let image = &images[fixture];
         for name in ["counted_global", "packed_global"] {
             let global = image
                 .globals()
@@ -188,7 +187,7 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
     }
 
     for fixture in ["types-c-gcc-o0", "types-c-clang-o0"] {
-        let image = load_fixture_image(fixture).await;
+        let image = &images[fixture];
         let global_type = |name: &str| {
             let global = image
                 .globals()
@@ -243,7 +242,7 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
         }
     }
 
-    let go = load_fixture_image("variables-go-o0").await;
+    let go = &images["variables-go-o0"];
     assert!(
         go.types().iter().any(|node| matches!(
             node,
@@ -279,9 +278,8 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
         !go_names.iter().any(|name| name.contains("scalarAlias")),
         "Go source aliases erased by the producer must not be reconstructed: {go_names:?}"
     );
-    drop(go);
 
-    let zig = load_fixture_image("variables-zig-o0").await;
+    let zig = &images["variables-zig-o0"];
     assert!(
         zig.types().iter().any(|node| matches!(
             node,
@@ -295,9 +293,8 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
         )),
         "Zig producer wrappers must be identified as encodings"
     );
-    drop(zig);
 
-    let rust = load_fixture_image("variables-rust-o0").await;
+    let rust = &images["variables-rust-o0"];
     assert!(
         rust.types()
             .iter()
@@ -318,19 +315,13 @@ async fn dwarf_normalization_preserves_inline_instances_and_line_rows() {
         "inline-clang-o1",
         "inline-clang-o2",
     ] {
-        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("initialize debugger");
-        let image = debugger.handle().module_image().clone();
-        assert_inline_metadata(&image, fixture);
-
-        debugger.shutdown().await.expect("shutdown debugger");
+        assert_inline_metadata(&*load_fixture_image(fixture).await, fixture);
     }
 }
 
 #[tokio::test]
 async fn line_zero_rows_do_not_extend_the_previous_source_line() {
-    let debugger =
-        Debugger::new(Scenario::fixture("variables-rust-o0")).expect("initialize debugger");
-    let image = debugger.handle().module_image().clone();
+    let image = load_fixture_image("variables-rust-o0").await;
     let function = image
         .function_named("inspect_scalars")
         .expect("inspect_scalars definition");
@@ -359,15 +350,11 @@ async fn line_zero_rows_do_not_extend_the_previous_source_line() {
         unattributed > 0,
         "line-0 regions were attributed to a neighboring source line"
     );
-
-    debugger.shutdown().await.expect("shutdown debugger");
 }
 
 /// A line table's last row for a function runs on, to the next row,
 /// through code the compiler did not describe, such as hand-written
-/// assembly placed after it. That code has no source line: the simulator
-/// found a step stopping in such assembly, presented as the closing brace
-/// of the C function before it.
+/// assembly placed after it. That code has no source line.
 #[tokio::test]
 async fn hand_written_assembly_after_a_function_has_no_source_line() {
     let image = load_fixture_image("assembly-after-code").await;
@@ -399,4 +386,154 @@ async fn hand_written_assembly_after_a_function_has_no_source_line() {
     // The row before still describes the function it belongs to.
     let before = uscope::ImageAddress::new(extent.start.get() - 1);
     assert!(image.locate(before).source.is_some());
+}
+
+fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {
+    let mut edges = Vec::new();
+    match kind {
+        uscope::TypeKind::Enumeration { underlying, .. } => {
+            edges.extend(underlying.iter().copied());
+        }
+        uscope::TypeKind::Pointer { target, .. } | uscope::TypeKind::Named { target, .. } => {
+            edges.extend(target.iter().copied());
+        }
+        uscope::TypeKind::Reference { target, .. } | uscope::TypeKind::Modified { target, .. } => {
+            edges.push(*target);
+        }
+        uscope::TypeKind::Array { element, .. } | uscope::TypeKind::Slice { element, .. } => {
+            edges.push(*element);
+        }
+        uscope::TypeKind::Record { members, bases, .. } => {
+            edges.extend(members.iter().map(|member| member.type_ref));
+            edges.extend(bases.iter().map(|base| base.type_ref));
+        }
+        uscope::TypeKind::Union { members, .. } => {
+            edges.extend(members.iter().map(|member| member.type_ref));
+        }
+        uscope::TypeKind::Variant {
+            common_members,
+            bases,
+            discriminant,
+            variants,
+            ..
+        } => {
+            edges.extend(common_members.iter().map(|member| member.type_ref));
+            edges.extend(bases.iter().map(|base| base.type_ref));
+            match discriminant.as_ref() {
+                uscope::VariantDiscriminant::Stored(member) => edges.push(member.type_ref),
+                uscope::VariantDiscriminant::TagType(reference) => edges.push(*reference),
+                _ => {}
+            }
+            edges.extend(
+                variants
+                    .iter()
+                    .flat_map(|variant| variant.members.iter())
+                    .map(|member| member.type_ref),
+            );
+        }
+        _ => {}
+    }
+    edges
+}
+
+fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
+    let leaf = image.function_named("leaf").expect("leaf definition");
+    let leaf_instances: Vec<_> = image
+        .instances_for_function(leaf.id)
+        .filter(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }))
+        .collect();
+
+    assert_eq!(
+        leaf_instances.len(),
+        6,
+        "unexpected {fixture} leaf instances"
+    );
+    assert_eq!(
+        image
+            .code_instances()
+            .iter()
+            .filter(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }))
+            .count(),
+        9,
+        "unexpected {fixture} inline instance count"
+    );
+    assert!(
+        image.code_instances().iter().any(|instance| {
+            matches!(instance.kind, CodeInstanceKind::Inline { .. }) && instance.ranges.len() > 1
+        }),
+        "{fixture} lost discontiguous ranges"
+    );
+
+    let mut columns_by_line = BTreeMap::<u64, BTreeSet<u64>>::new();
+    for instance in &leaf_instances {
+        let CodeInstanceKind::Inline {
+            call_site: Some(call_site),
+        } = &instance.kind
+        else {
+            panic!("{fixture} leaf instance has no call site")
+        };
+
+        if let Some(column) = call_site.column {
+            columns_by_line
+                .entry(call_site.line.get())
+                .or_default()
+                .insert(column.get());
+        }
+    }
+    assert!(
+        columns_by_line.values().any(|columns| columns.len() >= 2),
+        "{fixture} did not preserve same-line call columns"
+    );
+
+    let nested_leaf = leaf_instances
+        .iter()
+        .find(|instance| {
+            instance
+                .parent
+                .and_then(|parent| image.code_instance(parent))
+                .and_then(|parent| image.function(parent.function))
+                .is_some_and(|function| function.name.as_ref() == "middle")
+        })
+        .expect("nested leaf instance");
+    let location = image.locate(nested_leaf.ranges[0].start);
+    let InlineFrameLookup::Unique(chain) = location.inline_frames else {
+        panic!("{fixture} did not resolve one inline chain: {location:?}")
+    };
+    let chain_names: Vec<_> = chain
+        .instances
+        .iter()
+        .map(|instance| {
+            let instance = image.code_instance(*instance).expect("known instance");
+            image
+                .function(instance.function)
+                .expect("known function")
+                .name
+                .as_ref()
+        })
+        .collect();
+    assert_eq!(
+        chain_names,
+        ["middle", "leaf"],
+        "unexpected {fixture} chain"
+    );
+
+    assert!(!image.statement_rows().is_empty());
+    if fixture.starts_with("inline-gcc") {
+        assert!(
+            image.statement_rows().windows(2).any(|rows| {
+                rows[0].sequence == rows[1].sequence && rows[0].address == rows[1].address
+            }),
+            "{fixture} lost equal-address line rows"
+        );
+    }
+    let expected_provenance = if fixture.starts_with("inline-gcc") {
+        EntryProvenance::Explicit
+    } else {
+        EntryProvenance::RangeStart
+    };
+    assert!(leaf_instances.iter().all(|instance| {
+        instance
+            .breakpoint_entry
+            .is_some_and(|entry| entry.provenance == expected_provenance)
+    }));
 }
