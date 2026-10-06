@@ -110,12 +110,12 @@ impl ModuleLocator {
         let rooted = std::iter::once_with(move || {
             self.sysroot
                 .as_ref()
-                .map_or_else(|| open_host(recorded), |sysroot| sysroot.open(recorded))
+                .map_or_else(|| open(recorded, false), |sysroot| sysroot.open(recorded))
         });
         let named = recorded.file_name().into_iter().flat_map(move |name| {
             self.directories
                 .iter()
-                .map(move |directory| open_searched(&directory.path.join(name)))
+                .map(move |directory| open(&directory.path.join(name), true))
         });
         rooted.chain(named).filter_map(Result::transpose)
     }
@@ -134,7 +134,7 @@ impl ModuleLocator {
                     .get(build_id)
                     .into_iter()
                     .flatten()
-                    .map(|path| open_searched(path))
+                    .map(|path| open(path, true))
             })
             .filter_map(Result::transpose)
     }
@@ -213,18 +213,14 @@ fn file_build_id(path: &Path) -> Option<Vec<u8>> {
 
 /// Opens a file the user named explicitly, for which absence is an error.
 pub(super) fn open_explicit(path: &Path) -> Result<ModuleFile> {
-    read_opened(path, open_path(path), false)?.ok_or_else(|| Error::CoreModuleRead {
+    open(path, false)?.ok_or_else(|| Error::CoreModuleRead {
         path: path.to_owned(),
         error: io::Error::from(io::ErrorKind::NotFound),
     })
 }
 
-fn open_host(path: &Path) -> Result<Option<ModuleFile>> {
-    read_opened(path, open_path(path), false)
-}
-
-fn open_searched(path: &Path) -> Result<Option<ModuleFile>> {
-    read_opened(path, open_path(path), true)
+fn open(path: &Path, searched: bool) -> Result<Option<ModuleFile>> {
+    read_opened(path, open_path(path), searched)
 }
 
 /// Opens a path without reading from it: devices and FIFOs, which paths in a

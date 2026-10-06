@@ -1,14 +1,14 @@
 //! Platform-neutral disassembly.
 //!
-//! Machine code has no self-describing instruction boundaries on variable
-//! length architectures, so decoding from an arbitrary address can produce a
-//! convincing but wrong instruction stream. The engine therefore decodes only
-//! forward from proven instruction starts: a stopped thread's program
-//! counter, the start of a function's debug-information range, the start of
-//! a code symbol, or the start of an executable section. Every known start it passes must coincide with a decoded
-//! boundary; when one does not, the conflict is reported and decoding resumes
-//! at the known start. Instructions before an address are presented only when
-//! decoding forward from a known start lands exactly on that address.
+//! Variable-length machine code has no self-describing instruction
+//! boundaries, so decoding from an arbitrary address can produce a
+//! convincing but wrong instruction stream. The engine decodes only forward
+//! from proven instruction starts: a stopped thread's program counter, the
+//! start of a function's debug-information range, a code symbol, or an
+//! executable section. Every known start it passes must coincide with a
+//! decoded boundary; when one does not, the conflict is reported and
+//! decoding resumes at the known start. Instructions before an address are
+//! shown only when decoding forward from a known start lands exactly on it.
 //!
 //! An indirect jump, call, or return is resolved against the stopped state:
 //! the memory it loads its target from is read at the stop, and registers
@@ -133,12 +133,10 @@ pub struct InstructionReference {
 ///
 /// The target is what the stop holds: the register containing it, or the
 /// memory the instruction loads it from, such as a global offset table slot
-/// or a return address on the stack. Register values are known only for the
-/// instruction the selected thread is about to execute, so elsewhere a target
-/// is known only when the instruction alone determines the address it is
-/// loaded from. A slot the dynamic loader has not yet filled is reported as it is,
-/// such as one still holding a lazy-binding stub, or nothing before the
-/// loader has run.
+/// or a return address on the stack. Registers are known only for the
+/// instruction the selected thread is about to execute; elsewhere a target
+/// is known only when the instruction alone determines where it is loaded
+/// from. A slot the dynamic loader has not filled is reported as it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IndirectTarget {

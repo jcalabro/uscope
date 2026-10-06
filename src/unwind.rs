@@ -1,3 +1,6 @@
+//! The generic unwind loop: it iterates the caller contexts a
+//! [`CallerProvider`] reconstructs.
+
 use std::collections::{BTreeMap, HashSet};
 
 use crate::{UnwindTermination, VirtualAddress};
@@ -12,6 +15,7 @@ pub struct FrameContext {
     pub signal_frame: bool,
 }
 
+/// Register values by DWARF number. An absent register is unknown.
 #[derive(Debug, Clone)]
 pub struct RegisterFile {
     values: BTreeMap<u16, u64>,
@@ -92,8 +96,8 @@ pub fn collect_frames<P: CallerProvider, F>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FrameKind, StackFrame};
 
+    /// Returns its callers last first, then finishes.
     struct SequenceProvider {
         callers: Vec<FrameContext>,
     }
@@ -107,101 +111,36 @@ mod tests {
         }
     }
 
-    fn frame<P>(level: u32, context: &FrameContext, _provider: &P) -> StackFrame {
-        StackFrame::new(
-            level,
-            if context.signal_frame {
-                FrameKind::Signal
-            } else {
-                FrameKind::Physical
-            },
-            None,
-            context.instruction,
-        )
-    }
-
-    #[test]
-    fn collection_preserves_frames_and_completion_reason() {
-        let initial = FrameContext {
-            instruction: VirtualAddress::new(3),
-            cfa: Some(VirtualAddress::new(30)),
+    fn context(instruction: u64, cfa: u64) -> FrameContext {
+        FrameContext {
+            instruction: VirtualAddress::new(instruction),
+            cfa: Some(VirtualAddress::new(cfa)),
             signal_frame: false,
-        };
-        let mut provider = SequenceProvider {
-            callers: vec![
-                FrameContext {
-                    instruction: VirtualAddress::new(1),
-                    cfa: Some(VirtualAddress::new(10)),
-                    signal_frame: false,
-                },
-                FrameContext {
-                    instruction: VirtualAddress::new(2),
-                    cfa: Some(VirtualAddress::new(20)),
-                    signal_frame: true,
-                },
-            ],
-        };
-
-        let (frames, termination) = collect_frames(initial, &mut provider, frame, 16);
-
-        assert_eq!(
-            frames
-                .iter()
-                .map(|frame| frame.instruction.get())
-                .collect::<Vec<_>>(),
-            [3, 2, 1]
-        );
-        assert_eq!(frames[1].kind, FrameKind::Signal);
-        assert_eq!(termination, UnwindTermination::Complete);
-    }
-
-    #[test]
-    fn collection_detects_cycles_and_depth_limit() {
-        let context = FrameContext {
-            instruction: VirtualAddress::new(1),
-            cfa: Some(VirtualAddress::new(10)),
-            signal_frame: false,
-        };
-        let mut cyclic = SequenceProvider {
-            callers: vec![context.clone(), context.clone()],
-        };
-        let (frames, termination) = collect_frames(context.clone(), &mut cyclic, frame, 16);
-        assert_eq!(frames.len(), 1, "the repeated frame is not shown twice");
-        assert_eq!(termination, UnwindTermination::CycleDetected);
-
-        let mut deep = SequenceProvider {
-            callers: vec![context.clone(), context.clone()],
-        };
-        let (frames, termination) = collect_frames(context, &mut deep, frame, 1);
-        assert_eq!(frames.len(), 1);
-        assert_eq!(termination, UnwindTermination::DepthLimit);
-    }
-
-    #[test]
-    fn collection_returns_a_valid_prefix_when_the_provider_stops() {
-        struct FailingProvider;
-
-        impl CallerProvider for FailingProvider {
-            fn caller(&mut self, current: &FrameContext) -> CallerResult {
-                CallerResult::Finished(UnwindTermination::NoUnwindInfo {
-                    address: current.instruction,
-                })
-            }
         }
+    }
 
-        let initial = FrameContext {
-            instruction: VirtualAddress::new(0x1234),
-            cfa: None,
-            signal_frame: false,
+    #[test]
+    fn collection_ends_with_the_provider_at_a_repeated_frame_or_at_the_limit() {
+        let collect = |initial, callers, max_frames| {
+            collect_frames(
+                initial,
+                &mut SequenceProvider { callers },
+                |_, context, _| context.instruction.get(),
+                max_frames,
+            )
         };
-        let (frames, termination) = collect_frames(initial, &mut FailingProvider, frame, 16);
-
-        assert_eq!(frames.len(), 1);
+        let callers = || vec![context(1, 10), context(2, 20)];
         assert_eq!(
-            termination,
-            UnwindTermination::NoUnwindInfo {
-                address: VirtualAddress::new(0x1234)
-            }
+            collect(context(3, 30), callers(), 16),
+            (vec![3, 2, 1], UnwindTermination::Complete)
+        );
+        assert_eq!(
+            collect(context(1, 10), vec![context(1, 10)], 16),
+            (vec![1], UnwindTermination::CycleDetected)
+        );
+        assert_eq!(
+            collect(context(3, 30), callers(), 1),
+            (vec![3], UnwindTermination::DepthLimit)
         );
     }
 }

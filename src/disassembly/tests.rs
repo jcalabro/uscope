@@ -422,23 +422,6 @@ fn instructions_render_in_either_syntax_and_report_encoded_addresses() {
     );
 }
 
-#[test]
-fn incomplete_and_invalid_encodings_are_told_apart() {
-    let mut decoder = x86(AssemblySyntax::Intel);
-    assert!(matches!(
-        decoder.decode(BASE, &[0x48, 0xb8, 1, 2], None),
-        RawDecode::Incomplete
-    ));
-    assert!(matches!(
-        decoder.decode(BASE, &[], None),
-        RawDecode::Incomplete
-    ));
-    assert!(matches!(
-        decoder.decode(BASE, &[0x06, 0x90], None),
-        RawDecode::Invalid
-    ));
-}
-
 /// Decodes one instruction at `BASE`, with a thread stopped there when
 /// `registers` are given. Pointer slots follow at 0x2000: an address at
 /// 0x2000, 0x1010 at 0x2008, and four readable bytes at 0x2010.

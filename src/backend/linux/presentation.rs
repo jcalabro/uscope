@@ -1,23 +1,23 @@
 //! Views at a stop: which view presents each type, the presentation every
 //! inspection path attaches to the values it returns, and the children of
-//! presented values (`plans/views.md` §3.11).
+//! presented values.
 //!
-//! Views run here, on the controller thread, inside the inspection that
-//! asked for the value, charged to its budget. A view binds once per type
-//! and view set; each presentation then reads only what it shows.
+//! Views run on the controller thread, inside the inspection that asked for
+//! the value and charged to its budget. A view binds once per type and view
+//! set; each presentation then reads only what it shows.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::debug_info::Located;
+use crate::eval::error::ErrorKind;
 use crate::eval::target::{
-    Lookup, Planned, Refusal, Register, Scope, StepKind, Stop, TypeLookup, TypeQuery,
+    Lookup, Machine as _, Planned, Refusal, Register, Scope, StepKind, Stop, TypeLookup, TypeQuery,
 };
 use crate::eval::types::{Ty, TypeSource};
 use crate::inspection::InspectionBudget;
-use crate::model::ValueStorage;
-use crate::model::ViewChildren;
+use crate::model::{ValueStorage, ViewChildren};
 use crate::protocol::StopId;
 use crate::view::bind::BoundShape;
 use crate::view::kernel::Recordings;
@@ -25,9 +25,9 @@ use crate::view::run::{Child, Failure};
 use crate::view::scan::Checkpoints;
 use crate::view::{Choice, ViewSet};
 use crate::{
-    ByteOrder, Error, InspectedValue, PointerWidth, Presentation, PresentedCount, PresentedShape,
-    Result, TypeInfo, TypeReference, ValueChild, ValueChildPage, ValueChildRelationship,
-    ValueChildren, ValueChildrenReference, VariableState, ViewProblem,
+    Error, InspectedValue, Presentation, PresentedCount, PresentedShape, Result, TypeInfo,
+    TypeKind, TypeReference, ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren,
+    ValueChildrenReference, VariableState, ViewProblem, VirtualAddress,
 };
 
 use super::evaluation::{
@@ -35,7 +35,6 @@ use super::evaluation::{
 };
 use super::native::InspectionOps;
 use super::{Controller, RuntimeModule};
-use crate::TypeKind;
 
 /// How deeply views present values inside the values they present.
 const MAX_DEPTH: u8 = 4;
@@ -46,6 +45,9 @@ const MAX_SCANS: usize = 64;
 
 /// How many children a recording of kernel runs presents after a value.
 const RECORDED_CHILDREN: u32 = 256;
+
+/// The most children of a variant a sum's presentation reads.
+const MAX_SUM_CHILDREN: u32 = 64;
 
 /// The views a controller presents values with, the view each type has,
 /// and where the scans of values presented at this stop have been.
@@ -103,38 +105,38 @@ impl Views {
         self.scans.borrow_mut().entries.clear();
     }
 
-    /// The checkpoints of a value's scan at `stop`.
-    fn checkpoints(&self, stop: StopId, key: &ScanKey) -> Checkpoints {
-        if let Some(recordings) = &*self.recording.borrow() {
-            return Checkpoints::recording(recordings.clone());
+    /// Runs one scan of the value `key` names at `stop` from the checkpoints
+    /// earlier scans of it left, and keeps the ones this scan leaves.
+    fn scan<T>(&self, stop: StopId, key: ScanKey, run: impl FnOnce(&mut Checkpoints) -> T) -> T {
+        let recording = self.recording.borrow().clone();
+        if let Some(recordings) = recording {
+            return run(&mut Checkpoints::recording(recordings));
         }
+        let mut checkpoints = {
+            let mut scans = self.scans.borrow_mut();
+            if scans.stop != Some(stop) {
+                scans.stop = Some(stop);
+                scans.entries.clear();
+            }
+            scans
+                .entries
+                .iter()
+                .find(|(existing, _)| *existing == key)
+                .map(|(_, checkpoints)| checkpoints.clone())
+                .unwrap_or_default()
+        };
+        let result = run(&mut checkpoints);
         let mut scans = self.scans.borrow_mut();
-        if scans.stop != Some(stop) {
-            scans.stop = Some(stop);
-            scans.entries.clear();
+        if scans.stop == Some(stop) {
+            scans.entries.retain(|(existing, _)| *existing != key);
+            if checkpoints != Checkpoints::default() {
+                if scans.entries.len() == MAX_SCANS {
+                    scans.entries.remove(0);
+                }
+                scans.entries.push((key, checkpoints));
+            }
         }
-        scans
-            .entries
-            .iter()
-            .find(|(existing, _)| existing == key)
-            .map(|(_, checkpoints)| checkpoints.clone())
-            .unwrap_or_default()
-    }
-
-    /// Keeps a value's checkpoints at `stop`.
-    fn keep(&self, stop: StopId, key: ScanKey, checkpoints: Checkpoints) {
-        let mut scans = self.scans.borrow_mut();
-        if scans.stop != Some(stop) || self.recording.borrow().is_some() {
-            return;
-        }
-        scans.entries.retain(|(existing, _)| *existing != key);
-        if checkpoints == Checkpoints::default() {
-            return;
-        }
-        if scans.entries.len() == MAX_SCANS {
-            scans.entries.remove(0);
-        }
-        scans.entries.push((key, checkpoints));
+        result
     }
 }
 
@@ -150,6 +152,19 @@ fn scan_key(bound: &ViewBound, image: crate::ModuleImageId, place: &StopPlace) -
     }
 }
 
+impl StopPlace {
+    /// Where the value a children reference belongs to is.
+    fn of(reference: &ValueChildrenReference) -> Self {
+        Self {
+            module: reference.module,
+            located: Located {
+                ty: reference.target_type,
+                storage: reference.storage.clone(),
+            },
+        }
+    }
+}
+
 /// The scope a view binds in: one module's types, and no names. A view
 /// sees nothing a frame names, so it means the same at every stop.
 struct ModuleScope<'a, P: InspectionOps> {
@@ -159,23 +174,14 @@ struct ModuleScope<'a, P: InspectionOps> {
 
 impl<P: InspectionOps> TypeSource for ModuleScope<'_, P> {
     fn type_info(&self, ty: TypeReference) -> Option<TypeInfo> {
-        self.controller
-            .modules
-            .values()
-            .find(|module| module.loaded.image == ty.image)?
-            .image
-            .type_info(ty)
-            .cloned()
+        self.controller.module_of(ty)?.image.type_info(ty).cloned()
     }
 
     fn pointer_size(&self) -> u8 {
-        match self.controller.module_image.target().pointer_width {
-            PointerWidth::Bits32 => 4,
-            PointerWidth::Bits64 => 8,
-        }
+        self.controller.pointer_size()
     }
 
-    fn byte_order(&self) -> ByteOrder {
+    fn byte_order(&self) -> crate::ByteOrder {
         self.controller.module_image.target().byte_order
     }
 
@@ -223,35 +229,21 @@ impl<P: InspectionOps> Scope for ModuleScope<'_, P> {
         let global = match self.module.image.global_named(name) {
             Ok(global) => global,
             Err(Error::VariableNotFound(_)) => return Ok(None),
-            Err(error) => {
-                return Err(Refusal::new(
-                    crate::eval::error::ErrorKind::AmbiguousName,
-                    error.to_string(),
-                ));
-            }
-        };
-        let refuse = |error: Error| {
-            Refusal::new(
-                crate::eval::error::ErrorKind::Unsupported,
-                error.to_string(),
-            )
+            Err(error) => return Err(Refusal::new(ErrorKind::AmbiguousName, error.to_string())),
         };
         let key = self
             .module
             .variables
             .global_object(global.id)
-            .map_err(refuse)?;
+            .map_err(|error| Refusal::new(ErrorKind::Unsupported, error.to_string()))?;
         let ty = self.module.variables.object_type(key).map_err(|reason| {
             Refusal::new(
-                crate::eval::error::ErrorKind::Unsupported,
+                ErrorKind::Unsupported,
                 format!("`{name}` has a malformed type: {reason}"),
             )
         })?;
         Ok(Some((
-            StopStep::Global(super::evaluation::StopObject::global(
-                self.module.loaded.id,
-                key,
-            )),
+            StopStep::Global(StopObject::global(self.module.loaded.id, key)),
             TypeReference {
                 image: self.module.loaded.image,
                 id: ty,
@@ -280,6 +272,21 @@ fn element_type(shape: &BoundShape<StopStep>) -> Option<TypeReference> {
     }
 }
 
+/// Each view a choice tried, with why it did not bind.
+fn candidates(choice: &Choice<StopStep>) -> Vec<crate::ViewCandidate> {
+    choice
+        .candidates
+        .iter()
+        .map(|candidate| crate::ViewCandidate {
+            view: Arc::clone(&candidate.name),
+            rejection: candidate
+                .rejection
+                .as_ref()
+                .map(|rejection| rejection.to_string().into()),
+        })
+        .collect()
+}
+
 impl<P: InspectionOps> Controller<P> {
     /// The view that presents values of `ty`, with why each candidate
     /// before it did not bind.
@@ -287,21 +294,16 @@ impl<P: InspectionOps> Controller<P> {
         if let Some(choice) = self.views.choices.borrow().get(&ty) {
             return Arc::clone(choice);
         }
-        let choice = Arc::new(
-            self.modules
-                .values()
-                .find(|module| module.loaded.image == ty.image)
-                .map_or_else(Choice::default, |module| {
-                    crate::view::choose_among(
-                        &[&self.views.set, module.image.views(), &ViewSet::built_in()],
-                        ty,
-                        &ModuleScope {
-                            controller: self,
-                            module,
-                        },
-                    )
-                }),
-        );
+        let choice = Arc::new(self.module_of(ty).map_or_else(Choice::default, |module| {
+            crate::view::choose_among(
+                &[&self.views.set, module.image.views(), &ViewSet::built_in()],
+                ty,
+                &ModuleScope {
+                    controller: self,
+                    module,
+                },
+            )
+        }));
         self.views
             .choices
             .borrow_mut()
@@ -409,58 +411,24 @@ impl<P: InspectionOps> Controller<P> {
         module: &RuntimeModule,
         reference: TypeReference,
     ) -> Option<crate::TypeViews> {
-        let type_info = module.image.type_info(reference)?.clone();
-        let choice = self.view_choice(reference);
         Some(crate::TypeViews {
-            type_info,
+            type_info: module.image.type_info(reference)?.clone(),
             module: Arc::from(module.image.path()),
-            candidates: choice
-                .candidates
-                .iter()
-                .map(|candidate| crate::ViewCandidate {
-                    view: Arc::clone(&candidate.name),
-                    rejection: candidate
-                        .rejection
-                        .as_ref()
-                        .map(|rejection| rejection.to_string().into()),
-                })
-                .collect(),
+            candidates: candidates(&self.view_choice(reference)).into(),
         })
     }
 
     /// Why an expression's value is presented as it is.
     pub(super) fn explain_view(
         &self,
-        stop_id: crate::StopId,
+        stop_id: StopId,
         pid: nix::unistd::Pid,
         frame: crate::StackFrameId,
         expression: &crate::Expression,
     ) -> Result<crate::ViewExplanation> {
-        let evaluation = self.evaluate(
-            stop_id,
-            pid,
-            frame,
-            expression,
-            crate::EvaluationMode::Read,
-            crate::InspectionLimits::default(),
-        )?;
-        let crate::Evaluation::Value { value, .. } = evaluation else {
-            return Err(Error::InvalidValueExpression(
-                "a range of elements has no view; explain one element".into(),
-            ));
-        };
+        let value = self.view_subject(stop_id, pid, frame, expression, "explain")?;
         let candidates = value.type_info.as_ref().map_or_else(Vec::new, |info| {
-            self.view_choice(info.reference)
-                .candidates
-                .iter()
-                .map(|candidate| crate::ViewCandidate {
-                    view: Arc::clone(&candidate.name),
-                    rejection: candidate
-                        .rejection
-                        .as_ref()
-                        .map(|rejection| rejection.to_string().into()),
-                })
-                .collect()
+            candidates(&self.view_choice(info.reference))
         });
         let presentation = match &value.state {
             VariableState::Available { presentation, .. } => presentation.clone(),
@@ -478,27 +446,15 @@ impl<P: InspectionOps> Controller<P> {
     /// returns a recording of each kernel run that took, as text.
     pub(super) fn record_kernels(
         &self,
-        stop_id: crate::StopId,
+        stop_id: StopId,
         pid: nix::unistd::Pid,
         frame: crate::StackFrameId,
         expression: &crate::Expression,
     ) -> Result<Vec<String>> {
         let recordings = Recordings::default();
         *self.views.recording.borrow_mut() = Some(recordings.clone());
-        let presented = (|| {
-            let evaluation = self.evaluate(
-                stop_id,
-                pid,
-                frame,
-                expression,
-                crate::EvaluationMode::Read,
-                crate::InspectionLimits::default(),
-            )?;
-            let crate::Evaluation::Value { value, .. } = evaluation else {
-                return Err(Error::InvalidValueExpression(
-                    "a range of elements has no view; record one element".into(),
-                ));
-            };
+        let presented = (|| -> Result<()> {
+            let value = self.view_subject(stop_id, pid, frame, expression, "record")?;
             if let VariableState::Available {
                 presentation: Some(presentation),
                 ..
@@ -519,6 +475,30 @@ impl<P: InspectionOps> Controller<P> {
         *self.views.recording.borrow_mut() = None;
         presented?;
         Ok(recordings.take().iter().map(ToString::to_string).collect())
+    }
+
+    /// The one value an expression has, for a request about its view.
+    fn view_subject(
+        &self,
+        stop_id: StopId,
+        pid: nix::unistd::Pid,
+        frame: crate::StackFrameId,
+        expression: &crate::Expression,
+        verb: &str,
+    ) -> Result<InspectedValue> {
+        match self.evaluate(
+            stop_id,
+            pid,
+            frame,
+            expression,
+            crate::EvaluationMode::Read,
+            crate::InspectionLimits::default(),
+        )? {
+            crate::Evaluation::Value { value, .. } => Ok(value),
+            _ => Err(Error::InvalidValueExpression(format!(
+                "a range of elements has no view; {verb} one element"
+            ))),
+        }
     }
 
     /// The step from a value of `from` to an element its view presents,
@@ -559,16 +539,10 @@ impl<P: InspectionOps> Controller<P> {
                 })
             })
             .transpose()?;
-        let this = StopPlace {
-            module: reference.module,
-            located: Located {
-                ty: reference.target_type,
-                storage: reference.storage.clone(),
-            },
-        };
+        let this = StopPlace::of(reference);
         let end = offset.saturating_add(u64::from(limit)).min(reference.total);
         let mut children = Vec::new();
-        let mut completion_budget_exhausted = None;
+        let mut exhausted = None;
         // A view that presents the value as another lends it that value's
         // children.
         let mut next = offset;
@@ -586,52 +560,49 @@ impl<P: InspectionOps> Controller<P> {
             )?;
             children.extend(page.children.iter().cloned());
             next = view.elements;
-            if page.completion.exhaustion().is_some() {
-                completion_budget_exhausted = page.completion.exhaustion();
-            }
+            exhausted = page.completion.exhaustion();
         }
-        // What the debugger presents without a view has only `[raw]` after
-        // the elements it lends.
-        if bound.is_none() && completion_budget_exhausted.is_none() && next < end {
+        if exhausted.is_none() && next < end {
             let mut machine = StopMachine::new(&scope, budget, true);
-            children.push(value_child(Child::Raw, &this, &mut machine)?);
-        }
-        if let (Some(bound), true) = (&bound, completion_budget_exhausted.is_none() && next < end) {
-            let mut machine = StopMachine::new(&scope, budget, true);
-            // With borrowed elements, the view's own children start at
-            // its fields.
-            let (start, elements) = if view.inner.is_some() {
-                (next - view.elements, 0)
-            } else {
-                (next, view.elements)
-            };
-            let key = scan_key(bound, reference.image, &this);
-            let mut checkpoints = self.views.checkpoints(reference.stop_id, &key);
-            let presented = crate::view::run::children(
-                bound,
-                &mut machine,
-                this.clone(),
-                elements,
-                start,
-                end - next,
-                &mut checkpoints,
-            );
-            self.views.keep(reference.stop_id, key, checkpoints);
-            let presented = match presented {
-                Ok(presented) => presented,
-                Err(Failure::Debugger(error)) => return Err(error),
-                Err(Failure::Problem(ViewProblem::Unavailable(
-                    crate::VariableUnavailableReason::InspectionLimit(exhaustion),
-                ))) => {
-                    completion_budget_exhausted = Some(exhaustion);
-                    Vec::new()
+            match &bound {
+                // What the debugger presents without a view has only `[raw]`
+                // after the elements it lends.
+                None => children.push(value_child(Child::Raw, &this, &mut machine)?),
+                Some(bound) => {
+                    // With borrowed elements, the view's own children start
+                    // at its fields.
+                    let (start, elements) = if view.inner.is_some() {
+                        (next - view.elements, 0)
+                    } else {
+                        (next, view.elements)
+                    };
+                    let key = scan_key(bound, reference.image, &this);
+                    let presented = self.views.scan(reference.stop_id, key, |checkpoints| {
+                        crate::view::run::children(
+                            bound,
+                            &mut machine,
+                            this.clone(),
+                            elements,
+                            start,
+                            end - next,
+                            checkpoints,
+                        )
+                    });
+                    match presented {
+                        Ok(presented) => {
+                            for child in presented {
+                                children.push(value_child(child, &this, &mut machine)?);
+                            }
+                        }
+                        Err(Failure::Debugger(error)) => return Err(error),
+                        Err(Failure::Problem(ViewProblem::Unavailable(
+                            crate::VariableUnavailableReason::InspectionLimit(exhaustion),
+                        ))) => exhausted = Some(exhaustion),
+                        Err(Failure::Problem(problem)) => {
+                            return Err(Error::ViewFailed(problem.to_string().into()));
+                        }
+                    }
                 }
-                Err(Failure::Problem(problem)) => {
-                    return Err(Error::ViewFailed(problem.to_string().into()));
-                }
-            };
-            for child in presented {
-                children.push(value_child(child, &this, &mut machine)?);
             }
         }
         Ok(ValueChildPage {
@@ -639,7 +610,7 @@ impl<P: InspectionOps> Controller<P> {
             offset,
             total: reference.total,
             children: children.into(),
-            completion: completion_budget_exhausted.map_or_else(
+            completion: exhausted.map_or_else(
                 || budget.completion(),
                 crate::InspectionCompletion::Truncated,
             ),
@@ -654,39 +625,31 @@ fn value_child<P: InspectionOps>(
     this: &StopPlace,
     machine: &mut StopMachine<'_, '_, P>,
 ) -> Result<ValueChild> {
-    Ok(match child {
-        Child::Element(index, value) => ValueChild {
-            relationship: ValueChildRelationship::Element { index },
-            type_info: value.type_info.unwrap_or_else(|| placeholder(this)),
-            state: value.state,
-        },
-        Child::Entry(index, key, value) => ValueChild {
-            relationship: ValueChildRelationship::Entry {
+    let (relationship, value) = match child {
+        Child::Element(index, value) => (ValueChildRelationship::Element { index }, value),
+        Child::Entry(index, key, value) => (
+            ValueChildRelationship::Entry {
                 index,
                 key: Arc::new(crate::MapKey {
                     type_info: key.type_info.clone().unwrap_or_else(|| placeholder(this)),
                     state: key.state,
                 }),
             },
-            type_info: value.type_info.unwrap_or_else(|| placeholder(this)),
-            state: value.state,
-        },
-        Child::Field(name, value) => ValueChild {
-            relationship: ValueChildRelationship::Field { name },
-            type_info: value.type_info.unwrap_or_else(|| placeholder(this)),
-            state: value.state,
-        },
+            value,
+        ),
+        Child::Field(name, value) => (ValueChildRelationship::Field { name }, value),
         Child::Raw => {
             let module = machine.module(this.module).map_err(stopped)?;
             let value = machine
                 .materialize(module, &this.located)
                 .map_err(stopped)?;
-            ValueChild {
-                relationship: ValueChildRelationship::Raw,
-                type_info: value.type_info.unwrap_or_else(|| placeholder(this)),
-                state: value.state,
-            }
+            (ValueChildRelationship::Raw, value)
         }
+    };
+    Ok(ValueChild {
+        relationship,
+        type_info: value.type_info.unwrap_or_else(|| placeholder(this)),
+        state: value.state,
     })
 }
 
@@ -696,6 +659,22 @@ enum Dynamic {
     Nil,
     /// A value of type `ty` at `place`.
     Value { ty: TypeReference, place: StopPlace },
+}
+
+impl Dynamic {
+    /// The value of type `ty` at `address`, in `module`.
+    const fn at(module: &RuntimeModule, ty: TypeReference, address: u64) -> Self {
+        Self::Value {
+            ty,
+            place: StopPlace {
+                module: module.loaded.id,
+                located: Located {
+                    ty: ty.id,
+                    storage: ValueStorage::Memory(VirtualAddress::new(address)),
+                },
+            },
+        }
+    }
 }
 
 /// A type and the types its typedefs and qualifiers stand for, outermost
@@ -789,9 +768,6 @@ fn one_type(image: &crate::ModuleImage, name: &str) -> Option<TypeReference> {
         .then_some(first)
 }
 
-/// The most children of a variant a sum's presentation reads.
-const MAX_SUM_CHILDREN: u32 = 64;
-
 /// How a sum type's value reads: the value standing for it, if any, and
 /// its summary.
 struct Sum {
@@ -819,13 +795,7 @@ impl Sum {
         // `error`, whose errors it names without the `error.` the LLVM
         // backend gives them.
         match (zig, name, members) {
-            (true, "null", []) => {
-                return Ok(Self {
-                    payload: None,
-                    summary: "null".to_owned(),
-                });
-            }
-            (true, "null", [member]) if holds_nothing(member) => {
+            (true, "null", [] | [_]) if members.iter().all(holds_nothing) => {
                 return Ok(Self {
                     payload: None,
                     summary: "null".to_owned(),
@@ -965,7 +935,7 @@ fn placeholder(this: &StopPlace) -> TypeInfo {
         },
         name: "<unknown type>".into(),
         byte_size: None,
-        kind: crate::TypeKind::Unspecified,
+        kind: TypeKind::Unspecified,
         identity: None,
     }
 }
@@ -979,14 +949,140 @@ fn stopped(stop: Stop) -> Error {
     }
 }
 
+/// How a value a view presented reads: its shape and count, and the value
+/// that lends it elements, with how many. A value presented as a sequence
+/// or map stands for this one as that sequence or map: its elements, then
+/// this value's own fields and `[raw]`.
+fn collection(
+    presented: &crate::view::run::Presented,
+) -> (
+    PresentedShape,
+    Option<PresentedCount>,
+    Option<Arc<ValueChildrenReference>>,
+    u64,
+) {
+    let inner = presented
+        .inner
+        .as_ref()
+        .and_then(|inner| lent(&inner.state));
+    let collection = presented
+        .inner
+        .as_ref()
+        .and_then(|inner| match &inner.state {
+            VariableState::Available {
+                presentation: Some(presentation),
+                ..
+            } if matches!(
+                presentation.shape,
+                PresentedShape::Sequence | PresentedShape::Map
+            ) =>
+            {
+                Some((presentation.shape, presentation.count))
+            }
+            _ => None,
+        });
+    let (shape, count) = collection.unwrap_or((presented.shape, presented.count));
+    let elements = match (&inner, collection) {
+        (Some(_), Some((_, count))) => count.map_or(0, PresentedCount::known),
+        (Some((_, lent)), None) => *lent,
+        (None, _) => presented.count.map_or(0, PresentedCount::known),
+    };
+    (
+        shape,
+        count,
+        inner.map(|(reference, _)| reference),
+        elements,
+    )
+}
+
+/// The children of `raw` presented through a view: `elements` that `inner`
+/// lends or `bound` presents, then `fields`, then `[raw]`.
+fn presented_children(
+    raw: &ValueChildrenReference,
+    bound: Option<Arc<ViewBound>>,
+    inner: Option<Arc<ValueChildrenReference>>,
+    elements: u64,
+    fields: u64,
+) -> ValueChildren {
+    let mut reference = raw.clone();
+    reference.total = elements.saturating_add(fields).saturating_add(1);
+    reference.active_variant = None;
+    reference.view = Some(ViewChildren {
+        bound: bound.map(|bound| bound as Arc<dyn std::any::Any + Send + Sync>),
+        elements,
+        fields,
+        inner,
+    });
+    ValueChildren::Available(Arc::new(reference))
+}
+
+/// A presentation the debugger makes from debug information alone, under
+/// `header`, standing for the value whose children are `lent`.
+fn built_in_presentation(
+    header: &str,
+    shape: PresentedShape,
+    summary: String,
+    raw: &ValueChildrenReference,
+    lent: Option<(Arc<ValueChildrenReference>, u64)>,
+) -> Presentation {
+    let (inner, elements) = lent.map_or((None, 0), |(inner, elements)| (Some(inner), elements));
+    Presentation {
+        view: Arc::new(crate::ViewName {
+            source: "uscope".into(),
+            line: 0,
+            header: header.into(),
+            extend: false,
+        }),
+        shape,
+        count: None,
+        summary: summary.into(),
+        children: presented_children(raw, None, inner, elements, 0),
+        problem: None,
+    }
+}
+
+/// `value` with `presentation`.
+fn present_as(mut value: InspectedValue, presentation: Presentation) -> InspectedValue {
+    if let VariableState::Available {
+        presentation: slot, ..
+    } = &mut value.state
+    {
+        *slot = Some(Arc::new(presentation));
+    }
+    value
+}
+
+/// The presentation of a value a view failed to present, which shows it as
+/// stored, with the reason.
+fn failed(view: Arc<crate::ViewName>, problem: ViewProblem) -> Presentation {
+    Presentation {
+        view,
+        shape: PresentedShape::Raw,
+        count: None,
+        summary: problem.to_string().into(),
+        children: ValueChildren::NotApplicable,
+        problem: Some(problem),
+    }
+}
+
+/// A view's failure to run for an expression, as the machine's stop.
+fn view_stop(failure: Failure, bound: &ViewBound, kind: ErrorKind) -> Stop {
+    match failure {
+        Failure::Debugger(error) => Stop::Failed(error),
+        Failure::Problem(ViewProblem::Unavailable(reason)) => {
+            Stop::missing(VariableState::Unavailable(reason))
+        }
+        Failure::Problem(problem) => Stop::Refused(Refusal::new(
+            kind,
+            format!("the view {}: {problem}", bound.view.header),
+        )),
+    }
+}
+
 impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
     /// `value` with its presentation, when a view presents its type. The
     /// view runs with a share of the budget, so a presentation that runs
     /// out never takes the rest of the inspection with it.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "pointers to text and presented values share one budgeted path"
-    )]
     pub(super) fn presented(
         &mut self,
         mut value: InspectedValue,
@@ -995,24 +1091,24 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if !controller.views.enabled || self.depth >= MAX_DEPTH {
             return Ok(value);
         }
-        let viewed = value
+        let bound = value
             .type_info
             .as_ref()
-            .is_some_and(|info| controller.view_choice(info.reference).bound.is_some());
-        if let VariableState::Available {
-            value: crate::VariableValue::Address(_),
-            dereference:
-                crate::DereferenceState::Available(crate::DereferenceReference {
-                    module,
-                    image,
-                    target_type,
-                    target: crate::model::DereferenceTarget::Address(address),
-                    ..
-                }),
-            text: None,
-            ..
-        } = &value.state
-            && !viewed
+            .and_then(|info| controller.view_choice(info.reference).bound.clone());
+        if bound.is_none()
+            && let VariableState::Available {
+                value: crate::VariableValue::Address(_),
+                dereference:
+                    crate::DereferenceState::Available(crate::DereferenceReference {
+                        module,
+                        image,
+                        target_type,
+                        target: crate::model::DereferenceTarget::Address(address),
+                        ..
+                    }),
+                text: None,
+                ..
+            } = &value.state
         {
             // A pointer or reference to text shows the text, as a pointer
             // to characters does, or why its view could not read it. A
@@ -1029,7 +1125,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 module: *module,
                 located: Located {
                     ty: *target_type,
-                    storage: crate::model::ValueStorage::Memory(*address),
+                    storage: ValueStorage::Memory(*address),
                 },
             };
             let (text, presentation) = self.pointee_text(target, place)?;
@@ -1053,7 +1149,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         else {
             return Ok(value);
         };
-        let Some(bound) = controller.view_choice(type_info.reference).bound.clone() else {
+        let Some(bound) = bound else {
             return self.built_in(value);
         };
         // An aggregate's children say where it is; another value, such as
@@ -1061,86 +1157,35 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let Some(raw) = self.place_of(type_info, &value.state) else {
             return Ok(value);
         };
-        let this = StopPlace {
-            module: raw.module,
-            located: Located {
-                ty: raw.target_type,
-                storage: raw.storage.clone(),
-            },
-        };
+        let this = StopPlace::of(&raw);
         let key = scan_key(&bound, type_info.reference.image, &this);
-        let mut checkpoints = controller.views.checkpoints(self.frame.stop_id, &key);
-        let result = self
-            .in_share(|machine| crate::view::run::present(&bound, machine, this, &mut checkpoints));
-        controller.views.keep(self.frame.stop_id, key, checkpoints);
+        let result = controller
+            .views
+            .scan(self.frame.stop_id, key, |checkpoints| {
+                self.in_share(|machine| {
+                    crate::view::run::present(&bound, machine, this, checkpoints)
+                })
+            });
         let name = crate::view::name_of(&bound.view);
-        let (presentation, text) = match result {
-            Ok(presented) => {
-                let fields = presented.named;
-                let inner = presented
-                    .inner
-                    .as_ref()
-                    .and_then(|inner| lent(&inner.state));
-                // A value presented as a sequence or map stands for this one
-                // as that sequence or map: its elements, then this value's
-                // own fields and `[raw]`.
-                let collection = presented
-                    .inner
-                    .as_ref()
-                    .and_then(|inner| match &inner.state {
-                        VariableState::Available {
-                            presentation: Some(presentation),
-                            ..
-                        } if matches!(
-                            presentation.shape,
-                            PresentedShape::Sequence | PresentedShape::Map
-                        ) =>
-                        {
-                            Some((presentation.shape, presentation.count))
-                        }
-                        _ => None,
-                    });
-                let (shape, count) = collection.unwrap_or((presented.shape, presented.count));
-                let elements = match (&inner, collection) {
-                    (Some(_), Some((_, count))) => count.map_or(0, PresentedCount::known),
-                    (Some((_, lent)), None) => *lent,
-                    (None, _) => presented.count.map_or(0, PresentedCount::known),
-                };
-                let inner = inner.map(|(reference, _)| reference);
-                let mut reference = (*raw).clone();
-                reference.total = elements.saturating_add(fields).saturating_add(1);
-                reference.active_variant = None;
-                reference.view = Some(ViewChildren {
-                    bound: Some(bound as Arc<dyn std::any::Any + Send + Sync>),
-                    elements,
-                    fields,
-                    inner,
-                });
-                (
-                    Presentation {
-                        view: name,
-                        shape,
-                        count,
-                        summary: presented.summary.into(),
-                        children: ValueChildren::Available(Arc::new(reference)),
-                        problem: presented.partial,
-                    },
-                    presented.text,
-                )
-            }
-            Err(Failure::Problem(problem)) => (failed(name, problem), None),
+        let presented = match result {
+            Ok(presented) => presented,
+            Err(Failure::Problem(problem)) => return Ok(present_as(value, failed(name, problem))),
             Err(Failure::Debugger(error)) => return Err(Stop::Failed(error)),
         };
-        if let VariableState::Available {
-            text: state_text,
-            presentation: state_presentation,
-            ..
-        } = &mut value.state
+        let (shape, count, inner, elements) = collection(&presented);
+        let presentation = Presentation {
+            view: name,
+            shape,
+            count,
+            summary: presented.summary.into(),
+            children: presented_children(&raw, Some(bound), inner, elements, presented.named),
+            problem: presented.partial,
+        };
+        let mut value = present_as(value, presentation);
+        if let Some(text) = presented.text
+            && let VariableState::Available { text: slot, .. } = &mut value.state
         {
-            if let Some(text) = text {
-                *state_text = Some(Arc::new(text));
-            }
-            *state_presentation = Some(Arc::new(presentation));
+            *slot = Some(Arc::new(text));
         }
         Ok(value)
     }
@@ -1176,8 +1221,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             .as_ref()
             .map(|identity| identity.language);
         let children = self.children_of(&raw)?;
-        let first = children.len().saturating_sub(variant.members.len());
-        let members = &children[first..];
+        let members = &children[children.len().saturating_sub(variant.members.len())..];
         let name = variant
             .name
             .clone()
@@ -1187,7 +1231,19 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             })
             .unwrap_or_else(|| Arc::from("<unnamed variant>"));
         let sum = Sum::of(language, &name, members, self)?;
-        Ok(Self::with_sum(value, &raw, sum))
+        let shape = if sum.payload.is_some() {
+            PresentedShape::Value
+        } else {
+            PresentedShape::Empty
+        };
+        let lent = sum
+            .payload
+            .as_ref()
+            .and_then(|payload| lent(&payload.state));
+        Ok(present_as(
+            value,
+            built_in_presentation("sum types", shape, sum.summary, &raw, lent),
+        ))
     }
 
     /// What a value dynamically is, when its debug information and the
@@ -1201,13 +1257,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let Some(this) = self.place_of(type_info, &value.state) else {
             return Ok(None);
         };
-        let place = StopPlace {
-            module: this.module,
-            located: Located {
-                ty: this.target_type,
-                storage: this.storage.clone(),
-            },
-        };
+        let place = StopPlace::of(&this);
         let language = typedef_chain(self, type_info.reference)
             .iter()
             .find_map(|info| info.identity.as_ref().map(|identity| identity.language));
@@ -1258,7 +1308,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if !polymorphic(self, type_info.reference, 0) {
             return Ok(None);
         }
-        let crate::model::ValueStorage::Memory(address) = place.located.storage else {
+        let ValueStorage::Memory(address) = place.located.storage else {
             return Ok(None);
         };
         let address = address.get();
@@ -1287,16 +1337,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if whole == address && module.image.same_type(ty, type_info.reference) {
             return Ok(None);
         }
-        Ok(Some(Dynamic::Value {
-            ty,
-            place: StopPlace {
-                module: module.loaded.id,
-                located: Located {
-                    ty: ty.id,
-                    storage: crate::model::ValueStorage::Memory(crate::VirtualAddress::new(whole)),
-                },
-            },
-        }))
+        Ok(Some(Dynamic::at(module, ty, whole)))
     }
 
     /// A Rust trait object, `{pointer, vtable}` with a `dyn` pointee, holds
@@ -1329,7 +1370,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             .is_some_and(|target| target.name.starts_with("dyn "));
         let (
             true,
-            crate::model::ValueStorage::Memory(address),
+            ValueStorage::Memory(address),
             crate::RecordMemberLayout::ByteOffset(pointer_offset),
             crate::RecordMemberLayout::ByteOffset(vtable_offset),
         ) = (
@@ -1350,16 +1391,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let Some(ty) = module.image.trait_object_type(image) else {
             return Ok(None);
         };
-        Ok(Some(Dynamic::Value {
-            ty,
-            place: StopPlace {
-                module: module.loaded.id,
-                located: Located {
-                    ty: ty.id,
-                    storage: crate::model::ValueStorage::Memory(crate::VirtualAddress::new(data)),
-                },
-            },
-        }))
+        Ok(Some(Dynamic::at(module, ty, data)))
     }
 
     /// A Go interface holds the value of the type its runtime type
@@ -1384,7 +1416,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let Ok((_, record)) = crate::eval::types::representation(self, type_info.reference) else {
             return Ok(None);
         };
-        let (true, TypeKind::Record { members, .. }, crate::model::ValueStorage::Memory(address)) =
+        let (true, TypeKind::Record { members, .. }, ValueStorage::Memory(address)) =
             (is_interface, &record.kind, &place.located.storage)
         else {
             return Ok(None);
@@ -1448,40 +1480,28 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             || self.read(descriptor + kind, 1)?[0] & 0x20 != 0;
         let data = address + data_offset;
         let storage = if direct { data } else { self.word(data)? };
-        Ok(Some(Dynamic::Value {
-            ty,
-            place: StopPlace {
-                module: module.loaded.id,
-                located: Located {
-                    ty: ty.id,
-                    storage: crate::model::ValueStorage::Memory(crate::VirtualAddress::new(
-                        storage,
-                    )),
-                },
-            },
-        }))
+        Ok(Some(Dynamic::at(module, ty, storage)))
     }
 
     /// `value` with the presentation of what it dynamically is.
     fn with_dynamic(
         &mut self,
-        mut value: InspectedValue,
+        value: InspectedValue,
         dynamic: Dynamic,
     ) -> std::result::Result<InspectedValue, Stop> {
-        let Some(type_info) = value.type_info.clone() else {
+        let Some(raw) = value
+            .type_info
+            .as_ref()
+            .and_then(|info| self.place_of(info, &value.state))
+        else {
             return Ok(value);
         };
-        let Some(raw) = self.place_of(&type_info, &value.state) else {
-            return Ok(value);
-        };
-        let (shape, summary, inner) = match dynamic {
+        let (shape, summary, lent) = match dynamic {
             Dynamic::Nil => (PresentedShape::Empty, "nil".to_owned(), None),
             Dynamic::Value { ty, place } => {
                 let module = self.module(place.module)?;
                 let stored = self.materialize(module, &place.located)?;
-                let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
-                machine.depth = self.depth + 1;
-                let presented = machine.presented(stored)?;
+                let presented = self.nested(self.depth + 1).presented(stored)?;
                 let name = self
                     .type_info(ty)
                     .map_or_else(|| "<unknown type>".to_owned(), |info| info.name.to_string());
@@ -1504,42 +1524,17 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                         ),
                     },
                 };
-                let summary = format!("{name} {shown}");
-                (PresentedShape::Dynamic, summary, lent(&presented.state))
+                (
+                    PresentedShape::Dynamic,
+                    format!("{name} {shown}"),
+                    lent(&presented.state),
+                )
             }
         };
-        let elements = inner.as_ref().map_or(0, |(_, lent)| *lent);
-        let inner = inner.map(|(reference, _)| reference);
-        let mut reference = (*raw).clone();
-        reference.total = elements.saturating_add(1);
-        reference.active_variant = None;
-        reference.view = Some(ViewChildren {
-            bound: None,
-            elements,
-            fields: 0,
-            inner,
-        });
-        let presentation = Presentation {
-            view: Arc::new(crate::ViewName {
-                source: "uscope".into(),
-                line: 0,
-                header: "dynamic types".into(),
-                extend: false,
-            }),
-            shape,
-            count: None,
-            summary: summary.into(),
-            children: ValueChildren::Available(Arc::new(reference)),
-            problem: None,
-        };
-        if let VariableState::Available {
-            presentation: state_presentation,
-            ..
-        } = &mut value.state
-        {
-            *state_presentation = Some(Arc::new(presentation));
-        }
-        Ok(value)
+        Ok(present_as(
+            value,
+            built_in_presentation("dynamic types", shape, summary, &raw, lent),
+        ))
     }
 
     /// A record's members on one line, `{x: 1, y: 2}`, with its base
@@ -1656,20 +1651,14 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             return Ok(Vec::new());
         }
         let module = self.module(reference.module)?;
-        let mut runtime = self.frame.controller.frame_runtime(
-            self.frame.inferior,
-            self.frame.pid,
-            self.frame.resolved,
-            module,
-        );
+        let mut runtime = self.frame.runtime(module);
         let limit = u32::try_from(reference.total.min(u64::from(MAX_SUM_CHILDREN)))
             .unwrap_or(MAX_SUM_CHILDREN);
         let page = module
             .variables
             .value_children(reference, 0, limit, &mut runtime, self.budget)
             .map_err(Stop::Failed)?;
-        let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
-        machine.depth = self.depth + 1;
+        let mut machine = self.nested(self.depth + 1);
         let mut children = page.children.to_vec();
         for child in &mut children {
             let state = std::mem::replace(
@@ -1684,62 +1673,12 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         Ok(children)
     }
 
-    /// `value` with the presentation of the sum it is.
-    fn with_sum(
-        mut value: InspectedValue,
-        raw: &ValueChildrenReference,
-        sum: Sum,
-    ) -> InspectedValue {
-        let inner = sum
-            .payload
-            .as_ref()
-            .and_then(|payload| lent(&payload.state));
-        let elements = inner.as_ref().map_or(0, |(_, lent)| *lent);
-        let inner = inner.map(|(reference, _)| reference);
-        let mut reference = raw.clone();
-        reference.total = elements.saturating_add(1);
-        reference.active_variant = None;
-        reference.view = Some(ViewChildren {
-            bound: None,
-            elements,
-            fields: 0,
-            inner,
-        });
-        let presentation = Presentation {
-            view: Arc::new(crate::ViewName {
-                source: "uscope".into(),
-                line: 0,
-                header: "sum types".into(),
-                extend: false,
-            }),
-            shape: if sum.payload.is_some() {
-                PresentedShape::Value
-            } else {
-                PresentedShape::Empty
-            },
-            count: None,
-            summary: sum.summary.into(),
-            children: ValueChildren::Available(Arc::new(reference)),
-            problem: None,
-        };
-        if let VariableState::Available {
-            presentation: state_presentation,
-            ..
-        } = &mut value.state
-        {
-            *state_presentation = Some(Arc::new(presentation));
-        }
-        value
-    }
-
     /// Runs a view one level deeper. A view presenting a value at the top
     /// runs on a share of the budget, so running out never takes the rest
     /// of the inspection with it; the values inside it share that share.
     fn in_share<T>(&mut self, run: impl FnOnce(&mut StopMachine<'_, '_, P>) -> T) -> T {
         if self.depth > 0 {
-            let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
-            machine.depth = self.depth + 1;
-            return run(&mut machine);
+            return run(&mut self.nested(self.depth + 1));
         }
         let mut share = self.budget.share();
         let result = {
@@ -1780,7 +1719,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             },
             _ => return None,
         };
-        let module = self.frame.module_of(type_info.reference)?;
+        let module = self.frame.controller.module_of(type_info.reference)?;
         let context = self.context(module);
         Some(Arc::new(ValueChildrenReference {
             stop_id: context.stop_id,
@@ -1834,30 +1773,21 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         index: i128,
     ) -> std::result::Result<StopPlace, Stop> {
         let controller = self.frame.controller;
-        let image = self.module(from.module)?.loaded.image;
-        let key = scan_key(bound, image, from);
-        let mut checkpoints = controller.views.checkpoints(self.frame.stop_id, &key);
-        let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
-        machine.depth = self.depth;
-        let result = crate::view::run::element_place(
-            bound,
-            &mut machine,
-            from.clone(),
-            index,
-            &mut checkpoints,
-        );
-        controller.views.keep(self.frame.stop_id, key, checkpoints);
-        match result {
-            Ok(place) => Ok(place),
-            Err(Failure::Debugger(error)) => Err(Stop::Failed(error)),
-            Err(Failure::Problem(ViewProblem::Unavailable(reason))) => {
-                Err(Stop::missing(VariableState::Unavailable(reason)))
-            }
-            Err(Failure::Problem(problem)) => Err(Stop::Refused(Refusal::new(
-                crate::ExpressionErrorKind::Unsupported,
-                format!("the view {}: {problem}", bound.view.header),
-            ))),
-        }
+        let stop = self.frame.stop_id;
+        let key = scan_key(bound, self.module(from.module)?.loaded.image, from);
+        let mut machine = self.nested(self.depth);
+        controller
+            .views
+            .scan(stop, key, |checkpoints| {
+                crate::view::run::element_place(
+                    bound,
+                    &mut machine,
+                    from.clone(),
+                    index,
+                    checkpoints,
+                )
+            })
+            .map_err(|failure| view_stop(failure, bound, ErrorKind::Unsupported))
     }
 
     /// How many elements the value at `at` holds, or the length of its
@@ -1874,54 +1804,36 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let Some(bound) = controller.view_choice(ty).bound.clone() else {
             return Ok(None);
         };
+        let stop = self.frame.stop_id;
         let key = scan_key(&bound, ty.image, at);
-        let mut checkpoints = controller.views.checkpoints(self.frame.stop_id, &key);
-        let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
-        machine.depth = self.depth;
-        let result = crate::view::run::length(&bound, &mut machine, at.clone(), &mut checkpoints);
-        controller.views.keep(self.frame.stop_id, key, checkpoints);
-        match result {
-            Ok(length) => Ok(Some(length)),
-            Err(Failure::Debugger(error)) => Err(Stop::Failed(error)),
-            Err(Failure::Problem(ViewProblem::Unavailable(reason))) => {
-                Err(Stop::missing(VariableState::Unavailable(reason)))
-            }
-            Err(Failure::Problem(problem)) => Err(Stop::Refused(Refusal::new(
-                crate::ExpressionErrorKind::Type,
-                format!("the view {}: {problem}", bound.view.header),
-            ))),
-        }
+        let mut machine = self.nested(self.depth);
+        controller
+            .views
+            .scan(stop, key, |checkpoints| {
+                crate::view::run::length(&bound, &mut machine, at.clone(), checkpoints)
+            })
+            .map(Some)
+            .map_err(|failure| view_stop(failure, &bound, ErrorKind::Type))
     }
 
-    /// A value the provider read, with its presentation. A value whose
+    /// Presents a value the provider read in place. A value whose
     /// presentation needed what the budget or the program could not provide
     /// is missing for that reason, as any value is, rather than failing the
     /// inspection it is part of.
     pub(super) fn present_state(
         &mut self,
         type_info: Option<TypeInfo>,
-        state: VariableState,
-    ) -> Result<VariableState> {
-        let value = self.finish(type_info, state);
-        match self.presented(value) {
-            Ok(value) => Ok(value.state),
-            Err(Stop::Missing(state)) => Ok(*state),
-            Err(stop) => Err(stopped(stop)),
-        }
+        state: &mut VariableState,
+    ) -> Result<()> {
+        let read = std::mem::replace(
+            state,
+            VariableState::Unavailable(crate::VariableUnavailableReason::EvaluationLimit),
+        );
+        *state = match self.presented(self.finish(type_info, read)) {
+            Ok(value) => value.state,
+            Err(Stop::Missing(missing)) => *missing,
+            Err(stop) => return Err(stopped(stop)),
+        };
+        Ok(())
     }
 }
-
-/// The presentation of a value a view failed to present, which shows it as
-/// stored, with the reason.
-fn failed(view: Arc<crate::ViewName>, problem: ViewProblem) -> Presentation {
-    Presentation {
-        view,
-        shape: PresentedShape::Raw,
-        count: None,
-        summary: problem.to_string().into(),
-        children: ValueChildren::NotApplicable,
-        problem: Some(problem),
-    }
-}
-
-use crate::eval::target::Machine as _;
