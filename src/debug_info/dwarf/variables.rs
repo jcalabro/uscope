@@ -32,7 +32,7 @@ use crate::{
 
 use super::{DieKey, DwarfError, Reader, UnitCatalog, die_code_ranges, is_type_unit};
 use die::{
-    check_data_object_capacity, data_object_scope_ranges, debug_info_offset,
+    check_data_object_capacity, copy_name, data_object_scope_ranges, debug_info_offset,
     declaration_with_origins, is_type_scope, origin_chain, strict_flag, string_with_origins,
     type_with_origins, variable_order_key,
 };
@@ -122,6 +122,10 @@ struct CatalogDataObject {
     lexical_depth: u32,
     order: u64,
     type_info: TypeResolution,
+    /// For a variable Go moved to the heap, which its debug information
+    /// names `&name`, the type of the pointer its location holds; the
+    /// variable is what that points to.
+    escaped: Option<TypeId>,
     value: Metadata<ValueDescription>,
     frame_base: Metadata<LocationDescription>,
     malformed: Option<Arc<str>>,
@@ -148,7 +152,26 @@ struct Scope {
 struct CatalogFunction {
     ranges: Arc<[AddressRange<ImageAddress>]>,
     objects: Vec<usize>,
+    /// The name a Go function value calling it shows.
+    name: Option<Arc<str>>,
+    /// The variables a Go closure captured, in its context, or why they
+    /// cannot be known.
+    captures: std::result::Result<Vec<Capture>, Arc<str>>,
 }
+
+/// One variable a Go closure captured: a copy of its value, or, when its
+/// name begins with `&`, a pointer to the variable.
+#[derive(Clone)]
+struct Capture {
+    name: Arc<str>,
+    /// Its offset in the closure's context, past the code pointer.
+    offset: u64,
+    type_info: TypeResolution,
+}
+
+/// Go's `DW_AT_go_closure_offset`: where in a closure's context a captured
+/// variable is.
+const DW_AT_GO_CLOSURE_OFFSET: gimli::DwAt = gimli::DwAt(0x2907);
 
 pub(super) struct DwarfVariableInfo {
     objects: Arc<[CatalogDataObject]>,
@@ -158,6 +181,9 @@ pub(super) struct DwarfVariableInfo {
     evaluation_units: Arc<[EvaluationUnit]>,
     types: Arc<[TypeNode]>,
     dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
+    /// Go functions by the address their code begins at, which a func
+    /// value holds.
+    go_function_entries: HashMap<ImageAddress, usize>,
     /// The float type of complex numbers' parts, by the part's name and size.
     complex_parts: HashMap<(Arc<str>, u64), TypeId>,
     objects_by_debug_offset: HashMap<u64, usize>,
@@ -191,6 +217,7 @@ pub(super) fn load_variable_info<'data>(
     let mut objects = Vec::new();
     let mut functions = Vec::new();
     let mut vtables = Vec::new();
+    let mut go_function_entries = HashMap::new();
     let mut order = 0_u64;
     let evaluation_units = load_evaluation_units(units)?;
     let mut types = TypeArenaBuilder::new(
@@ -235,9 +262,44 @@ pub(super) fn load_variable_info<'data>(
                     let ranges =
                         die_code_ranges(dwarf, unit, entry, &catalog.code).map(Arc::<[_]>::from)?;
                     let function = functions.len();
+                    let go = evaluation_units[unit_index].language == Some(gimli::DW_LANG_Go);
+                    if go && defined {
+                        // A func value holds the address its code begins at.
+                        let entry_address = entry
+                            .attr_value(gimli::DW_AT_low_pc)
+                            .map(|value| dwarf.attr_address(unit, value))
+                            .transpose()?
+                            .flatten()
+                            .map(ImageAddress::new)
+                            .filter(|address| ranges.iter().any(|range| range.contains(*address)));
+                        if let Some(address) = entry_address {
+                            go_function_entries.insert(address, function);
+                        }
+                    }
                     functions.push(CatalogFunction {
                         ranges: Arc::clone(&ranges),
                         objects: Vec::new(),
+                        // An optimized closure's out-of-line code names
+                        // its abstract origin.
+                        name: if go {
+                            origin_chain(units, unit_index, entry)
+                                .ok()
+                                .and_then(|chain| {
+                                    string_with_origins(
+                                        dwarf,
+                                        units,
+                                        unit,
+                                        entry,
+                                        &chain,
+                                        gimli::DW_AT_name,
+                                    )
+                                    .ok()
+                                })
+                                .flatten()
+                        } else {
+                            None
+                        },
+                        captures: Ok(Vec::new()),
                     });
                     Some(Scope {
                         ranges,
@@ -358,6 +420,31 @@ pub(super) fn load_variable_info<'data>(
                 gimli::DW_TAG_formal_parameter => Some(VariableKind::Parameter),
                 _ => None,
             };
+            if entry.tag() == gimli::DW_TAG_variable
+                && let Some(scope) = parent.as_ref().filter(|scope| scope.routine)
+                && let Some(offset) = entry.attr_value(DW_AT_GO_CLOSURE_OFFSET)
+            {
+                let (type_unit, type_value) = type_with_origins(unit_index, entry, &[]);
+                let capture = match (offset.udata_value(), copy_name(dwarf, unit, entry)) {
+                    (Some(offset), Ok(Some(name))) => Ok(Capture {
+                        name,
+                        offset,
+                        type_info: types.variable_type(type_unit, type_value),
+                    }),
+                    _ => Err(Arc::from("a closure's captured variable is malformed")),
+                };
+                // One capture it cannot describe leaves them all unknown,
+                // rather than the closure seeming to capture less.
+                let captures = &mut functions[scope.function].captures;
+                match capture {
+                    Ok(capture) => {
+                        if let Ok(captures) = captures {
+                            captures.push(capture);
+                        }
+                    }
+                    Err(reason) => *captures = Err(reason),
+                }
+            }
             if let Some(kind) = kind {
                 let owning_scope = parent.as_ref().filter(|scope| {
                     !scope.ranges.is_empty() && (kind == VariableKind::Local || scope.routine)
@@ -412,6 +499,36 @@ pub(super) fn load_variable_info<'data>(
                     );
                     let (ranges, scope_error) = data_object_scope_ranges(scope, entry);
                     let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
+                    let type_info = types.variable_type(type_unit, type_value);
+                    // Go names a variable it moved to the heap `&name`, and
+                    // describes the pointer to it.
+                    let go = evaluation_units[unit_index].language == Some(gimli::DW_LANG_Go);
+                    let (name, type_info, escaped) = match (go, name.strip_prefix('&')) {
+                        (true, Some(variable)) => {
+                            let variable = Arc::from(variable);
+                            match type_info {
+                                TypeResolution::Resolved(pointer) => match types.pointee(pointer) {
+                                    Some(target) => (
+                                        variable,
+                                        TypeResolution::Resolved(target),
+                                        Some(pointer),
+                                    ),
+                                    None => (
+                                        variable,
+                                        TypeResolution::Malformed(
+                                            "a variable Go moved to the heap is not described by a pointer"
+                                                .into(),
+                                        ),
+                                        None,
+                                    ),
+                                },
+                                malformed @ TypeResolution::Malformed(_) => {
+                                    (variable, malformed, None)
+                                }
+                            }
+                        }
+                        _ => (name, type_info, None),
+                    };
                     check_data_object_capacity(objects.len())?;
                     functions[scope.function].objects.push(objects.len());
                     objects.push(CatalogDataObject {
@@ -423,7 +540,8 @@ pub(super) fn load_variable_info<'data>(
                         instance: scope.instance,
                         lexical_depth: scope.lexical_depth,
                         order,
-                        type_info: types.variable_type(type_unit, type_value),
+                        type_info,
+                        escaped,
                         value: copy_data_object_value(dwarf, unit_index, unit, entry),
                         frame_base: scope.frame_base.clone(),
                         malformed: declaration
@@ -501,6 +619,7 @@ pub(super) fn load_variable_info<'data>(
             evaluation_units: evaluation_units.into(),
             types: Arc::clone(&finalized_types),
             dynamic_record_layouts: types.dynamic_record_layouts,
+            go_function_entries,
             complex_parts: types.complex_parts,
             objects_by_debug_offset,
             target,
@@ -832,6 +951,10 @@ pub(super) fn fuzz_expression(data: &[u8]) {
 
         fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>> {
             Ok(VirtualAddress::new(address.get()))
+        }
+
+        fn image_address(&self, address: VirtualAddress) -> Option<ImageAddress> {
+            Some(ImageAddress::new(address.get()))
         }
 
         fn read_memory(

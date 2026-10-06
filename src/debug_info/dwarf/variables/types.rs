@@ -631,6 +631,19 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 explicit_size,
                 TypeKind::Unspecified,
             )),
+            // A Go func is a pointer to its closure context.
+            gimli::DW_TAG_subroutine_type
+                if self.language(unit_index) == SourceLanguage::Go
+                    && Self::go_kind(entry) == Some(GoKind::Func)
+                    && explicit_size == Some(8) =>
+            {
+                Ok(resolved(
+                    reference,
+                    explicit_name.unwrap_or_else(|| Arc::from("func")),
+                    explicit_size,
+                    TypeKind::Function,
+                ))
+            }
             // A type this backend does not model is opaque, not defective.
             tag => Ok(opaque(
                 reference,
@@ -1234,6 +1247,21 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
         }
         self.assign_identities();
+    }
+
+    /// The type a built pointer type points to.
+    pub(super) fn pointee(&self, pointer: TypeId) -> Option<TypeId> {
+        match self.entries.get(pointer.index()) {
+            Some(TypeEntry::Resolved(TypeInfo {
+                kind:
+                    TypeKind::Pointer {
+                        target: Some(target),
+                        address_class: 0,
+                    },
+                ..
+            })) => Some(target.id),
+            _ => None,
+        }
     }
 
     /// Gives each complex type's real and imaginary parts a float type:
@@ -3334,6 +3362,7 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
             }
         }
         TypeKind::Base(_)
+        | TypeKind::Function
         | TypeKind::Enumeration {
             underlying: None, ..
         }

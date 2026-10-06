@@ -418,6 +418,10 @@ mod tests {
             Ok(VirtualAddress::new(address.get()))
         }
 
+        fn image_address(&self, _: VirtualAddress) -> Option<ImageAddress> {
+            None
+        }
+
         fn read_memory(
             &mut self,
             _: VirtualAddress,
