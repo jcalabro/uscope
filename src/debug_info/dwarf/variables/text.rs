@@ -332,15 +332,14 @@ impl DwarfVariableInfo {
     /// classes of libraries, whose layouts are private, are views
     /// (`views/`).
     fn string_parts(&self, record: TypeId, members: &[RecordMember]) -> Option<(u64, u64)> {
-        let info = self.type_info(record).ok()?;
-        let go_kind = info
-            .identity
-            .as_ref()
-            .and_then(|identity| identity.go)
-            .map(|go| go.kind);
-        (go_kind == Some(GoKind::String)).then_some(())?;
-        // Go's string header.
-        Some((member(members, "str")?.0, member(members, "len")?.0))
+        let go = self.type_info(record).ok()?.identity.as_ref()?.go?;
+        if go.kind != GoKind::String {
+            return None;
+        }
+        Some((
+            member_offset(members, "str")?,
+            member_offset(members, "len")?,
+        ))
     }
 
     pub(super) const fn pointer_bytes(&self) -> usize {
@@ -380,13 +379,12 @@ impl DwarfVariableInfo {
     }
 }
 
-/// A member's byte offset and type.
-fn member(members: &[RecordMember], name: &str) -> Option<(u64, TypeId)> {
+fn member_offset(members: &[RecordMember], name: &str) -> Option<u64> {
     let member = members
         .iter()
         .find(|member| member.name.as_deref() == Some(name))?;
     match member.layout {
-        RecordMemberLayout::ByteOffset(offset) => Some((offset, member.type_ref.id)),
+        RecordMemberLayout::ByteOffset(offset) => Some(offset),
         _ => None,
     }
 }

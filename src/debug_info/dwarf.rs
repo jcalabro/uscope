@@ -1242,11 +1242,10 @@ fn load_lines(
                 .checked_add(1)
                 .ok_or(gimli::Error::UnsupportedOffset)?;
 
-            // Rows without a resolvable file or with line 0 mark compiler-
-            // generated code with no source attribution. They still terminate
-            // the previous entry's range; extending it would misattribute the
-            // gap to a neighboring source line. A prologue or epilogue marker
-            // remains actionable even when that source attribution is absent.
+            // A row without a file or with line 0 is compiler-generated code.
+            // It still ends the previous entry's range, so the gap is not
+            // attributed to a neighboring line, and keeps its prologue and
+            // epilogue markers.
             let location = match (
                 row.file(header),
                 row.line().and_then(|line| LineNumber::new(line.get())),

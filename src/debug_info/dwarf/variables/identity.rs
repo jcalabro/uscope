@@ -524,7 +524,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             .unwrap_or_default()
     }
 
-    /// Resolves the arguments parsed from names, now that every identity
+    /// Resolves the arguments parsed from names, once every identity
     /// exists. An argument resolves when the types it could name are one.
     fn resolve_parsed_arguments(&mut self, unresolved: &[(usize, SourceLanguage, Vec<usize>)]) {
         if unresolved.is_empty() {

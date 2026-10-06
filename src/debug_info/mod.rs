@@ -269,11 +269,8 @@ pub trait VariableInfo: Send + Sync {
     fn object_storage(&self, object: ObjectKey) -> ObjectStorage;
 
     /// Evaluates one cataloged global at the selected thread's current stop.
-    ///
-    /// `address` is the module-relative instruction context, or `None` when the
-    /// stopped thread's program counter does not fall within this module. A
-    /// range-gated location that cannot be selected without a context resolves
-    /// to an explicit unavailable state rather than a guessed address.
+    /// `address` is the module-relative program counter, `None` outside this
+    /// module, where a range-gated location is unavailable.
     fn inspect_global(
         &self,
         id: GlobalVariableId,
