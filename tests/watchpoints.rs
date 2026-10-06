@@ -1658,7 +1658,21 @@ async fn go_watchpoints_follow_goroutines_onto_new_threads_and_refuse_stack_obje
         "{reason:?}"
     );
     let watchpoint = watch(&scenario, "main.watchedCounter", WatchAccess::Write).await;
-    scenario.add_breakpoint("main.stackLocal").await;
+    // A Go local exists only past the line declaring it.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go/watch/main.go"),
+    )
+    .expect("read the fixture's source");
+    let declared = source
+        .lines()
+        .position(|line| line.contains("local := int64(5)"))
+        .expect("the fixture declares local");
+    scenario
+        .add_source_breakpoint(
+            "main.go",
+            u64::try_from(declared + 2).expect("lines fit u64"),
+        )
+        .await;
 
     let mut hit_count = 0;
     let mut writers = BTreeSet::new();

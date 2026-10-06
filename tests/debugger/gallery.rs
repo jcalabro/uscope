@@ -357,6 +357,8 @@ async fn go_values_agree_with_their_program() {
                 "escape",
                 "results",
                 "unnamed-results",
+                "visibility-before",
+                "visibility-after",
                 "pieces",
             ],
             optimized,
