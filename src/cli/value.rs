@@ -306,6 +306,13 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
             match matches.as_ref() {
                 [] => raw,
                 [enumerator] => format!("{} ({raw})", enumerator.name),
+                // Flags whose bitwise OR the value is.
+                flags if flags.iter().all(|flag| flag.value != *value) => {
+                    format!(
+                        "{} ({raw})",
+                        uscope::symbol_text(*value, flags).unwrap_or_default()
+                    )
+                }
                 aliases => format!(
                     "{raw} <{}>",
                     aliases

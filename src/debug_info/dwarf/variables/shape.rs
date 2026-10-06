@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use crate::model::ArrayDimension;
 use crate::{
-    BaseClass, BaseType, Enumerator, RecordMember, TypeId, TypeInfo, TypeKind, TypeModifier,
-    TypeReference, Variant, VariantDiscriminant,
+    BaseClass, BaseType, EnumerationOrigin, Enumerator, RecordMember, TypeId, TypeInfo, TypeKind,
+    TypeModifier, TypeReference, Variant, VariantDiscriminant,
 };
 
 use super::codec::integer_bit_width;
@@ -21,6 +21,9 @@ pub(super) enum ValueShape {
         representation: BaseType,
         enumerators: Arc<[Enumerator]>,
         byte_size: u64,
+        /// A language's enumeration, or constants Go gave a named type,
+        /// which make only the values they name symbolic.
+        origin: EnumerationOrigin,
     },
     Array {
         element: TypeId,
@@ -220,6 +223,7 @@ fn nested_value_shape<T: TypeMetadataEntry>(
         TypeKind::Enumeration {
             representation,
             enumerators,
+            origin,
             ..
         } => {
             if representation.byte_size == 0 {
@@ -243,6 +247,7 @@ fn nested_value_shape<T: TypeMetadataEntry>(
                 byte_size: representation.byte_size,
                 representation,
                 enumerators: Arc::clone(enumerators),
+                origin: *origin,
             })
         }
         TypeKind::Array {

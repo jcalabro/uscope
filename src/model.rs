@@ -856,7 +856,8 @@ pub enum VariableValue {
     Enumeration {
         /// The exact target value.
         value: IntegerValue,
-        /// Exact symbolic matches in producer/source order.
+        /// Exact symbolic matches in producer/source order, or, when none
+        /// equals the value, the flag constants whose bitwise OR it is.
         matches: Arc<[Enumerator]>,
     },
     /// A concrete thin pointer or reference address.

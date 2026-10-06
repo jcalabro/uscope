@@ -267,8 +267,12 @@ fn shown(kind: &str, state: &VariableState, type_info: Option<&TypeInfo>) -> Str
         _ => unreachable!("integers are signed or unsigned"),
     };
     match (kind, value) {
-        ("int" | "uint", VariableValue::Scalar(ScalarValue::Signed(value))) => value.to_string(),
-        ("int" | "uint", VariableValue::Scalar(ScalarValue::Unsigned(value))) => value.to_string(),
+        ("int" | "uint" | "number", VariableValue::Scalar(ScalarValue::Signed(value))) => {
+            value.to_string()
+        }
+        ("int" | "uint" | "number", VariableValue::Scalar(ScalarValue::Unsigned(value))) => {
+            value.to_string()
+        }
         ("int" | "uint", VariableValue::Enumeration { value, .. }) => integer(value),
         ("f32", VariableValue::Scalar(ScalarValue::Floating(FloatValue::Binary32(bits)))) => {
             format!("{bits:#x}")
@@ -303,6 +307,9 @@ fn shown(kind: &str, state: &VariableState, type_info: Option<&TypeInfo>) -> Str
             uscope::function_text(*code, function.as_deref())
         }
         ("len", VariableValue::Slice { length, .. }) => length.to_string(),
+        ("symbol", VariableValue::Enumeration { value, matches }) => {
+            uscope::symbol_text(*value, matches).unwrap_or_else(|| format!("{value:?}"))
+        }
         ("string", _) => text
             .as_ref()
             .map_or_else(|| format!("{value:?}"), |text| uscope::quoted_text(text)),
@@ -384,6 +391,7 @@ async fn go_values_agree_with_their_program() {
                 "visibility-before",
                 "visibility-after",
                 "temporaries",
+                "constants",
                 "pieces",
             ],
             optimized,
