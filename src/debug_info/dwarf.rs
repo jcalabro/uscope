@@ -249,6 +249,7 @@ fn load_debug_info(
                 globals: variables.globals,
                 types: variables.types,
                 vtables: variables.vtables,
+                packages: go_packages(&dwarf, &catalog)?,
                 source_files,
                 statements,
                 lines,
@@ -279,6 +280,32 @@ fn embedded_views(
         .file_name()
         .map_or_else(|| "module".into(), |name| name.to_string_lossy());
     Ok(Arc::new(crate::view::embedded::view_set(&module, &bytes)))
+}
+
+/// Go's attribute naming the package a unit compiles, which its
+/// `DW_AT_name` names by import path.
+const DW_AT_GO_PACKAGE_NAME: gimli::DwAt = gimli::DwAt(0x2905);
+
+/// The Go packages the image has units for, with the names their code
+/// declares.
+fn go_packages(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    catalog: &UnitCatalog<'_>,
+) -> std::result::Result<Vec<crate::model::PackageInfo>, DwarfError> {
+    let mut packages = Vec::new();
+    for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
+        let mut entries = unit.entries();
+        let Some(root) = entries.next_dfs()? else {
+            continue;
+        };
+        if let (Some(path), Some(name)) = (
+            string_attribute(dwarf, unit, root, gimli::DW_AT_name)?,
+            string_attribute(dwarf, unit, root, DW_AT_GO_PACKAGE_NAME)?,
+        ) {
+            packages.push(crate::model::PackageInfo { path, name });
+        }
+    }
+    Ok(packages)
 }
 
 /// Returns the code ranges of every unit written in Go, merged and sorted

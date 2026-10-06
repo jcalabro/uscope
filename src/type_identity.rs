@@ -5,6 +5,8 @@
 //! what the structure does not say, and an argument that does not resolve to
 //! exactly one type stays unknown rather than being guessed.
 
+pub mod functions;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;

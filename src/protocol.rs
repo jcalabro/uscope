@@ -130,13 +130,15 @@ pub struct ViewExplanation {
 /// A user-facing request for a logical breakpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BreakpointSpec {
-    /// Break at every function with this name.
+    /// Break at every concrete instance of the functions a location names;
+    /// see [`crate::ModuleImage::functions_located`].
     Function(String),
     /// Break at every statement address of a source line. A line without
     /// statements moves to the next one with statements in the function
     /// containing it; see [`crate::ModuleImage::breakpoint_line`].
     Source { path: PathBuf, line: LineNumber },
-    /// Break at every concrete instance of a function declared in one source file.
+    /// Break at every concrete instance of the functions a location names
+    /// that are declared in one source file.
     FileFunction { path: PathBuf, function: String },
     /// Break at an absolute process virtual address.
     Address(VirtualAddress),

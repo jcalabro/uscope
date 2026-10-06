@@ -87,6 +87,27 @@ Addresses are always `0x`-prefixed, so `break add` names a function. Functions
 without debug information, such as libc's, break at their symbol, and
 breakpoints in a shared library wait until it loads.
 
+A function is first looked up by its whole name, and every function with
+that name and code gets a location, inlined copies included. Go functions
+can also be named as Go source names them:
+
+- by package name or import path: `http.(*Server).Serve` or
+  `net/http.(*Server).Serve`;
+- by the method's receiver, with or without its `*`: `(*T).M`, `T.M`, and
+  `pkg.T.M` all name `T`'s method `M`, whichever receiver it declares, as in
+  Delve, since a type has at most one method of a name;
+- by a generic function's name, which names every instantiation:
+  `main.Sum` breaks in `main.Sum[go.shape.int]` and the rest;
+- by a closure's compiler name, `main.main.func1`;
+- unqualified, `Serve` or `(*Server).Serve`. At a stop this first means the
+  selected frame's package, and the breakpoint keeps the qualified name,
+  such as `main.Serve`.
+
+A name that matches functions of more than one package, or more than one
+function of a package, is refused with each candidate's qualified name, so
+`break main` asks for `main.main` or `runtime.main`. Wrappers the compiler
+generates, such as ABI wrappers, are never chosen.
+
 A hit condition is an operator and a count: `==3` stops at the third hit only,
 `>=5` at the fifth and later, `%10` at every tenth, and `!=`, `<`, `<=`, and `>`
 work likewise. A bare count is refused, because debuggers disagree about what
