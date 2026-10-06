@@ -33,28 +33,21 @@ pub fn is_type_word(word: &str) -> bool {
     CWord::parse(word).is_some() || Tag::parse(word).is_some() || QUALIFIERS.contains(&word)
 }
 
-/// Binding strengths, loosest first.
-mod precedence {
-    pub const ASSIGN: u8 = 1;
-    pub const CONDITIONAL: u8 = 2;
-    pub const OR: u8 = 3;
-    pub const AND: u8 = 4;
-    pub const COMPARISON: u8 = 5;
-    pub const BIT_OR: u8 = 6;
-    pub const BIT_XOR: u8 = 7;
-    pub const BIT_AND: u8 = 8;
-    pub const SHIFT: u8 = 9;
-    pub const ADDITIVE: u8 = 10;
-    pub const MULTIPLICATIVE: u8 = 11;
-    pub const AS: u8 = 12;
-    pub const PREFIX: u8 = 13;
-    pub const POSTFIX: u8 = 14;
-}
-
-pub use precedence::{
-    ADDITIVE, AND, AS, ASSIGN, BIT_AND, BIT_OR, BIT_XOR, COMPARISON, CONDITIONAL, MULTIPLICATIVE,
-    OR, POSTFIX, PREFIX, SHIFT,
-};
+// Binding strengths, loosest first.
+pub const ASSIGN: u8 = 1;
+pub const CONDITIONAL: u8 = 2;
+const OR: u8 = 3;
+const AND: u8 = 4;
+pub const COMPARISON: u8 = 5;
+const BIT_OR: u8 = 6;
+const BIT_XOR: u8 = 7;
+const BIT_AND: u8 = 8;
+const SHIFT: u8 = 9;
+const ADDITIVE: u8 = 10;
+const MULTIPLICATIVE: u8 = 11;
+pub const AS: u8 = 12;
+pub const PREFIX: u8 = 13;
+pub const POSTFIX: u8 = 14;
 
 /// A binary operator's precedence.
 pub const fn binary_precedence(op: BinaryOp) -> u8 {
@@ -207,10 +200,10 @@ fn ambiguities(tokens: &[Token]) -> Vec<usize> {
         Some(TokenKind::Punct(punct)) => Some(*punct),
         _ => None,
     };
-    let segment = |index: usize| match tokens.get(index).map(|token| &token.kind) {
-        Some(TokenKind::Quoted(_)) => true,
-        Some(TokenKind::Ident(word)) => is_name_word(word),
-        _ => false,
+    let segment = |index: usize| {
+        tokens
+            .get(index)
+            .is_some_and(|token| is_segment(&token.kind))
     };
     let mut starts = Vec::new();
     for open in 0..tokens.len() {
@@ -543,10 +536,7 @@ impl<'tokens> Parser<'tokens> {
         self.expect(Punct::OpenParen, "after `offsetof`")?;
         let (ty, _) = self.type_name(true)?;
         self.expect(Punct::Comma, "between `offsetof`'s type and member")?;
-        let (TokenKind::Ident(member) | TokenKind::Quoted(member)) = self.peek().clone() else {
-            return Err(self.unexpected("a member's name"));
-        };
-        self.advance();
+        let member = self.word_argument("a member's name")?;
         let close = self.expect(Punct::CloseParen, "to close `offsetof(`")?;
         self.push(NodeKind::OffsetOf { ty, member }, start.to(close))
     }
@@ -555,10 +545,7 @@ impl<'tokens> Parser<'tokens> {
     fn global(&mut self) -> Result<NodeId, ExpressionError> {
         let start = self.advance();
         self.expect(Punct::OpenParen, "after `global`")?;
-        let (TokenKind::Ident(name) | TokenKind::Quoted(name)) = self.peek().clone() else {
-            return Err(self.unexpected("a global's name"));
-        };
-        self.advance();
+        let name = self.word_argument("a global's name")?;
         let close = self.expect(Punct::CloseParen, "to close `global(`")?;
         self.push(NodeKind::Global(name), start.to(close))
     }
@@ -571,10 +558,7 @@ impl<'tokens> Parser<'tokens> {
         self.expect(Punct::Comma, "between `container_of`'s pointer and type")?;
         let (ty, _) = self.type_name(true)?;
         self.expect(Punct::Comma, "between `container_of`'s type and member")?;
-        let (TokenKind::Ident(member) | TokenKind::Quoted(member)) = self.peek().clone() else {
-            return Err(self.unexpected("a member's name"));
-        };
-        self.advance();
+        let member = self.word_argument("a member's name")?;
         let close = self.expect(Punct::CloseParen, "to close `container_of(`")?;
         self.push(
             NodeKind::ContainerOf {
@@ -584,6 +568,15 @@ impl<'tokens> Parser<'tokens> {
             },
             start.to(close),
         )
+    }
+
+    /// A plain or backticked name a view's built-in takes as an argument.
+    fn word_argument(&mut self, expected: &str) -> Result<String, ExpressionError> {
+        let (TokenKind::Ident(word) | TokenKind::Quoted(word)) = self.peek().clone() else {
+            return Err(self.unexpected(expected));
+        };
+        self.advance();
+        Ok(word)
     }
 
     /// `(` begins a cast or a parenthesized expression.
@@ -645,6 +638,8 @@ impl<'tokens> Parser<'tokens> {
 
     fn primary(&mut self) -> Result<NodeId, ExpressionError> {
         let span = self.peek_span();
+        let called = self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen);
+        let view_call = called && self.dialect == Dialect::View;
         let kind = match self.peek().clone() {
             TokenKind::Ident(word) => match word.as_str() {
                 "true" | "false" => {
@@ -662,36 +657,17 @@ impl<'tokens> Parser<'tokens> {
                     )
                     .with_hint("write `null`"));
                 }
-                "offsetof"
-                    if self.dialect == Dialect::View
-                        && self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen) =>
-                {
-                    return self.offset_of();
-                }
-                "container_of"
-                    if self.dialect == Dialect::View
-                        && self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen) =>
-                {
-                    return self.container_of();
-                }
-                "global"
-                    if self.dialect == Dialect::View
-                        && self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen) =>
-                {
-                    return self.global();
-                }
-                "len" if self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen) => {
+                "offsetof" if view_call => return self.offset_of(),
+                "container_of" if view_call => return self.container_of(),
+                "global" if view_call => return self.global(),
+                "len" if called => {
                     self.advance();
                     self.advance();
                     let operand = self.expression(ASSIGN)?;
                     let close = self.expect(Punct::CloseParen, "to close `len(`")?;
                     return self.push(NodeKind::Len(operand), span.to(close));
                 }
-                function
-                    if self.dialect == Dialect::View
-                        && self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen)
-                        && Builtin::parse(function).is_some() =>
-                {
+                function if view_call && Builtin::parse(function).is_some() => {
                     let function = Builtin::parse(function).expect("a built-in function");
                     self.advance();
                     self.advance();
@@ -742,7 +718,6 @@ impl<'tokens> Parser<'tokens> {
         self.push(kind, span)
     }
 
-    /// A name and the names `::` or `.` join to it.
     /// A name and the names `::` joins to it, and in a type name `.` too,
     /// as in Go's `main.point`. In an expression a `.` selects a member,
     /// which binding may find is part of a global's dotted name.

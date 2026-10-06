@@ -5,9 +5,7 @@ use std::sync::Arc;
 
 use super::error::{ErrorKind, ExpressionError};
 use super::ir::{Comparison, Constant, Conversion, Length, Node, Op, Program};
-use super::number::{
-    BitOperator, Bits, Exact, Float, FloatFormat, FloatOperator, IntType, Integer,
-};
+use super::number::{BitOperator, Bits, Exact, FloatFormat, FloatOperator, IntType, Integer};
 use super::syntax::ast::{
     BinaryOp, Builtin, Field, NodeId, NodeKind, Path, Separator, SizeOf, Suffix, Tree, TypeBase,
     TypeName, UnaryOp,
@@ -84,8 +82,8 @@ fn bind_as<S: Scope>(
     finish: Finish,
 ) -> Result<Program<S::Object, S::Step>, ExpressionError> {
     let mut casts = 0;
+    let binder = Binder::new(scope, expression.text(), mode, None);
     for (index, ambiguity) in expression.ambiguities().iter().enumerate() {
-        let binder = Binder::new(scope, expression.text(), mode, None);
         if binder.names_value(&ambiguity.name)? {
             continue;
         }
@@ -102,7 +100,7 @@ fn bind_as<S: Scope>(
                 ambiguity.span,
                 format!(
                     "`{}` names neither a value nor a type",
-                    super::syntax::print_path(&ambiguity.name)
+                    super::syntax::path_text(&ambiguity.name)
                 ),
             ));
         }
@@ -143,15 +141,6 @@ struct Binder<'a, S: Scope> {
     nodes: usize,
 }
 
-/// A failure that is about an operand's type being one the debugger cannot
-/// compute with, rather than the expression being wrong.
-fn opaque(category: &Category) -> Option<&str> {
-    match category {
-        Category::Opaque(reason) => Some(reason),
-        _ => None,
-    }
-}
-
 impl<'a, S: Scope> Binder<'a, S> {
     const fn new(scope: &'a S, text: &'a str, mode: Mode, tree: Option<&'a Tree>) -> Self {
         Self {
@@ -173,6 +162,42 @@ impl<'a, S: Scope> Binder<'a, S> {
 
     fn refused(span: Span, refusal: Refusal) -> ExpressionError {
         ExpressionError::new(refusal.kind, span, refusal.message)
+    }
+
+    fn ambiguous(span: Span, name: &str, candidates: &[String]) -> ExpressionError {
+        let candidates: Vec<String> = candidates
+            .iter()
+            .map(|candidate| format!("`{candidate}`"))
+            .collect();
+        Self::error(
+            span,
+            ErrorKind::AmbiguousName,
+            format!(
+                "`{name}` is ambiguous; select one of {}",
+                candidates.join(", ")
+            ),
+        )
+    }
+
+    /// The type a planned step reaches, refused when it reaches nothing the
+    /// debugger can compute with.
+    fn reached(
+        result: Option<TypeReference>,
+        span: Span,
+        message: impl FnOnce() -> String,
+    ) -> Result<Ty, ExpressionError> {
+        result
+            .map(Ty::Program)
+            .ok_or_else(|| Self::error(span, ErrorKind::Unsupported, message()))
+    }
+
+    /// An operand whose type the debugger cannot compute with.
+    fn unsupported(&self, span: Span, reason: &str) -> ExpressionError {
+        Self::error(
+            span,
+            ErrorKind::Unsupported,
+            format!("`{}` cannot be computed with: {reason}", self.quote(span)),
+        )
     }
 
     /// The text a span covers, for messages.
@@ -334,28 +359,8 @@ impl<'a, S: Scope> Binder<'a, S> {
                 self.container_of(pointer, target, &member, span)
             }
             NodeKind::Global(name) => match self.scope.global(&name) {
-                Ok(Lookup::Object { object, ty: Ok(ty) }) => {
-                    self.node(Op::Object(object), Ty::Program(ty), span)
-                }
-                Ok(Lookup::Object {
-                    ty: Err(reason), ..
-                }) => Err(Self::error(
-                    span,
-                    ErrorKind::Unsupported,
-                    format!("`{name}` has a malformed type: {reason}"),
-                )),
-                Ok(Lookup::Ambiguous(candidates)) => Err(Self::error(
-                    span,
-                    ErrorKind::AmbiguousName,
-                    format!(
-                        "`{name}` is ambiguous; select one of {}",
-                        candidates
-                            .iter()
-                            .map(|candidate| format!("`{candidate}`"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                )),
+                Ok(Lookup::Object { object, ty }) => self.object(&name, object, ty, span),
+                Ok(Lookup::Ambiguous(candidates)) => Err(Self::ambiguous(span, &name, &candidates)),
                 Ok(_) => Err(Self::error(
                     span,
                     ErrorKind::UnknownName,
@@ -495,18 +500,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             let mut node = match found {
                 Lookup::NotFound => continue,
                 Lookup::Ambiguous(candidates) => {
-                    return Err(Self::error(
-                        name_span,
-                        ErrorKind::AmbiguousName,
-                        format!(
-                            "`{name}` is ambiguous; select one of {}",
-                            candidates
-                                .iter()
-                                .map(|candidate| format!("`{candidate}`"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                    ));
+                    return Err(Self::ambiguous(name_span, &name, &candidates));
                 }
                 Lookup::Enumerator { value, ty } => {
                     if count < path.segments.len() {
@@ -533,19 +527,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     );
                 }
                 Lookup::Bound { object, ty } => self.node(Op::Bound(object), ty, name_span)?,
-                Lookup::Object { object, ty } => {
-                    let ty = match ty {
-                        Ok(ty) => ty,
-                        Err(reason) => {
-                            return Err(Self::error(
-                                name_span,
-                                ErrorKind::Unsupported,
-                                format!("`{name}` has a malformed type: {reason}"),
-                            ));
-                        }
-                    };
-                    self.node(Op::Object(object), Ty::Program(ty), name_span)?
-                }
+                Lookup::Object { object, ty } => self.object(&name, object, ty, name_span)?,
             };
             for segment in &path.segments[count..] {
                 let member_span = path.segments[0].span.to(segment.span);
@@ -565,6 +547,23 @@ impl<'a, S: Scope> Binder<'a, S> {
             ErrorKind::UnknownName,
             format!("no variable is named `{name}` here"),
         ))
+    }
+
+    fn object(
+        &mut self,
+        name: &str,
+        object: S::Object,
+        ty: Result<TypeReference, Arc<str>>,
+        span: Span,
+    ) -> BindResult<S> {
+        let ty = ty.map_err(|reason| {
+            Self::error(
+                span,
+                ErrorKind::Unsupported,
+                format!("`{name}` has a malformed type: {reason}"),
+            )
+        })?;
+        self.node(Op::Object(object), Ty::Program(ty), span)
     }
 
     fn enumerator(&mut self, value: Exact, ty: TypeReference, span: Span) -> BindResult<S> {
@@ -814,7 +813,7 @@ impl<'a, S: Scope> Binder<'a, S> {
 
     /// A language reference stands for what it refers to.
     fn settle(&mut self, node: Bound<S>) -> BindResult<S> {
-        if let Category::Reference(_) = self.category(&node.ty) {
+        if matches!(self.category(&node.ty), Category::Reference) {
             return self.deref_place(node);
         }
         Ok(node)
@@ -912,15 +911,8 @@ impl<'a, S: Scope> Binder<'a, S> {
     }
 
     fn type_error(&self, node: &Bound<S>, category: &Category, what: &str) -> ExpressionError {
-        if let Some(reason) = opaque(category) {
-            return Self::error(
-                node.span,
-                ErrorKind::Unsupported,
-                format!(
-                    "`{}` cannot be computed with: {reason}",
-                    self.quote(node.span)
-                ),
-            );
+        if let Category::Opaque(reason) = category {
+            return self.unsupported(node.span, reason);
         }
         Self::error(
             node.span,
@@ -947,14 +939,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 let (ty, span) = (node.ty.clone(), node.span);
                 self.node(Op::Load(Box::new(node)), ty, span)
             }
-            Category::Opaque(reason) => Err(Self::error(
-                node.span,
-                ErrorKind::Unsupported,
-                format!(
-                    "`{}` cannot be computed with: {reason}",
-                    self.quote(node.span)
-                ),
-            )),
+            Category::Opaque(reason) => Err(self.unsupported(node.span, &reason)),
             _ => Ok(node),
         }
     }
@@ -1368,7 +1353,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 ErrorKind::Type,
                 format!(
                     "`{}` cannot be applied to `{}` and `{}`",
-                    super::syntax::binary_operator_text(op),
+                    super::syntax::binary_text(op),
                     type_name(self.scope, &left.ty),
                     type_name(self.scope, &right.ty)
                 ),
@@ -1477,15 +1462,8 @@ impl<'a, S: Scope> Binder<'a, S> {
             (Category::Bool, Category::Bool) if !ordering => Comparison::Bools,
             (left_category, right_category) => {
                 for (node, category) in [(&left, &left_category), (&right, &right_category)] {
-                    if let Some(reason) = opaque(category) {
-                        return Err(Self::error(
-                            node.span,
-                            ErrorKind::Unsupported,
-                            format!(
-                                "`{}` cannot be computed with: {reason}",
-                                self.quote(node.span)
-                            ),
-                        ));
+                    if let Category::Opaque(reason) = category {
+                        return Err(self.unsupported(node.span, reason));
                     }
                 }
                 return Err(Self::error(
@@ -1493,7 +1471,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     ErrorKind::Type,
                     format!(
                         "`{}` cannot compare `{}` with `{}`",
-                        super::syntax::binary_operator_text(op),
+                        super::syntax::binary_text(op),
                         type_name(self.scope, &left.ty),
                         type_name(self.scope, &right.ty)
                     ),
@@ -1705,19 +1683,12 @@ impl<'a, S: Scope> Binder<'a, S> {
         }
         match self.scope.plan(*from, StepKind::Base(*base)) {
             Ok(planned) => {
-                let ty = planned.result.map_or_else(
-                    || {
-                        Err(Self::error(
-                            span,
-                            ErrorKind::Unsupported,
-                            format!(
-                                "`{}` has a type the debugger cannot compute with",
-                                self.quote(span)
-                            ),
-                        ))
-                    },
-                    |ty| Ok(Ty::Program(ty)),
-                )?;
+                let ty = Self::reached(planned.result, span, || {
+                    format!(
+                        "`{}` has a type the debugger cannot compute with",
+                        self.quote(span)
+                    )
+                })?;
                 self.node(
                     Op::Step {
                         base: Box::new(operand.clone()),
@@ -1915,19 +1886,12 @@ impl<'a, S: Scope> Binder<'a, S> {
             }
         }
         let planned = planned.map_err(|refusal| Self::refused(field_span, refusal))?;
-        let ty = planned.result.map_or_else(
-            || {
-                Err(Self::error(
-                    field_span,
-                    ErrorKind::Unsupported,
-                    format!(
-                        "`{}` has a type the debugger cannot compute with",
-                        self.quote(span)
-                    ),
-                ))
-            },
-            |ty| Ok(Ty::Program(ty)),
-        )?;
+        let ty = Self::reached(planned.result, field_span, || {
+            format!(
+                "`{}` has a type the debugger cannot compute with",
+                self.quote(span)
+            )
+        })?;
         self.node(
             Op::Step {
                 base: Box::new(base),
@@ -1942,10 +1906,6 @@ impl<'a, S: Scope> Binder<'a, S> {
 
     /// `a[i][j]...`: an array takes as many consecutive indices as it has
     /// dimensions, and a record any its view gives it.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "arrays, slices, pointers, and records each index differently"
-    )]
     fn index(&mut self, id: NodeId) -> BindResult<S> {
         let mut chain = Vec::new();
         let mut current = id;
@@ -1960,49 +1920,6 @@ impl<'a, S: Scope> Binder<'a, S> {
             node = self.settle(node)?;
             let category = self.category(&node.ty);
             match category {
-                ref category @ (Category::Array { .. } | Category::Slice(_)) if node.is_place() => {
-                    let Ty::Program(from) = node.ty else {
-                        unreachable!("arrays are program types")
-                    };
-                    let planned = self
-                        .scope
-                        .plan(
-                            from,
-                            StepKind::Index {
-                                available: pending.len(),
-                            },
-                        )
-                        .map_err(|refusal| Self::refused(*span, refusal))?;
-                    let consumed = planned.consumed.clamp(1, pending.len());
-                    let (taken, rest) = pending.split_at(consumed);
-                    let mut indices = Vec::new();
-                    for (index, _) in taken {
-                        let index = self.bind(*index)?;
-                        indices.push(self.integer_value(index)?);
-                    }
-                    let span = taken.last().map_or(*span, |(_, span)| *span);
-                    let ty = planned.result.map_or_else(
-                        || {
-                            Err(Self::error(
-                                span,
-                                ErrorKind::Unsupported,
-                                "the element has a type the debugger cannot compute with",
-                            ))
-                        },
-                        |ty| Ok(Ty::Program(ty)),
-                    )?;
-                    node = self.node(
-                        Op::Step {
-                            base: Box::new(node),
-                            step: planned.step,
-                            indices,
-                            follows: matches!(category, Category::Slice(_)),
-                        },
-                        ty,
-                        span,
-                    )?;
-                    pending = rest;
-                }
                 Category::Pointer(target) if !self.represents(&node.ty) => {
                     let pointer = self.value(node)?;
                     let scale = self.element_size(&pointer, target.as_ref())?;
@@ -2023,50 +1940,69 @@ impl<'a, S: Scope> Binder<'a, S> {
                     node = self.deref_value(moved, &target, *span)?;
                     pending = &pending[1..];
                 }
-                ref category @ (Category::Record | Category::Pointer(_)) if node.is_place() => {
-                    // A record has no indexing of its own, nor has a value
-                    // its language represents as a pointer; a view that
-                    // presents it as a sequence may give it some.
+                // A record has no indexing of its own, nor has a value its
+                // language represents as a pointer; a view that presents it
+                // as a sequence may give it some, one index at a time.
+                ref category @ (Category::Array { .. }
+                | Category::Slice(_)
+                | Category::Record
+                | Category::Pointer(_))
+                    if node.is_place() =>
+                {
                     let Ty::Program(from) = node.ty else {
-                        unreachable!("records and pointers are program types")
+                        unreachable!("indexed places are program types")
                     };
+                    let native = matches!(category, Category::Array { .. } | Category::Slice(_));
+                    let available = pending.len();
                     let planned = self
                         .scope
-                        .plan(
-                            from,
-                            StepKind::Index {
-                                available: pending.len(),
-                            },
-                        )
-                        .map_err(|_| self.type_error(&node, category, "cannot be indexed"))?;
-                    let index = self.bind(*first)?;
-                    let index = self.integer_value(index)?;
-                    let ty = planned.result.map_or_else(
-                        || {
-                            Err(Self::error(
-                                *span,
-                                ErrorKind::Unsupported,
-                                "the element has a type the debugger cannot compute with",
-                            ))
-                        },
-                        |ty| Ok(Ty::Program(ty)),
-                    )?;
+                        .plan(from, StepKind::Index { available })
+                        .map_err(|refusal| {
+                            if native {
+                                Self::refused(*span, refusal)
+                            } else {
+                                self.type_error(&node, category, "cannot be indexed")
+                            }
+                        })?;
+                    let consumed = if native {
+                        planned.consumed.clamp(1, available)
+                    } else {
+                        1
+                    };
+                    let (taken, rest) = pending.split_at(consumed);
+                    let mut indices = Vec::new();
+                    for (index, _) in taken {
+                        let index = self.bind(*index)?;
+                        indices.push(self.integer_value(index)?);
+                    }
+                    let span = taken.last().map_or(*span, |(_, span)| *span);
+                    let ty = Self::reached(planned.result, span, || {
+                        "the element has a type the debugger cannot compute with".to_owned()
+                    })?;
                     node = self.node(
                         Op::Step {
                             base: Box::new(node),
                             step: planned.step,
-                            indices: vec![index],
-                            follows: true,
+                            indices,
+                            follows: !matches!(category, Category::Array { .. }),
                         },
                         ty,
-                        *span,
+                        span,
                     )?;
-                    pending = &pending[1..];
+                    pending = rest;
                 }
                 category => return Err(self.type_error(&node, &category, "cannot be indexed")),
             }
         }
         Ok(node)
+    }
+
+    fn measured_as_text(&self, category: &Category, ty: &Ty) -> bool {
+        match category {
+            Category::Pointer(Some(pointee)) if is_character(self.scope, pointee) => true,
+            Category::Pointer(_) => matches!(ty, Ty::Program(ty) if self.scope.has_view(*ty)),
+            _ => true,
+        }
     }
 
     fn length(&mut self, operand: Bound<S>, span: Span) -> BindResult<S> {
@@ -2087,8 +2023,10 @@ impl<'a, S: Scope> Binder<'a, S> {
                 Ty::Exact,
                 span,
             ),
-            Category::Pointer(Some(ref pointee))
-                if operand.is_place() && is_character(self.scope, pointee) =>
+            // Text, or a pointer or record a view presents with a length,
+            // such as a Go map.
+            Category::Pointer(_) | Category::Record
+                if operand.is_place() && self.measured_as_text(&category, &operand.ty) =>
             {
                 self.node(
                     Op::Length {
@@ -2099,35 +2037,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     span,
                 )
             }
-            // A pointer a view presents, such as a Go map, has the view's
-            // length.
-            Category::Pointer(_)
-                if operand.is_place()
-                    && matches!(operand.ty, Ty::Program(ty) if self.scope.has_view(ty)) =>
-            {
-                self.node(
-                    Op::Length {
-                        operand: Box::new(operand),
-                        how: Length::Text,
-                    },
-                    Ty::Exact,
-                    span,
-                )
-            }
-            Category::Record if operand.is_place() => self.node(
-                Op::Length {
-                    operand: Box::new(operand),
-                    how: Length::Text,
-                },
-                Ty::Exact,
-                span,
-            ),
             category => Err(self.type_error(&operand, &category, "has no length")),
         }
     }
-}
-
-/// Helpers the binder shares with the interpreter.
-pub(super) fn float_from(value: crate::FloatValue) -> Float {
-    Float::from_value(value)
 }

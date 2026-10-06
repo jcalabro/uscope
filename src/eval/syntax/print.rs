@@ -78,14 +78,6 @@ pub fn name_text(name: &str) -> String {
     }
 }
 
-const fn suffix_text(suffix: Suffix) -> Option<(char, Option<u8>)> {
-    match suffix {
-        Suffix::Int { width, signed } => Some((if signed { 'i' } else { 'u' }, Some(width))),
-        Suffix::Size { signed } => Some((if signed { 'i' } else { 'u' }, None)),
-        Suffix::F32 | Suffix::F64 => None,
-    }
-}
-
 struct Printer<'tree> {
     tree: &'tree Tree,
     out: String,
@@ -108,26 +100,6 @@ impl Printer<'_> {
             | NodeKind::SizeOf(_)
             | NodeKind::OffsetOf { .. } => PREFIX,
             _ => POSTFIX,
-        }
-    }
-
-    /// A member's or global's name, quoted in backticks unless it is a
-    /// plain word.
-    fn word(&mut self, name: &str) {
-        if super::parser::is_name_word(name)
-            && name
-                .bytes()
-                .next()
-                .is_some_and(|byte| !byte.is_ascii_digit())
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            self.out.push_str(name);
-        } else {
-            self.out.push('`');
-            self.out.push_str(name);
-            self.out.push('`');
         }
     }
 
@@ -224,7 +196,7 @@ impl Printer<'_> {
                 self.out.push_str("offsetof(");
                 self.out.push_str(&type_text(ty));
                 self.out.push_str(", ");
-                self.word(member);
+                self.out.push_str(&name_text(member));
                 self.out.push(')');
             }
             NodeKind::ContainerOf {
@@ -237,12 +209,12 @@ impl Printer<'_> {
                 self.out.push_str(", ");
                 self.out.push_str(&type_text(ty));
                 self.out.push_str(", ");
-                self.word(member);
+                self.out.push_str(&name_text(member));
                 self.out.push(')');
             }
             NodeKind::Global(name) => {
                 self.out.push_str("global(");
-                self.word(name);
+                self.out.push_str(&name_text(name));
                 self.out.push(')');
             }
             NodeKind::Len(operand) => {
@@ -269,14 +241,15 @@ impl Printer<'_> {
             }
             NodeKind::Integer { value, suffix } => {
                 let _ = write!(self.out, "{value}");
-                if let Some((sign, width)) = suffix.and_then(suffix_text) {
-                    self.out.push(sign);
-                    match width {
-                        Some(width) => {
-                            let _ = write!(self.out, "{width}");
-                        }
-                        None => self.out.push_str("size"),
+                let sign = |signed| if signed { 'i' } else { 'u' };
+                match *suffix {
+                    Some(Suffix::Int { width, signed }) => {
+                        let _ = write!(self.out, "{}{width}", sign(signed));
                     }
+                    Some(Suffix::Size { signed }) => {
+                        let _ = write!(self.out, "{}size", sign(signed));
+                    }
+                    Some(Suffix::F32 | Suffix::F64) | None => {}
                 }
             }
             NodeKind::Float(value) => self.float(*value),

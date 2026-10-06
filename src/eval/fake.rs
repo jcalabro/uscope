@@ -1,6 +1,10 @@
 //! A deterministic world of types, variables, memory, and registers that
 //! the evaluator runs against in tests: a stand-in for data access with the
 //! simplest layouts, not a second debug-info provider.
+#![cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the view fuzzer uses only part of the world")
+)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -141,34 +145,28 @@ impl World {
         )
     }
 
+    fn info_mut(&mut self, ty: TypeReference) -> &mut TypeInfo {
+        &mut self.types[usize::try_from(ty.id.get()).expect("small ids")]
+    }
+
     pub fn record(
         &mut self,
         name: &str,
         byte_size: u64,
         members: &[(&str, TypeReference, u64)],
     ) -> TypeReference {
-        let members: Vec<RecordMember> = members
-            .iter()
-            .map(|(member, ty, offset)| RecordMember {
-                name: Some((*member).into()),
-                type_ref: *ty,
-                layout: RecordMemberLayout::ByteOffset(*offset),
-                accessibility: crate::Accessibility::Public,
-                artificial: false,
-                embedded: false,
-                declaration: None,
-            })
-            .collect();
-        self.add(
+        let record = self.add(
             name,
             Some(byte_size),
             TypeKind::Record {
                 kind: RecordKind::Struct,
-                members: members.into(),
+                members: Arc::from([]),
                 bases: Arc::from([]),
                 incomplete: false,
             },
-        )
+        );
+        self.set_members(record, members);
+        record
     }
 
     /// Gives a record its base classes, each at a byte offset.
@@ -182,10 +180,9 @@ impl World {
                 virtuality: crate::BaseClassVirtuality::None,
             })
             .collect();
-        let index = usize::try_from(record.id.get()).expect("small ids");
         let TypeKind::Record {
             bases: existing, ..
-        } = &mut self.types[index].kind
+        } = &mut self.info_mut(record).kind
         else {
             panic!("only records have bases");
         };
@@ -212,8 +209,8 @@ impl World {
         found
     }
 
-    /// Gives a record made without members its members, for a record that
-    /// points to its own type.
+    /// Replaces a record's members, as a record that points to its own type
+    /// needs.
     pub fn set_members(&mut self, record: TypeReference, members: &[(&str, TypeReference, u64)]) {
         let members: Vec<RecordMember> = members
             .iter()
@@ -227,10 +224,9 @@ impl World {
                 declaration: None,
             })
             .collect();
-        let index = usize::try_from(record.id.get()).expect("small ids");
         let TypeKind::Record {
             members: existing, ..
-        } = &mut self.types[index].kind
+        } = &mut self.info_mut(record).kind
         else {
             panic!("only records have members");
         };
@@ -353,8 +349,7 @@ impl World {
         base: &str,
         arguments: Vec<crate::TypeArgument>,
     ) {
-        let index = usize::try_from(ty.id.get()).expect("small ids");
-        self.types[index].identity = Some(Arc::new(crate::TypeIdentity {
+        self.info_mut(ty).identity = Some(Arc::new(crate::TypeIdentity {
             language,
             path: path.iter().map(|segment| Arc::from(*segment)).collect(),
             inline_namespaces: Arc::default(),
@@ -372,8 +367,8 @@ impl World {
 
     /// Gives a type Go's attributes, as Go's DWARF marks its kinds.
     pub fn go_kind(&mut self, ty: TypeReference, kind: crate::GoKind) {
-        let index = usize::try_from(ty.id.get()).expect("small ids");
-        let identity = self.types[index]
+        let identity = self
+            .info_mut(ty)
             .identity
             .as_mut()
             .expect("an identified type");
@@ -385,8 +380,8 @@ impl World {
 
     /// Marks where an identified type's template parameter pack begins.
     pub fn pack(&mut self, ty: TypeReference, start: usize) {
-        let index = usize::try_from(ty.id.get()).expect("small ids");
-        let identity = self.types[index]
+        let identity = self
+            .info_mut(ty)
             .identity
             .as_mut()
             .expect("an identified type");

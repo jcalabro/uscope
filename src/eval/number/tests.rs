@@ -113,10 +113,7 @@ fn exact_results_cover_both_signednesses_and_nothing_more() {
     assert_eq!(max.to_u128(), Some(u128::MAX));
     assert_eq!(exact(-1).to_u128(), None);
     assert_eq!(exact(0).neg(), Ok(Exact::ZERO));
-    assert!(
-        !exact(0).neg().unwrap().is_negative(),
-        "zero is never negative"
-    );
+    assert!(!exact(0).neg().unwrap().negative, "zero is never negative");
 }
 
 /// Typed bit operations over every pair of 8-bit patterns agree with
@@ -519,7 +516,7 @@ proptest! {
         }
         if let (Ok(quotient), Ok(remainder)) = (a.div(b), a.rem(b)) {
             prop_assert_eq!(quotient.mul(b).and_then(|product| product.add(remainder)), Ok(a));
-            prop_assert!(remainder.is_zero() || remainder.is_negative() == a.is_negative());
+            prop_assert!(remainder.is_zero() || remainder.negative == a.negative);
             prop_assert!(Exact::from(remainder.magnitude) < Exact::from(b.magnitude));
         }
         // Associativity and distributivity wherever every step is in range.
