@@ -111,26 +111,6 @@ impl Printer<'_> {
         }
     }
 
-    /// A member's or global's name, quoted in backticks unless it is a
-    /// plain word.
-    fn word(&mut self, name: &str) {
-        if super::parser::is_name_word(name)
-            && name
-                .bytes()
-                .next()
-                .is_some_and(|byte| !byte.is_ascii_digit())
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            self.out.push_str(name);
-        } else {
-            self.out.push('`');
-            self.out.push_str(name);
-            self.out.push('`');
-        }
-    }
-
     /// Prints a child that must bind at least as tightly as `minimum`.
     fn child(&mut self, id: NodeId, minimum: u8) {
         if self.precedence(id) < minimum {
@@ -224,7 +204,7 @@ impl Printer<'_> {
                 self.out.push_str("offsetof(");
                 self.out.push_str(&type_text(ty));
                 self.out.push_str(", ");
-                self.word(member);
+                self.out.push_str(&name_text(member));
                 self.out.push(')');
             }
             NodeKind::ContainerOf {
@@ -237,12 +217,12 @@ impl Printer<'_> {
                 self.out.push_str(", ");
                 self.out.push_str(&type_text(ty));
                 self.out.push_str(", ");
-                self.word(member);
+                self.out.push_str(&name_text(member));
                 self.out.push(')');
             }
             NodeKind::Global(name) => {
                 self.out.push_str("global(");
-                self.word(name);
+                self.out.push_str(&name_text(name));
                 self.out.push(')');
             }
             NodeKind::Len(operand) => {
