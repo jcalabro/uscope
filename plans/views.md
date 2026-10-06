@@ -815,9 +815,9 @@ items. Types, layout, and presentation stay in the declarative view:
 ```text
 view rust alloc::collections::btree::map::BTreeMap<K, V, _> {
     type Leaf = alloc::collections::btree::node::LeafNode<K, V>
-    show map(length) for e in kernel("btree", root.node, root.height, length,
-                                     sizeof(K), sizeof(V), offsetof(Leaf, keys), …)
-        => *(K*)e.0 : *(V*)e.1
+    show map(length) for key, value in kernel("rust-btree", node, height, …,
+                                              sizeof(K), sizeof(V), offsetof(Leaf, keys), …)
+        => *(key as *K) : *(value as *V)
 }
 ```
 
@@ -1553,6 +1553,23 @@ What P7 built, and what it learned:
   which has only swiss tables, so no kernel walks them. The simulator runs
   no kernels: its golden programs have no type that needs one. Paging deep
   into a large `BTreeMap` costs the reads of every page before it.
+
+**End of the project.** *Done 2026-10-06.*
+
+- [x] `just all`: 926 tests, `just stress` 10 of 10, and a 30-second
+  sweep of 173,105 sessions.
+- [x] `just sim 600`: 3,460,273 sessions, no failures.
+- [x] 15 minutes of `just fuzz views` in `scripts/contained.sh`: 118,572
+  runs, no failures, at most 548 MB.
+
+`just stress` first failed once: a debug adapter test's `setBreakpoints`,
+sent beside `launch`, is answered only once the program has loaded, and
+missed the harness's 5-second deadline for responses. The Rust containers
+fixture grew from 5.3 to 7.3 MB with the `BTreeMap` code, and its load from
+0.15 to 0.22 seconds, which `just stress` slows tenfold or more; sharing
+key and value types saved only 0.02 seconds, and the load's profile is the
+debug information's parsing, spread evenly. Responses are now bounded at 10
+seconds, as events are.
 
 ## 5. Testing
 
