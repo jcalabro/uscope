@@ -1,5 +1,5 @@
-//! Thread-local storage addresses read through glibc's own layout
-//! descriptors, for a C library whose version `libthread_db` refuses.
+//! Thread-local storage addresses read from glibc's structures directly,
+//! where `libthread_db` cannot read them.
 //!
 //! glibc exports a `_thread_db_*` descriptor for every structure field its
 //! `libthread_db` reads: the field's width in bits, its element count, and
@@ -8,22 +8,30 @@
 //! module follows glibc's `td_thr_tlsbase` step by step, reading every
 //! offset from the inferior's descriptors, so a C library of any version
 //! describes itself.
+//!
+//! A statically linked program contains the descriptors only with glibc's
+//! thread library, and is read without them: its executable is its only TLS
+//! module, which the start of glibc's thread control block locates.
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nix::unistd::Pid;
 
-use super::{ProcessServices, TlsError, failed};
+use super::{ProcessServices, TlsError, dtv, failed, read_word, thread_pointer};
 
 /// The C library the descriptors are looked up in. Lookups fall back to any
-/// module that defines them, as statically linked programs require.
+/// module that defines them.
 const C_LIBRARY: &str = "libc.so.6";
 /// A loader with more TLS slotinfo lists than this is corrupt.
 const MAX_SLOTINFO_LISTS: usize = 1 << 16;
 /// `TLS_DTV_UNALLOCATED` and every other odd DTV pointer mark a block the
 /// thread has not allocated.
 const UNALLOCATED_BIT: u64 = 1;
+/// The size of a DTV slot: a block's address and the allocation to free.
+const DTV_SLOT_SIZE: u64 = 16;
+/// The TLS module number glibc gives a statically linked executable.
+const EXECUTABLE_MODULE: u64 = 1;
 /// `l_tls_offset` values that name no static TLS block.
 const NO_TLS_OFFSET: u64 = 0;
 const FORCED_DYNAMIC_TLS_OFFSET: u64 = u64::MAX;
@@ -77,7 +85,7 @@ struct Glibc<'a> {
 impl Glibc<'_> {
     fn symbol(&self, name: &str) -> Result<u64, TlsError> {
         self.services
-            .lookup_symbol(C_LIBRARY, name)
+            .lookup_symbol(Some(C_LIBRARY), name)
             .ok_or_else(|| failed(format!("the C library does not define {name}")))
     }
 
@@ -251,6 +259,37 @@ pub(super) fn tls_address(
         .ok_or_else(|| failed("the TLS address overflows"))
 }
 
+/// The address of `offset` within the TLS block of a statically linked
+/// program's executable, for `thread`.
+///
+/// The start of glibc's x86-64 thread control block is fixed, as GCC's
+/// stack protector reads its canary at offset 0x28, after the DTV pointer.
+/// The DTV pointer addresses slot 0 of 16-byte slots, and slot N begins with
+/// TLS module N's block. glibc numbers the executable module 1, and gives
+/// every thread its block before the thread runs.
+pub(super) fn static_executable_tls_address(
+    services: &dyn ProcessServices,
+    thread: Pid,
+    offset: u64,
+) -> Result<u64, TlsError> {
+    let thread_pointer = thread_pointer(services, thread)?;
+    let dtv = dtv(services, thread_pointer)?;
+    let block = read_word(services, dtv.checked_add(EXECUTABLE_MODULE * DTV_SLOT_SIZE))?;
+    if block == 0 || block & UNALLOCATED_BIT != 0 {
+        return Err(TlsError::Deferred);
+    }
+    // The executable's block is static, so it lies below the thread pointer.
+    if block >= thread_pointer {
+        return Err(failed(format!(
+            "the executable's TLS block {block:#x} is not below the thread pointer \
+             {thread_pointer:#x}"
+        )));
+    }
+    block
+        .checked_add(offset)
+        .ok_or_else(|| failed("the TLS address overflows"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -294,7 +333,7 @@ mod tests {
             Some(registers)
         }
 
-        fn lookup_symbol(&self, _: &str, symbol: &str) -> Option<u64> {
+        fn lookup_symbol(&self, _: Option<&str>, symbol: &str) -> Option<u64> {
             self.symbols.get(symbol).copied()
         }
     }
@@ -325,6 +364,7 @@ mod tests {
                 symbols: BTreeMap::new(),
                 thread_pointer: THREAD_POINTER,
             };
+            process.word(THREAD_POINTER, THREAD_POINTER);
             process.descriptor("_thread_db_link_map_l_tls_modid", 64, 1, 0x430);
             process.descriptor("_thread_db_link_map_l_tls_offset", 64, 1, 0x428);
             process.descriptor("_thread_db___nptl_rtld_global", 64, 1, 0);
@@ -461,5 +501,30 @@ mod tests {
         let mut unreadable = Process::new(3, 0x5555_0000, 0x80);
         unreadable.memory.remove(&(THREAD_POINTER + 0x18));
         assert!(failure(&unreadable).contains("unreadable"));
+    }
+
+    #[test]
+    fn a_static_executables_block_is_in_dtv_slot_one() {
+        // A thread of a program without descriptors, whose DTV slot 1 holds
+        // `block`.
+        let address = |block: u64| {
+            let mut process = Process {
+                memory: BTreeMap::new(),
+                symbols: BTreeMap::new(),
+                thread_pointer: THREAD_POINTER,
+            };
+            process.word(THREAD_POINTER, THREAD_POINTER);
+            process.word(THREAD_POINTER + 8, DTV);
+            process.word(DTV + 16, block);
+            static_executable_tls_address(&process, Pid::from_raw(1), 0x24)
+        };
+        let block = THREAD_POINTER - 0x80;
+        assert_eq!(address(block), Ok(block + 0x24));
+        assert_eq!(address(0), Err(TlsError::Deferred));
+        assert_eq!(address(u64::MAX), Err(TlsError::Deferred));
+        assert!(matches!(
+            address(THREAD_POINTER + 0x80),
+            Err(TlsError::Failed(message)) if message.contains("not below the thread pointer")
+        ));
     }
 }

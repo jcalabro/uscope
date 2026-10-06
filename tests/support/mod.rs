@@ -824,11 +824,16 @@ pub fn vdso_module(modules: &LoadedModuleSnapshot) -> uscope::LoadedModuleRecord
     vdso
 }
 
-/// Checks each thread of a `tls-modules` fixture stopped in `tls_stop`: every
-/// TLS variable holds the value its thread stored, at the address the thread
-/// recorded for it in `tls_addresses`. Statically linked builds have no
-/// `plugin`.
-pub async fn assert_tls_modules(scenario: &mut Scenario, fixture: &str, plugin: bool) {
+/// Checks each of the `threads` threads of a `tls-modules` fixture stopped in
+/// `tls_stop`: every TLS variable holds the value its thread stored, at the
+/// address the thread recorded for it in `tls_addresses`. Statically linked
+/// builds have no `plugin`.
+pub async fn assert_tls_modules(
+    scenario: &mut Scenario,
+    fixture: &str,
+    plugin: bool,
+    threads: i128,
+) {
     let mut variables = vec![
         ("main_tls", "main", 100),
         ("main_zero_tls", "zero", 200),
@@ -865,7 +870,7 @@ pub async fn assert_tls_modules(scenario: &mut Scenario, fixture: &str, plugin: 
         indices.push(index);
     }
     indices.sort_unstable();
-    assert_eq!(indices, [0, 1, 2], "{fixture}");
+    assert_eq!(indices, (0..threads).collect::<Vec<_>>(), "{fixture}");
 }
 
 /// The value of an expression in the selected frame.

@@ -63,9 +63,7 @@ impl ProcessServices for CoreTarget {
         self.thread(lwp).ok().map(|thread| thread.registers)
     }
 
-    /// Prefers the named object, as the live lookup does, but accepts the
-    /// symbol from any loaded module when the object name differs.
-    fn lookup_symbol(&self, object: &str, symbol: &str) -> Option<u64> {
+    fn lookup_symbol(&self, object: Option<&str>, symbol: &str) -> Option<u64> {
         let mut fallback = None;
         for module in &self.symbol_modules {
             let Some(found) = module
@@ -79,11 +77,12 @@ impl ProcessServices for CoreTarget {
             let Some(address) = module.load_bias.checked_add(found.address.get()) else {
                 continue;
             };
-            let preferred = object.is_empty()
-                || module
+            let preferred = object.is_some_and(|object| {
+                module
                     .recorded_path
                     .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with(object));
+                    .is_some_and(|name| name.to_string_lossy().starts_with(object))
+            });
             if preferred {
                 return Some(address);
             }

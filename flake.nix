@@ -44,6 +44,10 @@
     in {
       devShells.${system}.default = pkgs.mkShell {
         NIX_HARDENING_ENABLE = "";
+        # glibc's static libraries, which only statically linked fixtures link
+        # against: on the default search path they would shadow the shared C
+        # library for every program.
+        GLIBC_STATIC_LIBRARIES = "${pkgs.glibc.static}/lib";
         RUSTFLAGS = "-C link-arg=-fuse-ld=mold -C link-arg=-Wl,--dynamic-linker=${pkgs.glibc}/lib/ld-linux-x86-64.so.2";
         packages = with pkgs; [
           rust

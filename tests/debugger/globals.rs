@@ -825,14 +825,19 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
 
 #[tokio::test]
 async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
-    // Each build, whether it runs on musl, and whether it is dynamically
-    // linked, with a library and a plugin as separate TLS modules.
-    for (fixture, musl, dynamic) in [
-        ("tls-modules-gcc", false, true),
-        ("tls-modules-musl-gcc-o0", true, true),
-        ("tls-modules-musl-clang-o2-nopie", true, true),
-        ("tls-modules-musl-gcc-static", true, false),
-        ("tls-modules-musl-clang-static-pie", true, false),
+    // Each build, whether it is dynamically linked, with a library and a
+    // plugin as separate TLS modules, and its thread count. Statically linked
+    // glibc builds without threads lack glibc's thread library.
+    for (fixture, dynamic, threads) in [
+        ("tls-modules-gcc", true, 3),
+        ("tls-modules-gcc-static", false, 3),
+        ("tls-modules-clang-static-pie", false, 3),
+        ("tls-modules-single-thread-gcc-static-pie", false, 1),
+        ("tls-modules-single-thread-clang-static", false, 1),
+        ("tls-modules-musl-gcc-o0", true, 3),
+        ("tls-modules-musl-clang-o2-nopie", true, 3),
+        ("tls-modules-musl-gcc-static", false, 3),
+        ("tls-modules-musl-clang-static-pie", false, 3),
     ] {
         let mut scenario = Scenario::launch(fixture);
         let entry = scenario
@@ -842,8 +847,10 @@ async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
             })
             .await;
         assert_eq!(entry, StopReason::Entry, "{fixture}");
-        // Before musl sets the thread pointer up, no thread has TLS.
-        if musl {
+        // Before the C library sets the thread pointer up, no thread has TLS.
+        // Only dynamically linked glibc needs its loader to identify the
+        // executable's TLS, and its loader has not run yet.
+        if fixture != "tls-modules-gcc" {
             let early = scenario
                 .operation("TLS at entry", scenario.handle().variable("main_tls"))
                 .await;
@@ -865,7 +872,7 @@ async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
             ),
             "{fixture}"
         );
-        support::assert_tls_modules(&mut scenario, fixture, dynamic).await;
+        support::assert_tls_modules(&mut scenario, fixture, dynamic, threads).await;
         assert_eq!(
             scenario.resume_to_stop().await,
             StopReason::Exited(ExitStatus::Code(0)),

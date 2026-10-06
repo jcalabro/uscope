@@ -74,10 +74,14 @@ int main(int argc, char **argv) {
     aborting = argc > 1 && strcmp(argv[1], "abort") == 0;
     pthread_t early;
     pthread_t late;
-    if (pthread_barrier_init(&loaded, NULL, 2) != 0 ||
+    // gcore cannot read the guard pages glibc 2.42 installs inside a stack
+    // mapping, and then saves none of the mapping, so threads have none.
+    pthread_attr_t unguarded;
+    if (pthread_attr_init(&unguarded) != 0 || pthread_attr_setguardsize(&unguarded, 0) != 0 ||
+        pthread_barrier_init(&loaded, NULL, 2) != 0 ||
         pthread_barrier_init(&ready, NULL, THREADS) != 0 ||
         pthread_barrier_init(&release, NULL, THREADS) != 0 ||
-        pthread_create(&early, NULL, worker, (void *)(intptr_t)1) != 0) {
+        pthread_create(&early, &unguarded, worker, (void *)(intptr_t)1) != 0) {
         return 1;
     }
 #ifndef STATIC_BUILD
@@ -91,7 +95,7 @@ int main(int argc, char **argv) {
     }
 #endif
     pthread_barrier_wait(&loaded);
-    if (pthread_create(&late, NULL, worker, (void *)(intptr_t)2) != 0) {
+    if (pthread_create(&late, &unguarded, worker, (void *)(intptr_t)2) != 0) {
         return 1;
     }
     record(0);

@@ -1925,16 +1925,19 @@ async fn core_tls_is_located_by_libthread_db_and_by_the_c_librarys_own_descripto
     foreign_scenario.shutdown().await;
 }
 
-/// musl has no thread debugging library, so its own thread structures in the
-/// dump locate each thread's TLS, with or without a dynamic loader.
+/// musl has no thread debugging library, and a statically linked glibc
+/// program may lack its own, so the C library's thread structures in the dump
+/// locate each thread's TLS, with or without a dynamic loader.
 #[tokio::test]
-async fn musl_cores_locate_every_threads_tls_in_every_module() {
-    for (name, dynamic) in [
-        ("tls-modules-musl-gcc-o0.core", true),
-        ("tls-modules-musl-clang-static-pie.core", false),
+async fn musl_and_static_glibc_cores_locate_every_threads_tls_in_every_module() {
+    for (name, dynamic, threads) in [
+        ("tls-modules-musl-gcc-o0.core", true, 3),
+        ("tls-modules-musl-clang-static-pie.core", false, 3),
+        ("tls-modules-gcc-static.core", false, 3),
+        ("tls-modules-single-thread-clang-static.core", false, 1),
     ] {
         let mut scenario = open_core(name);
-        support::assert_tls_modules(&mut scenario, name, dynamic).await;
+        support::assert_tls_modules(&mut scenario, name, dynamic, threads).await;
         scenario.shutdown().await;
     }
 }
