@@ -37,7 +37,7 @@ are reported as such.
 | --- | --- | --- |
 | C, C++, Rust (GCC, Clang, rustc) | Parameters, locals, and globals, including partly optimized-out values | Full |
 | Zig 0.16 (LLVM backend) | Parameters, locals, and globals | Full; inline frames when emitted |
-| Go 1.26 `gc` | Locals in `-N -l` builds; package globals in any build | Breakpoints and continue only: no source stepping, goroutines, or split-stack backtraces |
+| Go 1.27 `gc` | Locals in `-N -l` builds; package globals in any build | Breakpoints and continue only: no source stepping, goroutines, or split-stack backtraces |
 
 Thread-local storage is supported for glibc only.
 
