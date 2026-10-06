@@ -22,69 +22,9 @@ async fn stack_scalar_variables_are_read_through_the_public_scenario_path() {
             .iter()
             .map(|variable| variable.name.as_ref())
             .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            [
-                "boolean",
-                "character",
-                "signed_character",
-                "unsigned_character",
-                "signed_short",
-                "unsigned_short",
-                "signed_int",
-                "unsigned_int",
-                "signed_long",
-                "unsigned_long",
-                "signed_long_long",
-                "unsigned_long_long",
-                "single",
-                "double_precision",
-                "extended",
-            ]
-        );
-        let expected = [
-            ScalarValue::Boolean(true),
-            ScalarValue::Signed(65),
-            ScalarValue::Signed(-12),
-            ScalarValue::Unsigned(250),
-            ScalarValue::Signed(-1234),
-            ScalarValue::Unsigned(54_321),
-            ScalarValue::Signed(-1_234_567),
-            ScalarValue::Unsigned(3_456_789_012),
-            ScalarValue::Signed(-123_456_789),
-            ScalarValue::Unsigned(123_456_789),
-            ScalarValue::Signed(-1_234_567_890_123),
-            ScalarValue::Unsigned(12_345_678_901_234),
-            ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
-            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
-            ScalarValue::Floating(uscope::FloatValue::X87Extended {
-                significand: 0xc800_0000_0000_0000,
-                sign_exponent: 0x4000,
-            }),
-        ];
-        let expected_sizes = [1, 1, 1, 1, 2, 2, 4, 4, 8, 8, 8, 8, 4, 8, 16];
-        for ((variable, expected), expected_size) in
-            snapshot.variables.iter().zip(expected).zip(expected_sizes)
-        {
-            assert_variable_value(variable, expected);
-            assert_eq!(
-                variable
-                    .type_info
-                    .as_ref()
-                    .expect("available scalar type")
-                    .byte_size,
-                Some(expected_size)
-            );
-            let VariableState::Available { source, raw, .. } = &variable.state else {
-                unreachable!("value assertion checked availability")
-            };
-            assert!(
-                matches!(source, uscope::VariableValueSource::Memory(address) if address.get() != 0)
-            );
-            assert_eq!(
-                raw.as_ref().expect("available scalar bytes").len(),
-                usize::try_from(expected_size).unwrap()
-            );
+        assert_eq!(names, c_scalars().map(|(name, ..)| name), "{fixture}");
+        for (variable, (_, value, size)) in snapshot.variables.iter().zip(c_scalars()) {
+            assert_whole_in_memory(variable, value, size, fixture);
         }
         assert_eq!(
             scenario
@@ -979,54 +919,82 @@ async fn step_to_source_line(scenario: &mut Scenario, line: u32) {
     panic!("did not reach source line {line} within the step budget");
 }
 
+/// The C fixtures' scalar variables: each name, value, and byte size.
+const fn c_scalars() -> [(&'static str, ScalarValue, u64); 15] {
+    [
+        ("boolean", ScalarValue::Boolean(true), 1),
+        ("character", ScalarValue::Signed(65), 1),
+        ("signed_character", ScalarValue::Signed(-12), 1),
+        ("unsigned_character", ScalarValue::Unsigned(250), 1),
+        ("signed_short", ScalarValue::Signed(-1234), 2),
+        ("unsigned_short", ScalarValue::Unsigned(54_321), 2),
+        ("signed_int", ScalarValue::Signed(-1_234_567), 4),
+        ("unsigned_int", ScalarValue::Unsigned(3_456_789_012), 4),
+        ("signed_long", ScalarValue::Signed(-123_456_789), 8),
+        ("unsigned_long", ScalarValue::Unsigned(123_456_789), 8),
+        (
+            "signed_long_long",
+            ScalarValue::Signed(-1_234_567_890_123),
+            8,
+        ),
+        (
+            "unsigned_long_long",
+            ScalarValue::Unsigned(12_345_678_901_234),
+            8,
+        ),
+        (
+            "single",
+            ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+            4,
+        ),
+        (
+            "double_precision",
+            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+            8,
+        ),
+        (
+            "extended",
+            ScalarValue::Floating(uscope::FloatValue::X87Extended {
+                significand: 0xc800_0000_0000_0000,
+                sign_exponent: 0x4000,
+            }),
+            16,
+        ),
+    ]
+}
+
+/// Checks that a variable holds `expected`, read whole from memory.
+fn assert_whole_in_memory(
+    variable: &uscope::Variable,
+    expected: ScalarValue,
+    size: u64,
+    fixture: &str,
+) {
+    assert_variable_value(variable, expected);
+    assert_eq!(
+        variable.type_info.as_ref().and_then(|info| info.byte_size),
+        Some(size),
+        "{fixture}: {variable:?}"
+    );
+    assert!(
+        matches!(
+            &variable.state,
+            VariableState::Available {
+                source: uscope::VariableValueSource::Memory(address),
+                raw: Some(raw),
+                ..
+            } if address.get() != 0 && raw.len() == usize::try_from(size).unwrap()
+        ),
+        "{fixture}: {variable:?}"
+    );
+}
+
 fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
     assert_parameter_catalog(snapshot, fixture);
-    let expected = [
-        ScalarValue::Boolean(true),
-        ScalarValue::Signed(65),
-        ScalarValue::Signed(-12),
-        ScalarValue::Unsigned(250),
-        ScalarValue::Signed(-1234),
-        ScalarValue::Unsigned(54_321),
-        ScalarValue::Signed(-1_234_567),
-        ScalarValue::Unsigned(3_456_789_012),
-        ScalarValue::Signed(-123_456_789),
-        ScalarValue::Unsigned(123_456_789),
-        ScalarValue::Signed(-1_234_567_890_123),
-        ScalarValue::Unsigned(12_345_678_901_234),
-        ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
-        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
-        ScalarValue::Floating(uscope::FloatValue::X87Extended {
-            significand: 0xc800_0000_0000_0000,
-            sign_exponent: 0x4000,
-        }),
-        ScalarValue::Signed(99),
-    ];
-    let expected_sizes = [1, 1, 1, 1, 2, 2, 4, 4, 8, 8, 8, 8, 4, 8, 16, 4];
-    for ((variable, expected), expected_size) in
-        snapshot.variables.iter().zip(expected).zip(expected_sizes)
-    {
-        assert_variable_value(variable, expected);
-        assert_eq!(
-            variable
-                .type_info
-                .as_ref()
-                .expect("available scalar type")
-                .byte_size,
-            Some(expected_size)
-        );
-        let VariableState::Available { source, raw, .. } = &variable.state else {
-            unreachable!("value assertion checked availability")
-        };
-        assert!(matches!(
-            source,
-            uscope::VariableValueSource::Memory(address) if address.get() != 0
-        ));
-        assert_eq!(
-            raw.as_ref().expect("available scalar bytes").len(),
-            usize::try_from(expected_size).unwrap()
-        );
+    for (variable, (_, value, size)) in snapshot.variables.iter().zip(c_scalars()) {
+        assert_whole_in_memory(variable, value, size, fixture);
     }
+    assert_whole_in_memory(&snapshot.variables[15], ScalarValue::Signed(99), 4, fixture);
 }
 
 fn assert_parameter_catalog(snapshot: &uscope::VariableSnapshot, fixture: &str) {
@@ -1035,28 +1003,9 @@ fn assert_parameter_catalog(snapshot: &uscope::VariableSnapshot, fixture: &str) 
         .iter()
         .map(|variable| variable.name.as_ref())
         .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        [
-            "boolean",
-            "character",
-            "signed_character",
-            "unsigned_character",
-            "signed_short",
-            "unsigned_short",
-            "signed_int",
-            "unsigned_int",
-            "signed_long",
-            "unsigned_long",
-            "signed_long_long",
-            "unsigned_long_long",
-            "single",
-            "double_precision",
-            "extended",
-            "local",
-        ],
-        "{fixture}"
-    );
+    let mut expected = c_scalars().map(|(name, ..)| name).to_vec();
+    expected.push("local");
+    assert_eq!(names, expected, "{fixture}");
     assert!(
         snapshot.variables[..15]
             .iter()
@@ -1066,22 +1015,7 @@ fn assert_parameter_catalog(snapshot: &uscope::VariableSnapshot, fixture: &str) 
 }
 
 fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
-    let expected = [
-        ScalarValue::Boolean(true),
-        ScalarValue::Signed(65),
-        ScalarValue::Signed(-12),
-        ScalarValue::Unsigned(250),
-        ScalarValue::Signed(-1234),
-        ScalarValue::Unsigned(54_321),
-        ScalarValue::Signed(-1_234_567),
-        ScalarValue::Unsigned(3_456_789_012),
-        ScalarValue::Signed(-123_456_789),
-        ScalarValue::Unsigned(123_456_789),
-        ScalarValue::Signed(-1_234_567_890_123),
-        ScalarValue::Unsigned(12_345_678_901_234),
-        ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
-        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
-    ];
+    let expected = c_scalars().map(|(_, value, _)| value);
     match fixture {
         "variables-parameters-gcc-o2" => {
             for (variable, value) in snapshot.variables[..14].iter().zip(&expected) {
@@ -1102,13 +1036,7 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
             for variable in &snapshot.variables[6..12] {
                 assert_memory_source(variable, fixture);
             }
-            assert_variable_value(
-                &snapshot.variables[14],
-                ScalarValue::Floating(uscope::FloatValue::X87Extended {
-                    significand: 0xc800_0000_0000_0000,
-                    sign_exponent: 0x4000,
-                }),
-            );
+            assert_variable_value(&snapshot.variables[14], expected[14].clone());
             assert_memory_source(&snapshot.variables[14], fixture);
         }
         "variables-parameters-clang-o2" => {
@@ -1200,27 +1128,14 @@ fn assert_unsupported(
 
 fn assert_language_scalar_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
     assert_language_scalar_catalog(snapshot, fixture);
-    let expected = language_scalar_values();
     let sizes = [1, 4, 8, 4, 8, 1, 4, 8, 4, 8];
-    for ((variable, expected), size) in snapshot.variables.iter().zip(expected).zip(sizes) {
-        assert_variable_value(variable, expected);
-        assert_eq!(
-            variable
-                .type_info
-                .as_ref()
-                .expect("available language scalar type")
-                .byte_size,
-            Some(size),
-            "{fixture}: {variable:?}"
-        );
-        let VariableState::Available { source, raw, .. } = &variable.state else {
-            unreachable!("value assertion checked availability")
-        };
-        assert!(matches!(source, uscope::VariableValueSource::Memory(_)));
-        assert_eq!(
-            raw.as_ref().expect("available scalar bytes").len(),
-            usize::try_from(size).unwrap()
-        );
+    for ((variable, expected), size) in snapshot
+        .variables
+        .iter()
+        .zip(language_scalar_values())
+        .zip(sizes)
+    {
+        assert_whole_in_memory(variable, expected, size, fixture);
     }
 }
 
