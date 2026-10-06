@@ -214,6 +214,14 @@ pub fn fuzz_elf_symbols(data: &[u8]) {
     debug_info::fuzz_elf_symbols(data);
 }
 
+/// Exercises Go function-table decoding on hostile bytes for the fuzz
+/// harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_gopclntab(data: &[u8]) {
+    debug_info::fuzz_gopclntab(data);
+}
+
 /// Exercises disassembly boundary and decoding invariants for the fuzz
 /// harness.
 #[cfg(feature = "fuzzing")]

@@ -74,6 +74,7 @@ pub fn load_symbols(
             static_table: object.symbol_table().is_some(),
             dynamic_table: object.dynamic_symbol_table().is_some(),
             embedded_table,
+            runtime_function_table: EmbeddedSymbolTable::Absent,
         },
     }
 }
@@ -903,6 +904,7 @@ mod tests {
                 static_table: true,
                 dynamic_table: false,
                 embedded_table: EmbeddedSymbolTable::Absent,
+                runtime_function_table: EmbeddedSymbolTable::Absent,
             }
         );
         let provenance = |name: &str| {
