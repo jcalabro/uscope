@@ -30,7 +30,7 @@ use super::inspect::{
     row_major_array_index, static_member_layout_is_valid,
 };
 use super::location::{EvaluationUnit, Expression, LocationDescription, LocationEntry};
-use super::shape::{ValueShape, ValueShapeError, ValueShapeKind, value_shape_from};
+use super::shape::{ValueShape, ValueShapeError, value_shape_from};
 use super::types::{
     TypeArenaBuilder, TypeEntry, TypeResolution, inline_storage_cycle_nodes,
     propagate_wrapper_sizes, zig_error_union_type_names, zig_optional_payload_name,
@@ -1143,11 +1143,11 @@ fn type_graph_rejects_wrapper_cycles_but_permits_recursive_pointer_edges() {
     })];
     assert!(matches!(
         value_shape_from(&recursive_pointer, TypeId::new(0)),
-        Ok(ValueShape { kind: ValueShapeKind::Indirection {
+        Ok(ValueShape::Indirection {
             target: Some(id),
             byte_size: 8,
             address_class: 0,
-        }, .. }) if id == TypeId::new(0)
+        }) if id == TypeId::new(0)
     ));
 }
 

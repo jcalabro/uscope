@@ -31,8 +31,7 @@ use super::evaluate::{
 };
 use super::location::{Expression, ExpressionUse, LocationSelectionError};
 use super::shape::{
-    TransparentRepresentationError, ValueShape, ValueShapeError, ValueShapeKind,
-    indirection_byte_size, transparent_representation, value_shape_from,
+    ValueShape, ValueShapeError, indirection_byte_size, transparent_type_from, value_shape_from,
 };
 use super::types::{
     DynamicAggregateChild, DynamicAggregateLayoutKey, TypeResolution, type_info_from,
@@ -438,41 +437,7 @@ impl DwarfVariableInfo {
         &self,
         id: TypeId,
     ) -> std::result::Result<(TypeId, &TypeInfo), ValueShapeError> {
-        let mut current = id;
-        let mut visited = HashSet::new();
-        loop {
-            if !visited.insert(current) {
-                return Err(ValueShapeError::Malformed("type wrapper cycle".into()));
-            }
-            let info = self
-                .type_info(current)
-                .map_err(ValueShapeError::Malformed)?;
-            match info.kind {
-                TypeKind::Modified { target, .. }
-                | TypeKind::Named {
-                    target: Some(target),
-                    ..
-                } => {
-                    transparent_representation(&self.types, info, target).map_err(|error| {
-                        match error {
-                            TransparentRepresentationError::Malformed(reason) => {
-                                ValueShapeError::Malformed(reason)
-                            }
-                            TransparentRepresentationError::Unsupported(reason) => {
-                                ValueShapeError::Unsupported(reason)
-                            }
-                        }
-                    })?;
-                    current = target.id;
-                }
-                TypeKind::Named { target: None, .. } => {
-                    return Err(ValueShapeError::Unsupported(
-                        "incomplete named type has no representation target".into(),
-                    ));
-                }
-                _ => return Ok((current, info)),
-            }
-        }
+        transparent_type_from(&self.types, id)
     }
 
     fn validate_static_member_layout(&self, record: TypeId, member: &RecordMember) -> Result<()> {
@@ -1181,10 +1146,7 @@ impl DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<DecodedSlice, EvaluateError> {
-        let pointer_bytes = match self.target.pointer_width {
-            crate::PointerWidth::Bits32 => 4,
-            crate::PointerWidth::Bits64 => 8,
-        };
+        let pointer_bytes = self.pointer_bytes();
         let words = if has_capacity { 3 } else { 2 };
         // Validate the metadata's size before reading, so a bogus size cannot
         // spend the request's memory budget.
@@ -1287,9 +1249,9 @@ impl DwarfVariableInfo {
         budget: &mut InspectionBudget,
     ) -> std::result::Result<ValueStorage, EvaluateError> {
         let shape = self.value_shape(type_id).map_err(EvaluateError::from)?;
-        let base = match &shape.kind {
-            ValueShapeKind::Scalar(base) => base,
-            ValueShapeKind::Enumeration { representation, .. } => representation,
+        let base = match &shape {
+            ValueShape::Scalar(base) => base,
+            ValueShape::Enumeration { representation, .. } => representation,
             _ => {
                 return Err(EvaluateError::Unavailable(
                     VariableUnavailableReason::ValueAccess(
@@ -1421,13 +1383,11 @@ impl DwarfVariableInfo {
             };
         };
         let shape = self.value_shape(member.type_ref.id)?;
-        let representation = match &shape.kind {
-            ValueShapeKind::Scalar(base)
-                if !matches!(base.encoding, BaseTypeEncoding::Floating) =>
-            {
+        let representation = match &shape {
+            ValueShape::Scalar(base) if !matches!(base.encoding, BaseTypeEncoding::Floating) => {
                 base
             }
-            ValueShapeKind::Enumeration { representation, .. } => representation,
+            ValueShape::Enumeration { representation, .. } => representation,
             _ => {
                 return Err(EvaluateError::Malformed(
                     "variant discriminator type is not integral".into(),
@@ -1763,8 +1723,8 @@ impl DwarfVariableInfo {
                     .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
                 Self::read_storage(storage, size, runtime, budget)
             };
-        Ok(match &shape.kind {
-            ValueShapeKind::Scalar(base) => match read(base.byte_size, runtime, budget) {
+        Ok(match shape {
+            ValueShape::Scalar(base) => match read(base.byte_size, runtime, budget) {
                 Ok((source, raw)) => match decode_scalar(base, &raw, self.target) {
                     Ok(value) => leaf(
                         source,
@@ -1788,7 +1748,7 @@ impl DwarfVariableInfo {
                     evaluate_error_state(error, VariableMalformedKind::InvalidExpression)?
                 }
             },
-            ValueShapeKind::Enumeration {
+            ValueShape::Enumeration {
                 representation,
                 enumerators,
                 byte_size,
@@ -1819,7 +1779,7 @@ impl DwarfVariableInfo {
                     evaluate_error_state(error, VariableMalformedKind::InvalidExpression)?
                 }
             },
-            ValueShapeKind::Indirection {
+            ValueShape::Indirection {
                 target,
                 byte_size,
                 address_class,
@@ -1897,7 +1857,7 @@ impl DwarfVariableInfo {
                     }
                 },
             },
-            ValueShapeKind::Array { dimensions, .. } => {
+            ValueShape::Array { dimensions, .. } => {
                 let Some(total) = dimensions
                     .iter()
                     .try_fold(1_u64, |total, dimension| total.checked_mul(dimension.count))
@@ -1920,7 +1880,7 @@ impl DwarfVariableInfo {
                     presentation: None,
                 }
             }
-            ValueShapeKind::Slice {
+            ValueShape::Slice {
                 element: _,
                 byte_size,
                 has_capacity,
@@ -1956,7 +1916,7 @@ impl DwarfVariableInfo {
                     presentation: None,
                 }
             }
-            ValueShapeKind::Record { members, bases, .. } => {
+            ValueShape::Record { members, bases, .. } => {
                 let total =
                     u64::try_from(bases.len().saturating_add(members.len())).unwrap_or(u64::MAX);
                 VariableState::Available {
@@ -1971,7 +1931,7 @@ impl DwarfVariableInfo {
                     presentation: None,
                 }
             }
-            ValueShapeKind::Union { members, .. } => {
+            ValueShape::Union { members, .. } => {
                 let total = u64::try_from(members.len()).unwrap_or(u64::MAX);
                 VariableState::Available {
                     source: Self::storage_source(storage),
@@ -1985,7 +1945,7 @@ impl DwarfVariableInfo {
                     presentation: None,
                 }
             }
-            ValueShapeKind::Variant {
+            ValueShape::Variant {
                 aggregate,
                 common_members,
                 bases,
@@ -2155,16 +2115,16 @@ impl DwarfVariableInfo {
         let shape = self
             .value_shape(reference.target_type)
             .map_err(shape_error)?;
-        let expected_total = match &shape.kind {
-            ValueShapeKind::Array { dimensions, .. } => dimensions
+        let expected_total = match &shape {
+            ValueShape::Array { dimensions, .. } => dimensions
                 .iter()
                 .try_fold(1_u64, |total, dimension| total.checked_mul(dimension.count)),
-            ValueShapeKind::Slice { .. } => Some(reference.total),
-            ValueShapeKind::Record { members, bases, .. } => {
+            ValueShape::Slice { .. } => Some(reference.total),
+            ValueShape::Record { members, bases, .. } => {
                 u64::try_from(members.len().saturating_add(bases.len())).ok()
             }
-            ValueShapeKind::Union { members, .. } => u64::try_from(members.len()).ok(),
-            ValueShapeKind::Variant {
+            ValueShape::Union { members, .. } => u64::try_from(members.len()).ok(),
+            ValueShape::Variant {
                 common_members,
                 bases,
                 variants,
@@ -2225,16 +2185,16 @@ impl DwarfVariableInfo {
         let linear_storage = if storage_failure.is_some() {
             None
         } else {
-            match &shape.kind {
-                ValueShapeKind::Array { element, .. } | ValueShapeKind::Slice { element, .. } => {
+            match &shape {
+                ValueShape::Array { element, .. } | ValueShape::Slice { element, .. } => {
                     let element_shape = self.value_shape(*element).ok();
                     let requires_bytes = element_shape.as_ref().is_some_and(|shape| {
                         matches!(
-                            shape.kind,
-                            ValueShapeKind::Scalar(_)
-                                | ValueShapeKind::Enumeration { .. }
-                                | ValueShapeKind::Indirection { .. }
-                                | ValueShapeKind::Slice { .. }
+                            shape,
+                            ValueShape::Scalar(_)
+                                | ValueShape::Enumeration { .. }
+                                | ValueShape::Indirection { .. }
+                                | ValueShape::Slice { .. }
                         )
                     });
                     let stride = element_shape.as_ref().map(ValueShape::byte_size);
@@ -2286,8 +2246,8 @@ impl DwarfVariableInfo {
             if budget.consume_value_nodes(1).is_err() {
                 break;
             }
-            let (relationship, type_id, child_storage) = match &shape.kind {
-                ValueShapeKind::Array {
+            let (relationship, type_id, child_storage) = match &shape {
+                ValueShape::Array {
                     element,
                     dimensions,
                     ..
@@ -2338,7 +2298,7 @@ impl DwarfVariableInfo {
                         child_storage,
                     )
                 }
-                ValueShapeKind::Slice { element, .. } => {
+                ValueShape::Slice { element, .. } => {
                     let element_shape = self.value_shape(*element).map_err(shape_error)?;
                     let storage_index = if linear_storage.is_some() {
                         index - offset
@@ -2361,7 +2321,7 @@ impl DwarfVariableInfo {
                         }),
                     )
                 }
-                ValueShapeKind::Record {
+                ValueShape::Record {
                     record,
                     members,
                     bases,
@@ -2400,7 +2360,7 @@ impl DwarfVariableInfo {
                         )
                     }
                 }
-                ValueShapeKind::Union { union, members, .. } => {
+                ValueShape::Union { union, members, .. } => {
                     let member_index =
                         usize::try_from(index).expect("bounded union index fits usize");
                     let member = &members[member_index];
@@ -2418,7 +2378,7 @@ impl DwarfVariableInfo {
                         ),
                     )
                 }
-                ValueShapeKind::Variant {
+                ValueShape::Variant {
                     aggregate,
                     common_members,
                     bases,
@@ -2580,10 +2540,10 @@ impl DwarfVariableInfo {
     }
 
     fn constrain_dereference(&self, state: &mut VariableState, shape: &ValueShape) {
-        let ValueShapeKind::Indirection {
+        let ValueShape::Indirection {
             target: Some(target),
             ..
-        } = &shape.kind
+        } = shape
         else {
             return;
         };
