@@ -155,7 +155,15 @@ impl Client {
             .await
     }
 
-    async fn console(&self, text: impl Into<String>) -> Result<(), Closed> {
+    async fn thread(&self, reason: &str, thread: ThreadId) -> Result<(), Closed> {
+        self.event(
+            "thread",
+            json!({"reason": reason, "threadId": thread.get()}),
+        )
+        .await
+    }
+
+    pub(super) async fn console(&self, text: impl Into<String>) -> Result<(), Closed> {
         let mut text = text.into();
         text.push('\n');
         self.event("output", json!({"category": "console", "output": text}))
@@ -1209,12 +1217,7 @@ impl Session {
             }
             DebuggerEvent::ThreadExited { thread_id, .. } => {
                 if self.threads.remove(&thread_id) {
-                    self.client
-                        .event(
-                            "thread",
-                            json!({"reason": "exited", "threadId": thread_id.get()}),
-                        )
-                        .await?;
+                    self.client.thread("exited", thread_id).await?;
                 }
             }
             DebuggerEvent::ModuleLoaded { module, .. } => self.announce_module(&module).await?,
@@ -1392,12 +1395,7 @@ impl Session {
         // The program's threads end with it, also for a client that keeps
         // the session for a restart.
         for thread in std::mem::take(&mut self.threads) {
-            self.client
-                .event(
-                    "thread",
-                    json!({"reason": "exited", "threadId": thread.get()}),
-                )
-                .await?;
+            self.client.thread("exited", thread).await?;
         }
         if self.restarting {
             return Ok(());
@@ -1407,12 +1405,7 @@ impl Session {
 
     async fn announce_thread(&mut self, thread: ThreadId) -> Result<(), Closed> {
         if self.threads.insert(thread) {
-            self.client
-                .event(
-                    "thread",
-                    json!({"reason": "started", "threadId": thread.get()}),
-                )
-                .await?;
+            self.client.thread("started", thread).await?;
         }
         Ok(())
     }
@@ -1427,12 +1420,7 @@ impl Session {
             .collect::<BTreeSet<_>>();
         for gone in &self.threads - &live {
             self.threads.remove(&gone);
-            self.client
-                .event(
-                    "thread",
-                    json!({"reason": "exited", "threadId": gone.get()}),
-                )
-                .await?;
+            self.client.thread("exited", gone).await?;
         }
         for thread in live {
             self.announce_thread(thread).await?;

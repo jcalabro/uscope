@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
@@ -287,10 +287,7 @@ async fn read_frames<R: AsyncBufRead + Unpin>(
                     }
                 } else {
                     let _ = client
-                        .event(
-                            "output",
-                            json!({"category": "important", "output": format!("uscope ignored a malformed message: {error}\n")}),
-                        )
+                        .important(format!("uscope ignored a malformed message: {error}"))
                         .await;
                     continue;
                 }
