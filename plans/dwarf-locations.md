@@ -111,6 +111,11 @@ when:
   cycle or a second chain leading to the frame's function refuses with
   `TailCalls`, and a function the target cannot reach with
   `TargetMismatch`;
+- no function the call or a tail call entered is defined by another
+  loaded module as well, unless it is the executable's, which every
+  lookup finds first: a call or jump through the procedure linkage table
+  may have reached the other module's instead. Such a target refuses with
+  `UnknownTarget`, such a link with `TailCalls`;
 - the call that passed the parameter, the last link of the chain or the
   call site itself, passes it: the same register, or for a parameter
   reference the same parameter entry in the same module.
@@ -145,9 +150,10 @@ at load with the expressions that call them.
   partially optimized-out values, register halves, `__int128`, implicit
   pointer members, entry-value chains, a unique chain of tail calls and a
   refused cycle, IPA parameter references, a library function called
-  through the procedure linkage table, calls through a pointer the caller
-  kept or lost, reasons from a caller further out, and refused assignment
-  and watches of split values; the existing optimized fixtures, whose
+  through the procedure linkage table, a tail call the program's own
+  definition of a library function took, calls through a pointer the
+  caller kept or lost, reasons from a caller further out, and refused
+  assignment and watches of split values; the existing optimized fixtures, whose
   unsupported values became available.
 - Differential: gdb's reading of every frame of dumped cores, extended to
   record members, over the new fixture's cores.

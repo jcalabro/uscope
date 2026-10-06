@@ -196,6 +196,16 @@ pub struct CallSite {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CallSiteId(pub(crate) usize);
 
+/// The tail calls between the function a call entered and a frame's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailCallChain {
+    /// The tail calls, in the order they ran.
+    pub links: Arc<[CallSiteId]>,
+    /// The linker name of each function entered: the call's target, then
+    /// each link's. Another module may define one under the same name.
+    pub functions: Arc<[Option<Arc<str>>]>,
+}
+
 /// The function a call site calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallTarget {
@@ -354,12 +364,12 @@ pub trait VariableInfo: Send + Sync {
     /// The tail calls by which the function whose code holds `from`, entered
     /// by a call, became the activation of the function whose code holds
     /// `to`: none when they are the same function. Fails unless exactly one
-    /// chain of tail calls is possible.
+    /// chain of tail calls is possible within this module.
     fn tail_calls(
         &self,
         from: ImageAddress,
         to: ImageAddress,
-    ) -> std::result::Result<Arc<[CallSiteId]>, VariableRuntimeError>;
+    ) -> std::result::Result<TailCallChain, VariableRuntimeError>;
 
     /// The register-sized value a call site passed for `parameter`, in the
     /// state of the calling frame `runtime` reads.

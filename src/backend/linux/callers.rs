@@ -194,7 +194,8 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             .ok()
             .filter(|address| frame_module.image.contains_address(*address))
             .ok_or_else(|| unavailable(EntryValueUnavailableReason::TargetMismatch))?;
-        let path = frame_module.variables.tail_calls(from, code)?;
+        let tail_calls = frame_module.variables.tail_calls(from, code)?;
+        self.entered_as_described(module, &tail_calls.functions)?;
         let mut chain = Chain {
             callee: frame_module,
             caller,
@@ -202,7 +203,7 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             caller_runtime: &mut caller_runtime,
         };
         chain
-            .value(&path, parameter, module, budget)
+            .value(&tail_calls.links, parameter, module, budget)
             .map_err(|error| match error {
                 // What the caller cannot provide, the entry value cannot.
                 VariableRuntimeError::Unavailable(reason)
@@ -224,6 +225,47 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             .modules
             .get(&id)
             .ok_or_else(|| VariableRuntimeError::Fatal(format!("module {id} is not loaded").into()))
+    }
+
+    /// Fails unless the call and its tail calls entered `module`'s
+    /// `functions`, named as linker symbols: one another module also
+    /// defines may have taken the call, or a jump through the procedure
+    /// linkage table, in its place.
+    fn entered_as_described(
+        &self,
+        module: ModuleId,
+        functions: &[Option<Arc<str>>],
+    ) -> Result<(), VariableRuntimeError> {
+        for (position, name) in functions.iter().enumerate() {
+            if name
+                .as_deref()
+                .is_some_and(|name| self.defined_elsewhere(module, name))
+            {
+                return Err(unavailable(if position == 0 {
+                    EntryValueUnavailableReason::UnknownTarget
+                } else {
+                    EntryValueUnavailableReason::TailCalls
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a module other than `module` exports `name` as code, which
+    /// calls to `module`'s function of that name may reach instead. The
+    /// executable comes first in every lookup, so nothing takes its
+    /// functions' place. Untyped symbols count: assembly often leaves
+    /// functions so.
+    fn defined_elsewhere(&self, module: ModuleId, name: &str) -> bool {
+        module != ModuleId::new(0)
+            && self.controller.modules.values().any(|other| {
+                other.loaded.id != module
+                    && other.image.symbols_named(name).any(|symbol| {
+                        symbol.exported
+                            && symbol.binding != SymbolBinding::Local
+                            && symbol.kind != SymbolKind::Data
+                    })
+            })
     }
 
     /// The one address a linker symbol defines a function at, across every
