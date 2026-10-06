@@ -12,7 +12,8 @@ the debugger does and land in the core, the simulator, and DAP.
 ## Goals
 
 - A user states their preferences once, in a standard place, and a project
-  can state its own, which win.
+  can state its own, which win, including how its programs are launched,
+  as VS Code's `launch.json` does.
 - Breakpoints are managed as a set: listed as a table of source locations,
   enabled and disabled without losing their hit counts, made temporary,
   saved with the project, and restored the next time.
@@ -35,23 +36,35 @@ the debugger does and land in the core, the simulator, and DAP.
 
 ### Files and precedence
 
-Two files, both optional, in TOML:
+Three files, all optional, in TOML:
 
 1. The user's, `$XDG_CONFIG_HOME/uscope/config.toml`, or
    `~/.config/uscope/config.toml` when `XDG_CONFIG_HOME` is unset or empty,
-   as the user's view files are found today.
-2. The project's, `.uscope/config.toml` at the project root.
+   as the user's view files are found today. It is the user's alone and
+   applies to every project.
+2. The project's, `.uscope/config.toml` at the project root, usually
+   committed and shared by everyone who works on the project.
+3. The project's local file, `.uscope/config.local.toml`, for one person's
+   settings in one project. It is meant to be listed in the project's
+   `.gitignore`, which uscope never edits.
 
 Each setting comes from the first of these that sets it: a command-line
 flag, the environment (`NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `PAGER`,
-`EDITOR`), the project's file, the user's file, and the built-in default.
-Tables merge key by key, so a project that sets `[print] style` keeps the
-user's `[print] max-depth`; lists, such as `[stop] show`, replace rather
-than append, because a merged list cannot express removing an entry.
+`EDITOR`), the local file, the project's file, the user's file, and the
+built-in default. Tables merge key by key, so a project that sets `[print]
+style` keeps the user's `[print] max-depth`. Lists, such as `[stop] show`,
+replace rather than append, because a merged list cannot express removing
+an entry. The exceptions are startup commands, which run in order from
+every file, and launch configurations, which merge by name; see below.
+
+Every file accepts every setting except `[projects] trust`, which only the
+user's may set. A project that is not yet trusted gets its presentation
+settings at once and its commands only once the user trusts it; see
+[Trusting a project](#trusting-a-project).
 
 `--config FILE` reads `FILE` in place of the user's file, and
 `USCOPE_CONFIG=FILE` does the same. An empty `USCOPE_CONFIG`, or
-`--no-config`, reads neither file. Tests set it empty, so that a
+`--no-config`, reads none of the files. Tests set it empty, so that a
 developer's own configuration can never change a test's outcome.
 
 ### The project root
@@ -70,15 +83,84 @@ project should find the project's views, and a program's `--cwd` says
 nothing about which project is being debugged. `docs/views.md` changes with
 it.
 
-### What a project may set
+### Launch configurations
 
-A project file arrives with a clone, so it is trusted only with what
-cannot run anything. It may set every presentation setting, `[signals]`,
-and `[[source-map]]`, but not `[startup]`, which runs commands, or
-`[aliases]`, which change what a typed command does. Either in a project
-file is an error naming the key and saying it belongs in the user's file.
-This is gdb's `.gdbinit` auto-load problem avoided by construction rather
-than by a safe-path list.
+A project describes how its programs are debugged, as `launch.json` does:
+
+```toml
+[[launch]]
+name = "server"
+program = "build/server"            # relative to the project root
+args = ["--port", "8080"]
+env = { RUST_LOG = "debug" }
+cwd = "."
+startup = ["break handle_request", "run"]
+
+[[launch]]
+name = "attach-server"
+attach = "server"                   # a process id, or a name matched as pgrep -x does
+startup = ["bt"]
+
+[[launch]]
+name = "crash"
+core = "core.server"
+program = "build/server"
+```
+
+`uscope --launch NAME` (`-l NAME`) starts one. With no executable, no
+`--attach`, and no `--core`, a project with exactly one launch
+configuration starts it, and one with several lists their names and
+exits, since choosing one would be a guess. Flags change the
+configuration they start: arguments after `--` replace its `args`, `--env`
+adds to and overrides its `env`, and `--cwd` replaces its `cwd`. An
+`attach` name matching more than one process lists them and fails. Each
+file's configurations merge by name, so a local file can override the
+team's `server` without copying the others. The other options a flag
+takes, such as `sysroot`, `module-path`, and `views`, are keys of a
+launch configuration too.
+
+Startup commands run in order: the user's `[startup]`, the project's, the
+local file's, the launch configuration's `startup`, then `-c` files and
+`-e` commands. Unlike other lists they accumulate, because a team's
+startup commands should not remove the user's own.
+
+DAP has its own launch configurations in the editor, and `uscope dap`
+reads none of these.
+
+### Trusting a project
+
+A project's files arrive with a clone, so one file the user did not write
+could change a session's behavior just by being opened. That matters most
+on attaching: a committed `set var` or `handle SIGTERM nopass` would
+quietly change a live service. VS Code meets the same problem in
+`launch.json` with Workspace Trust, and direnv and mise with an `allow`
+or `trust` step; uscope does as they do rather than refusing commands
+from projects, as gdb's `.gdbinit` auto-load safe path does.
+
+Only settings that act need trust: `[startup]`, `[aliases]`, and
+`[[launch]]`, which runs a program with an environment that may preload
+code, in the project's file or its local file. Presentation settings,
+`[signals]`, and `[[source-map]]` apply without it.
+
+The user's `[projects] trust` chooses the policy:
+
+- `ask`, the default. An interactive session shows a project's acting
+  settings, exactly as written, and asks whether to trust them: `yes`,
+  `once` (this session only), or `no`. `yes` records them in
+  `$XDG_STATE_HOME/uscope/trust.toml` against the project root, and the
+  session never asks again until they change. The record holds the
+  settings themselves, not a hash, so it is readable and needs no hashing
+  crate. A change to a presentation setting does not ask again.
+- `always`, for users who want every project's files to apply, as they
+  would run its `Makefile`.
+- `never`: acting settings in project files never apply.
+
+Declining is never silent: the session starts without the untrusted
+settings and warns once which it left out. A batch session, or one whose
+input is not a terminal, cannot ask, so an untrusted project with acting
+settings is an error naming `--trust-project`, which trusts the project
+for that session. `uscope --launch NAME` from an untrusted project asks
+first, since the configuration is what the user asked to run.
 
 ### Strictness
 
@@ -145,11 +227,16 @@ SIGUSR1 = "nostop noprint pass"
 from = "/build"
 to = "."                  # relative to the project root
 
-[aliases]                 # user file only
+[aliases]
 bb = "break"
 
-[startup]                 # user file only
+[startup]
 commands = ["handle SIGPIPE nostop noprint"]
+
+[projects]                # user file only
+trust = "ask"             # ask | always | never
+
+[[launch]]                # see Launch configurations
 ```
 
 `max-depth` and `max-elements` replace `InspectionLimits::aggregate_depth`
@@ -164,8 +251,11 @@ later.
   root, and which exist.
 - `uscope config show` prints every setting in effect and where it came
   from (`default`, `user`, `project`, `flag`, `environment`).
-- `uscope config check` validates both files and exits non-zero on an
+- `uscope config check` validates every file and exits non-zero on an
   error, for a project's CI.
+- `uscope config trust` and `uscope config untrust` record and forget the
+  current project's acting settings, and `uscope config trusted` lists
+  every trusted project.
 - `uscope config init` writes a user file listing every setting commented
   out at its default, and refuses to overwrite one.
 
@@ -505,10 +595,17 @@ changed; `just all`, `just stress`, and `just sim 600` run once at the end.
 
 1. **Configuration.** Files, the project root, precedence, strict errors,
    `uscope config`, and the existing flags and history moved onto
-   `Settings`; themes; view discovery from the project root. Tests: one CLI
-   test of precedence across flag, project, user, and default; one of an
-   error's position and suggestion; one that a project file cannot set
-   `[startup]`; `USCOPE_CONFIG=""` in every CLI test's environment.
+   `Settings`; themes; view discovery from the project root; launch
+   configurations; trust. Tests: one CLI test of precedence across flag,
+   local, project, user, and default; one of an error's position and
+   suggestion; a launch configuration started by name with its arguments
+   and environment, and refused by ambiguity with several; startup
+   commands from every file in order; an untrusted project's startup
+   commands failing a batch session with a message naming
+   `--trust-project`, running with it, and running after `uscope config
+   trust` until they change; `never` leaving them out with a warning;
+   `USCOPE_CONFIG=""` in every CLI test's environment. The prompt itself is
+   tested at the unit level, since a terminal is not driven in tests.
 2. **Enable, disable, temporary, advance.** Core requests and options, the
    simulator's client choosing them and its hit oracles knowing a disabled
    breakpoint counts nothing and a temporary one is gone after its stop,
