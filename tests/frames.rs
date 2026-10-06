@@ -6,10 +6,11 @@ use std::path::Path;
 
 use support::Scenario;
 use uscope::{
-    CoreDumpOptions, DebuggerEvent, DereferenceState, Error, ExceptionDisposition, ExitStatus,
-    FloatValue, IntegerValue, PresentedFrame, ResumeScope, ScalarValue, StackFrame, StackFrameId,
-    StepKind, StopReason, ThreadId, ValueChildQuery, ValueChildren, Variable, VariableState,
-    VariableUnavailableReason, VariableValue, WatchAccess, WatchScope, WatchpointInvalidation,
+    CodeRole, CoreDumpOptions, DebuggerEvent, DereferenceState, Error, ExceptionDisposition,
+    ExitStatus, FloatValue, IntegerValue, PresentedFrame, ResumeScope, ScalarValue, StackFrame,
+    StackFrameId, StepKind, StopReason, ThreadId, ValueChildQuery, ValueChildren, Variable,
+    VariableState, VariableUnavailableReason, VariableValue, WatchAccess, WatchScope,
+    WatchpointInvalidation,
 };
 
 /// The frames fixture across compilers, optimization, and PIE.
@@ -636,10 +637,16 @@ async fn every_frame_of_every_dumped_thread_agrees_with_gdb() {
             let ours = backtrace(&scenario).await;
             for frame in frames {
                 let context = format!("{core} thread {tid} frame {}", frame.level);
-                // gdb unwinds past code no module describes, where ours stops.
+                // gdb unwinds past code no module describes, where ours
+                // stops, and past the frame a runtime declares its stack's
+                // first, into the code that started the thread.
                 let Some(our_frame) = ours.get(frame.level) else {
+                    let outermost = ours
+                        .last()
+                        .and_then(|frame| frame.function.as_ref())
+                        .is_some_and(|function| function.role == CodeRole::Outermost);
                     assert!(
-                        !frame.scope,
+                        !frame.scope || outermost,
                         "{context}: our backtrace is shorter: {ours:#?}"
                     );
                     continue;

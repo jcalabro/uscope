@@ -6,26 +6,26 @@
 
 mod layout;
 
-use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use layout::{Goroutines, Layout, Missing, Threads};
 
 use super::{
-    CodeAddress, Partial, RuntimeImage, RuntimeModel, RuntimeStop, RuntimeTask, TaskContext,
-    TaskPage, ThreadActivity,
+    CodeAddress, Crossing, Partial, RuntimeImage, RuntimeModel, RuntimeStop, RuntimeTask,
+    TaskContext, TaskPage, ThreadActivity,
 };
 use crate::unwind::RegisterFile;
-use crate::{AddressRange, ImageAddress, TaskStack, TaskState, ThreadId, VirtualAddress};
+use crate::{AddressRange, ImageAddress, StackSegment, TaskState, ThreadId, VirtualAddress};
 
 /// The release the contract was checked against. Another release is read
 /// the same way wherever its debug information binds, and says it is
 /// unverified.
 const VERIFIED: (u64, u64) = (1, 27);
-/// x86-64's DWARF register numbers for the registers a parked goroutine
-/// saves.
+/// x86-64's DWARF register numbers.
+const RSI: u16 = 4;
 const RBP: u16 = 6;
 const RSP: u16 = 7;
+const R12: u16 = 12;
 const RIP: u16 = 16;
 /// The first release whose runtime the model can read at all.
 const OLDEST: (u64, u64) = (1, 20);
@@ -91,16 +91,21 @@ impl GoRuntime {
             )
             .into()
         });
+        // An assembly function's symbol carries its ABI.
+        let code = |name: &str| {
+            let symbol = image
+                .symbol(name)
+                .or_else(|| image.symbol(&format!("{name}.abi0")))?;
+            Some(AddressRange {
+                start: symbol.address,
+                end: ImageAddress::new(symbol.address.get().checked_add(symbol.size?)?),
+            })
+        };
         let starting = ["runtime.clone", "runtime.settls"]
             .into_iter()
-            .filter_map(|name| {
-                let symbol = image.symbol(name)?;
-                Some(AddressRange {
-                    start: symbol.address,
-                    end: ImageAddress::new(symbol.address.get().checked_add(symbol.size?)?),
-                })
-            })
+            .filter_map(code)
             .collect();
+
         Ok(Self {
             layout: Layout::bind(image.as_ref()),
             internal: Internal::bind(image.as_ref()),
@@ -341,6 +346,139 @@ impl RuntimeModel for GoRuntime {
             after_call: task.resume.is_none_or(|resume| resume.after_call),
         }))
     }
+
+    /// The runtime's own traceback crosses the same switches
+    /// (`runtime/traceback.go`): on a thread's system stack, with a
+    /// goroutine on the thread, the frames go on at the registers the
+    /// goroutine saved in `g.sched` when it switched.
+    fn cross(
+        &self,
+        stop: &dyn RuntimeStop,
+        thread: ThreadId,
+        frame: &RegisterFile,
+    ) -> Result<Crossing, Arc<str>> {
+        let pc = frame.get(RIP).ok_or("the frame's instruction is unknown")?;
+        let name = self
+            .image
+            .function_name(ImageAddress::new(pc.wrapping_sub(stop.load_bias())));
+        let register = |number: u16, name: &str| {
+            frame
+                .get(number)
+                .ok_or_else(|| Arc::<str>::from(format!("the frame's {name} is unknown")))
+        };
+        let switch = match name.as_deref() {
+            Some("runtime.systemstack" | "runtime.asmcgocall") => Switch::Returns,
+            Some("runtime.morestack" | "runtime.mcall") => Switch::Abandons,
+            // A vDSO call keeps the goroutine's stack pointer in r12, which
+            // C preserves, while it runs on the system stack.
+            Some("runtime.nanotime1" | "runtime.vgetrandom1") => {
+                let mut registers = frame.clone();
+                registers.set(RSP, register(R12, "r12")?);
+                return Ok(Crossing::Resume {
+                    registers,
+                    segment: None,
+                });
+            }
+            // A new thread begins on the stack `clone` gives it, whose
+            // address is still in rsi; the thread that made it goes on on
+            // its own.
+            Some("runtime.clone") => {
+                return Ok(if register(RSP, "rsp")? == register(RSI, "rsi")? {
+                    Crossing::Outermost
+                } else {
+                    Crossing::Stay
+                });
+            }
+            Some("gogo") => Switch::Resumes,
+            name => {
+                return Err(format!(
+                    "{} switches stacks in a way the debugger does not follow",
+                    name.unwrap_or("the function")
+                )
+                .into());
+            }
+        };
+        let layout = self.goroutines()?;
+        let gs = self
+            .thread_gs(stop, thread)?
+            .ok_or("the thread runs no goroutine")?;
+        // Before a switch to the system stack, the frame is a call like any
+        // other on the goroutine's stack, as one switching to a goroutine
+        // is on the system stack until it has switched.
+        let on_system = gs.g == gs.g0;
+        match switch {
+            Switch::Resumes if on_system => return Ok(Crossing::Stay),
+            Switch::Resumes => return Err("the thread is switching to a goroutine".into()),
+            Switch::Returns | Switch::Abandons if !on_system => return Ok(Crossing::Stay),
+            Switch::Returns | Switch::Abandons => {}
+        }
+        // A system stack with no goroutine begins at the switch.
+        if gs.curg == 0 {
+            return Ok(Crossing::Outermost);
+        }
+        self.listed(stop, gs.curg)?;
+        let read = |offset: u64| {
+            word(stop, VirtualAddress::new(gs.curg.wrapping_add(offset))).ok_or_else(|| {
+                Arc::<str>::from(format!("the goroutine at {:#x} is unreadable", gs.curg))
+            })
+        };
+        if read(layout.m)? != gs.m {
+            return Err("the thread's goroutine is running on another thread".into());
+        }
+        let (saved_pc, sp, bp) = (
+            read(layout.sched_pc)?,
+            read(layout.sched_sp)?,
+            read(layout.sched_bp)?,
+        );
+        if sp == 0 {
+            return Err("the thread's goroutine saved no registers when it switched".into());
+        }
+        let mut registers = RegisterFile::new([(RSP, sp)]);
+        if bp != 0 {
+            registers.set(RBP, bp);
+        }
+        Ok(match switch {
+            Switch::Returns => {
+                registers.set(RIP, pc);
+                Crossing::Resume {
+                    registers,
+                    segment: Some(StackSegment::Task),
+                }
+            }
+            Switch::Abandons | Switch::Resumes if saved_pc == 0 => {
+                return Err("the thread's goroutine saved no instruction".into());
+            }
+            Switch::Abandons | Switch::Resumes => {
+                registers.set(RIP, saved_pc);
+                Crossing::Continue(registers)
+            }
+        })
+    }
+}
+
+/// How a function that switches between a goroutine's stack and its
+/// thread's system stack continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Switch {
+    /// It switches to the system stack, and returns to its caller on the
+    /// goroutine's stack once the function it runs there returns.
+    Returns,
+    /// It switches to the system stack and never returns; the goroutine
+    /// resumes where it saved its registers.
+    Abandons,
+    /// It switches from the system stack to a goroutine's.
+    Resumes,
+}
+
+/// The goroutines a thread's `m` knows, and the one in its thread-local
+/// storage.
+#[derive(Debug, Clone, Copy)]
+struct ThreadGs {
+    g: u64,
+    m: u64,
+    g0: u64,
+    gsignal: u64,
+    curg: u64,
 }
 
 impl GoRuntime {
@@ -371,8 +509,34 @@ impl GoRuntime {
         stop: &dyn RuntimeStop,
         thread: ThreadId,
     ) -> Result<ThreadActivity, Arc<str>> {
-        let threads = self.threads()?;
         let layout = self.goroutines()?;
+        let Some(gs) = self.thread_gs(stop, thread)? else {
+            return Ok(ThreadActivity::Idle);
+        };
+        let (task, stack) = if gs.g == gs.g0 {
+            (gs.curg, StackSegment::System)
+        } else if gs.g == gs.gsignal {
+            (gs.curg, StackSegment::Signal)
+        } else {
+            (gs.g, StackSegment::Task)
+        };
+        if task == 0 {
+            return Ok(ThreadActivity::Idle);
+        }
+        self.listed(stop, task)?;
+        let number = word(stop, VirtualAddress::new(task.wrapping_add(layout.goid)))
+            .ok_or_else(|| format!("the thread's goroutine at {task:#x} is unreadable"))?;
+        Ok(ThreadActivity::Task { number, stack })
+    }
+
+    /// The g in a thread's thread-local storage and the goroutines of its
+    /// `m`, or `None` for a thread with no g.
+    fn thread_gs(
+        &self,
+        stop: &dyn RuntimeStop,
+        thread: ThreadId,
+    ) -> Result<Option<ThreadGs>, Arc<str>> {
+        let threads = self.threads()?;
         let pointer = stop
             .thread_pointer(thread)
             .ok_or("the thread's thread pointer is unreadable")?;
@@ -385,7 +549,7 @@ impl GoRuntime {
         let slot = VirtualAddress::new(pointer.wrapping_add_signed(threads.tls_g));
         let g = word(stop, slot).ok_or("the thread's goroutine is unreadable")?;
         if g == 0 {
-            return Ok(ThreadActivity::Idle);
+            return Ok(None);
         }
         let read = |address: u64| {
             word(stop, VirtualAddress::new(address)).ok_or_else(|| {
@@ -396,30 +560,23 @@ impl GoRuntime {
         if m == 0 {
             return Err(format!("the thread's goroutine at {g:#x} has no m").into());
         }
-        let (g0, gsignal, curg) = (
-            read(m.wrapping_add(threads.m_g0))?,
-            read(m.wrapping_add(threads.m_gsignal))?,
-            read(m.wrapping_add(threads.m_curg))?,
-        );
-        let (task, stack) = if g == g0 {
-            (curg, TaskStack::System)
-        } else if g == gsignal {
-            (curg, TaskStack::Signal)
+        Ok(Some(ThreadGs {
+            g,
+            m,
+            g0: read(m.wrapping_add(threads.m_g0))?,
+            gsignal: read(m.wrapping_add(threads.m_gsignal))?,
+            curg: read(m.wrapping_add(threads.m_curg))?,
+        }))
+    }
+
+    /// Fails unless `g` is a goroutine the runtime lists, so a corrupted
+    /// pointer is never followed.
+    fn listed(&self, stop: &dyn RuntimeStop, g: u64) -> Result<(), Arc<str>> {
+        if self.allgs(stop)?.contains(&g) {
+            Ok(())
         } else {
-            (g, TaskStack::Own)
-        };
-        if task == 0 {
-            return Ok(ThreadActivity::Idle);
+            Err(format!("the thread's goroutine at {g:#x} is not in runtime.allgs").into())
         }
-        // Only a g the runtime lists is followed.
-        let allgs = self.allgs(stop)?.into_iter().collect::<HashSet<_>>();
-        if !allgs.contains(&task) {
-            return Err(
-                format!("the thread's goroutine at {task:#x} is not in runtime.allgs").into(),
-            );
-        }
-        let number = read(task.wrapping_add(layout.goid))?;
-        Ok(ThreadActivity::Task { number, stack })
     }
 }
 

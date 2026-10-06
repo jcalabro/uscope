@@ -298,15 +298,16 @@ pub struct TaskSnapshot {
     pub internal: bool,
 }
 
-/// Which stack a thread running a task is on.
+/// Whose stack a frame is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskStack {
-    /// The task's own stack.
-    Own,
-    /// The runtime's scheduler stack, running the runtime's code for the
-    /// task.
+pub enum StackSegment {
+    /// An OS thread's stack, which no task of a runtime owns.
+    Thread,
+    /// A task's own stack.
+    Task,
+    /// A runtime's scheduler stack, running the runtime's code for a task.
     System,
-    /// The runtime's signal-handling stack.
+    /// A runtime's signal-handling stack.
     Signal,
 }
 
@@ -314,7 +315,7 @@ pub enum TaskStack {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThreadActivity {
     /// A task, or the runtime's code on its behalf.
-    Task { task: TaskId, stack: TaskStack },
+    Task { task: TaskId, stack: StackSegment },
     /// The runtime's scheduler with no task, or code no runtime knows, such
     /// as a thread C created.
     Idle,
@@ -2893,6 +2894,9 @@ pub struct StackFrame {
     pub module: Option<ModuleId>,
     /// The exact instruction or resume address for the frame.
     pub instruction: VirtualAddress,
+    /// Whose stack the frame is on. A backtrace changes segment where a
+    /// runtime switched stacks.
+    pub segment: StackSegment,
     /// The concrete code instance represented by the frame, when known.
     pub code_instance: Option<CodeInstanceId>,
     /// The containing function, when known.
@@ -2946,6 +2950,7 @@ impl StackFrame {
             kind,
             module,
             instruction,
+            segment: StackSegment::Thread,
             code_instance: metadata.code_instance,
             function: metadata.function,
             source: metadata.source,
@@ -2973,6 +2978,9 @@ pub enum UnwindTermination {
     MemoryReadFailed { address: VirtualAddress },
     /// The reconstructed caller did not make valid progress.
     InvalidCaller { description: Arc<str> },
+    /// A runtime switched stacks at the frame, and where the stack it
+    /// switched from continues could not be found.
+    UnresolvedStackSwitch { reason: Arc<str> },
     /// A previously visited frame state was encountered again.
     CycleDetected,
     /// The configured maximum frame count was reached.
@@ -3003,6 +3011,12 @@ impl fmt::Display for UnwindTermination {
             }
             Self::InvalidCaller { description } => {
                 write!(formatter, "invalid unwind caller: {description}")
+            }
+            Self::UnresolvedStackSwitch { reason } => {
+                write!(
+                    formatter,
+                    "the stack continues where its runtime switched stacks: {reason}"
+                )
             }
             Self::CycleDetected => formatter.write_str("unwind metadata produced a frame cycle"),
             Self::DepthLimit => formatter.write_str("unwind depth limit reached"),

@@ -6,5 +6,6 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod stacks;
 mod truth;
 mod workers;

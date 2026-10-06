@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::unwind::RegisterFile;
 use crate::{
-    ImageAddress, IntegerValue, ModuleImage, RecordMemberLayout, TaskStack, TaskState, ThreadId,
+    ImageAddress, IntegerValue, ModuleImage, RecordMemberLayout, StackSegment, TaskState, ThreadId,
     TypeInfo, TypeKind, TypeNode, VirtualAddress,
 };
 
@@ -117,7 +117,7 @@ pub struct TaskPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThreadActivity {
     /// Running a task, or the runtime's code on its behalf.
-    Task { number: u64, stack: TaskStack },
+    Task { number: u64, stack: StackSegment },
     /// Running the runtime's scheduler with no task, or code the runtime
     /// does not know, such as a thread C created.
     Idle,
@@ -141,6 +141,29 @@ pub enum TaskContext {
     },
 }
 
+/// Where unwinding goes from a frame whose code switches stacks.
+#[derive(Debug, Clone)]
+pub enum Crossing {
+    /// The frame is on the stack it was called on, and unwinds as any
+    /// other frame does.
+    Stay,
+    /// The frame's own stack pointer is elsewhere than its registers say,
+    /// as for a frame called on a task's stack that runs on the system
+    /// stack. It unwinds as any other frame does, from these registers, and
+    /// its callers are on `segment`, or on its own stack when that is
+    /// `None`.
+    Resume {
+        registers: RegisterFile,
+        segment: Option<StackSegment>,
+    },
+    /// The frame never returns to its caller. The registers the task it
+    /// switched from saved begin the next frame, whose instruction is a
+    /// return address.
+    Continue(RegisterFile),
+    /// The frame is the first of its stack: no task's frames lie beyond it.
+    Outermost,
+}
+
 /// What a language runtime tells the debugger at a stop.
 pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     /// The runtime's tasks from `start`, an index into its own order, at
@@ -155,6 +178,14 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         stop: &dyn RuntimeStop,
         number: u64,
     ) -> Result<Option<TaskContext>, Arc<str>>;
+    /// Where unwinding goes from a frame of a stopped thread whose code
+    /// switches stacks, given the frame's registers.
+    fn cross(
+        &self,
+        stop: &dyn RuntimeStop,
+        thread: ThreadId,
+        frame: &RegisterFile,
+    ) -> Result<Crossing, Arc<str>>;
 }
 
 /// The runtime a module carries, bound against its debug information, or
