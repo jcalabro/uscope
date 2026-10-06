@@ -717,7 +717,19 @@ The built-in views cover:
   `HashMap`, `HashSet`, `BTreeMap`, `BTreeSet`, `Box`, `Rc`, `Arc`, both
   `Weak`s, `Cell`, `RefCell`, and `Mutex`. `&str`, `Box<str>`, and slices
   are text and elements without a view.
-- Go: maps and channels, including nil ones, which show as `nil`.
+- Go: maps and channels, including nil ones, which show as `nil`;
+  `time.Duration` as `Duration.String` writes it; `time.Time` as its wall
+  clock reading in UTC, its location, and its monotonic reading when it has
+  one, and the local location before the program loads it as `Local (not
+  yet loaded)`; `sync.Mutex` and `sync.RWMutex` as their locks and waiters;
+  `sync/atomic`'s values as the values they hold; `strings.Builder` as its
+  text, and `bytes.Buffer` as the text it has yet to read; `[]byte` as text
+  when it is text; `syscall.Errno` as the system's text for it; and the
+  errors of `errors.New`, `fmt.Errorf`, and `errors.Join` as their text, or
+  the errors they join, with the errors they wrap as `wrapped`. An error
+  whose `Error` method computes its text, as `*fs.PathError`'s does, shows
+  the parts it computes the text from, since uscope calls no function in
+  the program.
 - Zig: `std.ArrayList` and the managed list, `std.HashMap`, its unmanaged
   map, and `std.ArrayHashMapUnmanaged`.
 
