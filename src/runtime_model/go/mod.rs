@@ -353,13 +353,8 @@ impl RuntimeModel for GoRuntime {
         stop: &dyn RuntimeStop,
         thread: ThreadId,
     ) -> Result<Vec<(std::ops::Range<u64>, StackSegment)>, Arc<str>> {
-        let threads = self.threads()?;
         let Some(gs) = self.thread_gs(stop, thread)? else {
             return Ok(Vec::new());
-        };
-        let bounds = |g: u64| {
-            let read = |offset: u64| word(stop, VirtualAddress::new(g.wrapping_add(offset)));
-            Some(read(threads.g_stack_lo)?..read(threads.g_stack_hi)?)
         };
         let mut stacks = Vec::new();
         for (g, segment) in [
@@ -370,8 +365,7 @@ impl RuntimeModel for GoRuntime {
             if g == 0 {
                 continue;
             }
-            let stack = bounds(g)
-                .ok_or_else(|| format!("the stack bounds of the g at {g:#x} are unreadable"))?;
+            let stack = self.stack(stop, g)?;
             if !stack.is_empty() {
                 stacks.push((stack, segment));
             }
@@ -379,10 +373,6 @@ impl RuntimeModel for GoRuntime {
         Ok(stacks)
     }
 
-    /// The runtime's own traceback crosses the same switches
-    /// (`runtime/traceback.go`): on a thread's system stack, with a
-    /// goroutine on the thread, the frames go on at the registers the
-    /// goroutine saved in `g.sched` when it switched.
     /// The runtime preempts a goroutine with SIGURG, and rechecks that it
     /// still wants to whenever one arrives.
     fn signals(&self) -> RuntimeSignals {
@@ -391,6 +381,10 @@ impl RuntimeModel for GoRuntime {
         }
     }
 
+    /// The runtime's own traceback crosses the same switches
+    /// (`runtime/traceback.go`): on a thread's system stack, with a
+    /// goroutine on the thread, the frames go on at the registers the
+    /// goroutine saved in `g.sched` when it switched.
     fn cross(
         &self,
         stop: &dyn RuntimeStop,
@@ -441,8 +435,10 @@ impl RuntimeModel for GoRuntime {
             .ok_or("the thread runs no goroutine")?;
         // Before a switch to the system stack, the frame is a call like any
         // other on the goroutine's stack, as one switching to a goroutine
-        // is on the system stack until it has switched.
-        let on_system = gs.g == gs.g0;
+        // is on the system stack until it has switched. The frame's own
+        // stack says which, as the thread may since have gone on to its
+        // signal stack.
+        let on_system = self.stack(stop, gs.g0)?.contains(&register(RSP, "rsp")?);
         match switch {
             Switch::Resumes if on_system => return Ok(Crossing::Stay),
             Switch::Resumes => return Err("the thread is switching to a goroutine".into()),
@@ -601,6 +597,16 @@ impl GoRuntime {
             gsignal: read(m.wrapping_add(threads.m_gsignal))?,
             curg: read(m.wrapping_add(threads.m_curg))?,
         }))
+    }
+
+    /// The bounds of the stack of the g at `g`.
+    fn stack(&self, stop: &dyn RuntimeStop, g: u64) -> Result<std::ops::Range<u64>, Arc<str>> {
+        let threads = self.threads()?;
+        let read = |offset: u64| word(stop, VirtualAddress::new(g.wrapping_add(offset)));
+        read(threads.g_stack_lo)
+            .zip(read(threads.g_stack_hi))
+            .map(|(lo, hi)| lo..hi)
+            .ok_or_else(|| format!("the stack bounds of the g at {g:#x} are unreadable").into())
     }
 
     /// Fails unless `g` is a goroutine the runtime lists, so a corrupted

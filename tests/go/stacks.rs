@@ -418,6 +418,76 @@ async fn a_signal_handler_unwinds_onto_the_frame_it_interrupted() {
     }
 }
 
+/// A signal that interrupts a thread on its system stack unwinds through
+/// its handler and the system stack onto the goroutine that switched there,
+/// although the thread runs the signal's goroutine, not the system one.
+#[tokio::test]
+async fn a_signal_on_the_system_stack_unwinds_onto_its_goroutine() {
+    for fixture in BUILDS {
+        let (mut scenario, trace) = stop_in(fixture, "runtime.stopTheWorldWithSema", |segments| {
+            segments
+                .iter()
+                .any(|(_, names)| names.iter().any(|name| name == "main.stats"))
+        })
+        .await;
+        let ExecutionContext::Thread(thread) = trace.context else {
+            panic!("{fixture}: {trace:#?}");
+        };
+        let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
+            panic!("{fixture}: not stopped");
+        };
+        support::signal_thread(process_id, thread, nix::libc::SIGUSR1);
+        scenario.remove_all_breakpoints().await;
+        scenario.add_breakpoint("runtime.sighandler").await;
+        let reason = scenario.resume_to_stop().await;
+        let trace = stop_where(&mut scenario, reason, fixture, |segments| {
+            segments.iter().any(|(_, names)| {
+                names
+                    .iter()
+                    .any(|name| name == "runtime.stopTheWorldWithSema")
+            })
+        })
+        .await;
+        assert_eq!(trace.context, ExecutionContext::Thread(thread), "{fixture}");
+        assert_eq!(
+            segments(&trace),
+            [
+                (
+                    StackSegment::Signal,
+                    names(&[
+                        "runtime.sighandler",
+                        "runtime.sigtrampgo",
+                        "runtime.sigtramp",
+                        "runtime.sigreturn__sigaction",
+                    ])
+                ),
+                (
+                    StackSegment::System,
+                    names(&[
+                        "runtime.stopTheWorldWithSema",
+                        "runtime.stopTheWorld.func1",
+                        "runtime.systemstack",
+                    ])
+                ),
+                (
+                    StackSegment::Task,
+                    names(&[
+                        "runtime.stopTheWorld",
+                        "runtime.ReadMemStats",
+                        "main.stats",
+                        "main.main",
+                        "runtime.main",
+                        "runtime.goexit",
+                    ])
+                ),
+            ],
+            "{fixture}: {trace:#?}"
+        );
+        assert_eq!(trace.termination, UnwindTermination::Complete, "{fixture}");
+        scenario.shutdown().await;
+    }
+}
+
 /// The runtime turns a fault into a call to `sigpanic` from the faulting
 /// instruction, which the caller's frame names exactly.
 #[tokio::test]
