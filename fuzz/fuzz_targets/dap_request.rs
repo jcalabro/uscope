@@ -7,6 +7,10 @@ use serde_json::Value;
 #[path = "../../src/dap/protocol.rs"]
 mod protocol;
 
+#[allow(dead_code, reason = "the target exercises the parser only")]
+#[path = "../../src/dap/complete.rs"]
+mod complete;
+
 /// Decodes request arguments as each request the adapter serves would.
 fn decode(arguments: &Value) {
     macro_rules! decode_as {
@@ -33,7 +37,12 @@ fn decode(arguments: &Value) {
         protocol::DisassembleArguments,
         protocol::ModulesArguments,
         protocol::CompletionsArguments,
-        protocol::ExceptionInfoArguments
+        protocol::ExceptionInfoArguments,
+        protocol::SetVariableArguments,
+        protocol::SetExpressionArguments,
+        protocol::WriteMemoryArguments,
+        protocol::LocationsArguments,
+        protocol::SetValueFormatArguments
     );
 }
 
@@ -60,5 +69,8 @@ fuzz_target!(|data: &[u8]| {
     }
     if let Some(text) = std::str::from_utf8(data).ok() {
         let _ = protocol::address(text);
+        // What a completion completes is always the end of the text.
+        let (_, partial, start) = complete::completing(text);
+        assert_eq!(&text[start..], partial);
     }
 });
