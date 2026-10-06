@@ -333,7 +333,6 @@ impl std::str::FromStr for HitCondition {
 /// An immutable logical breakpoint and all locations resolved for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Breakpoint {
-    /// The breakpoint's session-scoped identifier.
     pub id: BreakpointId,
     /// The user intent that created the breakpoint.
     pub spec: BreakpointSpec,
@@ -561,7 +560,6 @@ pub enum WatchpointSpec {
 /// An armed hardware watchpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watchpoint {
-    /// The watchpoint's session-scoped identifier.
     pub id: WatchpointId,
     /// The accesses it reports.
     pub access: WatchAccess,

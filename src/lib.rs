@@ -226,8 +226,7 @@ pub fn fuzz_disassembly(data: &[u8]) {
 }
 
 /// Runs every built-in view, and a view file made of the input's tail,
-/// over memory made of its bytes, for the hostile fuzz harness
-/// (`plans/views.md` §3.14).
+/// over memory made of its bytes, for the fuzz harness.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub fn fuzz_views(data: &[u8]) {

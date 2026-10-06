@@ -256,17 +256,11 @@ pub struct RegisterSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BaseTypeEncoding {
-    /// A truth value.
     Boolean,
-    /// A signed integer.
     Signed,
-    /// A signed character integer.
     SignedCharacter,
-    /// An unsigned integer.
     Unsigned,
-    /// An unsigned character integer.
     UnsignedCharacter,
-    /// A binary floating-point value.
     Floating,
 }
 
@@ -289,9 +283,7 @@ pub struct BaseType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum IntegerValue {
-    /// A signed integral value.
     Signed(i128),
-    /// An unsigned integral value.
     Unsigned(u128),
 }
 
@@ -361,9 +353,7 @@ pub enum NamedTypeRelationship {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReferenceKind {
-    /// An lvalue reference.
     Lvalue,
-    /// An rvalue reference.
     Rvalue,
 }
 
@@ -371,9 +361,7 @@ pub enum ReferenceKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RecordKind {
-    /// A structure value.
     Struct,
-    /// A class value.
     Class,
 }
 
@@ -381,11 +369,8 @@ pub enum RecordKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VariantStorageKind {
-    /// Structure storage.
     Struct,
-    /// Class storage.
     Class,
-    /// Union storage.
     Union,
 }
 
@@ -393,11 +378,8 @@ pub enum VariantStorageKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Accessibility {
-    /// Public access.
     Public,
-    /// Protected access.
     Protected,
-    /// Private access.
     Private,
 }
 
@@ -423,7 +405,6 @@ pub enum RecordMemberLayout {
 pub struct RecordMember {
     /// The source member name; anonymous members have no name.
     pub name: Option<Arc<str>>,
-    /// The member's type.
     pub type_ref: TypeReference,
     /// Its location within a containing instance.
     pub layout: RecordMemberLayout,
@@ -443,14 +424,12 @@ pub struct RecordMember {
 pub enum BaseClassVirtuality {
     /// An ordinary non-virtual base.
     None,
-    /// A virtual base subobject.
     Virtual,
 }
 
 /// One base-class subobject in a normalized class type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseClass {
-    /// The base type.
     pub type_ref: TypeReference,
     /// Its location within the derived object.
     pub layout: RecordMemberLayout,
@@ -536,21 +515,18 @@ pub enum TypeKind {
     Reference {
         /// Whether this is an lvalue or rvalue reference.
         kind: ReferenceKind,
-        /// The referred-to type.
         target: TypeReference,
         /// The target-specific DWARF address class; zero is the default class.
         address_class: u64,
     },
     /// A statically bounded array with one or more dimensions.
     Array {
-        /// The element type.
         element: TypeReference,
         /// Dimensions in source order.
         dimensions: Arc<[ArrayDimension]>,
     },
     /// A language slice descriptor with a runtime element count.
     Slice {
-        /// The slice element type.
         element: TypeReference,
         /// Whether the descriptor includes a capacity field.
         has_capacity: bool,
@@ -595,7 +571,6 @@ pub enum TypeKind {
     Modified {
         /// The modifier at this graph node.
         modifier: TypeModifier,
-        /// The modified type.
         target: TypeReference,
     },
     /// A named type relationship described by a producer wrapper.
@@ -647,9 +622,7 @@ pub enum SourceLanguage {
     C,
     /// Any version of C++.
     Cpp,
-    /// Rust.
     Rust,
-    /// Go.
     Go,
     /// Zig, whichever backend produced it.
     Zig,
@@ -693,7 +666,6 @@ pub struct TypeIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TypeArgument {
-    /// A type.
     Type(TypeReference),
     /// An integral value, such as an array length.
     Value(IntegerValue),
@@ -844,11 +816,9 @@ pub enum FloatValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ScalarValue {
-    /// A source-language truth value.
     Boolean(bool),
     /// A sign-extended integer.
     Signed(i128),
-    /// An unsigned integer.
     Unsigned(u128),
     /// A binary floating-point value retained as exact target bits.
     Floating(FloatValue),
@@ -879,10 +849,7 @@ pub enum VariableValue {
     /// An optimized pointer with no concrete address representation.
     ImplicitPointer,
     /// An array whose elements are available through explicit child pages.
-    Array {
-        /// The array dimensions.
-        dimensions: Arc<[ArrayDimension]>,
-    },
+    Array { dimensions: Arc<[ArrayDimension]> },
     /// A decoded language slice whose elements are available through child pages.
     Slice {
         /// Runtime length from the descriptor.
@@ -2070,9 +2037,7 @@ pub struct VariableSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Architecture {
-    /// The x86-64 architecture.
     X86_64,
-    /// The 64-bit Arm architecture.
     Aarch64,
 }
 
@@ -2088,20 +2053,15 @@ pub enum ByteOrder {
 /// The width of an address on the target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerWidth {
-    /// A 32-bit address.
     Bits32,
-    /// A 64-bit address.
     Bits64,
 }
 
 /// Platform-independent properties of a debug target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetDescription {
-    /// The target CPU architecture.
     pub architecture: Architecture,
-    /// The target byte order.
     pub byte_order: ByteOrder,
-    /// The width of target addresses.
     pub pointer_width: PointerWidth,
 }
 
@@ -2206,7 +2166,6 @@ impl fmt::Display for ColumnNumber {
 /// A source file referenced by debug information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFile {
-    /// The file's session-scoped identifier.
     pub id: SourceFileId,
     /// The source path resolved from the debug metadata.
     pub path: Arc<PathBuf>,
@@ -2249,7 +2208,6 @@ pub struct SourceContext {
 /// Static information about a function in a module image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionInfo {
-    /// The function's session-scoped identifier.
     pub id: FunctionId,
     /// The source-level function name.
     pub name: Arc<str>,
@@ -2296,7 +2254,6 @@ pub struct BreakpointEntry {
 /// One concrete placement of a source-level function in a module image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeInstanceInfo {
-    /// The instance's session-scoped identifier.
     pub id: CodeInstanceId,
     /// The source-level function represented by this instance.
     pub function: FunctionId,
@@ -2366,7 +2323,6 @@ pub struct SymbolExtent {
 /// A linker symbol defined by a module image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolInfo {
-    /// The symbol's session-scoped identifier.
     pub id: SymbolId,
     /// The linker-visible symbol name.
     pub name: Arc<str>,
@@ -2427,7 +2383,6 @@ pub enum EmbeddedSymbolTable {
 /// The symbol whose code extent or data storage contains an address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolLocation {
-    /// The symbol's identifier within its module image.
     pub symbol: SymbolId,
     /// The linker-visible symbol name.
     pub name: Arc<str>,
@@ -2452,7 +2407,6 @@ impl SymbolLocation {
 /// An allocated section of a module image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionInfo {
-    /// The section's identifier within its module image.
     pub id: SectionId,
     /// The section name recorded by the object file.
     pub name: Arc<str>,
@@ -2467,7 +2421,6 @@ pub struct SectionInfo {
 /// The section containing an address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionLocation {
-    /// The section's identifier within its module image.
     pub section: SectionId,
     /// The section name.
     pub name: Arc<str>,
@@ -3420,11 +3373,10 @@ impl ModuleImage {
         })
     }
 
-    /// Returns the addresses within `range` that are known to begin an
-    /// instruction: the start of every range of an out-of-line function
-    /// instance, of every code symbol with an extent, and of every
-    /// executable section. Line
-    /// table rows are deliberately excluded: some producers emit rows inside
+    /// Returns the addresses within `range` known to begin an instruction:
+    /// the start of every range of an out-of-line function instance, of
+    /// every code symbol with an extent, and of every executable section.
+    /// Line table rows are excluded because some producers emit rows inside
     /// instructions, such as Go after a `LOCK` prefix.
     pub fn instruction_starts(
         &self,

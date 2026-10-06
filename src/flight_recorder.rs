@@ -3,13 +3,9 @@
 //! Every client request, native control call, wait status, classification,
 //! and published event is appended to a bounded in-memory ring as one line,
 //! stamped with the time since the first record and the thread that made it.
-//! Embedders decide where the ring goes: the test harness writes it to a file
-//! when a test fails, and the `uscope` binary streams every line to a file as
-//! it is recorded, so the recording survives even a killed process.
-//!
-//! Recordings live under [`directory`], `target/flight-recorder` of the
-//! source tree that built the binary. Release builds compile none of this:
-//! the module is absent and every `record!` expands to dead code.
+//! The test harness writes the ring to a file when a test fails, and the
+//! `uscope` binary streams every line to a file as it is recorded, so the
+//! recording survives a killed process. Release builds compile none of this.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
