@@ -85,7 +85,12 @@ fn expectation(text: &str) -> Expected {
 
 fn markers(source: &str) -> Vec<Marker> {
     let path = format!("{}/tests/fixtures/{source}", env!("CARGO_MANIFEST_DIR"));
-    let text = fs::read_to_string(&path).expect("read the fixture's source");
+    markers_in(&fs::read_to_string(&path).expect("read the fixture's source"))
+}
+
+/// The markers in a fixture's source, or in what it printed, each with its
+/// line.
+fn markers_in(text: &str) -> Vec<Marker> {
     text.lines()
         .enumerate()
         .filter_map(|(index, line)| {
@@ -518,14 +523,29 @@ async fn check_containers_but(
         .operation("select caller", scenario.handle().select_frame(caller))
         .await;
 
-    let markers = markers(source);
+    let markers = markers(source)
+        .into_iter()
+        .filter(|marker| !skipped.contains(&marker.expression.as_str()))
+        .collect::<Vec<_>>();
     assert!(markers.len() >= 5, "{source} has its markers");
     let mut seen = BTreeSet::new();
     let mut failures = Vec::new();
-    for marker in markers
-        .iter()
-        .filter(|marker| !skipped.contains(&marker.expression.as_str()))
-    {
+    check_markers(&scenario, &markers, optimized, &mut seen, &mut failures).await;
+    assert!(failures.is_empty(), "{fixture}:\n{}", failures.join("\n"));
+    scenario.shutdown().await;
+    seen
+}
+
+/// Checks every marker at the stop, noting the views that presented
+/// values.
+async fn check_markers(
+    scenario: &Scenario,
+    markers: &[Marker],
+    optimized: bool,
+    seen: &mut BTreeSet<String>,
+    failures: &mut Vec<String>,
+) {
+    for marker in markers {
         // An optimized build may keep no value of a variable, or no
         // variable at all.
         let value = if optimized {
@@ -537,13 +557,53 @@ async fn check_containers_but(
                 Err(error) => panic!("`{}`: {error}", marker.expression),
             }
         } else {
-            evaluate(&scenario, &marker.expression).await
+            evaluate(scenario, &marker.expression).await
         };
         if optimized && matches!(value.state, VariableState::Unavailable(_)) {
             continue;
         }
-        check_marker(&scenario, marker, &value, &mut seen, &mut failures).await;
+        check_marker(scenario, marker, &value, seen, failures).await;
     }
+}
+
+/// Runs a fixture that prints its markers before each call to `barrier`,
+/// and checks the markers printed before each stop there, at that stop.
+/// Returns the views that presented values.
+async fn check_printed_markers(fixture: &str, barrier: &str, optimized: bool) -> BTreeSet<String> {
+    let scratch = crate::support::ScratchDir::new("views");
+    let output_path = scratch.path().join("stdout");
+    let output = fs::File::create(&output_path).expect("create the fixture's output");
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_breakpoint(barrier).await;
+    let mut reason = scenario
+        .run_with_to_stop(LaunchOptions {
+            stdout: Some(std::process::Stdio::from(output)),
+            ..LaunchOptions::default()
+        })
+        .await;
+    let mut seen = BTreeSet::new();
+    let mut failures = Vec::new();
+    let mut read = 0;
+    let mut stops = 0;
+    while matches!(reason, StopReason::Breakpoint { .. }) {
+        stops += 1;
+        // The fixture writes its markers before it calls barrier.
+        let printed = fs::read_to_string(&output_path).expect("read the fixture's output");
+        let markers = markers_in(&printed[read..]);
+        read = printed.len();
+        assert!(
+            !markers.is_empty(),
+            "{fixture} printed markers before stop {stops}"
+        );
+        let before = failures.len();
+        check_markers(&scenario, &markers, optimized, &mut seen, &mut failures).await;
+        for failure in &mut failures[before..] {
+            *failure = format!("stop {stops}, printed {failure}");
+        }
+        reason = scenario.resume_to_stop().await;
+    }
+    assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)), "{fixture}");
+    assert!(stops >= 2, "{fixture} stopped at each barrier");
     assert!(failures.is_empty(), "{fixture}:\n{}", failures.join("\n"));
     scenario.shutdown().await;
     seen
@@ -646,6 +706,25 @@ async fn go_containers_present_as_their_views_say() {
         );
     }
     assert_every_view_binds("go-runtime.views", &seen);
+}
+
+/// The standard library's values present as Go itself shows them: the
+/// fixture prints each value's marker from its own String and Error
+/// methods, so the markers stay true when the toolchain moves.
+#[tokio::test]
+async fn go_library_values_present_as_go_shows_them() {
+    let mut seen = BTreeSet::new();
+    for (fixture, optimized) in [("stdlib-go-o0", false), ("stdlib-go-o2", true)] {
+        seen.extend(check_printed_markers(fixture, "main.barrier", optimized).await);
+    }
+    for library in [
+        "go-time.views",
+        "go-sync.views",
+        "go-text.views",
+        "go-errors.views",
+    ] {
+        assert_every_view_binds(library, &seen);
+    }
 }
 
 /// Inspection sent beside run control never holds it up or answers

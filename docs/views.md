@@ -36,6 +36,9 @@ world of C types:
 - `entry`, `{int mode; int color; long elapsed; unsigned short label[4];
   int letter}`, as `item`, with the enumerations `Access` (`NONE`, `READ`,
   `WRITE`, `EXEC`) and `Color` (`RED`, `GREEN`, `BLUE`);
+- `message`, `{uint8_t text[8]; uint8_t raw[4]}`, as `note` holding `hi
+  there` and the bytes 255, 0, 1, and 2, and `octets`, a `uint8_t[4]`, as
+  `word` holding `ok!?` and `blob` holding 255, 0, 1, and 2;
 - `run_queue`, `{list_head tasks; unsigned long nr}`, whose `task`s,
   `{int pid; list_head node}`, link through their `node`s in a ring, as
   `queue` holding the tasks 10 and 20;
@@ -237,12 +240,18 @@ the next line unless that line begins another statement or ends the view.
 - `hide NAME, …` leaves members and fields out of the children and the
   summary; `[raw]` still has them.
 - `format NAME, … as FORMAT` writes members and fields another way:
-  `hex`; `char`; `bytes`, a value's bytes in memory; `utf16`, an array of
+  `hex`; `char`; `bytes`, a value's bytes in memory; `utf8`, an array or
+  slice of bytes as text, when its bytes are valid UTF-8 with no control
+  characters but tab, newline, and carriage return; `utf16`, an array of
   16-bit units as text; `flags(ENUM)`, the enumerators whose bits an
-  integer sets; `enum(ENUM)`, the enumerator it equals; or `duration(UNIT)`,
-  a count of `ns`, `us`, `ms`, or `s`. `self` is the value a `value` shape
-  presents. A format that does not suit what it names keeps the view from
-  binding.
+  integer sets; `enum(ENUM)`, the enumerator it equals; `duration(UNIT)`, a
+  count of `ns`, `us`, `ms`, or `s`; or `time(UNIT)`, a count of them since
+  the Unix epoch, as the UTC date and time it is. `self` is the value a
+  `value` shape presents; `utf8` also writes `self` as the summary of any
+  other shape, whose children stay as they are. A format that does not suit
+  what it names keeps the view from binding, and one that does not suit a
+  value, such as `utf8` of bytes that are not text, leaves the value as it
+  would be.
 
 ```uscope-view-example
 uscope-views 1
@@ -286,6 +295,27 @@ view c entry {
 something => {kind: 0x1}
 something => children: kind = 0x1, [raw]
 item => {mode: READ | WRITE, color: BLUE, elapsed: 1.5s, label: "hi", letter: 'A'}
+```
+
+```uscope-view-example
+uscope-views 1
+view c entry {
+    hide mode, color, label, letter
+    format elapsed as time(ms)
+}
+view c message {
+    format text, raw as utf8
+}
+view c octets {
+    show sequence(4) for i in range(4) => self[i]
+    format self as utf8
+}
+---
+item => {elapsed: 1970-01-01 00:00:01.5 +0000 UTC}
+note => {text: "hi there", raw: […]}
+word => "ok!?"
+word => children: [0] = 111, [1] = 107, [2] = 33, [3] = 63, [raw]
+blob => len=4 [255, 0, 1, 2]
 ```
 
 ```uscope-view-example
@@ -687,7 +717,19 @@ The built-in views cover:
   `HashMap`, `HashSet`, `BTreeMap`, `BTreeSet`, `Box`, `Rc`, `Arc`, both
   `Weak`s, `Cell`, `RefCell`, and `Mutex`. `&str`, `Box<str>`, and slices
   are text and elements without a view.
-- Go: maps and channels, including nil ones, which show as `nil`.
+- Go: maps and channels, including nil ones, which show as `nil`;
+  `time.Duration` as `Duration.String` writes it; `time.Time` as its wall
+  clock reading in UTC, its location, and its monotonic reading when it has
+  one, and the local location before the program loads it as `Local (not
+  yet loaded)`; `sync.Mutex` and `sync.RWMutex` as their locks and waiters;
+  `sync/atomic`'s values as the values they hold; `strings.Builder` as its
+  text, and `bytes.Buffer` as the text it has yet to read; `[]byte` as text
+  when it is text; `syscall.Errno` as the system's text for it; and the
+  errors of `errors.New`, `fmt.Errorf`, and `errors.Join` as their text, or
+  the errors they join, with the errors they wrap as `wrapped`. An error
+  whose `Error` method computes its text, as `*fs.PathError`'s does, shows
+  the parts it computes the text from, since uscope calls no function in
+  the program.
 - Zig: `std.ArrayList` and the managed list, `std.HashMap`, its unmanaged
   map, and `std.ArrayHashMapUnmanaged`.
 

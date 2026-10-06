@@ -323,4 +323,7 @@ std::vector<int> ints = {1, 2, 3};            // VIEW: ints => len=3 [1, 2, 3]
 ```
 
 The tests check every marker in every build of the fixture, and that every
-built-in view presents some marked value.
+built-in view presents some marked value. Go's other library types are in
+`tests/fixtures/go/stdlib`, which prints each marker as the program runs,
+from what Go itself says of the value, such as its `String` method's text,
+so the markers stay true when the toolchain moves.

@@ -968,6 +968,10 @@ build_go_fixture "$go_fixtures_dir/names" "$output_dir/names-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/names" "$output_dir/names-go-o2" \
     -buildmode=pie
+build_go_fixture "$go_fixtures_dir/stdlib" "$output_dir/stdlib-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/stdlib" "$output_dir/stdlib-go-o2" \
+    -buildmode=pie
 require_dwarf_operation "$output_dir/variables-go-o0" 'DW_AT_language.*Go'
 require_dwarf_operation "$output_dir/variables-go-o0" main.inspectScalars
 require_dwarf_operation "$output_dir/enums-go-o0" 'DW_TAG_constant'
