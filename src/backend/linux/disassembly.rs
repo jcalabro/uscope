@@ -17,10 +17,7 @@ use super::frames::{UnwindModule, describe_address, unwind_module_for};
 use super::memory::read_logical_memory;
 use super::native::InspectionOps;
 use super::registers::x86_64_registers;
-use super::{
-    BreakpointSite, Controller, validate_image_current, validate_public_stop,
-    validate_stopped_thread,
-};
+use super::{BreakpointSite, Controller};
 
 impl<P: InspectionOps> Controller<P> {
     /// Disassembles the selected thread's stopped snapshot. The thread's
@@ -31,10 +28,7 @@ impl<P: InspectionOps> Controller<P> {
         pid: Pid,
         query: DisassemblyQuery,
     ) -> Result<Disassembly> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
         if let DisassemblyRange::Window { before, after, .. } = query.range
             && (before > MAX_WINDOW_BEFORE || after > MAX_WINDOW_AFTER || before + after == 0)
         {

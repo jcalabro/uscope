@@ -9,10 +9,10 @@ use crate::debug_info::{VariableContext, VariableRegister, VariableRuntime, Vari
 use crate::inspection::{InspectionBudget, MAX_INSPECTION_LIMITS};
 use crate::protocol::{GlobalVariableQuery, StopId, VariableQuery};
 use crate::{
-    CallFrameUnavailableReason, CodeInstanceId, Error, GlobalVariablePage, GlobalVariableReference,
-    ImageAddress, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, MemoryReadCompletion,
-    RegisterSnapshot, Result, StackFrameId, TlsUnavailableReason, UnwindTermination,
-    VariableSnapshot, VariableState, VariableUnavailableReason, VirtualAddress,
+    CodeInstanceId, Error, GlobalVariablePage, GlobalVariableReference, ImageAddress,
+    InspectedValue, LoadedGlobalVariableInfo, LoadedModule, MemoryReadCompletion, RegisterSnapshot,
+    Result, StackFrameId, TlsUnavailableReason, VariableSnapshot, VariableState,
+    VariableUnavailableReason, VirtualAddress,
 };
 
 use super::evaluation::StopMachine;
@@ -29,6 +29,16 @@ use super::{
 };
 
 impl<P: InspectionOps> Controller<P> {
+    /// The inferior, once `stop_id` is its current stop, `pid` one of its
+    /// stopped threads, and its image the one the thread executes.
+    pub(super) fn stopped_inferior(&self, stop_id: StopId, pid: Pid) -> Result<&Inferior> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, Some(stop_id))?;
+        validate_stopped_thread(inferior, pid)?;
+        validate_image_current(inferior)?;
+        Ok(inferior)
+    }
+
     pub(super) fn registers(
         &self,
         stop_id: StopId,
@@ -104,18 +114,9 @@ impl<P: InspectionOps> Controller<P> {
     ) -> Result<VariableSnapshot> {
         validate_inspection_limits(limits)?;
         let mut budget = InspectionBudget::new(limits);
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        // After exec(2) the retained module catalog and image metadata describe
-        // the previous program, but the stopped thread now executes the new
-        // image. Resolving a variable against stale metadata would silently
-        // produce a convincing but incorrect value, so refuse inspection in the
-        // exec-replaced state exactly as run control does.
-        validate_image_current(inferior)?;
-        // Source-level visibility follows the frame's logical scope: an inline
-        // frame scopes lookup to that instance's variables, a physical frame
-        // to the containing function's own variables.
+        let inferior = self.stopped_inferior(stop_id, pid)?;
+        // An inline frame sees its instance's variables; a physical frame,
+        // its function's own.
         let resolved = self.resolve_frame(inferior, pid, frame)?;
         let scope = self.frame_scope(&resolved);
         let inspect_locals = |budget: &mut InspectionBudget| {
@@ -144,32 +145,12 @@ impl<P: InspectionOps> Controller<P> {
                 match local {
                     Ok(variables) => variables,
                     Err(Error::VariableNotFound(_)) => {
-                        let mut matches = Vec::new();
-                        for module in self.modules.values() {
-                            match module.image.global_named(name) {
-                                Ok(global) => matches.push(GlobalVariableReference {
-                                    module: module.loaded.id,
-                                    image: module.loaded.image,
-                                    variable: global.id,
-                                }),
-                                Err(Error::VariableNotFound(_)) => {}
-                                Err(error) => return Err(error),
-                            }
-                        }
-                        let [global] = matches.as_slice() else {
-                            if matches.is_empty() {
-                                return Err(Error::VariableNotFound(name.clone()));
-                            }
-                            return Err(Error::AmbiguousLoadedGlobalVariable {
-                                selector: name.clone(),
-                                candidates: matches,
-                            });
-                        };
+                        let global = self.loaded_global_named(name)?;
                         vec![self.inspect_loaded_global(
                             inferior,
                             pid,
                             &resolved,
-                            *global,
+                            global,
                             &mut budget,
                         )?]
                     }
@@ -182,11 +163,7 @@ impl<P: InspectionOps> Controller<P> {
             let scope = self.frame_for(inferior, stop_id, pid, &resolved);
             let mut machine = StopMachine::new(&scope, &mut budget, true);
             for variable in &mut variables {
-                let state = std::mem::replace(
-                    &mut variable.state,
-                    VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit),
-                );
-                variable.state = machine.present_state(variable.type_info.clone(), state)?;
+                machine.present_state(variable.type_info.clone(), &mut variable.state)?;
             }
         }
         Ok(VariableSnapshot {
@@ -200,6 +177,51 @@ impl<P: InspectionOps> Controller<P> {
             completion: budget.completion(),
             usage: budget.usage(),
         })
+    }
+
+    /// A capability's thread and module, once its stop is current. Nothing
+    /// a stale capability names is consulted.
+    fn capability_module(
+        &self,
+        stop_id: StopId,
+        thread: super::DebugThreadId,
+        module: crate::ModuleId,
+        image: crate::ModuleImageId,
+    ) -> Result<(&Inferior, Pid, &RuntimeModule)> {
+        let pid = debug_pid(thread)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
+        let module = self
+            .modules
+            .get(&module)
+            .ok_or(Error::ModuleNotLoaded(module))?;
+        if module.loaded.image != image {
+            return Err(Error::StaleModuleImage);
+        }
+        Ok((inferior, pid, module))
+    }
+
+    /// The one global named `name` among the loaded modules.
+    fn loaded_global_named(&self, name: &str) -> Result<GlobalVariableReference> {
+        let mut matches = Vec::new();
+        for module in self.modules.values() {
+            match module.image.global_named(name) {
+                Ok(global) => matches.push(GlobalVariableReference {
+                    module: module.loaded.id,
+                    image: module.loaded.image,
+                    variable: global.id,
+                }),
+                Err(Error::VariableNotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        match matches.as_slice() {
+            [global] => Ok(*global),
+            [] => Err(Error::VariableNotFound(name.to_owned())),
+            _ => Err(Error::AmbiguousLoadedGlobalVariable {
+                selector: name.to_owned(),
+                candidates: matches,
+            }),
+        }
     }
 
     pub(super) fn inspect_loaded_global(
@@ -238,10 +260,6 @@ impl<P: InspectionOps> Controller<P> {
 
     /// The elements `start..end` of an inspected array or slice, by source
     /// index.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "range validation and selection preserve one atomic inspection budget"
-    )]
     pub(super) fn range_page(
         &self,
         stop_id: StopId,
@@ -251,101 +269,77 @@ impl<P: InspectionOps> Controller<P> {
         budget: &mut InspectionBudget,
     ) -> Result<crate::ValueChildPage> {
         let length = validate_range_length(start, end)?;
-        let type_name = inspected
-            .type_info
-            .as_ref()
-            .map_or_else(|| Arc::from("<unknown>"), |info| Arc::clone(&info.name));
+        let empty = |offset, total| crate::ValueChildPage {
+            stop_id,
+            offset,
+            total,
+            children: Arc::from([]),
+            completion: budget.completion(),
+            usage: budget.usage(),
+        };
+        let invalid = |why: String| Err(Error::InvalidValueRange(why.into()));
         let (lower_bound, count, reference) = match &inspected.state {
-            crate::VariableState::Available {
+            VariableState::Available {
                 value: crate::VariableValue::Array { dimensions, .. },
                 children: crate::ValueChildren::Available(reference),
                 ..
             } => {
                 let [dimension] = dimensions.as_ref() else {
-                    return Err(Error::InvalidValueRange(
-                        "ranges currently require a one-dimensional array".into(),
-                    ));
+                    return invalid("ranges currently require a one-dimensional array".into());
                 };
-                (
-                    dimension.lower_bound,
-                    dimension.count,
-                    Arc::clone(reference),
-                )
+                (dimension.lower_bound, dimension.count, reference)
             }
-            crate::VariableState::Available {
+            VariableState::Available {
                 value: crate::VariableValue::Slice { length, .. },
                 children: crate::ValueChildren::Available(reference),
                 ..
-            } => (0, *length, Arc::clone(reference)),
-            crate::VariableState::Available { .. } => {
-                return Err(Error::IndexAccessOnNonIndexable { type_name });
-            }
-            crate::VariableState::Unavailable(VariableUnavailableReason::InspectionLimit(_)) => {
-                return Ok(crate::ValueChildPage {
-                    stop_id,
-                    offset: 0,
-                    total: 0,
-                    children: Arc::from([]),
-                    completion: budget.completion(),
-                    usage: budget.usage(),
+            } => (0, *length, reference),
+            VariableState::Available { .. } => {
+                return Err(Error::IndexAccessOnNonIndexable {
+                    type_name: inspected
+                        .type_info
+                        .as_ref()
+                        .map_or_else(|| Arc::from("<unknown>"), |info| Arc::clone(&info.name)),
                 });
             }
-            crate::VariableState::Unavailable(reason) => {
-                return Err(Error::InvalidValueRange(
-                    format!("the selected aggregate is unavailable: {reason}").into(),
+            VariableState::Unavailable(VariableUnavailableReason::InspectionLimit(_)) => {
+                return Ok(empty(0, 0));
+            }
+            VariableState::Unavailable(reason) => {
+                return invalid(format!("the selected aggregate is unavailable: {reason}"));
+            }
+            VariableState::Malformed(reason) => {
+                return invalid(format!(
+                    "the selected aggregate is malformed: {}",
+                    reason.description
                 ));
             }
-            crate::VariableState::Malformed(reason) => {
-                return Err(Error::InvalidValueRange(
-                    format!(
-                        "the selected aggregate is malformed: {}",
-                        reason.description
-                    )
-                    .into(),
-                ));
-            }
-            crate::VariableState::Invalid { reason, .. } => {
-                return Err(Error::InvalidValueRange(
-                    format!("the selected aggregate has an invalid value: {reason}").into(),
+            VariableState::Invalid { reason, .. } => {
+                return invalid(format!(
+                    "the selected aggregate has an invalid value: {reason}"
                 ));
             }
         };
-        let relative_start = start
-            .checked_sub(lower_bound)
-            .and_then(|index| u64::try_from(index).ok());
-        let relative_end = end
-            .checked_sub(lower_bound)
-            .and_then(|index| u64::try_from(index).ok());
-        let (Some(offset), Some(relative_end)) = (relative_start, relative_end) else {
-            return Err(Error::ValueIndexOutOfBounds {
-                index: start,
-                lower_bound,
-                count,
-            });
+        // Once `start` is in bounds, `end`, which is not below it, can only
+        // be past the last element.
+        let relative = |index: i128| {
+            index
+                .checked_sub(lower_bound)
+                .and_then(|index| u64::try_from(index).ok())
+                .filter(|index| *index <= count)
         };
-        if offset > count || relative_end > count {
-            return Err(Error::ValueIndexOutOfBounds {
-                index: if offset > count {
-                    start
-                } else {
-                    end.checked_sub(1).unwrap_or(end)
-                },
-                lower_bound,
-                count,
-            });
-        }
+        let out_of_bounds = |index| Error::ValueIndexOutOfBounds {
+            index,
+            lower_bound,
+            count,
+        };
+        let offset = relative(start).ok_or_else(|| out_of_bounds(start))?;
+        relative(end).ok_or_else(|| out_of_bounds(end.checked_sub(1).unwrap_or(end)))?;
         if length == 0 {
-            return Ok(crate::ValueChildPage {
-                stop_id,
-                offset,
-                total: count,
-                children: Arc::from([]),
-                completion: budget.completion(),
-                usage: budget.usage(),
-            });
+            return Ok(empty(offset, count));
         }
         self.value_children_with_budget(
-            &reference,
+            reference,
             &crate::ValueChildQuery {
                 offset,
                 limit: u32::try_from(length).expect("validated range length fits u32"),
@@ -361,19 +355,12 @@ impl<P: InspectionOps> Controller<P> {
     ) -> Result<crate::DereferencedValue> {
         validate_inspection_limits(limits)?;
         let mut budget = InspectionBudget::new(limits);
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        // Validate the stop before consulting modules, registers, or memory.
-        validate_public_stop(inferior, Some(reference.stop_id))?;
-        let pid = debug_pid(reference.thread)?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
-        let module = self
-            .modules
-            .get(&reference.module)
-            .ok_or(Error::ModuleNotLoaded(reference.module))?;
-        if module.loaded.image != reference.image {
-            return Err(Error::StaleModuleImage);
-        }
+        let (inferior, pid, module) = self.capability_module(
+            reference.stop_id,
+            reference.thread,
+            reference.module,
+            reference.image,
+        )?;
         // The capability evaluates in the frame that produced it, whichever
         // frame is selected now.
         let frame = self.resolve_frame(inferior, pid, reference.frame)?;
@@ -383,7 +370,7 @@ impl<P: InspectionOps> Controller<P> {
             .dereference(reference, &mut runtime, &mut budget)?;
         let scope = self.frame_for(inferior, reference.stop_id, pid, &frame);
         let mut machine = StopMachine::new(&scope, &mut budget, true);
-        value.state = machine.present_state(Some(value.type_info.clone()), value.state)?;
+        machine.present_state(Some(value.type_info.clone()), &mut value.state)?;
         value.completion = budget.completion();
         value.usage = budget.usage();
         Ok(value)
@@ -406,22 +393,14 @@ impl<P: InspectionOps> Controller<P> {
         query: &crate::ValueChildQuery,
         budget: &mut InspectionBudget,
     ) -> Result<crate::ValueChildPage> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        // A capability must be rejected before consulting modules, registers,
-        // or memory if its stopped snapshot is no longer current.
-        validate_public_stop(inferior, Some(reference.stop_id))?;
+        let (inferior, pid, module) = self.capability_module(
+            reference.stop_id,
+            reference.thread,
+            reference.module,
+            reference.image,
+        )?;
         if !(1..=MAX_VALUE_CHILD_PAGE_LIMIT).contains(&query.limit) {
             return Err(Error::InvalidValueChildPageLimit(query.limit));
-        }
-        let pid = debug_pid(reference.thread)?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
-        let module = self
-            .modules
-            .get(&reference.module)
-            .ok_or(Error::ModuleNotLoaded(reference.module))?;
-        if module.loaded.image != reference.image {
-            return Err(Error::StaleModuleImage);
         }
         if let Some(view) = &reference.view {
             return self.view_children(reference, view, query.offset, query.limit, budget);
@@ -439,14 +418,10 @@ impl<P: InspectionOps> Controller<P> {
         let mut machine = StopMachine::new(&scope, budget, true);
         let mut children = page.children.to_vec();
         for child in &mut children {
-            let state = std::mem::replace(
-                &mut child.state,
-                VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit),
-            );
             // A base-class subobject is part of an object, not one of the
             // type it dynamically is.
             machine.dynamic = !matches!(child.relationship, crate::ValueChildRelationship::Base(_));
-            child.state = machine.present_state(Some(child.type_info.clone()), state)?;
+            machine.present_state(Some(child.type_info.clone()), &mut child.state)?;
         }
         page.children = children.into();
         page.completion = budget.completion();
@@ -545,22 +520,6 @@ pub(super) fn global_context_address(
         .code
         .filter(|(code_module, _)| *code_module == module.loaded.id)
         .map(|(_, address)| address)
-}
-
-pub(super) fn variable_cfa_error(termination: &UnwindTermination) -> VariableRuntimeError {
-    match termination {
-        // Defective unwind metadata makes a value malformed; anything else
-        // only leaves the call-frame address unavailable.
-        UnwindTermination::CorruptUnwindInfo { .. }
-        | UnwindTermination::InvalidCaller { .. }
-        | UnwindTermination::CycleDetected => {
-            VariableRuntimeError::Malformed(termination.to_string().into())
-        }
-        _ => VariableUnavailableReason::CallFrameUnavailable(
-            CallFrameUnavailableReason::UnwindTerminated(termination.to_string().into()),
-        )
-        .into(),
-    }
 }
 
 pub(super) struct LinuxVariableRuntime<'a, P> {

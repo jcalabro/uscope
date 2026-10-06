@@ -12,14 +12,13 @@ use crate::unwind::{
     CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, RegisterFile, collect_frames,
 };
 use crate::{
-    AddressDescription, Backtrace, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceKind,
-    Error, ExecutionLocation, FrameKind, ImageAddress, ImageLocation, InlineFrameLookup,
-    LoadedModule, ModuleAddress, ModuleId, ModuleImage, Result, SourceLocation, StackFrame,
-    StackFrameId, UnwindTermination, VariableUnavailableReason, VirtualAddress,
+    AddressDescription, Backtrace, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo,
+    CodeInstanceKind, Error, ExecutionLocation, FrameKind, ImageAddress, ImageLocation,
+    InlineFrameLookup, LoadedModule, ModuleAddress, ModuleId, ModuleImage, Result, SourceLocation,
+    StackFrame, StackFrameId, UnwindTermination, VariableUnavailableReason, VirtualAddress,
 };
 
 use super::breakpoints::runtime_breakpoint_address;
-use super::inspection::variable_cfa_error;
 use super::memory::PtraceMemory;
 use super::native::InspectionOps;
 use super::registers::x86_64_registers;
@@ -57,6 +56,11 @@ impl<P: InspectionOps> Controller<P> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let registers = self.ptrace.registers(pid)?;
         let instruction = VirtualAddress::new(registers.rip);
+        let physical = || FramePresentation {
+            instruction,
+            frame: PresentedFrame::Physical,
+            hidden_inline_frames: 0,
+        };
         // Presentations describe inline frames of the main image only; an
         // instruction elsewhere, or anywhere after exec replaced the image,
         // is presented as its physical frame.
@@ -68,17 +72,13 @@ impl<P: InspectionOps> Controller<P> {
                 !inferior.exec_unsupported && self.module_image.contains_address(*address)
             })
         else {
-            return Ok(FramePresentation {
-                instruction,
-                frame: PresentedFrame::Physical,
-                hidden_inline_frames: 0,
-            });
+            return Ok(physical());
         };
         let location = self.module_image.locate(image_address);
-
-        let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
-            return Ok(match &location.inline_frames {
-                InlineFrameLookup::Ambiguous(chains) => FramePresentation {
+        let chain = match &location.inline_frames {
+            InlineFrameLookup::Unique(chain) => chain,
+            InlineFrameLookup::Ambiguous(chains) => {
+                return Ok(FramePresentation {
                     instruction,
                     frame: PresentedFrame::Ambiguous(
                         chains
@@ -86,42 +86,30 @@ impl<P: InspectionOps> Controller<P> {
                             .flat_map(|chain| chain.instances.iter().copied())
                             .collect::<BTreeSet<_>>()
                             .into_iter()
-                            .collect::<Vec<_>>()
-                            .into(),
+                            .collect(),
                     ),
                     hidden_inline_frames: 0,
-                },
-                InlineFrameLookup::None => FramePresentation {
-                    instruction,
-                    frame: PresentedFrame::Physical,
-                    hidden_inline_frames: 0,
-                },
-                InlineFrameLookup::Unique(_) => unreachable!("matched above"),
-            });
+                });
+            }
+            InlineFrameLookup::None => return Ok(physical()),
         };
 
-        let breakpoint_targets = match reason {
-            Some(StopReason::Breakpoint { address, .. }) => {
-                self.breakpoint_code_instances(inferior, *address)?
-            }
-            _ => BTreeSet::new(),
-        };
-        if !breakpoint_targets.is_empty() {
-            // Every instance a breakpoint hit lies in the one chain, outermost
-            // first. Where several hit together, the stop presents the
-            // innermost, as gdb does; the others are its callers.
-            let innermost = location
+        // Every instance a breakpoint hit lies in the one chain, outermost
+        // first. Where several hit together, the stop presents the
+        // innermost, as gdb does; the others are its callers.
+        if let Some(StopReason::Breakpoint { address, .. }) = reason {
+            let hit = self.breakpoint_code_instances(inferior, *address)?;
+            if let Some(target) = location
                 .physical_instance
                 .into_iter()
                 .chain(chain.instances.iter().copied())
-                .rfind(|instance| breakpoint_targets.contains(instance));
-            if let Some(target) = innermost {
+                .rfind(|instance| hit.contains(instance))
+            {
                 let visible = chain
                     .instances
                     .iter()
                     .position(|instance| *instance == target)
                     .map_or(0, |index| index + 1);
-
                 return make_presentation(instruction, chain.instances.as_ref(), visible);
             }
         }
@@ -181,10 +169,7 @@ impl<P: InspectionOps> Controller<P> {
         pid: Pid,
         frame: StackFrameId,
     ) -> Result<ExecutionLocation> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
         if frame.get() != 0 {
             return self.outer_frame_location(inferior, pid, frame);
         }
@@ -221,15 +206,12 @@ impl<P: InspectionOps> Controller<P> {
     }
 
     pub(super) fn backtrace(&self, stop_id: StopId, pid: Pid) -> Result<Backtrace> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
         let presentation = self.presentation_for_stopped_thread(pid)?;
         let stack = self.physical_stack(inferior, pid, DEFAULT_MAX_FRAMES)?;
         let modules = self.unwind_modules(inferior);
 
-        expand_inline_backtrace(stack.backtrace(pid), &modules, &presentation)
+        expand_inline_backtrace(&stack, pid, &modules, &presentation)
     }
 
     /// Unwinds at most `max_frames` physical activations of a stopped
@@ -319,7 +301,7 @@ impl<P: InspectionOps> Controller<P> {
             });
         }
 
-        let trace = expand_inline_backtrace(stack.backtrace(pid), &modules, &presentation)?;
+        let trace = expand_inline_backtrace(&stack, pid, &modules, &presentation)?;
         let Some(selected) = trace.frames.get(level).cloned() else {
             return Err(Error::FrameNotFound {
                 frame,
@@ -469,10 +451,7 @@ impl<P: InspectionOps> Controller<P> {
         pid: Pid,
         frame: StackFrameId,
     ) -> Result<StackFrame> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
         let selected = self
             .resolve_frame(inferior, pid, frame)?
             .frame
@@ -503,6 +482,22 @@ impl<P: InspectionOps> Controller<P> {
         inferior.selected_thread = Some(pid);
         self.bump_revision();
         Ok(())
+    }
+}
+
+fn variable_cfa_error(termination: &UnwindTermination) -> VariableRuntimeError {
+    match termination {
+        // Defective unwind metadata makes a value malformed; anything else
+        // only leaves the call-frame address unavailable.
+        UnwindTermination::CorruptUnwindInfo { .. }
+        | UnwindTermination::InvalidCaller { .. }
+        | UnwindTermination::CycleDetected => {
+            VariableRuntimeError::Malformed(termination.to_string().into())
+        }
+        _ => VariableUnavailableReason::CallFrameUnavailable(
+            CallFrameUnavailableReason::UnwindTerminated(termination.to_string().into()),
+        )
+        .into(),
     }
 }
 
@@ -618,18 +613,7 @@ pub(super) fn apply_presentation(
         .and_then(|instance| module_image.code_instance(instance))
         .and_then(|instance| module_image.function(instance.function))
         .cloned();
-    location.source = if visible < chain.instances.len() {
-        chain
-            .instances
-            .get(visible)
-            .and_then(|instance| module_image.code_instance(*instance))
-            .and_then(|instance| match &instance.kind {
-                CodeInstanceKind::Inline { call_site } => call_site.clone(),
-                CodeInstanceKind::OutOfLine => None,
-            })
-    } else {
-        location.source.clone()
-    };
+    location.source = visible_source(module_image, location, &chain.instances, visible);
 
     Ok(())
 }
@@ -666,18 +650,29 @@ pub(super) fn source_for_code_instance(
             .position(|instance| *instance == selected)?
             + 1
     };
+    visible_source(module_image, location, &chain.instances, visible)
+}
 
-    if visible < chain.instances.len() {
-        chain
-            .instances
-            .get(visible)
-            .and_then(|instance| module_image.code_instance(*instance))
-            .and_then(|instance| match &instance.kind {
-                CodeInstanceKind::Inline { call_site } => call_site.clone(),
-                CodeInstanceKind::OutOfLine => None,
-            })
-    } else {
-        location.source.clone()
+/// The source line a frame shows when `visible` of `chain`'s inline frames
+/// are: the call site of the outermost hidden one, or the location's own
+/// line when none is hidden.
+fn visible_source(
+    module_image: &ModuleImage,
+    location: &ImageLocation,
+    chain: &[CodeInstanceId],
+    visible: usize,
+) -> Option<SourceLocation> {
+    chain.get(visible).map_or_else(
+        || location.source.clone(),
+        |hidden| module_image.code_instance(*hidden).and_then(call_site),
+    )
+}
+
+/// Where an inline instance was called from.
+fn call_site(instance: &CodeInstanceInfo) -> Option<SourceLocation> {
+    match &instance.kind {
+        CodeInstanceKind::Inline { call_site } => call_site.clone(),
+        CodeInstanceKind::OutOfLine => None,
     }
 }
 
@@ -715,29 +710,29 @@ pub(super) fn source_line_changed(
     })
 }
 
-pub(super) fn expand_inline_backtrace(
-    physical: Backtrace,
+/// A stack's logical frames: each activation's inline frames, innermost
+/// first, then the activation itself.
+fn expand_inline_backtrace(
+    stack: &PhysicalStack,
+    pid: Pid,
     modules: &[UnwindModule<'_>],
     presentation: &FramePresentation,
 ) -> Result<Backtrace> {
     let mut frames = Vec::new();
 
-    for physical_frame in physical.frames.iter() {
-        let context = FrameContext {
-            instruction: physical_frame.instruction,
-            cfa: None,
-            signal_frame: physical_frame.kind == FrameKind::Signal,
+    for (activation, physical) in stack.frames.iter().enumerate() {
+        let activation = u32::try_from(activation).expect("frame count fits u32");
+        let context = &physical.context;
+        let kind = if context.signal_frame {
+            FrameKind::Signal
+        } else {
+            FrameKind::Physical
         };
-        let lookup = frame_lookup_address(physical_frame.level, &context);
+        let lookup = frame_lookup_address(activation, context);
         let located = lookup.and_then(|address| unwind_module_for(modules, address));
         let (Some(lookup), Some((frame_module, image_address))) = (lookup, located) else {
             let level = u32::try_from(frames.len()).expect("frame count fits in u32");
-            frames.push(StackFrame::new(
-                level,
-                physical_frame.kind,
-                None,
-                physical_frame.instruction,
-            ));
+            frames.push(StackFrame::new(level, kind, None, context.instruction));
             continue;
         };
         let module_image = frame_module.image;
@@ -746,24 +741,12 @@ pub(super) fn expand_inline_backtrace(
         let physical_source = if let InlineFrameLookup::Unique(chain) = &location.inline_frames {
             // The stop presentation describes the main image only; innermost
             // frames in other modules show their complete inline chain.
-            let visible =
-                if physical_frame.level == 0 && frame_module.loaded.id == modules[0].loaded.id {
-                    presentation_visible_count(&location, presentation)?
-                } else {
-                    chain.instances.len()
-                };
-            let mut source = if visible < chain.instances.len() {
-                chain
-                    .instances
-                    .get(visible)
-                    .and_then(|instance| module_image.code_instance(*instance))
-                    .and_then(|instance| match &instance.kind {
-                        CodeInstanceKind::Inline { call_site } => call_site.clone(),
-                        CodeInstanceKind::OutOfLine => None,
-                    })
+            let visible = if activation == 0 && frame_module.loaded.id == modules[0].loaded.id {
+                presentation_visible_count(&location, presentation)?
             } else {
-                location.source.clone()
+                chain.instances.len()
             };
+            let mut source = visible_source(module_image, &location, &chain.instances, visible);
 
             for &instance_id in chain.instances[..visible].iter().rev() {
                 let instance = module_image
@@ -776,7 +759,7 @@ pub(super) fn expand_inline_backtrace(
                     level,
                     FrameKind::Inline,
                     module,
-                    physical_frame.instruction,
+                    context.instruction,
                     FrameMetadata {
                         code_instance: Some(instance.id),
                         function,
@@ -784,10 +767,7 @@ pub(super) fn expand_inline_backtrace(
                         symbol: None,
                     },
                 ));
-                source = match &instance.kind {
-                    CodeInstanceKind::Inline { call_site } => call_site.clone(),
-                    CodeInstanceKind::OutOfLine => None,
-                };
+                source = call_site(instance);
             }
             source
         } else {
@@ -804,9 +784,9 @@ pub(super) fn expand_inline_backtrace(
 
         frames.push(StackFrame::from_parts(
             level,
-            physical_frame.kind,
+            kind,
             module,
-            physical_frame.instruction,
+            context.instruction,
             FrameMetadata {
                 code_instance: physical_instance.map(|instance| instance.id),
                 function,
@@ -814,7 +794,7 @@ pub(super) fn expand_inline_backtrace(
                 // A caller is looked up just before its return address, but
                 // its offset describes the frame's own instruction.
                 symbol: location.symbol.clone().map(|mut symbol| {
-                    symbol.offset += physical_frame.instruction.get() - lookup.get();
+                    symbol.offset += context.instruction.get() - lookup.get();
                     symbol
                 }),
             },
@@ -822,9 +802,9 @@ pub(super) fn expand_inline_backtrace(
     }
 
     Ok(Backtrace {
-        thread: physical.thread,
+        thread: debug_thread_id(pid),
         frames: frames.into(),
-        termination: physical.termination,
+        termination: stack.termination.clone(),
     })
 }
 
@@ -848,34 +828,6 @@ pub(super) struct PhysicalStack {
     pub(super) native: libc::user_regs_struct,
     pub(super) frames: Vec<PhysicalFrame>,
     pub(super) termination: UnwindTermination,
-}
-
-impl PhysicalStack {
-    /// Describes the activations as physical backtrace frames, whose module
-    /// and symbol metadata the inline expansion resolves.
-    fn backtrace(&self, pid: Pid) -> Backtrace {
-        Backtrace {
-            thread: debug_thread_id(pid),
-            frames: self
-                .frames
-                .iter()
-                .enumerate()
-                .map(|(level, frame)| {
-                    StackFrame::new(
-                        u32::try_from(level).expect("frame count fits u32"),
-                        if frame.context.signal_frame {
-                            FrameKind::Signal
-                        } else {
-                            FrameKind::Physical
-                        },
-                        None,
-                        frame.context.instruction,
-                    )
-                })
-                .collect(),
-            termination: self.termination.clone(),
-        }
-    }
 }
 
 /// The registers a logical frame's values are read from.
@@ -966,15 +918,7 @@ impl DwarfCallerProvider<'_> {
     /// return address, which still belongs to the call. `None` means a
     /// return address of zero, which ends the stack.
     fn lookup_address(&self, current: &FrameContext) -> Option<VirtualAddress> {
-        if self.first || current.signal_frame {
-            Some(current.instruction)
-        } else {
-            current
-                .instruction
-                .get()
-                .checked_sub(1)
-                .map(VirtualAddress::new)
-        }
+        frame_lookup_address(u32::from(!self.first), current)
     }
 
     /// The canonical frame address of `current`, from its own unwind rules.

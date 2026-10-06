@@ -32,13 +32,12 @@ use crate::{
 };
 
 use super::frames::{FrameRegisters, ResolvedFrame};
-use super::inspection::{global_context_address, validate_inspection_limits, variable_context};
+use super::inspection::{
+    LinuxVariableRuntime, global_context_address, validate_inspection_limits, variable_context,
+};
 use super::native::{InspectionOps, LinuxTraceOps};
 use super::registers::x86_64_register_snapshot;
-use super::{
-    Controller, Inferior, RuntimeModule, validate_image_current, validate_public_stop,
-    validate_stopped_thread,
-};
+use super::{Controller, Inferior, RuntimeModule, validate_image_current};
 
 /// A data object a frame names.
 #[derive(Debug, Clone, Copy)]
@@ -94,17 +93,33 @@ pub(super) struct StopPlace {
 /// One frame of a stop, as expressions see it.
 pub(super) struct Frame<'a, P: InspectionOps> {
     pub(super) controller: &'a Controller<P>,
-    pub(super) inferior: &'a Inferior,
-    pub(super) pid: Pid,
+    inferior: &'a Inferior,
+    pid: Pid,
     pub(super) stop_id: StopId,
-    pub(super) resolved: &'a ResolvedFrame,
+    resolved: &'a ResolvedFrame,
     /// The frame's module, address, and inline instance, when it has debug
     /// information.
-    pub(super) code: Option<(&'a RuntimeModule, ImageAddress, Option<CodeInstanceId>)>,
+    code: Option<(&'a RuntimeModule, ImageAddress, Option<CodeInstanceId>)>,
     registers: OnceCell<Option<RegisterSnapshot>>,
     /// Units of work every machine running at the frame has done; the
     /// views presenting values one inside another each have a machine.
     charges: Cell<u32>,
+}
+
+impl<P: InspectionOps> Controller<P> {
+    /// The loaded module whose image defines `ty`.
+    pub(super) fn module_of(&self, ty: TypeReference) -> Option<&RuntimeModule> {
+        self.modules
+            .values()
+            .find(|module| module.loaded.image == ty.image)
+    }
+
+    pub(super) fn pointer_size(&self) -> u8 {
+        match self.module_image.target().pointer_width {
+            PointerWidth::Bits32 => 4,
+            PointerWidth::Bits64 => 8,
+        }
+    }
 }
 
 impl<'a, P: InspectionOps> Frame<'a, P> {
@@ -112,11 +127,10 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
         self.controller.modules.get(&id)
     }
 
-    pub(super) fn module_of(&self, ty: TypeReference) -> Option<&'a RuntimeModule> {
+    /// Reads the frame's registers and memory for values `module` describes.
+    pub(super) fn runtime(&self, module: &'a RuntimeModule) -> LinuxVariableRuntime<'a, P> {
         self.controller
-            .modules
-            .values()
-            .find(|module| module.loaded.image == ty.image)
+            .frame_runtime(self.inferior, self.pid, self.resolved, module)
     }
 
     /// Modules in the order names are looked up: the frame's first.
@@ -149,25 +163,126 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
             })
             .as_ref()
     }
+}
 
-    const fn reference(module: &RuntimeModule, id: crate::TypeId) -> TypeReference {
-        TypeReference {
+impl<P: InspectionOps> Frame<'_, P> {
+    /// The global `name` names in exactly one loaded module.
+    fn lookup_global(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Option<Lookup<StopObject>>, Refusal> {
+        let mut globals = Vec::new();
+        let mut candidates = BTreeSet::new();
+        for module in self.modules() {
+            match module.image.global_named(name) {
+                Ok(global) => globals.push((module, global.id)),
+                Err(Error::VariableNotFound(_)) => {}
+                Err(Error::AmbiguousGlobalVariable {
+                    candidates: found, ..
+                }) => {
+                    for candidate in found {
+                        let file = candidate
+                            .declaration_path
+                            .as_ref()
+                            .and_then(|path| path.file_name())
+                            .map(|file| file.to_string_lossy().into_owned());
+                        candidates.insert(file.map_or_else(
+                            || candidate.qualified_name.to_string(),
+                            |file| format!("{file}::{}", candidate.qualified_name),
+                        ));
+                    }
+                }
+                Err(error) => return Err(refusal(&error)),
+            }
+        }
+        match (globals.as_slice(), candidates.is_empty()) {
+            ([(module, id)], true) => {
+                let key = module
+                    .variables
+                    .global_object(*id)
+                    .map_err(|error| refusal(&error))?;
+                Ok(Some(object(module, key, false)))
+            }
+            ([], true) => Ok(None),
+            _ => {
+                for (module, id) in &globals {
+                    if let Some(global) = module.image.global(*id) {
+                        let file = module
+                            .image
+                            .path()
+                            .file_name()
+                            .map(|file| file.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        candidates.insert(format!("{file}::{}", global.qualified_name));
+                    }
+                }
+                Ok(Some(Lookup::Ambiguous(candidates.into_iter().collect())))
+            }
+        }
+    }
+
+    /// The enumerator `name` names, by its own name or qualified by its
+    /// enumeration's, in the frame's module before others.
+    fn lookup_enumerator(&self, name: &str) -> Option<Lookup<StopObject>> {
+        for module in self.modules() {
+            let mut found = Vec::new();
+            for node in module.image.types() {
+                let TypeNode::Resolved(info) = node else {
+                    continue;
+                };
+                let TypeKind::Enumeration { enumerators, .. } = &info.kind else {
+                    continue;
+                };
+                for enumerator in enumerators.iter() {
+                    let qualified = format!("{}::{}", info.name, enumerator.name);
+                    if enumerator.name.as_ref() == name || qualified == name {
+                        found.push((qualified, integer(enumerator.value), info.reference));
+                    }
+                }
+            }
+            found.sort_by(|left, right| left.0.cmp(&right.0));
+            found.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+            match found.as_slice() {
+                [] => {}
+                [(_, value, ty)] => {
+                    return Some(Lookup::Enumerator {
+                        value: *value,
+                        ty: *ty,
+                    });
+                }
+                _ => {
+                    return Some(Lookup::Ambiguous(
+                        found.into_iter().map(|(qualified, ..)| qualified).collect(),
+                    ));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// A data object of `module`, as a name lookup finds it.
+fn object(module: &RuntimeModule, key: ObjectKey, local: bool) -> Lookup<StopObject> {
+    Lookup::Object {
+        object: StopObject {
+            module: module.loaded.id,
+            key,
+            local,
+        },
+        ty: module.variables.object_type(key).map(|id| TypeReference {
             image: module.loaded.image,
             id,
-        }
+        }),
     }
 }
 
 impl<P: InspectionOps> TypeSource for Frame<'_, P> {
     fn type_info(&self, ty: TypeReference) -> Option<TypeInfo> {
-        self.module_of(ty)?.image.type_info(ty).cloned()
+        self.controller.module_of(ty)?.image.type_info(ty).cloned()
     }
 
     fn pointer_size(&self) -> u8 {
-        match self.controller.module_image.target().pointer_width {
-            PointerWidth::Bits32 => 4,
-            PointerWidth::Bits64 => 8,
-        }
+        self.controller.pointer_size()
     }
 
     fn byte_order(&self) -> ByteOrder {
@@ -256,17 +371,23 @@ fn refusal(error: &Error) -> Refusal {
     Refusal::new(kind, error.to_string())
 }
 
+/// The loaded module that defines `ty`.
+fn type_module<P: InspectionOps>(
+    controller: &Controller<P>,
+    ty: TypeReference,
+) -> std::result::Result<&RuntimeModule, Refusal> {
+    controller
+        .module_of(ty)
+        .ok_or_else(|| Refusal::new(ErrorKind::Unsupported, "the type's module is not loaded"))
+}
+
 /// Plans one step from a value of `from` in the image of its module.
 pub(super) fn plan_in<P: InspectionOps>(
     controller: &Controller<P>,
     from: TypeReference,
     step: StepKind<'_>,
 ) -> std::result::Result<Planned<StopStep>, Refusal> {
-    let module = controller
-        .modules
-        .values()
-        .find(|module| module.loaded.image == from.image)
-        .ok_or_else(|| Refusal::new(ErrorKind::Unsupported, "the type's module is not loaded"))?;
+    let module = type_module(controller, from)?;
     let image = &module.image;
     let base_name;
     let is_target;
@@ -360,10 +481,6 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
     type Object = StopObject;
     type Step = StopStep;
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "locals, globals, and enumerators are looked up in one order"
-    )]
     fn lookup(
         &self,
         name: &str,
@@ -371,19 +488,7 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
     ) -> std::result::Result<Lookup<StopObject>, Refusal> {
         if !outermost && let Some((module, address, selected)) = self.code {
             match module.variables.visible_object(address, selected, name) {
-                Ok(key) => {
-                    return Ok(Lookup::Object {
-                        object: StopObject {
-                            module: module.loaded.id,
-                            key,
-                            local: true,
-                        },
-                        ty: module
-                            .variables
-                            .object_type(key)
-                            .map(|id| Self::reference(module, id)),
-                    });
-                }
+                Ok(key) => return Ok(object(module, key, true)),
                 Err(Error::VariableNotFound(_)) => {}
                 Err(Error::AmbiguousVariable(_)) => {
                     return Ok(Lookup::Ambiguous(vec![name.to_owned()]));
@@ -391,102 +496,10 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
                 Err(error) => return Err(refusal(&error)),
             }
         }
-
-        let mut globals = Vec::new();
-        let mut candidates = BTreeSet::new();
-        for module in self.modules() {
-            match module.image.global_named(name) {
-                Ok(global) => globals.push((module, global.id)),
-                Err(Error::VariableNotFound(_)) => {}
-                Err(Error::AmbiguousGlobalVariable {
-                    candidates: found, ..
-                }) => {
-                    for candidate in found {
-                        let file = candidate
-                            .declaration_path
-                            .as_ref()
-                            .and_then(|path| path.file_name())
-                            .map(|file| file.to_string_lossy().into_owned());
-                        candidates.insert(file.map_or_else(
-                            || candidate.qualified_name.to_string(),
-                            |file| format!("{file}::{}", candidate.qualified_name),
-                        ));
-                    }
-                }
-                Err(error) => return Err(refusal(&error)),
-            }
+        if let Some(global) = self.lookup_global(name)? {
+            return Ok(global);
         }
-        match (globals.as_slice(), candidates.is_empty()) {
-            ([(module, id)], true) => {
-                let key = module
-                    .variables
-                    .global_object(*id)
-                    .map_err(|error| refusal(&error))?;
-                return Ok(Lookup::Object {
-                    object: StopObject {
-                        module: module.loaded.id,
-                        key,
-                        local: false,
-                    },
-                    ty: module
-                        .variables
-                        .object_type(key)
-                        .map(|id| Self::reference(module, id)),
-                });
-            }
-            ([], true) => {}
-            _ => {
-                for (module, id) in &globals {
-                    if let Some(global) = module.image.global(*id) {
-                        let file = module
-                            .image
-                            .path()
-                            .file_name()
-                            .map(|file| file.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        candidates.insert(format!("{file}::{}", global.qualified_name));
-                    }
-                }
-                return Ok(Lookup::Ambiguous(candidates.into_iter().collect()));
-            }
-        }
-
-        // Enumerators, by their own name or qualified by their
-        // enumeration's, in the frame's module before others.
-        for module in self.modules() {
-            let mut found = Vec::new();
-            for node in module.image.types() {
-                let TypeNode::Resolved(info) = node else {
-                    continue;
-                };
-                let TypeKind::Enumeration { enumerators, .. } = &info.kind else {
-                    continue;
-                };
-                for enumerator in enumerators.iter() {
-                    let qualified = format!("{}::{}", info.name, enumerator.name);
-                    if enumerator.name.as_ref() == name || qualified == name {
-                        found.push((qualified, integer(enumerator.value), info.reference));
-                    }
-                }
-            }
-            found.sort_by(|left, right| left.0.cmp(&right.0));
-            found.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
-            match found.as_slice() {
-                [] => {}
-                [(_, value, ty)] => {
-                    return Ok(Lookup::Enumerator {
-                        value: *value,
-                        ty: *ty,
-                    });
-                }
-                _ => {
-                    return Ok(Lookup::Ambiguous(
-                        found.into_iter().map(|(qualified, ..)| qualified).collect(),
-                    ));
-                }
-            }
-        }
-        Ok(Lookup::NotFound)
+        Ok(self.lookup_enumerator(name).unwrap_or(Lookup::NotFound))
     }
 
     /// The types a name means, in the frame's module first.
@@ -565,10 +578,6 @@ pub(super) struct StopMachine<'a, 'b, P: InspectionOps> {
 /// run control.
 pub(super) const INTERRUPT_INTERVAL: u32 = 64;
 
-const fn failed(error: Error) -> Stop {
-    Stop::Failed(error)
-}
-
 impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
     pub(super) const fn new(
         frame: &'b Frame<'a, P>,
@@ -584,10 +593,17 @@ impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
         }
     }
 
+    /// A machine on this one's budget, presenting values `depth` views deep.
+    pub(super) const fn nested(&mut self, depth: u8) -> StopMachine<'a, '_, P> {
+        let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
+        machine.depth = depth;
+        machine
+    }
+
     pub(super) fn module(&self, id: ModuleId) -> std::result::Result<&'a RuntimeModule, Stop> {
         self.frame
             .module(id)
-            .ok_or_else(|| failed(Error::ModuleNotLoaded(id)))
+            .ok_or_else(|| Stop::Failed(Error::ModuleNotLoaded(id)))
     }
 
     /// The instruction context values of `module` are evaluated at.
@@ -608,20 +624,15 @@ impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
     /// A value as it is stored, without a view.
     pub(super) fn materialize(
         &mut self,
-        module: &RuntimeModule,
+        module: &'a RuntimeModule,
         located: &Located,
     ) -> std::result::Result<InspectedValue, Stop> {
         let context = self.context(module);
-        let mut runtime = self.frame.controller.frame_runtime(
-            self.frame.inferior,
-            self.frame.pid,
-            self.frame.resolved,
-            module,
-        );
+        let mut runtime = self.frame.runtime(module);
         module
             .variables
             .materialize(located, context, &mut runtime, self.budget)
-            .map_err(failed)
+            .map_err(Stop::Failed)
     }
 
     fn accessed(
@@ -670,7 +681,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             && charges.is_multiple_of(INTERRUPT_INTERVAL)
             && self.frame.controller.run_control_waiting()
         {
-            return Err(failed(Error::Interrupted));
+            return Err(Stop::Failed(Error::Interrupted));
         }
         Ok(())
     }
@@ -678,16 +689,11 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
     fn locate(&mut self, object: &StopObject) -> std::result::Result<StopPlace, Stop> {
         let module = self.module(object.module)?;
         let address = self.address(module);
-        let mut runtime = self.frame.controller.frame_runtime(
-            self.frame.inferior,
-            self.frame.pid,
-            self.frame.resolved,
-            module,
-        );
+        let mut runtime = self.frame.runtime(module);
         let accessed = module
             .variables
             .locate(object.key, address, &mut runtime, self.budget)
-            .map_err(failed)?;
+            .map_err(Stop::Failed)?;
         Self::accessed(accessed, object.module)
     }
 
@@ -721,12 +727,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         };
         let module = self.module(module_id)?;
         let address = self.address(module);
-        let mut runtime = self.frame.controller.frame_runtime(
-            self.frame.inferior,
-            self.frame.pid,
-            self.frame.resolved,
-            module,
-        );
+        let mut runtime = self.frame.runtime(module);
         let accessed = module
             .variables
             .apply(
@@ -739,7 +740,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             )
             .map_err(|error| match error {
                 Error::ValueIndexOutOfBounds { .. } => Stop::Refused(refusal(&error)),
-                error => failed(error),
+                error => Stop::Failed(error),
             })?;
         Self::accessed(accessed, module_id)
     }
@@ -749,12 +750,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         address: u64,
         ty: TypeReference,
     ) -> std::result::Result<StopPlace, Stop> {
-        let module = self.frame.module_of(ty).ok_or_else(|| {
-            Stop::Refused(Refusal::new(
-                ErrorKind::Unsupported,
-                "the type's module is not loaded",
-            ))
-        })?;
+        let module = type_module(self.frame.controller, ty).map_err(Stop::Refused)?;
         Ok(StopPlace {
             module: module.loaded.id,
             located: Located {
@@ -795,16 +791,11 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
     fn load(&mut self, at: &StopPlace) -> std::result::Result<VariableValue, Stop> {
         let module = self.module(at.module)?;
         let context = self.context(module);
-        let mut runtime = self.frame.controller.frame_runtime(
-            self.frame.inferior,
-            self.frame.pid,
-            self.frame.resolved,
-            module,
-        );
+        let mut runtime = self.frame.runtime(module);
         module
             .variables
             .load(&at.located, context, &mut runtime, self.budget)
-            .map_err(failed)?
+            .map_err(Stop::Failed)?
             .map_err(Stop::missing)
     }
 
@@ -814,12 +805,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             .consume_memory(size)
             .map_err(|exhaustion| Stop::missing(VariableState::Unavailable(exhaustion.into())))?;
         let module = self.memory_module()?;
-        let mut runtime = self.frame.controller.frame_runtime(
-            self.frame.inferior,
-            self.frame.pid,
-            self.frame.resolved,
-            module,
-        );
+        let mut runtime = self.frame.runtime(module);
         runtime
             .read_memory(VirtualAddress::new(address), size)
             .map(|bytes| bytes.to_vec())
@@ -829,7 +815,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 }
                 crate::debug_info::VariableRuntimeError::Malformed(description)
                 | crate::debug_info::VariableRuntimeError::Fatal(description) => {
-                    failed(Error::VariableRuntime(description))
+                    Stop::Failed(Error::VariableRuntime(description))
                 }
             })
     }
@@ -888,12 +874,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         ty: TypeReference,
         bytes: &[u8],
     ) -> std::result::Result<InspectedValue, Stop> {
-        let module = self.frame.module_of(ty).ok_or_else(|| {
-            Stop::Refused(Refusal::new(
-                ErrorKind::Unsupported,
-                "the type's module is not loaded",
-            ))
-        })?;
+        let module = type_module(self.frame.controller, ty).map_err(Stop::Refused)?;
         let located = Located {
             ty: ty.id,
             storage: ValueStorage::Bytes {
@@ -928,7 +909,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 pointee: self.type_info(pointee).map(Box::new),
                 reason: DereferenceUnavailableReason::Null,
             },
-            (Some(pointee), address) => match self.frame.module_of(pointee) {
+            (Some(pointee), address) => match self.frame.controller.module_of(pointee) {
                 Some(module) => DereferenceState::Available(DereferenceReference {
                     stop_id: self.frame.stop_id,
                     thread: super::debug_thread_id(self.frame.pid),
@@ -972,7 +953,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
 }
 
 /// What evaluating an expression asks of the controller.
-pub(super) enum Evaluated {
+enum Evaluated {
     Done(Box<Evaluation>),
     /// Store `bytes` in `target`, then read it again.
     Write {
@@ -981,6 +962,14 @@ pub(super) enum Evaluated {
         whole: bool,
         span: Span,
     },
+}
+
+/// An interpreter failure as the debugger's error.
+fn failure(failure: Failure) -> Error {
+    match failure {
+        Failure::Expression(error) => Error::Expression(error),
+        Failure::Debugger(error) => error,
+    }
 }
 
 impl<P: LinuxTraceOps> Controller<P> {
@@ -994,31 +983,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         expression: &Expression,
         limits: crate::InspectionLimits,
     ) -> Result<Evaluation> {
-        validate_inspection_limits(limits)?;
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
-        let resolved = self.resolve_frame(inferior, pid, frame)?;
-        let mut budget = InspectionBudget::new(limits);
-        let evaluated = self.evaluate_in_frame(
-            inferior,
-            stop_id,
-            pid,
-            &resolved,
-            expression,
-            Mode::Assign,
-            &mut budget,
-        )?;
-        let (target, bytes, whole, span) = match evaluated {
-            Evaluated::Done(evaluation) => return Ok(*evaluation),
-            Evaluated::Write {
-                target,
-                bytes,
-                whole,
-                span,
-            } => (target, bytes, whole, span),
-        };
+        let (target, bytes, whole, span) =
+            match self.run_expression(stop_id, pid, frame, expression, Mode::Assign, limits)? {
+                Evaluated::Done(evaluation) => return Ok(*evaluation),
+                Evaluated::Write {
+                    target,
+                    bytes,
+                    whole,
+                    span,
+                } => (target, bytes, whole, span),
+            };
         let refused = |reason: String| {
             Error::Expression(crate::ExpressionError::new(
                 ErrorKind::Assignment,
@@ -1087,23 +1061,7 @@ impl<P: InspectionOps> Controller<P> {
         mode: Mode,
         limits: crate::InspectionLimits,
     ) -> Result<Evaluation> {
-        validate_inspection_limits(limits)?;
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
-        let resolved = self.resolve_frame(inferior, pid, frame)?;
-        let mut budget = InspectionBudget::new(limits);
-        let evaluated = self.evaluate_in_frame(
-            inferior,
-            stop_id,
-            pid,
-            &resolved,
-            expression,
-            mode,
-            &mut budget,
-        )?;
-        match evaluated {
+        match self.run_expression(stop_id, pid, frame, expression, mode, limits)? {
             Evaluated::Done(evaluation) => Ok(*evaluation),
             Evaluated::Write { span, .. } => Err(Error::Expression(crate::ExpressionError::new(
                 ErrorKind::Mode,
@@ -1111,6 +1069,47 @@ impl<P: InspectionOps> Controller<P> {
                 "this process's state cannot be changed",
             ))),
         }
+    }
+
+    fn run_expression(
+        &self,
+        stop_id: StopId,
+        pid: Pid,
+        frame: StackFrameId,
+        expression: &Expression,
+        mode: Mode,
+        limits: crate::InspectionLimits,
+    ) -> Result<Evaluated> {
+        validate_inspection_limits(limits)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
+        let resolved = self.resolve_frame(inferior, pid, frame)?;
+        let scope = self.frame_for(inferior, stop_id, pid, &resolved);
+        let program = bind(expression, &scope, mode).map_err(Error::Expression)?;
+        let mut budget = InspectionBudget::new(limits);
+        // Reading may wait for run control; an assignment, which changes
+        // the stop, may not.
+        let mut machine = StopMachine::new(&scope, &mut budget, mode == Mode::Read);
+        let outcome = run(&program, &mut machine);
+        record!("evaluate `{}`: {outcome:?}", expression.text());
+        Ok(match outcome.map_err(failure)? {
+            Outcome::Value { value, cause } => {
+                Evaluated::Done(Box::new(Evaluation::Value { value, cause }))
+            }
+            Outcome::Range { base, start, end } => Evaluated::Done(Box::new(Evaluation::Range(
+                self.range_page(stop_id, &base, start, end, &mut budget)?,
+            ))),
+            Outcome::Assign {
+                target,
+                bytes,
+                whole,
+                span,
+            } => Evaluated::Write {
+                target,
+                bytes,
+                whole,
+                span,
+            },
+        })
     }
 
     /// Evaluates an expression where a breakpoint hit stopped one thread
@@ -1138,8 +1137,7 @@ impl<P: InspectionOps> Controller<P> {
         )?;
         let resolved =
             self.resolve_presented_frame(inferior, pid, StackFrameId::INNERMOST, presentation)?;
-        let stop_id = StopId::new(0);
-        let scope = self.frame_for(inferior, stop_id, pid, &resolved);
+        let scope = self.frame_for(inferior, StopId::new(0), pid, &resolved);
         let program = if condition {
             crate::eval::bind::bind_condition(expression, &scope)
         } else {
@@ -1150,15 +1148,13 @@ impl<P: InspectionOps> Controller<P> {
         let mut machine = StopMachine::new(&scope, &mut budget, false);
         let outcome = run(&program, &mut machine);
         record!("evaluate `{}` at a hit: {outcome:?}", expression.text());
-        match outcome {
-            Ok(Outcome::Value { value, cause }) => Ok(Evaluation::Value { value, cause }),
-            Ok(_) => Err(Error::Expression(crate::ExpressionError::new(
+        match outcome.map_err(failure)? {
+            Outcome::Value { value, cause } => Ok(Evaluation::Value { value, cause }),
+            _ => Err(Error::Expression(crate::ExpressionError::new(
                 ErrorKind::Type,
                 Span::new(0, expression.text().len()),
                 "a breakpoint's expression must have a value",
             ))),
-            Err(Failure::Expression(error)) => Err(Error::Expression(error)),
-            Err(Failure::Debugger(error)) => Err(error),
         }
     }
 
@@ -1172,24 +1168,16 @@ impl<P: InspectionOps> Controller<P> {
         frame: StackFrameId,
         expression: &Expression,
     ) -> Result<crate::WatchTarget> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
         let resolved = self.resolve_frame(inferior, pid, frame)?;
         let scope = self.frame_for(inferior, stop_id, pid, &resolved);
         let program = bind(expression, &scope, Mode::Read).map_err(Error::Expression)?;
         let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
         let mut machine = StopMachine::new(&scope, &mut budget, false);
-        let value = match run(&program, &mut machine) {
-            Ok(Outcome::Value { value, .. }) => value,
-            Ok(_) => {
-                return Err(Error::WatchTargetUnsupported(
-                    "a range cannot be watched; watch one element".into(),
-                ));
-            }
-            Err(Failure::Expression(error)) => return Err(Error::Expression(error)),
-            Err(Failure::Debugger(error)) => return Err(error),
+        let Outcome::Value { value, .. } = run(&program, &mut machine).map_err(failure)? else {
+            return Err(Error::WatchTargetUnsupported(
+                "a range cannot be watched; watch one element".into(),
+            ));
         };
         let (address, byte_size) = super::watchpoints::watchable_storage(&value)?;
         let (watch_scope, evidence) = match program.root_object() {
@@ -1226,10 +1214,7 @@ impl<P: InspectionOps> Controller<P> {
         frame: StackFrameId,
         expression: &Expression,
     ) -> Result<TypeInfo> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
         let resolved = self.resolve_frame(inferior, pid, frame)?;
         let scope = self.frame_for(inferior, stop_id, pid, &resolved);
         let program = bind(expression, &scope, Mode::Read).map_err(Error::Expression)?;
@@ -1252,53 +1237,6 @@ impl<P: InspectionOps> Controller<P> {
             code: self.frame_scope(resolved),
             registers: OnceCell::new(),
             charges: Cell::new(0),
-        }
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "evaluation keeps the stop, frame, expression, mode, and budget explicit"
-    )]
-    pub(super) fn evaluate_in_frame(
-        &self,
-        inferior: &Inferior,
-        stop_id: StopId,
-        pid: Pid,
-        resolved: &ResolvedFrame,
-        expression: &Expression,
-        mode: Mode,
-        budget: &mut InspectionBudget,
-    ) -> Result<Evaluated> {
-        let scope = self.frame_for(inferior, stop_id, pid, resolved);
-        let program = bind(expression, &scope, mode).map_err(Error::Expression)?;
-        // Reading may wait for run control; an assignment, which changes
-        // the stop, may not.
-        let mut machine = StopMachine::new(&scope, budget, mode == Mode::Read);
-        let outcome = run(&program, &mut machine);
-        record!("evaluate `{}`: {outcome:?}", expression.text());
-        match outcome {
-            Ok(Outcome::Value { value, cause }) => {
-                Ok(Evaluated::Done(Box::new(Evaluation::Value {
-                    value,
-                    cause,
-                })))
-            }
-            Ok(Outcome::Range { base, start, end }) => self
-                .range_page(stop_id, &base, start, end, budget)
-                .map(|page| Evaluated::Done(Box::new(Evaluation::Range(page)))),
-            Ok(Outcome::Assign {
-                target,
-                bytes,
-                whole,
-                span,
-            }) => Ok(Evaluated::Write {
-                target,
-                bytes,
-                whole,
-                span,
-            }),
-            Err(Failure::Expression(error)) => Err(Error::Expression(error)),
-            Err(Failure::Debugger(error)) => Err(error),
         }
     }
 }
