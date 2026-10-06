@@ -273,6 +273,18 @@ impl Drop for Uscope {
     }
 }
 
+/// `--help` names the subcommands, which are dispatched before the main
+/// parser, and each answers its own `--help`.
+#[test]
+fn help_lists_the_subcommands() {
+    let help = assert_success(uscope(&["--help"]));
+    for subcommand in ["dap", "views"] {
+        assert!(help.contains(&format!("uscope {subcommand} ")), "{help}");
+        let own = assert_success(uscope(&[subcommand, "--help"]));
+        assert!(own.contains(&format!("uscope {subcommand}")), "{own}");
+    }
+}
+
 #[test]
 fn command_line_errors_explain_themselves() {
     let missing_process = i32::MAX.to_string();

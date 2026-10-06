@@ -14,8 +14,18 @@ use uscope::{CoreDumpOptions, Debugger, ProcessId, SourcePathMap};
 use cli::terminal::{ColorChoice, Role};
 use cli::{Cli, DisassemblySyntax, LaunchSettings, Renderers};
 
+/// The subcommands, which `async_main` dispatches before `Args` parses.
+const SUBCOMMANDS: &str = "\
+Commands:
+  uscope dap [--port PORT | --listen ADDRESS] [--log FILE]
+          Serve the Debug Adapter Protocol to an editor
+  uscope views <check|explain|replay> ...
+          Check how views present a program's types, without running it
+
+Each command describes itself with --help.";
+
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about, after_help = SUBCOMMANDS)]
 struct Args {
     /// Native executable to launch, or the executable for --attach or --core
     /// when automatic discovery is unavailable.
@@ -221,10 +231,10 @@ async fn run(args: &Args, renderers: Renderers) -> Result<()> {
     shutdown
 }
 
-/// `uscope views`: which views present a program's types, checked from its
-/// debug information alone, with no process.
+/// Checks which views present a program's types, from its debug
+/// information alone.
 #[derive(Parser)]
-#[command(name = "uscope views")]
+#[command(name = "uscope views", bin_name = "uscope views")]
 struct ViewsArgs {
     #[command(subcommand)]
     command: ViewsCommand,

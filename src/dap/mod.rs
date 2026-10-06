@@ -41,7 +41,7 @@ use session::{Client, Inbound, Session};
 
 /// Serves the Debug Adapter Protocol for one client at a time.
 #[derive(Parser)]
-#[command(name = "uscope dap", version, about)]
+#[command(name = "uscope dap", bin_name = "uscope dap", version)]
 pub struct DapArgs {
     /// Listen on 127.0.0.1:PORT instead of using stdin and stdout.
     #[arg(long, value_name = "PORT", conflicts_with = "listen")]
