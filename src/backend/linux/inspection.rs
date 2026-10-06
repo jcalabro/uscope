@@ -12,7 +12,7 @@ use crate::{
     CallFrameUnavailableReason, CodeInstanceId, Error, GlobalVariablePage, GlobalVariableReference,
     ImageAddress, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, MemoryReadCompletion,
     RegisterSnapshot, Result, StackFrameId, TlsUnavailableReason, UnwindTermination,
-    VariableSnapshot, VariableState, VariableUnavailableReason, VirtualAddress,
+    VariableSnapshot, VariableUnavailableReason, VirtualAddress,
 };
 
 use super::evaluation::StopMachine;
@@ -145,32 +145,12 @@ impl<P: InspectionOps> Controller<P> {
                 match local {
                     Ok(variables) => variables,
                     Err(Error::VariableNotFound(_)) => {
-                        let mut matches = Vec::new();
-                        for module in self.modules.values() {
-                            match module.image.global_named(name) {
-                                Ok(global) => matches.push(GlobalVariableReference {
-                                    module: module.loaded.id,
-                                    image: module.loaded.image,
-                                    variable: global.id,
-                                }),
-                                Err(Error::VariableNotFound(_)) => {}
-                                Err(error) => return Err(error),
-                            }
-                        }
-                        let [global] = matches.as_slice() else {
-                            if matches.is_empty() {
-                                return Err(Error::VariableNotFound(name.clone()));
-                            }
-                            return Err(Error::AmbiguousLoadedGlobalVariable {
-                                selector: name.clone(),
-                                candidates: matches,
-                            });
-                        };
+                        let global = self.loaded_global_named(name)?;
                         vec![self.inspect_loaded_global(
                             inferior,
                             pid,
                             &resolved,
-                            *global,
+                            global,
                             &mut budget,
                         )?]
                     }
@@ -183,11 +163,7 @@ impl<P: InspectionOps> Controller<P> {
             let scope = self.frame_for(inferior, stop_id, pid, &resolved);
             let mut machine = StopMachine::new(&scope, &mut budget, true);
             for variable in &mut variables {
-                let state = std::mem::replace(
-                    &mut variable.state,
-                    VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit),
-                );
-                variable.state = machine.present_state(variable.type_info.clone(), state)?;
+                machine.present_state(variable.type_info.clone(), &mut variable.state)?;
             }
         }
         Ok(VariableSnapshot {
@@ -201,6 +177,51 @@ impl<P: InspectionOps> Controller<P> {
             completion: budget.completion(),
             usage: budget.usage(),
         })
+    }
+
+    /// A capability's thread and module, once its stop is current. Nothing
+    /// a stale capability names is consulted.
+    fn capability_module(
+        &self,
+        stop_id: StopId,
+        thread: super::DebugThreadId,
+        module: crate::ModuleId,
+        image: crate::ModuleImageId,
+    ) -> Result<(&Inferior, Pid, &RuntimeModule)> {
+        let pid = debug_pid(thread)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
+        let module = self
+            .modules
+            .get(&module)
+            .ok_or(Error::ModuleNotLoaded(module))?;
+        if module.loaded.image != image {
+            return Err(Error::StaleModuleImage);
+        }
+        Ok((inferior, pid, module))
+    }
+
+    /// The one global named `name` among the loaded modules.
+    fn loaded_global_named(&self, name: &str) -> Result<GlobalVariableReference> {
+        let mut matches = Vec::new();
+        for module in self.modules.values() {
+            match module.image.global_named(name) {
+                Ok(global) => matches.push(GlobalVariableReference {
+                    module: module.loaded.id,
+                    image: module.loaded.image,
+                    variable: global.id,
+                }),
+                Err(Error::VariableNotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        match matches.as_slice() {
+            [global] => Ok(*global),
+            [] => Err(Error::VariableNotFound(name.to_owned())),
+            _ => Err(Error::AmbiguousLoadedGlobalVariable {
+                selector: name.to_owned(),
+                candidates: matches,
+            }),
+        }
     }
 
     pub(super) fn inspect_loaded_global(
@@ -362,19 +383,12 @@ impl<P: InspectionOps> Controller<P> {
     ) -> Result<crate::DereferencedValue> {
         validate_inspection_limits(limits)?;
         let mut budget = InspectionBudget::new(limits);
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        // Validate the stop before consulting modules, registers, or memory.
-        validate_public_stop(inferior, Some(reference.stop_id))?;
-        let pid = debug_pid(reference.thread)?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
-        let module = self
-            .modules
-            .get(&reference.module)
-            .ok_or(Error::ModuleNotLoaded(reference.module))?;
-        if module.loaded.image != reference.image {
-            return Err(Error::StaleModuleImage);
-        }
+        let (inferior, pid, module) = self.capability_module(
+            reference.stop_id,
+            reference.thread,
+            reference.module,
+            reference.image,
+        )?;
         // The capability evaluates in the frame that produced it, whichever
         // frame is selected now.
         let frame = self.resolve_frame(inferior, pid, reference.frame)?;
@@ -384,7 +398,7 @@ impl<P: InspectionOps> Controller<P> {
             .dereference(reference, &mut runtime, &mut budget)?;
         let scope = self.frame_for(inferior, reference.stop_id, pid, &frame);
         let mut machine = StopMachine::new(&scope, &mut budget, true);
-        value.state = machine.present_state(Some(value.type_info.clone()), value.state)?;
+        machine.present_state(Some(value.type_info.clone()), &mut value.state)?;
         value.completion = budget.completion();
         value.usage = budget.usage();
         Ok(value)
@@ -407,22 +421,14 @@ impl<P: InspectionOps> Controller<P> {
         query: &crate::ValueChildQuery,
         budget: &mut InspectionBudget,
     ) -> Result<crate::ValueChildPage> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        // A capability must be rejected before consulting modules, registers,
-        // or memory if its stopped snapshot is no longer current.
-        validate_public_stop(inferior, Some(reference.stop_id))?;
+        let (inferior, pid, module) = self.capability_module(
+            reference.stop_id,
+            reference.thread,
+            reference.module,
+            reference.image,
+        )?;
         if !(1..=MAX_VALUE_CHILD_PAGE_LIMIT).contains(&query.limit) {
             return Err(Error::InvalidValueChildPageLimit(query.limit));
-        }
-        let pid = debug_pid(reference.thread)?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
-        let module = self
-            .modules
-            .get(&reference.module)
-            .ok_or(Error::ModuleNotLoaded(reference.module))?;
-        if module.loaded.image != reference.image {
-            return Err(Error::StaleModuleImage);
         }
         if let Some(view) = &reference.view {
             return self.view_children(reference, view, query.offset, query.limit, budget);
@@ -440,14 +446,10 @@ impl<P: InspectionOps> Controller<P> {
         let mut machine = StopMachine::new(&scope, budget, true);
         let mut children = page.children.to_vec();
         for child in &mut children {
-            let state = std::mem::replace(
-                &mut child.state,
-                VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit),
-            );
             // A base-class subobject is part of an object, not one of the
             // type it dynamically is.
             machine.dynamic = !matches!(child.relationship, crate::ValueChildRelationship::Base(_));
-            child.state = machine.present_state(Some(child.type_info.clone()), state)?;
+            machine.present_state(Some(child.type_info.clone()), &mut child.state)?;
         }
         page.children = children.into();
         page.completion = budget.completion();
