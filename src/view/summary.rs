@@ -130,21 +130,17 @@ pub const fn is_character(type_info: &TypeInfo) -> bool {
 /// it, its text, a scalar, or a placeholder for an aggregate's parts.
 #[must_use]
 pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
-    let VariableState::Available {
-        value,
-        text,
-        presentation,
-        children,
-        ..
-    } = state
-    else {
-        return match state {
-            VariableState::Unavailable(_) => "<unavailable>",
-            VariableState::Malformed(_) => "<malformed>",
-            VariableState::Invalid { .. } => "<invalid>",
-            VariableState::Available { .. } => unreachable!("handled above"),
-        }
-        .to_owned();
+    let (value, text, presentation, children) = match state {
+        VariableState::Available {
+            value,
+            text,
+            presentation,
+            children,
+            ..
+        } => (value, text, presentation, children),
+        VariableState::Unavailable(_) => return "<unavailable>".to_owned(),
+        VariableState::Malformed(_) => return "<malformed>".to_owned(),
+        VariableState::Invalid { .. } => return "<invalid>".to_owned(),
     };
     if let Some(presentation) = presentation
         && presentation.shape != PresentedShape::Raw
