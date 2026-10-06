@@ -2060,6 +2060,17 @@ pub enum PointerWidth {
     Bits64,
 }
 
+impl PointerWidth {
+    /// The size of an address in bytes.
+    #[must_use]
+    pub const fn bytes(self) -> u8 {
+        match self {
+            Self::Bits32 => 4,
+            Self::Bits64 => 8,
+        }
+    }
+}
+
 /// Platform-independent properties of a debug target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetDescription {

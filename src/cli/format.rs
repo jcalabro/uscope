@@ -11,7 +11,7 @@ use uscope::{
     ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, IndirectTarget,
     InstructionContent, InstructionReferenceKind, InstructionTokenKind, InvalidatedWatchpoint,
     LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage,
-    PointerWidth, RegisterSnapshot, SourceContext, StackFrame, StateSnapshot, StepKind, StopReason,
+    RegisterSnapshot, SourceContext, StackFrame, StateSnapshot, StepKind, StopReason,
     SymbolExtentProvenance, SymbolLocation, TargetBoundary, ThreadState, VirtualAddress,
     WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
@@ -543,10 +543,7 @@ pub fn register_bytes(bytes: &[u8], byte_order: ByteOrder) -> String {
 }
 
 pub fn memory_read(read: &MemoryRead, renderer: Renderer) -> String {
-    let address_width = match read.target.pointer_width {
-        PointerWidth::Bits32 => 8,
-        PointerWidth::Bits64 => 16,
-    };
+    let address_width = usize::from(read.target.pointer_width.bytes()) * 2;
     let mut lines = Vec::new();
     for (line_index, bytes) in read.bytes.chunks(HEX_DUMP_BYTES_PER_LINE).enumerate() {
         let address = read.address.get() + (line_index * HEX_DUMP_BYTES_PER_LINE) as u64;
@@ -1539,6 +1536,7 @@ pub fn signal_received(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uscope::PointerWidth;
 
     fn memory_read(
         address: u64,

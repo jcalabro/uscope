@@ -25,8 +25,8 @@ use crate::model::{DereferenceTarget, ValueStorage};
 use crate::protocol::StopId;
 use crate::{
     AddressValue, ByteOrder, CodeInstanceId, DereferenceReference, DereferenceState,
-    DereferenceUnavailableReason, Error, ImageAddress, InspectedValue, ModuleId, PointerWidth,
-    RecordKind, RegisterSnapshot, Result, StackFrameId, TextSummary, TypeInfo, TypeKind, TypeNode,
+    DereferenceUnavailableReason, Error, ImageAddress, InspectedValue, ModuleId, RecordKind,
+    RegisterSnapshot, Result, StackFrameId, TextSummary, TypeInfo, TypeKind, TypeNode,
     TypeReference, ValueChildren, VariableState, VariableUnavailableReason, VariableValue,
     VariableValueSource, VirtualAddress,
 };
@@ -115,10 +115,7 @@ impl<P: InspectionOps> Controller<P> {
     }
 
     pub(super) fn pointer_size(&self) -> u8 {
-        match self.module_image.target().pointer_width {
-            PointerWidth::Bits32 => 4,
-            PointerWidth::Bits64 => 8,
-        }
+        self.module_image.target().pointer_width.bytes()
     }
 }
 

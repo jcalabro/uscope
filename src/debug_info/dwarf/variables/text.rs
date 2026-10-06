@@ -343,10 +343,7 @@ impl DwarfVariableInfo {
     }
 
     pub(super) const fn pointer_bytes(&self) -> usize {
-        match self.target.pointer_width {
-            crate::PointerWidth::Bits32 => 4,
-            crate::PointerWidth::Bits64 => 8,
-        }
+        self.target.pointer_width.bytes() as usize
     }
 
     fn read_pointer(
