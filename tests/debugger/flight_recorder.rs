@@ -3,10 +3,9 @@
 use std::fs;
 use std::path::Path;
 use std::thread;
-use std::time::{Duration, Instant};
 
-use crate::support::Scenario;
 use crate::support::flight_recordings::recording_path;
+use crate::support::{Scenario, wait_until};
 
 /// A scenario that fails mid-session leaves a recording of the requests,
 /// native control calls, wait statuses, and events that led to the failure,
@@ -64,12 +63,7 @@ fn failing_scenarios_keep_a_flight_recording() {
         .lines()
         .find_map(|line| line.split_once("spawned ")?.1.parse::<i32>().ok())
         .expect("the recording names the inferior");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Path::new(&format!("/proc/{inferior}")).exists() {
-        assert!(
-            Instant::now() < deadline,
-            "inferior {inferior} outlived its session"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_until("the failed scenario's inferior is reaped", || {
+        !Path::new(&format!("/proc/{inferior}")).exists()
+    });
 }

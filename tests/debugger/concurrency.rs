@@ -8,14 +8,7 @@ use uscope::{ExceptionDisposition, ResumeScope, ThreadId, WatchAccess, Watchpoin
 const THREAD_STEPS: [&str; 2] = ["thread-steps-gcc-o0", "thread-steps-clang-o2"];
 
 fn thread_steps_line(needle: &str) -> u64 {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/thread-steps.c");
-    let source = fs::read_to_string(path).expect("read thread-steps.c");
-    let index = source
-        .lines()
-        .position(|line| line.contains(needle))
-        .unwrap_or_else(|| panic!("thread-steps.c has no line containing {needle:?}"));
-    u64::try_from(index + 1).expect("line fits u64")
+    source_line("tests/fixtures/c/thread-steps.c", needle)
 }
 
 async fn stopped_thread(scenario: &mut Scenario) -> ThreadId {
@@ -570,10 +563,29 @@ async fn watchpoints_are_armed_and_disarmed_while_running() {
 }
 
 #[tokio::test]
-async fn finishing_a_threads_start_routine_ends_when_the_thread_exits() {
+async fn a_named_threads_start_routine_finishes_when_the_thread_exits() {
     for fixture in THREAD_STEPS {
         let (mut scenario, worker) =
             thread_steps_at(fixture, &["spin"], "thread_steps_sink += 1;").await;
+        // Threads are named as they name themselves; Linux keeps the first 15
+        // bytes of a name.
+        let names = scenario
+            .snapshot()
+            .await
+            .threads
+            .iter()
+            .map(|thread| {
+                (
+                    thread.id == worker,
+                    thread.name.as_deref().map(str::to_owned),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            names.contains(&(false, Some(fixture[..15].to_owned())))
+                && names.contains(&(true, Some("gated-worker".to_owned()))),
+            "{names:?}"
+        );
         assert_eq!(
             scenario.step_to_stop(StepKind::Out).await,
             StopReason::Step {
@@ -610,32 +622,6 @@ async fn finishing_a_threads_start_routine_ends_when_the_thread_exits() {
             scenario.resume_to_stop().await,
             StopReason::Exited(ExitStatus::Code(0)),
             "{fixture}"
-        );
-        scenario.shutdown().await;
-    }
-}
-
-#[tokio::test]
-async fn threads_are_named_as_they_name_themselves() {
-    for fixture in THREAD_STEPS {
-        let (mut scenario, worker) =
-            thread_steps_at(fixture, &["spin"], "thread_steps_sink += 1;").await;
-        let names = scenario
-            .snapshot()
-            .await
-            .threads
-            .iter()
-            .map(|thread| (thread.id, thread.name.as_deref().map(str::to_owned)))
-            .collect::<Vec<_>>();
-        let main = names
-            .iter()
-            .find(|(id, _)| *id != worker)
-            .expect("main thread");
-        // Linux keeps the first 15 bytes of a name.
-        assert_eq!(main.1.as_deref(), Some(&fixture[..15]), "{names:?}");
-        assert!(
-            names.contains(&(worker, Some("gated-worker".to_owned()))),
-            "{names:?}"
         );
         scenario.shutdown().await;
     }

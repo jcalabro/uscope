@@ -87,13 +87,13 @@ fn named_child<'a>(page: &'a uscope::ValueChildPage, name: &str) -> &'a uscope::
         .unwrap_or_else(|| panic!("value page has no member named {name}: {page:?}"))
 }
 
-fn assert_signed_state(state: &VariableState, expected: i128) {
+fn assert_signed(state: &VariableState, expected: i128, context: &str) {
     assert!(
         matches!(
             available_value(state),
             uscope::VariableValue::Scalar(ScalarValue::Signed(value)) if *value == expected
         ),
-        "{state:?}"
+        "{context}: {state:?}"
     );
 }
 
@@ -129,15 +129,6 @@ async fn record_page(
         };
     }
     child_page(scenario, state, 0, limit).await
-}
-
-async fn assert_dereferenced_record(
-    scenario: &Scenario,
-    value: &uscope::DereferencedValue,
-    minimum_children: usize,
-    context: &str,
-) {
-    record_page(scenario, &value.state, minimum_children, context).await;
 }
 
 fn value_expression(components: &[&str]) -> uscope::Expression {
@@ -231,16 +222,6 @@ async fn load_fixture_image(fixture: &str) -> Arc<ModuleImage> {
     image
 }
 
-fn assert_inspected_signed(value: &uscope::InspectedValue, expected: i128, context: &str) {
-    assert!(
-        matches!(
-            available_value(&value.state),
-            uscope::VariableValue::Scalar(ScalarValue::Signed(actual)) if *actual == expected
-        ),
-        "{context}: {value:?}"
-    );
-}
-
 fn single_image_breakpoint_address(breakpoint: &uscope::Breakpoint) -> uscope::ImageAddress {
     assert_eq!(breakpoint.locations.len(), 1);
     match breakpoint.locations[0].location {
@@ -277,16 +258,6 @@ async fn dereference_named(
         result = Some(value);
     }
     result.expect("positive dereference depth")
-}
-
-fn assert_dereferenced_scalar(value: &uscope::DereferencedValue, expected: i128, fixture: &str) {
-    assert!(
-        matches!(
-            available_value(&value.state),
-            uscope::VariableValue::Scalar(ScalarValue::Signed(actual)) if *actual == expected
-        ),
-        "{fixture}: {value:?}"
-    );
 }
 
 async fn assert_array_values(
@@ -381,7 +352,7 @@ async fn boundary_source_step(
         .await
 }
 
-fn boundary_function(location: &uscope::ExecutionLocation) -> Option<&str> {
+fn location_function(location: &uscope::ExecutionLocation) -> Option<&str> {
     location
         .image
         .function
@@ -389,12 +360,24 @@ fn boundary_function(location: &uscope::ExecutionLocation) -> Option<&str> {
         .map(|function| function.name.as_ref())
 }
 
-fn boundary_line(location: &uscope::ExecutionLocation) -> Option<u64> {
+fn location_line(location: &uscope::ExecutionLocation) -> Option<u64> {
     location
         .image
         .source
         .as_ref()
         .map(|source| source.line.get())
+}
+
+/// The one-based line of `path`, relative to the repository, that contains
+/// `marker`.
+fn source_line(path: &str, marker: &str) -> u64 {
+    let text = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+        .unwrap_or_else(|error| panic!("read {path}: {error}"));
+    let index = text
+        .lines()
+        .position(|line| line.contains(marker))
+        .unwrap_or_else(|| panic!("{path} has no line containing {marker:?}"));
+    u64::try_from(index + 1).expect("line fits u64")
 }
 
 fn fixture_symbol_address(
@@ -430,8 +413,8 @@ async fn advance_boundary_to_line(
                 scenario.handle().current_location(),
             )
             .await;
-        assert_eq!(boundary_function(&location), Some("main"));
-        let line = boundary_line(&location).expect("main call site has source");
+        assert_eq!(location_function(&location), Some("main"));
+        let line = location_line(&location).expect("main call site has source");
         if line == target {
             return location;
         }
@@ -455,14 +438,14 @@ async fn finish_boundary_physical_call(
     advance_boundary_to_line(scenario, fixture, call_line).await;
     let entered =
         boundary_source_step(scenario, StepKind::IntoSource, "entered physical callee").await;
-    assert_eq!(boundary_function(&entered), Some(callee));
+    assert_eq!(location_function(&entered), Some(callee));
     assert_ne!(entered.image.physical_instance, main_physical);
 
     let returned =
         boundary_source_step(scenario, StepKind::Out, "caller after physical finish").await;
-    assert_eq!(boundary_function(&returned), Some("main"));
+    assert_eq!(location_function(&returned), Some("main"));
     assert_eq!(returned.image.physical_instance, main_physical);
-    let line = boundary_line(&returned).expect("physical finish has caller source");
+    let line = location_line(&returned).expect("physical finish has caller source");
     assert!(
         (call_line..=last_caller_line).contains(&line),
         "{fixture} finished {callee} at unexpected line {line}"
@@ -484,7 +467,7 @@ async fn enter_inline_frame(scenario: &mut Scenario, fixture: &str, function: &s
                 scenario.handle().current_location(),
             )
             .await;
-        if boundary_function(&location) == Some(function) && boundary_line(&location) == Some(line)
+        if location_function(&location) == Some(function) && location_line(&location) == Some(line)
         {
             return;
         }
@@ -654,11 +637,7 @@ async fn assert_entry_stop(
         .await;
     assert_eq!(location.image.address, expected, "{}", case.fixture);
     assert_eq!(
-        location
-            .image
-            .function
-            .as_ref()
-            .map(|function| function.name.as_ref()),
+        location_function(&location),
         Some(case.function),
         "{}",
         case.fixture
@@ -728,7 +707,11 @@ fn catalog_global<'a>(
 
 async fn assert_go_pointer_values(scenario: &Scenario, fixture: &str) {
     for (name, depth) in [("pointerParameter", 1), ("pointerPointer", 2)] {
-        assert_dereferenced_scalar(&dereference_named(scenario, name, depth).await, 42, fixture);
+        assert_signed(
+            &dereference_named(scenario, name, depth).await.state,
+            42,
+            fixture,
+        );
     }
     let nil_pointer = scenario
         .operation(
@@ -750,9 +733,9 @@ async fn assert_go_pointer_values(scenario: &Scenario, fixture: &str) {
         "{nil_pointer:?}"
     );
     let structure = dereference_named(scenario, "structurePointer", 1).await;
-    assert_dereferenced_record(scenario, &structure, 2, fixture).await;
+    record_page(scenario, &structure.state, 2, fixture).await;
     let recursive = dereference_named(scenario, "recursivePointer", 1).await;
-    assert_dereferenced_record(scenario, &recursive, 2, fixture).await;
+    record_page(scenario, &recursive.state, 2, fixture).await;
     let slice = scenario
         .operation("inspect Go slice", scenario.handle().variable("sliceValue"))
         .await;
@@ -1374,24 +1357,8 @@ fn assert_inline_location(
     address: VirtualAddress,
 ) {
     assert_eq!(location.address, address, "{fixture}");
-    assert_eq!(
-        location
-            .image
-            .function
-            .as_ref()
-            .map(|function| function.name.as_ref()),
-        Some(function),
-        "{fixture}"
-    );
-    assert_eq!(
-        location
-            .image
-            .source
-            .as_ref()
-            .map(|source| source.line.get()),
-        Some(line),
-        "{fixture}"
-    );
+    assert_eq!(location_function(location), Some(function), "{fixture}");
+    assert_eq!(location_line(location), Some(line), "{fixture}");
 }
 
 fn assert_no_continued_event(
@@ -1444,4 +1411,30 @@ fn assert_inline_backtrace(fixture: &str, trace: &uscope::Backtrace) {
             .collect::<Vec<_>>(),
         [Some(7), Some(14), Some(28)]
     );
+}
+
+/// The text summary of a variable, or `None` when it has none.
+fn text_of(variables: &[uscope::Variable], name: &str) -> Option<uscope::TextSummary> {
+    let variable = variables
+        .iter()
+        .find(|variable| &*variable.name == name)
+        .unwrap_or_else(|| panic!("no variable {name} in {variables:?}"));
+    let VariableState::Available { text, .. } = &variable.state else {
+        panic!("{name} is not available: {:?}", variable.state);
+    };
+    text.as_deref().cloned()
+}
+
+/// Waits until `process`'s main thread is a zombie: it exited, and nothing
+/// has reaped it.
+fn wait_for_zombie(process: ProcessId) {
+    let stat = format!("/proc/{process}/stat");
+    support::wait_until("the main thread exits", || {
+        fs::read_to_string(&stat).is_ok_and(|stat| {
+            // Fields resume after the command name's final parenthesis.
+            stat.rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().next())
+                == Some("Z")
+        })
+    });
 }

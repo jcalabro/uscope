@@ -6,15 +6,7 @@ use super::*;
 /// line, as a source breakpoint there does.
 async fn stopped_at_line(fixture: &str, source: &str, marker: &str) -> Scenario {
     let mut scenario = Scenario::launch(fixture);
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/c")
-        .join(source);
-    let line = std::fs::read_to_string(&path)
-        .expect("source")
-        .lines()
-        .position(|line| line.contains(marker))
-        .expect("marker") as u64
-        + 1;
+    let line = source_line(&format!("tests/fixtures/c/{source}"), marker);
     scenario.add_source_breakpoint(source, line).await;
     assert!(matches!(
         scenario.run_to_stop().await,

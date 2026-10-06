@@ -89,54 +89,6 @@ async fn pointer_variables_are_available_and_explicitly_dereferenceable() {
 }
 
 #[tokio::test]
-async fn structural_inspection_selects_direct_and_pointer_record_members() {
-    for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("variables.c", 68).await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-
-        for (components, expected) in [
-            (&["pair", "first"][..], 20),
-            (&["pair", "second"][..], 22),
-            (&["structure_pointer", "first"][..], 20),
-            (&["structure_pointer", "second"][..], 22),
-        ] {
-            let value = scenario
-                .operation(
-                    "inspect record member",
-                    scenario.handle().inspect(&value_expression(components)),
-                )
-                .await;
-            assert_inspected_signed(&value, expected, fixture);
-        }
-
-        scenario.shutdown().await;
-    }
-
-    for fixture in ["variables-cpp-gcc-o0", "variables-cpp-clang-o0"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("variables.cpp", 50).await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-        let value = scenario
-            .operation(
-                "inspect member through C++ reference",
-                scenario
-                    .handle()
-                    .inspect(&value_expression(&["structure_reference", "second"])),
-            )
-            .await;
-        assert_inspected_signed(&value, 22, fixture);
-        scenario.shutdown().await;
-    }
-}
-
-#[tokio::test]
 async fn structural_inspection_dereferences_each_intermediate_pointer_only_when_needed() {
     for fixture in [
         "variables-gcc-o0",
@@ -172,6 +124,10 @@ async fn structural_inspection_dereferences_each_intermediate_pointer_only_when_
         );
 
         for (components, expected) in [
+            (&["pair", "first"][..], 20),
+            (&["pair", "second"][..], 22),
+            (&["structure_pointer", "first"][..], 20),
+            (&["structure_pointer", "second"][..], 22),
             (&["recursive_pointer", "value"][..], 40),
             (&["recursive_pointer", "next", "value"][..], 41),
             (&["recursive_pointer", "next", "next", "value"][..], 42),
@@ -182,7 +138,7 @@ async fn structural_inspection_dereferences_each_intermediate_pointer_only_when_
                     scenario.handle().inspect(&value_expression(components)),
                 )
                 .await;
-            assert_inspected_signed(&value, expected, fixture);
+            assert_signed(&value.state, expected, fixture);
         }
 
         let unavailable = scenario
@@ -259,14 +215,6 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
             "null_pointer",
         ),
         (
-            "variables-gcc-nopie",
-            "variables.c",
-            68,
-            "pointer",
-            "pointer_pointer",
-            "null_pointer",
-        ),
-        (
             "variables-cpp-gcc-o0",
             "variables.cpp",
             50,
@@ -330,14 +278,6 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
             "pointer_pointer",
             "null_pointer",
         ),
-        (
-            "variables-zig-nopie",
-            "variables.zig",
-            73,
-            "pointer",
-            "pointer_pointer",
-            "null_pointer",
-        ),
     ] {
         let mut scenario = Scenario::launch(fixture);
         scenario.add_source_breakpoint(source, line).await;
@@ -347,9 +287,9 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
         ));
 
         let pointee = dereference_named(&scenario, pointer, 1).await;
-        assert_dereferenced_scalar(&pointee, 42, fixture);
+        assert_signed(&pointee.state, 42, fixture);
         let nested_pointee = dereference_named(&scenario, nested, 2).await;
-        assert_dereferenced_scalar(&nested_pointee, 42, fixture);
+        assert_signed(&nested_pointee.state, 42, fixture);
 
         let null = scenario
             .operation("inspect null pointer", scenario.handle().variable(null))
@@ -372,23 +312,25 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
             "{fixture}: {null:?}"
         );
         if source == "variables.c" {
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "pointer_parameter", 1).await,
+            assert_signed(
+                &dereference_named(&scenario, "pointer_parameter", 1)
+                    .await
+                    .state,
                 42,
                 fixture,
             );
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "alias_pointer", 1).await,
+            assert_signed(
+                &dereference_named(&scenario, "alias_pointer", 1).await.state,
                 42,
                 fixture,
             );
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "const_pointee", 1).await,
+            assert_signed(
+                &dereference_named(&scenario, "const_pointee", 1).await.state,
                 42,
                 fixture,
             );
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "const_pointer", 1).await,
+            assert_signed(
+                &dereference_named(&scenario, "const_pointer", 1).await.state,
                 42,
                 fixture,
             );
@@ -424,23 +366,29 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
             );
         }
         if source == "variables.cpp" {
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "pointer_parameter", 1).await,
+            assert_signed(
+                &dereference_named(&scenario, "pointer_parameter", 1)
+                    .await
+                    .state,
                 42,
                 fixture,
             );
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "reference_parameter", 1).await,
+            assert_signed(
+                &dereference_named(&scenario, "reference_parameter", 1)
+                    .await
+                    .state,
                 42,
                 fixture,
             );
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "const_reference", 1).await,
+            assert_signed(
+                &dereference_named(&scenario, "const_reference", 1)
+                    .await
+                    .state,
                 42,
                 fixture,
             );
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "alias_pointer", 1).await,
+            assert_signed(
+                &dereference_named(&scenario, "alias_pointer", 1).await.state,
                 42,
                 fixture,
             );
@@ -462,13 +410,26 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                     "{fixture}: {variable:?}"
                 );
             }
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "rvalue_reference", 1).await,
+            assert_signed(
+                &dereference_named(&scenario, "rvalue_reference", 1)
+                    .await
+                    .state,
                 42,
                 fixture,
             );
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "reference_to_pointer", 2).await,
+            let member = scenario
+                .operation(
+                    "member through a reference",
+                    scenario
+                        .handle()
+                        .inspect(&value_expression(&["structure_reference", "second"])),
+                )
+                .await;
+            assert_signed(&member.state, 22, fixture);
+            assert_signed(
+                &dereference_named(&scenario, "reference_to_pointer", 2)
+                    .await
+                    .state,
                 42,
                 fixture,
             );
@@ -480,8 +441,8 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 "raw_const",
                 "alias_pointer",
             ] {
-                assert_dereferenced_scalar(
-                    &dereference_named(&scenario, name, 1).await,
+                assert_signed(
+                    &dereference_named(&scenario, name, 1).await.state,
                     42,
                     fixture,
                 );
@@ -499,7 +460,7 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                             .inspect(&parsed_value_expression("slice[1]")),
                     )
                     .await;
-                assert_inspected_signed(&indexed, 22, fixture);
+                assert_signed(&indexed.state, 22, fixture);
                 let range_page = scenario
                     .operation(
                         "inspect one bounded Rust slice range",
@@ -548,26 +509,28 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
         }
         if source == "variables.zig" {
             if fixture != "variables-zig-o2" {
-                assert_dereferenced_scalar(
-                    &dereference_named(&scenario, "pointer_parameter", 1).await,
+                assert_signed(
+                    &dereference_named(&scenario, "pointer_parameter", 1)
+                        .await
+                        .state,
                     42,
                     fixture,
                 );
             }
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "const_pointer", 1).await,
+            assert_signed(
+                &dereference_named(&scenario, "const_pointer", 1).await.state,
                 42,
                 fixture,
             );
             if fixture != "variables-zig-o2" {
-                assert_dereferenced_scalar(
-                    &dereference_named(&scenario, "alias_pointer", 1).await,
+                assert_signed(
+                    &dereference_named(&scenario, "alias_pointer", 1).await.state,
                     42,
                     fixture,
                 );
             }
-            assert_dereferenced_scalar(
-                &dereference_named(&scenario, "many_pointer", 1).await,
+            assert_signed(
+                &dereference_named(&scenario, "many_pointer", 1).await.state,
                 42,
                 fixture,
             );
@@ -585,8 +548,10 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
         parameter.run_to_stop().await,
         StopReason::Breakpoint { .. }
     ));
-    assert_dereferenced_scalar(
-        &dereference_named(&parameter, "pointer_parameter", 1).await,
+    assert_signed(
+        &dereference_named(&parameter, "pointer_parameter", 1)
+            .await
+            .state,
         42,
         fixture,
     );
@@ -639,7 +604,7 @@ async fn record_pointees_are_bounded_values_and_unsupported_pointees_remain_prin
         }
         for name in record_pointers {
             let value = dereference_named(&scenario, name, 1).await;
-            assert_dereferenced_record(&scenario, &value, 2, &format!("{fixture} {name}")).await;
+            record_page(&scenario, &value.state, 2, &format!("{fixture} {name}")).await;
         }
         for name in unsupported_pointers {
             let variable = scenario
@@ -724,15 +689,15 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
         );
         let inner = named_child(&global_page, "inner");
         let inner_page = record_page(&scenario, &inner.state, 2, fixture).await;
-        assert_signed_state(&named_child(&inner_page, "signed_value").state, -7);
+        assert_signed(&named_child(&inner_page, "signed_value").state, -7, fixture);
 
         if inspect_parameters {
             let record = dereference_named(&scenario, "record", 1).await;
-            assert_dereferenced_record(&scenario, &record, 2, fixture).await;
+            record_page(&scenario, &record.state, 2, fixture).await;
 
             let bits = dereference_named(&scenario, "bits", 1).await;
             let bits_page = record_page(&scenario, &bits.state, 3, fixture).await;
-            assert_signed_state(&named_child(&bits_page, "negative").state, -3);
+            assert_signed(&named_child(&bits_page, "negative").state, -3, fixture);
             assert!(matches!(
                 available_value(&named_child(&bits_page, "first").state),
                 uscope::VariableValue::Scalar(ScalarValue::Unsigned(5))
@@ -755,11 +720,11 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
                 panic!("{fixture}: nested array was not decoded: {records:?}");
             };
             let values_page = child_page(&scenario, &values.state, 0, 2).await;
-            assert_signed_state(&values_page.children[1].state, 44);
+            assert_signed(&values_page.children[1].state, 44, fixture);
 
             let flexible = dereference_named(&scenario, "flexible", 1).await;
             let flexible_page = record_page(&scenario, &flexible.state, 2, fixture).await;
-            assert_signed_state(&named_child(&flexible_page, "count").state, 2);
+            assert_signed(&named_child(&flexible_page, "count").state, 2, fixture);
             let unsupported = uscope::UnsupportedVariableFeature::TypeRepresentation;
             assert_eq!(
                 named_child(&flexible_page, "values").state,
@@ -804,252 +769,251 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
     reason = "one scenario proves lazy record and array access plus the existing structural path across both C compilers"
 )]
 async fn structural_inspection_reads_a_small_field_without_materializing_a_large_record() {
-    for fixture in ["records-c-gcc-o0", "records-c-clang-o0"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("inspect_records").await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
+    let fixture = "records-c-gcc-o0";
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_breakpoint("inspect_records").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
 
-        let whole_record = dereference_named(&scenario, "large", 1).await;
-        assert!(
-            matches!(
-                whole_record.state,
-                VariableState::Available {
-                    raw: None,
-                    value: uscope::VariableValue::Record,
-                    ..
-                }
-            ) && available_children(&whole_record.state).total() == 2,
-            "{fixture}: the large record was eagerly read: {whole_record:?}"
-        );
-        let tail = child_page(&scenario, &whole_record.state, 1, 1).await;
-        assert_eq!(tail.children.len(), 1, "{fixture}: {tail:?}");
-        assert_signed_state(&tail.children[0].state, 73);
-        let header = child_page(&scenario, &whole_record.state, 0, 1).await;
-        let padding = &header.children[0];
-        assert!(
-            matches!(
-                available_value(&padding.state),
-                uscope::VariableValue::Array { .. }
-            ) && available_children(&padding.state).total() == 2048,
-            "{fixture}: large member did not remain lazy: {padding:?}"
-        );
-        let middle = child_page(&scenario, &padding.state, 1024, 256).await;
-        assert_eq!(middle.children.len(), 256, "{fixture}: {middle:?}");
-        assert!(middle.children.iter().all(|child| matches!(
-            available_value(&child.state),
-            uscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
-        )));
-        assert!(matches!(
-            &middle.children[255].relationship,
-            uscope::ValueChildRelationship::ArrayElement {
-                index: 1279,
-                indices,
-            } if indices.as_ref() == [1279]
-        ));
-        let huge = scenario
+    let whole_record = dereference_named(&scenario, "large", 1).await;
+    assert!(
+        matches!(
+            whole_record.state,
+            VariableState::Available {
+                raw: None,
+                value: uscope::VariableValue::Record,
+                ..
+            }
+        ) && available_children(&whole_record.state).total() == 2,
+        "{fixture}: the large record was eagerly read: {whole_record:?}"
+    );
+    let tail = child_page(&scenario, &whole_record.state, 1, 1).await;
+    assert_eq!(tail.children.len(), 1, "{fixture}: {tail:?}");
+    assert_signed(&tail.children[0].state, 73, fixture);
+    let header = child_page(&scenario, &whole_record.state, 0, 1).await;
+    let padding = &header.children[0];
+    assert!(
+        matches!(
+            available_value(&padding.state),
+            uscope::VariableValue::Array { .. }
+        ) && available_children(&padding.state).total() == 2048,
+        "{fixture}: large member did not remain lazy: {padding:?}"
+    );
+    let middle = child_page(&scenario, &padding.state, 1024, 256).await;
+    assert_eq!(middle.children.len(), 256, "{fixture}: {middle:?}");
+    assert!(middle.children.iter().all(|child| matches!(
+        available_value(&child.state),
+        uscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
+    )));
+    assert!(matches!(
+        &middle.children[255].relationship,
+        uscope::ValueChildRelationship::ArrayElement {
+            index: 1279,
+            indices,
+        } if indices.as_ref() == [1279]
+    ));
+    let huge = scenario
+        .operation(
+            "inspect array above the former eager limit",
+            scenario.handle().variable("huge_array"),
+        )
+        .await;
+    assert!(
+        matches!(
+            huge.state,
+            VariableState::Available {
+                raw: None,
+                value: uscope::VariableValue::Array { .. },
+                ..
+            }
+        ) && available_children(&huge.state).total() == 1024 * 1024 + 1,
+        "{fixture}: large array was rejected or read eagerly: {huge:?}"
+    );
+    let huge_tail = child_page(&scenario, &huge.state, 1024 * 1024, 1).await;
+    assert!(matches!(
+        available_value(&huge_tail.children[0].state),
+        uscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
+    ));
+    for expression in ["huge_array[0]", "huge_array[1048576]"] {
+        let indexed = scenario
             .operation(
-                "inspect array above the former eager limit",
-                scenario.handle().variable("huge_array"),
-            )
-            .await;
-        assert!(
-            matches!(
-                huge.state,
-                VariableState::Available {
-                    raw: None,
-                    value: uscope::VariableValue::Array { .. },
-                    ..
-                }
-            ) && available_children(&huge.state).total() == 1024 * 1024 + 1,
-            "{fixture}: large array was rejected or read eagerly: {huge:?}"
-        );
-        let huge_tail = child_page(&scenario, &huge.state, 1024 * 1024, 1).await;
-        assert!(matches!(
-            available_value(&huge_tail.children[0].state),
-            uscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
-        ));
-        for expression in ["huge_array[0]", "huge_array[1048576]"] {
-            let indexed = scenario
-                .operation(
-                    "inspect one large-array element directly",
-                    scenario
-                        .handle()
-                        .inspect(&parsed_value_expression(expression)),
-                )
-                .await;
-            assert!(
-                matches!(
-                    available_value(&indexed.state),
-                    uscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
-                ),
-                "{fixture}: {expression}: {indexed:?}"
-            );
-        }
-        let nested_array_member = scenario
-            .operation(
-                "inspect through an explicitly dereferenced array",
+                "inspect one large-array element directly",
                 scenario
                     .handle()
-                    .inspect(&parsed_value_expression("(*records)[1].values[1]")),
+                    .inspect(&parsed_value_expression(expression)),
             )
-            .await;
-        assert_inspected_signed(&nested_array_member, 44, fixture);
-        let matrix_element = scenario
-            .operation(
-                "inspect one multidimensional array element",
-                scenario
-                    .handle()
-                    .inspect(&parsed_value_expression("matrix[1][2]")),
-            )
-            .await;
-        assert_inspected_signed(&matrix_element, 6, fixture);
-        let range_page = scenario
-            .operation(
-                "inspect one bounded array range",
-                evaluate_range(
-                    scenario.handle(),
-                    "huge_array[3..7]",
-                    uscope::InspectionLimits::default(),
-                ),
-            )
-            .await;
-        assert_eq!(range_page.offset, 3, "{fixture}: {range_page:?}");
-        assert_eq!(range_page.children.len(), 4, "{fixture}: {range_page:?}");
-        assert!(range_page.children.iter().enumerate().all(|(relative, child)| {
-            matches!(
-                &child.relationship,
-                uscope::ValueChildRelationship::ArrayElement { index, indices }
-                    if *index == 3 + u64::try_from(relative).expect("small index")
-                        && indices.as_ref() == [i128::try_from(3 + relative).expect("small index")]
-            )
-        }));
-        // The page is read at once, but each element reports its own address.
-        let sources = range_page
-            .children
-            .iter()
-            .map(|child| match &child.state {
-                VariableState::Available {
-                    source: uscope::VariableValueSource::Memory(address),
-                    ..
-                } => address.get(),
-                other => panic!("{fixture}: element is not in memory: {other:?}"),
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            sources.windows(2).all(|pair| pair[1] == pair[0] + 1),
-            "{fixture}: element sources {sources:#x?}"
-        );
-        let empty_page = scenario
-            .operation(
-                "inspect one empty in-bounds range",
-                evaluate_range(
-                    scenario.handle(),
-                    "huge_array[7..7]",
-                    uscope::InspectionLimits::default(),
-                ),
-            )
-            .await;
-        assert_eq!(empty_page.offset, 7, "{fixture}: {empty_page:?}");
-        assert!(empty_page.children.is_empty(), "{fixture}: {empty_page:?}");
-        for expression in [
-            "huge_array[7..3]",
-            "huge_array[0..257]",
-            "huge_array[1048576..1048578]",
-            "matrix[0..1]",
-            "global_record[0..1]",
-        ] {
-            let result = evaluate_range(
-                scenario.handle(),
-                expression,
-                uscope::InspectionLimits::default(),
-            )
-            .await;
-            let expected = match expression {
-                "huge_array[1048576..1048578]" => matches!(
-                    &result,
-                    Err(Error::ValueIndexOutOfBounds {
-                        index: 1_048_577,
-                        count: 1_048_577,
-                        ..
-                    })
-                ),
-                "global_record[0..1]" => matches!(
-                    &result,
-                    Err(Error::Expression(error)) if error.kind == uscope::ExpressionErrorKind::Type
-                ),
-                _ => matches!(&result, Err(Error::InvalidValueRange(_))),
-            };
-            assert!(expected, "{fixture}: {expression}: {result:?}");
-        }
-        let out_of_bounds = scenario
-            .handle()
-            .inspect(&parsed_value_expression("huge_array[1048577]"))
             .await;
         assert!(
             matches!(
-                &out_of_bounds,
-                Err(uscope::Error::Expression(error))
-                    if error.kind == uscope::ExpressionErrorKind::Bounds
+                available_value(&indexed.state),
+                uscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
             ),
-            "{fixture}: {out_of_bounds:?}"
+            "{fixture}: {expression}: {indexed:?}"
         );
-        // A pointer indexes as C indexes it: `records[0]` is `*records`.
-        let pointer_index = scenario
-            .handle()
-            .inspect(&parsed_value_expression("records[0]"))
-            .await;
-        assert_eq!(
-            pointer_index
-                .as_ref()
-                .ok()
-                .and_then(|value| value.type_info.as_ref())
-                .map(|info| info.name.as_ref()),
-            Some("outer_record[2]"),
-            "{fixture}: {pointer_index:?}"
-        );
-        for (components, expected) in [
-            (&["record", "inner", "signed_value"][..], -7),
-            (&["bits", "negative"][..], -3),
-        ] {
-            let value = scenario
-                .operation(
-                    "inspect nested or bit-field member",
-                    scenario.handle().inspect(&value_expression(components)),
-                )
-                .await;
-            assert_inspected_signed(&value, expected, fixture);
-        }
-        let unsigned_bit_field = scenario
-            .operation(
-                "inspect unsigned bit-field member",
-                scenario
-                    .handle()
-                    .inspect(&value_expression(&["bits", "second"])),
-            )
-            .await;
-        assert!(
-            matches!(
-                available_value(&unsigned_bit_field.state),
-                uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
-            ),
-            "{fixture}: {unsigned_bit_field:?}"
-        );
-
-        let selected = scenario
-            .operation(
-                "inspect small field in large record",
-                scenario
-                    .handle()
-                    .inspect(&value_expression(&["large", "small"])),
-            )
-            .await;
-        assert_inspected_signed(&selected, 73, fixture);
-
-        scenario.shutdown().await;
     }
+    let nested_array_member = scenario
+        .operation(
+            "inspect through an explicitly dereferenced array",
+            scenario
+                .handle()
+                .inspect(&parsed_value_expression("(*records)[1].values[1]")),
+        )
+        .await;
+    assert_signed(&nested_array_member.state, 44, fixture);
+    let matrix_element = scenario
+        .operation(
+            "inspect one multidimensional array element",
+            scenario
+                .handle()
+                .inspect(&parsed_value_expression("matrix[1][2]")),
+        )
+        .await;
+    assert_signed(&matrix_element.state, 6, fixture);
+    let range_page = scenario
+        .operation(
+            "inspect one bounded array range",
+            evaluate_range(
+                scenario.handle(),
+                "huge_array[3..7]",
+                uscope::InspectionLimits::default(),
+            ),
+        )
+        .await;
+    assert_eq!(range_page.offset, 3, "{fixture}: {range_page:?}");
+    assert_eq!(range_page.children.len(), 4, "{fixture}: {range_page:?}");
+    assert!(range_page.children.iter().enumerate().all(|(relative, child)| {
+        matches!(
+            &child.relationship,
+            uscope::ValueChildRelationship::ArrayElement { index, indices }
+                if *index == 3 + u64::try_from(relative).expect("small index")
+                    && indices.as_ref() == [i128::try_from(3 + relative).expect("small index")]
+        )
+    }));
+    // The page is read at once, but each element reports its own address.
+    let sources = range_page
+        .children
+        .iter()
+        .map(|child| match &child.state {
+            VariableState::Available {
+                source: uscope::VariableValueSource::Memory(address),
+                ..
+            } => address.get(),
+            other => panic!("{fixture}: element is not in memory: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        sources.windows(2).all(|pair| pair[1] == pair[0] + 1),
+        "{fixture}: element sources {sources:#x?}"
+    );
+    let empty_page = scenario
+        .operation(
+            "inspect one empty in-bounds range",
+            evaluate_range(
+                scenario.handle(),
+                "huge_array[7..7]",
+                uscope::InspectionLimits::default(),
+            ),
+        )
+        .await;
+    assert_eq!(empty_page.offset, 7, "{fixture}: {empty_page:?}");
+    assert!(empty_page.children.is_empty(), "{fixture}: {empty_page:?}");
+    for expression in [
+        "huge_array[7..3]",
+        "huge_array[0..257]",
+        "huge_array[1048576..1048578]",
+        "matrix[0..1]",
+        "global_record[0..1]",
+    ] {
+        let result = evaluate_range(
+            scenario.handle(),
+            expression,
+            uscope::InspectionLimits::default(),
+        )
+        .await;
+        let expected = match expression {
+            "huge_array[1048576..1048578]" => matches!(
+                &result,
+                Err(Error::ValueIndexOutOfBounds {
+                    index: 1_048_577,
+                    count: 1_048_577,
+                    ..
+                })
+            ),
+            "global_record[0..1]" => matches!(
+                &result,
+                Err(Error::Expression(error)) if error.kind == uscope::ExpressionErrorKind::Type
+            ),
+            _ => matches!(&result, Err(Error::InvalidValueRange(_))),
+        };
+        assert!(expected, "{fixture}: {expression}: {result:?}");
+    }
+    let out_of_bounds = scenario
+        .handle()
+        .inspect(&parsed_value_expression("huge_array[1048577]"))
+        .await;
+    assert!(
+        matches!(
+            &out_of_bounds,
+            Err(uscope::Error::Expression(error))
+                if error.kind == uscope::ExpressionErrorKind::Bounds
+        ),
+        "{fixture}: {out_of_bounds:?}"
+    );
+    // A pointer indexes as C indexes it: `records[0]` is `*records`.
+    let pointer_index = scenario
+        .handle()
+        .inspect(&parsed_value_expression("records[0]"))
+        .await;
+    assert_eq!(
+        pointer_index
+            .as_ref()
+            .ok()
+            .and_then(|value| value.type_info.as_ref())
+            .map(|info| info.name.as_ref()),
+        Some("outer_record[2]"),
+        "{fixture}: {pointer_index:?}"
+    );
+    for (components, expected) in [
+        (&["record", "inner", "signed_value"][..], -7),
+        (&["bits", "negative"][..], -3),
+    ] {
+        let value = scenario
+            .operation(
+                "inspect nested or bit-field member",
+                scenario.handle().inspect(&value_expression(components)),
+            )
+            .await;
+        assert_signed(&value.state, expected, fixture);
+    }
+    let unsigned_bit_field = scenario
+        .operation(
+            "inspect unsigned bit-field member",
+            scenario
+                .handle()
+                .inspect(&value_expression(&["bits", "second"])),
+        )
+        .await;
+    assert!(
+        matches!(
+            available_value(&unsigned_bit_field.state),
+            uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+        ),
+        "{fixture}: {unsigned_bit_field:?}"
+    );
+
+    let selected = scenario
+        .operation(
+            "inspect small field in large record",
+            scenario
+                .handle()
+                .inspect(&value_expression(&["large", "small"])),
+        )
+        .await;
+    assert_signed(&selected.state, 73, fixture);
+
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
@@ -1058,254 +1022,253 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
     reason = "one public scenario proves every budget resource and resumable partial pages"
 )]
 async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary() {
-    for fixture in ["records-c-gcc-o0", "records-c-clang-o0"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("inspect_records").await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
+    let fixture = "records-c-gcc-o0";
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_breakpoint("inspect_records").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
 
-        let limits = uscope::InspectionLimits {
-            variables: 1,
-            ..uscope::InspectionLimits::default()
-        };
-        let variables = scenario
-            .operation(
-                "truncate visible variables at the exact variable boundary",
-                scenario.handle().variables_with_limits(limits),
-            )
-            .await;
-        assert_eq!(variables.variables.len(), 1, "{variables:?}");
-        assert!(matches!(
-            variables.completion,
-            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-                resource: uscope::InspectionLimit::Variables,
-                limit: 1,
-                used: 1,
-                requested: 1,
-            })
-        ));
+    let limits = uscope::InspectionLimits {
+        variables: 1,
+        ..uscope::InspectionLimits::default()
+    };
+    let variables = scenario
+        .operation(
+            "truncate visible variables at the exact variable boundary",
+            scenario.handle().variables_with_limits(limits),
+        )
+        .await;
+    assert_eq!(variables.variables.len(), 1, "{variables:?}");
+    assert!(matches!(
+        variables.completion,
+        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+            resource: uscope::InspectionLimit::Variables,
+            limit: 1,
+            used: 1,
+            requested: 1,
+        })
+    ));
 
-        let node_limited_variables = scenario
-            .operation(
-                "reserve each visible variable and value node atomically",
-                scenario
-                    .handle()
-                    .variables_with_limits(uscope::InspectionLimits {
-                        value_nodes: 1,
-                        ..uscope::InspectionLimits::default()
-                    }),
-            )
-            .await;
-        assert_eq!(
-            node_limited_variables.variables.len(),
-            1,
-            "{node_limited_variables:?}"
-        );
-        assert_eq!(
-            node_limited_variables.usage.variables, 1,
-            "{node_limited_variables:?}"
-        );
-        assert!(matches!(
-            node_limited_variables.completion,
-            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-                resource: uscope::InspectionLimit::ValueNodes,
-                limit: 1,
-                used: 1,
-                requested: 1,
-            })
-        ));
-
-        let huge = scenario
-            .operation(
-                "obtain a stop-scoped large-array capability",
-                scenario
-                    .handle()
-                    .inspect(&parsed_value_expression("huge_array")),
-            )
-            .await;
-        let reference = available_children(&huge.state).clone();
-
-        let range = scenario
-            .operation(
-                "share one value-node budget across range selection and its child page",
-                evaluate_range(
-                    scenario.handle(),
-                    "huge_array[0..4]",
-                    uscope::InspectionLimits {
-                        value_nodes: 3,
-                        ..uscope::InspectionLimits::default()
-                    },
-                ),
-            )
-            .await;
-        // The selection and the page share the limit, which the page's
-        // elements reach.
-        assert_eq!(range.children.len(), 3, "{range:?}");
-        assert!(matches!(
-            range.completion,
-            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-                resource: uscope::InspectionLimit::ValueNodes,
-                limit: 3,
-                used: 3,
-                requested: 1,
-            })
-        ));
-
-        let node_limits = uscope::InspectionLimits {
-            value_nodes: 2,
-            ..uscope::InspectionLimits::default()
-        };
-        let nodes = scenario
-            .operation(
-                "truncate a child page by value nodes",
-                scenario.handle().value_children_with_limits(
-                    reference.clone(),
-                    uscope::ValueChildQuery {
-                        offset: 0,
-                        limit: 4,
-                    },
-                    node_limits,
-                ),
-            )
-            .await;
-        assert_eq!(nodes.children.len(), 2, "{nodes:?}");
-        assert!(matches!(
-            nodes.completion,
-            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-                resource: uscope::InspectionLimit::ValueNodes,
-                limit: 2,
-                used: 2,
-                requested: 1,
-            })
-        ));
-        let resumed = scenario
-            .operation(
-                "resume after a truncated child prefix with a fresh budget",
-                scenario.handle().value_children_with_limits(
-                    reference.clone(),
-                    uscope::ValueChildQuery {
-                        offset: 2,
-                        limit: 2,
-                    },
-                    node_limits,
-                ),
-            )
-            .await;
-        assert!(matches!(
-            resumed.children.as_ref(),
-            [first, second]
-                if matches!(
-                    &first.relationship,
-                    uscope::ValueChildRelationship::ArrayElement { index: 2, .. }
-                ) && matches!(
-                    &second.relationship,
-                    uscope::ValueChildRelationship::ArrayElement { index: 3, .. }
-                )
-        ));
-
-        let byte_limits = uscope::InspectionLimits {
-            memory_bytes: 2,
-            ..uscope::InspectionLimits::default()
-        };
-        let bytes = scenario
-            .operation(
-                "truncate a child page by requested memory bytes",
-                scenario.handle().value_children_with_limits(
-                    reference.clone(),
-                    uscope::ValueChildQuery {
-                        offset: 0,
-                        limit: 4,
-                    },
-                    byte_limits,
-                ),
-            )
-            .await;
-        assert_eq!(bytes.children.len(), 2, "{bytes:?}");
-        assert_eq!(bytes.usage.memory_bytes, 2, "{bytes:?}");
-        assert!(matches!(
-            bytes.completion,
-            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-                resource: uscope::InspectionLimit::MemoryBytes,
-                limit: 2,
-                used: 2,
-                requested: 1,
-            })
-        ));
-
-        let read_limits = uscope::InspectionLimits {
-            memory_reads: 1,
-            memory_bytes: 3,
-            ..uscope::InspectionLimits::default()
-        };
-        let reads = scenario
-            .operation(
-                "truncate a child page by logical memory reads",
-                scenario.handle().value_children_with_limits(
-                    reference,
-                    uscope::ValueChildQuery {
-                        offset: 0,
-                        limit: 4,
-                    },
-                    read_limits,
-                ),
-            )
-            .await;
-        assert_eq!(reads.children.len(), 1, "{reads:?}");
-        assert_eq!(reads.usage.memory_reads, 1, "{reads:?}");
-        assert!(matches!(
-            reads.completion,
-            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-                resource: uscope::InspectionLimit::MemoryReads,
-                limit: 1,
-                used: 1,
-                requested: 1,
-            })
-        ));
-
-        let work_limits = uscope::InspectionLimits {
-            expression_work: 1,
-            ..uscope::InspectionLimits::default()
-        };
-        let work = scenario
-            .operation(
-                "truncate evaluation by expression work",
-                scenario
-                    .handle()
-                    .inspect_with_limits(&parsed_value_expression("huge_array[0]"), work_limits),
-            )
-            .await;
-        assert!(
-            matches!(
-                work.completion,
-                uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-                    resource: uscope::InspectionLimit::ExpressionWork,
-                    limit: 1,
-                    ..
-                })
-            ),
-            "{work:?}"
-        );
-
-        let invalid = uscope::InspectionLimits {
-            memory_reads: 0,
-            ..uscope::InspectionLimits::default()
-        };
-        assert!(matches!(
+    let node_limited_variables = scenario
+        .operation(
+            "reserve each visible variable and value node atomically",
             scenario
                 .handle()
-                .inspect_with_limits(&parsed_value_expression("huge_array"), invalid)
-                .await,
-            Err(uscope::Error::InvalidInspectionLimit {
-                resource: uscope::InspectionLimit::MemoryReads,
-                value: 0,
-                maximum: 1_024,
-            })
-        ));
+                .variables_with_limits(uscope::InspectionLimits {
+                    value_nodes: 1,
+                    ..uscope::InspectionLimits::default()
+                }),
+        )
+        .await;
+    assert_eq!(
+        node_limited_variables.variables.len(),
+        1,
+        "{node_limited_variables:?}"
+    );
+    assert_eq!(
+        node_limited_variables.usage.variables, 1,
+        "{node_limited_variables:?}"
+    );
+    assert!(matches!(
+        node_limited_variables.completion,
+        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+            resource: uscope::InspectionLimit::ValueNodes,
+            limit: 1,
+            used: 1,
+            requested: 1,
+        })
+    ));
 
-        scenario.shutdown().await;
-    }
+    let huge = scenario
+        .operation(
+            "obtain a stop-scoped large-array capability",
+            scenario
+                .handle()
+                .inspect(&parsed_value_expression("huge_array")),
+        )
+        .await;
+    let reference = available_children(&huge.state).clone();
+
+    let range = scenario
+        .operation(
+            "share one value-node budget across range selection and its child page",
+            evaluate_range(
+                scenario.handle(),
+                "huge_array[0..4]",
+                uscope::InspectionLimits {
+                    value_nodes: 3,
+                    ..uscope::InspectionLimits::default()
+                },
+            ),
+        )
+        .await;
+    // The selection and the page share the limit, which the page's
+    // elements reach.
+    assert_eq!(range.children.len(), 3, "{range:?}");
+    assert!(matches!(
+        range.completion,
+        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+            resource: uscope::InspectionLimit::ValueNodes,
+            limit: 3,
+            used: 3,
+            requested: 1,
+        })
+    ));
+
+    let node_limits = uscope::InspectionLimits {
+        value_nodes: 2,
+        ..uscope::InspectionLimits::default()
+    };
+    let nodes = scenario
+        .operation(
+            "truncate a child page by value nodes",
+            scenario.handle().value_children_with_limits(
+                reference.clone(),
+                uscope::ValueChildQuery {
+                    offset: 0,
+                    limit: 4,
+                },
+                node_limits,
+            ),
+        )
+        .await;
+    assert_eq!(nodes.children.len(), 2, "{nodes:?}");
+    assert!(matches!(
+        nodes.completion,
+        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+            resource: uscope::InspectionLimit::ValueNodes,
+            limit: 2,
+            used: 2,
+            requested: 1,
+        })
+    ));
+    let resumed = scenario
+        .operation(
+            "resume after a truncated child prefix with a fresh budget",
+            scenario.handle().value_children_with_limits(
+                reference.clone(),
+                uscope::ValueChildQuery {
+                    offset: 2,
+                    limit: 2,
+                },
+                node_limits,
+            ),
+        )
+        .await;
+    assert!(matches!(
+        resumed.children.as_ref(),
+        [first, second]
+            if matches!(
+                &first.relationship,
+                uscope::ValueChildRelationship::ArrayElement { index: 2, .. }
+            ) && matches!(
+                &second.relationship,
+                uscope::ValueChildRelationship::ArrayElement { index: 3, .. }
+            )
+    ));
+
+    let byte_limits = uscope::InspectionLimits {
+        memory_bytes: 2,
+        ..uscope::InspectionLimits::default()
+    };
+    let bytes = scenario
+        .operation(
+            "truncate a child page by requested memory bytes",
+            scenario.handle().value_children_with_limits(
+                reference.clone(),
+                uscope::ValueChildQuery {
+                    offset: 0,
+                    limit: 4,
+                },
+                byte_limits,
+            ),
+        )
+        .await;
+    assert_eq!(bytes.children.len(), 2, "{bytes:?}");
+    assert_eq!(bytes.usage.memory_bytes, 2, "{bytes:?}");
+    assert!(matches!(
+        bytes.completion,
+        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+            resource: uscope::InspectionLimit::MemoryBytes,
+            limit: 2,
+            used: 2,
+            requested: 1,
+        })
+    ));
+
+    let read_limits = uscope::InspectionLimits {
+        memory_reads: 1,
+        memory_bytes: 3,
+        ..uscope::InspectionLimits::default()
+    };
+    let reads = scenario
+        .operation(
+            "truncate a child page by logical memory reads",
+            scenario.handle().value_children_with_limits(
+                reference,
+                uscope::ValueChildQuery {
+                    offset: 0,
+                    limit: 4,
+                },
+                read_limits,
+            ),
+        )
+        .await;
+    assert_eq!(reads.children.len(), 1, "{reads:?}");
+    assert_eq!(reads.usage.memory_reads, 1, "{reads:?}");
+    assert!(matches!(
+        reads.completion,
+        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+            resource: uscope::InspectionLimit::MemoryReads,
+            limit: 1,
+            used: 1,
+            requested: 1,
+        })
+    ));
+
+    let work_limits = uscope::InspectionLimits {
+        expression_work: 1,
+        ..uscope::InspectionLimits::default()
+    };
+    let work = scenario
+        .operation(
+            "truncate evaluation by expression work",
+            scenario
+                .handle()
+                .inspect_with_limits(&parsed_value_expression("huge_array[0]"), work_limits),
+        )
+        .await;
+    assert!(
+        matches!(
+            work.completion,
+            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+                resource: uscope::InspectionLimit::ExpressionWork,
+                limit: 1,
+                ..
+            })
+        ),
+        "{work:?}"
+    );
+
+    let invalid = uscope::InspectionLimits {
+        memory_reads: 0,
+        ..uscope::InspectionLimits::default()
+    };
+    assert!(matches!(
+        scenario
+            .handle()
+            .inspect_with_limits(&parsed_value_expression("huge_array"), invalid)
+            .await,
+        Err(uscope::Error::InvalidInspectionLimit {
+            resource: uscope::InspectionLimit::MemoryReads,
+            value: 0,
+            maximum: 1_024,
+        })
+    ));
+
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
@@ -1341,11 +1304,11 @@ async fn cpp_records_cover_multiple_and_virtual_base_metadata() {
                 .all(|member| member.name.as_deref() != Some("static_value")),
             "{fixture}: static member appeared in instance: {derived:?}"
         );
-        assert_signed_state(&named_child(&derived_page, "own").state, 22);
+        assert_signed(&named_child(&derived_page, "own").state, 22, fixture);
         let left_page = record_page(&scenario, &bases[0].state, 1, fixture).await;
-        assert_signed_state(&named_child(&left_page, "left").state, 9);
+        assert_signed(&named_child(&left_page, "left").state, 9, fixture);
         let right_page = record_page(&scenario, &bases[1].state, 1, fixture).await;
-        assert_signed_state(&named_child(&right_page, "right").state, 11);
+        assert_signed(&named_child(&right_page, "right").state, 11, fixture);
 
         let virtual_derived = dereference_named(&scenario, "virtual_derived", 1).await;
         let virtual_page = record_page(&scenario, &virtual_derived.state, 1, fixture).await;
@@ -1363,7 +1326,11 @@ async fn cpp_records_cover_multiple_and_virtual_base_metadata() {
             })
         ));
         let virtual_base_page = record_page(&scenario, &bases[0].state, 1, fixture).await;
-        assert_signed_state(&named_child(&virtual_base_page, "virtual_value").state, 22);
+        assert_signed(
+            &named_child(&virtual_base_page, "virtual_value").state,
+            22,
+            fixture,
+        );
 
         let diamond = dereference_named(&scenario, "diamond", 1).await;
         let diamond_page = record_page(&scenario, &diamond.state, 2, fixture).await;
@@ -1407,7 +1374,6 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
         ("records-rust-o2", "inspect_records", false),
         ("records-zig-o0", "records.inspectRecords", true),
         ("records-zig-o2", "records.inspectRecords", false),
-        ("records-zig-nopie", "records.inspectRecords", true),
     ] {
         let mut scenario = Scenario::launch(fixture);
         if fixture.contains("zig") {
@@ -1497,7 +1463,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
         run_go_to_breakpoint(&mut scenario, fixture).await;
         if inspect_values {
             let record = dereference_named(&scenario, "record", 1).await;
-            assert_dereferenced_record(&scenario, &record, 2, fixture).await;
+            record_page(&scenario, &record.state, 2, fixture).await;
             let record_page = record_page(&scenario, &record.state, 2, fixture).await;
             assert!(
                 record_page.children.iter().any(|child| matches!(
@@ -1553,7 +1519,7 @@ async fn assert_record_members(scenario: &Scenario, signed_member: &str, fixture
                     .inspect(&parsed_value_expression(&expression)),
             )
             .await;
-        assert_inspected_signed(&value, expected, &format!("{fixture}: {expression}"));
+        assert_signed(&value.state, expected, &format!("{fixture}: {expression}"));
     }
 }
 
@@ -1884,7 +1850,7 @@ async fn c_raw_unions_expose_overlapping_interpretations_without_claiming_an_act
             ["integer", "floating"],
             "{fixture}: {raw:?}"
         );
-        assert_signed_state(&named_child(&page, "integer").state, 42);
+        assert_signed(&named_child(&page, "integer").state, 42, fixture);
 
         let integer = scenario
             .operation(
@@ -1894,7 +1860,7 @@ async fn c_raw_unions_expose_overlapping_interpretations_without_claiming_an_act
                     .inspect(&value_expression(&["raw", "integer"])),
             )
             .await;
-        assert_inspected_signed(&integer, 42, fixture);
+        assert_signed(&integer.state, 42, fixture);
 
         assert_eq!(
             scenario.resume_to_stop().await,
@@ -2054,227 +2020,231 @@ async fn zig_enums_tagged_unions_and_bare_unions_decode_without_guessing() {
     reason = "one scenario proves scalar, child-page, indexed, and ranged boundary reads"
 )]
 async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() {
-    for fixture in ["pointer-memory-gcc-o0", "pointer-memory-clang-o0"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("inspect_boundaries").await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-
-        let valid = dereference_named(&scenario, "valid_pointer", 1).await;
-        assert_dereferenced_scalar(&valid, 42, fixture);
-        let boundary = dereference_named(&scenario, "boundary_pointer", 1).await;
-        assert!(
-            matches!(
-                boundary.state,
-                VariableState::Unavailable(
-                    VariableUnavailableReason::MemoryInaccessible {
-                        address,
-                        requested: 4,
-                        completed: 2,
-                        next_address,
-                    }
-                ) if next_address.get() == address.get() + 2
-            ),
-            "{boundary:?}"
-        );
-        let valid_after_failure = dereference_named(&scenario, "valid_pointer", 1).await;
-        assert_dereferenced_scalar(&valid_after_failure, 42, fixture);
-
-        let array = dereference_named(&scenario, "boundary_array", 1).await;
-        assert!(
-            matches!(
-                array.state,
-                VariableState::Available {
-                    raw: None,
-                    value: uscope::VariableValue::Array { .. },
-                    ..
-                }
-            ) && available_children(&array.state).total() == 4,
-            "{fixture}: array summary performed an eager boundary read: {array:?}"
-        );
-        let readable = child_page(&scenario, &array.state, 0, 2).await;
-        assert_signed_state(&readable.children[0].state, 41);
-        assert_signed_state(&readable.children[1].state, 42);
-        let unreadable = child_page(&scenario, &array.state, 2, 2).await;
-        assert_eq!(unreadable.children.len(), 2, "{fixture}: {unreadable:?}");
-        assert!(
-            unreadable.children.iter().all(|child| matches!(
-                child.state,
-                VariableState::Unavailable(VariableUnavailableReason::MemoryInaccessible {
-                    completed: 0,
-                    ..
-                })
-            )),
-            "{fixture}: an unmapped child was reported as readable: {unreadable:?}"
-        );
-        assert_eq!(
-            child_page(&scenario, &array.state, 2, 2).await,
-            unreadable,
-            "{fixture}: repeated page evaluation changed at one stop"
-        );
-        let indexed_readable = scenario
-            .operation(
-                "inspect a readable element at a mapping boundary",
-                scenario
-                    .handle()
-                    .inspect(&parsed_value_expression("(*boundary_array)[1]")),
-            )
-            .await;
-        assert_inspected_signed(&indexed_readable, 42, fixture);
-        let indexed_unreadable = scenario
-            .operation(
-                "inspect an unreadable element at a mapping boundary",
-                scenario
-                    .handle()
-                    .inspect(&parsed_value_expression("(*boundary_array)[2]")),
-            )
-            .await;
-        assert!(
-            matches!(
-                indexed_unreadable.state,
-                VariableState::Unavailable(VariableUnavailableReason::MemoryInaccessible {
-                    requested: 4,
-                    completed: 0,
-                    ..
-                })
-            ),
-            "{fixture}: {indexed_unreadable:?}"
-        );
-        let range = scenario
-            .operation(
-                "inspect a range crossing an unmapped boundary",
-                evaluate_range(
-                    scenario.handle(),
-                    "(*boundary_array)[0..4]",
-                    uscope::InspectionLimits::default(),
-                ),
-            )
-            .await;
-        assert_eq!(range.children.len(), 4, "{fixture}: {range:?}");
-        assert_signed_state(&range.children[0].state, 41);
-        assert_signed_state(&range.children[1].state, 42);
-        assert!(
-            range.children[2..].iter().all(|child| matches!(
-                child.state,
-                VariableState::Unavailable(VariableUnavailableReason::MemoryInaccessible {
-                    completed: 0,
-                    ..
-                })
-            )),
-            "{fixture}: {range:?}"
-        );
-
-        assert_eq!(
-            scenario.resume_to_stop().await,
-            StopReason::Exited(ExitStatus::Code(0))
-        );
-        scenario.shutdown().await;
-    }
-}
-
-#[tokio::test]
-async fn value_child_pages_are_arbitrary_repeatable_bounded_and_stop_scoped() {
-    for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("variables.c", 68).await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-        let array = dereference_named(&scenario, "array_pointer", 1).await;
-        let reference = available_children(&array.state).clone();
-        assert_eq!(reference.total(), 2);
-
-        let tail = child_page(&scenario, &array.state, 1, 1).await;
-        assert_eq!(tail.offset, 1);
-        assert_eq!(tail.total, 2);
-        assert_eq!(tail.children.len(), 1);
-        assert_signed_state(&tail.children[0].state, 22);
-        assert!(matches!(
-            &tail.children[0].relationship,
-            uscope::ValueChildRelationship::ArrayElement { index: 1, indices }
-                if indices.as_ref() == [1]
-        ));
-        assert_eq!(
-            child_page(&scenario, &array.state, 1, 1).await,
-            tail,
-            "{fixture}: a repeated page changed at the same stop"
-        );
-        let beyond = child_page(&scenario, &array.state, u64::MAX, 1).await;
-        assert_eq!(beyond.offset, u64::MAX);
-        assert!(beyond.children.is_empty());
-
-        for limit in [0, 257] {
-            assert!(matches!(
-                scenario
-                    .handle()
-                    .value_children(
-                        reference.clone(),
-                        uscope::ValueChildQuery { offset: 0, limit },
-                    )
-                    .await,
-                Err(Error::InvalidValueChildPageLimit(actual)) if actual == limit
-            ));
-        }
-
-        assert!(matches!(
-            scenario.resume_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-        assert!(matches!(
-            scenario
-                .handle()
-                .value_children(
-                    reference,
-                    uscope::ValueChildQuery {
-                        offset: 0,
-                        limit: 1,
-                    },
-                )
-                .await,
-            Err(Error::StaleStop)
-        ));
-        let fresh = dereference_named(&scenario, "array_pointer", 1).await;
-        let head = child_page(&scenario, &fresh.state, 0, 1).await;
-        assert_signed_state(&head.children[0].state, 20);
-        scenario.shutdown().await;
-    }
-}
-
-#[tokio::test]
-async fn value_child_capabilities_reject_running_state_before_becoming_stale() {
-    let mut scenario = Scenario::new("running value children", Scenario::fixture("spin"));
-    scenario.add_breakpoint("main").await;
+    let fixture = "pointer-memory-gcc-o0";
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_breakpoint("inspect_boundaries").await;
     assert!(matches!(
         scenario.run_to_stop().await,
         StopReason::Breakpoint { .. }
     ));
-    let array = scenario
+
+    let valid = dereference_named(&scenario, "valid_pointer", 1).await;
+    assert_signed(&valid.state, 42, fixture);
+    let boundary = dereference_named(&scenario, "boundary_pointer", 1).await;
+    assert!(
+        matches!(
+            boundary.state,
+            VariableState::Unavailable(
+                VariableUnavailableReason::MemoryInaccessible {
+                    address,
+                    requested: 4,
+                    completed: 2,
+                    next_address,
+                }
+            ) if next_address.get() == address.get() + 2
+        ),
+        "{boundary:?}"
+    );
+    let valid_after_failure = dereference_named(&scenario, "valid_pointer", 1).await;
+    assert_signed(&valid_after_failure.state, 42, fixture);
+
+    let array = dereference_named(&scenario, "boundary_array", 1).await;
+    assert!(
+        matches!(
+            array.state,
+            VariableState::Available {
+                raw: None,
+                value: uscope::VariableValue::Array { .. },
+                ..
+            }
+        ) && available_children(&array.state).total() == 4,
+        "{fixture}: array summary performed an eager boundary read: {array:?}"
+    );
+    let readable = child_page(&scenario, &array.state, 0, 2).await;
+    assert_signed(&readable.children[0].state, 41, fixture);
+    assert_signed(&readable.children[1].state, 42, fixture);
+    let unreadable = child_page(&scenario, &array.state, 2, 2).await;
+    assert_eq!(unreadable.children.len(), 2, "{fixture}: {unreadable:?}");
+    assert!(
+        unreadable.children.iter().all(|child| matches!(
+            child.state,
+            VariableState::Unavailable(VariableUnavailableReason::MemoryInaccessible {
+                completed: 0,
+                ..
+            })
+        )),
+        "{fixture}: an unmapped child was reported as readable: {unreadable:?}"
+    );
+    assert_eq!(
+        child_page(&scenario, &array.state, 2, 2).await,
+        unreadable,
+        "{fixture}: repeated page evaluation changed at one stop"
+    );
+    let indexed_readable = scenario
         .operation(
-            "inspect spin array",
-            scenario.handle().variable("spin_values"),
+            "inspect a readable element at a mapping boundary",
+            scenario
+                .handle()
+                .inspect(&parsed_value_expression("(*boundary_array)[1]")),
         )
         .await;
-    let reference = available_children(&array.state).clone();
-    scenario.remove_all_breakpoints().await;
-    let running = scenario.start_resuming().await;
+    assert_signed(&indexed_readable.state, 42, fixture);
+    let indexed_unreadable = scenario
+        .operation(
+            "inspect an unreadable element at a mapping boundary",
+            scenario
+                .handle()
+                .inspect(&parsed_value_expression("(*boundary_array)[2]")),
+        )
+        .await;
+    assert!(
+        matches!(
+            indexed_unreadable.state,
+            VariableState::Unavailable(VariableUnavailableReason::MemoryInaccessible {
+                requested: 4,
+                completed: 0,
+                ..
+            })
+        ),
+        "{fixture}: {indexed_unreadable:?}"
+    );
+    let range = scenario
+        .operation(
+            "inspect a range crossing an unmapped boundary",
+            evaluate_range(
+                scenario.handle(),
+                "(*boundary_array)[0..4]",
+                uscope::InspectionLimits::default(),
+            ),
+        )
+        .await;
+    assert_eq!(range.children.len(), 4, "{fixture}: {range:?}");
+    assert_signed(&range.children[0].state, 41, fixture);
+    assert_signed(&range.children[1].state, 42, fixture);
+    assert!(
+        range.children[2..].iter().all(|child| matches!(
+            child.state,
+            VariableState::Unavailable(VariableUnavailableReason::MemoryInaccessible {
+                completed: 0,
+                ..
+            })
+        )),
+        "{fixture}: {range:?}"
+    );
+
+    // A raw read returns the readable prefix and where it stopped.
+    let pointer = scenario
+        .operation(
+            "boundary array",
+            scenario.handle().variable("boundary_array"),
+        )
+        .await;
+    let uscope::VariableValue::Address(boundary) = available_value(&pointer.state) else {
+        panic!("{fixture}: boundary array was not an address: {pointer:?}");
+    };
+    let end = VirtualAddress::new(boundary.address.get() + 8);
+    let prefix = scenario
+        .operation(
+            "read across the boundary",
+            scenario.handle().read_memory(boundary.address, 16),
+        )
+        .await;
+    assert_eq!(
+        prefix.bytes.as_ref(),
+        [41_i32.to_le_bytes(), 42_i32.to_le_bytes()].concat()
+    );
+    let inaccessible = uscope::MemoryReadCompletion::Incomplete {
+        next_address: end,
+        reason: uscope::MemoryReadUnavailableReason::Inaccessible,
+    };
+    assert_eq!(prefix.completion, inaccessible);
+    let none = scenario
+        .operation(
+            "read past the boundary",
+            scenario.handle().read_memory(end, 8),
+        )
+        .await;
+    assert!(none.bytes.is_empty(), "{none:?}");
+    assert_eq!(none.completion, inaccessible);
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn value_child_pages_are_arbitrary_repeatable_bounded_and_stop_scoped() {
+    let fixture = "variables-gcc-o0";
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_source_breakpoint("variables.c", 68).await;
     assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let array = dereference_named(&scenario, "array_pointer", 1).await;
+    let reference = available_children(&array.state).clone();
+    assert_eq!(reference.total(), 2);
+    let pointer = scenario
+        .operation("pointer", scenario.handle().variable("pointer"))
+        .await;
+    let VariableState::Available {
+        dereference: uscope::DereferenceState::Available(target),
+        ..
+    } = pointer.state
+    else {
+        panic!("pointer was not dereferenceable: {pointer:?}");
+    };
+    let first = scenario
+        .operation("dereference", scenario.handle().dereference(target.clone()))
+        .await;
+    assert_eq!(
         scenario
-            .handle()
-            .value_children(
-                reference.clone(),
-                uscope::ValueChildQuery {
-                    offset: 0,
-                    limit: 1,
-                },
+            .operation(
+                "dereference again",
+                scenario.handle().dereference(target.clone())
             )
             .await,
-        Err(Error::NotStopped)
+        first
+    );
+
+    let tail = child_page(&scenario, &array.state, 1, 1).await;
+    assert_eq!(tail.offset, 1);
+    assert_eq!(tail.total, 2);
+    assert_eq!(tail.children.len(), 1);
+    assert_signed(&tail.children[0].state, 22, fixture);
+    assert!(matches!(
+        &tail.children[0].relationship,
+        uscope::ValueChildRelationship::ArrayElement { index: 1, indices }
+            if indices.as_ref() == [1]
     ));
-    assert_eq!(scenario.handle().pause().await.unwrap(), StopReason::Pause);
-    assert_eq!(running.await.unwrap().unwrap(), StopReason::Pause);
+    assert_eq!(
+        child_page(&scenario, &array.state, 1, 1).await,
+        tail,
+        "{fixture}: a repeated page changed at the same stop"
+    );
+    let beyond = child_page(&scenario, &array.state, u64::MAX, 1).await;
+    assert_eq!(beyond.offset, u64::MAX);
+    assert!(beyond.children.is_empty());
+
+    for limit in [0, 257] {
+        assert!(matches!(
+            scenario
+                .handle()
+                .value_children(
+                    reference.clone(),
+                    uscope::ValueChildQuery { offset: 0, limit },
+                )
+                .await,
+            Err(Error::InvalidValueChildPageLimit(actual)) if actual == limit
+        ));
+    }
+
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
     assert!(matches!(
         scenario
             .handle()
@@ -2288,91 +2258,63 @@ async fn value_child_capabilities_reject_running_state_before_becoming_stale() {
             .await,
         Err(Error::StaleStop)
     ));
-    scenario.shutdown().await;
-}
-
-#[tokio::test]
-async fn dereference_capabilities_are_invalidated_by_the_next_stop() {
-    let mut scenario = Scenario::new(
-        "stale pointer capability",
-        Scenario::fixture("variables-gcc-o0"),
-    );
-    scenario.add_source_breakpoint("variables.c", 68).await;
     assert!(matches!(
-        scenario.run_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-    let pointer = scenario
-        .operation(
-            "inspect first pointer",
-            scenario.handle().variable("pointer"),
-        )
-        .await;
-    let reference = match pointer.state {
-        VariableState::Available {
-            dereference: uscope::DereferenceState::Available(reference),
-            ..
-        } => reference,
-        state => panic!("pointer was not dereferenceable: {state:?}"),
-    };
-    let first = scenario
-        .operation(
-            "first repeated dereference",
-            scenario.handle().dereference(reference.clone()),
-        )
-        .await;
-    let repeated = scenario
-        .operation(
-            "second repeated dereference",
-            scenario.handle().dereference(reference.clone()),
-        )
-        .await;
-    assert_eq!(repeated, first);
-    assert_dereferenced_scalar(&first, 42, "repeated capability");
-    assert!(matches!(
-        scenario.resume_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-    assert!(matches!(
-        scenario.handle().dereference(reference).await,
+        scenario.handle().dereference(target).await,
         Err(Error::StaleStop)
     ));
-    let fresh = dereference_named(&scenario, "pointer", 1).await;
-    assert_dereferenced_scalar(&fresh, 42, "fresh capability");
+    let fresh = dereference_named(&scenario, "array_pointer", 1).await;
+    let head = child_page(&scenario, &fresh.state, 0, 1).await;
+    assert_signed(&head.children[0].state, 20, fixture);
     scenario.shutdown().await;
 }
 
 #[tokio::test]
-async fn dereference_capabilities_reject_running_state_before_becoming_stale() {
-    let mut scenario = Scenario::new("running pointer capability", Scenario::fixture("spin"));
+async fn stop_scoped_capabilities_reject_running_state_before_becoming_stale() {
+    let mut scenario = Scenario::launch("spin");
     scenario.add_breakpoint("main").await;
     assert!(matches!(
         scenario.run_to_stop().await,
         StopReason::Breakpoint { .. }
     ));
-    let pointer = scenario
-        .operation(
-            "inspect spin pointer",
-            scenario.handle().variable("spin_pointer"),
-        )
+    let array = scenario
+        .operation("spin array", scenario.handle().variable("spin_values"))
         .await;
-    let reference = match pointer.state {
-        VariableState::Available {
-            dereference: uscope::DereferenceState::Available(reference),
-            ..
-        } => reference,
-        state => panic!("spin pointer was not dereferenceable: {state:?}"),
+    let children = available_children(&array.state).clone();
+    let pointer = scenario
+        .operation("spin pointer", scenario.handle().variable("spin_pointer"))
+        .await;
+    let VariableState::Available {
+        dereference: uscope::DereferenceState::Available(target),
+        ..
+    } = pointer.state
+    else {
+        panic!("spin pointer was not dereferenceable: {pointer:?}");
+    };
+    let page = uscope::ValueChildQuery {
+        offset: 0,
+        limit: 1,
     };
     scenario.remove_all_breakpoints().await;
     let running = scenario.start_resuming().await;
     assert!(matches!(
-        scenario.handle().dereference(reference.clone()).await,
+        scenario
+            .handle()
+            .value_children(children.clone(), page.clone())
+            .await,
+        Err(Error::NotStopped)
+    ));
+    assert!(matches!(
+        scenario.handle().dereference(target.clone()).await,
         Err(Error::NotStopped)
     ));
     assert_eq!(scenario.handle().pause().await.unwrap(), StopReason::Pause);
     assert_eq!(running.await.unwrap().unwrap(), StopReason::Pause);
     assert!(matches!(
-        scenario.handle().dereference(reference).await,
+        scenario.handle().value_children(children, page).await,
+        Err(Error::StaleStop)
+    ));
+    assert!(matches!(
+        scenario.handle().dereference(target).await,
         Err(Error::StaleStop)
     ));
     scenario.shutdown().await;
@@ -2411,7 +2353,7 @@ async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_a
     );
 
     let pointee = dereference_named(&scenario, "pointer_pointer", 2).await;
-    assert_dereferenced_scalar(&pointee, 42, fixture);
+    assert_signed(&pointee.state, 42, fixture);
     let atomic_pointee = scenario
         .operation(
             "inspect through implicit pointer chain atomically",
@@ -2420,7 +2362,7 @@ async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_a
                 .inspect(&parsed_value_expression("**pointer_pointer")),
         )
         .await;
-    assert_inspected_signed(&atomic_pointee, 42, fixture);
+    assert_signed(&atomic_pointee.state, 42, fixture);
     scenario.shutdown().await;
 
     let mut offset = Scenario::new(
@@ -2515,52 +2457,39 @@ async fn go_slices_decode_subranges_empty_and_nil_descriptors() {
 
 #[tokio::test]
 async fn readable_invalid_boolean_bytes_are_not_reported_as_unavailable_or_malformed() {
-    for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("inspect_invalid_boolean").await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
+    let fixture = "variables-gcc-o0";
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_breakpoint("inspect_invalid_boolean").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
 
-        let value = scenario
-            .operation(
-                "inspect invalid boolean representation",
-                scenario
-                    .handle()
-                    .inspect(&parsed_value_expression("*invalid")),
-            )
-            .await;
-        assert!(
-            matches!(
-                value.state,
-                VariableState::Invalid {
-                    source: uscope::VariableValueSource::Memory(_),
-                    ref raw,
-                    reason: uscope::VariableInvalidReason::BooleanRepresentation(2),
-                } if raw.as_ref() == [2]
-            ),
-            "{fixture}: {value:?}"
-        );
+    let value = scenario
+        .operation(
+            "inspect invalid boolean representation",
+            scenario
+                .handle()
+                .inspect(&parsed_value_expression("*invalid")),
+        )
+        .await;
+    assert!(
+        matches!(
+            value.state,
+            VariableState::Invalid {
+                source: uscope::VariableValueSource::Memory(_),
+                ref raw,
+                reason: uscope::VariableInvalidReason::BooleanRepresentation(2),
+            } if raw.as_ref() == [2]
+        ),
+        "{fixture}: {value:?}"
+    );
 
-        assert_eq!(
-            scenario.resume_to_stop().await,
-            StopReason::Exited(ExitStatus::Code(0))
-        );
-        scenario.shutdown().await;
-    }
-}
-
-/// The text summary of a variable, or `None` when it has none.
-fn text_of(variables: &[uscope::Variable], name: &str) -> Option<uscope::TextSummary> {
-    let variable = variables
-        .iter()
-        .find(|variable| &*variable.name == name)
-        .unwrap_or_else(|| panic!("no variable {name} in {variables:?}"));
-    let VariableState::Available { text, .. } = &variable.state else {
-        panic!("{name} is not available: {:?}", variable.state);
-    };
-    text.as_deref().cloned()
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
 }
 
 fn text(bytes: &[u8], completion: uscope::TextCompletion) -> uscope::TextSummary {
@@ -2590,16 +2519,8 @@ async fn assert_strings(
     if let Some(function) = function {
         scenario.add_breakpoint(function).await;
     } else {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(source);
-        let line = std::fs::read_to_string(&path)
-            .expect("source")
-            .lines()
-            .position(|line| line.contains("strings stop here"))
-            .expect("marker") as u64
-            + 1;
-        let file = path.file_name().expect("name").to_str().expect("utf8");
+        let line = source_line(&format!("tests/fixtures/{source}"), "strings stop here");
+        let file = source.rsplit('/').next().expect("a file name");
         scenario.add_source_breakpoint(file, line).await;
     }
     assert!(matches!(

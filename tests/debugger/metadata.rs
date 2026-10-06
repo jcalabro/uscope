@@ -52,7 +52,12 @@ async fn discarded_functions_are_not_cataloged_at_their_tombstone_addresses() {
 }
 
 #[tokio::test]
-async fn normalized_type_graph_is_public_dense_and_closed_across_languages() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the compiler-language matrix checks its graphs and their semantics"
+)]
+async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
+    let mut images = BTreeMap::new();
     for fixture in [
         "variables-gcc-o0",
         "variables-clang-o0",
@@ -94,17 +99,11 @@ async fn normalized_type_graph_is_public_dense_and_closed_across_languages() {
                 }
             }
         }
+        images.insert(fixture, image);
     }
-}
 
-#[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one compiler-language matrix keeps the cross-language semantic contract visible"
-)]
-async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
     for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
-        let image = load_fixture_image(fixture).await;
+        let image = &images[fixture];
         let resolved = image
             .types()
             .iter()
@@ -149,7 +148,7 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
     }
 
     for fixture in ["variables-cpp-gcc-o0", "variables-cpp-clang-o0"] {
-        let image = load_fixture_image(fixture).await;
+        let image = &images[fixture];
         assert!(
             image.types().iter().any(|node| matches!(
                 node,
@@ -167,7 +166,7 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
     }
 
     for fixture in ["types-cpp-gcc-dwarf4", "types-cpp-gcc-dwarf5"] {
-        let image = load_fixture_image(fixture).await;
+        let image = &images[fixture];
         for name in ["counted_global", "packed_global"] {
             let global = image
                 .globals()
@@ -188,7 +187,7 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
     }
 
     for fixture in ["types-c-gcc-o0", "types-c-clang-o0"] {
-        let image = load_fixture_image(fixture).await;
+        let image = &images[fixture];
         let global_type = |name: &str| {
             let global = image
                 .globals()
@@ -243,7 +242,7 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
         }
     }
 
-    let go = load_fixture_image("variables-go-o0").await;
+    let go = &images["variables-go-o0"];
     assert!(
         go.types().iter().any(|node| matches!(
             node,
@@ -279,9 +278,8 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
         !go_names.iter().any(|name| name.contains("scalarAlias")),
         "Go source aliases erased by the producer must not be reconstructed: {go_names:?}"
     );
-    drop(go);
 
-    let zig = load_fixture_image("variables-zig-o0").await;
+    let zig = &images["variables-zig-o0"];
     assert!(
         zig.types().iter().any(|node| matches!(
             node,
@@ -295,9 +293,8 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
         )),
         "Zig producer wrappers must be identified as encodings"
     );
-    drop(zig);
 
-    let rust = load_fixture_image("variables-rust-o0").await;
+    let rust = &images["variables-rust-o0"];
     assert!(
         rust.types()
             .iter()
@@ -318,19 +315,13 @@ async fn dwarf_normalization_preserves_inline_instances_and_line_rows() {
         "inline-clang-o1",
         "inline-clang-o2",
     ] {
-        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("initialize debugger");
-        let image = debugger.handle().module_image().clone();
-        assert_inline_metadata(&image, fixture);
-
-        debugger.shutdown().await.expect("shutdown debugger");
+        assert_inline_metadata(&*load_fixture_image(fixture).await, fixture);
     }
 }
 
 #[tokio::test]
 async fn line_zero_rows_do_not_extend_the_previous_source_line() {
-    let debugger =
-        Debugger::new(Scenario::fixture("variables-rust-o0")).expect("initialize debugger");
-    let image = debugger.handle().module_image().clone();
+    let image = load_fixture_image("variables-rust-o0").await;
     let function = image
         .function_named("inspect_scalars")
         .expect("inspect_scalars definition");
@@ -359,8 +350,6 @@ async fn line_zero_rows_do_not_extend_the_previous_source_line() {
         unattributed > 0,
         "line-0 regions were attributed to a neighboring source line"
     );
-
-    debugger.shutdown().await.expect("shutdown debugger");
 }
 
 /// A line table's last row for a function runs on, to the next row,
