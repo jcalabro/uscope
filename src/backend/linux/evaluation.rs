@@ -513,6 +513,10 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
                 .is_some_and(|bound| bound.shape.has_elements() || bound.shape.has_text())
     }
 
+    fn stands_for_container(&self, ty: TypeReference) -> bool {
+        crate::view::stands_for_container(self, ty)
+    }
+
     fn plan(
         &self,
         from: TypeReference,

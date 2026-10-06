@@ -92,6 +92,8 @@ pub struct World {
     /// Ranges that reading fails the test: what a short circuit skips.
     poisoned: Vec<(u64, u64)>,
     registers: BTreeMap<&'static str, Option<u128>>,
+    /// Pointer types that stand for containers.
+    containers: Vec<TypeReference>,
     next: u64,
     /// Every memory read, in order.
     pub reads: Vec<(u64, usize)>,
@@ -365,17 +367,24 @@ impl World {
         }));
     }
 
-    /// Gives a type Go's attributes, as Go's DWARF marks its kinds.
-    pub fn go_kind(&mut self, ty: TypeReference, kind: crate::GoKind) {
+    /// Changes an identified type's identity, as a language's debug
+    /// information adds to it.
+    pub fn edit_identity(
+        &mut self,
+        ty: TypeReference,
+        edit: impl FnOnce(&mut crate::TypeIdentity),
+    ) {
         let identity = self
             .info_mut(ty)
             .identity
             .as_mut()
             .expect("an identified type");
-        Arc::make_mut(identity).go = Some(crate::GoTypeAttributes {
-            kind,
-            runtime_type: None,
-        });
+        edit(Arc::make_mut(identity));
+    }
+
+    /// Makes a pointer type stand for a container a view presents.
+    pub fn container(&mut self, ty: TypeReference) {
+        self.containers.push(ty);
     }
 
     /// Marks where an identified type's template parameter pack begins.
@@ -957,6 +966,10 @@ impl Scope for World {
             })
             .map(|info| info.reference)
             .collect()
+    }
+
+    fn stands_for_container(&self, ty: TypeReference) -> bool {
+        self.containers.contains(&ty)
     }
 
     fn global_step(&self, name: &str) -> Result<Option<(Step, TypeReference)>, Refusal> {

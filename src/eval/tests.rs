@@ -414,10 +414,15 @@ proptest::proptest! {
 
 /// The evaluator is pure: it reaches a program only through the traits the
 /// debugger implements for it, so none of its code may reach for process
-/// control, debug information, I/O, clocks, or threads. Tests are exempt.
+/// control, debug information, I/O, clocks, or threads. It is one language
+/// for every source language, so it tests for none: what a language's
+/// types mean reaches it as capabilities of those traits. Tests are exempt.
 #[test]
 fn the_evaluator_stays_pure() {
-    const FORBIDDEN: [&str; 11] = [
+    const FORBIDDEN: [&str; 14] = [
+        "SourceLanguage::",
+        "GoKind",
+        "GoTypeAttributes",
         "crate::backend",
         "crate::debug_info",
         "crate::sim",

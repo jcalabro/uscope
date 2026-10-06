@@ -226,6 +226,36 @@ pub fn name_of(view: &View) -> Arc<ViewName> {
     })
 }
 
+/// Whether `ty`, through its typedefs and qualifiers, is a pointer that
+/// only stands for a container its language gives a kind of its own, which
+/// a pattern names by that kind: a Go map or channel. Expressions index,
+/// measure, and size such a value through its view, never as a pointer.
+#[must_use]
+pub fn stands_for_container(types: &dyn TypeSource, mut ty: TypeReference) -> bool {
+    for _ in 0..64 {
+        let Some(info) = types.type_info(ty) else {
+            return false;
+        };
+        if info
+            .identity
+            .as_deref()
+            .and_then(pattern::go_kind_word)
+            .is_some_and(|kind| matches!(kind, "map" | "chan"))
+        {
+            return true;
+        }
+        match info.kind {
+            crate::TypeKind::Named {
+                target: Some(target),
+                ..
+            }
+            | crate::TypeKind::Modified { target, .. } => ty = target,
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Chooses the view for values of `ty`: the first, in the set's order,
 /// whose pattern names the type and which binds against it in `scope`. A
 /// typedef's own identity is tried before what it stands for, as Go's map

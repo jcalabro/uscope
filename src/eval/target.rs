@@ -132,6 +132,15 @@ pub trait Scope: TypeSource {
         false
     }
 
+    /// Whether `ty`, a pointer, only stands for a container its language
+    /// gives a kind of its own, such as a Go map or channel: it is indexed,
+    /// measured, and sized through the view that presents the container,
+    /// never as a pointer, whether or not views are on.
+    fn stands_for_container(&self, ty: TypeReference) -> bool {
+        let _ = ty;
+        false
+    }
+
     /// The types whose identity has this base, in a stable order, for
     /// views that construct a type from its arguments.
     fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
