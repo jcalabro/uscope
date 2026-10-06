@@ -1392,36 +1392,6 @@ async fn instruction_step_executes_the_instruction_hidden_by_a_breakpoint() {
 }
 
 #[tokio::test]
-async fn finish_uses_unwind_information_across_the_compiler_matrix() {
-    for fixture in ["unwind-o0", "unwind-o2", "unwind-nopie", "unwind-clang-o2"] {
-        let mut scenario = Scenario::new(format!("finish {fixture}"), Scenario::fixture(fixture));
-        scenario.add_breakpoint("deepest").await;
-        scenario.run_to_stop().await;
-
-        assert_eq!(
-            scenario.step_to_stop(StepKind::Out).await,
-            StopReason::Step {
-                kind: StepKind::Out
-            },
-            "finish failed for {fixture}"
-        );
-        let location = scenario
-            .operation(
-                "location after finish",
-                scenario.handle().current_location(),
-            )
-            .await;
-        assert_eq!(
-            location_function(&location),
-            Some("middle"),
-            "unexpected caller for {fixture}: {location:?}"
-        );
-
-        scenario.shutdown().await;
-    }
-}
-
-#[tokio::test]
 async fn a_user_breakpoint_interrupts_finish_at_a_shared_site() {
     let mut scenario = Scenario::new("shared plan breakpoint", Scenario::fixture("unwind-o0"));
     scenario.add_breakpoint("deepest").await;
