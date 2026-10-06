@@ -109,13 +109,17 @@ fn whole(
             },
         )),
         Location::Bytes { value } => {
+            // Like a piece of one, an implicit value must cover the object.
             let raw = implicit_bytes(value)?;
-            if raw.len() != size {
+            if raw.len() < size {
                 return Err(EvaluateError::Malformed(
-                    "implicit value size does not match its scalar type".into(),
+                    "implicit value is shorter than its object".into(),
                 ));
             }
-            Ok(bytes(VariableValueSource::Constant, raw))
+            Ok(bytes(
+                VariableValueSource::Constant,
+                Arc::from(&raw[..size]),
+            ))
         }
         Location::ImplicitPointer { value, byte_offset } => Ok(ValueStorage::ImplicitPointer {
             debug_info_offset: u64::try_from(value.0)

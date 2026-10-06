@@ -528,6 +528,19 @@ fn implicit_and_computed_values_materialize_with_source_provenance() {
     assert_eq!(materialized.0, VariableValueSource::Constant);
     assert_eq!(materialized.1.as_ref(), &[0xd6, 0xff, 0xff, 0xff]);
 
+    // An implicit value need only cover its piece, whether that piece is
+    // the whole object or one of several.
+    let wider = Location::Bytes {
+        value: gimli::EndianSlice::new(&[1, 2, 3, 4, 5, 6, 7, 8], RunTimeEndian::Little),
+    };
+    for pieces in [
+        vec![piece(wider, 32)],
+        vec![piece(wider, 16), piece(Location::Empty, 16)],
+    ] {
+        let stored = composite(&pieces, 4, &mut runtime).expect("implicit value storage");
+        assert_eq!(read_at(&stored, 0, 2, &mut runtime), Ok(vec![1, 2]));
+    }
+
     let computed = dwarf_value_bytes(
         Value::Generic(u64::MAX - 1),
         &scalar_type(BaseTypeEncoding::Boolean, 1),
