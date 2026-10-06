@@ -1016,7 +1016,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let process_id = process_id(inferior.tgid);
         let owned_execution = inferior.active.as_ref().is_some_and(|active| {
             matches!(active.scope, ResumeScope::Thread(thread) if thread == thread_id)
-                || matches!(active.kind, ActiveKind::Step { thread, .. } if thread == pid)
+                || matches!(active.kind, ActiveKind::Step { owner, .. } if owner.thread == pid)
         });
         // A thread resumed alone to reach its awaited breakpoint holds its
         // siblings back; they must run once it is gone.
