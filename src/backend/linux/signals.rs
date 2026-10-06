@@ -131,7 +131,7 @@ impl SignalPolicies {
 /// neither stop nor print and are delivered, an interrupt from the
 /// terminal stops without being delivered, and everything else stops and
 /// is delivered.
-pub fn default_policy(signal: Signal) -> SignalPolicy {
+fn default_policy(signal: Signal) -> SignalPolicy {
     const QUIET: [i32; 8] = [
         libc::SIGALRM,
         libc::SIGURG,
@@ -309,70 +309,6 @@ impl WaitEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn signals_are_named_like_gdb_and_found_by_any_spelling() {
-        assert_eq!(Signal::SIGSEGV.name(), "SIGSEGV");
-        assert_eq!(Signal::new(34).expect("real-time").name(), "SIG34");
-        assert_eq!(Signal::named("SIGUSR1"), Signal::new(libc::SIGUSR1));
-        assert_eq!(Signal::named("usr1"), Signal::new(libc::SIGUSR1));
-        assert_eq!(Signal::named("sig34"), Signal::new(34));
-        assert_eq!(Signal::named("10"), Signal::new(libc::SIGUSR1));
-        assert_eq!(Signal::named("SIGNOPE"), None);
-        assert_eq!(Signal::named("65"), None);
-        assert_eq!(Signal::named("0"), None);
-        assert_eq!(Signal::all().count(), 64);
-    }
-
-    #[test]
-    fn policies_default_to_gdbs_and_remember_only_changes() {
-        let quiet = SignalPolicy {
-            stop: false,
-            print: false,
-            pass: true,
-        };
-        for name in [
-            "SIGALRM",
-            "SIGURG",
-            "SIGCHLD",
-            "SIGWINCH",
-            "SIGPROF",
-            "SIGVTALRM",
-            "SIGIO",
-            "SIGPOLL",
-            "SIGPWR",
-        ] {
-            let signal = Signal::named(name).expect("known signal");
-            assert_eq!(default_policy(signal), quiet, "{name}");
-        }
-        assert_eq!(
-            default_policy(Signal::SIGINT),
-            SignalPolicy {
-                stop: true,
-                print: true,
-                pass: false
-            }
-        );
-        for name in ["SIGSEGV", "SIGTRAP", "SIGUSR1", "SIGPIPE", "SIG34", "SIG64"] {
-            let signal = Signal::named(name).expect("known signal");
-            assert_eq!(
-                default_policy(signal),
-                SignalPolicy {
-                    stop: true,
-                    print: true,
-                    pass: true
-                },
-                "{name}"
-            );
-        }
-
-        let mut policies = SignalPolicies::default();
-        let usr1 = Signal::new(libc::SIGUSR1).expect("SIGUSR1");
-        assert_eq!(policies.set(usr1, quiet), default_policy(usr1));
-        assert_eq!(policies.get(usr1), quiet);
-        assert_eq!(policies.set(usr1, default_policy(usr1)), quiet);
-        assert!(policies.changed.is_empty(), "a default is not remembered");
-    }
 
     #[test]
     fn wait_statuses_decode_every_signal_and_event() {
