@@ -4,21 +4,8 @@ A view tells uscope what one of your types stands for: a vector as its
 elements, a tagged union as the value it holds, a queue as the tasks on it.
 This tutorial writes views for a small C program and a Rust one, both in
 uscope's own tests, so everything here runs. `docs/views.md` is the
-reference for the language.
-
-## Where views go
-
-A view file is any file that begins with `uscope-views 1`. uscope reads:
-
-- files you name, with `uscope --views FILE`, `views load FILE` in a
-  session, or the debug adapter's `viewFiles`;
-- every `*.views` file in your project's `.uscope/views`, and in
-  `~/.config/uscope/views`;
-- views a program carries for its own types, which this tutorial does.
-
-Whichever you choose, `uscope views check PROGRAM` tells you, without
-running the program, which view presents each type a view names, and why a
-view does not bind.
+reference for the language and says where uscope finds view files; the
+programs here carry their views themselves.
 
 ## A vector
 
@@ -51,8 +38,7 @@ view c intvec {
   that breaks it shows as stored, with the check that failed, never as a
   plausible vector of nine elements.
 - `show sequence(n) for i in range(n) => data[i]` says the vector is `n`
-  elements, the `i`th at `data[i]`. A debug adapter pages through them,
-  each reached directly.
+  elements, the `i`th at `data[i]`.
 - `field capacity = cap` adds a child beside the elements.
 
 ```text
@@ -143,15 +129,13 @@ view c run_queue {
   node's `next` after it, until it comes back around.
 - `if n != &tasks` leaves out the queue's own node, which is no task's.
 - `container_of(n, task, run_node)` is the task whose `run_node` `n` is.
-  uscope checks that `n` points to a `list_head`, the type of `run_node`.
 
 ```text
 (run_queue) queue = len=2 [7, 8]
 ```
 
-A list that leads back to a node it has already shown is a cycle, which
-shows as a problem rather than a list that never ends, and a list that
-holds fewer nodes than `nr` says is one too.
+A list that leads back to a node it has already shown, or holds fewer
+nodes than `nr` says, shows as a problem rather than a list.
 
 ## Carrying views in the program
 
@@ -164,10 +148,7 @@ USCOPE_VIEWS_FILE("tests/fixtures/c/tutorial/tutorial.views");
 ```
 
 `uscope_views.h` is in uscope's `sdk/c`. The path is read when the program
-is built, relative to where the compiler runs. The views go in a section
-of the debug information that is not loaded when the program runs, and
-that `strip --strip-debug` removes. A library's views present only that
-library's types, so one library cannot change how another's look.
+is built, relative to where the compiler runs.
 
 ## A kernel
 
@@ -189,9 +170,7 @@ struct tree {
 
 No generator walks it, each node before its children: `list` follows one
 link and `inorder` two, and this walk needs a stack of the siblings still
-to come. A kernel walks it instead. A kernel is a small function, compiled
-to WebAssembly, that reads the program's memory and yields items, here each
-node's address:
+to come. A kernel walks it instead, yielding each node's address:
 
 ```c tests/fixtures/c/tutorial/tree.c
 #include "uscope_kernel.h"
@@ -230,12 +209,9 @@ USCOPE_KERNEL_EXPORT int32_t run(const uint64_t *arguments, int32_t count) {
 }
 ```
 
-- `uscope_kernel.h`, in uscope's `sdk/c`, declares what a kernel may call:
-  `uscope_read` and the loads built on it, which read the program's
-  memory, and `uscope_yield`, which yields an item of words and says
-  whether uscope wants another. A kernel can do nothing else: it cannot
-  write memory, call the program, or perform I/O, and its reads and work
-  are charged to the inspection's budget, as a view's are.
+- `uscope_kernel.h`, in uscope's `sdk/c`, declares `uscope_read` and the
+  loads built on it, which read the program's memory, and `uscope_yield`,
+  which yields an item of words and says whether uscope wants another.
 - `run` takes the view's arguments, here the root and where a node keeps
   its links, and returns 0 when it is done. Anything else is a failure,
   which shows the value as stored, with the number `run` returned.
@@ -266,16 +242,13 @@ that `uscope views check` shows the kernel as the source it is built from:
 USCOPE_KERNEL("tree", "tests/fixtures/c/tutorial/tree.c", "tutorial-tree.wasm");
 ```
 
-A view file's kernel can instead be beside it, as `tree.wasm`. Zig kernels
-use `sdk/zig/uscope_kernel.zig`, and Rust ones the `uscope-views` crate's
-`kernel` module, as uscope's test program in
+Zig kernels use `sdk/zig/uscope_kernel.zig`, and Rust ones the
+`uscope-views` crate's `kernel` module, as uscope's test program in
 `tests/fixtures/rust/embedded-views` does for the same tree.
 
-A run of a kernel depends only on its arguments and the memory it reads,
-so it can be recorded and run again without the program. `views record
-runs.txt family` records the runs that present `family`, and `uscope views
-replay runs.txt --kernel tree.wasm` runs a new build of the kernel on them,
-saying where it first does something else.
+`views record runs.txt family` records the kernel runs that present
+`family`, and `uscope views replay runs.txt --kernel tree.wasm` runs a new
+build of the kernel on them, saying where it first does something else.
 
 ## A Rust newtype
 
@@ -316,17 +289,15 @@ writes the one line a value shows as.
 ```
 
 A view names a Rust type by its path from its crate, here
-`embedded_views`, and `**` stands for any modules between, as in
-`alloc::**::Rc<T, _>`.
+`embedded_views`.
 
 ## When a view does not bind
 
-Before a view runs, uscope binds it against the type: every member it
-names must exist, and every expression must make sense for the type's
-members. A view that does not bind is skipped, and the next one whose
-pattern names the type is tried. `info view EXPR` in a session, and
-`uscope views explain PROGRAM TYPE` without one, say which view presents a
-value and why each one before it did not bind:
+A view that names a member the type lacks, or an expression that does not
+make sense for its members, does not bind, and the next view whose pattern
+names the type is tried. `uscope views explain PROGRAM TYPE` says, without
+running the program, which view presents a type and why each one before it
+did not bind:
 
 ```text
 $ uscope views explain build/test-programs/tutorial intvec
@@ -337,23 +308,8 @@ intvec in /…/build/test-programs/tutorial
 ```
 
 `uscope views check PROGRAM` does so for every type a view names, and fails
-when a view you gave it binds nothing it names, or presents no type at all,
-so it can guard a project's views in its own tests.
-
-## Adding to a view
-
-`extend` adds fields, `hide`s, and `format`s to whatever view presents a
-type, without copying it, such as a field of your own on the built-in view
-of `std::vector`, or hexadecimal for a member of a type with no view:
-
-```text
-extend c intvec {
-    field room = cap - n
-}
-extend c packet {
-    format flags as hex
-}
-```
+when a view you gave it binds nothing, so it can guard a project's views in
+its own tests.
 
 ## Contributing a built-in view
 

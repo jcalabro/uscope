@@ -2,16 +2,16 @@
 
 A view presents a value as the thing it stands for: a `std::string` as its
 text, a `Vec` as its elements, a hand-rolled C vector as the integers it
-holds. The value as it is stored is never lost. It is one step away, as the
-`[raw]` child, `print/r`, or `set views off`.
+holds. The value as stored stays one step away, as the `[raw]` child,
+`print/r`, or `set views off`. uscope builds in views for the C++, Rust, Go,
+and Zig standard libraries, and anyone can write views for their own types
+in the same language; `docs/writing-views.md` is a tutorial.
 
-uscope has views for the C++, Rust, Go, and Zig standard libraries' strings,
-vectors, lists, trees, and hash tables built in, and anyone can write views
-for their own types in the same language. Views run inside the debugger, on the data of a
-stopped program, and can only read: they cannot write memory, call
-functions, or perform I/O, and every read they make is charged to the
-inspection's budget, so a view can never hang the debugger or show a
-convincing wrong value.
+A view can only read the stopped program: it cannot write memory, call
+functions, or perform I/O. Every read it makes is charged to the
+inspection's budget, so a view can never hang the debugger, and a value a
+view cannot make sense of shows as stored, with the reason, never as a
+plausible wrong value.
 
 Every example on this page runs as one of uscope's tests, against a small
 world of C types:
@@ -21,8 +21,8 @@ world of C types:
   in that room, `none` with no storage, `big` holding 0 to 299, and
   `dangling` pointing at unmapped memory;
 - `str_t`, text `{char *p; unsigned long len}`, as `s` holding `hello`;
-- `tagged`, a tagged union `{int kind; int value}`, as `nothing` of kind 0
-  and `something` of kind 1 holding 7;
+- `tagged`, a tagged union `{int kind; int value}`, as `nothing` of kind 0,
+  `something` of kind 1 holding 7, and `strange` of kind 5;
 - the Rust `alloc::boxed::Box<i32>`, a wrapper around a pointer, as `b`
   pointing at 42;
 - the C++ `app::detail::Pair<int, 3>`, `{int first; int items[3]}`, as `p`
@@ -33,6 +33,14 @@ world of C types:
   holds the argument `index` chooses in `storage`, as `number` holding the
   int 7, `pointer` holding the pointer 0x90000, and `neither` whose index
   is 5;
+- `entry`, `{int mode; int color; long elapsed; unsigned short label[4];
+  int letter}`, as `item`, with the enumerations `Access` (`NONE`, `READ`,
+  `WRITE`, `EXEC`) and `Color` (`RED`, `GREEN`, `BLUE`);
+- `run_queue`, `{list_head tasks; unsigned long nr}`, whose `task`s,
+  `{int pid; list_head node}`, link through their `node`s in a ring, as
+  `queue` holding the tasks 10 and 20;
+- `handle_t`, `{int index}` into the global array `arena` of 5, 6, 7, and
+  8, as `slot` with index 2;
 - `list`, a linked list `{node *head; unsigned long count}` of `node {int
   value; node *next}`, as `three` holding 1, 2, and 3, `circle` holding 4,
   5, and 6 in a ring, `looped` whose third node leads back to its second,
@@ -52,9 +60,8 @@ world of C types:
 An example block holds a view file, then `---`, then rows that read
 `value => outcome`. An outcome is the summary the value is presented as;
 `children:` and the children it expands to, a map's entries as `key:
-value`; `problem:` and why a view that
-binds refuses the value; `unbound:` and why no view binds; or `error:` and
-why the file itself is refused.
+value`; `problem:` and why a view that binds refuses the value; `unbound:`
+and why no view binds; or `error:` and why the file itself is refused.
 
 ## Files
 
@@ -105,10 +112,9 @@ A pattern is a type's path from its root, its name, and its leading
 arguments: `std::vector<T, _>`, `alloc::vec::Vec<T, _>`,
 `array_list.Aligned(T, _)`. Paths are separated by `::` or `.`, and
 arguments are in `<>`, `()`, or `[]`, whichever the language writes. A
-pattern names what a type is, not how its compiler spelled it, so it matches
-whatever the compiler called the type: `pair<int const, …>` and
-`pair<const int, …>` are one type, and inline namespaces such as libc++'s
-`std::__1` may be spelled or left out.
+pattern names what a type is, not how its compiler spelled it:
+`pair<int const, …>` and `pair<const int, …>` are one type, and inline
+namespaces such as libc++'s `std::__1` may be spelled or left out.
 
 - `**` in a path matches any run of segments, so `alloc::**::Box<T>` keeps
   matching when the standard library moves a type between modules.
@@ -121,9 +127,9 @@ whatever the compiler called the type: `pair<int const, …>` and
   `std::tuple<A, B>` names only tuples of two, and `std::tuple`, with no
   arguments, every tuple.
 - In Go, `map<K, V>`, `chan<T>`, and `interface` name every map, channel,
-  and interface, by the kind Go's debug information gives the type,
-  whatever the type's name: `go map<K, V>` presents `map[string]int` and a
-  `type Counts map[string]int` alike.
+  and interface by the kind Go's debug information gives the type, whatever
+  its name: `go map<K, V>` presents `map[string]int` and a `type Counts
+  map[string]int` alike.
 
 ```uscope-view-example
 uscope-views 1
@@ -148,18 +154,26 @@ p => unbound: no view's pattern names the type
 
 ## Expressions
 
-The expressions in a view are uscope's own expressions
-(`docs/expressions.md`), evaluated with `self` as the value presented. A
-member of `self` is named by its own name, and a view's `let`s and the
-arguments its pattern captured shadow them. Nothing the program's frame
-names is visible, so a view means the same thing at every stop.
+A view's expressions are uscope's own (`docs/expressions.md`), evaluated
+with `self` as the value presented. A member of `self` is named by its own
+name, and a view's `let`s and the arguments its pattern captured shadow
+members. Nothing the program's frame names is visible, so a view means the
+same thing at every stop.
 
-Views may also call `inner(x)`, which steps through wrapper records: while
-`x` is a record with exactly one member of non-zero size, and no base, it is
-that member. Zero-sized markers such as Rust's `PhantomData` do not count.
-`inner` absorbs the wrapper layers a library adds and removes between
-versions, such as the `RawVec`, `Unique`, and `NonNull` around a Rust
-`Vec`'s pointer.
+Views may also call:
+
+- `inner(x)`, which steps through wrapper records: while `x` is a record
+  with exactly one member of non-zero size, and no base, it is that member.
+  Zero-sized markers such as Rust's `PhantomData` do not count. `inner`
+  absorbs the wrapper layers a library adds and removes between versions,
+  such as the `RawVec`, `Unique`, and `NonNull` around a Rust `Vec`'s
+  pointer.
+- `offsetof(TYPE, member)`, where one of a record's own members is, in
+  bytes.
+- `container_of(PTR, TYPE, member)`, a pointer to the `TYPE` whose own
+  `member` `PTR` points to, as intrusive lists find their nodes. `PTR` must
+  point to the member's type, or be a `void *`.
+- `global(NAME)`, a global of the module whose value the view presents.
 
 ```uscope-view-example
 uscope-views 1
@@ -169,13 +183,6 @@ view rust alloc::**::Box<T> {
 ---
 b => 42
 ```
-
-Views may also write `offsetof(TYPE, member)`, where one of a record's own
-members is, in bytes, as its debug information places it, and
-`container_of(PTR, TYPE, member)`, a pointer to the `TYPE` whose own
-`member` `PTR` points to, as intrusive lists find their nodes.
-`global(NAME)` is a global of the module whose value the view presents;
-nothing else the program names is visible to a view.
 
 ```uscope-view-example
 uscope-views 1
@@ -190,8 +197,6 @@ view c handle_t {
 queue => len=2 [10, 20]
 slot => 7
 ```
-
-`container_of`'s pointer must point to the member's type, or be a `void *`.
 
 ```uscope-view-example
 uscope-views 1
@@ -218,11 +223,11 @@ the next line unless that line begins another statement or ends the view.
   `N`th argument, counted from 0, or `TYPE.Name`, a type declared inside
   another, as Zig's `typeof(self).Header`. A type with arguments, such as
   `app::Cell<T>`, is the one type whose arguments are those, found by what
-  they are, not by how a compiler spelled them, so the arguments may be
+  they are rather than how a compiler spelled them, so its arguments may be
   types the pattern captured or the view names.
-- `check EXPR` states an invariant. A value that breaks one is not what the
-  view describes, so it shows as stored, with the check that failed. A
-  check of several conditions joined by `&&` is several checks.
+- `check EXPR` states an invariant. A value that breaks one shows as
+  stored, with the check that failed. A check of conditions joined by `&&`
+  is one check for each.
 - `field NAME = EXPR` adds a named child.
 - `summary "TEXT {EXPR} TEXT"` overrides the summary; `{EXPR}` is replaced
   by its value's summary, and `\{` and `\}` are braces.
@@ -307,8 +312,8 @@ something => unbound: line 7: `format kind`: the format writes an array of 16-bi
   it holds.
 - `empty("TEXT")` is a value that holds nothing, summarized as `TEXT`.
 - `sequence(COUNT) GENERATORS => ELEMENT` is a sequence of `COUNT`
-  elements, one for each value the generators make (see below). `COUNT`
-  may be `_` to leave the count to the generators.
+  elements, one for each value the generators make. `COUNT` may be `_` to
+  leave the count to the generators.
 - `map(COUNT) GENERATORS => KEY : VALUE` is a map of `COUNT` entries, each
   a key and a value.
 - `record { NAME = EXPR, … }` is a record of the members it names, which
@@ -318,11 +323,12 @@ something => unbound: line 7: `format kind`: the format writes an array of 16-bi
   presented as any value of that type is. `TYPE` may be `arg(TYPE, EXPR)`,
   the type's argument at a position the program's data holds, as a
   `std::variant`'s index does; a position that names no type is a problem.
-- `if COND { SHAPE } else { SHAPE }` chooses a shape, and may begin a
-  statement of its own.
+- `if COND { SHAPE } else { SHAPE }` chooses a shape.
 - `match EXPR { VALUE => SHAPE, … _ => SHAPE }` chooses the shape of the
   first arm whose value `EXPR` equals, or of `_`; a value no arm names is a
-  problem. It may begin a statement of its own.
+  problem.
+
+`if` and `match` may also begin a statement of their own.
 
 ```uscope-view-example
 uscope-views 1
@@ -395,8 +401,8 @@ neither => problem: the type has no type argument 5
 ## Generators
 
 A sequence's or map's elements come from generators, each `for NAME in
-GENERATOR`, which may nest up to four deep: an inner generator runs once for
-each value of the one around it.
+GENERATOR`, which may nest: an inner generator runs once for each value of
+the one around it.
 
 - `range(N)` is 0, 1, …, `N` - 1. A sequence of one `range` reaches each
   element directly, so reading one costs the same wherever it is.
@@ -406,6 +412,7 @@ each value of the one around it.
 - `inorder(ROOT, P => LEFT, P => RIGHT)` is a binary tree's nodes, each
   after its left subtree and before its right, a null pointer being an
   empty tree.
+- `kernel("NAME", ARG, …)` is the items a kernel yields (see Kernels).
 
 After a generator, `if COND` keeps only the values for which `COND` holds,
 and `let NAME = EXPR` names a value computed once for each value, which the
@@ -456,8 +463,8 @@ short => len=3 [1, 2, 3]
 
 A linked structure never shows a node twice as if it were two elements. A
 node that leads back to one already visited is a cycle, and a tree deeper
-than 128 levels is none a library builds; either is a problem, as is a
-sequence without a count that passes 16,777,216 elements.
+than any a library builds is refused; either is a problem, as is a sequence
+without a count that passes its limit.
 
 ```uscope-view-example
 uscope-views 1
@@ -495,22 +502,18 @@ view rust alloc::collections::btree::map::BTreeMap<K, V, _> {
 }
 ```
 
-- `kernel("NAME", ARG, …)` runs the kernel `NAME` with up to 32
-  arguments, each a 64-bit word: an integer in two's complement, a
-  pointer's address, or a truth value as 0 or 1.
+- `kernel("NAME", ARG, …)` runs the kernel `NAME`, each argument a 64-bit
+  word: an integer in two's complement, a pointer's address, or a truth
+  value as 0 or 1.
 - Each item the kernel yields is a word for each variable its clause
-  names, one to eight of them, and each variable is that word, an integer,
-  which the view casts to the pointer it is.
+  names, and each variable is that word, an integer, which the view casts
+  to the pointer it is.
 - A kernel can only compute. It may import nothing but uscope's `read` and
-  `yield`, so it cannot write memory, call the program, or perform I/O,
-  and a module that imports anything else, starts itself, or uses floats or
-  SIMD is refused. Its reads and its work are charged to the inspection's
-  budget like the view's own.
+  `yield`, so a module that imports anything else, starts itself, or uses
+  floats or SIMD is refused. Its reads and its work are charged to the
+  inspection's budget like the view's own.
 - A kernel that traps, returns a failure, or yields the wrong number of
   words makes the value's presentation a problem.
-- A scan with a kernel keeps no checkpoints: a kernel's run cannot be
-  resumed, only run again, so reading a later page costs the reads of the
-  pages before it.
 
 ```uscope-view-example
 uscope-views 1
@@ -533,28 +536,23 @@ A view calls the kernels of its own source before the built-in ones:
 
 - uscope builds in `rust-btree`, from `views/kernels/rust-btree.zig`;
 - a view file's kernels are `NAME.wasm` files beside it, loaded with it;
-- a module's own views call the kernels the module carries in its
-  `.debug_uscope_views` section, as records of kind 2, format 1: a 16-bit
-  length and the kernel's name, a 32-bit length and its source, or a link
-  to it, and the module. A C or C++ program writes
-  `USCOPE_KERNEL("tree", "kernels/tree.c", "build/tree.wasm");` and a Rust
-  one `uscope_views::uscope_kernel!("tree", SOURCE, MODULE);`.
+- a module's own views call the kernels the module carries (see Where views
+  come from).
 
 `views check` lists each kernel loaded for the session or carried by a
 module with its source, so a kernel is reviewed as its source rather than
 trusted as a module.
 
-A kernel is a core WebAssembly module of at most 256 KiB. It imports at
-most `read(address: i64, buffer: i32, length: i32) -> i32`, which fills
-its buffer from the program's memory, and `yield(words: i32, count: i32)
--> i32`, which yields an item and returns whether uscope wants another,
-both from the module `uscope_kernel_v1`. It exports its `memory` and
-`run(arguments: i32, count: i32) -> i32`, which uscope calls with the
-arguments in memory it adds after the kernel's own, and which returns 0
-once it has yielded every item. A read that uscope cannot make ends the
-run, as any read a view makes does. `sdk/c/uscope_kernel.h`,
-`sdk/zig/uscope_kernel.zig`, and the `uscope-views` crate's `kernel`
-module write the rest, and `docs/writing-views.md` writes a kernel in C.
+A kernel is a core WebAssembly module. It imports at most `read(address:
+i64, buffer: i32, length: i32) -> i32`, which fills its buffer from the
+program's memory, and `yield(words: i32, count: i32) -> i32`, which yields
+an item and returns whether uscope wants another, both from the module
+`uscope_kernel_v1`. It exports its `memory` and `run(arguments: i32, count:
+i32) -> i32`, which uscope calls with the arguments in memory it adds after
+the kernel's own, and which returns 0 once it has yielded every item. A
+read that uscope cannot make ends the run, as any read a view makes does.
+`sdk/c/uscope_kernel.h`, `sdk/zig/uscope_kernel.zig`, and the
+`uscope-views` crate's `kernel` module write the rest.
 
 A run is a pure function of its arguments and the bytes its reads return,
 so a recording of them replays it without the program. `views record FILE
@@ -585,9 +583,8 @@ v => unbound: `count` is neither a member of `intvec` nor a name the view declar
 
 A view that binds can still refuse a value: when a check fails, when the
 memory it needs cannot be read, or when its count disagrees with its range.
-The value then shows as stored, with the reason, never as a plausible
-container. An element the program cannot provide is said to be unavailable
-and ends the summary's preview.
+The value then shows as stored, with the reason. An element the program
+cannot provide is said to be unavailable and ends the summary's preview.
 
 ```uscope-view-example
 uscope-views 1
@@ -634,13 +631,11 @@ something => {kind: 0x1, value: 7}
 A presented value's summary is one line in one style for every language:
 text in quotes, as `"hello, world"`; a sequence's length and its first
 elements, as `len=3 [1, 2, 3]`, and a map's and its first entries, as
-`len=2 {"one": 1, "two": 2}`, up to 16 or about 96 characters; and other
-values as they print.
+`len=2 {"one": 1, "two": 2}`; and other values as they print.
 
 ## Where views come from
 
-Views come from four places, and a type's view is the first that binds,
-in this order:
+A type's view is the first that binds, from these sources in order:
 
 1. **The session's files**: those given with `--views FILE` or the debug
    adapter's `viewFiles`, and those `views load FILE` loads, the latest
@@ -652,29 +647,34 @@ in this order:
 3. **The program's own**: views a module carries in its
    `.debug_uscope_views` section, which present only that module's own
    types, so that one library never restyles another's.
-4. **The built-in views**, described below.
+4. **The built-in views**, in `views/`, one file per library.
 
 Loading views never asks first, since a view can only read. A file, or a
 view in one, that cannot be used is reported once, with where and why, and
 the session goes on without it.
 
-A C or C++ program carries a view file by including `uscope_views.h`,
-from uscope's `sdk/c`, and writing `USCOPE_VIEWS_FILE("views/app.views");`
-at file scope; a Rust program, with the `uscope-views` crate in
-`sdk/rust`, by writing
-`uscope_views::uscope_views_file!(concat!(env!("CARGO_MANIFEST_DIR"), "/app.views"));`.
-Both read the file when the program is built, into a section that is not
-loaded when it runs and that `strip --strip-debug` removes with the rest of
-the debug information. The section holds records, each a kind (1 for a
-view file, 2 for a kernel, described under Kernels), a format (1), a 32-bit
-little-endian length, and that many bytes; zero bytes between them are
-padding.
+A C or C++ program carries a view file by including `uscope_views.h`, from
+uscope's `sdk/c`, and writing `USCOPE_VIEWS_FILE("views/app.views");` at
+file scope, and a kernel by writing `USCOPE_KERNEL("tree",
+"kernels/tree.c", "build/tree.wasm");`, the kernel's name, its source or a
+link to it, and its module. A Rust program, with the `uscope-views` crate
+in `sdk/rust`, writes
+`uscope_views::uscope_views_file!(concat!(env!("CARGO_MANIFEST_DIR"), "/app.views"));`
+and `uscope_views::uscope_kernel!("tree", SOURCE, MODULE);`. Both read the
+files when the program is built, into a section that is not loaded when it
+runs and that `strip --strip-debug` removes with the rest of the debug
+information.
 
-The views built into uscope cover:
+The section holds records, each a kind, a format (1), a 32-bit
+little-endian length, and that many bytes; zero bytes between records are
+padding. A view file is kind 1. A kernel is kind 2: a 16-bit length and
+the kernel's name, a 32-bit length and its source, and its module.
+
+The built-in views cover:
 
 - C++, in libstdc++ and libc++: `std::string` and its other characters,
-  in libstdc++'s C++11 and earlier copy-on-write ABIs and in libc++ short
-  and long; `std::string_view`, `std::vector` (not `std::vector<bool>`),
+  in libstdc++'s C++11 and copy-on-write ABIs and in libc++ short and long;
+  `std::string_view`, `std::vector` (not `std::vector<bool>`),
   `std::array`, `std::span`, `std::deque`, `std::list`, `std::forward_list`,
   `std::map`, `std::multimap`, `std::set`, `std::multiset`, and the
   `unordered_` maps and sets; `std::unique_ptr` (not of an array),
@@ -690,8 +690,6 @@ The views built into uscope cover:
 - Go: maps and channels, including nil ones, which show as `nil`.
 - Zig: `std.ArrayList` and the managed list, `std.HashMap`, its unmanaged
   map, and `std.ArrayHashMapUnmanaged`.
-
-Their files are in `views/`, one per library.
 
 Some values need no view, because their debug information says what they
 are:
@@ -719,25 +717,23 @@ are:
   and `uscope views check PROGRAM` do so from the program's debug
   information alone; `views check` fails when a view loaded for the
   session or carried by the program presents no type, or binds no type it
-  names. `docs/writing-views.md` is a tutorial.
+  names.
 - A pointer to a value presented as text shows the text after its address,
   as a pointer to characters does, or why the view could not read it. A
   null pointer shows only its address.
 - An element of a value presented as a sequence is `v[i]`, and the count
   of a sequence or map is `len(v)`, in any expression: `break f if
   len(queue) > 100`. A Go channel is indexed this way too, though it is
-  stored as a pointer, because Go never indexes one as a pointer. An element in memory can be assigned and its address
-  taken. A map is not indexed by position; its entries are found by key in
-  a later version.
+  stored as a pointer, because Go never indexes one as a pointer. An
+  element in memory can be assigned and its address taken. A map is
+  indexed neither by position nor by key.
 - A debug adapter client sees a presented value's elements or entries as
   indexed variables, in pages, and its fields and `[raw]` as named ones. An
   entry is named by its key, and evaluates as the place its value is in,
   `*(T*)ADDRESS`.
-- Reading a later page of a list, tree, or table resumes where the reads
-  before it were, at most 256 elements back, rather than from the start;
-  one a kernel walks runs the kernel again.
-- `views record FILE EXPR` records the kernel runs presenting a value, and
-  `uscope views replay FILE` replays them with no program.
+- Reading a later page of a list, tree, or table resumes from a checkpoint
+  at most 256 elements back rather than from the start. A kernel's run
+  cannot be resumed, so a later page of one runs the kernel again.
 
 ## Limits
 
@@ -745,10 +741,11 @@ A view file may be at most 256 KiB and hold at most 1024 views, and each of
 its expressions is subject to the expression limits. A presentation's
 summary may use a quarter of what its inspection has left, which the values
 it presents share, and running out ends the summary early without failing
-the inspection. Text is read up to 256 bytes. Views present values inside
-the values they present at most four deep. Generators nest at most four
-deep, trees are walked at most 128 levels deep, and a sequence without a
-count generates at most 16,777,216 elements. A kernel is at most 256 KiB,
-its memory at most 4 MiB, its calls nest at most 1024 deep, and each read
-it makes is at most 64 KiB; it takes at most 32 arguments, and its items
-are at most eight words.
+the inspection. A summary previews at most 16 elements or about 96
+characters. Text is read up to 256 bytes. Views present values inside the
+values they present at most four deep. Generators nest at most four deep,
+trees are walked at most 128 levels deep, and a sequence without a count
+generates at most 16,777,216 elements. A kernel is at most 256 KiB, its
+memory at most 4 MiB, its calls nest at most 1024 deep, and each read it
+makes is at most 64 KiB; it takes at most 32 arguments, and its items are
+one to eight words.
