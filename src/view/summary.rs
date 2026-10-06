@@ -8,9 +8,9 @@ use rustc_apfloat::Float as _;
 use rustc_apfloat::ieee::X87DoubleExtended;
 
 use crate::{
-    BaseTypeEncoding, FloatValue, IntegerValue, PresentedShape, ScalarValue, TextCompletion,
-    TextSummary, TypeInfo, TypeKind, ValueChildren, VariableState, VariableUnavailableReason,
-    VariableValue,
+    BaseTypeEncoding, FloatValue, IntegerValue, PresentedCount, PresentedShape, ScalarValue,
+    TextCompletion, TextSummary, TypeInfo, TypeKind, ValueChildren, VariableState,
+    VariableUnavailableReason, VariableValue,
 };
 
 /// The most elements a summary previews.
@@ -175,19 +175,44 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
     }
 }
 
+/// A count as a summary begins: `len=3`, or `len>=3` when there are at
+/// least that many.
+fn length(count: PresentedCount) -> String {
+    match count {
+        PresentedCount::Exact(count) => format!("len={count}"),
+        PresentedCount::AtLeast(count) => format!("len>={count}"),
+    }
+}
+
 /// A sequence's summary: its length and the elements previewed.
 #[must_use]
-pub fn sequence(length: u64, elements: &[String], complete: bool) -> String {
-    let mut output = format!("len={length} [");
-    for (index, element) in elements.iter().enumerate() {
+pub fn sequence(count: PresentedCount, elements: &[String], complete: bool) -> String {
+    bracketed(count, elements, complete, ('[', ']'))
+}
+
+/// A map's summary: its length and the entries previewed, each `key:
+/// value`.
+#[must_use]
+pub fn map(count: PresentedCount, entries: &[String], complete: bool) -> String {
+    bracketed(count, entries, complete, ('{', '}'))
+}
+
+fn bracketed(
+    count: PresentedCount,
+    items: &[String],
+    complete: bool,
+    (open, close): (char, char),
+) -> String {
+    let mut output = format!("{} {open}", length(count));
+    for (index, item) in items.iter().enumerate() {
         if index > 0 {
             output.push_str(", ");
         }
-        output.push_str(element);
+        output.push_str(item);
     }
     if !complete {
-        output.push_str(if elements.is_empty() { "…" } else { ", …" });
+        output.push_str(if items.is_empty() { "…" } else { ", …" });
     }
-    output.push(']');
+    output.push(close);
     output
 }

@@ -986,6 +986,7 @@ impl Kernel {
                 })
         };
         match self.sabotage {
+            Some(Sabotage::SkipLinkedNodes) if address.checked_add(8) == Some(word) => word + 16,
             Some(Sabotage::SkewReturnAddresses) if return_slot(true) => word + 1,
             Some(Sabotage::SkewSmallStackWords) if small_on_stack() => word + 1,
             Some(Sabotage::FlickeringStackWords) if small_on_stack() => {

@@ -238,6 +238,8 @@ pub fn child_name(child: &ValueChild) -> String {
         | ValueChildRelationship::Element { index } => {
             format!("[{index}]")
         }
+        // A map's entry is named by its key.
+        ValueChildRelationship::Entry { key, .. } => summary(Some(&key.type_info), &key.state),
         ValueChildRelationship::Member(member) => {
             member.name.as_deref().unwrap_or("<anonymous>").to_owned()
         }
@@ -268,6 +270,15 @@ pub fn child_path(
         ValueChildRelationship::Member(member) => parent.member(member.name.as_deref()?),
         // The value as stored is the parent's value.
         ValueChildRelationship::Raw => Some(parent.clone()),
+        // Maps are not indexed by key yet, so an entry's value is named by
+        // where it is.
+        ValueChildRelationship::Entry { .. } => match &child.state {
+            VariableState::Available {
+                source: VariableValueSource::Memory(address),
+                ..
+            } => uscope::Expression::at(&child.type_info.name, address.get()),
+            _ => None,
+        },
         _ => None,
     }
 }

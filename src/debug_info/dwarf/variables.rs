@@ -33,7 +33,7 @@ use crate::{
 use super::{DieKey, DwarfError, Reader, UnitCatalog, die_code_ranges, is_type_unit};
 use die::{
     check_data_object_capacity, copy_name_with_origins, data_object_scope_ranges,
-    declaration_with_origins, is_type_scope, origin_chain, variable_order_key,
+    declaration_with_origins, is_type_scope, origin_chain, strict_flag, variable_order_key,
 };
 use evaluate::FrameBaseCache;
 use globals::{load_globals, public_global_type};
@@ -138,6 +138,9 @@ struct Scope {
     /// belongs directly to the physical frame.
     instance: Option<CodeInstanceId>,
     malformed: Option<Arc<str>>,
+    /// Whether the scope is in a subprogram's definition, abstract or
+    /// concrete, rather than in a declaration inside a type.
+    defined: bool,
 }
 
 struct CatalogFunction {
@@ -214,6 +217,13 @@ pub(super) fn load_variable_info<'data>(
 
             let scope = match entry.tag() {
                 gimli::DW_TAG_subprogram => {
+                    let defined = strict_flag(entry, gimli::DW_AT_declaration) == Ok(false);
+                    // The types a function's code uses are the program's
+                    // types too, though no data holds them: a view may name
+                    // the type only an inlined function returns.
+                    if defined {
+                        types.reach(unit_index, entry.attr_value(gimli::DW_AT_type));
+                    }
                     let ranges =
                         die_code_ranges(dwarf, unit, entry, &catalog.code).map(Arc::<[_]>::from)?;
                     let function = functions.len();
@@ -235,6 +245,7 @@ pub(super) fn load_variable_info<'data>(
                         function,
                         instance: None,
                         malformed: None,
+                        defined,
                     })
                 }
                 gimli::DW_TAG_lexical_block => parent.as_ref().map(|parent| {
@@ -256,6 +267,7 @@ pub(super) fn load_variable_info<'data>(
                         function: parent.function,
                         instance: parent.instance,
                         malformed: malformed.or_else(|| parent.malformed.clone()),
+                        defined: parent.defined,
                     }
                 }),
                 // An inline instance keeps the caller's frame base and function
@@ -296,6 +308,7 @@ pub(super) fn load_variable_info<'data>(
                         function: parent.function,
                         instance,
                         malformed: malformed.or_else(|| parent.malformed.clone()),
+                        defined: parent.defined,
                     }
                 }),
                 tag if is_type_scope(tag) => None,
@@ -326,6 +339,12 @@ pub(super) fn load_variable_info<'data>(
                 let owning_scope = parent.as_ref().filter(|scope| {
                     !scope.ranges.is_empty() && (kind == VariableKind::Local || scope.routine)
                 });
+                // A variable of code with no address of its own, such as an
+                // abstract inline instance, names no value, but its type is
+                // the program's.
+                if owning_scope.is_none() && parent.as_ref().is_some_and(|scope| scope.defined) {
+                    types.reach(unit_index, entry.attr_value(gimli::DW_AT_type));
+                }
                 if let Some(scope) = owning_scope {
                     // Concrete inline-instance entries reference their
                     // abstract origin for descriptive metadata.

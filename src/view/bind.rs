@@ -19,7 +19,10 @@ use crate::eval::types::{Category, Ty, TypeSource, category, representation};
 use crate::{BaseTypeEncoding, TypeArgument, TypeInfo, TypeKind, TypeReference};
 
 use super::pattern::{Captured, Captures};
-use super::syntax::{Count, Expr, Piece, Shape, Statement, TypeExpr, View};
+use super::syntax::{
+    ArgumentPattern, Clause, Count, Expr, Generator, Item, Pattern, Piece, Shape, Statement,
+    TypeExpr, View,
+};
 
 /// Something a view's expression names, which its machine reaches at a
 /// stop.
@@ -76,6 +79,72 @@ pub enum TextSource<St> {
     Elements { program: ViewProgram<St>, first: St },
 }
 
+/// A generator, bound: its programs see the variables of the clauses
+/// around it, and a link's program also its node, at the clause's own
+/// position.
+#[derive(Debug, Clone)]
+pub enum BoundGenerator<St> {
+    Range(ViewProgram<St>),
+    List {
+        head: ViewProgram<St>,
+        next: ViewProgram<St>,
+    },
+    Inorder {
+        root: ViewProgram<St>,
+        left: ViewProgram<St>,
+        right: ViewProgram<St>,
+    },
+}
+
+/// What follows a clause's generator, bound.
+#[derive(Debug, Clone)]
+pub enum BoundItem<St> {
+    Filter(ViewProgram<St>),
+    /// A value computed once for each of the clause's values, at the next
+    /// position.
+    Let(ViewProgram<St>),
+}
+
+/// A clause, bound. Its variable is at one position, and its `let`s at the
+/// positions after it.
+#[derive(Debug, Clone)]
+pub struct BoundClause<St> {
+    pub generator: BoundGenerator<St>,
+    pub items: Vec<BoundItem<St>>,
+}
+
+impl<St> BoundClause<St> {
+    /// How many positions the clause's variable and `let`s take.
+    pub fn width(&self) -> usize {
+        1 + self
+            .items
+            .iter()
+            .filter(|item| matches!(item, BoundItem::Let(_)))
+            .count()
+    }
+}
+
+/// The generators of a sequence or map, and its declared count.
+#[derive(Debug, Clone)]
+pub struct BoundScan<St> {
+    /// `None` when the view leaves the count to the generators.
+    pub count: Option<ViewProgram<St>>,
+    pub clauses: Vec<BoundClause<St>>,
+}
+
+impl<St> BoundScan<St> {
+    /// Whether element `k` is reached directly: one `range` and no filter.
+    pub fn random_access(&self) -> bool {
+        matches!(
+            self.clauses.as_slice(),
+            [BoundClause {
+                generator: BoundGenerator::Range(_),
+                items,
+            }] if items.iter().all(|item| matches!(item, BoundItem::Let(_)))
+        )
+    }
+}
+
 /// A shape, bound.
 #[derive(Debug, Clone)]
 pub enum BoundShape<St> {
@@ -85,11 +154,14 @@ pub enum BoundShape<St> {
     },
     Value(ViewProgram<St>),
     Empty(Arc<str>),
-    /// `count` is `None` when the view leaves it to the range.
     Sequence {
-        count: Option<ViewProgram<St>>,
-        length: ViewProgram<St>,
+        scan: BoundScan<St>,
         element: ViewProgram<St>,
+    },
+    Map {
+        scan: BoundScan<St>,
+        key: ViewProgram<St>,
+        value: ViewProgram<St>,
     },
     If {
         condition: ViewProgram<St>,
@@ -110,10 +182,11 @@ impl<St> BoundShape<St> {
         }
     }
 
-    /// Whether any branch presents a sequence, whose elements are children.
+    /// Whether any branch presents a sequence or map, whose elements or
+    /// entries are children.
     pub fn has_elements(&self) -> bool {
         match self {
-            Self::Sequence { .. } => true,
+            Self::Sequence { .. } | Self::Map { .. } => true,
             Self::If {
                 then, otherwise, ..
             } => then.has_elements() || otherwise.has_elements(),
@@ -162,7 +235,9 @@ pub struct ViewScope<'a, S: Scope> {
     captures: &'a Captures,
     types: Vec<(String, TypeReference)>,
     lets: Vec<(String, Ty, bool)>,
-    variables: Vec<String>,
+    /// The generators' variables and clauses' `let`s in scope, by
+    /// position, with their types and whether each is a place.
+    variables: Vec<(String, Ty, bool)>,
 }
 
 impl<'a, S: Scope> ViewScope<'a, S> {
@@ -196,6 +271,10 @@ impl<S: Scope> TypeSource for ViewScope<'_, S> {
     fn byte_order(&self) -> crate::ByteOrder {
         self.base.byte_order()
     }
+
+    fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        self.base.same_type(left, right)
+    }
 }
 
 impl<S: Scope> Scope for ViewScope<'_, S> {
@@ -206,10 +285,21 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
         if outermost {
             return Ok(Lookup::NotFound);
         }
-        if let Some(depth) = self.variables.iter().rposition(|variable| variable == name) {
-            return Ok(Lookup::Bound {
-                object: ViewObject::Variable(depth),
-                ty: Ty::Exact,
+        if let Some(depth) = self
+            .variables
+            .iter()
+            .rposition(|(variable, ..)| variable == name)
+        {
+            let (_, ty, place) = &self.variables[depth];
+            return Ok(match (place, ty) {
+                (true, Ty::Program(reference)) => Lookup::Object {
+                    object: ViewObject::Variable(depth),
+                    ty: Ok(*reference),
+                },
+                _ => Lookup::Bound {
+                    object: ViewObject::Variable(depth),
+                    ty: ty.clone(),
+                },
             });
         }
         if let Some(index) = self
@@ -290,6 +380,10 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
 
     fn register(&self, _name: &str) -> Option<Register> {
         None
+    }
+
+    fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
+        self.base.types_with_base(base)
     }
 }
 
@@ -549,23 +643,29 @@ fn bind_shape<S: Scope>(
         Shape::Empty(text) => BoundShape::Empty(text.as_str().into()),
         Shape::Sequence {
             count,
-            variable,
-            length,
+            clauses,
             element,
         } => {
-            let count = match count {
-                Count::Known(count) => Some(bind_integer(count, scope)?),
-                Count::Unknown => None,
-            };
-            let length = bind_integer(length, scope)?;
-            scope.variables.push(variable.clone());
+            let scan = bind_scan(count, clauses, scope)?;
             let element = bind_part(element, scope, Mode::Read);
-            scope.variables.pop();
+            scope.variables.clear();
             BoundShape::Sequence {
-                count,
-                length,
+                scan,
                 element: element?,
             }
+        }
+        Shape::Map {
+            count,
+            clauses,
+            key,
+            value,
+        } => {
+            let scan = bind_scan(count, clauses, scope)?;
+            let bound = bind_part(key, scope, Mode::Read)
+                .and_then(|key| Ok((key, bind_part(value, scope, Mode::Read)?)));
+            scope.variables.clear();
+            let (key, value) = bound?;
+            BoundShape::Map { scan, key, value }
         }
         Shape::If {
             condition,
@@ -578,6 +678,117 @@ fn bind_shape<S: Scope>(
             otherwise: Box::new(bind_shape(otherwise, scope)?),
         },
     })
+}
+
+/// Binds a count and its clauses, leaving the clauses' variables in scope
+/// for the element, or the key and value, that follows; the caller clears
+/// them.
+fn bind_scan<S: Scope>(
+    count: &Count,
+    clauses: &[Clause],
+    scope: &mut ViewScope<'_, S>,
+) -> Result<BoundScan<S::Step>, Rejection> {
+    let count = match count {
+        Count::Known(count) => Some(bind_integer(count, scope)?),
+        Count::Unknown => None,
+    };
+    let mut bound = Vec::new();
+    for clause in clauses {
+        match bind_clause(clause, scope) {
+            Ok(clause) => bound.push(clause),
+            Err(rejection) => {
+                scope.variables.clear();
+                return Err(rejection);
+            }
+        }
+    }
+    Ok(BoundScan {
+        count,
+        clauses: bound,
+    })
+}
+
+/// Binds one clause, then puts its variable in scope.
+fn bind_clause<S: Scope>(
+    clause: &Clause,
+    scope: &mut ViewScope<'_, S>,
+) -> Result<BoundClause<S::Step>, Rejection> {
+    let (generator, ty) = match &clause.generator {
+        Generator::Range(length) => (
+            BoundGenerator::Range(bind_integer(length, scope)?),
+            Ty::Exact,
+        ),
+        Generator::List { head, next } => {
+            let (head, ty) = bind_node(head, scope)?;
+            let next = bind_link(next, &ty, scope)?;
+            (BoundGenerator::List { head, next }, ty)
+        }
+        Generator::Inorder { root, left, right } => {
+            let (root, ty) = bind_node(root, scope)?;
+            let left = bind_link(left, &ty, scope)?;
+            let right = bind_link(right, &ty, scope)?;
+            (BoundGenerator::Inorder { root, left, right }, ty)
+        }
+    };
+    scope.variables.push((clause.variable.clone(), ty, false));
+    let mut items = Vec::new();
+    for item in &clause.items {
+        items.push(match item {
+            Item::Filter(filter) => BoundItem::Filter(
+                bind_condition(&filter.expression, scope)
+                    .map_err(|error| rejection(scope, filter, &error))?,
+            ),
+            Item::Let { name, value } => {
+                let program = bind_value(&value.expression, scope)
+                    .map_err(|error| rejection(scope, value, &error))?;
+                let ty = program.result().clone();
+                let place = program.is_place() && matches!(ty, Ty::Program(_));
+                scope.variables.push((name.clone(), ty, place));
+                BoundItem::Let(program)
+            }
+        });
+    }
+    Ok(BoundClause { generator, items })
+}
+
+/// A linked structure's first node: a pointer, whose type every node has.
+fn bind_node<S: Scope>(
+    expr: &Expr,
+    scope: &ViewScope<'_, S>,
+) -> Result<(ViewProgram<S::Step>, Ty), Rejection> {
+    let program =
+        bind_value(&expr.expression, scope).map_err(|error| rejection(scope, expr, &error))?;
+    if !matches!(category(scope, program.result()), Category::Pointer(_)) {
+        return Err(Rejection {
+            line: expr.line,
+            part: expr.text().to_owned(),
+            reason: "a linked structure's nodes are pointers".to_owned(),
+        });
+    }
+    let ty = program.result().clone();
+    Ok((program, ty))
+}
+
+/// `P => EXPR`, with `P` a node of type `ty`; the next node is a pointer.
+fn bind_link<S: Scope>(
+    link: &super::syntax::Link,
+    ty: &Ty,
+    scope: &mut ViewScope<'_, S>,
+) -> Result<ViewProgram<S::Step>, Rejection> {
+    scope
+        .variables
+        .push((link.parameter.clone(), ty.clone(), false));
+    let program = bind_value(&link.expression.expression, scope);
+    scope.variables.pop();
+    let program = program.map_err(|error| rejection(scope, &link.expression, &error))?;
+    if !matches!(category(scope, program.result()), Category::Pointer(_)) {
+        return Err(Rejection {
+            line: link.expression.line,
+            part: link.expression.text().to_owned(),
+            reason: "a linked structure's nodes are pointers".to_owned(),
+        });
+    }
+    Ok(program)
 }
 
 /// Whether a type's values are one byte of text: a character or a byte.
@@ -660,8 +871,33 @@ fn resolve_type<S: Scope>(
                     "`{name}` names several types: {}",
                     candidates.join(", ")
                 )),
+                TypeLookup::NotFound if name.contains(['<', '(', '[']) => construct(name, scope),
                 TypeLookup::NotFound => Err(format!("no type is named `{name}`")),
             }
+        }
+        TypeExpr::Nested { of, name } => {
+            let of = resolve_type(of, scope)?;
+            let outer = scope
+                .type_info(of)
+                .map(|info| info.name)
+                .ok_or_else(|| "the type is malformed".to_owned())?;
+            for separator in [".", "::"] {
+                let full = format!("{outer}{separator}{name}");
+                match scope.lookup_type(&TypeQuery {
+                    name: full.clone(),
+                    tag: None,
+                }) {
+                    TypeLookup::Found(reference) => return Ok(reference),
+                    TypeLookup::Ambiguous(candidates) => {
+                        return Err(format!(
+                            "`{full}` names several types: {}",
+                            candidates.join(", ")
+                        ));
+                    }
+                    TypeLookup::NotFound => {}
+                }
+            }
+            Err(format!("`{outer}` declares no type `{name}`"))
         }
         TypeExpr::TypeOf(expr) => {
             let program = bind_expression(&expr.expression, scope, Mode::Read)
@@ -687,4 +923,72 @@ fn resolve_type<S: Scope>(
             }
         }
     }
+}
+
+/// The one type whose identity a name with arguments spells, the
+/// arguments being types the program defines, arguments the view's
+/// pattern captured, or types the view names: `std::_Rb_tree_node<Value>`.
+/// It is found through the type index by comparing identities, never by
+/// spelling the type's name.
+fn construct<S: Scope>(name: &str, scope: &ViewScope<'_, S>) -> Result<TypeReference, String> {
+    let pattern =
+        super::syntax::type_pattern(name).map_err(|reason| format!("`{name}`: {reason}"))?;
+    let mut known = scope.captures.clone();
+    for (type_name, reference) in &scope.types {
+        known.retain(|(captured, _)| captured != type_name);
+        known.push((type_name.clone(), Captured::Type(*reference)));
+    }
+    if let Some(unknown) = unknown_capture(&pattern, &known) {
+        return Err(format!(
+            "`{name}`: `{unknown}` is neither an argument the pattern captured nor a type the view names"
+        ));
+    }
+    let language = scope
+        .type_info(scope.self_type)
+        .and_then(|info| info.identity.map(|identity| identity.language));
+    let mut found = Vec::<TypeReference>::new();
+    for candidate in scope.types_with_base(&pattern.base) {
+        let Some(info) = scope.type_info(candidate) else {
+            continue;
+        };
+        let Some(identity) = info.identity.as_deref() else {
+            continue;
+        };
+        if language.is_some_and(|language| identity.language != language) {
+            continue;
+        }
+        if super::pattern::matches_with(&pattern, identity, scope, known.clone()).is_some()
+            && !found.iter().any(|other| scope.same_type(*other, candidate))
+        {
+            found.push(candidate);
+        }
+    }
+    match found.as_slice() {
+        [reference] => Ok(*reference),
+        [] => Err(format!("no type is `{name}`")),
+        _ => Err(format!(
+            "`{name}` names several types: {}",
+            found
+                .iter()
+                .filter_map(|reference| scope.type_info(*reference))
+                .map(|info| info.name.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// A capitalized name in a pattern that nothing the view knows names.
+fn unknown_capture(pattern: &Pattern, known: &Captures) -> Option<String> {
+    pattern
+        .arguments
+        .iter()
+        .flatten()
+        .find_map(|argument| match argument {
+            ArgumentPattern::Capture(name) if !known.iter().any(|(known, _)| known == name) => {
+                Some(name.clone())
+            }
+            ArgumentPattern::Type(inner) => unknown_capture(inner, known),
+            _ => None,
+        })
 }

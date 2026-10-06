@@ -40,6 +40,7 @@ mod semantics;
 pub mod swarm;
 #[cfg(test)]
 mod tests;
+mod views;
 mod watches;
 pub mod world;
 

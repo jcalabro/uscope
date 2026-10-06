@@ -16,9 +16,12 @@ use crate::eval::target::{
 };
 use crate::eval::types::{Ty, TypeSource};
 use crate::inspection::InspectionBudget;
+use crate::model::ValueStorage;
 use crate::model::ViewChildren;
+use crate::protocol::StopId;
 use crate::view::bind::BoundShape;
 use crate::view::run::{Child, Failure};
+use crate::view::scan::Checkpoints;
 use crate::view::{Choice, ViewSet};
 use crate::{
     ByteOrder, Error, InspectedValue, PointerWidth, Presentation, PresentedCount, PresentedShape,
@@ -35,13 +38,34 @@ use super::{Controller, RuntimeModule};
 /// How deeply views present values inside the values they present.
 const MAX_DEPTH: u8 = 4;
 
-/// The views a controller presents values with, and the view each type
-/// has.
+/// The most values whose scans the controller keeps checkpoints for at one
+/// stop; the oldest is forgotten first.
+const MAX_SCANS: usize = 64;
+
+/// The views a controller presents values with, the view each type has,
+/// and where the scans of values presented at this stop have been.
 pub(super) struct Views {
     pub(super) set: Arc<ViewSet>,
     pub(super) enabled: bool,
     /// The view each type has under this set, bound when first needed.
     choices: RefCell<BTreeMap<TypeReference, Arc<Choice<StopStep>>>>,
+    scans: RefCell<Scans>,
+}
+
+/// Which value a scan presents: its type, its view, and its storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScanKey {
+    ty: TypeReference,
+    view: (Arc<str>, u32),
+    storage: ValueStorage,
+}
+
+/// The checkpoints of scans at one stop, oldest first. They hold while the
+/// program's state does, so a new stop or a write forgets them.
+#[derive(Default)]
+struct Scans {
+    stop: Option<StopId>,
+    entries: Vec<(ScanKey, Checkpoints)>,
 }
 
 impl Default for Views {
@@ -50,6 +74,7 @@ impl Default for Views {
             set: ViewSet::built_in(),
             enabled: true,
             choices: RefCell::default(),
+            scans: RefCell::default(),
         }
     }
 }
@@ -59,6 +84,55 @@ impl Views {
     pub(super) fn replace(&mut self, set: Arc<ViewSet>) {
         self.set = set;
         self.choices.get_mut().clear();
+        self.forget_scans();
+    }
+
+    /// Forgets where scans have been, after the program's state changed.
+    pub(super) fn forget_scans(&self) {
+        self.scans.borrow_mut().entries.clear();
+    }
+
+    /// The checkpoints of a value's scan at `stop`.
+    fn checkpoints(&self, stop: StopId, key: &ScanKey) -> Checkpoints {
+        let mut scans = self.scans.borrow_mut();
+        if scans.stop != Some(stop) {
+            scans.stop = Some(stop);
+            scans.entries.clear();
+        }
+        scans
+            .entries
+            .iter()
+            .find(|(existing, _)| existing == key)
+            .map(|(_, checkpoints)| checkpoints.clone())
+            .unwrap_or_default()
+    }
+
+    /// Keeps a value's checkpoints at `stop`.
+    fn keep(&self, stop: StopId, key: ScanKey, checkpoints: Checkpoints) {
+        let mut scans = self.scans.borrow_mut();
+        if scans.stop != Some(stop) {
+            return;
+        }
+        scans.entries.retain(|(existing, _)| *existing != key);
+        if checkpoints == Checkpoints::default() {
+            return;
+        }
+        if scans.entries.len() == MAX_SCANS {
+            scans.entries.remove(0);
+        }
+        scans.entries.push((key, checkpoints));
+    }
+}
+
+/// The key of the scan presenting `place` with `bound`.
+fn scan_key(bound: &ViewBound, image: crate::ModuleImageId, place: &StopPlace) -> ScanKey {
+    ScanKey {
+        ty: TypeReference {
+            image,
+            id: place.located.ty,
+        },
+        view: (Arc::clone(&bound.view.source), bound.view.line),
+        storage: place.located.storage.clone(),
     }
 }
 
@@ -90,6 +164,10 @@ impl<P: InspectionOps> TypeSource for ModuleScope<'_, P> {
     fn byte_order(&self) -> ByteOrder {
         self.controller.module_image.target().byte_order
     }
+
+    fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        left.image == self.module.loaded.image && self.module.image.same_type(left, right)
+    }
 }
 
 impl<P: InspectionOps> Scope for ModuleScope<'_, P> {
@@ -118,6 +196,10 @@ impl<P: InspectionOps> Scope for ModuleScope<'_, P> {
 
     fn register(&self, _name: &str) -> Option<Register> {
         None
+    }
+
+    fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
+        self.module.image.types_with_base(base)
     }
 }
 
@@ -285,13 +367,23 @@ impl<P: InspectionOps> Controller<P> {
             let mut machine = StopMachine::new(&scope, budget, true);
             // With borrowed elements, the view's own children start at
             // its fields.
-            let start = if view.inner.is_some() {
-                next - view.elements
+            let (start, elements) = if view.inner.is_some() {
+                (next - view.elements, 0)
             } else {
-                next
+                (next, view.elements)
             };
-            let presented =
-                crate::view::run::children(&bound, &mut machine, this.clone(), start, end - next);
+            let key = scan_key(&bound, reference.image, &this);
+            let mut checkpoints = self.views.checkpoints(reference.stop_id, &key);
+            let presented = crate::view::run::children(
+                &bound,
+                &mut machine,
+                this.clone(),
+                elements,
+                start,
+                end - next,
+                &mut checkpoints,
+            );
+            self.views.keep(reference.stop_id, key, checkpoints);
             let presented = match presented {
                 Ok(presented) => presented,
                 Err(Failure::Debugger(error)) => return Err(error),
@@ -306,29 +398,7 @@ impl<P: InspectionOps> Controller<P> {
                 }
             };
             for child in presented {
-                children.push(match child {
-                    Child::Element(index, value) => ValueChild {
-                        relationship: ValueChildRelationship::Element { index },
-                        type_info: value.type_info.unwrap_or_else(|| placeholder(&this)),
-                        state: value.state,
-                    },
-                    Child::Field(name, value) => ValueChild {
-                        relationship: ValueChildRelationship::Field { name },
-                        type_info: value.type_info.unwrap_or_else(|| placeholder(&this)),
-                        state: value.state,
-                    },
-                    Child::Raw => {
-                        let module = machine.module(this.module).map_err(stopped)?;
-                        let value = machine
-                            .materialize(module, &this.located)
-                            .map_err(stopped)?;
-                        ValueChild {
-                            relationship: ValueChildRelationship::Raw,
-                            type_info: value.type_info.unwrap_or_else(|| placeholder(&this)),
-                            state: value.state,
-                        }
-                    }
-                });
+                children.push(value_child(child, &this, &mut machine)?);
             }
         }
         Ok(ValueChildPage {
@@ -343,6 +413,48 @@ impl<P: InspectionOps> Controller<P> {
             usage: budget.usage(),
         })
     }
+}
+
+/// A child a view presents, as the public model has it.
+fn value_child<P: InspectionOps>(
+    child: Child,
+    this: &StopPlace,
+    machine: &mut StopMachine<'_, '_, P>,
+) -> Result<ValueChild> {
+    Ok(match child {
+        Child::Element(index, value) => ValueChild {
+            relationship: ValueChildRelationship::Element { index },
+            type_info: value.type_info.unwrap_or_else(|| placeholder(this)),
+            state: value.state,
+        },
+        Child::Entry(index, key, value) => ValueChild {
+            relationship: ValueChildRelationship::Entry {
+                index,
+                key: Arc::new(crate::MapKey {
+                    type_info: key.type_info.clone().unwrap_or_else(|| placeholder(this)),
+                    state: key.state,
+                }),
+            },
+            type_info: value.type_info.unwrap_or_else(|| placeholder(this)),
+            state: value.state,
+        },
+        Child::Field(name, value) => ValueChild {
+            relationship: ValueChildRelationship::Field { name },
+            type_info: value.type_info.unwrap_or_else(|| placeholder(this)),
+            state: value.state,
+        },
+        Child::Raw => {
+            let module = machine.module(this.module).map_err(stopped)?;
+            let value = machine
+                .materialize(module, &this.located)
+                .map_err(stopped)?;
+            ValueChild {
+                relationship: ValueChildRelationship::Raw,
+                type_info: value.type_info.unwrap_or_else(|| placeholder(this)),
+                state: value.state,
+            }
+        }
+    })
 }
 
 /// A type for a child whose own type is unknown.
@@ -384,6 +496,10 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
         if !controller.views.enabled || self.depth >= MAX_DEPTH {
             return Ok(value);
         }
+        let viewed = value
+            .type_info
+            .as_ref()
+            .is_some_and(|info| controller.view_choice(info.reference).bound.is_some());
         if let VariableState::Available {
             value: crate::VariableValue::Address(_),
             dereference:
@@ -397,6 +513,7 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
             text: None,
             ..
         } = &value.state
+            && !viewed
         {
             // A pointer or reference to text shows the text, as a pointer
             // to characters does, or why its view could not read it. A
@@ -431,9 +548,7 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
         let (
             Some(type_info),
             VariableState::Available {
-                children: ValueChildren::Available(raw),
-                presentation: None,
-                ..
+                presentation: None, ..
             },
         ) = (&value.type_info, &value.state)
         else {
@@ -442,7 +557,11 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
         let Some(bound) = controller.view_choice(type_info.reference).bound.clone() else {
             return Ok(value);
         };
-        let raw = Arc::clone(raw);
+        // An aggregate's children say where it is; another value, such as
+        // a Go map's pointer, is where its state was read from.
+        let Some(raw) = self.place_of(type_info, &value.state) else {
+            return Ok(value);
+        };
         let this = StopPlace {
             module: raw.module,
             located: Located {
@@ -450,13 +569,11 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
                 storage: raw.storage.clone(),
             },
         };
-        let mut share = self.budget.share();
-        let result = {
-            let mut machine = StopMachine::new(self.frame, &mut share, self.interruptible);
-            machine.depth = self.depth + 1;
-            crate::view::run::present(&bound, &mut machine, this)
-        };
-        self.budget.absorb(share.usage());
+        let key = scan_key(&bound, type_info.reference.image, &this);
+        let mut checkpoints = controller.views.checkpoints(self.frame.stop_id, &key);
+        let result = self
+            .in_share(|machine| crate::view::run::present(&bound, machine, this, &mut checkpoints));
+        controller.views.keep(self.frame.stop_id, key, checkpoints);
         let name = crate::view::name_of(&bound.view);
         let (presentation, text) = match result {
             Ok(presented) => {
@@ -480,9 +597,31 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
                         } => Some(Arc::clone(reference)),
                         _ => None,
                     });
-                let elements = inner
+                // A value presented as a sequence or map stands for this one
+                // as that sequence or map: its elements, then this value's
+                // own fields and `[raw]`.
+                let collection = presented
+                    .inner
                     .as_ref()
-                    .map_or_else(|| presented.count.unwrap_or(0), |inner| inner.total());
+                    .and_then(|inner| match &inner.state {
+                        VariableState::Available {
+                            presentation: Some(presentation),
+                            ..
+                        } if matches!(
+                            presentation.shape,
+                            PresentedShape::Sequence | PresentedShape::Map
+                        ) =>
+                        {
+                            Some((presentation.shape, presentation.count))
+                        }
+                        _ => None,
+                    });
+                let (shape, count) = collection.unwrap_or((presented.shape, presented.count));
+                let elements = match (&inner, collection) {
+                    (Some(_), Some((_, count))) => count.map_or(0, PresentedCount::known),
+                    (Some(inner), None) => inner.total(),
+                    (None, _) => presented.count.map_or(0, PresentedCount::known),
+                };
                 let mut reference = (*raw).clone();
                 reference.total = elements.saturating_add(fields).saturating_add(1);
                 reference.active_variant = None;
@@ -495,8 +634,8 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
                 (
                     Presentation {
                         view: name,
-                        shape: presented.shape,
-                        count: presented.count.map(PresentedCount::Exact),
+                        shape,
+                        count,
                         summary: presented.summary.into(),
                         children: ValueChildren::Available(Arc::new(reference)),
                         problem: presented.partial,
@@ -521,6 +660,71 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
         Ok(value)
     }
 
+    /// Runs a view one level deeper. A view presenting a value at the top
+    /// runs on a share of the budget, so running out never takes the rest
+    /// of the inspection with it; the values inside it share that share.
+    fn in_share<T>(&mut self, run: impl FnOnce(&mut StopMachine<'_, '_, P>) -> T) -> T {
+        if self.depth > 0 {
+            let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
+            machine.depth = self.depth + 1;
+            return run(&mut machine);
+        }
+        let mut share = self.budget.share();
+        let result = {
+            let mut machine = StopMachine::new(self.frame, &mut share, self.interruptible);
+            machine.depth = self.depth + 1;
+            run(&mut machine)
+        };
+        self.budget.absorb(share.usage());
+        result
+    }
+
+    /// Where a value of `type_info` is, as a capability over its storage.
+    fn place_of(
+        &self,
+        type_info: &TypeInfo,
+        state: &VariableState,
+    ) -> Option<Arc<ValueChildrenReference>> {
+        let VariableState::Available {
+            source,
+            raw,
+            children,
+            ..
+        } = state
+        else {
+            return None;
+        };
+        if let ValueChildren::Available(reference) = children {
+            return Some(Arc::clone(reference));
+        }
+        let storage = match (source, raw) {
+            (crate::VariableValueSource::Memory(address), _) => ValueStorage::Memory(*address),
+            (source, Some(raw)) => ValueStorage::Bytes {
+                source: source.clone(),
+                raw: Arc::clone(raw),
+                start: 0,
+                end: raw.len(),
+                address: None,
+            },
+            _ => return None,
+        };
+        let module = self.frame.module_of(type_info.reference)?;
+        let context = self.context(module);
+        Some(Arc::new(ValueChildrenReference {
+            stop_id: context.stop_id,
+            thread: context.thread,
+            frame: context.frame,
+            module: context.module,
+            image: context.image,
+            context_address: context.address,
+            target_type: type_info.reference.id,
+            storage,
+            total: 0,
+            active_variant: None,
+            view: None,
+        }))
+    }
+
     /// The text a view presents the value at `place` as, when it presents
     /// values of `ty` as text, or the presentation that says why it could
     /// not.
@@ -535,13 +739,10 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
         if !bound.shape.has_text() {
             return Ok((None, None));
         }
-        let mut share = self.budget.share();
-        let result = {
-            let mut machine = StopMachine::new(self.frame, &mut share, self.interruptible);
-            machine.depth = self.depth + 1;
-            crate::view::run::present(&bound, &mut machine, place)
-        };
-        self.budget.absorb(share.usage());
+        // A text view scans nothing.
+        let result = self.in_share(|machine| {
+            crate::view::run::present(&bound, machine, place, &mut Checkpoints::default())
+        });
         match result {
             Ok(presented) => Ok((presented.text, None)),
             Err(Failure::Problem(problem)) => Ok((
@@ -560,9 +761,21 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
         from: &StopPlace,
         index: i128,
     ) -> std::result::Result<StopPlace, Stop> {
+        let controller = self.frame.controller;
+        let image = self.module(from.module)?.loaded.image;
+        let key = scan_key(bound, image, from);
+        let mut checkpoints = controller.views.checkpoints(self.frame.stop_id, &key);
         let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
         machine.depth = self.depth;
-        match crate::view::run::element_place(bound, &mut machine, from.clone(), index) {
+        let result = crate::view::run::element_place(
+            bound,
+            &mut machine,
+            from.clone(),
+            index,
+            &mut checkpoints,
+        );
+        controller.views.keep(self.frame.stop_id, key, checkpoints);
+        match result {
             Ok(place) => Ok(place),
             Err(Failure::Debugger(error)) => Err(Stop::Failed(error)),
             Err(Failure::Problem(ViewProblem::Unavailable(reason))) => {
@@ -589,9 +802,13 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
         let Some(bound) = controller.view_choice(ty).bound.clone() else {
             return Ok(None);
         };
+        let key = scan_key(&bound, ty.image, at);
+        let mut checkpoints = controller.views.checkpoints(self.frame.stop_id, &key);
         let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
         machine.depth = self.depth;
-        match crate::view::run::length(&bound, &mut machine, at.clone()) {
+        let result = crate::view::run::length(&bound, &mut machine, at.clone(), &mut checkpoints);
+        controller.views.keep(self.frame.stop_id, key, checkpoints);
+        match result {
             Ok(length) => Ok(Some(length)),
             Err(Failure::Debugger(error)) => Err(Stop::Failed(error)),
             Err(Failure::Problem(ViewProblem::Unavailable(reason))) => {

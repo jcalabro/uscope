@@ -105,7 +105,8 @@ impl Printer<'_> {
                 form: CastForm::Prefix,
                 ..
             }
-            | NodeKind::SizeOf(_) => PREFIX,
+            | NodeKind::SizeOf(_)
+            | NodeKind::OffsetOf { .. } => PREFIX,
             _ => POSTFIX,
         }
     }
@@ -196,6 +197,27 @@ impl Printer<'_> {
             NodeKind::SizeOf(SizeOf::Operand(operand)) => {
                 self.out.push_str("sizeof(");
                 self.child(*operand, ASSIGN);
+                self.out.push(')');
+            }
+            NodeKind::OffsetOf { ty, member } => {
+                self.out.push_str("offsetof(");
+                self.out.push_str(&type_text(ty));
+                self.out.push_str(", ");
+                if super::parser::is_name_word(member)
+                    && member
+                        .bytes()
+                        .next()
+                        .is_some_and(|byte| !byte.is_ascii_digit())
+                    && member
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                {
+                    self.out.push_str(member);
+                } else {
+                    self.out.push('`');
+                    self.out.push_str(member);
+                    self.out.push('`');
+                }
                 self.out.push(')');
             }
             NodeKind::Len(operand) => {

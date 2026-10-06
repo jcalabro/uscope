@@ -39,6 +39,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         bytes: &[u8],
     ) -> Result<u64> {
         let length = bytes.len() as u64;
+        // Scans resumed after a write could follow links it changed.
+        self.views.forget_scans();
         if length > MAX_PUBLIC_MEMORY_WRITE {
             return Err(Error::MemoryWriteTooLarge {
                 requested: length,
@@ -99,6 +101,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         register: crate::RegisterId,
         bytes: &[u8],
     ) -> Result<()> {
+        self.views.forget_scans();
         let mut registers = self.ptrace.registers(pid)?;
         let slot = super::registers::x86_64_general_register_slot(&mut registers, register)
             .ok_or_else(|| backend_error(LinuxError::UnsupportedRegisterWrite))?;

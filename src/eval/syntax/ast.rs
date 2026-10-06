@@ -367,6 +367,11 @@ pub enum NodeKind {
         end: NodeId,
     },
     SizeOf(SizeOf),
+    /// `offsetof(TYPE, member)`, a view's: where a member is in its record.
+    OffsetOf {
+        ty: TypeName,
+        member: String,
+    },
     Len(NodeId),
     /// A call of a view's built-in function on one operand.
     Call {
@@ -387,7 +392,8 @@ impl NodeKind {
             | Self::Text(_)
             | Self::Bool(_)
             | Self::Null
-            | Self::SizeOf(SizeOf::Type(_)) => Vec::new(),
+            | Self::SizeOf(SizeOf::Type(_))
+            | Self::OffsetOf { .. } => Vec::new(),
             Self::Unary { operand, .. }
             | Self::Cast { operand, .. }
             | Self::SizeOf(SizeOf::Operand(operand))
@@ -456,6 +462,13 @@ impl NodeKind {
             (Self::SizeOf(SizeOf::Type(left)), Self::SizeOf(SizeOf::Type(right))) => {
                 same_type(left, right)
             }
+            (
+                Self::OffsetOf { ty, member },
+                Self::OffsetOf {
+                    ty: other_ty,
+                    member: other_member,
+                },
+            ) => same_type(ty, other_ty) && member == other_member,
             _ => false,
         }
     }

@@ -1,15 +1,23 @@
 // Standard library containers, and deliberately corrupted ones, which the
 // built-in views present. Each `VIEW:` marker says what its expression must
 // show, evaluated in main() where barrier() is called: `{c*N}` stands for N
-// of the character c, and `problem:` says the view must refuse the value,
-// and why.
+// of the character c, `problem:` says the view must refuse the value, and
+// why, and `(any order)` that a hash table's entries may come in any order.
 
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <deque>
+#include <forward_list>
+#include <list>
+#include <map>
+#include <new>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 extern "C" __attribute__((noinline)) void barrier(void *fixture) {
@@ -26,6 +34,19 @@ template <typename T> union Corrupt {
 
 template <typename T> static void keep(T &value) {
     __asm__ volatile("" : : "r"(&value) : "memory");
+}
+
+// Where a list node's links are, in each library: libstdc++'s nodes begin
+// with their next link, libc++'s with their previous one.
+#ifdef _LIBCPP_VERSION
+constexpr std::size_t next_link = 1;
+#else
+constexpr std::size_t next_link = 0;
+#endif
+
+// The words of an object, to corrupt it.
+template <typename T> static void **object_words(T &value) {
+    return reinterpret_cast<void **>(&value);
 }
 
 int main() {
@@ -61,9 +82,62 @@ int main() {
     char *ragged_ends[3] = {bytes, bytes + 6, bytes + 16};
     std::memcpy(static_cast<void *>(&ragged.value), ragged_ends, sizeof ragged_ends);
 
+
+    std::map<int, int> ordered = {{3, 30}, {1, 10}, {2, 20}}; // VIEW: ordered => len=3 {1: 10, 2: 20, 3: 30}
+    std::map<std::string, int> named = {{"two", 2}, {"one", 1}}; // VIEW: named => len=2 {"one": 1, "two": 2}
+    std::map<int, int> no_entries;                // VIEW: no_entries => len=0 {}
+    std::multimap<int, int> repeated_keys = {{1, 1}, {1, 2}}; // VIEW: repeated_keys => len=2 {1: 1, 1: 2}
+    std::set<int> distinct = {5, 3, 4};           // VIEW: distinct => len=3 [3, 4, 5]
+    std::multiset<int> repeated = {2, 1, 1};      // VIEW: repeated => len=3 [1, 1, 2]
+    std::map<int, int> big_map;                   // VIEW: big_map => len=300 {0: 0, 1: 1, 2: 4, 3: 9, 4: 16, 5: 25, 6: 36, 7: 49, 8: 64, 9: 81, 10: 100, 11: 121, 12: 144, 13: 169, …}
+    for (int index = 0; index < 300; ++index) {
+        big_map[index] = index * index;
+    }
+    std::unordered_map<int, int> hashed = {{1, 10}, {2, 20}}; // VIEW: hashed => len=2 {1: 10, 2: 20} (any order)
+    std::unordered_map<std::string, int> hashed_names = {{"one", 1}}; // VIEW: hashed_names => len=1 {"one": 1}
+    std::unordered_multimap<int, int> hashed_repeats = {{1, 1}, {1, 2}}; // VIEW: hashed_repeats => len=2 {1: 1, 1: 2} (any order)
+    std::unordered_set<int> hashed_set = {7, 8};  // VIEW: hashed_set => len=2 [7, 8] (any order)
+    std::unordered_multiset<int> hashed_multiset = {9, 9}; // VIEW: hashed_multiset => len=2 [9, 9]
+    std::unordered_map<int, int> no_hashed;       // VIEW: no_hashed => len=0 {}
+    std::list<int> linked = {1, 2, 3};            // VIEW: linked => len=3 [1, 2, 3]
+    std::list<std::string> linked_words = {"a", "b"}; // VIEW: linked_words => len=2 ["a", "b"]
+    std::list<int> no_links;                      // VIEW: no_links => len=0 []
+    std::forward_list<int> forward = {4, 5};      // VIEW: forward => len=2 [4, 5]
+    std::forward_list<int> no_forward;            // VIEW: no_forward => len=0 []
+    std::deque<int> queue;                        // VIEW: queue => len=1501 [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, …]
+    for (int index = 0; index < 1500; ++index) {
+        queue.push_back(index);
+    }
+    queue.push_front(-1);
+    std::deque<std::string> word_queue = {"x"};   // VIEW: word_queue => len=1 ["x"]
+    std::deque<int> no_queue;                     // VIEW: no_queue => len=0 []
+
+    // A list whose last node leads back to its second: walking it would
+    // show the second and third elements again.
+    std::list<int> looped = {7, 8, 9};            // VIEW: looped => problem: cycle at element 3
+    void **first = static_cast<void **>(object_words(looped)[next_link]);
+    void **second = static_cast<void **>(first[next_link]);
+    void **third = static_cast<void **>(second[next_link]);
+    third[next_link] = second;
+    // A list that claims more elements than it links. libstdc++'s old ABI
+    // keeps no count, so the test does not ask it for this one.
+    std::list<int> overcounted = {1, 2};          // VIEW: overcounted => problem: the view declares 4 elements and generates 2
+#if defined(_LIBCPP_VERSION) || _GLIBCXX_USE_CXX11_ABI
+    object_words(looped)[2] = reinterpret_cast<void *>(5);
+    object_words(overcounted)[2] = reinterpret_cast<void *>(4);
+#endif
+
     keep(text), keep(empty_text), keep(long_text), keep(with_nul), keep(view);
     keep(ints), keep(no_ints), keep(words), keep(many), keep(four), keep(none);
     keep(dynamic_span), keep(fixed_span), keep(past_capacity), keep(dangling), keep(ragged);
+    keep(ordered), keep(named), keep(no_entries), keep(repeated_keys), keep(distinct);
+    keep(repeated), keep(big_map), keep(hashed), keep(hashed_names), keep(hashed_repeats);
+    keep(hashed_set), keep(hashed_multiset), keep(no_hashed), keep(linked), keep(linked_words);
+    keep(no_links), keep(forward), keep(no_forward), keep(queue), keep(word_queue);
+    keep(no_queue), keep(looped), keep(overcounted);
     barrier(&text);
+    // The corrupted lists are never destroyed.
+    new (&looped) std::list<int>();
+    new (&overcounted) std::list<int>();
     return static_cast<int>(ints.size() + many.size()) == 303 ? 0 : 1;
 }

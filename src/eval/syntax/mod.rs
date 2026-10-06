@@ -194,6 +194,14 @@ impl Expression {
         Self::parse(&format!("*({self})")).ok()
     }
 
+    /// The value of type `ty` stored at `address`: `*(T*)0x…`.
+    #[must_use]
+    pub fn at(ty: &str, address: u64) -> Option<Self> {
+        Self::parse(&format!("*({ty}*){address:#x}"))
+            .ok()
+            .or_else(|| Self::parse(&format!("*({}*){address:#x}", print::name_text(ty))).ok())
+    }
+
     /// The elements `start..end` of this expression's array or slice.
     #[must_use]
     pub fn range(&self, start: i128, end: i128) -> Option<Self> {

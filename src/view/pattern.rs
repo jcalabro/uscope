@@ -7,7 +7,7 @@
 
 use crate::eval::types::TypeSource;
 use crate::type_identity::same_integer;
-use crate::{IntegerValue, SourceLanguage, TypeArgument, TypeIdentity, TypeReference};
+use crate::{GoKind, IntegerValue, SourceLanguage, TypeArgument, TypeIdentity, TypeReference};
 
 use super::syntax::{ArgumentPattern, Language, Pattern, Segment};
 
@@ -45,8 +45,33 @@ pub fn matches(
     identity: &TypeIdentity,
     types: &dyn TypeSource,
 ) -> Option<Captures> {
-    let mut captures = Captures::new();
+    matches_with(pattern, identity, types, Captures::new())
+}
+
+/// As [`matches`], with names already captured, which the type's arguments
+/// must then equal.
+pub fn matches_with(
+    pattern: &Pattern,
+    identity: &TypeIdentity,
+    types: &dyn TypeSource,
+    mut captures: Captures,
+) -> Option<Captures> {
     matches_into(pattern, identity, types, &mut captures, 0).then_some(captures)
+}
+
+/// The word a Go pattern names a kind of type with, whatever its name:
+/// `go map<K, V>` is every map.
+#[must_use]
+pub fn go_kind_word(identity: &TypeIdentity) -> Option<&'static str> {
+    if identity.language != SourceLanguage::Go {
+        return None;
+    }
+    match identity.go?.kind {
+        GoKind::Map => Some("map"),
+        GoKind::Chan => Some("chan"),
+        GoKind::Interface => Some("interface"),
+        _ => None,
+    }
 }
 
 fn matches_into(
@@ -56,8 +81,15 @@ fn matches_into(
     captures: &mut Captures,
     depth: usize,
 ) -> bool {
-    if depth > MAX_DEPTH || identity.base.as_ref() != pattern.base {
+    if depth > MAX_DEPTH {
         return false;
+    }
+    let by_kind = pattern.path.is_empty() && go_kind_word(identity) == Some(&pattern.base);
+    if !by_kind && identity.base.as_ref() != pattern.base {
+        return false;
+    }
+    if by_kind {
+        return arguments_match(pattern, identity, types, captures, depth);
     }
     // A pattern may spell the inline namespaces a path omits, anywhere.
     let path = pattern
@@ -73,9 +105,17 @@ fn matches_into(
         .iter()
         .map(AsRef::as_ref)
         .collect::<Vec<&str>>();
-    if !path_matches(&path, &actual) {
-        return false;
-    }
+    path_matches(&path, &actual) && arguments_match(pattern, identity, types, captures, depth)
+}
+
+/// Whether a pattern's leading arguments match the type's.
+fn arguments_match(
+    pattern: &Pattern,
+    identity: &TypeIdentity,
+    types: &dyn TypeSource,
+    captures: &mut Captures,
+    depth: usize,
+) -> bool {
     let Some(arguments) = &pattern.arguments else {
         return true;
     };
@@ -146,7 +186,7 @@ fn capture(captures: &mut Captures, name: &str, found: Captured, types: &dyn Typ
         }
         Some((_, Captured::Type(previous))) => match found {
             Captured::Type(reference) => {
-                *previous == reference
+                types.same_type(*previous, reference)
                     || types
                         .type_info(*previous)
                         .zip(types.type_info(reference))

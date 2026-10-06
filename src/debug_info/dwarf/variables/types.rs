@@ -303,6 +303,20 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
     }
 
+    /// Builds the type an attribute refers to, if any, so that the type
+    /// index knows it; a malformed reference only goes unbuilt.
+    pub(super) fn reach(
+        &mut self,
+        unit_index: usize,
+        value: Option<gimli::AttributeValue<Reader<'data>>>,
+    ) {
+        if let Ok(Some(key)) =
+            die_reference_with_signatures(value, unit_index, self.units, self.type_signatures)
+        {
+            self.resolve(key);
+        }
+    }
+
     pub(super) fn resolve(&mut self, key: DieKey) -> TypeId {
         if let Some(id) = self.by_die.get(&key) {
             return *id;

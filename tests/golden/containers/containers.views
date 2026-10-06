@@ -1,0 +1,20 @@
+uscope-views 1
+
+# The views the containers program's types are presented with, which the
+# simulator's views oracle judges against memory.
+
+view c intvec {
+    check n <= cap
+    show sequence(n) for i in range(n) => data[i]
+    field capacity = cap
+}
+
+view c list {
+    show sequence(count) for x in list(head, p => p->next) => x->value
+}
+
+view c table {
+    check n <= cap
+    show map(n) for i in range(cap) let slot = slots[i] if slot.used != 0
+        => slot.key : slot.value
+}

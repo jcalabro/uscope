@@ -4,6 +4,7 @@
 //! budget, never panics, and allocates only what its limits allow.
 
 use super::run::{Child, Failure, children, element_place, length, present};
+use super::scan::Checkpoints;
 use super::{ViewSet, choose};
 use crate::eval::fake::{Place, World};
 use crate::{BaseTypeEncoding as E, IntegerValue, SourceLanguage, TypeArgument, TypeReference};
@@ -290,6 +291,9 @@ fn containers(input: &mut Input<'_>) -> (World, Vec<(String, TypeReference)>) {
     );
     variables.push(("ArrayList(i32)".to_owned(), list));
 
+    // Linked and hashed containers, whose views scan.
+    linked_containers(&mut world, &mut variables);
+
     let heap = (0..HEAP_SIZE).map(|_| input.byte()).collect::<Vec<_>>();
     world.map(HEAP, &heap);
     for (name, ty) in &variables {
@@ -298,6 +302,263 @@ fn containers(input: &mut Input<'_>) -> (World, Vec<(String, TypeReference)>) {
         world.variable(name, *ty, &object);
     }
     (world, variables)
+}
+
+/// The containers whose built-in views scan: libstdc++'s list and map,
+/// Rust's `HashMap`, a Go map, and Zig's hash map, laid out as their
+/// libraries lay them out (bases flattened into their members).
+#[expect(clippy::too_many_lines, reason = "one type graph per library")]
+fn linked_containers(world: &mut World, variables: &mut Vec<(String, TypeReference)>) {
+    let int = world.base("int", E::Signed, 4);
+    let size = world.base("unsigned long", E::Unsigned, 8);
+    let i32 = world.base("i32", E::Signed, 4);
+    let u8 = world.base("u8", E::Unsigned, 1);
+    let usize = world.base("usize", E::Unsigned, 8);
+    let u32 = world.base("u32", E::Unsigned, 4);
+    let unknown = |text: &str| TypeArgument::Unknown(text.into());
+
+    // libstdc++ std::list<int>
+    let link = world.record("_List_node_base", 16, &[]);
+    let link_pointer = world.pointer(Some(link));
+    world.set_members(
+        link,
+        &[("_M_next", link_pointer, 0), ("_M_prev", link_pointer, 8)],
+    );
+    let header = world.record(
+        "_List_node_header",
+        24,
+        &[
+            ("_M_next", link_pointer, 0),
+            ("_M_prev", link_pointer, 8),
+            ("_M_size", size, 16),
+        ],
+    );
+    let list_impl = world.record("_List_impl", 24, &[("_M_node", header, 0)]);
+    let list = world.record("list<int>", 24, &[("_M_impl", list_impl, 0)]);
+    world.identify(
+        list,
+        SourceLanguage::Cpp,
+        &["std"],
+        "list",
+        vec![TypeArgument::Type(int), unknown("allocator")],
+    );
+    let list_node = world.record(
+        "_List_node<int>",
+        24,
+        &[
+            ("_M_next", link_pointer, 0),
+            ("_M_prev", link_pointer, 8),
+            ("_M_storage", int, 16),
+        ],
+    );
+    world.identify(
+        list_node,
+        SourceLanguage::Cpp,
+        &["std"],
+        "_List_node",
+        vec![TypeArgument::Type(int)],
+    );
+    variables.push(("libstdc++ list".to_owned(), list));
+
+    // libstdc++ std::map<int, int>
+    let tree_node_base = world.record("_Rb_tree_node_base", 32, &[]);
+    let base_pointer = world.pointer(Some(tree_node_base));
+    world.set_members(
+        tree_node_base,
+        &[
+            ("_M_color", int, 0),
+            ("_M_parent", base_pointer, 8),
+            ("_M_left", base_pointer, 16),
+            ("_M_right", base_pointer, 24),
+        ],
+    );
+    let pair = world.record(
+        "pair<int const, int>",
+        8,
+        &[("first", int, 0), ("second", int, 4)],
+    );
+    world.identify(
+        pair,
+        SourceLanguage::Cpp,
+        &["std"],
+        "pair",
+        vec![TypeArgument::Type(int), TypeArgument::Type(int)],
+    );
+    let tree_impl = world.record(
+        "_Rb_tree_impl",
+        40,
+        &[
+            ("_M_header", tree_node_base, 0),
+            ("_M_node_count", size, 32),
+        ],
+    );
+    let tree = world.record("_Rb_tree<int, pair>", 40, &[("_M_impl", tree_impl, 0)]);
+    world.identify(
+        tree,
+        SourceLanguage::Cpp,
+        &["std"],
+        "_Rb_tree",
+        vec![TypeArgument::Type(int), TypeArgument::Type(pair)],
+    );
+    let map = world.record("map<int, int>", 40, &[("_M_t", tree, 0)]);
+    world.identify(
+        map,
+        SourceLanguage::Cpp,
+        &["std"],
+        "map",
+        vec![
+            TypeArgument::Type(int),
+            TypeArgument::Type(int),
+            unknown("less"),
+            unknown("allocator"),
+        ],
+    );
+    let tree_node = world.record(
+        "_Rb_tree_node<pair>",
+        40,
+        &[
+            ("_M_color", int, 0),
+            ("_M_parent", base_pointer, 8),
+            ("_M_left", base_pointer, 16),
+            ("_M_right", base_pointer, 24),
+            ("_M_storage", pair, 32),
+        ],
+    );
+    world.identify(
+        tree_node,
+        SourceLanguage::Cpp,
+        &["std"],
+        "_Rb_tree_node",
+        vec![TypeArgument::Type(pair)],
+    );
+    variables.push(("libstdc++ map".to_owned(), map));
+
+    // Rust HashMap<i32, i32>
+    let byte_pointer = world.pointer(Some(u8));
+    let non_null = world.record("NonNull<u8>", 8, &[("pointer", byte_pointer, 0)]);
+    let inner = world.record(
+        "RawTableInner",
+        32,
+        &[
+            ("bucket_mask", usize, 0),
+            ("ctrl", non_null, 8),
+            ("growth_left", usize, 16),
+            ("items", usize, 24),
+        ],
+    );
+    let tuple = world.record("(i32, i32)", 8, &[("__0", i32, 0), ("__1", i32, 4)]);
+    let raw_table = world.record("RawTable<(i32, i32)>", 32, &[("table", inner, 0)]);
+    world.identify(
+        raw_table,
+        SourceLanguage::Rust,
+        &["hashbrown", "raw"],
+        "RawTable",
+        vec![TypeArgument::Type(tuple), unknown("Global")],
+    );
+    let brown = world.record("HashMap<i32, i32>", 32, &[("table", raw_table, 0)]);
+    let hash_map = world.record("HashMap<i32, i32>", 32, &[("base", brown, 0)]);
+    world.identify(
+        hash_map,
+        SourceLanguage::Rust,
+        &["std", "collections", "hash", "map"],
+        "HashMap",
+        vec![
+            TypeArgument::Type(i32),
+            TypeArgument::Type(i32),
+            unknown("RandomState"),
+        ],
+    );
+    variables.push(("Rust HashMap".to_owned(), hash_map));
+
+    // A Go map[int]int: a pointer to a swiss table.
+    let slot = world.record(
+        "struct { key int; elem int }",
+        16,
+        &[("key", size, 0), ("elem", size, 8)],
+    );
+    let slots = world.array(slot, &[8]);
+    let group = world.record(
+        "noalg.map.group[int]int",
+        136,
+        &[("ctrl", size, 0), ("slots", slots, 8)],
+    );
+    let group_pointer = world.pointer(Some(group));
+    let reference = world.record(
+        "groupReference<int,int>",
+        16,
+        &[("data", group_pointer, 0), ("lengthMask", size, 8)],
+    );
+    let table = world.record(
+        "table<int,int>",
+        32,
+        &[
+            ("used", u32, 0),
+            ("capacity", u32, 4),
+            ("localDepth", u8, 8),
+            ("index", size, 16),
+            ("groups", reference, 24),
+        ],
+    );
+    let table_pointer = world.pointer(Some(table));
+    let directory = world.pointer(Some(table_pointer));
+    let header = world.record(
+        "map<int,int>",
+        48,
+        &[
+            ("used", size, 0),
+            ("seed", size, 8),
+            ("dirPtr", directory, 16),
+            ("dirLen", size, 24),
+            ("globalDepth", u8, 32),
+        ],
+    );
+    let header_pointer = world.pointer(Some(header));
+    let go_map = world.typedef("map[int]int", header_pointer);
+    world.identify(
+        go_map,
+        SourceLanguage::Go,
+        &[],
+        "map[int]int",
+        vec![TypeArgument::Type(size), TypeArgument::Type(size)],
+    );
+    world.go_kind(go_map, crate::GoKind::Map);
+    variables.push(("Go map".to_owned(), go_map));
+
+    // Zig HashMapUnmanaged(u32, u32, …): metadata, with its header before it.
+    let name = "hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80)";
+    let u32_pointer = world.pointer(Some(u32));
+    world.record(
+        &format!("{name}.Header"),
+        24,
+        &[
+            ("values", u32_pointer, 0),
+            ("keys", u32_pointer, 8),
+            ("capacity", u32, 16),
+        ],
+    );
+    let metadata = world.pointer(Some(u8));
+    let zig_map = world.record(
+        name,
+        16,
+        &[
+            ("metadata", metadata, 0),
+            ("size", u32, 8),
+            ("available", u32, 12),
+        ],
+    );
+    world.identify(
+        zig_map,
+        SourceLanguage::Zig,
+        &["hash_map"],
+        "HashMapUnmanaged",
+        vec![
+            TypeArgument::Type(u32),
+            TypeArgument::Type(u32),
+            unknown("hash_map.AutoContext(u32)"),
+            TypeArgument::Value(IntegerValue::Unsigned(80)),
+        ],
+    );
+    variables.push(("Zig HashMapUnmanaged".to_owned(), zig_map));
 }
 
 fn world_size(world: &World, ty: TypeReference) -> u64 {
@@ -341,7 +602,9 @@ pub fn hostile(data: &[u8]) {
             ty: *ty,
         };
         world.work = Some(work.min(MAX_WORK));
-        match present(&bound, &mut world, this.clone()) {
+        let mut checkpoints = Checkpoints::default();
+        let mut elements = 0;
+        match present(&bound, &mut world, this.clone(), &mut checkpoints) {
             Ok(presented) => {
                 if let Some(text) = &presented.text {
                     assert!(text.bytes.len() <= crate::TextSummary::MAX_BYTES, "{name}");
@@ -351,6 +614,7 @@ pub fn hostile(data: &[u8]) {
                     "{name}: {}",
                     presented.summary.len()
                 );
+                elements = presented.count.map_or(0, crate::PresentedCount::known);
             }
             Err(Failure::Problem(_)) => {}
             Err(Failure::Debugger(error)) => panic!("{name}: {error}"),
@@ -358,22 +622,36 @@ pub fn hostile(data: &[u8]) {
         world.work = Some(work.min(MAX_WORK));
         let offset = u64::from(input.byte()) * 16;
         let limit = u64::from(input.byte());
-        if let Ok(page) = children(&bound, &mut world, this.clone(), offset, limit) {
+        if let Ok(page) = children(
+            &bound,
+            &mut world,
+            this.clone(),
+            elements,
+            offset,
+            limit,
+            &mut checkpoints,
+        ) {
             assert!(
                 page.len() as u64 <= limit,
                 "{name}: {} of {limit}",
                 page.len()
             );
             for child in &page {
-                if let Child::Element(index, _) = child {
+                if let Child::Element(index, _) | Child::Entry(index, ..) = child {
                     assert!(*index >= offset && *index < offset + limit, "{name}");
                 }
             }
         }
         world.work = Some(work.min(MAX_WORK));
-        let _ = length(&bound, &mut world, this.clone());
+        let _ = length(&bound, &mut world, this.clone(), &mut checkpoints);
         world.work = Some(work.min(MAX_WORK));
-        let _ = element_place(&bound, &mut world, this, i128::from(input.byte()) - 8);
+        let _ = element_place(
+            &bound,
+            &mut world,
+            this,
+            i128::from(input.byte()) - 8,
+            &mut checkpoints,
+        );
     }
 }
 

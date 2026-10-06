@@ -54,3 +54,106 @@ view c++ std::span<T, E> {
     let size = _M_extent._M_extent_value or E
     show sequence(size) for i in range(size) => _M_ptr[i]
 }
+
+# The ordered containers are red-black trees: _M_header's parent is the
+# root, and each node's value is in its _M_storage, an aligned buffer that
+# follows the node's links.
+view c++ std::map<K, V, _, _> {
+    type Value = arg(typeof(_M_t), 1)
+    type Node = std::_Rb_tree_node<Value>
+    show map(_M_t._M_impl._M_node_count)
+        for x in inorder(_M_t._M_impl._M_header._M_parent, n => n->_M_left, n => n->_M_right)
+        => (*(Value*)&((Node*)x)->_M_storage).first : (*(Value*)&((Node*)x)->_M_storage).second
+}
+
+view c++ std::multimap<K, V, _, _> {
+    type Value = arg(typeof(_M_t), 1)
+    type Node = std::_Rb_tree_node<Value>
+    show map(_M_t._M_impl._M_node_count)
+        for x in inorder(_M_t._M_impl._M_header._M_parent, n => n->_M_left, n => n->_M_right)
+        => (*(Value*)&((Node*)x)->_M_storage).first : (*(Value*)&((Node*)x)->_M_storage).second
+}
+
+view c++ std::set<K, _, _> {
+    type Value = arg(typeof(_M_t), 1)
+    type Node = std::_Rb_tree_node<Value>
+    show sequence(_M_t._M_impl._M_node_count)
+        for x in inorder(_M_t._M_impl._M_header._M_parent, n => n->_M_left, n => n->_M_right)
+        => *(Value*)&((Node*)x)->_M_storage
+}
+
+view c++ std::multiset<K, _, _> {
+    type Value = arg(typeof(_M_t), 1)
+    type Node = std::_Rb_tree_node<Value>
+    show sequence(_M_t._M_impl._M_node_count)
+        for x in inorder(_M_t._M_impl._M_header._M_parent, n => n->_M_left, n => n->_M_right)
+        => *(Value*)&((Node*)x)->_M_storage
+}
+
+# The unordered containers keep every node on one list from
+# _M_before_begin; the node type is the one their allocator allocates.
+view c++ std::unordered_map<K, V, _, _, _> {
+    type Value = arg(typeof(_M_h), 1)
+    type Node = arg(typeof(_M_h._M_alloc._M_obj), 0)
+    show map(_M_h._M_element_count) for x in list(_M_h._M_before_begin._M_nxt, n => n->_M_nxt)
+        => (*(Value*)&((Node*)x)->_M_storage).first : (*(Value*)&((Node*)x)->_M_storage).second
+}
+
+view c++ std::unordered_multimap<K, V, _, _, _> {
+    type Value = arg(typeof(_M_h), 1)
+    type Node = arg(typeof(_M_h._M_alloc._M_obj), 0)
+    show map(_M_h._M_element_count) for x in list(_M_h._M_before_begin._M_nxt, n => n->_M_nxt)
+        => (*(Value*)&((Node*)x)->_M_storage).first : (*(Value*)&((Node*)x)->_M_storage).second
+}
+
+view c++ std::unordered_set<K, _, _, _> {
+    type Value = arg(typeof(_M_h), 1)
+    type Node = arg(typeof(_M_h._M_alloc._M_obj), 0)
+    show sequence(_M_h._M_element_count) for x in list(_M_h._M_before_begin._M_nxt, n => n->_M_nxt)
+        => *(Value*)&((Node*)x)->_M_storage
+}
+
+view c++ std::unordered_multiset<K, _, _, _> {
+    type Value = arg(typeof(_M_h), 1)
+    type Node = arg(typeof(_M_h._M_alloc._M_obj), 0)
+    show sequence(_M_h._M_element_count) for x in list(_M_h._M_before_begin._M_nxt, n => n->_M_nxt)
+        => *(Value*)&((Node*)x)->_M_storage
+}
+
+# A list is a ring through its own _M_node, which holds no element.
+view c++ std::list<T, _> {
+    type Node = std::_List_node<T>
+    let sentinel = &_M_impl._M_node
+    show sequence(_M_impl._M_node._M_size)
+        for x in list(sentinel, n => n->_M_next) if x != sentinel
+        => *(T*)&((Node*)x)->_M_storage
+}
+
+# The old ABI's list keeps no count.
+view c++ std::list<T, _> {
+    type Node = std::_List_node<T>
+    let sentinel = &_M_impl._M_node
+    show sequence(_) for x in list(sentinel, n => n->_M_next) if x != sentinel
+        => *(T*)&((Node*)x)->_M_storage
+}
+
+# A forward list keeps no count; its last node links to nothing.
+view c++ std::forward_list<T, _> {
+    type Node = std::_Fwd_list_node<T>
+    show sequence(_) for x in list(_M_impl._M_head._M_next, n => n->_M_next)
+        => *(T*)&((Node*)x)->_M_storage
+}
+
+# A deque's elements are in blocks of equal size, which its start
+# iterator's bounds measure; _M_node points into the map of blocks.
+view c++ std::deque<T, _> {
+    let start = _M_impl._M_start
+    let finish = _M_impl._M_finish
+    let nodes = start._M_node
+    let block = start._M_last - start._M_first
+    let skipped = start._M_cur - start._M_first
+    let blocks = finish._M_node - nodes
+    let size = block * (blocks - 1) + (finish._M_cur - finish._M_first) + (start._M_last - start._M_cur)
+    check block > 0 && blocks >= 0 && size >= 0
+    show sequence(size) for i in range(size) => nodes[(skipped + i) / block][(skipped + i) % block]
+}

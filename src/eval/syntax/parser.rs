@@ -217,7 +217,7 @@ fn ambiguities(tokens: &[Token]) -> Vec<usize> {
         if punct(open) != Some(Punct::OpenParen)
             || open > 0
                 && ident(open - 1).is_some_and(|word| {
-                    matches!(word, "sizeof" | "len") || Builtin::parse(word).is_some()
+                    matches!(word, "sizeof" | "len" | "offsetof") || Builtin::parse(word).is_some()
                 })
         {
             continue;
@@ -534,6 +534,20 @@ impl<'tokens> Parser<'tokens> {
         self.push(NodeKind::SizeOf(SizeOf::Operand(operand)), start.to(close))
     }
 
+    /// `offsetof(TYPE, member)`, which only views write.
+    fn offset_of(&mut self) -> Result<NodeId, ExpressionError> {
+        let start = self.advance();
+        self.expect(Punct::OpenParen, "after `offsetof`")?;
+        let (ty, _) = self.type_name(true)?;
+        self.expect(Punct::Comma, "between `offsetof`'s type and member")?;
+        let (TokenKind::Ident(member) | TokenKind::Quoted(member)) = self.peek().clone() else {
+            return Err(self.unexpected("a member's name"));
+        };
+        self.advance();
+        let close = self.expect(Punct::CloseParen, "to close `offsetof(`")?;
+        self.push(NodeKind::OffsetOf { ty, member }, start.to(close))
+    }
+
     /// `(` begins a cast or a parenthesized expression.
     fn parenthesized(&mut self) -> Result<NodeId, ExpressionError> {
         let open = self.position;
@@ -609,6 +623,12 @@ impl<'tokens> Parser<'tokens> {
                         format!("`{word}` is spelled `null`"),
                     )
                     .with_hint("write `null`"));
+                }
+                "offsetof"
+                    if self.dialect == Dialect::View
+                        && self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen) =>
+                {
+                    return self.offset_of();
                 }
                 "len" if self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen) => {
                     self.advance();

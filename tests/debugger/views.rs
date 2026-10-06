@@ -3,10 +3,11 @@
 //! matrix, and every built-in view binds in some build.
 //!
 //! A marker reads `VIEW: <expression> => <summary>`, where `{c*N}` stands
-//! for N of the character c, `VIEW: <expression> => problem: <words>` when
-//! the view must refuse the value, or `VIEW: <expression> => stored` when no
-//! view presents it. Each expression is evaluated in the frame that calls
-//! `barrier`.
+//! for N of the character c and a trailing `(any order)` lets a hash
+//! table's entries come in any order, `VIEW: <expression> => problem:
+//! <words>` when the view must refuse the value, or `VIEW: <expression> =>
+//! stored` when no view presents it. Each expression is evaluated in the
+//! frame that calls `barrier`.
 
 use uscope::{
     Evaluation, Expression, InspectedValue, PresentedCount, PresentedShape, StackFrameId,
@@ -18,6 +19,11 @@ use super::*;
 /// What a marker says its expression shows.
 enum Expected {
     Summary(String),
+    /// A summary whose items may come in any order.
+    Unordered(String),
+    /// Only how many elements or entries, which come in an order that
+    /// changes between runs.
+    Count(u64),
     /// The view refuses the value, saying this.
     Problem(String),
     /// No view presents the value, and it holds no text.
@@ -54,6 +60,23 @@ fn expand(text: &str) -> String {
     out
 }
 
+/// What a marker's text after ` => ` says.
+fn expectation(text: &str) -> Expected {
+    if text == "stored" {
+        return Expected::Stored;
+    }
+    if let Some(problem) = text.strip_prefix("problem: ") {
+        return Expected::Problem(problem.to_owned());
+    }
+    if let Some(count) = text.strip_prefix("count: ") {
+        return Expected::Count(count.parse().expect("a count"));
+    }
+    text.strip_suffix(" (any order)").map_or_else(
+        || Expected::Summary(expand(text)),
+        |summary| Expected::Unordered(expand(summary)),
+    )
+}
+
 fn markers(source: &str) -> Vec<Marker> {
     let path = format!("{}/tests/fixtures/{source}", env!("CARGO_MANIFEST_DIR"));
     let text = fs::read_to_string(&path).expect("read the fixture's source");
@@ -65,13 +88,7 @@ fn markers(source: &str) -> Vec<Marker> {
             Some(Marker {
                 line: index + 1,
                 expression: expression.trim().to_owned(),
-                expected: match expected.trim() {
-                    "stored" => Expected::Stored,
-                    expected => expected.strip_prefix("problem: ").map_or_else(
-                        || Expected::Summary(expand(expected)),
-                        |problem| Expected::Problem(problem.to_owned()),
-                    ),
-                },
+                expected: expectation(expected.trim()),
             })
         })
         .collect()
@@ -86,6 +103,38 @@ async fn evaluate(scenario: &Scenario, text: &str) -> InspectedValue {
         Evaluation::Value { value, .. } => value,
         other => panic!("`{text}` is not a value: {other:?}"),
     }
+}
+
+/// A summary with its items sorted, so that items in any order compare
+/// equal: `len=2 {2: 20, 1: 10}` is `len=2 {1: 10, 2: 20}`.
+fn sorted_items(summary: &str) -> String {
+    let Some(open) = summary.find(['[', '{']) else {
+        return summary.to_owned();
+    };
+    let (head, body) = summary.split_at(open);
+    let (inner, close) = body[1..].split_at(body.len() - 2);
+    let mut items = Vec::new();
+    let mut depth = 0_i32;
+    let mut quoted = false;
+    let mut start = 0;
+    let bytes = inner.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'"' if index == 0 || bytes[index - 1] != b'\\' => quoted = !quoted,
+            b'[' | b'{' if !quoted => depth += 1,
+            b']' | b'}' if !quoted => depth -= 1,
+            b',' if !quoted && depth == 0 => {
+                items.push(inner[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if !inner.trim().is_empty() {
+        items.push(inner[start..].trim());
+    }
+    items.sort_unstable();
+    format!("{head}{}{}{close}", &body[..1], items.join(", "))
 }
 
 fn presentation(value: &InspectedValue) -> Option<&uscope::Presentation> {
@@ -105,9 +154,67 @@ fn summary(value: &InspectedValue) -> String {
     }
 }
 
-/// Checks a presented sequence's children: its elements, which evaluate
-/// back by their index, the same in pages of any size; its fields; and
-/// `[raw]`, the value as stored.
+/// Whether a child is an element or an entry.
+const fn is_item(relationship: &ValueChildRelationship) -> bool {
+    matches!(
+        relationship,
+        ValueChildRelationship::Element { .. } | ValueChildRelationship::Entry { .. }
+    )
+}
+
+/// The first `wanted` children, in as few pages as the largest budget
+/// allows: a scan resumes where the page before it ran out.
+async fn first_children(
+    scenario: &Scenario,
+    marker: &Marker,
+    reference: &Arc<uscope::ValueChildrenReference>,
+    wanted: u64,
+    failures: &mut Vec<String>,
+) -> Option<Vec<uscope::ValueChild>> {
+    let mut children = Vec::new();
+    while (children.len() as u64) < wanted {
+        let page = scenario
+            .operation(
+                "children",
+                scenario.handle().value_children_with_limits(
+                    Arc::clone(reference),
+                    ValueChildQuery {
+                        offset: children.len() as u64,
+                        limit: u32::try_from(wanted - children.len() as u64).expect("small"),
+                    },
+                    uscope::InspectionLimits {
+                        memory_reads: 1024,
+                        ..uscope::InspectionLimits::default()
+                    },
+                ),
+            )
+            .await;
+        if page.children.is_empty() {
+            failures.push(format!(
+                "line {}: a page at {} is empty: {:?}",
+                marker.line,
+                children.len(),
+                page.completion
+            ));
+            return None;
+        }
+        if page.children.len() as u64 != wanted - children.len() as u64
+            && page.completion.exhaustion().is_none()
+        {
+            failures.push(format!(
+                "line {}: a short page at {} is complete",
+                marker.line,
+                children.len()
+            ));
+        }
+        children.extend(page.children.iter().cloned());
+    }
+    Some(children)
+}
+
+/// Checks a presented sequence's or map's children: its elements or
+/// entries, which evaluate back, the same in pages of any size; its fields;
+/// and `[raw]`, the value as stored.
 async fn check_children(
     scenario: &Scenario,
     marker: &Marker,
@@ -118,36 +225,14 @@ async fn check_children(
         failures.push(format!("line {}: no children", marker.line));
         return;
     };
-    let count = match presentation.count {
-        Some(PresentedCount::Exact(count)) => count,
-        _ => 0,
+    let count = presentation.count.map_or(0, PresentedCount::known);
+    let wanted = reference.total().min(256);
+    let Some(whole) = first_children(scenario, marker, reference, wanted, failures).await else {
+        return;
     };
-    let page = |offset, limit| {
-        scenario
-            .handle()
-            .value_children(Arc::clone(reference), ValueChildQuery { offset, limit })
-    };
-    // A whole page of elements needs more reads than the default budget.
-    let whole = scenario
-        .operation(
-            "children",
-            scenario.handle().value_children_with_limits(
-                Arc::clone(reference),
-                ValueChildQuery {
-                    offset: 0,
-                    limit: u32::try_from(reference.total().min(256)).expect("small"),
-                },
-                uscope::InspectionLimits {
-                    memory_reads: 1024,
-                    ..uscope::InspectionLimits::default()
-                },
-            ),
-        )
-        .await;
     let elements = whole
-        .children
         .iter()
-        .filter(|child| matches!(child.relationship, ValueChildRelationship::Element { .. }))
+        .filter(|child| is_item(&child.relationship))
         .count() as u64;
     if elements != count.min(256) {
         failures.push(format!(
@@ -155,7 +240,7 @@ async fn check_children(
             marker.line
         ));
     }
-    let raw = whole.children.last();
+    let raw = whole.last();
     if !matches!(
         raw,
         Some(uscope::ValueChild {
@@ -174,12 +259,18 @@ async fn check_children(
     let mut paged = Vec::new();
     let mut offset = 0;
     while offset < count.min(32) {
-        let small = scenario.operation("a small page", page(offset, 7)).await;
+        let small = scenario
+            .operation(
+                "a small page",
+                scenario
+                    .handle()
+                    .value_children(Arc::clone(reference), ValueChildQuery { offset, limit: 7 }),
+            )
+            .await;
         paged.extend(small.children.iter().map(|child| child.state.clone()));
         offset += 7;
     }
     let expected = whole
-        .children
         .iter()
         .take(paged.len())
         .map(|child| child.state.clone())
@@ -190,29 +281,152 @@ async fn check_children(
             marker.line
         ));
     }
-    // An element's name evaluates back to it.
     for index in [0, count.saturating_sub(1)] {
-        if index >= count.min(256) {
-            continue;
+        if index < count.min(256) {
+            let child = &whole[usize::try_from(index).expect("small")];
+            check_name(scenario, marker, index, child, failures).await;
         }
-        let child = &whole.children[usize::try_from(index).expect("small")];
-        let again = evaluate(scenario, &format!("({})[{index}]", marker.expression)).await;
-        let rendered = |state: &VariableState| match state {
+    }
+}
+
+/// An element's name evaluates back to it, and so does where an entry's
+/// value is.
+async fn check_name(
+    scenario: &Scenario,
+    marker: &Marker,
+    index: u64,
+    child: &uscope::ValueChild,
+    failures: &mut Vec<String>,
+) {
+    let name = match (&child.relationship, &child.state) {
+        (ValueChildRelationship::Element { .. }, _) => {
+            format!("({})[{index}]", marker.expression)
+        }
+        (
+            ValueChildRelationship::Entry { .. },
             VariableState::Available {
-                presentation: Some(presentation),
+                source: uscope::VariableValueSource::Memory(address),
                 ..
-            } => presentation.summary.to_string(),
-            VariableState::Available { value, text, .. } => format!("{value:?} {text:?}"),
-            state => format!("{state:?}"),
-        };
-        if rendered(&again.state) != rendered(&child.state) {
+            },
+        ) => uscope::Expression::at(&child.type_info.name, address.get())
+            .expect("an entry's place")
+            .to_string(),
+        other => {
+            failures.push(format!("line {}: child {index} is {other:?}", marker.line));
+            return;
+        }
+    };
+    let again = evaluate(scenario, &name).await;
+    let rendered = |state: &VariableState| match state {
+        VariableState::Available {
+            presentation: Some(presentation),
+            ..
+        } => presentation.summary.to_string(),
+        VariableState::Available { value, text, .. } => format!("{value:?} {text:?}"),
+        state => format!("{state:?}"),
+    };
+    if rendered(&again.state) != rendered(&child.state) {
+        failures.push(format!(
+            "line {}: `{name}` is {} but child {index} is {}",
+            marker.line,
+            rendered(&again.state),
+            rendered(&child.state)
+        ));
+    }
+}
+
+/// Checks what one marker says its expression shows.
+async fn check_marker(
+    scenario: &Scenario,
+    marker: &Marker,
+    value: &InspectedValue,
+    seen: &mut BTreeSet<String>,
+    failures: &mut Vec<String>,
+) {
+    if matches!(marker.expected, Expected::Stored) {
+        if !matches!(
+            value.state,
+            VariableState::Available {
+                text: None,
+                presentation: None,
+                ..
+            }
+        ) {
             failures.push(format!(
-                "line {}: `{}[{index}]` is {} but its child is {}",
-                marker.line,
-                marker.expression,
-                rendered(&again.state),
-                rendered(&child.state)
+                "line {}: `{}` is presented: {:?}",
+                marker.line, marker.expression, value.state
             ));
+        }
+        return;
+    }
+    // Text a language's own types hold, such as Rust's `Box<str>`, needs
+    // no view.
+    if let (
+        VariableState::Available {
+            text: Some(text),
+            presentation: None,
+            ..
+        },
+        Expected::Summary(expected) | Expected::Unordered(expected),
+    ) = (&value.state, &marker.expected)
+    {
+        if &uscope::quoted_text(text) != expected {
+            failures.push(format!("line {}: the text is {text:?}", marker.line));
+        }
+        return;
+    }
+    let Some(presentation) = presentation(value) else {
+        failures.push(format!(
+            "line {}: `{}` has no presentation: {:?}",
+            marker.line, marker.expression, value.state
+        ));
+        return;
+    };
+    seen.insert(presentation.view.to_string());
+    match (&marker.expected, presentation.shape) {
+        (Expected::Problem(words), PresentedShape::Raw) => {
+            let problem = presentation
+                .problem
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            if !problem.contains(words.as_str()) {
+                failures.push(format!("line {}: the problem is `{problem}`", marker.line));
+            }
+        }
+        (Expected::Problem(_), _) => failures.push(format!(
+            "line {}: `{}` shows as {}, not a problem",
+            marker.line,
+            marker.expression,
+            summary(value)
+        )),
+        (Expected::Stored, _) => unreachable!("checked above"),
+        (Expected::Count(expected), _) => {
+            if presentation.count != Some(PresentedCount::Exact(*expected)) {
+                failures.push(format!(
+                    "line {}: `{}` counts {:?}",
+                    marker.line, marker.expression, presentation.count
+                ));
+            }
+            check_children(scenario, marker, presentation, failures).await;
+        }
+        (Expected::Summary(expected) | Expected::Unordered(expected), _) => {
+            let mut actual = summary(value);
+            if matches!(marker.expected, Expected::Unordered(_)) {
+                actual = sorted_items(&actual);
+            }
+            if &actual != expected {
+                failures.push(format!(
+                    "line {}: `{}`\n    expected {expected}\n    actual   {actual}",
+                    marker.line, marker.expression
+                ));
+            }
+            if matches!(
+                presentation.shape,
+                PresentedShape::Sequence | PresentedShape::Map
+            ) {
+                check_children(scenario, marker, presentation, failures).await;
+            }
         }
     }
 }
@@ -224,6 +438,18 @@ async fn check_containers(
     source: &str,
     barrier: &str,
     optimized: bool,
+) -> BTreeSet<String> {
+    check_containers_but(fixture, source, barrier, optimized, &[]).await
+}
+
+/// As [`check_containers`], skipping the markers of `skipped` expressions,
+/// which a build has no way to show.
+async fn check_containers_but(
+    fixture: &str,
+    source: &str,
+    barrier: &str,
+    optimized: bool,
+    skipped: &[&str],
 ) -> BTreeSet<String> {
     let mut scenario = Scenario::launch(fixture);
     scenario.add_breakpoint(barrier).await;
@@ -244,82 +470,27 @@ async fn check_containers(
     assert!(markers.len() >= 5, "{source} has its markers");
     let mut seen = BTreeSet::new();
     let mut failures = Vec::new();
-    for marker in &markers {
-        let value = evaluate(&scenario, &marker.expression).await;
+    for marker in markers
+        .iter()
+        .filter(|marker| !skipped.contains(&marker.expression.as_str()))
+    {
+        // An optimized build may keep no value of a variable, or no
+        // variable at all.
+        let value = if optimized {
+            let expression = Expression::parse(&marker.expression).expect("an expression");
+            match scenario.handle().evaluate(&expression).await {
+                Ok(Evaluation::Value { value, .. }) => value,
+                Ok(other) => panic!("`{}` is not a value: {other:?}", marker.expression),
+                Err(error) if error.to_string().contains("no variable is named") => continue,
+                Err(error) => panic!("`{}`: {error}", marker.expression),
+            }
+        } else {
+            evaluate(&scenario, &marker.expression).await
+        };
         if optimized && matches!(value.state, VariableState::Unavailable(_)) {
             continue;
         }
-        if matches!(marker.expected, Expected::Stored) {
-            if !matches!(
-                value.state,
-                VariableState::Available {
-                    text: None,
-                    presentation: None,
-                    ..
-                }
-            ) {
-                failures.push(format!(
-                    "line {}: `{}` is presented: {:?}",
-                    marker.line, marker.expression, value.state
-                ));
-            }
-            continue;
-        }
-        // Text a language's own types hold, such as Rust's `Box<str>`, needs
-        // no view.
-        if let (
-            VariableState::Available {
-                text: Some(text),
-                presentation: None,
-                ..
-            },
-            Expected::Summary(expected),
-        ) = (&value.state, &marker.expected)
-        {
-            if &uscope::quoted_text(text) != expected {
-                failures.push(format!("line {}: the text is {text:?}", marker.line));
-            }
-            continue;
-        }
-        let Some(presentation) = presentation(&value) else {
-            failures.push(format!(
-                "line {}: `{}` has no presentation: {:?}",
-                marker.line, marker.expression, value.state
-            ));
-            continue;
-        };
-        seen.insert(presentation.view.to_string());
-        match (&marker.expected, presentation.shape) {
-            (Expected::Problem(words), PresentedShape::Raw) => {
-                let problem = presentation
-                    .problem
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default();
-                if !problem.contains(words.as_str()) {
-                    failures.push(format!("line {}: the problem is `{problem}`", marker.line));
-                }
-            }
-            (Expected::Problem(_), _) => failures.push(format!(
-                "line {}: `{}` shows as {}, not a problem",
-                marker.line,
-                marker.expression,
-                summary(&value)
-            )),
-            (Expected::Stored, _) => unreachable!("checked above"),
-            (Expected::Summary(expected), _) => {
-                let actual = summary(&value);
-                if &actual != expected {
-                    failures.push(format!(
-                        "line {}: `{}`\n    expected {expected}\n    actual   {actual}",
-                        marker.line, marker.expression
-                    ));
-                }
-                if presentation.shape == PresentedShape::Sequence {
-                    check_children(&scenario, marker, presentation, &mut failures).await;
-                }
-            }
-        }
+        check_marker(&scenario, marker, &value, &mut seen, &mut failures).await;
     }
     assert!(failures.is_empty(), "{fixture}:\n{}", failures.join("\n"));
     scenario.shutdown().await;
@@ -343,16 +514,20 @@ fn assert_every_view_binds(library: &str, seen: &BTreeSet<String>) {
 #[tokio::test]
 async fn cpp_containers_present_as_their_views_say_across_the_library_matrix() {
     let mut seen = BTreeSet::new();
-    for (fixture, optimized) in [
-        ("containers-cpp-gcc-o0", false),
-        ("containers-cpp-gcc-o2", true),
-        ("containers-cpp-clang-o0", false),
-        ("containers-cpp-clang-o2", true),
-        ("containers-cpp-gcc-oldabi", false),
-        ("containers-cpp-libcxx-o0", false),
-        ("containers-cpp-libcxx-o2", true),
+    for (fixture, optimized, skipped) in [
+        ("containers-cpp-gcc-o0", false, &[][..]),
+        ("containers-cpp-gcc-o2", true, &[]),
+        ("containers-cpp-clang-o0", false, &[]),
+        ("containers-cpp-clang-o2", true, &[]),
+        // The old ABI's list keeps no count to be wrong.
+        ("containers-cpp-gcc-oldabi", false, &["overcounted"]),
+        ("containers-cpp-libcxx-o0", false, &[]),
+        ("containers-cpp-libcxx-o2", true, &[]),
     ] {
-        seen.extend(check_containers(fixture, "cpp/containers.cpp", "barrier", optimized).await);
+        seen.extend(
+            check_containers_but(fixture, "cpp/containers.cpp", "barrier", optimized, skipped)
+                .await,
+        );
     }
     assert_every_view_binds("libstdc++.views", &seen);
     assert_every_view_binds("libc++.views", &seen);
@@ -370,10 +545,33 @@ async fn rust_containers_present_as_their_views_say() {
 #[tokio::test]
 async fn zig_containers_present_as_their_views_say() {
     let mut seen = BTreeSet::new();
-    for (fixture, optimized) in [("containers-zig-o0", false), ("containers-zig-o2", true)] {
-        seen.extend(check_containers(fixture, "zig/containers.zig", "barrier", optimized).await);
+    for (fixture, optimized, skipped) in [
+        ("containers-zig-o0", false, &[][..]),
+        // ReleaseSafe emits no entry type for an array hash map, so nothing
+        // says how its entries are laid out, and it shows as stored.
+        (
+            "containers-zig-o2",
+            true,
+            &["ordered", "strings", "no_ordered"],
+        ),
+    ] {
+        seen.extend(
+            check_containers_but(fixture, "zig/containers.zig", "barrier", optimized, skipped)
+                .await,
+        );
     }
     assert_every_view_binds("zig-std.views", &seen);
+}
+
+#[tokio::test]
+async fn go_maps_present_as_their_views_say() {
+    let mut seen = BTreeSet::new();
+    for (fixture, optimized) in [("containers-go-o0", false), ("containers-go-o2", true)] {
+        seen.extend(
+            check_containers(fixture, "go/containers/main.go", "main.barrier", optimized).await,
+        );
+    }
+    assert_every_view_binds("go-runtime.views", &seen);
 }
 
 /// Inspection sent beside run control never holds it up or answers
@@ -567,7 +765,7 @@ view rust nowhere {
     assert_eq!(
         errors.iter().map(ToString::to_string).collect::<Vec<_>>(),
         [
-            "session.views:10:10: expected a shape: `text`, `value`, `empty`, `sequence`, or `if`, found `nothing`"
+            "session.views:10:10: expected a shape: `text`, `value`, `empty`, `sequence`, `map`, or `if`, found `nothing`"
         ]
     );
     let ints = evaluate(&scenario, "ints").await;

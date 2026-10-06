@@ -130,6 +130,9 @@ pub struct Program {
     pub source_lines: u64,
     /// The conditions the source states at its lines.
     pub markers: Vec<Marker>,
+    /// The views its types are presented with, from `NAME.views` beside
+    /// its source, which the client loads.
+    pub views: Option<Arc<str>>,
 }
 
 pub struct Corpus {
@@ -228,6 +231,7 @@ impl Corpus {
             let markers =
                 markers::parse(&source).map_err(|error| CorpusError::load(&source_file, error))?;
             programs.push(Program {
+                views: views_of(&root, &manifest.program)?,
                 source: PathBuf::from(format!("{SIMULATED_ROOT}/{0}/{0}.c", manifest.program)),
                 source_lines,
                 markers,
@@ -238,6 +242,17 @@ impl Corpus {
             });
         }
         Ok(Self { programs })
+    }
+}
+
+/// The views of program `name`'s types, from `NAME.views` beside its
+/// source, if it has one.
+fn views_of(root: &Path, name: &str) -> Result<Option<Arc<str>>, CorpusError> {
+    let path = root.join(name).join(format!("{name}.views"));
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(Arc::from(text))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(CorpusError::Io { path, error }),
     }
 }
 

@@ -639,3 +639,74 @@ fn views_present_containers_with_paged_elements_and_raw_one_step_away() {
     );
     dap.finish();
 }
+
+/// A map's entries are indexed and named by their keys; each entry's value
+/// evaluates back by where it is, and can be changed. A scanned sequence's
+/// elements evaluate back by their index.
+#[test]
+fn views_present_maps_as_entries_named_by_their_keys() {
+    let mut dap = Dap::start("maps");
+    let stop = stopped_at(
+        &mut dap,
+        "containers-cpp-gcc-o0",
+        "cpp/containers.cpp",
+        "barrier(&text)",
+    );
+    let frame = frames(&mut dap, stop.thread)[0].clone();
+    let scopes = scopes(&mut dap, &frame);
+    let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
+
+    let ordered = named(&locals, "ordered");
+    assert_eq!(ordered["value"], "len=3 {1: 10, 2: 20, 3: 30}");
+    assert_eq!(
+        (&ordered["indexedVariables"], &ordered["namedVariables"]),
+        (&json!(3), &json!(1))
+    );
+    let entries = dap.request(
+        "variables",
+        json!({"variablesReference": ordered["variablesReference"], "filter": "indexed", "start": 0, "count": 3}),
+    )["variables"]
+        .as_array()
+        .expect("variables")
+        .clone();
+    assert_eq!(
+        values(&entries),
+        [
+            ("1".to_owned(), "10".to_owned()),
+            ("2".to_owned(), "20".to_owned()),
+            ("3".to_owned(), "30".to_owned()),
+        ]
+    );
+    let place = entries[1]["evaluateName"]
+        .as_str()
+        .expect("an evaluateName");
+    assert!(place.starts_with("*(int*)"), "{place}");
+    let again = dap.request(
+        "evaluate",
+        json!({"expression": place, "frameId": frame["id"], "context": "watch"}),
+    );
+    assert_eq!(again["result"], "20");
+    let changed = dap.request(
+        "setVariable",
+        json!({"variablesReference": ordered["variablesReference"], "name": "2", "value": "25"}),
+    );
+    assert_eq!(changed["value"], "25");
+    let evaluated = dap.request(
+        "evaluate",
+        json!({"expression": "ordered", "frameId": frame["id"], "context": "watch"}),
+    );
+    assert_eq!(evaluated["result"], "len=3 {1: 10, 2: 25, 3: 30}");
+
+    let linked = named(&locals, "linked");
+    let elements = variables(&mut dap, &linked["variablesReference"]);
+    assert_eq!(
+        (&elements[2]["name"], &elements[2]["evaluateName"]),
+        (&json!("[2]"), &json!("linked[2]"))
+    );
+    let third = dap.request(
+        "evaluate",
+        json!({"expression": "linked[2] + len(linked)", "frameId": frame["id"], "context": "watch"}),
+    );
+    assert_eq!(third["result"], "6");
+    dap.finish();
+}

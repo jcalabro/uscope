@@ -16,3 +16,31 @@ view zig array_list.AlignedManaged(T, _) {
     show sequence(len(items)) for i in range(len(items)) => items[i]
     field capacity = capacity
 }
+
+# The managed hash map holds an unmanaged one and its allocator.
+view zig hash_map.HashMap(K, V, _, _) {
+    show value(unmanaged)
+}
+
+# A hash map's metadata is a byte for each slot, whose top bit is set when
+# the slot is used; its header, which holds the keys, the values, and the
+# capacity, lies just before the metadata.
+view zig hash_map.HashMapUnmanaged(K, V, _, _) {
+    type Header = typeof(self).Header
+    let header = (Header*)metadata - 1
+    let used = (u8*)metadata
+    check size == 0 || metadata != null
+    show map(size) for i in range(size == 0 ? 0 : header->capacity) if used[i] & 0x80 != 0
+        => header->keys[i] : header->values[i]
+}
+
+# An array hash map keeps its entries in a MultiArrayList, which holds each
+# field of an entry in an array of its own; the arrays follow one another
+# in the order Zig lays the fields out in the entry's type.
+view zig array_hash_map.Custom(K, V, _, _) {
+    type Data = arg(typeof(entries), 0)
+    let keys = (K*)(entries.bytes + entries.capacity * offsetof(Data, key))
+    let values = (V*)(entries.bytes + entries.capacity * offsetof(Data, value))
+    check entries.len <= entries.capacity
+    show map(entries.len) for i in range(entries.len) => keys[i] : values[i]
+}
