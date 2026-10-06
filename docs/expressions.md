@@ -168,7 +168,6 @@ f(x)                      => error syntax at `f(`
 a +                       => error syntax at ``
 ```
 
-
 ## Arithmetic is exact
 
 `+ - * / %` compute the true result. No operand's type limits it: two `u8`

@@ -192,6 +192,23 @@ impl<M: Machine> Interpreter<'_, M> {
         }
     }
 
+    /// The address a pointer points at, unavailable when it is null.
+    fn pointee_address(
+        &mut self,
+        node: &Node<M::Object, M::Step>,
+        span: Span,
+    ) -> Result<u64, Halt> {
+        match self.pointer(node)? {
+            0 => Err(Halt::Missing {
+                state: Box::new(unavailable(VariableUnavailableReason::ValueAccess(
+                    ValueAccessUnavailableReason::NullPointer,
+                ))),
+                cause: span,
+            }),
+            address => Ok(address),
+        }
+    }
+
     /// An index value as `i128`, which every index the debugger can reach
     /// fits.
     fn index(&mut self, node: &Node<M::Object, M::Step>) -> Result<i128, Halt> {
@@ -231,29 +248,10 @@ impl<M: Machine> Interpreter<'_, M> {
                 Value::Place(Self::at(span, self.machine.step(&base, step, &values))?)
             }
             Op::At { address, pointee } => {
-                let address = self.pointer(address)?;
-                if address == 0 {
-                    return Err(Halt::Missing {
-                        state: Box::new(unavailable(VariableUnavailableReason::ValueAccess(
-                            ValueAccessUnavailableReason::NullPointer,
-                        ))),
-                        cause: span,
-                    });
-                }
+                let address = self.pointee_address(address, span)?;
                 Value::Place(Self::at(span, self.machine.place_at(address, *pointee))?)
             }
-            Op::Raw { address } => {
-                let address = self.pointer(address)?;
-                if address == 0 {
-                    return Err(Halt::Missing {
-                        state: Box::new(unavailable(VariableUnavailableReason::ValueAccess(
-                            ValueAccessUnavailableReason::NullPointer,
-                        ))),
-                        cause: span,
-                    });
-                }
-                Value::Raw(address)
-            }
+            Op::Raw { address } => Value::Raw(self.pointee_address(address, span)?),
             Op::Load(place) => match self.eval(place)? {
                 Value::Place(at) => {
                     let loaded = Self::at(span, self.machine.load(&at))?;
@@ -927,14 +925,7 @@ impl<M: Machine> Interpreter<'_, M> {
             },
             Value::Bool(value) => u128::from(*value),
             Value::Pointer(address) => u128::from(*address),
-            Value::Float(value) => match value.to_value() {
-                crate::FloatValue::Binary32(bits) => u128::from(bits),
-                crate::FloatValue::Binary64(bits) => u128::from(bits),
-                crate::FloatValue::X87Extended {
-                    significand,
-                    sign_exponent,
-                } => u128::from(sign_exponent) << 64 | u128::from(significand),
-            },
+            Value::Float(value) => float_bits(value.to_value()),
             Value::Place(_) | Value::Raw(_) | Value::Text(_) => 0,
         };
         self.ordered(raw, size)
@@ -946,14 +937,7 @@ impl<M: Machine> Interpreter<'_, M> {
             VariableValue::Scalar(ScalarValue::Unsigned(value)) => *value,
             VariableValue::Scalar(ScalarValue::Boolean(value)) => u128::from(*value),
             VariableValue::Address(address) => u128::from(address.address.get()),
-            VariableValue::Scalar(ScalarValue::Floating(value)) => match value {
-                crate::FloatValue::Binary32(bits) => u128::from(*bits),
-                crate::FloatValue::Binary64(bits) => u128::from(*bits),
-                crate::FloatValue::X87Extended {
-                    significand,
-                    sign_exponent,
-                } => u128::from(*sign_exponent) << 64 | u128::from(*significand),
-            },
+            VariableValue::Scalar(ScalarValue::Floating(value)) => float_bits(*value),
             _ => 0,
         };
         self.ordered(raw, size)
@@ -966,5 +950,17 @@ impl<M: Machine> Interpreter<'_, M> {
             bytes.reverse();
         }
         bytes
+    }
+}
+
+/// A float's bit pattern, zero-extended.
+fn float_bits(value: crate::FloatValue) -> u128 {
+    match value {
+        crate::FloatValue::Binary32(bits) => u128::from(bits),
+        crate::FloatValue::Binary64(bits) => u128::from(bits),
+        crate::FloatValue::X87Extended {
+            significand,
+            sign_exponent,
+        } => u128::from(sign_exponent) << 64 | u128::from(significand),
     }
 }

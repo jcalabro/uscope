@@ -16,18 +16,10 @@ mod print;
 use std::fmt;
 use std::sync::Arc;
 
+use ast::Path;
 pub use ast::Tree;
-use ast::{BinaryOp, Path};
-
-/// A path as it is written.
-pub fn print_path(path: &Path) -> String {
-    print::path_text(path)
-}
-
-/// A binary operator as it is written.
-pub const fn binary_operator_text(op: BinaryOp) -> &'static str {
-    parser::binary_text(op)
-}
+pub(super) use parser::binary_text;
+pub(super) use print::path_text;
 
 use super::error::ExpressionError;
 
@@ -99,7 +91,6 @@ pub struct Expression {
 #[derive(Debug)]
 struct Parsed {
     text: String,
-    dialect: Dialect,
     ambiguities: Vec<Ambiguity>,
     /// One reading per combination: bit `i` of the index is set when
     /// ambiguity `i` reads as a cast.
@@ -124,17 +115,10 @@ impl Expression {
         Ok(Self {
             parsed: Arc::new(Parsed {
                 text: text.to_owned(),
-                dialect,
                 ambiguities,
                 readings,
             }),
         })
-    }
-
-    /// The language the expression was read in.
-    #[must_use]
-    pub fn dialect(&self) -> Dialect {
-        self.parsed.dialect
     }
 
     /// The text as written.
@@ -318,7 +302,7 @@ fn check_invariants_in(text: &str, dialect: Dialect) -> Result<(), String> {
         }
     }
     let printed = expression.to_string();
-    let reparsed = match Expression::parse_in(&printed, expression.dialect()) {
+    let reparsed = match Expression::parse_in(&printed, dialect) {
         Ok(reparsed) => reparsed,
         // Spaces and parentheses can take text near a limit past it.
         Err(error) if error.kind == super::error::ErrorKind::Limit => return Ok(()),

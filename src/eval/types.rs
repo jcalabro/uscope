@@ -46,7 +46,7 @@ pub enum Category {
     /// A pointer, to `void` when the pointee is `None`.
     Pointer(Option<Ty>),
     /// A language reference, which stands for what it refers to.
-    Reference(TypeReference),
+    Reference,
     Array {
         element: TypeReference,
         dimensions: Arc<[ArrayDimension]>,
@@ -167,7 +167,7 @@ fn program_category(types: &dyn TypeSource, ty: TypeReference) -> Category {
             Category::Void => Category::Pointer(None),
             _ => Category::Pointer(Some(Ty::Program(*target))),
         },
-        TypeKind::Reference { target, .. } => Category::Reference(*target),
+        TypeKind::Reference { .. } => Category::Reference,
         TypeKind::Array {
             element,
             dimensions,

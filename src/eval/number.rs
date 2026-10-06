@@ -80,10 +80,6 @@ impl Exact {
         })
     }
 
-    pub const fn is_negative(self) -> bool {
-        self.negative
-    }
-
     pub const fn is_zero(self) -> bool {
         self.magnitude == 0
     }
@@ -254,12 +250,6 @@ impl From<u128> for Exact {
             negative: false,
             magnitude: value,
         }
-    }
-}
-
-impl From<i64> for Exact {
-    fn from(value: i64) -> Self {
-        Self::from(i128::from(value))
     }
 }
 
