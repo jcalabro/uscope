@@ -11,7 +11,7 @@ use rustc_apfloat::ieee::X87DoubleExtended;
 use crate::{
     BaseTypeEncoding, FloatValue, IntegerValue, PresentedCount, PresentedShape, ScalarValue,
     TextCompletion, TextSummary, TypeInfo, TypeKind, ValueChildren, VariableState,
-    VariableUnavailableReason, VariableValue,
+    VariableUnavailableReason, VariableValue, VirtualAddress,
 };
 
 /// The most elements a summary previews.
@@ -179,6 +179,7 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
             .map_or_else(|| integer(*value), |enumerator| enumerator.name.to_string()),
         VariableValue::Address(address) => format!("{:#x}", address.address.get()),
         VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
+        VariableValue::Function { code, function } => self::function(*code, function.as_deref()),
         VariableValue::Array { .. } | VariableValue::Slice { .. } => "[…]".to_owned(),
         // A record with no parts has nothing to elide; Rust's is `()`.
         VariableValue::Record if partless => {
@@ -195,6 +196,17 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
     match (text, value) {
         (Some(text), VariableValue::Address(_)) => format!("{rendered} {}", quoted(text)),
         _ => rendered,
+    }
+}
+
+/// A function value: the function it calls, `nil`, or the address of
+/// code no debug information names.
+#[must_use]
+pub fn function(code: Option<VirtualAddress>, function: Option<&str>) -> String {
+    match (code, function) {
+        (None, _) => "nil".to_owned(),
+        (Some(_), Some(function)) => function.to_owned(),
+        (Some(code), None) => format!("{:#x}", code.get()),
     }
 }
 

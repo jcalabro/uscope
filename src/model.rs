@@ -588,6 +588,10 @@ pub enum TypeKind {
     },
     /// A deliberately unspecified type such as C `void`.
     Unspecified,
+    /// A function value, such as Go's `func`: null, or a pointer to a
+    /// context whose first word is the code it calls and whose rest holds
+    /// what a closure captured.
+    Function,
     /// A valid type whose value shape is not implemented yet.
     Opaque {
         /// A stable description of the unsupported DWARF type tag.
@@ -857,6 +861,14 @@ pub enum VariableValue {
     },
     /// A concrete thin pointer or reference address.
     Address(AddressValue),
+    /// A function value. A closure's captured variables are its children.
+    Function {
+        /// The code it calls, or `None` for a null (Go's nil) function.
+        code: Option<VirtualAddress>,
+        /// The function that code begins, when the debug information
+        /// describes one there.
+        function: Option<Arc<str>>,
+    },
     /// An optimized pointer with no concrete address representation.
     ImplicitPointer,
     /// An array whose elements are available through explicit child pages.
@@ -1425,6 +1437,9 @@ pub enum ValueAccessUnavailableReason {
     NonIntegralBitField,
     /// The selected member belongs to a different active variant.
     InactiveVariant(Option<Arc<str>>),
+    /// Debug information does not describe what the closure a function
+    /// value calls captured, or describes it malformedly.
+    UndescribedClosure,
     /// An implicit-pointer view falls outside its referenced source object.
     ImplicitPointerOutOfBounds {
         /// Signed byte offset into the referenced object.
@@ -1570,6 +1585,9 @@ impl fmt::Display for VariableUnavailableReason {
             }
             Self::ValueAccess(ValueAccessUnavailableReason::NonIntegralBitField) => {
                 formatter.write_str("non-integral bit-fields are unsupported")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::UndescribedClosure) => {
+                formatter.write_str("debug information does not describe what the closure captured")
             }
             Self::ValueAccess(ValueAccessUnavailableReason::InactiveVariant(name)) => {
                 if let Some(name) = name {

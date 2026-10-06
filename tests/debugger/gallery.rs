@@ -9,7 +9,7 @@ use std::process::Stdio;
 
 use uscope::{
     FloatValue, IntegerValue, LaunchOptions, StackFrameId, TypeInfo, ValueChildRelationship,
-    Variable, VariableValue,
+    Variable, VariableValue, VariableValueSource,
 };
 
 use super::*;
@@ -188,7 +188,14 @@ async fn check_truth(
                     "has no child {segment} among {} children",
                     reference.total()
                 )
-            })?;
+            });
+        // Optimized code may leave out what nothing reads, such as a
+        // variable a closure captured.
+        let child = match child {
+            Ok(child) => child,
+            Err(_) if may_be_unavailable => return Ok(()),
+            Err(failure) => return Err(failure),
+        };
         type_name = Some(child.type_info.name.clone());
         type_info = Some(child.type_info.clone());
         state = child.state.clone();
@@ -253,6 +260,17 @@ fn shown(kind: &str, state: &VariableState, type_info: Option<&TypeInfo>) -> Str
             }),
         ) => format!("{real:#x}:{imaginary:#x}"),
         ("summary", _) => uscope::value_summary(type_info, state),
+        ("addressable", _) => match state {
+            VariableState::Available {
+                source: VariableValueSource::Memory(_),
+                ..
+            } => String::new(),
+            VariableState::Available { source, .. } => format!("{source:?}"),
+            _ => unreachable!("only available values are shown"),
+        },
+        ("func", VariableValue::Function { code, function }) => {
+            uscope::function_text(*code, function.as_deref())
+        }
         ("len", VariableValue::Slice { length, .. }) => length.to_string(),
         ("string", _) => text
             .as_ref()
@@ -316,13 +334,17 @@ async fn go_values_agree_with_their_program() {
                 "pieces:ratio",
                 "complex:small",
                 "complex:large",
+                "funcs:closure",
+                "funcs:closure.offset",
+                "funcs:closure.total",
+                "escape:counter",
             ][..],
         ),
     ] {
         check_gallery(&Gallery {
             fixture,
             breakpoints: &["main.reached", "main.pieces"],
-            checkpoints: &["complex", "pieces"],
+            checkpoints: &["complex", "funcs", "escape", "pieces"],
             optimized,
             required,
             go: true,

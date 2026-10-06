@@ -318,6 +318,10 @@ impl VariableRuntime for Runtime {
         Ok(VirtualAddress::new(address.get()))
     }
 
+    fn image_address(&self, address: VirtualAddress) -> Option<ImageAddress> {
+        Some(ImageAddress::new(address.get()))
+    }
+
     fn read_memory(
         &mut self,
         _address: VirtualAddress,

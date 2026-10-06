@@ -324,6 +324,9 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
             format!("0x{:0width$x}", value.address.get())
         }
         VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
+        VariableValue::Function { code, function } => {
+            uscope::function_text(*code, function.as_deref())
+        }
         VariableValue::Array { .. } => format!("[<{total} elements>]"),
         VariableValue::Slice { length, capacity } => capacity.map_or_else(
             || format!("[<{length} elements>]"),
@@ -486,18 +489,25 @@ pub async fn expanded(
 
         let page = first_children(debugger, reference, reference.total(), &mut remaining).await?;
         let (opening, closing) = match value {
-            VariableValue::Array { .. } | VariableValue::Slice { .. } => ("[", "]".to_owned()),
+            VariableValue::Array { .. } | VariableValue::Slice { .. } => {
+                ("[".to_owned(), "]".to_owned())
+            }
+            // A closure is its function and what it captured.
+            VariableValue::Function { code, function } => (
+                format!("{} {{", uscope::function_text(*code, function.as_deref())),
+                "}".to_owned(),
+            ),
             VariableValue::Variant { active, .. } => (
-                "{",
+                "{".to_owned(),
                 active
                     .as_ref()
                     .and_then(|variant| variant.name.as_deref())
                     .map_or_else(|| "}".to_owned(), |name| format!("}}<{name}>")),
             ),
-            VariableValue::Union => ("{", "} <active member unknown>".to_owned()),
-            _ => ("{", "}".to_owned()),
+            VariableValue::Union => ("{".to_owned(), "} <active member unknown>".to_owned()),
+            _ => ("{".to_owned(), "}".to_owned()),
         };
-        output.push_str(opening);
+        output.push_str(&opening);
         work.push(Work::Text(closing));
         schedule_children(&mut work, reference.total(), page.as_ref(), depth + 1, raw);
     }

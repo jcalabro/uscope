@@ -156,15 +156,14 @@ pub fn variable(
                 path,
             })?;
         }
-        // A pointer to a function leads to the function's code.
-        if let VariableValue::Address(address) = value
-            && code.function_entry(address.address.get()).is_some()
+        // A pointer to a function, or a function value, leads to the
+        // function's code.
+        if let Some(function) = called(value)
+            && code.function_entry(function.get()).is_some()
         {
             variable.insert(
                 "valueLocationReference".to_owned(),
-                references
-                    .location(Location::Code(address.address.get()))?
-                    .into(),
+                references.location(Location::Code(function.get()))?.into(),
             );
         }
         if options.memory {
@@ -196,6 +195,17 @@ pub fn variable(
     }
     variable.insert("variablesReference".to_owned(), reference.into());
     Ok(variable)
+}
+
+/// The address a pointer or function value would call, if it is one.
+const fn called(value: &VariableValue) -> Option<uscope::VirtualAddress> {
+    match value {
+        VariableValue::Address(address) => Some(address.address),
+        VariableValue::Function {
+            code: Some(code), ..
+        } => Some(*code),
+        _ => None,
+    }
 }
 
 /// How many children a value has, and whether they are all elements
