@@ -1816,20 +1816,24 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             .map_err(|failure| view_stop(failure, &bound, ErrorKind::Type))
     }
 
-    /// A value the provider read, with its presentation. A value whose
+    /// Presents a value the provider read in place. A value whose
     /// presentation needed what the budget or the program could not provide
     /// is missing for that reason, as any value is, rather than failing the
     /// inspection it is part of.
     pub(super) fn present_state(
         &mut self,
         type_info: Option<TypeInfo>,
-        state: VariableState,
-    ) -> Result<VariableState> {
-        let value = self.finish(type_info, state);
-        match self.presented(value) {
-            Ok(value) => Ok(value.state),
-            Err(Stop::Missing(state)) => Ok(*state),
-            Err(stop) => Err(stopped(stop)),
-        }
+        state: &mut VariableState,
+    ) -> Result<()> {
+        let read = std::mem::replace(
+            state,
+            VariableState::Unavailable(crate::VariableUnavailableReason::EvaluationLimit),
+        );
+        *state = match self.presented(self.finish(type_info, read)) {
+            Ok(value) => value.state,
+            Err(Stop::Missing(missing)) => *missing,
+            Err(stop) => return Err(stopped(stop)),
+        };
+        Ok(())
     }
 }

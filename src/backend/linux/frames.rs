@@ -12,10 +12,10 @@ use crate::unwind::{
     CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, RegisterFile, collect_frames,
 };
 use crate::{
-    AddressDescription, Backtrace, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceKind,
-    Error, ExecutionLocation, FrameKind, ImageAddress, ImageLocation, InlineFrameLookup,
-    LoadedModule, ModuleAddress, ModuleId, ModuleImage, Result, SourceLocation, StackFrame,
-    StackFrameId, UnwindTermination, VariableUnavailableReason, VirtualAddress,
+    AddressDescription, Backtrace, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo,
+    CodeInstanceKind, Error, ExecutionLocation, FrameKind, ImageAddress, ImageLocation,
+    InlineFrameLookup, LoadedModule, ModuleAddress, ModuleId, ModuleImage, Result, SourceLocation,
+    StackFrame, StackFrameId, UnwindTermination, VariableUnavailableReason, VirtualAddress,
 };
 
 use super::breakpoints::runtime_breakpoint_address;
@@ -57,6 +57,11 @@ impl<P: InspectionOps> Controller<P> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let registers = self.ptrace.registers(pid)?;
         let instruction = VirtualAddress::new(registers.rip);
+        let physical = || FramePresentation {
+            instruction,
+            frame: PresentedFrame::Physical,
+            hidden_inline_frames: 0,
+        };
         // Presentations describe inline frames of the main image only; an
         // instruction elsewhere, or anywhere after exec replaced the image,
         // is presented as its physical frame.
@@ -68,17 +73,13 @@ impl<P: InspectionOps> Controller<P> {
                 !inferior.exec_unsupported && self.module_image.contains_address(*address)
             })
         else {
-            return Ok(FramePresentation {
-                instruction,
-                frame: PresentedFrame::Physical,
-                hidden_inline_frames: 0,
-            });
+            return Ok(physical());
         };
         let location = self.module_image.locate(image_address);
-
-        let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
-            return Ok(match &location.inline_frames {
-                InlineFrameLookup::Ambiguous(chains) => FramePresentation {
+        let chain = match &location.inline_frames {
+            InlineFrameLookup::Unique(chain) => chain,
+            InlineFrameLookup::Ambiguous(chains) => {
+                return Ok(FramePresentation {
                     instruction,
                     frame: PresentedFrame::Ambiguous(
                         chains
@@ -86,42 +87,30 @@ impl<P: InspectionOps> Controller<P> {
                             .flat_map(|chain| chain.instances.iter().copied())
                             .collect::<BTreeSet<_>>()
                             .into_iter()
-                            .collect::<Vec<_>>()
-                            .into(),
+                            .collect(),
                     ),
                     hidden_inline_frames: 0,
-                },
-                InlineFrameLookup::None => FramePresentation {
-                    instruction,
-                    frame: PresentedFrame::Physical,
-                    hidden_inline_frames: 0,
-                },
-                InlineFrameLookup::Unique(_) => unreachable!("matched above"),
-            });
+                });
+            }
+            InlineFrameLookup::None => return Ok(physical()),
         };
 
-        let breakpoint_targets = match reason {
-            Some(StopReason::Breakpoint { address, .. }) => {
-                self.breakpoint_code_instances(inferior, *address)?
-            }
-            _ => BTreeSet::new(),
-        };
-        if !breakpoint_targets.is_empty() {
-            // Every instance a breakpoint hit lies in the one chain, outermost
-            // first. Where several hit together, the stop presents the
-            // innermost, as gdb does; the others are its callers.
-            let innermost = location
+        // Every instance a breakpoint hit lies in the one chain, outermost
+        // first. Where several hit together, the stop presents the
+        // innermost, as gdb does; the others are its callers.
+        if let Some(StopReason::Breakpoint { address, .. }) = reason {
+            let hit = self.breakpoint_code_instances(inferior, *address)?;
+            if let Some(target) = location
                 .physical_instance
                 .into_iter()
                 .chain(chain.instances.iter().copied())
-                .rfind(|instance| breakpoint_targets.contains(instance));
-            if let Some(target) = innermost {
+                .rfind(|instance| hit.contains(instance))
+            {
                 let visible = chain
                     .instances
                     .iter()
                     .position(|instance| *instance == target)
                     .map_or(0, |index| index + 1);
-
                 return make_presentation(instruction, chain.instances.as_ref(), visible);
             }
         }
@@ -609,18 +598,7 @@ pub(super) fn apply_presentation(
         .and_then(|instance| module_image.code_instance(instance))
         .and_then(|instance| module_image.function(instance.function))
         .cloned();
-    location.source = if visible < chain.instances.len() {
-        chain
-            .instances
-            .get(visible)
-            .and_then(|instance| module_image.code_instance(*instance))
-            .and_then(|instance| match &instance.kind {
-                CodeInstanceKind::Inline { call_site } => call_site.clone(),
-                CodeInstanceKind::OutOfLine => None,
-            })
-    } else {
-        location.source.clone()
-    };
+    location.source = visible_source(module_image, location, &chain.instances, visible);
 
     Ok(())
 }
@@ -657,18 +635,29 @@ pub(super) fn source_for_code_instance(
             .position(|instance| *instance == selected)?
             + 1
     };
+    visible_source(module_image, location, &chain.instances, visible)
+}
 
-    if visible < chain.instances.len() {
-        chain
-            .instances
-            .get(visible)
-            .and_then(|instance| module_image.code_instance(*instance))
-            .and_then(|instance| match &instance.kind {
-                CodeInstanceKind::Inline { call_site } => call_site.clone(),
-                CodeInstanceKind::OutOfLine => None,
-            })
-    } else {
-        location.source.clone()
+/// The source line a frame shows when `visible` of `chain`'s inline frames
+/// are: the call site of the outermost hidden one, or the location's own
+/// line when none is hidden.
+fn visible_source(
+    module_image: &ModuleImage,
+    location: &ImageLocation,
+    chain: &[CodeInstanceId],
+    visible: usize,
+) -> Option<SourceLocation> {
+    chain.get(visible).map_or_else(
+        || location.source.clone(),
+        |hidden| module_image.code_instance(*hidden).and_then(call_site),
+    )
+}
+
+/// Where an inline instance was called from.
+fn call_site(instance: &CodeInstanceInfo) -> Option<SourceLocation> {
+    match &instance.kind {
+        CodeInstanceKind::Inline { call_site } => call_site.clone(),
+        CodeInstanceKind::OutOfLine => None,
     }
 }
 
@@ -743,18 +732,7 @@ pub(super) fn expand_inline_backtrace(
                 } else {
                     chain.instances.len()
                 };
-            let mut source = if visible < chain.instances.len() {
-                chain
-                    .instances
-                    .get(visible)
-                    .and_then(|instance| module_image.code_instance(*instance))
-                    .and_then(|instance| match &instance.kind {
-                        CodeInstanceKind::Inline { call_site } => call_site.clone(),
-                        CodeInstanceKind::OutOfLine => None,
-                    })
-            } else {
-                location.source.clone()
-            };
+            let mut source = visible_source(module_image, &location, &chain.instances, visible);
 
             for &instance_id in chain.instances[..visible].iter().rev() {
                 let instance = module_image
@@ -775,10 +753,7 @@ pub(super) fn expand_inline_backtrace(
                         symbol: None,
                     },
                 ));
-                source = match &instance.kind {
-                    CodeInstanceKind::Inline { call_site } => call_site.clone(),
-                    CodeInstanceKind::OutOfLine => None,
-                };
+                source = call_site(instance);
             }
             source
         } else {
@@ -957,15 +932,7 @@ impl DwarfCallerProvider<'_> {
     /// return address, which still belongs to the call. `None` means a
     /// return address of zero, which ends the stack.
     fn lookup_address(&self, current: &FrameContext) -> Option<VirtualAddress> {
-        if self.first || current.signal_frame {
-            Some(current.instruction)
-        } else {
-            current
-                .instruction
-                .get()
-                .checked_sub(1)
-                .map(VirtualAddress::new)
-        }
+        frame_lookup_address(u32::from(!self.first), current)
     }
 
     /// The canonical frame address of `current`, from its own unwind rules.
