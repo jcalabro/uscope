@@ -445,19 +445,14 @@ impl<P: InspectionOps> Controller<P> {
         self.stack_view(pid).position(native.rsp)
     }
 
-    /// The main executable's unwind context, used by stepping plans that are
-    /// deliberately limited to code described by the main image.
-    pub(super) fn main_unwind_module<'a>(&'a self, inferior: &Inferior) -> UnwindModule<'a> {
-        UnwindModule {
+    /// Every loaded module's unwind context, beginning with the main image.
+    pub(super) fn unwind_modules<'a>(&'a self, inferior: &Inferior) -> Vec<UnwindModule<'a>> {
+        let main = UnwindModule {
             loaded: inferior.loaded_module,
             image: &self.module_image,
             unwind: self.unwind_info.as_ref(),
-        }
-    }
-
-    /// Every loaded module's unwind context, beginning with the main image.
-    pub(super) fn unwind_modules<'a>(&'a self, inferior: &Inferior) -> Vec<UnwindModule<'a>> {
-        std::iter::once(self.main_unwind_module(inferior))
+        };
+        std::iter::once(main)
             .chain(
                 self.modules
                     .values()
