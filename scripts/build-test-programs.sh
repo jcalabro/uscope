@@ -747,6 +747,10 @@ run_cached_build "$c_fixtures_dir/tutorial" "$output_dir/tutorial" \
     "$embedded_views_metadata" \
     gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 -fPIE -pie -Isdk/c "-Wa,-I$output_dir" \
     "$c_fixtures_dir/tutorial/tutorial.c" -o "$output_dir/tutorial"
+build_shared_fixture gcc "$c_fixtures_dir/moved-code/library.c" "$output_dir/libmoved-code.so" \
+    -O0 -g3 -gdwarf-5
+build_fixture gcc "$c_fixtures_dir/moved-code/main.c" "$output_dir/moved-code" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie "-L$output_dir" -lmoved-code '-Wl,-rpath,$ORIGIN'
 build_shared_fixture gcc "$c_fixtures_dir/module-frames/library.c" "$output_dir/libmodule-frames.so" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
 build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-frames-gcc-o0" \
@@ -1263,6 +1267,12 @@ build_go_fixture "$go_fixtures_dir/callers" "$output_dir/callers-go-stripped" \
     -buildmode=pie "-ldflags=-s -w"
 GO_CGO=1 build_go_fixture "$go_fixtures_dir/callers" "$output_dir/callers-go-external-stripped" \
     "-ldflags=-linkmode=external -s -w"
+build_fixture gcc "$c_fixtures_dir/vdso.c" "$output_dir/vdso-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/vdso.c" "$output_dir/vdso-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_fixture clang "$c_fixtures_dir/vdso.c" "$output_dir/vdso-clang-o2-nopie" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie
 
 # Post-mortem cores. 0x33 is the kernel's default coredump_filter; 0x23 omits
 # ELF header pages, 0x10 saves only ELF header pages so modified file-backed
@@ -1345,6 +1355,16 @@ generate_core "$output_dir/crash-go-nodwarf.core" 11 "$headers_only_core_filter"
 
 generate_core "$output_dir/null-call.core" 11 "$default_core_filter" \
     "$output_dir/null-call" "$output_dir/null-call"
+
+# Cores of programs that faulted inside the vDSO, which no file backs.
+readonly vdso_variants=(gcc-o0 gcc-o2 clang-o2-nopie)
+for variant in "${vdso_variants[@]}"; do
+    program="$output_dir/vdso-${variant}"
+    for mode in clock time; do
+        generate_core "${program}-${mode}.core" 11 "$default_core_filter" "$program" \
+            "$program" "$mode"
+    done
+done
 
 # Independent readings of the ELF symbol fixture by binutils and gdb, which
 # differential tests compare against uscope's symbol tables and backtraces.
@@ -1438,6 +1458,13 @@ for variant in gcc-o0 clang-o2 gcc-o2-nopie; do
 done
 for language in rust go zig; do
     generate_frame_oracle "$output_dir/crash-${language}-o0" "$output_dir/crash-${language}-o0.core"
+done
+for variant in "${vdso_variants[@]}"; do
+    for mode in clock time; do
+        program="$output_dir/vdso-${variant}"
+        generate_backtrace_oracle "$program" "${program}-${mode}.core"
+        generate_frame_oracle "$program" "${program}-${mode}.core"
+    done
 done
 
 for library in gcc clang stripped minidebug; do

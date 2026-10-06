@@ -88,6 +88,7 @@ mod signals;
 pub mod sim_edge;
 mod stepping;
 mod thread_db;
+mod vdso;
 mod watchpoints;
 mod writes;
 
@@ -372,6 +373,10 @@ enum ClassifiedStop {
     /// The thread executed a trap whose site was removed before its report
     /// was handled; it has been rewound to the restored instruction.
     RemovedTrap,
+    /// The thread executed a trap carried by code that moved since the
+    /// modules were refreshed; it has been rewound to the trap, which the
+    /// refresh takes out.
+    CarriedTrap,
     /// SIGKILL took the thread out of the reported stop; its exit follows.
     Superseded,
     Unclassifiable(RawStopRecord),

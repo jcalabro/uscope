@@ -602,7 +602,7 @@ async fn compare_frame(
 }
 
 /// Cores whose every thread and frame gdb described, with their executables.
-const ORACLE_CORES: [&str; 14] = [
+const ORACLE_CORES: [&str; 20] = [
     "frames-gcc-o0.core",
     "frames-gcc-o2.core",
     "frames-gcc-o2-nopie.core",
@@ -617,6 +617,12 @@ const ORACLE_CORES: [&str; 14] = [
     "crash-rust-o0.core",
     "crash-go-o0.core",
     "crash-zig-o0.core",
+    "vdso-gcc-o0-clock.core",
+    "vdso-gcc-o0-time.core",
+    "vdso-gcc-o2-clock.core",
+    "vdso-gcc-o2-time.core",
+    "vdso-clang-o2-nopie-clock.core",
+    "vdso-clang-o2-nopie-time.core",
 ];
 
 #[tokio::test]

@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::ops::Range;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,13 +11,16 @@ use nix::unistd::Pid;
 use object::{Object, ObjectSection, ObjectSegment};
 
 use crate::backend::FileIdentity;
+use crate::debug_info::DebugInfo;
 use crate::protocol::DebuggerEvent;
 use crate::{
-    Error, ImageAddress, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, Result,
-    VirtualAddress,
+    Error, ImageAddress, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, ModuleImageId,
+    Result, VirtualAddress,
 };
 
+use super::breakpoints::MovedCode;
 use super::native::{InspectionOps, LinuxTraceOps};
+use super::vdso::{VDSO_NAME, vdso_mapping};
 use super::{Controller, LinuxError, RuntimeModule, backend_error};
 
 /// One file-backed mapping from `/proc/<pid>/maps`.
@@ -95,17 +99,21 @@ impl<P: InspectionOps> Controller<P> {
 
 impl<P: LinuxTraceOps> Controller<P> {
     /// Synchronizes the module registry with the shared objects mapped at a
-    /// coherent stop. A mapping whose file cannot be identified, such as a
-    /// deleted library or JIT code, contributes no module instead of failing
-    /// the stop; its frames stay unnamed.
-    pub(super) fn refresh_modules(&mut self) -> Result<()> {
+    /// coherent stop, the vDSO among them. A mapping whose file cannot be
+    /// identified, such as a deleted library or JIT code, contributes no
+    /// module instead of failing the stop; its frames stay unnamed. Sites
+    /// whose memory changed are forgotten first, as they must be before a
+    /// moved vDSO is read again; returns whether a breakpoint lost a
+    /// location to them.
+    pub(super) fn refresh_modules(&mut self) -> Result<bool> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         // The leader may have exited before the rest of its process.
         let pid = inferior.memory_thread();
         let main_loaded = inferior.loaded_module;
         let mut observed = Vec::<(PathBuf, u64)>::new();
         let mut mapped_modules = BTreeMap::new();
-        for mapping in self.ptrace.module_mappings(pid)? {
+        let mappings = self.ptrace.module_mappings(pid)?;
+        for mapping in mappings.files {
             if mapping.inode == self.executable_identity.inode {
                 continue;
             }
@@ -122,6 +130,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             mapped_modules.insert(mapping, module);
         }
         self.mapped_modules = mapped_modules;
+        let moved = self.moved_code(&observed, mappings.vdso.as_ref());
+        let lost_locations = self.reconcile_sites(&moved)?;
+        let (vdso, vdso_image) = self.observe_vdso(pid, mappings.vdso.as_ref()).unzip();
+        observed.extend(vdso);
+        let mut vdso_image = vdso_image.flatten();
         observed.sort();
         observed.dedup();
         let link_maps = loader_link_maps(&self.ptrace, pid, &self.executable_data, main_loaded)?;
@@ -163,7 +176,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .checked_add(1)
                 .ok_or_else(|| backend_error(LinuxError::ModuleImageIdExhausted))?;
             // Metadata a module's file cannot provide leaves its frames unnamed.
-            let Ok(debug) = self.ptrace.load_module(&path, image_id) else {
+            let Ok(debug) = self.load_observed(&path, image_id, &mut vdso_image) else {
                 continue;
             };
             let loaded = LoadedModule {
@@ -196,7 +209,83 @@ impl<P: LinuxTraceOps> Controller<P> {
             .expect("main module is registered");
         main.loaded = main_loaded;
         main.link_map = link_maps.get(&main_loaded.load_bias).copied();
-        Ok(())
+        Ok(lost_locations)
+    }
+}
+
+impl<P: LinuxTraceOps> Controller<P> {
+    /// The code that moved since the modules were refreshed, as the memory
+    /// map shows it now.
+    pub(super) fn moved_code_now(&self, pid: Pid) -> Result<Vec<MovedCode>> {
+        let mappings = self.ptrace.module_mappings(pid)?;
+        let files = mappings
+            .files
+            .iter()
+            .filter(|mapping| mapping.inode != self.executable_identity.inode)
+            .filter_map(|mapping| {
+                self.mapped_modules
+                    .get(mapping)
+                    .cloned()
+                    .or_else(|| self.ptrace.identify_module(mapping))
+            })
+            .filter(|(path, _)| *path != *self.executable)
+            .collect::<Vec<_>>();
+        Ok(self.moved_code(&files, mappings.vdso.as_ref()))
+    }
+
+    /// The code of each registered library that is now mapped elsewhere:
+    /// the vDSO wherever its name is, or a file mapped at one new place and
+    /// no longer at its old one. `files` are the files observed mapped.
+    fn moved_code(&self, files: &[(PathBuf, u64)], vdso: Option<&Range<u64>>) -> Vec<MovedCode> {
+        self.modules
+            .values()
+            .filter(|module| module.loaded.id != crate::ModuleId::new(0))
+            .filter_map(|module| {
+                let path = module.image.path();
+                let code = module.image.address_range();
+                let bias = module.loaded.load_bias;
+                let from = bias + code.start.get()..bias + code.end.get();
+                if path.as_os_str() == VDSO_NAME {
+                    let to = vdso?.start;
+                    return (to != from.start).then_some(MovedCode { from, to });
+                }
+                let biases = files
+                    .iter()
+                    .filter(|(file, _)| file == path)
+                    .map(|&(_, bias)| bias);
+                if biases.clone().any(|observed| observed == bias) {
+                    return None;
+                }
+                let mut new = biases.filter(|&observed| {
+                    !self.modules.values().any(|other| {
+                        other.image.path() == path && other.loaded.load_bias == observed
+                    })
+                });
+                match (new.next(), new.next()) {
+                    (Some(moved), None) => Some(MovedCode {
+                        from,
+                        to: moved + code.start.get(),
+                    }),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Loads the metadata of an observed module: the vDSO's from the image
+    /// read from memory, and any other's from its file.
+    fn load_observed(
+        &self,
+        path: &Path,
+        image: ModuleImageId,
+        vdso_image: &mut Option<Vec<u8>>,
+    ) -> Result<DebugInfo> {
+        vdso_image
+            .take_if(|_| path.as_os_str() == VDSO_NAME)
+            .map_or_else(
+                || self.ptrace.load_module(path, image),
+                |data| crate::debug_info::load_module_bytes(path, &data, image),
+            )
     }
 }
 
@@ -250,10 +339,27 @@ pub(super) fn read_maps(pid: Pid) -> std::io::Result<String> {
 
 /// Returns the executable mappings of files, which identify loaded modules.
 pub(super) fn module_mappings(pid: Pid) -> Result<Vec<ModuleMapping>> {
-    let maps = read_maps(pid)?;
-    let mut mappings = parse_maps(&maps)?;
-    mappings.retain(|mapping| mapping.executable);
-    Ok(mappings)
+    Ok(process_mappings_in(&read_maps(pid)?)?.files)
+}
+
+/// The mappings of one process that hold loaded modules.
+#[derive(Debug, Default)]
+pub(super) struct ProcessMappings {
+    /// Executable mappings of files.
+    pub(super) files: Vec<ModuleMapping>,
+    /// The vDSO, which no file backs.
+    pub(super) vdso: Option<Range<u64>>,
+}
+
+/// The mappings holding loaded modules in a process whose memory map is
+/// `maps`.
+pub(super) fn process_mappings_in(maps: &str) -> Result<ProcessMappings> {
+    let mut files = parse_maps(maps)?;
+    files.retain(|mapping| mapping.executable);
+    Ok(ProcessMappings {
+        files,
+        vdso: vdso_mapping(maps),
+    })
 }
 
 /// Resolves the file behind a module mapping and the load bias it was mapped

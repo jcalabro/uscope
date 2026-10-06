@@ -33,6 +33,21 @@ async fn assert_reexecuted(scenario: &Scenario, reason: &StopReason, argc: i128)
     assert_variable_value(&count, ScalarValue::Signed(argc));
 }
 
+/// Checks that the one vDSO module is the one the executed image mapped,
+/// since exec(2) maps a new vDSO, anywhere under randomization.
+async fn assert_vdso_follows_the_image(scenario: &mut Scenario) {
+    let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
+        panic!("the program is stopped");
+    };
+    let modules = scenario
+        .operation("modules", scenario.handle().loaded_modules())
+        .await;
+    assert_eq!(
+        support::vdso_module(&modules).module.load_bias,
+        support::vdso_mapping(process_id).start
+    );
+}
+
 #[tokio::test]
 async fn a_program_that_executes_itself_again_is_followed_with_its_breakpoints() {
     let mut scenario = Scenario::launch("reexec");
@@ -57,6 +72,7 @@ async fn a_program_that_executes_itself_again_is_followed_with_its_breakpoints()
 
     let reason = scenario.resume_to_stop().await;
     assert_reexecuted(&scenario, &reason, 2).await;
+    assert_vdso_follows_the_image(&mut scenario).await;
     let reason = scenario.resume_to_stop().await;
     let StopReason::Breakpoint { hits, .. } = &reason else {
         panic!("stopped for {reason:?}");
@@ -87,6 +103,8 @@ async fn a_launcher_that_executes_the_program_launches_it() {
             .await;
         if stop_at_entry {
             assert_eq!(reason, StopReason::Entry);
+            // The launcher runs randomized, as does the program it executes.
+            assert_vdso_follows_the_image(&mut scenario).await;
             reason = scenario.resume_to_stop().await;
         }
         assert_reexecuted(&scenario, &reason, 3).await;

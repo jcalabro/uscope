@@ -757,22 +757,25 @@ async fn vdso_writes_are_reported_in_user_mode() {
         panic!("inferior is stopped");
     };
     let pc = program_counter(&scenario).await;
-    let maps = std::fs::read_to_string(format!("/proc/{process_id}/maps")).expect("maps");
-    let vdso = maps
-        .lines()
-        .find(|line| line.ends_with("[vdso]"))
-        .and_then(|line| line.split_whitespace().next())
-        .and_then(|range| range.split_once('-'))
-        .map(|(start, end)| {
-            (
-                u64::from_str_radix(start, 16).expect("vdso start"),
-                u64::from_str_radix(end, 16).expect("vdso end"),
-            )
-        })
-        .expect("the process maps a vDSO");
+    let vdso = support::vdso_mapping(process_id);
     assert!(
-        (vdso.0..vdso.1).contains(&pc),
+        vdso.contains(&pc),
         "the store happened in the vDSO, pc {pc:#x} outside {vdso:x?}"
+    );
+    // The vDSO's own call-frame information leads back to the watching code.
+    let modules = scenario
+        .operation("modules", scenario.handle().loaded_modules())
+        .await;
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let frames = support::frame_modules(&trace, &modules);
+    assert_eq!(frames[0].0, support::VDSO, "{frames:#?}");
+    let writer = support::position_of(&frames, FIXTURE, "vdso_write");
+    assert_eq!(
+        frames[writer + 1],
+        (FIXTURE.to_owned(), Some("main".to_owned())),
+        "{frames:#?}"
     );
 
     scenario

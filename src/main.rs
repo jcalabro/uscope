@@ -8,95 +8,197 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use uscope::{CoreDumpOptions, Debugger, ProcessId, SourcePathMap};
 
 use cli::terminal::{ColorChoice, Role};
 use cli::{Cli, DisassemblySyntax, LaunchSettings, Renderers};
 
-/// The subcommands, which `async_main` dispatches before `Args` parses.
-const SUBCOMMANDS: &str = "\
-Commands:
-  uscope dap [--port PORT | --listen ADDRESS] [--log FILE]
-          Serve the Debug Adapter Protocol to an editor
-  uscope views <check|explain|replay> ...
-          Check how views present a program's types, without running it
+const COMMON_FORMS: &str = "\
+Common forms:
+  uscope EXECUTABLE [-- ARGS...]
+  uscope --attach PID [EXECUTABLE]
+  uscope --core CORE [EXECUTABLE]
 
-Each command describes itself with --help.";
+Use `uscope --help` for every option.";
 
 #[derive(Parser)]
-#[command(version, about, after_help = SUBCOMMANDS)]
+#[command(
+    version,
+    about = "Debug Linux x86-64 programs, processes, and core dumps",
+    after_help = COMMON_FORMS,
+    subcommand_help_heading = "Tools",
+    subcommand_value_name = "TOOL",
+    subcommand_negates_reqs = true,
+    args_conflicts_with_subcommands = true
+)]
 struct Args {
-    /// Native executable to launch, or the executable for --attach or --core
-    /// when automatic discovery is unavailable.
-    #[arg(value_name = "EXECUTABLE", required_unless_present_any = ["attach", "core"])]
+    /// Native executable to launch.
+    ///
+    /// With --attach or --core, the executable is normally discovered but
+    /// can be supplied when automatic discovery is unavailable.
+    #[arg(
+        value_name = "EXECUTABLE",
+        required_unless_present_any = ["attach", "core"],
+        help_heading = "Target"
+    )]
     executable: Option<PathBuf>,
 
-    /// Attach to an existing process. The executable is discovered through /proc by default.
-    #[arg(short = 'p', long, value_name = "PID", conflicts_with = "core")]
+    /// Attach to a running process.
+    ///
+    /// The executable is discovered through /proc by default.
+    #[arg(
+        short = 'p',
+        long,
+        value_name = "PID",
+        conflicts_with = "core",
+        help_heading = "Target"
+    )]
     attach: Option<u64>,
 
-    /// Open a post-mortem core dump. The executable recorded in the dump is used by default.
-    #[arg(long, value_name = "CORE")]
+    /// Inspect a core dump.
+    ///
+    /// The executable recorded in the dump is used by default.
+    #[arg(long, value_name = "CORE", help_heading = "Target")]
     core: Option<PathBuf>,
+
+    /// Execute commands from a file. May be repeated.
+    #[arg(
+        short = 'c',
+        long = "command",
+        value_name = "FILE",
+        help_heading = "Startup"
+    )]
+    command_files: Vec<PathBuf>,
+
+    /// Execute one command. May be repeated.
+    #[arg(
+        short = 'e',
+        long = "eval",
+        value_name = "COMMAND",
+        help_heading = "Startup"
+    )]
+    commands: Vec<String>,
+
+    /// Execute commands without starting the interactive REPL.
+    #[arg(long, help_heading = "Startup")]
+    batch: bool,
 
     /// Look up the core dump's recorded module paths inside DIR, a copy of the
     /// files of the machine that wrote it, instead of on this machine.
-    #[arg(long, value_name = "DIR", requires = "core")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        requires = "core",
+        hide_short_help = true,
+        help_heading = "Core dump files"
+    )]
     sysroot: Option<PathBuf>,
 
     /// Search DIR for core dump modules missing from their recorded paths or
     /// not matching the dump, by file name and then by build-id. May be repeated.
-    #[arg(long = "module-path", value_name = "DIR", requires = "core")]
+    #[arg(
+        long = "module-path",
+        value_name = "DIR",
+        requires = "core",
+        hide_short_help = true,
+        help_heading = "Core dump files"
+    )]
     module_paths: Vec<PathBuf>,
+
+    /// Use module files that cannot be proven to match the core dump.
+    #[arg(
+        long,
+        requires = "core",
+        hide_short_help = true,
+        help_heading = "Core dump files"
+    )]
+    allow_module_mismatch: bool,
 
     /// Read source files recorded under FROM from TO instead, such as for a
     /// program built elsewhere. May be repeated; earlier rules are tried first.
-    #[arg(long, num_args = 2, value_names = ["FROM", "TO"])]
+    #[arg(
+        long,
+        num_args = 2,
+        value_names = ["FROM", "TO"],
+        hide_short_help = true,
+        help_heading = "Debug information"
+    )]
     source_map: Vec<PathBuf>,
-
-    /// Use module files that cannot be proven to match the core dump.
-    #[arg(long, requires = "core")]
-    allow_module_mismatch: bool,
 
     /// Present values with the views in FILE, ahead of the project's, the
     /// user's, the program's own, and the built-in ones. May be repeated;
     /// later files come first.
-    #[arg(long = "views", value_name = "FILE")]
+    #[arg(
+        long = "views",
+        value_name = "FILE",
+        hide_short_help = true,
+        help_heading = "Debug information"
+    )]
     views: Vec<PathBuf>,
 
-    /// Execute commands from a file. May be repeated.
-    #[arg(short = 'c', long = "command", value_name = "FILE")]
-    command_files: Vec<PathBuf>,
-
-    /// Execute one command. May be repeated.
-    #[arg(short = 'e', long = "eval", value_name = "COMMAND")]
-    commands: Vec<String>,
-
-    /// Execute commands without starting the interactive REPL.
-    #[arg(long)]
-    batch: bool,
-
-    /// Control colored terminal output.
-    #[arg(long, value_enum, default_value_t)]
-    color: ColorChoice,
-
-    /// The assembly syntax `disassemble` renders.
-    #[arg(long, value_enum, default_value_t)]
-    disassembly_syntax: DisassemblySyntax,
-
     /// Run the launched program in DIR instead of the current directory.
-    #[arg(long, value_name = "DIR", conflicts_with_all = ["attach", "core"])]
+    #[arg(
+        long,
+        value_name = "DIR",
+        conflicts_with_all = ["attach", "core"],
+        hide_short_help = true,
+        help_heading = "Launch environment"
+    )]
     cwd: Option<PathBuf>,
 
     /// Set NAME to VALUE in the launched program's environment. May be repeated.
-    #[arg(long = "env", value_name = "NAME=VALUE", value_parser = parse_environment_variable,
-          conflicts_with_all = ["attach", "core"])]
+    #[arg(
+        long = "env",
+        value_name = "NAME=VALUE",
+        value_parser = parse_environment_variable,
+        conflicts_with_all = ["attach", "core"],
+        hide_short_help = true,
+        help_heading = "Launch environment"
+    )]
     environment: Vec<(OsString, OsString)>,
 
     /// Arguments passed to the launched program.
-    #[arg(last = true, value_name = "ARGS", conflicts_with_all = ["attach", "core"])]
+    #[arg(
+        last = true,
+        value_name = "ARGS",
+        conflicts_with_all = ["attach", "core"],
+        hide_short_help = true,
+        help_heading = "Launch environment"
+    )]
     arguments: Vec<OsString>,
+
+    /// Control colored terminal output.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t,
+        hide_short_help = true,
+        help_heading = "Display"
+    )]
+    color: ColorChoice,
+
+    /// The assembly syntax `disassemble` renders.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t,
+        hide_short_help = true,
+        help_heading = "Display"
+    )]
+    disassembly_syntax: DisassemblySyntax,
+
+    #[command(subcommand)]
+    tool: Option<Tool>,
+}
+
+#[derive(Subcommand)]
+enum Tool {
+    /// Serve the Debug Adapter Protocol to an editor.
+    #[command(version)]
+    Dap(dap::DapArgs),
+    /// Check and explain how views present program types.
+    Views(ViewsArgs),
 }
 
 fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsString), String> {
@@ -156,35 +258,32 @@ fn start_flight_recording() {
 }
 
 async fn async_main() -> ExitCode {
-    let subcommand = std::env::args_os().nth(1);
-    if subcommand.as_ref().is_some_and(|command| command == "dap") {
-        let args = dap::DapArgs::parse_from(std::env::args_os().skip(1));
-        let code = match dap::run(args).await {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("error: {error:#}");
-                1
-            }
-        };
-        // Reading stdin blocks a runtime thread that would keep the
-        // runtime from shutting down after the client left.
-        std::process::exit(code);
+    let args = parse_args();
+    match &args.tool {
+        Some(Tool::Dap(dap_args)) => {
+            let code = match dap::run(dap_args).await {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    1
+                }
+            };
+            // Reading stdin blocks a runtime thread that would keep the
+            // runtime from shutting down after the client left.
+            std::process::exit(code);
+        }
+        Some(Tool::Views(views)) => {
+            return match run_views(views).await {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::FAILURE,
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        None => {}
     }
-    if subcommand
-        .as_ref()
-        .is_some_and(|command| command == "views")
-    {
-        let args = ViewsArgs::parse_from(std::env::args_os().skip(1));
-        return match run_views(args).await {
-            Ok(true) => ExitCode::SUCCESS,
-            Ok(false) => ExitCode::FAILURE,
-            Err(error) => {
-                eprintln!("error: {error:#}");
-                ExitCode::FAILURE
-            }
-        };
-    }
-    let args = Args::parse();
     let renderers = Renderers::detect(args.color, args.batch);
 
     match run(&args, renderers).await {
@@ -199,6 +298,17 @@ async fn async_main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn parse_args() -> Args {
+    let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    if arguments.len() == 1 {
+        arguments.push("-h".into());
+    }
+    let color = cli::help::color_choice(&arguments);
+    let command = cli::help::configure(Args::command(), color);
+    let matches = command.get_matches_from(arguments);
+    Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
 }
 
 async fn run(args: &Args, renderers: Renderers) -> Result<()> {
@@ -233,8 +343,7 @@ async fn run(args: &Args, renderers: Renderers) -> Result<()> {
 
 /// Checks which views present a program's types, from its debug
 /// information alone.
-#[derive(Parser)]
-#[command(name = "uscope views", bin_name = "uscope views")]
+#[derive(clap::Args)]
 struct ViewsArgs {
     #[command(subcommand)]
     command: ViewsCommand,
@@ -324,7 +433,7 @@ fn replay_views(recording: &std::path::Path, kernel: Option<&std::path::Path>) -
 }
 
 /// Runs `uscope views check`, `explain`, or `replay`.
-async fn run_views(args: ViewsArgs) -> Result<bool> {
+async fn run_views(args: &ViewsArgs) -> Result<bool> {
     let (program, views) = match &args.command {
         ViewsCommand::Check { program, views } | ViewsCommand::Explain { program, views, .. } => {
             (program, views)

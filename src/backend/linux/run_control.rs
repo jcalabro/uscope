@@ -561,6 +561,18 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .reason = None;
                 self.restart_after_internal(pid)
             }
+            // Resumes once the refresh has taken the trap out, and the
+            // breakpoints that follow the code are installed where it went.
+            ClassifiedStop::CarriedTrap => {
+                record!("{pid} executed a trap carried by moved code");
+                self.inferior
+                    .as_mut()
+                    .ok_or(Error::NotRunning)?
+                    .thread_mut(pid)?
+                    .reason = None;
+                self.queue_module_refresh()?;
+                self.restart_after_internal(pid)
+            }
             ClassifiedStop::Breakpoint(address) => self.handle_breakpoint_stop(pid, address),
             ClassifiedStop::Watch(owners) => self.handle_watch_stop(pid, owners),
             ClassifiedStop::Trace { watch } => self.handle_trace_stop(pid, watch),

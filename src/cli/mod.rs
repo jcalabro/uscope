@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod format;
+pub mod help;
 mod repl;
 pub mod terminal;
 pub mod value;
