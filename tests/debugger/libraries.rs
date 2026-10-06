@@ -134,12 +134,7 @@ async fn source_breakpoints_resolve_in_library_source_once_it_loads() {
     let mut scenario = Scenario::launch("globals-shared");
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/shared/library.c");
-    let line = std::fs::read_to_string(&path)
-        .expect("source")
-        .lines()
-        .position(|line| line.contains("return *dso_pointer"))
-        .expect("line") as u64
-        + 1;
+    let line = source_line("tests/fixtures/c/shared/library.c", "return *dso_pointer");
     let breakpoint = scenario
         .operation(
             "add pending source breakpoint",
@@ -163,14 +158,7 @@ async fn source_breakpoints_resolve_in_library_source_once_it_loads() {
     let location = scenario
         .operation("location", scenario.handle().current_location())
         .await;
-    assert_eq!(
-        location
-            .image
-            .source
-            .as_ref()
-            .map(|source| source.line.get()),
-        Some(line)
-    );
+    assert_eq!(location_line(&location), Some(line));
     scenario.shutdown().await;
 }
 
