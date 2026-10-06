@@ -114,6 +114,14 @@ impl ViewSet {
     pub fn errors(&self) -> &[syntax::Error] {
         &self.errors
     }
+
+    /// Whether a view of the set names a type of this identity's base, or
+    /// its Go kind.
+    #[must_use]
+    pub fn names(&self, identity: &crate::TypeIdentity) -> bool {
+        self.by_base.contains_key(identity.base.as_ref())
+            || pattern::go_kind_word(identity).is_some_and(|kind| self.by_base.contains_key(kind))
+    }
 }
 
 /// A view a type was matched against, and whether it bound.
@@ -149,6 +157,7 @@ pub fn name_of(view: &View) -> Arc<ViewName> {
         source: Arc::clone(&view.source),
         line: view.line,
         header: Arc::clone(&view.header),
+        extend: view.extend,
     })
 }
 

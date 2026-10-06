@@ -69,6 +69,36 @@ pub struct ViewCandidate {
     pub rejection: Option<Arc<str>>,
 }
 
+/// The views whose patterns name one type: those tried until the first
+/// that binds, and the `extend`s that add to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeViews {
+    pub type_info: crate::TypeInfo,
+    /// The module image that defines the type.
+    pub module: Arc<std::path::Path>,
+    pub candidates: Arc<[ViewCandidate]>,
+}
+
+impl TypeViews {
+    /// The view that presents the type's values, when one binds.
+    #[must_use]
+    pub fn presented_by(&self) -> Option<&Arc<crate::ViewName>> {
+        self.candidates
+            .iter()
+            .find(|candidate| candidate.rejection.is_none() && !candidate.view.extend)
+            .map(|candidate| &candidate.view)
+    }
+}
+
+/// How the loaded modules' types are presented: every type a view's pattern
+/// names, and the views loaded for the session or carried by a module that
+/// present none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewCheck {
+    pub types: Arc<[TypeViews]>,
+    pub unused: Arc<[Arc<crate::ViewName>]>,
+}
+
 /// Why a value is presented as it is: the views its type matched, and how
 /// the one that binds presents the value at this stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1368,6 +1398,16 @@ pub enum Request {
         frame: StackFrameId,
         reply: Reply<ViewExplanation>,
     },
+    /// The views whose patterns name the types a name means, in every
+    /// loaded module.
+    ExplainType {
+        name: String,
+        reply: Reply<Vec<TypeViews>>,
+    },
+    /// How every loaded module's types are presented.
+    CheckViews {
+        reply: Reply<ViewCheck>,
+    },
     SelectThread {
         stop_id: StopId,
         thread_id: ThreadId,
@@ -1479,6 +1519,8 @@ impl Request {
             Self::ExplainView { expression, .. } => {
                 format!("explain the view of `{}`", expression.text())
             }
+            Self::ExplainType { name, .. } => format!("explain the views of `{name}`"),
+            Self::CheckViews { .. } => "check views".to_owned(),
             Self::SelectThread { .. } => "select thread".to_owned(),
             Self::SelectFrame { .. } => "select frame".to_owned(),
             Self::SignalPolicy { .. } => "signal policy".to_owned(),

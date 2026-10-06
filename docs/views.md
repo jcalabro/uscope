@@ -621,7 +621,13 @@ are:
 - `set views off` shows every value as stored, and `set views on` restores
   views.
 - `info view EXPR` says which view presents a value, from which file and
-  line, and why each view tried before it did not bind.
+  line, and why each view tried before it did not bind. `views explain
+  TYPE` says the same of a type, and `views check` of every type a view's
+  pattern names. Without a session, `uscope views explain PROGRAM TYPE`
+  and `uscope views check PROGRAM` do so from the program's debug
+  information alone; `views check` fails when a view loaded for the
+  session or carried by the program presents no type, or binds no type it
+  names. `docs/writing-views.md` is a tutorial.
 - A pointer to a value presented as text shows the text after its address,
   as a pointer to characters does, or why the view could not read it. A
   null pointer shows only its address.

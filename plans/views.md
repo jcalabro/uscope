@@ -1368,7 +1368,7 @@ What P4 built, and what it learned:
   show as stored. A Go interface's pointer to anything but a struct shows
   its address.
 
-**P5 User and embedded views, and the authoring tools.**
+**P5 User and embedded views, and the authoring tools.** *Done 2026-10-06.*
 
 - [x] Session, user, and project files, and the DAP `viewFiles` launch
   argument.
@@ -1376,8 +1376,64 @@ What P4 built, and what it learned:
   scoping.
 - [x] `extend`, `hide`, `format`, `match`, `record` (in P4),
   `container_of`, `global`.
-- [ ] `uscope views check` and `views explain`.
-- [ ] `docs/writing-views.md`.
+- [x] `uscope views check` and `views explain`.
+- [x] `docs/writing-views.md`.
+- [x] End of phase: `/roast` of each of the three commits, whose seven
+  confirmed findings were fixed (`container_of` located objects through
+  pointers of any type; `utf16` assumed little-endian; the CLI found
+  project views where uscope ran rather than where the program does; an
+  embedded record could be any size; `views explain` passed despite a
+  broken view file and skipped the awaited shutdown on an error; and an
+  advertised `views explain` came only with the third commit); `just`
+  (919 tests) and `just sim 60` (344,060 sessions).
+
+What P5 built, and what it learned:
+
+- **The language.** `match` is an `if` chain, `(EXPR) == (VALUE)` for each
+  arm, so an enumerator binds next to the value it is compared with, and
+  ends in a problem that names a value no arm does. A view without a `show`
+  presents a record's members, its bases as members named by their types
+  (through the P4 upcast), or any other value as itself. `hide` and
+  `format` act on a value's named children, and are checked when the view
+  binds: a name that is no member or field, or a format that does not suit
+  what it writes, keeps the view from binding. Formats are `hex`, `char`,
+  `bytes`, `utf16` (arrays), `flags(E)`, `enum(E)`, and `duration(UNIT)`,
+  written as Go writes durations. An `extend` is bound in a scope of its
+  own and attached to whichever view binds, or to a show-less
+  presentation of the members when none does. `container_of` checks that
+  its pointer points to the member's type, or is a `void *`: without that,
+  a mistyped view located the wrong object. `global(NAME)` reaches the
+  value's own module's globals, through a step that ignores its base.
+- **Sources.** A type's view is chosen among the session's files, the
+  project's `.uscope/views` (where the program runs) and the user's, the
+  views its own module carries, and the built-in ones, in that order. The
+  client keeps the files and the controller only the parsed set; a module's
+  views are parsed with its debug information. The record format is a
+  kind, a format, a 32-bit length, and the bytes, padding skipped, each
+  record no larger than a view file. The C header and the Rust macro emit
+  the section through `.incbin` in assembly, since a C string cannot carry
+  view text into `asm` and Rust's `global_asm!` reads braces; labels avoid
+  `0` and `1`, which Intel syntax reads as binary.
+- **Tools.** `views check` and `views explain` are controller requests that
+  reuse the view choices of a live session, which hold before the program
+  runs, so `uscope views check PROGRAM` needs no process: 0.3 seconds for
+  the C++ containers fixture. It fails only for views given to it or
+  carried by the program, never for a built-in view that cannot present a
+  type such as `unique_ptr<int[]>`, which it still reports.
+- **A presented value has one `[raw]`.** P4 kept a lent value's own
+  `[raw]` out; a field that cannot be computed is now that child's
+  problem, as an element's is, rather than the whole page's.
+- **Tests.** The `embedded-views` fixtures, a C program and library and a
+  Rust program, check scoping and both writers; `tests/cli.rs` checks the
+  sources' order, `--cwd`, `views load` and `clear`, and `views check` and
+  `explain`; `tests/dap/variables.rs` checks `viewFiles` and its errors;
+  the reference's examples cover every new statement and shape; the
+  `tutorial` fixture's markers and a test that the tutorial quotes its
+  fixtures verbatim keep `docs/writing-views.md` true. `just test` and
+  `just stress` give tests an empty user configuration.
+- **Left for later.** `views explain` names types as `types_named` does,
+  so a typedef and its target are separate entries. A library's views are
+  checked by `views check` only in a session that has loaded it.
 
 **P6 A wider matrix.**
 

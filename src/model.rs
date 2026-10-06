@@ -1726,11 +1726,18 @@ pub struct ViewName {
     pub line: u32,
     /// Its language and pattern, as written.
     pub header: Arc<str>,
+    /// Whether it is an `extend`, which adds to a view.
+    pub extend: bool,
 }
 
 impl fmt::Display for ViewName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}:{} `{}`", self.source, self.line, self.header)
+        let keyword = if self.extend { "extend " } else { "" };
+        write!(
+            formatter,
+            "{}:{} `{keyword}{}`",
+            self.source, self.line, self.header
+        )
     }
 }
 
@@ -3344,6 +3351,13 @@ impl ModuleImage {
     #[must_use]
     pub(crate) const fn views(&self) -> &Arc<crate::view::ViewSet> {
         &self.views
+    }
+
+    /// A type's identity as one string, which every type the same as it
+    /// shares.
+    #[must_use]
+    pub(crate) fn type_key(&self, reference: TypeReference) -> Option<&Arc<str>> {
+        self.type_index.key(reference)
     }
 
     /// What kept parts of the views the image carries out.

@@ -1496,6 +1496,12 @@ impl<P: InspectionOps> Controller<P> {
                 self.views.enabled = enabled;
                 let _ = reply.send(Ok(()));
             }
+            Request::ExplainType { name, reply } => {
+                let _ = reply.send(Ok(self.explain_type(&name)));
+            }
+            Request::CheckViews { reply } => {
+                let _ = reply.send(Ok(self.check_views()));
+            }
             Request::ExplainView {
                 expression,
                 stop_id,

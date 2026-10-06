@@ -258,8 +258,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Views,
         "views",
         [],
-        "views [load|clear] [file...]",
-        "List the view files values are presented with, load more, or clear those loaded"
+        "views [load|clear|check|explain] [argument...]",
+        "List the view files values are presented with, load more, clear those loaded, check how the program's types are presented, or explain which view presents a type"
     ),
     command!(
         Globals,
@@ -978,7 +978,16 @@ impl Cli {
                 }
                 Ok("forgot the loaded view files".to_owned())
             }
-            _ => bail!("usage: views [load <file...>|clear]"),
+            ["check"] => {
+                let check = self.debugger.check_views().await?;
+                Ok(format::view_check(&check, self.renderers.stdout).0)
+            }
+            ["explain", words @ ..] if !words.is_empty() => {
+                let name = words.join(" ");
+                let types = self.debugger.explain_type(&name).await?;
+                Ok(format::type_views(&name, &types, self.renderers.stdout))
+            }
+            _ => bail!("usage: views [load <file...>|clear|check|explain <type...>]"),
         }
     }
 
