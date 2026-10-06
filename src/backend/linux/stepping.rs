@@ -1263,7 +1263,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// The canonical frame address of a stopped thread's innermost frame.
     fn top_cfa(&self, pid: Pid, native: &libc::user_regs_struct) -> Result<VirtualAddress> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        self.main_image_unwinder(inferior, pid, native)
+        self.stack_unwinder(inferior, pid, native)
             .frame_cfa(&innermost_frame(native))
             .map_err(|reason| backend_error(LinuxError::CallerUnavailable(reason)))
     }
@@ -1276,15 +1276,14 @@ impl<P: LinuxTraceOps> Controller<P> {
     ) -> Result<Option<ImageLocation>> {
         // A live activation's CFA remains beyond the stack pointer. Once the
         // stack pointer reaches it, the return has already restored the
-        // caller's stack. Recognize that transition before asking the
-        // main-module-only unwinder to interpret libc code.
+        // caller's stack. Recognize that transition without unwinding.
         if activation.has_returned(self.stack_position(pid, native)) {
             return Ok(None);
         }
         let view = self.stack_view(pid);
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let mut context = innermost_frame(native);
-        let mut provider = self.main_image_unwinder(inferior, pid, native);
+        let mut provider = self.stack_unwinder(inferior, pid, native);
 
         for level in 0..DEFAULT_MAX_FRAMES {
             // Each frame is known by its own CFA, so the starting activation
@@ -1331,7 +1330,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     ) -> Result<VirtualAddress> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         match self
-            .main_image_unwinder(inferior, pid, native)
+            .stack_unwinder(inferior, pid, native)
             .caller(&innermost_frame(native))
         {
             CallerResult::Caller(caller) => self.executable_return_address(pid, caller.instruction),
@@ -1359,16 +1358,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         )))
     }
 
-    /// Unwinds `pid`'s stack from `native` through the main image's
-    /// call-frame information alone.
-    fn main_image_unwinder<'a>(
+    /// Unwinds `pid`'s stack from `native` through every loaded module's
+    /// call-frame information.
+    fn stack_unwinder<'a>(
         &'a self,
         inferior: &Inferior,
         pid: Pid,
         native: &libc::user_regs_struct,
     ) -> DwarfCallerProvider<'a> {
         DwarfCallerProvider {
-            modules: vec![self.main_unwind_module(inferior)],
+            modules: self.unwind_modules(inferior),
             registers: x86_64_registers(native),
             memory: PtraceMemory {
                 ptrace: &self.ptrace,
