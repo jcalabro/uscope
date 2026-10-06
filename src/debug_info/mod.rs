@@ -5,6 +5,8 @@ compile_error!("uscope currently supports debug information only on Linux");
 mod dwarf;
 #[cfg(target_os = "linux")]
 mod elf;
+#[cfg(target_os = "linux")]
+mod gopclntab;
 mod roles;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod x86_64;
@@ -17,6 +19,11 @@ pub fn fuzz_dwarf_expression(data: &[u8]) {
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_elf_symbols(data: &[u8]) {
     elf::fuzz(data);
+}
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_gopclntab(data: &[u8]) {
+    gopclntab::fuzz(data);
 }
 
 use std::path::Path;

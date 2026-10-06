@@ -16,10 +16,10 @@ use crate::model::{LineEntry, ModuleMetadata};
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     AddressRange, Architecture, BreakpointEntry, ByteOrder, CodeInstanceId, CodeInstanceInfo,
-    CodeInstanceKind, ColumnNumber, EntryProvenance, Error, FunctionId, FunctionInfo, ImageAddress,
-    LineNumber, LineSequenceId, ModuleImage, PointerWidth, Result, SourceFile, SourceFileId,
-    SourceLanguage, SourceLocation, StatementFlags, StatementRow, TargetDescription,
-    UnwindTermination, VirtualAddress,
+    CodeInstanceKind, ColumnNumber, EmbeddedSymbolTable, EntryProvenance, Error, FunctionId,
+    FunctionInfo, ImageAddress, LineNumber, LineSequenceId, ModuleImage, PointerWidth, Result,
+    SourceFile, SourceFileId, SourceLanguage, SourceLocation, StatementFlags, StatementRow,
+    TargetDescription, UnwindTermination, VirtualAddress,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -144,6 +144,9 @@ struct DwarfUnwindInfo {
     /// convention lets a callee overwrite registers the System V ABI
     /// preserves.
     go_code: Vec<AddressRange<ImageAddress>>,
+    /// Go's function table, which unwinds Go code no call-frame information
+    /// describes and says where Go frames saved the frame pointer.
+    go: Option<Arc<super::gopclntab::GoUnwind>>,
 }
 
 pub fn load(path: &Path, image_id: crate::ModuleImageId) -> Result<DebugInfo> {
@@ -155,6 +158,10 @@ pub fn load_bytes(path: &Path, data: &[u8], image_id: crate::ModuleImageId) -> R
     load_debug_info(path, data, image_id).map_err(Error::debug_info)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one loader assembles every table of an image from its sources"
+)]
 fn load_debug_info(
     path: &Path,
     data: &[u8],
@@ -200,8 +207,18 @@ fn load_debug_info(
         code: CodeRanges(super::elf::executable_ranges(&object)),
     };
 
-    let mut function_metadata =
-        load_function_metadata(&dwarf, &catalog, &mut source_files, &mut source_file_ids)?;
+    // Go's own function table, which the runtime reads and stripping keeps.
+    let (mut go_table, mut runtime_function_table) = match super::gopclntab::load(&object) {
+        Ok(Some(table)) => (Some(Arc::new(table)), EmbeddedSymbolTable::Loaded),
+        Ok(None) => (None, EmbeddedSymbolTable::Absent),
+        Err(error) => (None, unusable_table(&error)),
+    };
+    let mut function_metadata = load_function_metadata(
+        &dwarf,
+        &catalog,
+        &mut source_files,
+        &mut source_file_ids,
+    )?;
 
     for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
         load_lines(
@@ -214,6 +231,31 @@ fn load_debug_info(
             &mut lines,
             &mut next_sequence,
         )?;
+    }
+
+    // Code no DWARF describes, such as a stripped image's, gets functions
+    // and lines from the function table.
+    let code = |address: u64, length: usize| {
+        code_bytes(&object, address, address.checked_add(length as u64)?)
+    };
+    if let Some(table) = &go_table
+        && let Err(error) = super::gopclntab::complete_metadata(
+            table,
+            code,
+            &mut super::gopclntab::Catalog {
+                functions: &mut function_metadata.functions,
+                code_instances: &mut function_metadata.code_instances,
+                statements: &mut statements,
+                lines: &mut lines,
+                next_sequence: &mut next_sequence,
+                source_file: &mut |path| {
+                    source_file_id(path, &mut source_files, &mut source_file_ids)
+                },
+            },
+        )
+    {
+        runtime_function_table = unusable_table(&error);
+        go_table = None;
     }
 
     refine_proved_prologue_entries(
@@ -233,8 +275,12 @@ fn load_debug_info(
         &mut source_file_ids,
     )?;
     let go_code = go_code_ranges(&dwarf, &catalog)?;
-    let unwind = Arc::new(load_unwind_info(&object, target, go_code)?);
-    let symbols = super::elf::load_symbols(&object, &unwind.function_ranges());
+    let go_unwind = go_table
+        .as_ref()
+        .map(|table| Arc::new(super::gopclntab::GoUnwind::new(Arc::clone(table), code)));
+    let unwind = Arc::new(load_unwind_info(&object, target, go_code, go_unwind)?);
+    let mut symbols = super::elf::load_symbols(&object, &unwind.function_ranges());
+    symbols.sources.runtime_function_table = runtime_function_table;
     let image = Arc::new(
         ModuleImage::new(
             path.to_owned(),
@@ -278,6 +324,12 @@ fn embedded_views(
         .file_name()
         .map_or_else(|| "module".into(), |name| name.to_string_lossy());
     Ok(Arc::new(crate::view::embedded::view_set(&module, &bytes)))
+}
+
+fn unusable_table(error: &super::gopclntab::PclntabError) -> EmbeddedSymbolTable {
+    EmbeddedSymbolTable::Unusable {
+        reason: error.to_string().into(),
+    }
 }
 
 /// Returns the code ranges of every unit written in Go, merged and sorted
@@ -382,6 +434,7 @@ fn load_unwind_info(
     object: &object::File<'_>,
     target: TargetDescription,
     go_code: Vec<AddressRange<ImageAddress>>,
+    go: Option<Arc<super::gopclntab::GoUnwind>>,
 ) -> std::result::Result<DwarfUnwindInfo, DwarfError> {
     let section_data = |name| -> std::result::Result<Arc<[u8]>, DwarfError> {
         Ok(object
@@ -413,6 +466,7 @@ fn load_unwind_info(
         address_size: target.pointer_width.bytes(),
         bases,
         go_code,
+        go,
     })
 }
 
@@ -443,7 +497,9 @@ impl DwarfUnwindInfo {
     /// without saving them, by the calling convention it follows.
     fn call_clobbered_registers(&self, address: ImageAddress) -> &'static [u16] {
         let after = self.go_code.partition_point(|range| range.start <= address);
-        if after > 0 && self.go_code[after - 1].contains(address) {
+        if after > 0 && self.go_code[after - 1].contains(address)
+            || self.go.as_ref().is_some_and(|go| go.is_go(address.get()))
+        {
             &X86_64_GO_CALL_CLOBBERED_REGISTERS
         } else {
             &X86_64_SYSV_CALL_CLOBBERED_REGISTERS
@@ -489,7 +545,14 @@ impl UnwindInfo for DwarfUnwindInfo {
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
-        cfa_from_section(&self.debug_frame(), &self.bases, address, registers, memory)
+        let result = cfa_from_section(&self.debug_frame(), &self.bases, address, registers, memory);
+        if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
+            return result;
+        }
+        self.go
+            .as_ref()
+            .and_then(|go| go.cfa(address.get(), registers))
+            .unwrap_or(result)
     }
 
     fn unwind(
@@ -507,17 +570,31 @@ impl UnwindInfo for DwarfUnwindInfo {
             clobbered,
             memory,
         );
-        if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
+        let result = if matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
+            unwind_from_section(
+                &self.debug_frame(),
+                &self.bases,
+                address,
+                registers,
+                clobbered,
+                memory,
+            )
+        } else {
+            result
+        };
+        let Some(go) = &self.go else {
             return result;
-        }
-        unwind_from_section(
-            &self.debug_frame(),
-            &self.bases,
-            address,
-            registers,
-            clobbered,
-            memory,
-        )
+        };
+        let result = match result {
+            Err(UnwindTermination::NoUnwindInfo { .. }) => go
+                .unwind(address.get(), registers, clobbered, memory)
+                .unwrap_or(result),
+            result => result,
+        };
+        result.map(|mut step| {
+            go.recover_frame_pointer(address.get(), registers, &mut step, memory);
+            step
+        })
     }
 }
 

@@ -2401,6 +2401,10 @@ pub struct SymbolTableSources {
     pub dynamic_table: bool,
     /// The state of the image's embedded compressed symbol table.
     pub embedded_table: EmbeddedSymbolTable,
+    /// The state of a language runtime's own function table, such as Go's
+    /// `.gopclntab`, which names, places, and unwinds functions when no
+    /// debug information describes them.
+    pub runtime_function_table: EmbeddedSymbolTable,
 }
 
 impl Default for SymbolTableSources {
@@ -2409,19 +2413,21 @@ impl Default for SymbolTableSources {
             static_table: false,
             dynamic_table: false,
             embedded_table: EmbeddedSymbolTable::Absent,
+            runtime_function_table: EmbeddedSymbolTable::Absent,
         }
     }
 }
 
-/// The state of a symbol table embedded in compressed form (on ELF, the
-/// `.gnu_debugdata` `MiniDebugInfo` section).
+/// The state of a table an image embeds beside its ELF symbol tables: a
+/// symbol table in compressed form (on ELF, the `.gnu_debugdata`
+/// `MiniDebugInfo` section), or a language runtime's function table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmbeddedSymbolTable {
-    /// The image embeds no symbol table.
+    /// The image embeds no such table.
     Absent,
-    /// The embedded symbol table was read.
+    /// The embedded table was read.
     Loaded,
-    /// The embedded symbol table could not be read, so its symbols are absent.
+    /// The embedded table could not be read, so what it holds is absent.
     Unusable {
         /// Why the table could not be read.
         reason: Arc<str>,

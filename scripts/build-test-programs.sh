@@ -334,6 +334,8 @@ build_rust_fixture() {
         -C link-arg=-lc "$@"
 }
 
+# Builds a Go package without cgo. GO_CGO=1 enables cgo, which an external
+# link needs.
 build_go_fixture() {
     local package_dir="$1"
     local output="$2"
@@ -347,7 +349,7 @@ build_go_fixture() {
         exit 1
     fi
     local -a command=(
-        env CGO_ENABLED=0 go build -buildvcs=false "$@" -o "$output" "${sources[@]}"
+        env "CGO_ENABLED=${GO_CGO:-0}" go build -buildvcs=false "$@" -o "$output" "${sources[@]}"
     )
     if [[ -z "$go_version" ]]; then
         go_version=$(go version)
@@ -582,7 +584,8 @@ suite_is_current() {
     local signature="$1"
     [[ -f "$suite_stamp" && -f "$suite_outputs" ]] || return 1
     [[ "$(<"$suite_stamp")" == "$signature" ]] || return 1
-    [[ -z "$(find "$fixtures_dir" sdk views/kernels "${BASH_SOURCE[0]}" -newer "$suite_stamp" \
+    [[ -z "$(find "$fixtures_dir" sdk views/kernels scripts/gosym-oracle "${BASH_SOURCE[0]}" \
+        -newer "$suite_stamp" \
         -print -quit)" ]] \
         || return 1
     local output
@@ -1223,6 +1226,14 @@ build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-nodwarf" \
     -buildmode=pie "-gcflags=all=-N -l" -ldflags=-w
 build_zig_fixture "$zig_fixtures_dir/crash.zig" "$output_dir/crash-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
+# A call chain the program records itself, built as `go build` does by
+# default, stripped of DWARF and symbols, and stripped after an external link,
+# which puts Go's code after the C runtime's.
+build_go_fixture "$go_fixtures_dir/callers" "$output_dir/callers-go"
+build_go_fixture "$go_fixtures_dir/callers" "$output_dir/callers-go-stripped" \
+    -buildmode=pie "-ldflags=-s -w"
+GO_CGO=1 build_go_fixture "$go_fixtures_dir/callers" "$output_dir/callers-go-external-stripped" \
+    "-ldflags=-linkmode=external -s -w"
 
 # Post-mortem cores. 0x33 is the kernel's default coredump_filter; 0x23 omits
 # ELF header pages, 0x10 saves only ELF header pages so modified file-backed
@@ -1423,6 +1434,25 @@ for variant in "${symbols_variants[@]}"; do
         "$program $output_dir/libelf-symbols-${library}.so" "$program"
     generate_backtrace_oracle "$program" "${program}.core"
 done
+
+# Go's own reading of the function tables of images the Go linker linked,
+# which a test compares uscope's reader with.
+readonly gosym_oracle="$output_dir/gosym-oracle"
+build_go_fixture scripts/gosym-oracle "$gosym_oracle"
+generate_gosym_oracle() {
+    local program="$1"
+    local oracle="${program}.gosym"
+    rebuilt_outputs["$oracle"]=false
+    if [[ -s "$oracle" && "$oracle" -nt "$program" && "$oracle" -nt "$gosym_oracle" ]]; then
+        printf '[cached] %s\n' "$oracle"
+        return
+    fi
+    printf '[oracle] %s\n' "$oracle"
+    "$gosym_oracle" "$program" >"${oracle}.tmp"
+    mv "${oracle}.tmp" "$oracle"
+}
+generate_gosym_oracle "$output_dir/callers-go"
+generate_gosym_oracle "$output_dir/callers-go-stripped"
 
 # GNU objdump's decoding of every executable section, which differential tests
 # compare against uscope's disassembly. -z keeps the zero-filled runs objdump
