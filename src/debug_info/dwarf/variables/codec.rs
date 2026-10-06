@@ -400,7 +400,7 @@ pub(super) fn signed_integer_bytes(
     integer_bytes(value.cast_unsigned() & low_bits_mask(bits), size, target)
 }
 
-pub(super) const fn low_bits_mask(bits: usize) -> u128 {
+const fn low_bits_mask(bits: usize) -> u128 {
     if bits == 128 {
         u128::MAX
     } else {
@@ -504,7 +504,7 @@ pub(super) fn unsigned_value(
     })
 }
 
-pub(super) fn decode_float(
+fn decode_float(
     type_info: &BaseType,
     bytes: &[u8],
     target: TargetDescription,

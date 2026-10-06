@@ -6,8 +6,7 @@ use gimli::Reader as _;
 
 use crate::debug_info::dwarf::Reader;
 use crate::{
-    BaseType, BaseTypeEncoding, ByteOrder, IntegerValue, TypeInfo, TypeKind, TypeReference,
-    Variant, VariantSelection, VariantSelector,
+    BaseType, BaseTypeEncoding, ByteOrder, IntegerValue, Variant, VariantSelection, VariantSelector,
 };
 
 use super::MAX_VARIANT_METADATA;
@@ -15,23 +14,6 @@ use super::codec::{
     checked_integer_value, compare_integer_values, enumeration_constant, read_sleb128_i128,
     read_uleb128_u128,
 };
-use super::types::TypeEntry;
-
-pub(super) fn variant_metadata_limit_type(
-    reference: TypeReference,
-    name: &Arc<str>,
-    byte_size: Option<u64>,
-) -> TypeEntry {
-    TypeEntry::Resolved(TypeInfo {
-        reference,
-        name: Arc::clone(name),
-        byte_size,
-        kind: TypeKind::Opaque {
-            description: "variant metadata exceeds its resource limit".into(),
-        },
-        identity: None,
-    })
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum VariantMetadataError {
@@ -60,7 +42,7 @@ impl VariantMetadataBudget {
     }
 }
 
-pub(super) fn read_discriminant_leb128(
+fn read_discriminant_leb128(
     bytes: &[u8],
     cursor: &mut usize,
     base: &BaseType,
@@ -143,7 +125,7 @@ pub(super) fn parse_discriminant_list(
     Ok(VariantSelection::Selectors(selectors.into()))
 }
 
-pub(super) fn variant_selection_matches(
+fn variant_selection_matches(
     selection: &VariantSelection,
     value: IntegerValue,
 ) -> std::result::Result<bool, Arc<str>> {

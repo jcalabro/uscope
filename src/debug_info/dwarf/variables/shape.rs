@@ -172,7 +172,7 @@ pub(super) fn value_shape_from<T: TypeMetadataEntry>(
     clippy::too_many_lines,
     reason = "each normalized type shape has distinct validation"
 )]
-pub(super) fn nested_value_shape<T: TypeMetadataEntry>(
+fn nested_value_shape<T: TypeMetadataEntry>(
     types: &[T],
     id: TypeId,
     depth: usize,

@@ -26,6 +26,7 @@ use super::types::{TypeArenaBuilder, TypeEntry};
 const DW_AT_GO_KIND: gimli::DwAt = gimli::DwAt(0x2900);
 const DW_AT_GO_KEY: gimli::DwAt = gimli::DwAt(0x2901);
 const DW_AT_GO_ELEM: gimli::DwAt = gimli::DwAt(0x2902);
+const DW_AT_GO_EMBEDDED_FIELD: gimli::DwAt = gimli::DwAt(0x2903);
 const DW_AT_GO_RUNTIME_TYPE: gimli::DwAt = gimli::DwAt(0x2904);
 
 /// The inline namespaces of C++ standard libraries, for units older than
@@ -91,6 +92,16 @@ pub(super) fn go_runtime_type(entry: &gimli::DebuggingInformationEntry<Reader<'_
         value => value.udata_value(),
     }
     .filter(|offset| *offset != 0)
+}
+
+/// Whether Go embeds a struct member.
+pub(super) fn go_embedded(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) -> bool {
+    entry
+        .attr(DW_AT_GO_EMBEDDED_FIELD)
+        .is_some_and(|attribute| match attribute.value() {
+            gimli::AttributeValue::Flag(value) => value,
+            _ => attribute.udata_value().is_some_and(|value| value != 0),
+        })
 }
 
 pub(super) const fn source_language(language: Option<gimli::DwLang>, zig: bool) -> SourceLanguage {
@@ -190,7 +201,7 @@ pub(super) fn inline_namespace_path(
 
 impl<'data> TypeArenaBuilder<'_, 'data> {
     /// A function's name, from its own DIE or the declaration it completes.
-    pub(super) fn function_name(&self, key: DieKey) -> Option<Arc<str>> {
+    fn function_name(&self, key: DieKey) -> Option<Arc<str>> {
         let mut current = key;
         for _ in 0..4 {
             let unit = self.units.get(current.unit)?;

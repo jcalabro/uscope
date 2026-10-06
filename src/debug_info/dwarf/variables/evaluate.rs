@@ -104,7 +104,7 @@ impl From<crate::UnsupportedVariableFeature> for EvaluateError {
     }
 }
 
-pub(super) fn resolve_frame_base(
+fn resolve_frame_base(
     context: &mut FrameBaseContext<'_>,
     endian: RunTimeEndian,
     units: &[EvaluationUnit],
@@ -259,7 +259,7 @@ fn empty_location<'expression>() -> Vec<gimli::Piece<Reader<'expression>>> {
     }]
 }
 
-pub(super) fn evaluate_with_object<'expression>(
+fn evaluate_with_object<'expression>(
     expression: &'expression Expression,
     endian: RunTimeEndian,
     frame_base: &mut FrameBase<'_>,
@@ -373,7 +373,7 @@ pub(super) fn evaluate_with_object<'expression>(
     }
 }
 
-pub(super) fn evaluation_step<T>(
+fn evaluation_step<T>(
     result: std::result::Result<T, gimli::Error>,
 ) -> std::result::Result<T, EvaluateError> {
     result.map_err(|error| {
@@ -384,7 +384,7 @@ pub(super) fn evaluation_step<T>(
     })
 }
 
-pub(super) fn evaluation_value_type(
+fn evaluation_value_type(
     expression: &Expression,
     units: &[EvaluationUnit],
     offset: usize,
@@ -399,7 +399,7 @@ pub(super) fn evaluation_value_type(
         .ok_or_else(|| crate::UnsupportedVariableFeature::TypedValue.into())
 }
 
-pub(super) fn evaluation_value(
+fn evaluation_value(
     bytes: &[u8],
     value_type: gimli::ValueType,
     endian: RunTimeEndian,
@@ -543,7 +543,7 @@ pub(super) fn incomplete_piece_reason(
     )))
 }
 
-pub(super) fn object_bytes(
+fn object_bytes(
     bytes: &[u8],
     size: usize,
     endian: RunTimeEndian,
@@ -635,6 +635,6 @@ fn narrowed_constant(value: u128, size: usize) -> u128 {
     }
 }
 
-pub(super) fn evaluation_error(error: gimli::Error) -> Arc<str> {
+fn evaluation_error(error: gimli::Error) -> Arc<str> {
     format!("DWARF expression evaluation failed: {error}").into()
 }

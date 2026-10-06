@@ -309,7 +309,7 @@ pub(super) fn load_globals<'data>(
     Ok((globals, global_objects))
 }
 
-pub(super) const fn value_rank(value: &Metadata<ValueDescription>) -> u8 {
+const fn value_rank(value: &Metadata<ValueDescription>) -> u8 {
     match value {
         Metadata::Value(ValueDescription::Location(_)) => 3,
         Metadata::Value(ValueDescription::Constant(_)) => 2,
