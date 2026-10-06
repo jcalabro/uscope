@@ -137,10 +137,12 @@ fn stack_frames_show_the_parameters_line_and_module_a_client_asks_for() {
 
 /// What a client numbering from `base` sees of one stop: the breakpoint's
 /// line, the frame's line and column, the disassembly's location of the
-/// stopped instruction, and the lines breakpoints can use there.
+/// stopped instruction, and the lines breakpoints can use there. A
+/// breakpoint on the line before the client's first is refused.
 fn positions(base: u64) -> Vec<u64> {
     let path = source("c/basic.c");
     let line = line_of(&path, "return uscope_value;") - 1 + base;
+    let before_first = i64::try_from(base).expect("a small base") - 1;
     let mut dap = Dap::start(format!("lines from {base}"));
     let mark = dap.mark();
     dap.request(
@@ -151,7 +153,12 @@ fn positions(base: u64) -> Vec<u64> {
     let launch = dap.send("launch", json!({"program": fixture("basic")}));
     let set = dap.request(
         "setBreakpoints",
-        json!({"source": {"path": path}, "breakpoints": [{"line": line}]}),
+        json!({"source": {"path": path}, "breakpoints": [{"line": line}, {"line": before_first}]}),
+    );
+    assert_eq!(set["breakpoints"][1]["verified"], false, "{set}");
+    assert_eq!(
+        set["breakpoints"][1]["message"],
+        format!("line {before_first} does not exist")
     );
     dap.request("configurationDone", Value::Null);
     dap.success(launch);

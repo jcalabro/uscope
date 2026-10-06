@@ -1489,8 +1489,15 @@ impl Session {
         })?;
         let lines_start_at1 = self.support().lines_start_at1;
         let to_line = |line: i64| -> Key {
-            let line = u64::try_from(line).unwrap_or(0);
-            Key::Line(if lines_start_at1 { line } else { line + 1 })
+            let from_one = if lines_start_at1 {
+                line
+            } else {
+                line.saturating_add(1)
+            };
+            match u64::try_from(from_one) {
+                Ok(from_one) if from_one > 0 => Key::Line(from_one),
+                _ => Key::Invalid(format!("line {line} does not exist")),
+            }
         };
         let wants = match (arguments.breakpoints, arguments.lines) {
             (Some(breakpoints), _) => breakpoints
