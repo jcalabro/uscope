@@ -185,21 +185,21 @@ pub const COMMANDS: &[CommandSpec] = &[
         Watch,
         "watch",
         [],
-        "watch [-w] <value-path|0xaddress:byte-count>",
+        "watch [-w] <expression|0xaddress:byte-count>",
         "Stop when a store changes watched memory; with -w, at every store, even of the same value"
     ),
     command!(
         AccessWatch,
         "awatch",
         [],
-        "awatch <value-path|0xaddress:byte-count>",
+        "awatch <expression|0xaddress:byte-count>",
         "Stop when watched memory is read or written"
     ),
     command!(
         ReadWatch,
         "rwatch",
         [],
-        "rwatch <value-path|0xaddress:byte-count>",
+        "rwatch <expression|0xaddress:byte-count>",
         "Stop when watched memory is read"
     ),
     command!(

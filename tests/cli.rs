@@ -2418,11 +2418,11 @@ fn watch_command_failures_explain_themselves() {
         ),
         (
             &["break scalar_stores", "run", "watch 0x1000:many"][..],
-            "watch [-w] <value-path|0xaddress:byte-count>",
+            "watch [-w] <expression|0xaddress:byte-count>",
         ),
         (
             &["break scalar_stores", "run", "watch -x watch_i32"][..],
-            "watch [-w] <value-path|0xaddress:byte-count>",
+            "watch [-w] <expression|0xaddress:byte-count>",
         ),
         (
             &["break scalar_stores", "run", "unwatch 9"][..],
@@ -2430,11 +2430,11 @@ fn watch_command_failures_explain_themselves() {
         ),
         (
             &["watch"][..],
-            "watch [-w] <value-path|0xaddress:byte-count>",
+            "watch [-w] <expression|0xaddress:byte-count>",
         ),
         (
             &["watch -w"][..],
-            "watch [-w] <value-path|0xaddress:byte-count>",
+            "watch [-w] <expression|0xaddress:byte-count>",
         ),
     ] {
         let arguments = commands
