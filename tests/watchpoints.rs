@@ -7,7 +7,7 @@ use support::Scenario;
 use uscope::{
     BreakpointSpec, DebuggerEvent, Error, ExitStatus, InferiorState, RegisterRole, StepKind,
     StopReason, ThreadId, ThreadState, VirtualAddress, WatchAccess, WatchScope, Watchpoint,
-    WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointSpec,
+    WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions, WatchpointSpec,
 };
 
 /// The single-threaded fixture across the compiler, optimization, and PIE
@@ -174,9 +174,10 @@ async fn write_watchpoints_report_every_store_after_its_instruction() {
             std::slice::from_ref(&watchpoint)
         );
 
-        for (previous, current) in [(0, 1), (1, 2), (2, 2), (2, 42)] {
+        for (hit_count, (previous, current)) in (1..).zip([(0, 1), (1, 2), (2, 2), (2, 42)]) {
             let reason = scenario.resume_to_stop().await;
             assert_single_hit(&reason, watchpoint.id, previous, current);
+            assert_eq!(hits(&reason)[0].hit_count, hit_count);
             assert_eq!(
                 hits(&reason)[0].thread,
                 selected_thread(&mut scenario).await
@@ -215,7 +216,11 @@ async fn write_watchpoints_report_every_store_after_its_instruction() {
                 scenario.handle().remove_watchpoint(watchpoint.id),
             )
             .await;
-        assert_eq!(removed, watchpoint);
+        let counted = Watchpoint {
+            hit_count: 4,
+            ..watchpoint
+        };
+        assert_eq!(removed, counted);
         assert!(scenario.snapshot().await.watchpoints.is_empty());
         // One watchpoint stays armed through the process's exit.
         let armed = watch(&scenario, "watch_wide.words[3]", WatchAccess::Write).await;
@@ -2058,10 +2063,13 @@ async fn attached_processes_arm_threads_they_create_later() {
 /// and after.
 type Change = (String, u64, u64);
 
+/// An expression to watch for changes, with the condition its stops need.
+type Watched<'a> = (&'a str, Option<&'a str>);
+
 /// Runs a fixture to its end under gdb with a `watch` on each expression,
 /// which stops only where a store changes the value, and collects what gdb
 /// reported.
-fn gdb_changes(fixture: &str, expressions: &[&str]) -> Vec<Change> {
+fn gdb_changes(fixture: &str, expressions: &[Watched<'_>]) -> Vec<Change> {
     let mut command = std::process::Command::new("gdb");
     command.args(["--quiet", "--nx", "--batch"]);
     for setup in [
@@ -2073,8 +2081,9 @@ fn gdb_changes(fixture: &str, expressions: &[&str]) -> Vec<Change> {
     ] {
         command.args(["-ex", setup]);
     }
-    for expression in expressions {
-        command.args(["-ex", &format!("watch {expression}")]);
+    for (expression, condition) in expressions {
+        let condition = condition.map_or_else(String::new, |condition| format!(" if {condition}"));
+        command.args(["-ex", &format!("watch {expression}{condition}")]);
     }
     for _ in 0..48 {
         command.args(["-ex", "continue"]);
@@ -2115,12 +2124,25 @@ fn gdb_changes(fixture: &str, expressions: &[&str]) -> Vec<Change> {
 
 /// Runs a fixture to its end with a change watchpoint on each expression
 /// and collects what they reported.
-async fn uscope_changes(fixture: &str, expressions: &[&str]) -> Vec<Change> {
+async fn uscope_changes(fixture: &str, expressions: &[Watched<'_>]) -> Vec<Change> {
     let mut scenario = Scenario::launch(fixture);
     run_to(&mut scenario, "main").await;
     let mut watched = BTreeMap::new();
-    for expression in expressions {
-        let watchpoint = watch(&scenario, expression, WatchAccess::Change).await;
+    for (expression, condition) in expressions {
+        let options = WatchpointOptions {
+            condition: condition.map(|text| uscope::Condition::parse(text).expect("condition")),
+            ..WatchpointOptions::default()
+        };
+        let watchpoint = scenario
+            .operation(
+                &format!("watch {expression}"),
+                scenario.handle().watch_with(
+                    &uscope::Expression::parse(expression).expect("expression"),
+                    WatchAccess::Change,
+                    options,
+                ),
+            )
+            .await;
         assert_eq!(watchpoint.access, WatchAccess::Change);
         watched.insert(watchpoint.id, *expression);
     }
@@ -2163,14 +2185,46 @@ async fn change_watchpoints_report_the_changes_gdb_watch_reports() {
             ][..],
             &["watch_kernel", "watch_pair.first", "watch_u8", "watch_u16"][..],
         ] {
-            let expected = gdb_changes(fixture, expressions);
+            let expressions = expressions
+                .iter()
+                .map(|expression| (*expression, None))
+                .collect::<Vec<_>>();
+            let expected = gdb_changes(fixture, &expressions);
             assert!(expected.len() >= 5, "{fixture}: {expected:?}");
             assert_eq!(
-                uscope_changes(fixture, expressions).await,
+                uscope_changes(fixture, &expressions).await,
                 expected,
                 "{fixture}: changes differ from gdb's"
             );
         }
+    }
+}
+
+/// gdb's conditional `watch` is an independent oracle for what a change
+/// that a condition declines leaves: the value the next reported change is
+/// a change from, as each check sees it.
+#[tokio::test]
+async fn conditional_change_watchpoints_report_the_changes_gdb_reports() {
+    for fixture in ["hit-counts-gcc-o0", "hit-counts-clang-o2"] {
+        let expressions = [
+            ("last_call", Some("last_call % 7 == 3")),
+            ("shared_total", Some("shared_total % 3 == 0")),
+        ];
+        let expected = gdb_changes(fixture, &expressions);
+        assert!(expected.len() >= 10, "{fixture}: {expected:?}");
+        // Each reported call follows a declined one, the old value.
+        assert!(
+            expected
+                .iter()
+                .filter(|(name, ..)| name == "last_call")
+                .all(|(_, old, new)| old + 1 == *new),
+            "{fixture}: {expected:?}"
+        );
+        assert_eq!(
+            uscope_changes(fixture, &expressions).await,
+            expected,
+            "{fixture}: changes differ from gdb's"
+        );
     }
 }
 
@@ -2179,6 +2233,14 @@ async fn change_watchpoints_report_the_changes_gdb_watch_reports() {
 /// stopped. The script depends only on where each step stops: it steps out
 /// only of the callee and ends once execution leaves both functions.
 async fn steady_step_script(fixture: &str, access: Option<WatchAccess>) -> Vec<(StopReason, u64)> {
+    steady_step_script_with(fixture, access, WatchpointOptions::default()).await
+}
+
+async fn steady_step_script_with(
+    fixture: &str,
+    access: Option<WatchAccess>,
+    options: WatchpointOptions,
+) -> Vec<(StopReason, u64)> {
     use StepKind::{Instruction, IntoSource, Out, OverInstruction, OverSource};
     let mut scenario = Scenario::launch(fixture);
     run_to(&mut scenario, "steady_stores").await;
@@ -2189,7 +2251,14 @@ async fn steady_step_script(fixture: &str, access: Option<WatchAccess>) -> Vec<(
         )
         .await;
     if let Some(access) = access {
-        watch(&scenario, "watch_steady", access).await;
+        scenario
+            .operation(
+                "watch watch_steady",
+                scenario
+                    .handle()
+                    .watch_with(&expression("watch_steady"), access, options),
+            )
+            .await;
     }
     let mut stops = Vec::new();
     for kind in [
@@ -2238,7 +2307,7 @@ async fn steady_step_script(fixture: &str, access: Option<WatchAccess>) -> Vec<(
 }
 
 #[tokio::test]
-async fn steps_cross_stores_that_change_nothing_as_if_unwatched() {
+async fn steps_cross_stores_that_change_nothing_or_are_declined_as_if_unwatched() {
     for fixture in MATRIX {
         let plain = steady_step_script(fixture, None).await;
         assert!(plain.len() >= 10, "{fixture}: {plain:?}");
@@ -2255,6 +2324,23 @@ async fn steps_cross_stores_that_change_nothing_as_if_unwatched() {
                 .any(|(reason, _)| matches!(reason, StopReason::Watchpoint { .. })),
             "{fixture}: {written:?}"
         );
+        // Unless its condition or hit condition declines every store.
+        for options in [
+            WatchpointOptions {
+                condition: Some(uscope::Condition::parse("watch_steady != 7").expect("condition")),
+                ..WatchpointOptions::default()
+            },
+            WatchpointOptions {
+                hit_condition: Some("==1000".parse().expect("hit condition")),
+                ..WatchpointOptions::default()
+            },
+        ] {
+            assert_eq!(
+                steady_step_script_with(fixture, Some(WatchAccess::Write), options.clone()).await,
+                plain,
+                "{fixture}: {options:?}"
+            );
+        }
     }
 }
 

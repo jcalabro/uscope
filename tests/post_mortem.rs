@@ -516,6 +516,20 @@ async fn post_mortem_targets_reject_execution_modification_and_breakpoints() {
             "delete all",
             handle.remove_all_breakpoints().await.map(drop),
         ),
+        (
+            "watch condition",
+            handle
+                .set_watchpoint_condition(uscope::WatchpointId::new(1), None)
+                .await
+                .map(drop),
+        ),
+        (
+            "watch hit condition",
+            handle
+                .set_watchpoint_hit_condition(uscope::WatchpointId::new(1), None)
+                .await
+                .map(drop),
+        ),
     ];
     for (operation, result) in rejected {
         assert!(

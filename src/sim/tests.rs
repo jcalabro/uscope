@@ -251,6 +251,19 @@ fn missed_watch_traps_fail_watch_accounting() {
     );
 }
 
+/// A CPU that raises a watched access's debug exception again after the
+/// next instruction makes the debugger count a hit no access made, which
+/// watch accounting catches even when a condition declines both hits.
+#[test]
+fn repeated_watch_traps_fail_watch_accounting() {
+    some_failure_saying(
+        Sabotage::RepeatWatchTraps,
+        "watch accounting",
+        "accesses to it",
+        &["watch accounting"],
+    );
+}
+
 /// A kernel whose reads skip a linked node makes the debugger present a
 /// list without one of its elements, which the views oracle catches.
 #[test]

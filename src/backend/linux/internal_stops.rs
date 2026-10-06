@@ -100,9 +100,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             Edit::AddWatchpoint {
                 spec,
                 access,
+                options,
                 reply,
             } => {
-                let _ = reply.send(self.add_watchpoint(spec, access));
+                let _ = reply.send(self.add_watchpoint(spec, access, options));
             }
             Edit::RemoveWatchpoint { id, reply } => {
                 let _ = reply.send(self.remove_watchpoint(id));
@@ -225,7 +226,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.inferior
                 .iter()
                 .flat_map(|inferior| inferior.threads.values())
-                .flat_map(|thread| thread.watch_hits.iter().copied()),
+                .flat_map(|thread| thread.watch_hits.keys().copied()),
         )?;
         // A stop holds a hit or two, so looking each up beats indexing every
         // breakpoint at every stop.
@@ -245,7 +246,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if !resumed.contains(pid) {
                 continue;
             }
-            thread.watch_hits.retain(|id| {
+            thread.watch_hits.retain(|id, _| {
                 inferior.watch.watchpoints.contains_key(id) && !unchanged.contains(id)
             });
             match &thread.reason {

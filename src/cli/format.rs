@@ -6,14 +6,14 @@ use std::sync::Arc;
 
 use uscope::{
     AddressDescription, Backtrace, BlockCompletion, BoundaryConflict, BoundaryEvidence, Breakpoint,
-    BreakpointLocation, ByteOrder, ContextShortfall, CoreDumpInfo, CoreModuleState,
-    DecodedInstruction, DisassembledInstruction, Disassembly, DisassemblyBlock, DisassemblyView,
-    ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, IndirectTarget,
-    InstructionContent, InstructionReferenceKind, InstructionTokenKind, InvalidatedWatchpoint,
-    LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage,
-    RegisterSnapshot, SourceContext, StackFrame, StateSnapshot, StepKind, StopReason,
-    SymbolExtentProvenance, SymbolLocation, TargetBoundary, ThreadState, VirtualAddress,
-    WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
+    BreakpointLocation, ByteOrder, Condition, ConditionOwner, ContextShortfall, CoreDumpInfo,
+    CoreModuleState, DecodedInstruction, DisassembledInstruction, Disassembly, DisassemblyBlock,
+    DisassemblyView, ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, HitCondition,
+    IndirectTarget, InstructionContent, InstructionReferenceKind, InstructionTokenKind,
+    InvalidatedWatchpoint, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId,
+    ModuleIdentity, ModuleImage, RegisterSnapshot, SourceContext, StackFrame, StateSnapshot,
+    StepKind, StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary, ThreadState,
+    VirtualAddress, WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
 
 use super::commands::{COMMANDS, CommandSpec};
@@ -132,15 +132,45 @@ fn breakpoint_location(location: BreakpointLocation, renderer: Renderer) -> Stri
     }
 }
 
-/// Describes which hits a breakpoint stops at, or nothing when it stops at
-/// every hit.
-fn hit_condition(breakpoint: &Breakpoint, renderer: Renderer) -> Option<String> {
-    let condition = breakpoint.hit_condition?;
+/// Describes which hits a breakpoint or watchpoint that counted
+/// `hit_count` hits stops at, or nothing when it stops at every hit.
+fn hit_condition(
+    condition: Option<HitCondition>,
+    hit_count: u64,
+    renderer: Renderer,
+) -> Option<String> {
+    let condition = condition?;
     let mut text = format!("stops at hits {}", renderer.paint(Role::Name, condition));
-    if !condition.may_stop_after(breakpoint.hit_count) {
+    if !condition.may_stop_after(hit_count) {
         text.push_str(" (no later hit can stop)");
     }
     Some(text)
+}
+
+/// Appends a breakpoint's or watchpoint's hit condition and condition, two
+/// spaces before each, as listings show them.
+fn append_conditions(
+    output: &mut String,
+    hit: Option<HitCondition>,
+    hit_count: u64,
+    condition: Option<&Condition>,
+    renderer: Renderer,
+) {
+    if let Some(text) = hit_condition(hit, hit_count, renderer) {
+        write!(output, "  {text}").expect("writing to a String cannot fail");
+    }
+    if let Some(condition) = condition {
+        write!(output, "  where {}", renderer.paint(Role::Value, condition))
+            .expect("writing to a String cannot fail");
+    }
+}
+
+/// Names the breakpoint or watchpoint a condition belongs to.
+pub fn condition_owner(owner: ConditionOwner) -> String {
+    match owner {
+        ConditionOwner::Breakpoint(id) => format!("breakpoint {id}"),
+        ConditionOwner::Watchpoint(id) => format!("watchpoint {id}"),
+    }
 }
 
 pub fn breakpoint(breakpoint: &Breakpoint, renderer: Renderer) -> String {
@@ -149,7 +179,7 @@ pub fn breakpoint(breakpoint: &Breakpoint, renderer: Renderer) -> String {
         renderer.paint(Role::Success, "breakpoint"),
         renderer.paint(Role::Metadata, breakpoint.id),
     );
-    let condition = hit_condition(breakpoint, renderer)
+    let condition = hit_condition(breakpoint.hit_condition, breakpoint.hit_count, renderer)
         .map(|condition| format!(", {condition}"))
         .unwrap_or_default();
     if let [resolved] = breakpoint.locations.as_ref() {
@@ -179,8 +209,21 @@ pub fn breakpoint_hit_condition(breakpoint: &Breakpoint, renderer: Renderer) -> 
         "{} {} {}, hit {} so far",
         renderer.paint(Role::Success, "breakpoint"),
         renderer.paint(Role::Metadata, breakpoint.id),
-        hit_condition(breakpoint, renderer).unwrap_or_else(|| "stops at every hit".to_owned()),
+        hit_condition(breakpoint.hit_condition, breakpoint.hit_count, renderer)
+            .unwrap_or_else(|| "stops at every hit".to_owned()),
         plural(breakpoint.hit_count, "time"),
+    )
+}
+
+/// Describes a watchpoint whose hit condition changed.
+pub fn watchpoint_hit_condition(watchpoint: &Watchpoint, renderer: Renderer) -> String {
+    format!(
+        "{} {} {}, hit {} so far",
+        renderer.paint(Role::Success, "watchpoint"),
+        renderer.paint(Role::Metadata, watchpoint.id),
+        hit_condition(watchpoint.hit_condition, watchpoint.hit_count, renderer)
+            .unwrap_or_else(|| "stops at every hit".to_owned()),
+        plural(watchpoint.hit_count, "time"),
     )
 }
 
@@ -193,13 +236,13 @@ pub fn breakpoints(breakpoints: &[Breakpoint], renderer: Renderer) -> String {
             plural(breakpoint.locations.len() as u64, "location"),
             plural(breakpoint.hit_count, "time"),
         );
-        if let Some(condition) = hit_condition(breakpoint, renderer) {
-            write!(output, "  {condition}").expect("writing to a String cannot fail");
-        }
-        if let Some(condition) = &breakpoint.condition {
-            write!(output, "  where {}", renderer.paint(Role::Value, condition))
-                .expect("writing to a String cannot fail");
-        }
+        append_conditions(
+            &mut output,
+            breakpoint.hit_condition,
+            breakpoint.hit_count,
+            breakpoint.condition.as_ref(),
+            renderer,
+        );
         if let Some(message) = &breakpoint.log_message {
             write!(
                 output,
@@ -239,7 +282,7 @@ fn watch_scope_suffix(scope: &WatchScope) -> String {
 }
 
 pub fn watchpoint_set(watchpoint: &Watchpoint, renderer: Renderer) -> String {
-    format!(
+    let mut output = format!(
         "{} {} set on {}: {} at {} using {}{}",
         renderer.paint(Role::Success, "watchpoint"),
         renderer.paint(Role::Metadata, watchpoint.id),
@@ -248,20 +291,52 @@ pub fn watchpoint_set(watchpoint: &Watchpoint, renderer: Renderer) -> String {
         renderer.paint(Role::Metadata, watchpoint.address),
         plural(watchpoint.coverage.len() as u64, "hardware slot"),
         watch_scope_suffix(&watchpoint.scope),
+    );
+    if let Some(condition) = &watchpoint.condition {
+        write!(
+            output,
+            ", stops where {}",
+            renderer.paint(Role::Value, condition)
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+/// Describes a watchpoint whose condition changed.
+pub fn watchpoint_condition(watchpoint: &Watchpoint, renderer: Renderer) -> String {
+    let id = renderer.paint(Role::Metadata, watchpoint.id);
+    watchpoint.condition.as_ref().map_or_else(
+        || format!("watchpoint {id} stops unconditionally"),
+        |condition| {
+            format!(
+                "watchpoint {id} stops where {} holds",
+                renderer.paint(Role::Value, condition)
+            )
+        },
     )
 }
 
 pub fn watchpoints(watchpoints: &[Watchpoint], renderer: Renderer) -> String {
     lines_or(watchpoints, "no watchpoints", renderer, |watchpoint| {
-        format!(
-            "{}  {}  {}  {} at {}{}",
+        let mut output = format!(
+            "{}  {}  {}  {} at {}{}  hit {}",
             renderer.paint(Role::Metadata, watchpoint.id),
             watchpoint.access,
             renderer.paint(Role::Name, watch_subject(watchpoint)),
             plural(watchpoint.byte_size, "byte"),
             renderer.paint(Role::Metadata, watchpoint.address),
             watch_scope_suffix(&watchpoint.scope),
-        )
+            plural(watchpoint.hit_count, "time"),
+        );
+        append_conditions(
+            &mut output,
+            watchpoint.hit_condition,
+            watchpoint.hit_count,
+            watchpoint.condition.as_ref(),
+            renderer,
+        );
+        output
     })
 }
 
@@ -312,11 +387,15 @@ pub fn watchpoint_hits(
                 "{} by {}{} in thread {}{}",
                 renderer.paint(Role::Current, "stopped"),
                 renderer.paint(Role::Metadata, format!("watchpoint {}", hit.watchpoint)),
-                watchpoint.map_or_else(String::new, |watchpoint| format!(
-                    " ({}) on {}",
-                    watchpoint.access,
-                    renderer.paint(Role::Name, watch_subject(watchpoint))
-                )),
+                watchpoint.map_or_else(
+                    || format!(" (hit {})", hit.hit_count),
+                    |watchpoint| format!(
+                        " ({}, hit {}) on {}",
+                        watchpoint.access,
+                        hit.hit_count,
+                        renderer.paint(Role::Name, watch_subject(watchpoint))
+                    )
+                ),
                 renderer.paint(Role::Metadata, hit.thread),
                 if hit.changed() {
                     format!("\n  old: {old}\n  new: {new}")
@@ -333,6 +412,21 @@ fn exception(description: &str, code: u64, renderer: Renderer) -> String {
     format!("{} ({code:#x})", renderer.paint(Role::Error, description))
 }
 
+/// Names the breakpoints or watchpoints a stop hit, with each hit's number:
+/// `breakpoint 1 (hit 3)` or `watchpoints 1 (hit 2), 2 (hit 5)`.
+fn numbered_hits(
+    noun: &str,
+    hits: impl ExactSizeIterator<Item = (u64, u64)>,
+    renderer: Renderer,
+) -> String {
+    let plural = if hits.len() == 1 { "" } else { "s" };
+    let hits = hits
+        .map(|(id, hit)| format!("{} (hit {hit})", renderer.paint(Role::Metadata, id)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{noun}{plural} {hits}")
+}
+
 /// Summarizes a stop on one line, without watched values or source.
 pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
     let stopped = |role| renderer.paint(role, "stopped");
@@ -340,32 +434,22 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
         StopReason::Attach => format!("{} after attaching", stopped(Role::Current)),
         StopReason::Entry => format!("{} at the program entry", stopped(Role::Current)),
         StopReason::Breakpoint { address, hits } => format!(
-            "{} at {} {} at {}",
+            "{} at {} at {}",
             stopped(Role::Current),
-            if hits.len() == 1 {
-                "breakpoint"
-            } else {
-                "breakpoints"
-            },
-            hits.iter()
-                .map(|hit| format!(
-                    "{} (hit {})",
-                    renderer.paint(Role::Metadata, hit.breakpoint),
-                    hit.hit_count
-                ))
-                .collect::<Vec<_>>()
-                .join(", "),
+            numbered_hits(
+                "breakpoint",
+                hits.iter().map(|hit| (hit.breakpoint.get(), hit.hit_count)),
+                renderer
+            ),
             renderer.paint(Role::Metadata, address)
         ),
         StopReason::Watchpoint { hits } => format!(
-            "{} by watchpoint {}",
+            "{} by {}",
             stopped(Role::Current),
-            renderer.paint(
-                Role::Metadata,
-                hits.iter()
-                    .map(|hit| hit.watchpoint.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+            numbered_hits(
+                "watchpoint",
+                hits.iter().map(|hit| (hit.watchpoint.get(), hit.hit_count)),
+                renderer
             )
         ),
         StopReason::WatchpointInvalidated { invalidated } => {

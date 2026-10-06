@@ -704,7 +704,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.threads.get_mut(&pid))
             .map(|thread| std::mem::replace(&mut thread.expected, ExpectedStop::None))
             .ok_or(Error::NotRunning)?;
-        let watch = self.reportable_watch_hits(watch)?;
+        let watch = self.stopping_watch_hits(pid, watch)?;
         if !watch.is_empty() {
             return self.finish_watched_instruction(pid, &expected, watch);
         }
@@ -731,9 +731,10 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// Handles a debug exception a running thread took after accessing
-    /// watched memory. When every watchpoint it reported watches for a
-    /// change that the access did not make, the thread carries on as if it
-    /// had not trapped.
+    /// watched memory. When no watchpoint it reported stops at the access,
+    /// because the access changed nothing a change watchpoint watches or a
+    /// condition declined it, the thread carries on as if it had not
+    /// trapped.
     fn handle_watch_stop(&mut self, pid: Pid, owners: BTreeSet<WatchpointId>) -> Result<()> {
         let expected = self
             .inferior
@@ -741,7 +742,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.threads.get_mut(&pid))
             .map(|thread| std::mem::replace(&mut thread.expected, ExpectedStop::None))
             .ok_or(Error::NotRunning)?;
-        let owners = self.reportable_watch_hits(owners)?;
+        let owners = self.stopping_watch_hits(pid, owners)?;
         if !owners.is_empty() {
             return self.finish_watched_instruction(pid, &expected, owners);
         }
@@ -768,7 +769,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         &mut self,
         pid: Pid,
         expected: &ExpectedStop,
-        owners: BTreeSet<WatchpointId>,
+        owners: BTreeMap<WatchpointId, u64>,
     ) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         if let ExpectedStop::BreakpointRepair { address } = *expected {

@@ -259,8 +259,9 @@ struct TraceThread {
     /// The watch-plan generation programmed into this thread's debug
     /// registers. `None` means the debugger never programmed them.
     armed: Option<u64>,
-    /// Watchpoints whose slots this thread hit since its last public stop.
-    watch_hits: BTreeSet<WatchpointId>,
+    /// The watchpoints whose hits this thread stops for since its last
+    /// public stop, with each hit's number.
+    watch_hits: BTreeMap<WatchpointId, u64>,
     /// The thread's name as of its start or the last published stop.
     name: Option<Arc<str>>,
 }
@@ -277,7 +278,7 @@ impl TraceThread {
             awaiting_breakpoint: None,
             debugger_stop_pending: false,
             armed: None,
-            watch_hits: BTreeSet::new(),
+            watch_hits: BTreeMap::new(),
             name: None,
         }
     }
@@ -522,6 +523,7 @@ enum Edit {
     AddWatchpoint {
         spec: crate::WatchpointSpec,
         access: WatchAccess,
+        options: crate::WatchpointOptions,
         reply: Reply<Watchpoint>,
     },
     RemoveWatchpoint {
@@ -1195,13 +1197,29 @@ impl<P: LinuxTraceOps> Controller<P> {
             Request::AddWatchpoint {
                 spec,
                 access,
+                options,
                 reply,
             } => {
                 self.edit(Edit::AddWatchpoint {
                     spec,
                     access,
+                    options,
                     reply,
                 });
+            }
+            Request::SetWatchpointCondition {
+                id,
+                condition,
+                reply,
+            } => {
+                let _ = reply.send(self.set_watchpoint_condition(id, condition));
+            }
+            Request::SetWatchpointHitCondition {
+                id,
+                hit_condition,
+                reply,
+            } => {
+                let _ = reply.send(self.set_watchpoint_hit_condition(id, hit_condition));
             }
             Request::RemoveWatchpoint { id, reply } => {
                 self.edit(Edit::RemoveWatchpoint { id, reply });
@@ -1577,6 +1595,8 @@ impl<P: InspectionOps> Controller<P> {
             | Request::RemoveBreakpoint { .. }
             | Request::RemoveAllBreakpoints { .. }
             | Request::AddWatchpoint { .. }
+            | Request::SetWatchpointCondition { .. }
+            | Request::SetWatchpointHitCondition { .. }
             | Request::RemoveWatchpoint { .. }
             | Request::RemoveAllWatchpoints { .. }
             | Request::Launch { .. }

@@ -20,7 +20,7 @@ pub struct UserWatch {
     /// Whether loads count too.
     pub loads: bool,
     /// Whether the debugger reports every access, rather than only those
-    /// that change the bytes.
+    /// that change the bytes or that its conditions let stop.
     pub every: bool,
 }
 
@@ -55,6 +55,12 @@ pub struct Watching {
     pub log: BTreeMap<Tid, BTreeSet<u64>>,
     /// The watches a store left as they were since the world last looked.
     pub unchanged: BTreeSet<u64>,
+    /// Per watch, how many instructions accessed it since the world last
+    /// looked, each of which raised one debug exception.
+    pub counts: BTreeMap<u64, u64>,
+    /// Per watch, the bytes each store since the world last looked left,
+    /// where all were mapped.
+    pub stored: BTreeMap<u64, Vec<Vec<u8>>>,
     /// The threads that executed an instruction since the world last
     /// looked.
     pub ran: BTreeSet<Tid>,
@@ -69,13 +75,15 @@ impl Watching {
             lost: Vec::new(),
             log: BTreeMap::new(),
             unchanged: BTreeSet::new(),
+            counts: BTreeMap::new(),
+            stored: BTreeMap::new(),
             ran: BTreeSet::new(),
         }
     }
 
     /// Notes `tid` running again. An access traps once its instruction
     /// completes, holding the thread there until the debugger, having
-    /// reported it, resumes it.
+    /// reported it or its conditions having declined it, resumes it.
     pub fn resume(&mut self, tid: Tid) {
         let Some(accessed) = self.log.get(&tid) else {
             return;
@@ -124,6 +132,7 @@ impl Watching {
     ) {
         self.ran.insert(tid);
         for ((watch, before), after) in self.watches.iter().zip(before).zip(after) {
+            let mut counted = false;
             for access in accesses.iter() {
                 let overlaps = watch.spans.iter().any(|&(start, end)| {
                     access.address < end && start < access.address + access.size
@@ -132,8 +141,19 @@ impl Watching {
                     continue;
                 }
                 self.log.entry(tid).or_default().insert(watch.id);
+                if !std::mem::replace(&mut counted, true) {
+                    *self.counts.entry(watch.id).or_default() += 1;
+                }
                 if access.write && before == after {
                     self.unchanged.insert(watch.id);
+                }
+                if access.write
+                    && let Some(spans) = after
+                {
+                    self.stored
+                        .entry(watch.id)
+                        .or_default()
+                        .push(spans.concat());
                 }
                 let mut alone = Accesses::default();
                 alone.push(access);
@@ -152,6 +172,8 @@ impl Watching {
     pub fn restart(&mut self) {
         self.log.clear();
         self.unchanged.clear();
+        self.counts.clear();
+        self.stored.clear();
         self.ran.clear();
     }
 }

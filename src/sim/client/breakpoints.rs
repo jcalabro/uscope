@@ -15,7 +15,7 @@ use crate::sim::watches::Intent;
 use crate::{
     BreakpointId, BreakpointLocation, BreakpointOptions, BreakpointSpec, Condition, Error,
     HitComparison, HitCondition, LineNumber, LogMessage, ProcessId, StateSnapshot, VirtualAddress,
-    WatchAccess, WatchpointSpec,
+    WatchAccess, Watchpoint, WatchpointId, WatchpointOptions, WatchpointSpec,
 };
 
 /// A breakpoint the client added, with the image addresses of its traps.
@@ -62,9 +62,10 @@ impl Client {
             let offset = self.draw(size - width + 1);
             (format!("{name}+{offset}"), image_address + offset, width)
         };
+        let (options, policy) = self.choose_watch_options();
         let result = if whole && self.draw(2) == 0 {
             match crate::Expression::name(&name) {
-                Some(expression) => self.handle.watch(&expression, access).await,
+                Some(expression) => self.handle.watch_with(&expression, access, options).await,
                 None => {
                     return Err(Failure::simulator(
                         "client",
@@ -75,37 +76,18 @@ impl Client {
         } else {
             let address = VirtualAddress::new(image_address + self.main_bias().await?);
             self.handle
-                .add_watchpoint(
+                .add_watchpoint_with(
                     WatchpointSpec::Location {
                         address,
                         byte_size: size,
                     },
                     access,
+                    options,
                 )
                 .await
         };
         match result {
-            Ok(watchpoint) => {
-                self.note(format!(
-                    "watchpoint {} on {name} for {access}: {:x?}",
-                    watchpoint.id, watchpoint.coverage
-                ));
-                self.shared.watches.borrow_mut().insert(
-                    watchpoint.id.get(),
-                    Intent {
-                        id: watchpoint.id.get(),
-                        address: watchpoint.address.get(),
-                        size: watchpoint.byte_size,
-                        access: watchpoint.access,
-                        spans: watchpoint
-                            .coverage
-                            .iter()
-                            .map(|span| (span.start.get(), span.end.get()))
-                            .collect(),
-                    },
-                );
-                self.mark(Mark::WatchAdded);
-            }
+            Ok(watchpoint) => self.armed(&watchpoint, &name, policy),
             Err(Error::UnsupportedWatchAccess(WatchAccess::Read))
                 if access == WatchAccess::Read =>
             {
@@ -130,6 +112,107 @@ impl Client {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// Notes a watchpoint the debugger armed, which the kernel then
+    /// follows.
+    fn armed(&self, watchpoint: &Watchpoint, name: &str, policy: Policy) {
+        self.note(format!(
+            "watchpoint {} on {name} for {}: {:x?} {:?} {:?}",
+            watchpoint.id,
+            watchpoint.access,
+            watchpoint.coverage,
+            watchpoint.hit_condition,
+            watchpoint.condition
+        ));
+        self.shared.watches.borrow_mut().insert(
+            watchpoint.id.get(),
+            Intent {
+                id: watchpoint.id.get(),
+                address: watchpoint.address.get(),
+                size: watchpoint.byte_size,
+                access: watchpoint.access,
+                spans: watchpoint
+                    .coverage
+                    .iter()
+                    .map(|span| (span.start.get(), span.end.get()))
+                    .collect(),
+                policies: vec![policy],
+            },
+        );
+        self.mark(Mark::WatchAdded);
+    }
+
+    /// Chooses a new watchpoint's options: half none, the rest a hit
+    /// condition, a condition whose value the client knows, or both.
+    fn choose_watch_options(&self) -> (WatchpointOptions, Policy) {
+        if self.draw(2) == 0 {
+            return (WatchpointOptions::default(), UNCONDITIONAL);
+        }
+        let condition = self.choose_condition(None);
+        let options = WatchpointOptions {
+            hit_condition: self.choose_hit_condition(),
+            condition: condition.parse(&self.script.markers, None),
+        };
+        let policy = Policy {
+            hit_condition: options.hit_condition,
+            condition: self.known(condition, None, &[]),
+            logs: false,
+        };
+        (options, policy)
+    }
+
+    /// Changes one watchpoint's hit condition or condition, which applies
+    /// from the next hit the debugger handles.
+    pub(super) async fn amend_watch(&self) -> Result<(), Failure> {
+        let ids = self
+            .shared
+            .watches
+            .borrow()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let id = *self.choices.borrow_mut().pick(Stream::Client, &ids);
+        let mut policy = *self.shared.watches.borrow()[&id]
+            .policies
+            .last()
+            .expect("a watch has a policy");
+        let watchpoint = WatchpointId::new(id);
+        let request = if self.draw(2) == 0 {
+            let hit_condition = self.choose_hit_condition();
+            policy.hit_condition = hit_condition;
+            Ok(hit_condition)
+        } else {
+            let choice = self.choose_condition(None);
+            policy.condition = self.known(choice, None, &[]);
+            Err(choice.parse(&self.script.markers, None))
+        };
+        // From the moment the client asks, the new policy may apply.
+        if let Some(intent) = self.shared.watches.borrow_mut().get_mut(&id) {
+            intent.policies.push(policy);
+        }
+        let amended = match request {
+            Ok(hit_condition) => {
+                self.handle
+                    .set_watchpoint_hit_condition(watchpoint, hit_condition)
+                    .await
+            }
+            Err(condition) => {
+                self.handle
+                    .set_watchpoint_condition(watchpoint, condition)
+                    .await
+            }
+        }
+        .map_err(|error| protocol(format!("amending watchpoint {id} failed: {error}")))?;
+        self.note(format!(
+            "watchpoint {id} now {:?} {:?}",
+            amended.hit_condition, amended.condition
+        ));
+        self.mark(Mark::WatchAmended);
         Ok(())
     }
 
@@ -471,7 +554,14 @@ impl Client {
     }
 }
 
-/// The condition a breakpoint is given.
+/// What a watchpoint without a hit condition or condition does.
+const UNCONDITIONAL: Policy = Policy {
+    hit_condition: None,
+    condition: Known::Absent,
+    logs: false,
+};
+
+/// The condition a breakpoint or watchpoint is given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConditionChoice {
     None,

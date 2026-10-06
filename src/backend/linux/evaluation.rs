@@ -1102,29 +1102,24 @@ impl<P: InspectionOps> Controller<P> {
         })
     }
 
-    /// Evaluates an expression where a breakpoint hit stopped one thread
-    /// while others may run, as a condition or log message does: in the
-    /// hit's innermost frame, with capabilities that belong to no stop. A
-    /// condition's value is its truth.
+    /// Evaluates an expression where a breakpoint or watchpoint hit stopped
+    /// one thread while others may run, as a condition or log message does:
+    /// in the innermost frame the hit's stop `reason` presents, with
+    /// capabilities that belong to no stop. A condition's value is its
+    /// truth.
     pub(super) fn evaluate_at_hit(
         &self,
         pid: Pid,
         expression: &Expression,
         condition: bool,
+        reason: &crate::StopReason,
     ) -> Result<Evaluation> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         // The thread is in the ptrace-stop that reported the hit, which its
         // recorded state does not reflect until the hit is resolved.
         validate_image_current(inferior)?;
         let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
-        let address = VirtualAddress::new(self.ptrace.registers(pid)?.rip);
-        let presentation = self.presentation_for_thread(
-            pid,
-            Some(&crate::StopReason::Breakpoint {
-                address,
-                hits: Arc::from([]),
-            }),
-        )?;
+        let presentation = self.presentation_for_thread(pid, Some(reason))?;
         let resolved =
             self.resolve_presented_frame(inferior, pid, StackFrameId::INNERMOST, presentation)?;
         let scope = self.frame_for(inferior, StopId::new(0), pid, &resolved);
