@@ -36,12 +36,8 @@ pub(super) fn checked_integer_value(
             BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter,
             IntegerValue::Signed(value),
         ) => {
-            if bits < 128 {
-                let minimum = -(1_i128 << (bits - 1));
-                let maximum = (1_i128 << (bits - 1)) - 1;
-                if !(minimum..=maximum).contains(&value) {
-                    return Err("signed enumerator does not fit its representation".into());
-                }
+            if !fits_signed(value, bits) {
+                return Err("signed enumerator does not fit its representation".into());
             }
             Ok(IntegerValue::Signed(value))
         }
@@ -304,12 +300,7 @@ pub(super) fn wrapping_integer_bytes(
     if size == 0 || size > 16 {
         return Err(crate::UnsupportedVariableFeature::ScalarRepresentation.into());
     }
-    let value = value & low_bits_mask(size * 8);
-    let bytes = match target.byte_order {
-        ByteOrder::Little => value.to_le_bytes()[..size].to_vec(),
-        ByteOrder::Big => value.to_be_bytes()[16 - size..].to_vec(),
-    };
-    Ok(bytes.into())
+    integer_bytes(value & low_bits_mask(size * 8), size, target)
 }
 
 pub(super) fn dwarf_address_bytes(
@@ -350,16 +341,10 @@ pub(super) fn decode_address(
             "pointer storage size does not match its declared type".into(),
         ));
     }
-    let mut bytes = [0_u8; 8];
-    match target.byte_order {
-        ByteOrder::Little => bytes[..size].copy_from_slice(raw),
-        ByteOrder::Big => bytes[8 - size..].copy_from_slice(raw),
-    }
-    let value = match target.byte_order {
-        ByteOrder::Little => u64::from_le_bytes(bytes),
-        ByteOrder::Big => u64::from_be_bytes(bytes),
-    };
-    Ok(VirtualAddress::new(value))
+    let value = unsigned_value(raw, target.byte_order).map_err(EvaluateError::Malformed)?;
+    Ok(VirtualAddress::new(
+        u64::try_from(value).expect("at most eight bytes fit u64"),
+    ))
 }
 
 pub(super) fn integer_bytes(
@@ -388,19 +373,24 @@ pub(super) fn signed_integer_bytes(
         return Err(crate::UnsupportedVariableFeature::ScalarRepresentation.into());
     }
     let bits = size * 8;
-    if bits < 128 {
-        let minimum = -(1_i128 << (bits - 1));
-        let maximum = (1_i128 << (bits - 1)) - 1;
-        if !(minimum..=maximum).contains(&value) {
-            return Err(EvaluateError::Malformed(
-                "signed constant value does not fit its scalar type".into(),
-            ));
-        }
+    if !fits_signed(value, u32::try_from(bits).expect("at most 128 bits")) {
+        return Err(EvaluateError::Malformed(
+            "signed constant value does not fit its scalar type".into(),
+        ));
     }
     integer_bytes(value.cast_unsigned() & low_bits_mask(bits), size, target)
 }
 
-pub(super) const fn low_bits_mask(bits: usize) -> u128 {
+/// Whether `value` fits a two's-complement integer `bits` wide.
+const fn fits_signed(value: i128, bits: u32) -> bool {
+    if bits >= 128 {
+        return true;
+    }
+    let half = 1_i128 << (bits - 1);
+    -half <= value && value < half
+}
+
+const fn low_bits_mask(bits: usize) -> u128 {
     if bits == 128 {
         u128::MAX
     } else {
@@ -504,7 +494,7 @@ pub(super) fn unsigned_value(
     })
 }
 
-pub(super) fn decode_float(
+fn decode_float(
     type_info: &BaseType,
     bytes: &[u8],
     target: TargetDescription,

@@ -32,13 +32,14 @@ use crate::{
 
 use super::{DieKey, DwarfError, Reader, UnitCatalog, die_code_ranges, is_type_unit};
 use die::{
-    check_data_object_capacity, copy_name_with_origins, data_object_scope_ranges,
-    declaration_with_origins, is_type_scope, origin_chain, strict_flag, variable_order_key,
+    check_data_object_capacity, data_object_scope_ranges, debug_info_offset,
+    declaration_with_origins, is_type_scope, origin_chain, strict_flag, string_with_origins,
+    type_with_origins, variable_order_key,
 };
 use evaluate::FrameBaseCache;
 use globals::{load_globals, public_global_type};
 pub(in crate::debug_info) use inspect::{PathStep, array_byte_offset};
-use inspect::{inspected_value, path_error_state, unavailable};
+use inspect::{data_object, evaluate_error_state, inspected_value};
 use location::{
     EvaluationUnit, Expression, LocationDescription, copy_data_object_value,
     copy_optional_location, load_evaluation_units,
@@ -275,10 +276,8 @@ pub(super) fn load_variable_info<'data>(
                     }
                 }),
                 // An inline instance keeps the caller's frame base and function
-                // while narrowing to its own code ranges. Unlike a lexical
-                // block, an instance with no usable ranges must not widen to
-                // the caller's extent: give it an empty extent so its locals
-                // and parameters can never contaminate lookups.
+                // but only its own code ranges; one without usable ranges gets
+                // none, unlike a lexical block, so its locals never match.
                 gimli::DW_TAG_inlined_subroutine => parent.as_ref().map(|parent| {
                     let instance = instance_ids
                         .get(&DieKey {
@@ -344,13 +343,7 @@ pub(super) fn load_variable_info<'data>(
             // describes, which no data need mention.
             if depth == 1
                 && types::is_type_die_tag(entry.tag())
-                && entry
-                    .attr_value(identity::DW_AT_GO_RUNTIME_TYPE)
-                    .and_then(|value| match value {
-                        gimli::AttributeValue::Addr(offset) => Some(offset),
-                        value => value.udata_value(),
-                    })
-                    .is_some_and(|offset| offset != 0)
+                && identity::go_runtime_type(entry).is_some()
             {
                 types.resolve(DieKey {
                     unit: unit_index,
@@ -384,20 +377,24 @@ pub(super) fn load_variable_info<'data>(
                         VariableKind::Local => "variable",
                         VariableKind::Global => "global",
                     };
-                    let (name, name_error) =
-                        match copy_name_with_origins(dwarf, units, unit, entry, &chain) {
-                            Ok(Some(name)) => (name, None),
-                            Ok(None) => (
-                                format!("<anonymous {object_name} at {:#x}>", entry.offset().0)
-                                    .into(),
-                                Some(Arc::from(format!("{object_name} has no name"))),
-                            ),
-                            Err(error) => (
-                                format!("<malformed {object_name} at {:#x}>", entry.offset().0)
-                                    .into(),
-                                Some(error.to_string().into()),
-                            ),
-                        };
+                    let (name, name_error) = match string_with_origins(
+                        dwarf,
+                        units,
+                        unit,
+                        entry,
+                        &chain,
+                        gimli::DW_AT_name,
+                    ) {
+                        Ok(Some(name)) => (name, None),
+                        Ok(None) => (
+                            format!("<anonymous {object_name} at {:#x}>", entry.offset().0).into(),
+                            Some(Arc::from(format!("{object_name} has no name"))),
+                        ),
+                        Err(error) => (
+                            format!("<malformed {object_name} at {:#x}>", entry.offset().0).into(),
+                            Some(error.to_string().into()),
+                        ),
+                    };
                     order = order
                         .checked_add(1)
                         .expect("data-object DIE order overflow");
@@ -411,24 +408,11 @@ pub(super) fn load_variable_info<'data>(
                         source_file_ids,
                     );
                     let (ranges, scope_error) = data_object_scope_ranges(scope, entry);
-                    let (type_unit, type_value) = entry
-                        .attr_value(gimli::DW_AT_type)
-                        .map(|value| (unit_index, Some(value)))
-                        .or_else(|| {
-                            chain.iter().find_map(|(origin_unit, origin_entry)| {
-                                origin_entry
-                                    .attr_value(gimli::DW_AT_type)
-                                    .map(|value| (*origin_unit, Some(value)))
-                            })
-                        })
-                        .unwrap_or((unit_index, None));
+                    let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
                     check_data_object_capacity(objects.len())?;
                     functions[scope.function].objects.push(objects.len());
                     objects.push(CatalogDataObject {
-                        debug_info_offset: entry
-                            .offset()
-                            .to_debug_info_offset(&unit.header)
-                            .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64")),
+                        debug_info_offset: debug_info_offset(unit, entry),
                         kind,
                         name,
                         declaration: declaration.as_ref().ok().cloned().flatten(),
@@ -487,22 +471,19 @@ pub(super) fn load_variable_info<'data>(
     let finalized_types = std::mem::take(&mut types.entries)
         .into_iter()
         .enumerate()
-        .map(|(index, entry)| match entry {
-            TypeEntry::Resolved(info) => TypeNode::Resolved(info),
-            TypeEntry::Malformed(description) => TypeNode::Malformed {
+        .map(|(index, entry)| {
+            let description = match entry {
+                TypeEntry::Resolved(info) => return TypeNode::Resolved(info),
+                TypeEntry::Malformed(description) => description,
+                TypeEntry::Building => "type graph did not finish building".into(),
+            };
+            TypeNode::Malformed {
                 reference: TypeReference {
                     image: image_id,
                     id: TypeId::new(u32::try_from(index).expect("type count fits u32")),
                 },
                 description,
-            },
-            TypeEntry::Building => TypeNode::Malformed {
-                reference: TypeReference {
-                    image: image_id,
-                    id: TypeId::new(u32::try_from(index).expect("type count fits u32")),
-                },
-                description: "type graph did not finish building".into(),
-            },
+            }
         })
         .collect::<Arc<[_]>>();
     Ok(LoadedVariables {
@@ -588,63 +569,28 @@ impl VariableInfo for DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<Vec<Variable>> {
-        let Some(function) = self.function_at(address) else {
-            return match query {
-                VariableQuery::All => Ok(Vec::new()),
-                VariableQuery::Name(name) => Err(Error::VariableNotFound(name.clone())),
-                VariableQuery::Global(global) => {
-                    Err(Error::VariableNotFound(global.variable.to_string()))
-                }
-            };
-        };
-        let active = || {
-            function
-                .objects
-                .iter()
-                .map(|&index| &self.objects[index])
-                .filter(|object| object.instance == selected)
-                .filter(|object| object.ranges.iter().any(|range| range.contains(address)))
-        };
-        if matches!(query, VariableQuery::All) {
-            let mut frame_base = FrameBaseCache::Empty;
-            let mut variables = Vec::new();
-            for object in active() {
-                if budget.consume_variable_value().is_err() {
-                    break;
-                }
-                variables.push(self.inspect_data_object(
-                    object,
-                    Some(address),
-                    context,
-                    runtime,
-                    &mut frame_base,
-                    budget,
-                )?);
-            }
-            return Ok(variables);
-        }
-        let selected_objects = match query {
+        let objects = match query {
+            VariableQuery::All => self.function_at(address).map_or_else(Vec::new, |function| {
+                function
+                    .objects
+                    .iter()
+                    .map(|&index| &self.objects[index])
+                    .filter(|object| {
+                        object.instance == selected
+                            && object.ranges.iter().any(|range| range.contains(address))
+                    })
+                    .collect()
+            }),
             VariableQuery::Name(name) => {
-                let mut named = active()
-                    .filter(|object| object.name.as_ref() == name)
-                    .collect::<Vec<_>>();
-                let Some(depth) = named.iter().map(|object| object.lexical_depth).max() else {
-                    return Err(Error::VariableNotFound(name.clone()));
-                };
-                named.retain(|object| object.lexical_depth == depth);
-                if named.len() != 1 {
-                    return Err(Error::AmbiguousVariable(name.clone()));
-                }
-                named
+                vec![&self.objects[self.visible_object(address, selected, name)?]]
             }
             VariableQuery::Global(global) => {
                 return Err(Error::VariableNotFound(global.variable.to_string()));
             }
-            VariableQuery::All => unreachable!("all-variable lookup returned above"),
         };
         let mut frame_base = FrameBaseCache::Empty;
         let mut variables = Vec::new();
-        for object in selected_objects {
+        for object in objects {
             if budget.consume_variable_value().is_err() {
                 break;
             }
@@ -706,11 +652,10 @@ impl VariableInfo for DwarfVariableInfo {
             }
         };
         match self.located_data_object(variable, address, runtime, &mut frame_base, budget) {
-            Ok(storage) => Ok(Ok(Located {
-                ty,
-                storage: Self::retained_storage(&storage),
-            })),
-            Err(error) => path_error_state(error).map(Err),
+            Ok(storage) => Ok(Ok(Located { ty, storage })),
+            Err(error) => {
+                evaluate_error_state(error, VariableMalformedKind::InvalidExpression).map(Err)
+            }
         }
     }
 
@@ -724,7 +669,7 @@ impl VariableInfo for DwarfVariableInfo {
         budget: &mut InspectionBudget,
     ) -> Result<Accessed> {
         let mut frame_base = FrameBaseCache::Empty;
-        let storage = Self::restored_storage(&from.storage);
+        let storage = from.storage.clone();
         match self.apply_steps(
             storage,
             &step.steps,
@@ -741,12 +686,11 @@ impl VariableInfo for DwarfVariableInfo {
                         "an untyped step unexpectedly reached storage".into(),
                     ))));
                 };
-                Ok(Ok(Located {
-                    ty,
-                    storage: Self::retained_storage(&storage),
-                }))
+                Ok(Ok(Located { ty, storage }))
             }
-            Err(error) => path_error_state(error).map(Err),
+            Err(error) => {
+                evaluate_error_state(error, VariableMalformedKind::InvalidExpression).map(Err)
+            }
         }
     }
 
@@ -757,13 +701,7 @@ impl VariableInfo for DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<std::result::Result<crate::VariableValue, VariableState>> {
-        match self.decode_state(
-            at.ty,
-            &Self::restored_storage(&at.storage),
-            context,
-            runtime,
-            budget,
-        )? {
+        match self.decode_state(at.ty, &at.storage, context, runtime, budget)? {
             VariableState::Available { value, .. } => Ok(Ok(value)),
             state => Ok(Err(state)),
         }
@@ -789,14 +727,7 @@ impl VariableInfo for DwarfVariableInfo {
                 ));
             }
         };
-        self.materialize_inspected_value(
-            at.ty,
-            type_info,
-            &Self::restored_storage(&at.storage),
-            context,
-            runtime,
-            budget,
-        )
+        self.materialize_inspected_value(at.ty, type_info, &at.storage, context, runtime, budget)
     }
 
     fn object_storage(&self, object: ObjectKey) -> ObjectStorage {
@@ -818,7 +749,11 @@ impl VariableInfo for DwarfVariableInfo {
             .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
         let object = &self.objects[object_index];
         if let Err(exhaustion) = budget.consume_variable_value() {
-            return Ok(unavailable(object, None, exhaustion.into()));
+            return Ok(data_object(
+                object,
+                None,
+                VariableState::Unavailable(exhaustion.into()),
+            ));
         }
         let mut frame_base = FrameBaseCache::Empty;
         self.inspect_data_object(object, address, context, runtime, &mut frame_base, budget)

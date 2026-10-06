@@ -57,11 +57,8 @@ impl LocationDescription {
         &self,
         address: Option<ImageAddress>,
     ) -> std::result::Result<Option<&Expression>, LocationSelectionError> {
-        // Specific ranged entries override default (range-less) entries per
-        // DWARF 5 default-location semantics. Without an instruction context we
-        // cannot select a ranged entry; a range-less default still resolves, but
-        // an entry that only exists behind a range must fail explicitly rather
-        // than silently resolve against a guessed address.
+        // An entry whose range holds the address overrides a default
+        // (range-less) entry; without an address only a default can apply.
         if let Some(address) = address {
             let mut specific = self
                 .entries
@@ -84,8 +81,6 @@ impl LocationDescription {
             ));
         }
         if address.is_none() && expression.is_none() && !self.entries.is_empty() {
-            // A global was requested without a valid module-relative instruction,
-            // yet every location entry is range-gated. Refuse to guess.
             return Err(LocationSelectionError::Unavailable(
                 VariableUnavailableReason::NoInstructionContext,
             ));
@@ -117,16 +112,9 @@ pub(super) fn copy_data_object_value(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
 ) -> Metadata<ValueDescription> {
     if let Some(location) = entry.attr_value(gimli::DW_AT_location) {
-        return match copy_optional_location(
-            dwarf,
-            unit_index,
-            unit,
-            Some(location),
-            MetadataAbsence::NoLocation,
-        ) {
-            Metadata::Value(location) => Metadata::Value(ValueDescription::Location(location)),
-            Metadata::Absent(reason) => Metadata::Absent(reason),
-            Metadata::Malformed(reason) => Metadata::Malformed(reason),
+        return match copy_location(dwarf, unit_index, unit, location) {
+            Ok(location) => Metadata::Value(ValueDescription::Location(location)),
+            Err(error) => Metadata::Malformed(error.to_string().into()),
         };
     }
     if let Some(value) = entry.attr_value(gimli::DW_AT_const_value) {
@@ -146,20 +134,15 @@ pub(super) fn copy_data_object_value_with_origins(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
 ) -> Metadata<ValueDescription> {
-    let direct = copy_data_object_value(dwarf, unit_index, unit, entry);
-    if !matches!(direct, Metadata::Absent(_)) {
-        return direct;
-    }
-    for (origin_unit, origin) in chain {
-        let inherited = copy_data_object_value(dwarf, *origin_unit, &units[*origin_unit], origin);
-        if !matches!(inherited, Metadata::Absent(_)) {
-            return inherited;
-        }
-    }
-    direct
+    std::iter::once(copy_data_object_value(dwarf, unit_index, unit, entry))
+        .chain(chain.iter().map(|(origin_unit, origin)| {
+            copy_data_object_value(dwarf, *origin_unit, &units[*origin_unit], origin)
+        }))
+        .find(|value| !matches!(value, Metadata::Absent(_)))
+        .unwrap_or(Metadata::Absent(MetadataAbsence::NoLocation))
 }
 
-pub(super) fn copy_constant(
+fn copy_constant(
     value: gimli::AttributeValue<Reader<'_>>,
 ) -> std::result::Result<ConstantValue, Arc<str>> {
     Ok(match value {
@@ -181,7 +164,7 @@ pub(super) fn copy_constant(
     })
 }
 
-pub(super) fn copy_location(
+fn copy_location(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
@@ -283,9 +266,6 @@ pub(super) fn load_evaluation_units(
                 if entry.tag() != gimli::DW_TAG_base_type {
                     continue;
                 }
-                // Use the shared constant/encoding classifiers so a base type
-                // encoded with `DW_FORM_data16` is recognized here too. Any form
-                // this backend cannot use is simply skipped for typed evaluation.
                 let ByteSize::Constant(byte_size) = byte_size_attribute(entry) else {
                     continue;
                 };
@@ -305,31 +285,24 @@ pub(super) fn load_evaluation_units(
         .collect()
 }
 
-pub(super) const fn dwarf_value_type(
-    encoding: gimli::DwAte,
-    byte_size: u64,
-) -> Option<gimli::ValueType> {
+const fn dwarf_value_type(encoding: gimli::DwAte, byte_size: u64) -> Option<gimli::ValueType> {
     use gimli::ValueType::{F32, F64, I8, I16, I32, I64, U8, U16, U32, U64};
-    if encoding.0 == gimli::DW_ATE_float.0 {
-        return match byte_size {
-            4 => Some(F32),
-            8 => Some(F64),
-            _ => None,
-        };
-    }
-    let signed = encoding.0 == gimli::DW_ATE_signed.0 || encoding.0 == gimli::DW_ATE_signed_char.0;
-    let unsigned = encoding.0 == gimli::DW_ATE_boolean.0
-        || encoding.0 == gimli::DW_ATE_unsigned.0
-        || encoding.0 == gimli::DW_ATE_unsigned_char.0;
-    match (signed, unsigned, byte_size) {
-        (true, false, 1) => Some(I8),
-        (true, false, 2) => Some(I16),
-        (true, false, 4) => Some(I32),
-        (true, false, 8) => Some(I64),
-        (false, true, 1) => Some(U8),
-        (false, true, 2) => Some(U16),
-        (false, true, 4) => Some(U32),
-        (false, true, 8) => Some(U64),
-        _ => None,
-    }
+    let signed = matches!(encoding, gimli::DW_ATE_signed | gimli::DW_ATE_signed_char);
+    let unsigned = matches!(
+        encoding,
+        gimli::DW_ATE_boolean | gimli::DW_ATE_unsigned | gimli::DW_ATE_unsigned_char
+    );
+    Some(match (encoding, signed, unsigned, byte_size) {
+        (gimli::DW_ATE_float, _, _, 4) => F32,
+        (gimli::DW_ATE_float, _, _, 8) => F64,
+        (_, true, _, 1) => I8,
+        (_, true, _, 2) => I16,
+        (_, true, _, 4) => I32,
+        (_, true, _, 8) => I64,
+        (_, _, true, 1) => U8,
+        (_, _, true, 2) => U16,
+        (_, _, true, 4) => U32,
+        (_, _, true, 8) => U64,
+        _ => return None,
+    })
 }

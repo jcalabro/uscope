@@ -8,7 +8,7 @@ use gimli::Reader as _;
 
 use crate::debug_info::dwarf::{
     DieKey, DwarfError, Reader, die_reference, is_type_unit, source_file_id, source_path,
-    type_unit_source_file_id,
+    string_attribute, type_unit_source_file_id,
 };
 use crate::{
     AddressRange, ColumnNumber, ImageAddress, LineNumber, SourceFile, SourceFileId, SourceLocation,
@@ -111,12 +111,7 @@ pub(super) fn copy_name(
     unit: &gimli::Unit<Reader<'_>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
 ) -> std::result::Result<Option<Arc<str>>, DwarfError> {
-    entry
-        .attr_value(gimli::DW_AT_name)
-        .map(|value| dwarf.attr_string(unit, value))
-        .transpose()
-        .map_err(DwarfError::from)
-        .map(|value| value.map(|value| Arc::from(value.to_string_lossy().into_owned())))
+    string_attribute(dwarf, unit, entry, gimli::DW_AT_name)
 }
 
 /// Zig's attribute for the type or namespace a declaration is in, which its
@@ -169,7 +164,9 @@ pub(super) fn zig_qualified_name(
     Ok(parts.join(".").into())
 }
 
-pub(super) fn copy_string_attribute_with_origins(
+/// A string attribute of a DIE or, failing that, of the first origin that
+/// has it.
+pub(super) fn string_with_origins(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     units: &[gimli::Unit<Reader<'_>>],
     unit: &gimli::Unit<Reader<'_>>,
@@ -177,31 +174,50 @@ pub(super) fn copy_string_attribute_with_origins(
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
     attribute: gimli::DwAt,
 ) -> std::result::Result<Option<Arc<str>>, DwarfError> {
-    if let Some(value) = entry.attr_value(attribute) {
-        return Ok(Some(Arc::from(
-            dwarf
-                .attr_string(unit, value)?
-                .to_string_lossy()
-                .into_owned(),
-        )));
+    if let Some(value) = string_attribute(dwarf, unit, entry, attribute)? {
+        return Ok(Some(value));
     }
     for (origin_unit, origin) in chain {
-        if let Some(value) = origin.attr_value(attribute) {
-            return Ok(Some(Arc::from(
-                dwarf
-                    .attr_string(&units[*origin_unit], value)?
-                    .to_string_lossy()
-                    .into_owned(),
-            )));
+        if let Some(value) = string_attribute(dwarf, &units[*origin_unit], origin, attribute)? {
+            return Ok(Some(value));
         }
     }
     Ok(None)
 }
 
-pub(super) fn flag_attribute_with_origins(
-    _unit: &gimli::Unit<Reader<'_>>,
+/// The `DW_AT_type` of a DIE or of its first origin that has one, with the
+/// index of the unit holding it.
+pub(super) fn type_with_origins<'data>(
+    unit_index: usize,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
+) -> (usize, Option<gimli::AttributeValue<Reader<'data>>>) {
+    entry
+        .attr_value(gimli::DW_AT_type)
+        .map(|value| (unit_index, Some(value)))
+        .or_else(|| {
+            chain.iter().find_map(|(origin_unit, origin)| {
+                origin
+                    .attr_value(gimli::DW_AT_type)
+                    .map(|value| (*origin_unit, Some(value)))
+            })
+        })
+        .unwrap_or((unit_index, None))
+}
+
+/// A DIE's offset in `.debug_info`, which implicit pointers name it by.
+pub(super) fn debug_info_offset(
+    unit: &gimli::Unit<Reader<'_>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
-    _units: &[gimli::Unit<Reader<'_>>],
+) -> Option<u64> {
+    entry
+        .offset()
+        .to_debug_info_offset(&unit.header)
+        .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64"))
+}
+
+pub(super) fn flag_with_origins(
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
     attribute: gimli::DwAt,
 ) -> Option<bool> {
@@ -258,7 +274,7 @@ pub(super) fn checked_reference_chain(
     Ok(chain)
 }
 
-pub(super) fn origin_reference(
+fn origin_reference(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     unit_index: usize,
     units: &[gimli::Unit<Reader<'_>>],
@@ -278,24 +294,6 @@ pub(super) fn strict_flag(
         Some(gimli::AttributeValue::Flag(value)) => Ok(value),
         Some(_) => Err(format!("{attribute:?} has an invalid flag encoding").into()),
     }
-}
-
-pub(super) fn copy_name_with_origins(
-    dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
-    unit: &gimli::Unit<Reader<'_>>,
-    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
-    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
-) -> std::result::Result<Option<Arc<str>>, DwarfError> {
-    if let Some(name) = copy_name(dwarf, unit, entry)? {
-        return Ok(Some(name));
-    }
-    for (origin_unit, origin_entry) in chain {
-        if let Some(name) = copy_name(dwarf, &units[*origin_unit], origin_entry)? {
-            return Ok(Some(name));
-        }
-    }
-    Ok(None)
 }
 
 pub(super) fn declaration_with_origins<'data>(
@@ -423,14 +421,11 @@ pub(super) enum ByteSize {
     Absent,
     /// A constant unsigned size in bytes.
     Constant(u64),
-    /// A valid constant size the backend cannot represent (a `u128` above
-    /// `u64::MAX`). Valid metadata, but not usable here.
+    /// A valid constant above `u64::MAX`.
     Unsupported(Arc<str>),
-    /// A valid dynamic size (a location expression or DIE reference) that this
-    /// backend cannot evaluate to a static width.
+    /// A location expression or DIE reference, known only at run time.
     Dynamic,
-    /// A present attribute whose form is neither a constant nor a supported
-    /// dynamic size, i.e. defective metadata.
+    /// A form DWARF does not permit for a byte size.
     Malformed,
 }
 
@@ -439,19 +434,14 @@ pub(super) enum ByteSize {
 pub(super) enum UnsignedConstant {
     /// A representable constant value.
     Value(u64),
-    /// A valid constant that exceeds the representable `u64` range (a
-    /// `DW_FORM_data16` value above `u64::MAX`). Valid metadata, unusable here.
+    /// A valid `DW_FORM_data16` constant above `u64::MAX`.
     Oversized,
-    /// A present attribute whose form is not an integer constant, i.e. defective.
+    /// A form that is not an integer constant.
     NonConstant,
 }
 
-/// Classifies an attribute expected to be an unsigned integer constant.
-///
-/// `udata_value` decodes the small constant forms but not the DWARF 5
-/// `DW_FORM_data16`, so that form is handled explicitly. Every attribute that
-/// must be an integer (byte size, address class, encoding) shares this so the
-/// constant-versus-oversized-versus-defective distinction is made once.
+/// Classifies an attribute expected to be an unsigned integer constant,
+/// including `DW_FORM_data16`, which `udata_value` does not decode.
 pub(super) fn unsigned_constant(attribute: &gimli::Attribute<Reader<'_>>) -> UnsignedConstant {
     if let Some(value) = attribute.udata_value() {
         return UnsignedConstant::Value(value);
@@ -464,11 +454,8 @@ pub(super) fn unsigned_constant(attribute: &gimli::Attribute<Reader<'_>>) -> Uns
     }
 }
 
-/// Extracts a base type's `DW_AT_encoding` as a one-byte `DW_ATE_*` value.
-///
-/// The encoding domain is a single byte, so a present value outside `0..=255`
-/// (or a non-constant form) is defective metadata rather than a vendor encoding
-/// this backend merely does not implement.
+/// Extracts a base type's `DW_AT_encoding` as a one-byte `DW_ATE_*` value;
+/// anything else is malformed.
 pub(super) fn base_type_encoding(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
 ) -> std::result::Result<u8, Arc<str>> {
@@ -498,11 +485,8 @@ pub(super) fn byte_size_attribute(
         UnsignedConstant::Oversized => {
             ByteSize::Unsupported("constant DW_AT_byte_size exceeds the supported u64 range".into())
         }
-        // Not an integer constant. Per DWARF a byte size may instead be a
-        // location expression or a reference to another DIE (class exprloc or
-        // reference); those are valid but not statically sizable here. Every
-        // other form is defective. `DW_FORM_sec_offset` (loclist/rnglist class)
-        // is deliberately excluded: it is not a permitted `DW_AT_byte_size` form.
+        // DWARF also permits an expression or a DIE reference, which are
+        // valid but not statically sizable; any other form is malformed.
         UnsignedConstant::NonConstant => match attribute.value() {
             gimli::AttributeValue::Exprloc(_)
             | gimli::AttributeValue::Block(_)

@@ -15,12 +15,7 @@ use super::variant::is_single_default_variant;
 use super::{MAX_SCALAR_BYTES, MAX_TYPE_RESOLUTION_DEPTH};
 
 #[derive(Clone, Debug)]
-pub(super) struct ValueShape {
-    pub(super) kind: ValueShapeKind,
-}
-
-#[derive(Clone, Debug)]
-pub(super) enum ValueShapeKind {
+pub(super) enum ValueShape {
     Scalar(BaseType),
     Enumeration {
         representation: BaseType,
@@ -67,18 +62,44 @@ pub(super) enum ValueShapeKind {
     },
 }
 
-pub(super) enum TransparentRepresentationError {
-    Malformed(Arc<str>),
-    Unsupported(Arc<str>),
+/// Strips the aliases and qualifiers around `id` that share their target's
+/// representation, returning the type beneath them.
+pub(super) fn transparent_type_from<T: TypeMetadataEntry>(
+    types: &[T],
+    id: TypeId,
+) -> std::result::Result<(TypeId, &TypeInfo), ValueShapeError> {
+    let mut current = id;
+    let mut visited = HashSet::new();
+    loop {
+        if !visited.insert(current) {
+            return Err(ValueShapeError::Malformed("type wrapper cycle".into()));
+        }
+        let info = type_info_from(types, current).map_err(ValueShapeError::Malformed)?;
+        match info.kind {
+            TypeKind::Modified { target, .. }
+            | TypeKind::Named {
+                target: Some(target),
+                ..
+            } => {
+                transparent_representation(types, info, target)?;
+                current = target.id;
+            }
+            TypeKind::Named { target: None, .. } => {
+                return Err(ValueShapeError::Unsupported(
+                    "incomplete named type has no representation target".into(),
+                ));
+            }
+            _ => return Ok((current, info)),
+        }
+    }
 }
 
-pub(super) fn transparent_representation<T: TypeMetadataEntry>(
+fn transparent_representation<T: TypeMetadataEntry>(
     types: &[T],
     wrapper: &TypeInfo,
     target: TypeReference,
-) -> std::result::Result<(), TransparentRepresentationError> {
-    let target =
-        type_info_from(types, target.id).map_err(TransparentRepresentationError::Malformed)?;
+) -> std::result::Result<(), ValueShapeError> {
+    let target = type_info_from(types, target.id).map_err(ValueShapeError::Malformed)?;
     if matches!(
         wrapper.kind,
         TypeKind::Modified {
@@ -86,14 +107,14 @@ pub(super) fn transparent_representation<T: TypeMetadataEntry>(
             ..
         }
     ) {
-        return Err(TransparentRepresentationError::Unsupported(
+        return Err(ValueShapeError::Unsupported(
             "shared-qualified values require UPC distributed-memory semantics".into(),
         ));
     }
     if let (Some(wrapper_size), Some(target_size)) = (wrapper.byte_size, target.byte_size)
         && wrapper_size != target_size
     {
-        return Err(TransparentRepresentationError::Unsupported(
+        return Err(ValueShapeError::Unsupported(
             format!(
                 "transparent type wrapper size {wrapper_size} differs from target size {target_size}"
             )
@@ -103,17 +124,12 @@ pub(super) fn transparent_representation<T: TypeMetadataEntry>(
     Ok(())
 }
 
-/// Why a value shape could not be resolved from a type graph.
-///
-/// The variant distinguishes defective metadata (`Malformed`) from valid
-/// metadata whose shape the debugger does not yet implement (`Unsupported`)
-/// so callers can map each to the correct public state.
+/// Why a type has no value shape.
 #[derive(Debug)]
 pub(super) enum ValueShapeError {
-    /// The type graph is defective: a wrapper cycle, an indirection with no
-    /// byte size, or an underlying malformed/incomplete type entry.
+    /// The type graph is defective.
     Malformed(Arc<str>),
-    /// The type is valid but its value shape is not implemented.
+    /// The type is valid but its shape is not implemented.
     Unsupported(Arc<str>),
 }
 
@@ -121,17 +137,9 @@ pub(super) enum ValueShapeError {
 /// `VirtualAddress`.
 pub(super) const MAX_ADDRESS_BYTES: u64 = 8;
 
-/// Resolves the storage size of a pointer or reference value.
-///
-/// The type builder only leaves `byte_size` unset for a non-default address
-/// class with no explicit `DW_AT_byte_size`, which is valid target-specific
-/// metadata this backend cannot size rather than defective metadata. A missing
-/// size under the default address class would be an internal inconsistency, so
-/// the two cases are classified distinctly. A zero-byte indirection cannot hold
-/// an address, so it is rejected as defective at this boundary rather than
-/// permitting a zero-length read that would only fail later. A width wider than
-/// a decodable address is valid-but-unsupported metadata and is rejected here so
-/// inspection never performs a doomed inferior read.
+/// Resolves the storage size of a pointer or reference value. The type
+/// builder leaves the size unset only for a non-default address class
+/// without `DW_AT_byte_size`, which is unsupported rather than malformed.
 pub(super) fn indirection_byte_size(
     byte_size: Option<u64>,
     address_class: u64,
@@ -172,7 +180,7 @@ pub(super) fn value_shape_from<T: TypeMetadataEntry>(
     clippy::too_many_lines,
     reason = "each normalized type shape has distinct validation"
 )]
-pub(super) fn nested_value_shape<T: TypeMetadataEntry>(
+fn nested_value_shape<T: TypeMetadataEntry>(
     types: &[T],
     id: TypeId,
     depth: usize,
@@ -182,267 +190,223 @@ pub(super) fn nested_value_shape<T: TypeMetadataEntry>(
             "array nesting exceeds its limit".into(),
         ));
     }
-    let mut current = id;
-    let mut visited = HashSet::new();
-    loop {
-        if !visited.insert(current) {
-            return Err(ValueShapeError::Malformed("type wrapper cycle".into()));
+    let (current, info) = transparent_type_from(types, id)?;
+    match &info.kind {
+        TypeKind::Base(base) => {
+            if base.byte_size == 0 {
+                // A scalar encoding cannot occupy zero bytes; treat it as
+                // defective rather than decoding empty storage.
+                return Err(ValueShapeError::Malformed(
+                    "base type has a zero byte size".into(),
+                ));
+            }
+            if base.byte_size > MAX_SCALAR_BYTES {
+                return Err(ValueShapeError::Unsupported(
+                    format!("scalar type occupies {} bytes", base.byte_size).into(),
+                ));
+            }
+            let mut base = base.clone();
+            base.name = Arc::clone(
+                &type_info_from(types, id)
+                    .map_err(ValueShapeError::Malformed)?
+                    .name,
+            );
+            Ok(ValueShape::Scalar(base))
         }
-        let info = type_info_from(types, current).map_err(ValueShapeError::Malformed)?;
-        match &info.kind {
-            TypeKind::Base(base) => {
-                if base.byte_size == 0 {
-                    // A scalar encoding cannot occupy zero bytes; treat it as
-                    // defective rather than decoding empty storage.
-                    return Err(ValueShapeError::Malformed(
-                        "base type has a zero byte size".into(),
-                    ));
-                }
-                if base.byte_size > MAX_SCALAR_BYTES {
-                    return Err(ValueShapeError::Unsupported(
-                        format!("scalar type occupies {} bytes", base.byte_size).into(),
-                    ));
-                }
-                let mut base = base.clone();
-                base.name = Arc::clone(
-                    &type_info_from(types, id)
-                        .map_err(ValueShapeError::Malformed)?
-                        .name,
-                );
-                return Ok(ValueShape {
-                    kind: ValueShapeKind::Scalar(base),
-                });
+        TypeKind::Enumeration {
+            representation,
+            enumerators,
+            ..
+        } => {
+            if representation.byte_size == 0 {
+                return Err(ValueShapeError::Malformed(
+                    "enumeration has a zero byte size".into(),
+                ));
             }
-            TypeKind::Enumeration {
+            if representation.byte_size > MAX_SCALAR_BYTES {
+                return Err(ValueShapeError::Unsupported(
+                    format!("enumeration occupies {} bytes", representation.byte_size).into(),
+                ));
+            }
+            integer_bit_width(representation).map_err(ValueShapeError::Malformed)?;
+            let mut representation = representation.clone();
+            representation.name = Arc::clone(
+                &type_info_from(types, id)
+                    .map_err(ValueShapeError::Malformed)?
+                    .name,
+            );
+            Ok(ValueShape::Enumeration {
+                byte_size: representation.byte_size,
                 representation,
-                enumerators,
-                ..
-            } => {
-                if representation.byte_size == 0 {
-                    return Err(ValueShapeError::Malformed(
-                        "enumeration has a zero byte size".into(),
-                    ));
-                }
-                if representation.byte_size > MAX_SCALAR_BYTES {
-                    return Err(ValueShapeError::Unsupported(
-                        format!("enumeration occupies {} bytes", representation.byte_size).into(),
-                    ));
-                }
-                integer_bit_width(representation).map_err(ValueShapeError::Malformed)?;
-                let mut representation = representation.clone();
-                representation.name = Arc::clone(
-                    &type_info_from(types, id)
-                        .map_err(ValueShapeError::Malformed)?
-                        .name,
-                );
-                return Ok(ValueShape {
-                    kind: ValueShapeKind::Enumeration {
-                        byte_size: representation.byte_size,
-                        representation,
-                        enumerators: Arc::clone(enumerators),
-                    },
-                });
-            }
-            TypeKind::Array {
-                element,
-                dimensions,
-            } => {
-                let element_shape = nested_value_shape(types, element.id, depth + 1)?;
-                let mut count = 1_u64;
-                for dimension in dimensions.iter() {
-                    count = count.checked_mul(dimension.count).ok_or_else(|| {
-                        ValueShapeError::Unsupported("array element count overflows".into())
-                    })?;
-                }
-                let element_size = element_shape.byte_size();
-                let byte_size = count.checked_mul(element_size).ok_or_else(|| {
-                    ValueShapeError::Unsupported("array byte size overflows".into())
+                enumerators: Arc::clone(enumerators),
+            })
+        }
+        TypeKind::Array {
+            element,
+            dimensions,
+        } => {
+            let element_shape = nested_value_shape(types, element.id, depth + 1)?;
+            let mut count = 1_u64;
+            for dimension in dimensions.iter() {
+                count = count.checked_mul(dimension.count).ok_or_else(|| {
+                    ValueShapeError::Unsupported("array element count overflows".into())
                 })?;
-                return Ok(ValueShape {
-                    kind: ValueShapeKind::Array {
-                        element: element.id,
-                        dimensions: Arc::clone(dimensions),
-                        byte_size,
-                    },
-                });
             }
-            TypeKind::Slice {
-                element,
-                has_capacity,
-                text,
-            } => {
-                let byte_size = info.byte_size.ok_or_else(|| {
-                    ValueShapeError::Malformed("slice descriptor has no byte size".into())
-                })?;
-                return Ok(ValueShape {
-                    kind: ValueShapeKind::Slice {
-                        element: element.id,
-                        byte_size,
-                        has_capacity: *has_capacity,
-                        text: *text,
-                    },
-                });
-            }
-            TypeKind::Record {
-                members,
-                bases,
-                incomplete,
-                ..
-            } => {
-                if *incomplete {
-                    return Err(ValueShapeError::Unsupported(
-                        "incomplete record values are unsupported".into(),
-                    ));
-                }
-                let byte_size = info.byte_size.ok_or_else(|| {
-                    ValueShapeError::Malformed("complete record type has no byte size".into())
-                })?;
-                return Ok(ValueShape {
-                    kind: ValueShapeKind::Record {
-                        record: current,
-                        members: Arc::clone(members),
-                        bases: Arc::clone(bases),
-                        byte_size,
-                    },
-                });
-            }
-            TypeKind::Union {
-                members,
-                incomplete,
-            } => {
-                if *incomplete {
-                    return Err(ValueShapeError::Unsupported(
-                        "incomplete union values are unsupported".into(),
-                    ));
-                }
-                let byte_size = info.byte_size.ok_or_else(|| {
-                    ValueShapeError::Malformed("complete union type has no byte size".into())
-                })?;
-                return Ok(ValueShape {
-                    kind: ValueShapeKind::Union {
-                        union: current,
-                        members: Arc::clone(members),
-                        byte_size,
-                    },
-                });
-            }
-            TypeKind::Variant {
-                common_members,
-                bases,
-                discriminant,
-                variants,
-                incomplete,
-                ..
-            } => {
-                if *incomplete {
-                    return Err(ValueShapeError::Unsupported(
-                        "incomplete variant values are unsupported".into(),
-                    ));
-                }
-                if matches!(discriminant.as_ref(), VariantDiscriminant::TagType(_))
-                    && !is_single_default_variant(variants)
-                {
-                    return Err(ValueShapeError::Unsupported(
-                        "tagless variant selection is unsupported".into(),
-                    ));
-                }
-                let byte_size = info.byte_size.ok_or_else(|| {
-                    ValueShapeError::Malformed("complete variant type has no byte size".into())
-                })?;
-                return Ok(ValueShape {
-                    kind: ValueShapeKind::Variant {
-                        aggregate: current,
-                        common_members: Arc::clone(common_members),
-                        bases: Arc::clone(bases),
-                        discriminant: discriminant.as_ref().clone(),
-                        variants: Arc::clone(variants),
-                        byte_size,
-                    },
-                });
-            }
-            TypeKind::Pointer {
-                target,
-                address_class,
-            } => {
-                let byte_size = indirection_byte_size(info.byte_size, *address_class, "pointer")?;
-                return Ok(ValueShape {
-                    kind: ValueShapeKind::Indirection {
-                        target: target.map(|target| target.id),
-                        byte_size,
-                        address_class: *address_class,
-                    },
-                });
-            }
-            TypeKind::Reference {
-                target,
-                address_class,
-                ..
-            } => {
-                let byte_size = indirection_byte_size(info.byte_size, *address_class, "reference")?;
-                return Ok(ValueShape {
-                    kind: ValueShapeKind::Indirection {
-                        target: Some(target.id),
-                        byte_size,
-                        address_class: *address_class,
-                    },
-                });
-            }
-            TypeKind::Modified { target, .. }
-            | TypeKind::Named {
-                target: Some(target),
-                ..
-            } => {
-                transparent_representation(types, info, *target).map_err(|error| match error {
-                    TransparentRepresentationError::Malformed(reason) => {
-                        ValueShapeError::Malformed(reason)
-                    }
-                    TransparentRepresentationError::Unsupported(reason) => {
-                        ValueShapeError::Unsupported(reason)
-                    }
-                })?;
-                current = target.id;
-            }
-            TypeKind::Named { target: None, .. } => {
+            let element_size = element_shape.byte_size();
+            let byte_size = count
+                .checked_mul(element_size)
+                .ok_or_else(|| ValueShapeError::Unsupported("array byte size overflows".into()))?;
+            Ok(ValueShape::Array {
+                element: element.id,
+                dimensions: Arc::clone(dimensions),
+                byte_size,
+            })
+        }
+        TypeKind::Slice {
+            element,
+            has_capacity,
+            text,
+        } => {
+            let byte_size = info.byte_size.ok_or_else(|| {
+                ValueShapeError::Malformed("slice descriptor has no byte size".into())
+            })?;
+            Ok(ValueShape::Slice {
+                element: element.id,
+                byte_size,
+                has_capacity: *has_capacity,
+                text: *text,
+            })
+        }
+        TypeKind::Record {
+            members,
+            bases,
+            incomplete,
+            ..
+        } => {
+            if *incomplete {
                 return Err(ValueShapeError::Unsupported(
-                    "incomplete named type has no representation target".into(),
+                    "incomplete record values are unsupported".into(),
                 ));
             }
-            TypeKind::Unspecified => {
+            let byte_size = info.byte_size.ok_or_else(|| {
+                ValueShapeError::Malformed("complete record type has no byte size".into())
+            })?;
+            Ok(ValueShape::Record {
+                record: current,
+                members: Arc::clone(members),
+                bases: Arc::clone(bases),
+                byte_size,
+            })
+        }
+        TypeKind::Union {
+            members,
+            incomplete,
+        } => {
+            if *incomplete {
                 return Err(ValueShapeError::Unsupported(
-                    "unspecified values are unsupported".into(),
+                    "incomplete union values are unsupported".into(),
                 ));
             }
-            TypeKind::Opaque { description } => {
-                return Err(ValueShapeError::Unsupported(Arc::clone(description)));
+            let byte_size = info.byte_size.ok_or_else(|| {
+                ValueShapeError::Malformed("complete union type has no byte size".into())
+            })?;
+            Ok(ValueShape::Union {
+                union: current,
+                members: Arc::clone(members),
+                byte_size,
+            })
+        }
+        TypeKind::Variant {
+            common_members,
+            bases,
+            discriminant,
+            variants,
+            incomplete,
+            ..
+        } => {
+            if *incomplete {
+                return Err(ValueShapeError::Unsupported(
+                    "incomplete variant values are unsupported".into(),
+                ));
             }
+            if matches!(discriminant.as_ref(), VariantDiscriminant::TagType(_))
+                && !is_single_default_variant(variants)
+            {
+                return Err(ValueShapeError::Unsupported(
+                    "tagless variant selection is unsupported".into(),
+                ));
+            }
+            let byte_size = info.byte_size.ok_or_else(|| {
+                ValueShapeError::Malformed("complete variant type has no byte size".into())
+            })?;
+            Ok(ValueShape::Variant {
+                aggregate: current,
+                common_members: Arc::clone(common_members),
+                bases: Arc::clone(bases),
+                discriminant: discriminant.as_ref().clone(),
+                variants: Arc::clone(variants),
+                byte_size,
+            })
+        }
+        TypeKind::Pointer {
+            target,
+            address_class,
+        } => {
+            let byte_size = indirection_byte_size(info.byte_size, *address_class, "pointer")?;
+            Ok(ValueShape::Indirection {
+                target: target.map(|target| target.id),
+                byte_size,
+                address_class: *address_class,
+            })
+        }
+        TypeKind::Reference {
+            target,
+            address_class,
+            ..
+        } => {
+            let byte_size = indirection_byte_size(info.byte_size, *address_class, "reference")?;
+            Ok(ValueShape::Indirection {
+                target: Some(target.id),
+                byte_size,
+                address_class: *address_class,
+            })
+        }
+        TypeKind::Modified { .. } | TypeKind::Named { .. } => {
+            unreachable!("transparent_type_from strips every wrapper")
+        }
+        TypeKind::Unspecified => Err(ValueShapeError::Unsupported(
+            "unspecified values are unsupported".into(),
+        )),
+        TypeKind::Opaque { description } => {
+            Err(ValueShapeError::Unsupported(Arc::clone(description)))
         }
     }
 }
 
 impl ValueShape {
     pub(super) const fn byte_size(&self) -> u64 {
-        match &self.kind {
-            ValueShapeKind::Scalar(base) => base.byte_size,
-            ValueShapeKind::Enumeration { byte_size, .. }
-            | ValueShapeKind::Indirection { byte_size, .. }
-            | ValueShapeKind::Array { byte_size, .. }
-            | ValueShapeKind::Slice { byte_size, .. }
-            | ValueShapeKind::Record { byte_size, .. }
-            | ValueShapeKind::Union { byte_size, .. }
-            | ValueShapeKind::Variant { byte_size, .. } => *byte_size,
+        match self {
+            Self::Scalar(base) => base.byte_size,
+            Self::Enumeration { byte_size, .. }
+            | Self::Indirection { byte_size, .. }
+            | Self::Array { byte_size, .. }
+            | Self::Slice { byte_size, .. }
+            | Self::Record { byte_size, .. }
+            | Self::Union { byte_size, .. }
+            | Self::Variant { byte_size, .. } => *byte_size,
         }
     }
 
     pub(super) const fn scalar(&self) -> Option<&BaseType> {
-        match &self.kind {
-            ValueShapeKind::Scalar(base) => Some(base),
-            ValueShapeKind::Enumeration { .. }
-            | ValueShapeKind::Indirection { .. }
-            | ValueShapeKind::Array { .. }
-            | ValueShapeKind::Slice { .. }
-            | ValueShapeKind::Record { .. }
-            | ValueShapeKind::Union { .. }
-            | ValueShapeKind::Variant { .. } => None,
+        match self {
+            Self::Scalar(base) => Some(base),
+            Self::Enumeration { .. }
+            | Self::Indirection { .. }
+            | Self::Array { .. }
+            | Self::Slice { .. }
+            | Self::Record { .. }
+            | Self::Union { .. }
+            | Self::Variant { .. } => None,
         }
     }
 }
