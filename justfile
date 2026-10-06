@@ -33,8 +33,8 @@ golden:
     ./scripts/golden.sh build
 
 # Builds the native test fixtures and uscope.
-build: build-test-programs
-    cargo build
+build *ARGS="": build-test-programs
+    cargo build {{ARGS}}
 
 # Builds uscope and runs it with the supplied arguments.
 run *ARGS: build
