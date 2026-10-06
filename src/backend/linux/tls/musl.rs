@@ -1,11 +1,10 @@
 //! Thread-local storage addresses in musl's thread layout.
 //!
 //! musl has no thread debugging library, but the start of its thread
-//! descriptor is ABI that its own assembly depends on. On x86-64 the thread
-//! pointer addresses the descriptor, whose first word points back at the
-//! descriptor and whose second points at the thread's dynamic thread vector
-//! (DTV). The DTV's first word counts the modules it has slots for, and slot
-//! N holds the address of TLS module N's block.
+//! descriptor is ABI that its own assembly depends on: it is the thread
+//! control block, whose second word points at the thread's DTV. The DTV's
+//! first word counts the modules it has slots for, and slot N holds the
+//! address of TLS module N's block.
 //!
 //! musl gives a thread every module's block before the module's code can
 //! run: a new thread copies every block, and `dlopen` extends every thread's
@@ -17,10 +16,8 @@ use std::num::NonZeroU64;
 
 use nix::unistd::Pid;
 
-use super::{ProcessServices, TlsError, failed};
+use super::{ProcessServices, TlsError, dtv, failed, read_word, thread_pointer};
 
-/// Where the descriptor keeps its DTV's address, after its own.
-const DTV_OFFSET: u64 = 8;
 const WORD_SIZE: u64 = 8;
 
 /// The address of `offset` within the TLS block of module `module` for
@@ -31,35 +28,12 @@ pub(super) fn tls_address(
     module: NonZeroU64,
     offset: u64,
 ) -> Result<u64, TlsError> {
-    let thread_pointer = services
-        .registers(thread)
-        .ok_or_else(|| failed(format!("the registers of thread {thread} are unavailable")))?
-        .fs_base;
-    // A thread has no thread pointer until musl sets one up.
-    if thread_pointer == 0 {
+    let dtv = dtv(services, thread_pointer(services, thread)?)?;
+    if module.get() > read_word(services, Some(dtv))? {
         return Err(TlsError::Deferred);
     }
-    let read = |address: Option<u64>| {
-        let address = address.ok_or_else(|| failed("musl's thread state overflows"))?;
-        let mut bytes = [0; 8];
-        if services.read(address, &mut bytes) {
-            Ok(u64::from_le_bytes(bytes))
-        } else {
-            Err(failed(format!(
-                "musl's thread state at {address:#x} is unreadable"
-            )))
-        }
-    };
-    if read(Some(thread_pointer))? != thread_pointer {
-        return Err(failed(format!(
-            "the thread pointer {thread_pointer:#x} does not address a musl thread descriptor"
-        )));
-    }
-    let dtv = read(thread_pointer.checked_add(DTV_OFFSET))?;
-    if module.get() > read(Some(dtv))? {
-        return Err(TlsError::Deferred);
-    }
-    let block = read(
+    let block = read_word(
+        services,
         module
             .get()
             .checked_mul(WORD_SIZE)
@@ -105,7 +79,7 @@ mod tests {
             Some(registers)
         }
 
-        fn lookup_symbol(&self, _: &str, _: &str) -> Option<u64> {
+        fn lookup_symbol(&self, _: Option<&str>, _: &str) -> Option<u64> {
             None
         }
     }
@@ -158,7 +132,7 @@ mod tests {
         // not musl's.
         let mut foreign = Process::new(&[0x1000]);
         foreign.words.insert(THREAD_POINTER, 0);
-        assert!(failure(&foreign).contains("does not address a musl thread descriptor"));
+        assert!(failure(&foreign).contains("does not address a thread control block"));
         let mut unreadable = Process::new(&[0x1000]);
         unreadable.words.remove(&DTV);
         assert!(failure(&unreadable).contains("0x60000000 is unreadable"));

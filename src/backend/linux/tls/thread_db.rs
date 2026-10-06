@@ -229,8 +229,8 @@ fn td_error(code: c_int) -> String {
         TD_VERSION => "the inferior's C library is not the version of the debugger's libthread_db",
         TD_TLSDEFER => "the thread has not allocated the module's TLS block",
         TD_NOLIBTHREAD => {
-            "no module defines glibc's thread library version, and the C library was not \
-             recognized as musl"
+            "no module defines glibc's thread library version, and the C library was \
+             recognized neither as musl nor as statically linked glibc"
         }
         _ => return name,
     };
@@ -293,13 +293,20 @@ unsafe extern "C" fn ps_pglobal_lookup(
     symbol_name: *const c_char,
     address: *mut *mut c_void,
 ) -> c_int {
+    if symbol_name.is_null() {
+        return PS_ERR;
+    }
     with_process(process, |_, services| {
-        // SAFETY: libthread_db supplies valid NUL-terminated names and a
-        // writable result pointer for this synchronous callback.
-        let object_name = unsafe { CStr::from_ptr(object_name) }.to_string_lossy();
+        // A null object name, which libthread_db passes for the variables
+        // of a statically linked C library, accepts any module.
+        // SAFETY: libthread_db supplies valid NUL-terminated names, the
+        // object's possibly null, and a writable result pointer for this
+        // synchronous callback.
+        let object_name = (!object_name.is_null())
+            .then(|| unsafe { CStr::from_ptr(object_name) }.to_string_lossy());
         // SAFETY: same callback contract as `object_name` above.
         let symbol_name = unsafe { CStr::from_ptr(symbol_name) }.to_string_lossy();
-        let Some(value) = services.lookup_symbol(&object_name, &symbol_name) else {
+        let Some(value) = services.lookup_symbol(object_name.as_deref(), &symbol_name) else {
             return PS_NOSYM;
         };
         let Ok(value) = usize::try_from(value) else {
@@ -411,3 +418,45 @@ unsupported_process_service!(ps_pstop(process: *mut c_void));
 unsupported_process_service!(ps_pcontinue(process: *mut c_void));
 unsupported_process_service!(ps_lstop(process: *mut c_void, lwp: c_int));
 unsupported_process_service!(ps_lcontinue(process: *mut c_void, lwp: c_int));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symbol_lookups_without_an_object_name_search_every_module() {
+        struct Symbols;
+
+        impl ProcessServices for Symbols {
+            fn read(&self, _: u64, _: &mut [u8]) -> bool {
+                false
+            }
+
+            fn registers(&self, _: Pid) -> Option<libc::user_regs_struct> {
+                None
+            }
+
+            fn lookup_symbol(&self, object: Option<&str>, symbol: &str) -> Option<u64> {
+                (object.is_none() && symbol == "_dl_stack_user").then_some(0x1234)
+            }
+        }
+
+        let mut process = ProcessHandle {
+            pid: 1,
+            services: &Symbols,
+        };
+        let mut address = ptr::null_mut();
+        // SAFETY: the handle and the result pointer are valid for the call,
+        // and libthread_db passes no object name for a symbol a statically
+        // linked program defines.
+        let result = unsafe {
+            ps_pglobal_lookup(
+                (&raw mut process).cast(),
+                ptr::null(),
+                c"_dl_stack_user".as_ptr(),
+                &raw mut address,
+            )
+        };
+        assert_eq!((result, address.addr()), (PS_OK, 0x1234));
+    }
+}

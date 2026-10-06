@@ -499,6 +499,38 @@ require_musl() {
     record_validation "$stamp" "$signature"
 }
 
+# Fails the build unless a fixture is statically linked with glibc: it has no
+# interpreter and contains glibc's static TLS setup. `threads` says whether it
+# must contain glibc's thread library, whose absence leaves a program without
+# the descriptors libthread_db reads.
+require_static_glibc() {
+    local output="$1"
+    local threads="$2"
+    local stamp="${output}.validation-static-glibc"
+    local signature="validator=static-glibc-v1"$'\n'"threads=${threads}"
+    if validation_is_cached "$output" "$stamp" "$signature"; then
+        return
+    fi
+    local symbols
+    symbols=$(nm "$output")
+    if readelf -lW "$output" | grep -F 'Requesting program interpreter' >/dev/null ||
+        ! grep -E ' __libc_setup_tls$' <<<"$symbols" >/dev/null; then
+        printf 'error: %s is not statically linked with glibc\n' "$output" >&2
+        exit 1
+    fi
+    if grep -E ' __nptl_version$' <<<"$symbols" >/dev/null; then
+        local linked=yes
+    else
+        local linked=no
+    fi
+    if [[ $linked != "$threads" ]]; then
+        printf 'error: %s contains the thread library: %s, expected %s\n' \
+            "$output" "$linked" "$threads" >&2
+        exit 1
+    fi
+    record_validation "$stamp" "$signature"
+}
+
 # Fails the build when a fixture's DWARF stops exercising the operation a test
 # depends on, instead of letting the test pass without its coverage.
 require_dwarf_operation() {
@@ -596,6 +628,14 @@ generate_core() {
         rm -f "$temporary"
         exit 1
     fi
+    # gcore saves zeros for the whole of a mapping it fails to read. No
+    # process can read the vsyscall page, which no test reads either.
+    if grep -F 'Memory read failed for corefile section' <<<"$log" |
+        grep -Fv ' at 0xffffffffff600000.' >/dev/null; then
+        printf 'error: gcore could not read all of %s:\n%s\n' "$temporary" "$log" >&2
+        rm -f "$temporary"
+        exit 1
+    fi
     mv "$temporary" "$core"
     rebuilt_outputs["$core"]=true
     printf '%s\n' "$signature" >"${stamp}.tmp"
@@ -613,7 +653,9 @@ suite_signature() {
             paths+=("$path")
         fi
     done
-    printf 'suite-v1\nGOOS=%s GOARCH=%s\n' "${GOOS-}" "${GOARCH-}"
+    # Statically linked glibc fixtures link from a store path of their own.
+    printf 'suite-v1\nGOOS=%s GOARCH=%s\nGLIBC_STATIC_LIBRARIES=%s\n' \
+        "${GOOS-}" "${GOARCH-}" "$GLIBC_STATIC_LIBRARIES"
     stat -L --format='%n %Y' "${paths[@]}"
 }
 
@@ -867,6 +909,20 @@ build_tls_modules_fixture musl-clang "$output_dir/tls-modules-musl-clang-static-
 for variant in gcc-o0 clang-o2-nopie gcc-static clang-static-pie; do
     require_musl "$output_dir/tls-modules-musl-${variant}"
 done
+# Statically linked glibc, with and without its thread library.
+glibc_static=(-L"$GLIBC_STATIC_LIBRARIES" -DSTATIC_BUILD "$tls_modules_dir/library.c")
+build_tls_modules_fixture gcc "$output_dir/tls-modules-gcc-static" -O0 -static \
+    "$tls_modules_dir/main.c" "${glibc_static[@]}"
+build_tls_modules_fixture clang "$output_dir/tls-modules-clang-static-pie" -O2 \
+    -static-pie -fPIE "$tls_modules_dir/main.c" "${glibc_static[@]}"
+build_tls_modules_fixture gcc "$output_dir/tls-modules-single-thread-gcc-static-pie" -O0 \
+    -static-pie -fPIE "$tls_modules_dir/single-thread.c" "${glibc_static[@]}"
+build_tls_modules_fixture clang "$output_dir/tls-modules-single-thread-clang-static" -O2 \
+    -static "$tls_modules_dir/single-thread.c" "${glibc_static[@]}"
+require_static_glibc "$output_dir/tls-modules-gcc-static" yes
+require_static_glibc "$output_dir/tls-modules-clang-static-pie" yes
+require_static_glibc "$output_dir/tls-modules-single-thread-gcc-static-pie" no
+require_static_glibc "$output_dir/tls-modules-single-thread-clang-static" no
 build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture g++ "$cpp_fixtures_dir/overloads.cpp" "$output_dir/overloads-cpp-gcc-o0" \
@@ -1339,8 +1395,10 @@ program="$output_dir/tls-modules-musl-gcc-o0"
 generate_core "${program}.core" 6 "$default_core_filter" \
     "$program $output_dir/libtls-modules-musl.so $output_dir/libtls-plugin-musl.so" \
     "$program" abort
-program="$output_dir/tls-modules-musl-clang-static-pie"
-generate_core "${program}.core" 6 "$default_core_filter" "$program" "$program" abort
+for variant in musl-clang-static-pie gcc-static single-thread-clang-static; do
+    program="$output_dir/tls-modules-${variant}"
+    generate_core "${program}.core" 6 "$default_core_filter" "$program" "$program" abort
+done
 # Cores whose executable or shared library was deleted after the crash. The
 # copies are refreshed whenever a core itself must be regenerated.
 generate_core_without() {
