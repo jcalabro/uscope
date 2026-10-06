@@ -98,6 +98,17 @@ pub fn force_internal_tls_lookup(forced: bool) {
     tls::force_glibc_descriptors(forced);
 }
 
+/// Ends the job-control stop of a held process, and returns whether it
+/// did: a process no longer held is left alone.
+pub fn release_held(held: &crate::HeldProcess) -> Result<bool> {
+    native::continue_held(lifecycle::requested_pid(held.process_id)?, held.start_time)
+}
+
+/// Whether a held process is still held.
+pub fn still_held(held: &crate::HeldProcess) -> Result<bool> {
+    native::process_held(lifecycle::requested_pid(held.process_id)?, held.start_time)
+}
+
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_core_dump(data: &[u8]) {
     core_dump::fuzz(data);
@@ -619,6 +630,24 @@ struct Inferior {
     /// The signal the debugger sent to end the inferior, which never stops
     /// it whatever its policy.
     terminating: Option<Terminating>,
+    /// How far an attach to a process another session held has ended the
+    /// job-control stop it was held in.
+    held: Option<HeldStop>,
+}
+
+/// An attach to a held process ends the job-control stop it was held in
+/// with `SIGCONT`, whose delivery it then suppresses: the program never
+/// sees the signal the debuggers exchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeldStop {
+    /// Still stopped, until the attach completes.
+    Stopped,
+    /// `SIGCONT` sent, its delivery not yet seen.
+    Continued,
+    /// Detaching, with `SIGCONT` unblocked in `thread`, which blocked it
+    /// with `mask`, so that the thread takes it first. A fork child stops
+    /// first inside `fork`, which blocks nearly every signal.
+    Draining { thread: Pid, mask: u64 },
 }
 
 /// The debugger asked the inferior to end with `signal`. Programs often
@@ -665,6 +694,7 @@ impl Inferior {
             loader_site: None,
             watch: WatchState::default(),
             terminating: None,
+            held: None,
         }
     }
 
@@ -975,6 +1005,9 @@ struct Controller<P: InspectionOps> {
     kill_reply: Option<Reply<()>>,
     /// Fork children still traced after the inferior ended.
     orphans: Option<Orphans>,
+    /// Where the processes the inferior forks are held, while a receiver
+    /// takes them; otherwise they are released.
+    held_children: Option<tokio::sync::mpsc::UnboundedSender<crate::HeldChild>>,
     /// A launch or attach waiting for those children to be released.
     deferred_start: Option<Start>,
     signals: SignalPolicies,
@@ -986,6 +1019,8 @@ struct Controller<P: InspectionOps> {
 /// traps it inherited and released at that stop; the waiter, which would
 /// otherwise poll them forever, is joined once none remains.
 struct Orphans {
+    /// The process that forked them.
+    parent: Pid,
     /// Each child with the traps it may hold.
     children: BTreeMap<Pid, Vec<(VirtualAddress, u8)>>,
     /// Children that could not be scrubbed, killed and awaiting their exit.
@@ -996,7 +1031,12 @@ struct Orphans {
 /// A requested launch or attach.
 enum Start {
     Launch(crate::LaunchOptions, Reply<ExecutionId>),
-    Attach(ProcessId, Reply<StopId>),
+    Attach {
+        requested: ProcessId,
+        /// Whether the process is one a session held.
+        held: bool,
+        reply: Reply<StopId>,
+    },
     LaunchByExec {
         requested: ProcessId,
         stop_at_entry: bool,
@@ -1075,6 +1115,7 @@ impl<P: InspectionOps> Controller<P> {
             shutdown_reply: None,
             kill_reply: None,
             orphans: None,
+            held_children: None,
             deferred_start: None,
             signals: SignalPolicies::default(),
             revision: 0,
@@ -1237,7 +1278,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.edit(Edit::RemoveAllWatchpoints { reply });
             }
             Request::Launch { options, reply } => self.start(Start::Launch(*options, reply)),
-            Request::Attach { process_id, reply } => self.start(Start::Attach(process_id, reply)),
+            Request::Attach {
+                process_id,
+                held,
+                reply,
+            } => self.start(Start::Attach {
+                requested: process_id,
+                held,
+                reply,
+            }),
             Request::LaunchByExec {
                 process_id,
                 stop_at_entry,
@@ -1306,6 +1355,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             Request::Kill { reply } => self.kill(reply),
             Request::Terminate { reply } => {
                 let _ = reply.send(self.terminate());
+            }
+            Request::HoldForks { children, reply } => {
+                self.held_children = Some(children);
+                let _ = reply.send(Ok(()));
             }
             request => self.handle_inspection_request(request),
         }
@@ -1617,6 +1670,7 @@ impl<P: InspectionOps> Controller<P> {
             | Request::WriteMemory { .. }
             | Request::Kill { .. }
             | Request::Terminate { .. }
+            | Request::HoldForks { .. }
             | Request::Shutdown { .. } => {
                 unreachable!("run-control requests are routed by the session dispatcher")
             }

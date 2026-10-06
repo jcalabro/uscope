@@ -37,11 +37,14 @@ use crate::backend::ControllerMessage;
 use crate::protocol::Request;
 use crate::{
     Backtrace, DebuggerEvent, DebuggerHandle, Error, ExceptionDisposition, ExecutionId,
-    FramePresentation, InferiorState, LaunchOptions, MemoryReadCompletion, ModuleId, ProcessId,
-    ResumeScope, StateSnapshot, StepKind, StopId, StopReason, ThreadId, ThreadState,
+    FramePresentation, HeldChildren, InferiorState, LaunchOptions, MemoryReadCompletion, ModuleId,
+    ProcessId, ResumeScope, StateSnapshot, StepKind, StopId, StopReason, ThreadId, ThreadState,
     VariableSnapshot, VirtualAddress,
 };
 
+pub use self::adopter::Adopter;
+
+mod adopter;
 mod breakpoints;
 mod stops;
 
@@ -81,6 +84,9 @@ pub struct Script {
     /// The program the world started untraced, which the client attaches
     /// to rather than launching it first.
     pub attach: Option<ProcessId>,
+    /// Whether the session holds the children the program forks, for
+    /// sessions of their own.
+    pub follow: bool,
 }
 
 /// What the client shares with the world.
@@ -105,6 +111,11 @@ pub struct Shared {
     /// The watchpoints the debugger said it armed, and the client has not
     /// asked to remove, by identifier.
     pub watches: Rc<RefCell<BTreeMap<u64, Intent>>>,
+    /// Whether the session holds the children the program forks.
+    pub following: Rc<Cell<bool>>,
+    /// The children the session held, which the world hands to sessions of
+    /// their own.
+    pub held: Rc<RefCell<Option<HeldChildren>>>,
 }
 
 /// Something the client saw that an oracle judges against the simulation.
@@ -295,6 +306,9 @@ impl Client {
     pub async fn run(self) -> Result<(), Failure> {
         let mut events = self.handle.subscribe();
         self.load_views().await?;
+        if self.script.follow {
+            self.hold_forks().await?;
+        }
         let mut breakpoints = Vec::new();
         for _ in 0..self.script.early_breakpoints {
             self.add_breakpoint(&mut breakpoints).await?;
@@ -387,6 +401,20 @@ impl Client {
             }
         }
         self.shutdown().await
+    }
+
+    /// Holds the children the program forks, for the world to hand to
+    /// sessions of their own.
+    async fn hold_forks(&self) -> Result<(), Failure> {
+        let held = self
+            .handle
+            .hold_forks()
+            .await
+            .map_err(|error| protocol(format!("holding forks failed: {error}")))?;
+        *self.shared.held.borrow_mut() = Some(held);
+        self.shared.following.set(true);
+        self.note("holding forks");
+        Ok(())
     }
 
     /// Loads the views the program's types are presented with, if it has

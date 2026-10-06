@@ -206,6 +206,16 @@ pub fn force_internal_tls_lookup(forced: bool) {
     linux::force_internal_tls_lookup(forced);
 }
 
+/// Lets a held process run, unless it is no longer held.
+pub fn release_held(held: &crate::HeldProcess) -> Result<bool> {
+    linux::release_held(held)
+}
+
+/// Whether a held process is still held.
+pub fn still_held(held: &crate::HeldProcess) -> Result<bool> {
+    linux::still_held(held)
+}
+
 /// Finds a signal's exception code by name.
 pub fn signal_named(name: &str) -> Option<u64> {
     linux::Signal::named(name).map(linux::Signal::code)

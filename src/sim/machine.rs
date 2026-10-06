@@ -1,9 +1,9 @@
-//! The simulated machine the controller's calls reach: the kernel, the
-//! waiter, and the faults that may strike between any two calls.
+//! The simulated machine the controllers' calls reach: the kernel, each
+//! session's waiter, and the faults that may strike between any two calls.
 //!
-//! The world performs its actions through the machine, and the controller's
-//! edge holds it for preemption: before each call into the kernel takes
-//! effect, threads may run and the waiter may reap, as on Linux.
+//! The world performs its actions through the machine, and each
+//! controller's edge holds it for preemption: before each call into the
+//! kernel takes effect, threads may run and waiters may reap, as on Linux.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -14,11 +14,12 @@ use nix::libc;
 
 use super::choices::{Choices, Stream};
 use super::faults::Faults;
-use super::kernel::{Happening, Kernel, Parent, Planted, State, Tid};
+use super::kernel::{Happening, Kernel, Parent, Planted, State, Tid, signals};
 use super::marks::{Mark, Marks};
-use super::schedule::{Action, Scheduler};
+use super::schedule::{Action, Scheduler, SessionId};
 #[cfg(test)]
 use super::world::Sabotage;
+use super::world::TRACER;
 use crate::backend::sim_edge::{Preemption, SimWaiter};
 
 /// The most instructions a thread runs at one preemption point.
@@ -26,7 +27,8 @@ const PREEMPT_BURST: u64 = 8;
 
 pub struct Machine {
     pub kernel: Rc<RefCell<Kernel>>,
-    pub waiter: Rc<RefCell<SimWaiter>>,
+    /// Each session's waiter, by session.
+    pub waiters: RefCell<Vec<Rc<RefCell<SimWaiter>>>>,
     pub choices: Rc<RefCell<Choices>>,
     pub scheduler: RefCell<Scheduler>,
     pub faults: RefCell<Faults>,
@@ -35,9 +37,13 @@ pub struct Machine {
     pub killed: Rc<RefCell<BTreeSet<Tid>>>,
     /// Processes that began to end as a whole.
     pub ending: Rc<RefCell<BTreeSet<Tid>>>,
+    /// Whether the first session holds the children its program forks.
+    pub following: Rc<Cell<bool>>,
     /// Threads the debugger released with code not the program's: the
     /// address, the byte there, and the program's.
     pub unclean: RefCell<Vec<(Tid, Planted)>>,
+    /// Threads that received a SIGCONT, which only a debugger sends.
+    pub leaked: RefCell<Vec<Tid>>,
     /// The action in progress.
     pub step: Cell<u64>,
     /// How many instructions threads executed so far.
@@ -111,22 +117,12 @@ impl Machine {
                         lines.extend(self.kill(Mark::KilledNearFork));
                     }
                 }
-                Happening::Released { tid, planted } => {
-                    let kernel = self.kernel.borrow();
-                    let mut marks = self.marks.borrow_mut();
-                    match kernel.process_of(tid).map(|process| process.parent) {
-                        Some(Parent::Launcher) => marks.hit(Mark::Detached),
-                        Some(Parent::Process(_)) => marks.hit(Mark::ForkChildReleased),
-                        Some(Parent::Init) => {
-                            marks.hit(Mark::ForkChildReleased);
-                            marks.hit(Mark::ReleasedAfterParentExit);
-                        }
-                        Some(Parent::Tracer) | None => {}
-                    }
-                    drop(marks);
-                    if let Some(planted) = planted {
-                        self.unclean.borrow_mut().push((tid, planted));
-                    }
+                Happening::Released {
+                    tid,
+                    tracer,
+                    planted,
+                } => {
+                    self.note_released(tid, tracer, planted);
                     lines.push(format!("{tid} was released"));
                 }
                 Happening::ReapedChild { parent, child } => {
@@ -145,9 +141,58 @@ impl Machine {
                     self.marks.borrow_mut().hit(Mark::InterruptWaited);
                     lines.push(format!("an interrupt waits for stopped {tid}"));
                 }
+                Happening::JobStopped { tid } => lines.push(format!("{tid} stopped untraced")),
+                Happening::Continued { tgid } => lines.push(format!("SIGCONT ended {tgid}'s stop")),
+                Happening::Suppressed { tid, signal } => {
+                    if signal == libc::SIGCONT {
+                        self.marks.borrow_mut().hit(Mark::HeldContinueSuppressed);
+                    }
+                    lines.push(format!(
+                        "{tid} was resumed without {}",
+                        signals::name(signal)
+                    ));
+                }
+                Happening::Delivered { tid, signal } => {
+                    // Only a debugger sends SIGCONT, which the program must
+                    // never receive.
+                    if signal == libc::SIGCONT {
+                        self.leaked.borrow_mut().push(tid);
+                    }
+                    lines.push(format!("{tid} received {}", signals::name(signal)));
+                }
             }
         }
         lines
+    }
+
+    /// Counts a thread `tracer` released, and notes code it left that is not
+    /// the program's. A session adopting a held child releases a fork
+    /// child too, which the first session's marks do not count.
+    fn note_released(&self, tid: Tid, tracer: i32, planted: Option<Planted>) {
+        let kernel = self.kernel.borrow();
+        let mut marks = self.marks.borrow_mut();
+        let parent = kernel.process_of(tid).map(|process| process.parent);
+        // A child held for a session of its own is detached stopping, not
+        // released.
+        let held = kernel.threads.get(&tid).is_some_and(|thread| {
+            thread.state == State::JobStopped || thread.pending.contains(signals::SIGSTOP)
+        });
+        match parent.filter(|_| tracer == TRACER) {
+            Some(Parent::Launcher) => marks.hit(Mark::Detached),
+            Some(Parent::Process(_) | Parent::Init) if !held => {
+                marks.hit(Mark::ForkChildReleased);
+                if parent == Some(Parent::Init) {
+                    marks.hit(Mark::ReleasedAfterParentExit);
+                }
+                if self.following.get() {
+                    marks.hit(Mark::ReleasedWhileFollowing);
+                }
+            }
+            Some(_) | None => {}
+        }
+        if let Some(planted) = planted {
+            self.unclean.borrow_mut().push((tid, planted));
+        }
     }
 
     /// Marks a new thread or process that starts in an interrupt's stop,
@@ -187,13 +232,19 @@ impl Machine {
         Some(format!("fault: SIGKILL from outside to {tgid}"))
     }
 
-    /// Reaps one status, if the waiter can, choosing among the ready ones.
-    pub fn collect(&self) -> String {
+    /// Reaps one status for `session`, if its waiter can, choosing among
+    /// the ready ones.
+    pub fn collect(&self, session: SessionId) -> String {
         let mut kernel = self.kernel.borrow_mut();
-        let collected = self.waiter.borrow_mut().collect(&mut kernel, |ready| {
+        let waiter = Rc::clone(&self.waiters.borrow()[session]);
+        let collected = waiter.borrow_mut().collect(&mut kernel, |ready| {
             *self.choices.borrow_mut().pick(Stream::Schedule, ready)
         });
-        let mut line = String::from("collect");
+        let mut line = if session == 0 {
+            String::from("collect")
+        } else {
+            format!("collect for session {session}")
+        };
         if let Some(status) = collected.reaped {
             let _ = write!(line, " {status}");
         }
@@ -206,13 +257,20 @@ impl Machine {
         line
     }
 
-    /// Whether the waiter can collect now.
-    pub fn can_collect(&self) -> bool {
+    /// Whether `session`'s waiter can collect now.
+    pub fn can_collect(&self, session: SessionId) -> bool {
         #[cfg(test)]
         if self.sabotage == Some(Sabotage::DeafWaiter) {
             return false;
         }
-        self.waiter.borrow().can_collect(&self.kernel.borrow())
+        self.waiters.borrow()[session]
+            .borrow()
+            .can_collect(&self.kernel.borrow())
+    }
+
+    /// The sessions whose waiters can collect now.
+    pub fn collectable(&self) -> impl Iterator<Item = SessionId> + '_ {
+        (0..self.waiters.borrow().len()).filter(|&session| self.can_collect(session))
     }
 
     /// Runs `tid` for up to `budget` instructions. Returns a line for the
@@ -253,24 +311,28 @@ impl Preemption for Machine {
                 .runnable()
                 .map(Action::Run)
                 .collect::<Vec<_>>();
-            if self.can_collect() {
-                options.push(Action::Collect);
-            }
+            options.extend(self.collectable().map(Action::Collect));
             if options.is_empty() {
                 return;
             }
             let action = *self.choices.borrow_mut().pick(Stream::Preempt, &options);
-            let line = if let Action::Run(tid) = action {
-                let budget = self
-                    .choices
-                    .borrow_mut()
-                    .below(Stream::Preempt, PREEMPT_BURST)
-                    + 1;
-                self.marks.borrow_mut().hit(Mark::PreemptedCall);
-                self.run_thread(tid, budget)
-            } else {
-                self.marks.borrow_mut().hit(Mark::ReapedInsideCall);
-                self.collect()
+            let line = match action {
+                Action::Run(tid) => {
+                    let budget = self
+                        .choices
+                        .borrow_mut()
+                        .below(Stream::Preempt, PREEMPT_BURST)
+                        + 1;
+                    self.marks.borrow_mut().hit(Mark::PreemptedCall);
+                    self.run_thread(tid, budget)
+                }
+                Action::Collect(session) => {
+                    self.marks.borrow_mut().hit(Mark::ReapedInsideCall);
+                    self.collect(session)
+                }
+                Action::Deliver(_) | Action::Poll(_) | Action::Follow => {
+                    unreachable!("only threads and waiters act inside a call")
+                }
             };
             record_inside_call(&format!("preempt: {line}"));
             for line in self.absorb() {
@@ -299,6 +361,7 @@ fn describe_state(state: Option<State>) -> String {
         None => "reaped".to_owned(),
         Some(State::Running) => "running".to_owned(),
         Some(State::Stopped { kind, .. }) => format!("stopped {kind:?}"),
+        Some(State::JobStopped) => "job-control stopped".to_owned(),
         Some(State::Exiting(exit)) => format!("exiting {exit:?}"),
         Some(State::Zombie(exit)) => format!("zombie {exit:?}"),
     }

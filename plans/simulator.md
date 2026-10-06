@@ -40,7 +40,8 @@ Out of scope, and covered by real-kernel scenario tests instead:
   `mremap`, or `munmap`, so code never moves or goes away under a site, and
   every site the debugger checks at a stop still holds its trap.
 - Go, Rust, Zig, and C++ programs. The corpus is libc-free C.
-- `exec`, `vfork`, signal handlers, real-time signals, and group-stops.
+- `exec`, `vfork`, signal handlers, real-time signals, and job control
+  beyond the stop a held fork child waits in (K-STOP-1 to K-STOP-3).
 - Floating-point and SSE semantics. A fixed FXSAVE area is reported.
 - Memory ordering. Threads interleave whole instructions, which is
   sequentially consistent; debugger races come from kernel ordering.
@@ -71,24 +72,37 @@ Out of scope, and covered by real-kernel scenario tests instead:
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-A run builds a world from its seed, then repeats one step until the session
-ends or a check fails: list the enabled actions, let the scheduler pick
-one, perform it, append it to the trace, and run the oracles.
+A run builds a world from its seed, then repeats one step until every
+session ends or a check fails: list the enabled actions, let the scheduler
+pick one, perform it, append it to the trace, and run the oracles.
 
 | Action | What happens | Real counterpart |
 |---|---|---|
 | `Run(tid)` | A running thread executes a burst of instructions, stopping early at a trap, fault, or system call, which the kernel then handles. | CPU time |
-| `Collect` | The waiter reaps one reportable status, as `waitpid(-1, __WALL \| WNOHANG)` does, and queues it if the controller's queue has room. | The waiter thread |
-| `Deliver` | The controller handles the message at the front of its queue. | The controller thread |
-| `Poll` | The client task runs until it waits again. | A client task |
+| `Collect(session)` | The session's waiter reaps one reportable status of its tracer's, as `waitpid(-1, __WALL \| WNOHANG)` does, and queues it if the controller's queue has room. | The waiter thread |
+| `Deliver(session)` | The session's controller handles the message at the front of its queue. | The controller thread |
+| `Poll(session)` | The session's client task runs until it waits again. | A client task |
+| `Follow` | The next child the first session held is adopted by a session of its own, or released. | A DAP session's `startDebugging` |
+
+**Sessions.** The first session is the one the client drives and the
+oracles judge in full. Seeds whose program forks may follow forks
+(`plans/forks.md`): its client holds the children the program forks, and
+each child held starts a session of its own, as a DAP client's
+`startDebugging` would, or is released, as `release_held` does for a client
+that refuses. An adopting session is a real controller tracing as a process
+of its own, with its own waiter, driven by a small client that attaches
+with `held`, continues or pauses the child, and detaches it at a stop or
+while it runs. Now and then the first session stops taking children, and
+its debugger releases those forked after.
 
 - **Preemption points.** Every call the controller makes into `SimTrace` is
   also a chance for running threads to advance, or the waiter to reap,
   before the call takes effect. That produces the races real ptrace has: a
   thread leaving its stop between `GETSIGINFO` and `GETREGS`, or a
   sibling's `exit_group` landing while a stop is handled.
-- **One queue.** The waiter and the client share the controller's bounded
-  `mpsc` queue, as in production, so backpressure is real.
+- **One queue per session.** A session's waiter and client share its
+  controller's bounded `mpsc` queue, as in production, so backpressure is
+  real.
 - **The waiter reaps.** `Collect` reaps the status before the controller
   sees it, as the real waiter does. A zombie is released then, so later
   requests about it fail with ESRCH where they would in a real session.
@@ -113,7 +127,7 @@ so `SimTrace` and the controller facade live in
 | `kernel/` | Processes, threads, signals, ptrace, system calls, debug registers, and shadow state |
 | `cpu/`, `memory`, `loader` | The interpreter, copy-on-write address spaces, and golden ELF images |
 | `corpus`, `facts`, `markers` | The golden programs, what binutils say about them, and the conditions their sources state |
-| `client/` | The simulated user driving `DebuggerHandle` |
+| `client/` | The simulated user driving `DebuggerHandle`, and the clients of sessions adopting held children |
 | `oracles`, `semantics`, `hits`, `watches`, `views`, `audit` | Checks of the debugger against ground truth |
 | `marks`, `report` | Coverage marks; traces, fingerprints, and failures |
 | `conformance/` | Dual-run kernel probes and CPU lockstep against the real machine |
@@ -196,6 +210,7 @@ fails the run as a model gap, so the simulator never guesses.
 | K-TRAP-1 | `int3` raises SIGTRAP with `si_code` `SI_KERNEL` and `rip` after the trap byte, outside any system call (`orig_rax` is -1). A single step reports `TRAP_TRACE`. A step across `syscall` reports `TRAP_BRKPT` at the call's exit, with `orig_rax` naming the call. |
 | K-SIG-1 | The tracer's `tgkill(SIGSTOP)` produces a signal-delivery stop with `si_code` `SI_TKILL` and the tracer's process as sender, whether the thread was running or stopped when it was sent. |
 | K-SEIZE-1 | A seized thread runs on until an interrupt stops it. The threads and processes it creates are traced with its options, and each first stops in a `PTRACE_EVENT_STOP` of its own rather than for SIGSTOP. |
+| K-SEIZE-2 | A thread has one tracer. Another tracer's requests on it fail with ESRCH, though it is in a ptrace-stop, and its seize with EPERM. |
 | K-INT-1 | `PTRACE_INTERRUPT` stops a running seized thread with `PTRACE_EVENT_STOP` before it runs on. One sent to a thread already stopped waits until the thread resumes, ahead of a pending signal, and the thread's next stop of any kind consumes it. |
 | K-INT-2 | `PTRACE_INTERRUPT` and `tgkill` return 0 for a thread at its exit event or an unreaped zombie, and ESRCH once it is reaped. When the reap lands inside the interrupt's own window, the interrupt fails with EIO; no probe can produce that race, so it is not modeled. |
 | K-EXIT-1 | `exit_group` with running siblings: every thread stops at `PTRACE_EVENT_EXIT`, with message `code << 8` and `si_code` `0x605`; the caller stops inside the call (`rax` is `-ENOSYS`, `orig_rax` names it). After `PTRACE_CONT`, each reports its exit, the leader's last. A thread ending alone with `exit` stops the same way. |
@@ -208,6 +223,9 @@ fails the run as a model gap, so the simulator never guesses.
 | K-FORK-1 | A fork stops the parent at `PTRACE_EVENT_FORK` inside the call, naming the child, which leads its own group and is the forking thread's child. The child gets a copy of the parent's address space, traps included. It is traced with the parent's options and starts in a stop. |
 | K-FORK-2 | A detached child runs untraced: requests on it fail with ESRCH, its parent reaps it after SIGCHLD, and a trap it executes kills it with SIGTRAP. |
 | K-FORK-3 | A child whose parent exits passes to a reaper, and its exit is still the tracer's to reap first. |
+| K-STOP-1 | An untraced thread that takes SIGSTOP, as a fork child sent one and detached does before it runs an instruction, enters a job-control stop: `/proc` shows `T`. Its parent gets SIGCHLD with `CLD_STOPPED`. |
+| K-STOP-2 | Seizing a stopped process reports a group-stop: `PTRACE_EVENT_STOP` with SIGSTOP, whose siginfo has that signal, `si_code` `0x8013`, and no sender. Detached again, the thread stops again, and its parent hears nothing new. |
+| K-STOP-3 | SIGCONT flushes every pending stop signal, as a stop signal flushes a pending SIGCONT, and ends a job-control stop; the parent gets SIGCHLD with `CLD_CONTINUED` once a thread of the process next runs. It interrupts every seized thread as `PTRACE_INTERRUPT` does, and is queued for a traced one, which then stops with `PTRACE_EVENT_STOP` before it stops for SIGCONT with `SI_USER` from its sender. Sent to an untraced process, it is discarded, which a program that neither blocks nor handles SIGCONT, as every simulated one, cannot tell from receiving it. |
 | K-DR-1 | A watch hit raises SIGTRAP with `TRAP_HWBKPT` and `rip` after the instruction. DR6 changes only at debug exceptions and is stale at every other stop. |
 | K-DR-2 | Single-stepping over a watched store gives one stop: `TRAP_TRACE`, with DR6 holding both the single-step bit and the watch bit. |
 | K-DR-3 | New threads and fork children start with debug registers disarmed, but `PEEKUSER` of DR7 returns the creator's value. Detaching does not clear them. |
@@ -220,15 +238,28 @@ stops for an interrupt or the tracer's SIGSTOP depends on timing, so those
 probes compare signals only; whether a child a trap kills dumps core
 depends on the machine, so K-FORK-2 records only the signal.
 
-**Tracing.** The kernel knows how the tracer traces each thread: untraced,
-attached (launched, and what those threads create), or seized (attached
-to, and what those threads create). A program started untraced is the child
-of a launcher that reaps it, as a shell would. When the controller exits,
-its tracer thread exits with it, and the kernel releases what it still
-traces (K-WAIT-3). Two releases are not modeled and fail as a model gap: a
-thread held in a ptrace-stop other than its exit event, and
+**Tracing.** The kernel knows which tracer traces each thread, and how:
+untraced, attached (launched, and what those threads create), or seized
+(attached to, and what those threads create). Each session's controller is
+a tracer of its own, as a process of its own would be: the kernel serves
+one tracer's request at a time, which reaches only the threads that tracer
+traces (K-SEIZE-2), and a tracer's waits report only them, as a separate
+process's do. A program started untraced
+is the child of a launcher that reaps it, as a shell would. When a
+controller exits, its tracer thread exits with it, and the kernel releases
+what it still traces (K-WAIT-3). Two releases are not modeled and fail as a
+model gap: a thread held in a ptrace-stop other than its exit event, and
 `PTRACE_O_EXITKILL` killing live threads. The controller never leaves
 either behind, and the clean-exit oracle checks the first.
+
+**Job control** is modeled as far as holding a fork child needs (K-STOP-1
+to K-STOP-3): a process with one untraced thread that takes SIGSTOP stops,
+a seize reports its group-stop, and SIGCONT ends it. A SIGCONT sent to a
+process whose leader is untraced is discarded, as Linux discards an
+ignored signal; no script can observe that, since the process runs on and
+would ignore it. Group-stops of traced threads or of processes with several
+threads, and resuming a thread while its process is still stopped, are
+model gaps.
 
 **Debug registers** have four slots per thread, each backed by a hardware
 breakpoint once the tracer writes its address, the DR7 the tracer last
@@ -476,7 +507,8 @@ failed request about it.
 - No stop reports `Exception` or `Unclassifiable` unless something outside
   killed the process: no golden program raises a signal.
 
-**Ground truth** (the world, after every action):
+**Ground truth** (the world, after every action; all-stop, code integrity,
+and site ownership judge every session's controller):
 
 - *All-stop:* while a stop is published, every thread of the inferior is in
   a ptrace-stop or a zombie, and the controller's threads are exactly the
@@ -488,11 +520,15 @@ failed request about it.
   plan sites, and a published stop ended every plan.
 - *Clean release:* a fork child or attached program the debugger released
   holds no byte the debugger planted.
-- *Clean exit:* the controller never exits holding a thread in a stop, which
-  Linux would leave stopped forever, and when the session ends no process
+- *Holding:* a fork child held for another session is untraced, stopped or
+  about to take the SIGSTOP queued before it was released, holds no byte
+  the debugger planted, and has run no instruction, until a session seizes
+  it.
+- *Clean exit:* no controller exits holding a thread in a stop, which Linux
+  would leave stopped forever, and when every session ends no process
   remains, not even a zombie.
-- *Liveness:* a run fails as stuck when nothing can happen while the client
-  waits, when the controller keeps running after answering a shutdown, or
+- *Liveness:* a run fails as stuck when nothing can happen while a client
+  waits, when a controller keeps running after answering a shutdown, or
   after two million actions.
 
 **Breakpoint accounting:**
@@ -605,7 +641,10 @@ program wrote so far always begins what it writes undisturbed; one that
 exited by itself wrote exactly that and exited as it does. A released or
 detached program runs on to its own end and must reach the same result,
 including what it wrote untraced before the client attached. An orphaned
-fork child must exit 0.
+fork child must exit 0. A child a session adopted shows in what its parent
+writes, as any child its parent waits for does. No SIGCONT, which only a
+debugger sends, reaches the program, untraced or passed on by a session: a
+held child never receives the SIGCONT that ended its stop.
 
 ## 11. Running the simulator
 

@@ -1040,3 +1040,127 @@ fn k_wait_3_a_tracers_exit_releases_an_exiting_thread() {
         record.result("SIGKILL", result);
     });
 }
+
+/// K-STOP-1: a fork child sent SIGSTOP and detached takes it untraced
+/// before it runs an instruction, and stops: a job-control stop, which
+/// tells its parent with SIGCHLD and `CLD_STOPPED`. K-STOP-2: seizing a
+/// stopped process reports a group-stop, `PTRACE_EVENT_STOP` with SIGSTOP;
+/// detached again, it stops again, telling its parent nothing new. K-STOP-3:
+/// SIGCONT then lets it run on, which its parent hears of.
+#[test]
+fn k_stop_1_a_detached_child_takes_its_sigstop_untraced() {
+    dual_run("fork", &["1", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        let child = record.forked(leader);
+        record.wait(child);
+        record.rip(child);
+        record.request_stop_of(child, child);
+        record.detach(child, None);
+        record.job_stopped(child);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.signal(leader);
+        record.resume(leader, Some(libc::SIGCHLD));
+
+        record.seize(child);
+        record.wait(child);
+        record.signal(child);
+        record.rip(child);
+        record.detach(child, None);
+        record.job_stopped(child);
+        // The next SIGCHLD the parent gets says its child continued.
+        record.continue_process(child);
+        record.wait(leader);
+        record.signal(leader);
+    });
+}
+
+/// K-STOP-3: SIGCONT ends a process's job-control stop, and its parent gets
+/// SIGCHLD with `CLD_CONTINUED` once one of its threads next runs. Every
+/// SIGCONT flushes pending stop signals, as a stop signal flushes a
+/// pending SIGCONT. It interrupts a seized thread as `PTRACE_INTERRUPT`
+/// does (K-INT-1), and is queued for a traced one: resumed, the thread
+/// stops with `PTRACE_EVENT_STOP`, then for SIGCONT from its sender.
+#[test]
+fn k_stop_3_sigcont_ends_a_stop_and_interrupts_a_seized_thread() {
+    dual_run("fork", &["1", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        let child = record.forked(leader);
+        record.wait(child);
+        record.request_stop_of(child, child);
+        record.detach(child, None);
+        record.job_stopped(child);
+        record.seize(child);
+        record.wait(child);
+        record.interrupt(child);
+        // The parent hears of the stop, then waits for its child.
+        record.resume(leader, None);
+        record.wait(leader);
+        record.signal(leader);
+        record.resume(leader, Some(libc::SIGCHLD));
+
+        record.continue_process(child);
+        record.resume(child, None);
+        record.wait(child);
+        record.signal(child);
+        record.wait(leader);
+        record.signal(leader);
+        record.resume(child, None);
+        record.wait(child);
+        record.signal(child);
+
+        // SIGCONT flushes a pending SIGSTOP, and interrupts again.
+        record.request_stop_of(child, child);
+        record.continue_process(child);
+        record.resume(child, None);
+        record.wait(child);
+        record.signal(child);
+        record.resume(child, None);
+        record.wait(child);
+        record.signal(child);
+
+        // SIGSTOP flushes a pending SIGCONT.
+        record.continue_process(child);
+        record.request_stop_of(child, child);
+        record.resume(child, None);
+        record.wait(child);
+        record.signal(child);
+        record.resume(child, None);
+        record.wait(child);
+        record.signal(child);
+
+        // Suppressed, the child runs to its exit, which its parent reaps.
+        record.resume(child, None);
+        record.wait(child);
+        record.event_message(child);
+        record.resume(child, None);
+        record.wait(child);
+        record.resume(leader, Some(libc::SIGCHLD));
+        record.wait(leader);
+        record.signal(leader);
+        record.resume(leader, Some(libc::SIGCHLD));
+        record.wait(leader);
+        record.event_message(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+    });
+}
+
+/// K-SEIZE-2: a thread has one tracer. Another tracer's requests on it fail
+/// with ESRCH, though it is in a ptrace-stop, and its seize with EPERM.
+#[test]
+fn k_seize_2_a_thread_answers_only_its_own_tracer() {
+    dual_run("fork", &["1", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        let child = record.forked(leader);
+        record.wait(child);
+        record.as_another_tracer(leader);
+        record.as_another_tracer(child);
+    });
+}

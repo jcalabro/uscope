@@ -1,25 +1,35 @@
-//! The world: one session of the real controller and client against the
+//! The world: sessions of the real controller and client against the
 //! simulated kernel, advanced one action at a time on one thread.
+//!
+//! The first session is the one the client drives and the oracles judge in
+//! full. When it holds the children its program forks, each child it holds
+//! is adopted by a session of its own, as a DAP client starts one for each
+//! `startDebugging` request, or released. Each session's controller traces
+//! as a process of its own, with a waiter of its own.
 //!
 //! Each step lists the enabled actions, lets the scheduler pick one,
 //! performs it, records it in the trace, and runs the oracles:
 //!
 //! - `Run`: a running thread executes a burst of instructions.
-//! - `Collect`: the waiter reaps a status and queues it for the controller.
-//! - `Deliver`: the controller serves the message at the front of its queue.
-//! - `Poll`: the client task runs until it waits again.
+//! - `Collect`: a session's waiter reaps a status and queues it for its
+//!   controller.
+//! - `Deliver`: a session's controller serves the message at the front of
+//!   its queue.
+//! - `Poll`: a session's client task runs until it waits again.
+//! - `Follow`: the next child the first session held is adopted or
+//!   released.
 //!
 //! Inside `Deliver`, every call the controller makes into the kernel is a
-//! preemption point, where threads may run and the waiter may reap before
-//! the call takes effect, as on Linux. A planned fault fires as an action of
+//! preemption point, where threads may run and waiters may reap before the
+//! call takes effect, as on Linux. A planned fault fires as an action of
 //! its own, or at a preemption point.
 //!
-//! The session ends when the client has shut the controller down and
-//! nothing is left to do. A session in which nothing can happen while the
-//! client still waits is stuck, which is a failure.
+//! The run ends when every client has shut its controller down and nothing
+//! is left to do. A run in which nothing can happen while a client still
+//! waits is stuck, which is a failure.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
@@ -32,7 +42,7 @@ use nix::libc;
 
 use super::audit::Auditor;
 use super::choices::{Choices, Stream};
-use super::client::{Client, Observation, Script, Shared};
+use super::client::{Adopter, Client, Observation, Script, Shared};
 use super::corpus::{Corpus, Program, Run, Variant};
 use super::faults::{Faults, Plan};
 use super::kernel::shadow::Tracking;
@@ -42,7 +52,7 @@ use super::machine::Machine;
 use super::marks::{Mark, Marks};
 use super::oracles::{self, HeardTrap};
 use super::report::{Failure, Trace};
-use super::schedule::{Action, Scheduler};
+use super::schedule::{Action, Scheduler, SessionId};
 use super::semantics::{self, Begun, Inspected, Judged, Unwound};
 use super::swarm::Swarm;
 use super::views;
@@ -50,10 +60,13 @@ use super::watches::{self, Intent};
 use crate::backend::sim_edge::{
     Preemption, SimController, SimExecutable, SimLaunch, SimParts, SimWaiter,
 };
-use crate::{DebuggerHandle, ProcessId};
+use crate::{DebuggerHandle, HeldChild, HeldProcess, ProcessId};
 
-/// The simulated debugger's process identifier.
-const TRACER: i32 = 100;
+/// The process identifier of the first session's debugger, which launches
+/// programs. Each session adopting a held child traces as the next.
+pub const TRACER: i32 = 100;
+/// The session the client drives.
+const FIRST: SessionId = 0;
 
 /// How a run is carried out.
 #[derive(Debug, Clone)]
@@ -116,6 +129,15 @@ pub enum Sabotage {
     /// memory, report the node after that successor, so a list walk skips
     /// a node.
     SkipLinkedNodes,
+    /// `PTRACE_DETACH` forgets a SIGSTOP pending for the thread, so a fork
+    /// child released to be held runs on instead.
+    ForgetStopRequests,
+    /// The kernel never reports a SIGCONT pending, so a session detaching
+    /// from a held child leaves the one that ended its stop for the program.
+    HideQueuedContinue,
+    /// SIGCONT is reported sent by no process, so a session cannot tell the
+    /// one it sent to end a held child's stop from the program's own.
+    MisattributeContinues,
 }
 
 impl Default for Settings {
@@ -231,24 +253,62 @@ impl Wake for Woken {
 
 type ClientTask = Pin<Box<dyn Future<Output = Result<(), Failure>>>>;
 
+/// One debugger session: a controller tracing as a process of its own, and
+/// the client task that drives it.
+struct Session {
+    tracer: i32,
+    /// The controller, until it exits.
+    controller: Option<SimController>,
+    /// The client task, until it finishes.
+    client: Option<ClientTask>,
+    /// What the client did, for the trace.
+    notes: Rc<RefCell<Vec<String>>>,
+    woken: Arc<Woken>,
+    waker: Waker,
+    /// Whether the controller was asked to shut down.
+    shutting_down: bool,
+}
+
+impl Session {
+    fn new(
+        tracer: i32,
+        controller: SimController,
+        client: ClientTask,
+        notes: Rc<RefCell<Vec<String>>>,
+    ) -> Self {
+        let woken = Arc::new(Woken(AtomicBool::new(true)));
+        let waker = Waker::from(Arc::clone(&woken));
+        Self {
+            tracer,
+            controller: Some(controller),
+            client: Some(client),
+            notes,
+            woken,
+            waker,
+            shutting_down: false,
+        }
+    }
+}
+
 struct World<'a> {
     swarm: Swarm,
     program: &'a Program,
     variant: &'a Variant,
     run: &'a Run,
+    /// The bytes `AT_RANDOM` names.
+    random: [u8; 16],
     machine: Rc<Machine>,
-    /// The controller, until it exits.
-    controller: Option<SimController>,
-    /// The client task, until it finishes.
-    client: Option<ClientTask>,
+    /// The sessions, the first the client's.
+    sessions: Vec<Session>,
     shared: Shared,
-    woken: Arc<Woken>,
-    waker: Waker,
     auditor: Auditor,
+    /// The children the first session held that no session took yet.
+    waiting: VecDeque<HeldChild>,
+    /// The children held that no session has seized, and that were not
+    /// released, which the holding oracle watches.
+    held: BTreeSet<Tid>,
     /// Each thread's latest arrival at a trap the controller heard of.
     arrivals: BTreeMap<Tid, Arrival>,
-    /// Whether the controller was asked to shut down.
-    shutting_down: bool,
     /// The step the client requested, until it ends.
     stepping: Option<Begun>,
     /// The watchpoints the client knows of, with the bytes each watched at
@@ -292,47 +352,24 @@ impl<'a> World<'a> {
             .map(|_| start_untraced(&mut kernel.borrow_mut(), variant, run, random));
         let machine = Rc::new(Machine {
             kernel: Rc::clone(&kernel),
-            waiter: Rc::new(RefCell::new(SimWaiter::default())),
+            waiters: RefCell::new(Vec::new()),
             choices: Rc::clone(&choices),
             scheduler: RefCell::new(scheduler),
             faults: RefCell::new(Faults::new(swarm.fault)),
             marks: Rc::clone(&marks),
             killed: Rc::clone(&shared.killed),
             ending: Rc::clone(&shared.ending),
+            following: Rc::clone(&shared.following),
             unclean: RefCell::new(Vec::new()),
+            leaked: RefCell::new(Vec::new()),
             step: Cell::new(0),
             ran: Cell::new(0),
             preempt: swarm.preempt,
             #[cfg(test)]
             sabotage: settings.sabotage,
         });
-        let debug_info = variant.debug_info();
-        let module_image = Arc::clone(&debug_info.image);
-        let (controller, channels) = SimController::new(SimParts {
-            kernel,
-            waiter: Rc::clone(&machine.waiter),
-            preemption: Rc::clone(&machine) as Rc<dyn Preemption>,
-            launch: SimLaunch {
-                image: Arc::clone(&variant.image),
-                path: Arc::clone(&variant.path),
-                random,
-            },
-            executable: SimExecutable {
-                path: Arc::clone(&variant.path),
-                data: Arc::clone(&variant.data),
-                inode: variant.inode,
-            },
-            debug_info,
-            queue_capacity: swarm.queue_capacity,
-            event_capacity: swarm.event_capacity,
-        });
-        let handle = DebuggerHandle {
-            module_image,
-            core_dump: None,
-            source_paths: Arc::default(),
-            requests: channels.requests,
-            events: channels.events,
-        };
+        let (controller, handle) =
+            start_controller(&machine, variant, &swarm, random, TRACER, None);
         let auditor = Auditor::new(handle.subscribe(), Rc::clone(&shared.published));
         let client = Client {
             handle,
@@ -343,8 +380,12 @@ impl<'a> World<'a> {
             alone: Cell::new(None),
             baseline: RefCell::new(None),
         };
-        let woken = Arc::new(Woken(AtomicBool::new(true)));
-        let waker = Waker::from(Arc::clone(&woken));
+        let first = Session::new(
+            TRACER,
+            controller,
+            Box::pin(client.run()),
+            Rc::clone(&shared.notes),
+        );
         let mut trace = Trace::new(settings.keep);
         trace.line(format!(
             "program {} {:?}; {swarm}",
@@ -355,15 +396,14 @@ impl<'a> World<'a> {
             program,
             variant,
             run,
+            random,
             machine,
-            controller: Some(controller),
-            client: Some(Box::pin(client.run())),
+            sessions: vec![first],
             shared,
-            woken,
-            waker,
             auditor,
+            waiting: VecDeque::new(),
+            held: BTreeSet::new(),
             arrivals: BTreeMap::new(),
-            shutting_down: false,
             stepping: None,
             watches: Vec::new(),
             baselines: BTreeMap::new(),
@@ -403,16 +443,24 @@ impl<'a> World<'a> {
             .runnable()
             .map(Action::Run)
             .collect::<Vec<_>>();
-        if let Some(controller) = &self.controller {
-            if self.machine.can_collect() {
-                actions.push(Action::Collect);
+        for (id, session) in self.sessions.iter().enumerate() {
+            if let Some(controller) = &session.controller {
+                if self.machine.can_collect(id) {
+                    actions.push(Action::Collect(id));
+                }
+                if controller.has_message() {
+                    actions.push(Action::Deliver(id));
+                }
             }
-            if controller.has_message() {
-                actions.push(Action::Deliver);
+            if session.client.is_some()
+                && session.woken.0.load(Ordering::Relaxed)
+                && (id != FIRST || self.client_may_act())
+            {
+                actions.push(Action::Poll(id));
             }
         }
-        if self.client.is_some() && self.woken.0.load(Ordering::Relaxed) && self.client_may_act() {
-            actions.push(Action::Poll);
+        if !self.waiting.is_empty() {
+            actions.push(Action::Follow);
         }
         actions
     }
@@ -445,9 +493,10 @@ impl<'a> World<'a> {
         for line in self.machine.absorb() {
             self.trace.line(format!("    {line}"));
         }
+        self.receive_held();
         self.flush();
         performed?;
-        if action == Action::Poll {
+        if action == Action::Poll(FIRST) {
             // The user's breakpoints, as the client now knows them, are what
             // the kernel watches for unseen hits.
             self.machine.kernel.borrow_mut().user_breakpoints =
@@ -467,8 +516,7 @@ impl<'a> World<'a> {
     fn sabotage(&self) {
         if self.machine.sabotage != Some(Sabotage::ResumeBehindTheController)
             || self
-                .controller
-                .as_ref()
+                .controller()
                 .is_none_or(|controller| controller.truth().public_stop.is_none())
         {
             return;
@@ -500,27 +548,194 @@ impl<'a> World<'a> {
                     + 1;
                 Ok(self.machine.run_thread(tid, budget))
             }
-            Action::Collect => Ok(self.machine.collect()),
-            Action::Deliver => self.deliver(),
-            Action::Poll => {
-                self.woken.0.store(false, Ordering::Relaxed);
-                let task = self.client.as_mut().expect("poll needs a client");
-                match task.as_mut().poll(&mut Context::from_waker(&self.waker)) {
-                    Poll::Pending => Ok("poll client".to_owned()),
+            Action::Collect(id) => Ok(self.machine.collect(id)),
+            Action::Deliver(FIRST) => self.deliver(),
+            Action::Deliver(id) => self.deliver_to(id),
+            Action::Poll(id) => {
+                let session = &mut self.sessions[id];
+                session.woken.0.store(false, Ordering::Relaxed);
+                let task = session.client.as_mut().expect("poll needs a client");
+                let polled = if id == FIRST {
+                    "poll client".to_owned()
+                } else {
+                    format!("poll session {id}")
+                };
+                match task.as_mut().poll(&mut Context::from_waker(&session.waker)) {
+                    Poll::Pending => Ok(polled),
                     Poll::Ready(result) => {
-                        self.client = None;
+                        session.client = None;
                         self.flush();
-                        result.map(|()| "poll client -> done".to_owned())
+                        result.map(|()| format!("{polled} -> done"))
                     }
                 }
             }
+            Action::Follow => self.follow(),
         }
+    }
+
+    /// The first session's controller, until it exits.
+    fn controller(&self) -> Option<&SimController> {
+        self.sessions[FIRST].controller.as_ref()
+    }
+
+    /// Takes the children the first session held since the last look,
+    /// which the holding oracle watches from now on.
+    fn receive_held(&mut self) {
+        let mut receiver = self.shared.held.borrow_mut();
+        let Some(receiver) = receiver.as_mut() else {
+            return;
+        };
+        let kernel = self.machine.kernel.borrow();
+        let mut marks = self.machine.marks.borrow_mut();
+        while let Ok(child) = receiver.try_recv() {
+            let tgid = tid_of(child.process().process_id);
+            marks.hit(Mark::ChildHeld);
+            if kernel
+                .processes
+                .get(&tgid)
+                .is_some_and(|process| process.parent == Parent::Init)
+            {
+                marks.hit(Mark::HeldAfterParentExit);
+            }
+            self.trace.line(format!(
+                "    {} held {tgid} for another session",
+                child.parent()
+            ));
+            self.held.insert(tgid);
+            self.waiting.push_back(child);
+        }
+    }
+
+    /// Hands the next child held to a session of its own, as a client
+    /// answering `startDebugging` does, or releases it, as one refusing
+    /// does. Now and then the first session stops taking children, as one
+    /// ending does, and its debugger releases those it forks from then on.
+    fn follow(&mut self) -> Result<String, Failure> {
+        let held = self
+            .waiting
+            .pop_front()
+            .expect("follow needs a held child")
+            .hand_over();
+        let tgid = tid_of(held.process_id);
+        let decision = self.machine.choices.borrow_mut().below(Stream::Client, 8);
+        if decision == 1
+            && let Some(receiver) = self.shared.held.borrow_mut().as_mut()
+        {
+            receiver.close();
+            self.trace
+                .line("    the first session takes no more children".to_owned());
+        }
+        if decision == 0 {
+            self.release(held)?;
+            return Ok(format!("follow {tgid} -> released"));
+        }
+        let id = self.sessions.len();
+        let tracer = TRACER + i32::try_from(id).expect("few sessions");
+        let (controller, handle) = start_controller(
+            &self.machine,
+            self.variant,
+            &self.swarm,
+            self.random,
+            tracer,
+            Some(held.start_time),
+        );
+        let notes = Rc::default();
+        let requests = self.machine.choices.borrow_mut().below(Stream::Client, 8) + 1;
+        let adopter = Adopter {
+            handle,
+            choices: Rc::clone(&self.machine.choices),
+            marks: Rc::clone(&self.machine.marks),
+            notes: Rc::clone(&notes),
+            child: held,
+            requests,
+        };
+        self.sessions.push(Session::new(
+            tracer,
+            controller,
+            Box::pin(adopter.run()),
+            notes,
+        ));
+        Ok(format!(
+            "follow {tgid} -> session {id}, tracing as {tracer}"
+        ))
+    }
+
+    /// Lets a held child run on, as `release_held` does for a client that
+    /// will not adopt it: `SIGCONT` from the first session's process, once
+    /// the child is known to be the one held.
+    fn release(&mut self, held: HeldProcess) -> Result<(), Failure> {
+        let tgid = tid_of(held.process_id);
+        let mut kernel = self.machine.kernel.borrow_mut();
+        let start_time = kernel
+            .processes
+            .get(&tgid)
+            .map(|process| process.start_time);
+        if start_time != Some(held.start_time) {
+            return Err(Failure::debugger(
+                "holding",
+                format!(
+                    "held child {tgid} started at {}, but its process started at {start_time:?}",
+                    held.start_time
+                ),
+            ));
+        }
+        kernel.serve(TRACER);
+        kernel
+            .kill(tgid, libc::SIGCONT)
+            .expect("a held child can be continued");
+        self.held.remove(&tgid);
+        self.machine.marks.borrow_mut().hit(Mark::HeldChildReleased);
+        Ok(())
+    }
+
+    /// Lets a session adopting a held child handle the message at the
+    /// front of its controller's queue.
+    fn deliver_to(&mut self, id: SessionId) -> Result<String, Failure> {
+        let session = &mut self.sessions[id];
+        let controller = session
+            .controller
+            .as_mut()
+            .expect("deliver needs a controller");
+        let delivery = controller.take().expect("deliver needs a message");
+        let description = format!("deliver to session {id}: {}", delivery.description);
+        session.shutting_down |= delivery.shutdown;
+        if controller.handle(delivery) {
+            return Ok(description);
+        }
+        self.controller_exited(id)?;
+        Ok(format!("{description} -> controller exited"))
+    }
+
+    /// A session's controller exited, and its tracer thread with it, which
+    /// releases what it still traces (K-WAIT-3). It must hold no thread in
+    /// a stop.
+    fn controller_exited(&mut self, id: SessionId) -> Result<(), Failure> {
+        let session = &mut self.sessions[id];
+        session.controller = None;
+        let tracer = session.tracer;
+        let mut kernel = self.machine.kernel.borrow_mut();
+        if let Some(thread) = kernel
+            .threads
+            .values()
+            .find(|thread| thread.tracer() == Some(tracer) && thread.held())
+        {
+            return Err(Failure::debugger(
+                "clean exit",
+                format!(
+                    "the controller exited holding thread {} in a stop",
+                    thread.tid
+                ),
+            ));
+        }
+        kernel.forget_tracer(tracer);
+        Ok(())
     }
 
     /// Lets the controller handle the message at the front of its queue,
     /// and checks the breakpoint hits it counted.
     fn deliver(&mut self) -> Result<String, Failure> {
-        let controller = self
+        let session = &mut self.sessions[FIRST];
+        let controller = session
             .controller
             .as_mut()
             .expect("deliver needs a controller");
@@ -540,29 +755,12 @@ impl<'a> World<'a> {
                 .get(&tid)
                 .filter(|arrival| arrival.address == address && arrival.retired == retired)
                 .map(|arrival| arrival.counted.clone()),
-            in_shutdown: self.shutting_down,
+            in_shutdown: session.shutting_down,
         });
-        self.shutting_down |= delivery.shutdown;
+        session.shutting_down |= delivery.shutdown;
         let running = controller.handle(delivery);
         if !running {
-            self.controller = None;
-            let mut kernel = self.machine.kernel.borrow_mut();
-            if let Some(thread) = kernel
-                .threads
-                .values()
-                .find(|thread| thread.traced() && thread.held())
-            {
-                return Err(Failure::debugger(
-                    "clean exit",
-                    format!(
-                        "the controller exited holding thread {} in a stop",
-                        thread.tid
-                    ),
-                ));
-            }
-            // The tracer thread exits with the controller, which releases
-            // what it could not detach (K-WAIT-3).
-            kernel.forget_tracer();
+            self.controller_exited(FIRST)?;
             return Ok(format!("deliver {description} -> controller exited"));
         }
         let after = controller.truth();
@@ -727,8 +925,7 @@ impl<'a> World<'a> {
         }
         let kernel = self.machine.kernel.borrow();
         let Some(tgid) = self
-            .controller
-            .as_ref()
+            .controller()
             .and_then(|controller| controller.truth().inferior)
         else {
             return Ok(Vec::new());
@@ -770,8 +967,7 @@ impl<'a> World<'a> {
         }
         let mut kernel = self.machine.kernel.borrow_mut();
         let tgid = self
-            .controller
-            .as_ref()
+            .controller()
             .and_then(|controller| controller.truth().inferior);
         self.baselines
             .retain(|id, _| watches.iter().any(|watch| watch.id == *id));
@@ -848,7 +1044,7 @@ impl<'a> World<'a> {
 
     /// Whether `stop` is still published, and its process is not ending.
     fn still_at(&self, stop: crate::StopId) -> bool {
-        let Some(truth) = self.controller.as_ref().map(SimController::truth) else {
+        let Some(truth) = self.controller().map(SimController::truth) else {
             return false;
         };
         truth.public_stop == Some(stop.get())
@@ -892,8 +1088,7 @@ impl<'a> World<'a> {
             return Ok(());
         };
         let stop = self
-            .controller
-            .as_ref()
+            .controller()
             .and_then(|controller| controller.truth().public_stop);
         let ended = matches!(reason, Some(crate::StopReason::Step { kind }) if *kind == begun.kind);
         if !ended || !stop.is_some_and(|stop| self.still_at(crate::StopId::new(stop))) {
@@ -923,8 +1118,14 @@ impl<'a> World<'a> {
         for line in self.capture.take() {
             self.trace.line(format!("    | {line}"));
         }
-        for note in self.shared.notes.borrow_mut().drain(..) {
-            self.trace.line(format!("    client: {note}"));
+        for (id, session) in self.sessions.iter().enumerate() {
+            for note in session.notes.borrow_mut().drain(..) {
+                if id == FIRST {
+                    self.trace.line(format!("    client: {note}"));
+                } else {
+                    self.trace.line(format!("    session {id}: {note}"));
+                }
+            }
         }
     }
 
@@ -955,6 +1156,13 @@ impl<'a> World<'a> {
                 ),
             ));
         }
+        if let Some(tid) = self.machine.leaked.borrow().first() {
+            return Err(Failure::debugger(
+                "transparency",
+                format!("thread {tid} received SIGCONT, which only a debugger sends"),
+            ));
+        }
+        self.check_held()?;
         if let Some(lost) = self.machine.kernel.borrow().watching.lost.first() {
             return Err(Failure::debugger(
                 "watch accounting",
@@ -967,7 +1175,7 @@ impl<'a> World<'a> {
         // Only a process the controller debugs has the user's breakpoints
         // and watches, once it finished launching or attaching: none once it
         // detached, or once it exited itself.
-        let truth = self.controller.as_ref().map(SimController::truth);
+        let truth = self.controller().map(SimController::truth);
         let debugged = truth
             .as_ref()
             .filter(|truth| truth.established)
@@ -986,7 +1194,10 @@ impl<'a> World<'a> {
         let kernel = self.machine.kernel.borrow();
         oracles::unseen_hits(&kernel)
             .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
-        if let Some(controller) = &self.controller {
+        for (id, session) in self.sessions.iter().enumerate() {
+            let Some(controller) = &session.controller else {
+                continue;
+            };
             let truth = controller.truth();
             oracles::code_integrity(&kernel, &truth, &self.variant.image)
                 .map_err(|message| Failure::debugger("code integrity", message))?;
@@ -994,31 +1205,59 @@ impl<'a> World<'a> {
                 .map_err(|message| Failure::debugger("site ownership", message))?;
             oracles::all_stop(&kernel, &truth)
                 .map_err(|message| Failure::debugger("all-stop", message))?;
-            oracles::user_breakpoints(
-                &kernel,
-                &truth,
-                &self.shared.intent(self.variant.image.bias()),
-            )
-            .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
+            if id == FIRST {
+                oracles::user_breakpoints(
+                    &kernel,
+                    &truth,
+                    &self.shared.intent(self.variant.image.bias()),
+                )
+                .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
+            }
         }
         oracles::output_so_far(&kernel, self.run)
             .map_err(|message| Failure::debugger("transparency", message))?;
         Ok(())
     }
 
-    /// Ends a session in which nothing more can happen.
-    fn finish(&self) -> Result<Progress, Failure> {
-        if self.client.is_some() {
-            return Err(Failure::debugger(
-                "liveness",
-                format!("the client waits but nothing can happen: {}", self.dump()),
-            ));
+    /// Holding: every child held is as the oracle requires until a session
+    /// seizes it.
+    fn check_held(&mut self) -> Result<(), Failure> {
+        let kernel = self.machine.kernel.borrow();
+        let mut seized = Vec::new();
+        for &tgid in &self.held {
+            if !oracles::held(&kernel, tgid)
+                .map_err(|message| Failure::debugger("holding", message))?
+            {
+                seized.push(tgid);
+            }
         }
-        if self.controller.is_some() {
-            return Err(Failure::debugger(
-                "liveness",
-                "the controller kept running after it answered the shutdown",
-            ));
+        for tgid in seized {
+            self.held.remove(&tgid);
+        }
+        Ok(())
+    }
+
+    /// Ends a run in which nothing more can happen.
+    fn finish(&self) -> Result<Progress, Failure> {
+        for (id, session) in self.sessions.iter().enumerate() {
+            if session.client.is_some() {
+                return Err(Failure::debugger(
+                    "liveness",
+                    format!(
+                        "the client of session {id} waits but nothing can happen: {}",
+                        self.dump()
+                    ),
+                ));
+            }
+            if session.controller.is_some() {
+                return Err(Failure::debugger(
+                    "liveness",
+                    format!(
+                        "the controller of session {id} kept running after it answered the \
+                         shutdown"
+                    ),
+                ));
+            }
         }
         let kernel = self.machine.kernel.borrow();
         oracles::clean_exit(&kernel).map_err(|message| Failure::debugger("clean exit", message))?;
@@ -1051,29 +1290,86 @@ impl<'a> World<'a> {
                 thread.registers.rip
             );
         }
-        let waiter = self.machine.waiter.borrow();
-        let _ = write!(
-            text,
-            "\n  waiter {}, holding {:?}; controller {}; client {}",
-            if waiter.started() {
-                "started"
-            } else {
-                "not started"
-            },
-            waiter.holding(),
-            match &self.controller {
-                Some(controller) if controller.has_message() => "running, with messages queued",
-                Some(_) => "running, queue empty",
-                None => "exited",
-            },
-            if self.client.is_some() {
-                "waiting"
-            } else {
-                "done"
-            },
-        );
+        for (id, session) in self.sessions.iter().enumerate() {
+            let waiter = Rc::clone(&self.machine.waiters.borrow()[id]);
+            let waiter = waiter.borrow();
+            let _ = write!(
+                text,
+                "\n  session {id}, tracing as {}: waiter {}, holding {:?}; controller {}; \
+                 client {}",
+                session.tracer,
+                if waiter.started() {
+                    "started"
+                } else {
+                    "not started"
+                },
+                waiter.holding(),
+                match &session.controller {
+                    Some(controller) if controller.has_message() => {
+                        "running, with messages queued"
+                    }
+                    Some(_) => "running, queue empty",
+                    None => "exited",
+                },
+                if session.client.is_some() {
+                    "waiting"
+                } else {
+                    "done"
+                },
+            );
+        }
         text
     }
+}
+
+/// Starts a controller tracing as `tracer`, with a waiter of its own, which
+/// checks the start time of a process it attaches to against `start_time`.
+/// Returns it with the handle a client drives it through.
+fn start_controller(
+    machine: &Rc<Machine>,
+    variant: &Variant,
+    swarm: &Swarm,
+    random: [u8; 16],
+    tracer: i32,
+    start_time: Option<u64>,
+) -> (SimController, DebuggerHandle) {
+    let waiter = Rc::new(RefCell::new(SimWaiter::new(tracer)));
+    machine.waiters.borrow_mut().push(Rc::clone(&waiter));
+    let debug_info = variant.debug_info();
+    let module_image = Arc::clone(&debug_info.image);
+    let (controller, channels) = SimController::new(SimParts {
+        tracer,
+        kernel: Rc::clone(&machine.kernel),
+        waiter,
+        preemption: Rc::clone(machine) as Rc<dyn Preemption>,
+        launch: SimLaunch {
+            image: Arc::clone(&variant.image),
+            path: Arc::clone(&variant.path),
+            random,
+        },
+        executable: SimExecutable {
+            path: Arc::clone(&variant.path),
+            data: Arc::clone(&variant.data),
+            inode: variant.inode,
+            start_time,
+        },
+        debug_info,
+        queue_capacity: swarm.queue_capacity,
+        event_capacity: swarm.event_capacity,
+    });
+    let handle = DebuggerHandle {
+        module_image,
+        core_dump: None,
+        source_paths: Arc::default(),
+        requests: channels.requests,
+        events: channels.events,
+    };
+    (controller, handle)
+}
+
+/// The simulated thread a process identifier names.
+fn tid_of(process: ProcessId) -> Tid {
+    Tid::try_from(process.get()).expect("a simulated process id fits")
 }
 
 /// Starts the program untraced, for the client to attach to.
@@ -1121,6 +1417,7 @@ fn script(
         debug: swarm.debug,
         image: Arc::clone(&variant.image),
         attach,
+        follow: swarm.follow,
     }
 }
 

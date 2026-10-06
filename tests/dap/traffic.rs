@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::dap::{Dap, Sent, fixture};
+use crate::dap::{Configuration, Dap, Sent, fixture};
 use crate::support::ExternalProcess;
 
 /// Fields whose values the adapter assigns and the client echoes.
@@ -116,12 +116,13 @@ fn await_live(
 }
 
 fn replay(name: &str) {
-    replay_with(name, None);
+    replay_with(name, None, None);
 }
 
 /// Replays a recording; one that attached is given a live process in place
-/// of the recorded one.
-fn replay_with(name: &str, mut target: Option<Target>) {
+/// of the recorded one. With `children`, the harness starts each child
+/// session the adapter asks for, configured so, and finishes it last.
+fn replay_with(name: &str, mut target: Option<Target>, children: Option<Configuration>) {
     let mut text = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("tests/dap/traffic/{name}.log")),
@@ -156,6 +157,10 @@ fn replay_with(name: &str, mut target: Option<Target>) {
     };
 
     let mut dap = Dap::start(format!("replay {name}"));
+    let following = children.is_some();
+    if let Some(configuration) = children {
+        dap.follow_children(configuration);
+    }
     let mut ids = Ids::default();
     let mut sent = HashMap::new();
     let mut seen = 0;
@@ -188,8 +193,12 @@ fn replay_with(name: &str, mut target: Option<Target>) {
         }
     }
     // The recording ends with its client's disconnect.
+    let child = following.then(|| dap.child().0);
     dap.close_stdin();
     dap.finish();
+    if let Some(child) = child {
+        child.finish();
+    }
     if let Some(target) = target {
         // Detached, the process finishes on its own.
         assert_eq!(target.process.wait().code(), Some(23));
@@ -212,7 +221,13 @@ fn vscode_attaching_to_a_process() {
         process: ExternalProcess::spawn(&fixture("attach")),
         released: false,
     };
-    replay_with("vscode-attach", Some(target));
+    replay_with("vscode-attach", Some(target), None);
+}
+
+#[test]
+fn vscode_following_a_forked_child() {
+    // The child's session runs it to its end, which its parent waits for.
+    replay_with("vscode-fork", None, Some(Configuration::default()));
 }
 
 #[test]
@@ -228,4 +243,9 @@ fn nvim_dap_launching_stepping_and_evaluating() {
 #[test]
 fn nvim_dap_running_a_program_in_its_terminal() {
     replay("nvim-terminal");
+}
+
+#[test]
+fn nvim_dap_following_a_forked_child() {
+    replay_with("nvim-fork", None, Some(Configuration::default()));
 }

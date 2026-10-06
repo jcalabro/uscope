@@ -15,9 +15,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uscope::{
     Backtrace, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle, Error,
-    ExceptionDisposition, ExitStatus, InferiorState, LaunchOptions, LineNumber, ModuleId,
-    ModuleImage, ProcessId, ResumeScope, SignalPolicy, StackFrameId, StepKind, StopContext, StopId,
-    StopReason, ThreadId, VariableSnapshot, VirtualAddress,
+    ExceptionDisposition, ExitStatus, HeldProcess, InferiorState, LaunchOptions, LineNumber,
+    ModuleId, ModuleImage, ProcessId, ResumeScope, SignalPolicy, StackFrameId, StepKind,
+    StopContext, StopId, StopReason, ThreadId, VariableSnapshot, VirtualAddress,
 };
 
 use super::breakpoints::{Breakpoints, Change, Entry, Group, Key, Placement, Slot, State, Want};
@@ -226,6 +226,7 @@ pub(super) struct ClientSupport {
     pub invalidated: bool,
     pub memory_events: bool,
     pub run_in_terminal: bool,
+    pub start_debugging: bool,
 }
 
 /// The program being debugged.
@@ -246,6 +247,8 @@ struct Target {
     recorded_paths: Option<HashMap<PathBuf, PathBuf>>,
     process: Option<ProcessId>,
     pumps: Vec<JoinHandle<()>>,
+    /// The settings child sessions carry over.
+    inherited: serde_json::Map<String, Value>,
 }
 
 /// The stop the client was last told about.
@@ -276,6 +279,10 @@ pub struct Session {
     starting: Option<Header>,
     target: Option<Target>,
     events: Option<broadcast::Receiver<DebuggerEvent>>,
+    /// The processes the program forked, held for child sessions.
+    held: Option<uscope::HeldChildren>,
+    /// The requests for child sessions still waiting for the client.
+    follows: Vec<JoinHandle<()>>,
     pub(super) breakpoints: Breakpoints,
     pub(super) data: super::watch::Data,
     exceptions: Selection,
@@ -314,6 +321,8 @@ impl Session {
             starting: None,
             target: None,
             events: None,
+            held: None,
+            follows: Vec::new(),
             breakpoints: Breakpoints::default(),
             data: super::watch::Data::default(),
             exceptions: Selection::default(),
@@ -352,12 +361,18 @@ impl Session {
                     biased;
                     () = &mut shutdown => None,
                     message = inbox.recv() => message.map(Input::Message),
+                    child = next_held(&mut self.held) => Some(Input::Held(child)),
                     event = next_event(&mut self.events) => Some(Input::Event(event)),
                 }
             };
             let result = match input {
                 None => break,
                 Some(Input::Message(message)) => self.message(message).await,
+                Some(Input::Held(Some(child))) => self.follow(child).await,
+                Some(Input::Held(None)) => {
+                    self.held = None;
+                    Ok(())
+                }
                 Some(Input::Event(Ok(event))) => self.event(event).await,
                 Some(Input::Event(Err(broadcast::error::RecvError::Lagged(_)))) => {
                     self.resync().await
@@ -507,6 +522,7 @@ impl Session {
             invalidated: arguments.supports_invalidated_event.unwrap_or(false),
             memory_events: arguments.supports_memory_event.unwrap_or(false),
             run_in_terminal: arguments.supports_run_in_terminal_request.unwrap_or(false),
+            start_debugging: arguments.supports_start_debugging_request.unwrap_or(false),
         });
         self.after = Some(After::Initialized);
         Ok(capabilities())
@@ -555,21 +571,38 @@ impl Session {
             Start::Attach {
                 process,
                 executable,
+                held,
             } => {
                 let process = *process;
+                let held = held.map(|start_time| HeldProcess {
+                    process_id: process,
+                    start_time,
+                });
                 let attached = async {
-                    match executable {
-                        Some(executable) => {
+                    match (executable, held) {
+                        (Some(executable), Some(held)) => {
+                            Debugger::attach_held_with_executable(held, executable).await
+                        }
+                        (None, Some(held)) => Debugger::attach_held(held).await,
+                        (Some(executable), None) => {
                             Debugger::attach_with_executable(process, executable).await
                         }
-                        None => Debugger::attach(process).await,
+                        (None, None) => Debugger::attach(process).await,
                     }
                 };
-                self.with_progress(format!("Attaching to process {process}"), attached)
-                    .await
-                    .map_err(|error| {
-                        ErrorBody::shown(format!("failed to attach to process {process}: {error}"))
-                    })?
+                let attached = self
+                    .with_progress(format!("Attaching to process {process}"), attached)
+                    .await;
+                attached.map_err(|error| {
+                    // A held process this session cannot take runs on.
+                    let released = held.is_some_and(|held| {
+                        uscope::release_held(&held).is_ok_and(|released| released)
+                    });
+                    let released = if released { "; it runs on its own" } else { "" };
+                    ErrorBody::shown(format!(
+                        "failed to attach to process {process}: {error}{released}"
+                    ))
+                })?
             }
             Start::Core(options) => {
                 let core = options.core.display().to_string();
@@ -639,6 +672,8 @@ impl Session {
             signals,
             view_files,
             working_directory,
+            follow_forks,
+            inherited,
         } = configuration;
         let launched = matches!(start, Start::Launch(_));
         let core = matches!(start, Start::Core(_));
@@ -669,7 +704,11 @@ impl Session {
             recorded_paths: None,
             process: None,
             pumps: Vec::new(),
+            inherited,
         });
+        if follow_forks && !core {
+            self.hold_forks().await?;
+        }
         self.load_views(working_directory, &view_files).await?;
         self.apply_signal_policies().await?;
         if !launched {
@@ -691,6 +730,49 @@ impl Session {
             self.after = Some(After::Start);
         }
         Ok(None)
+    }
+
+    /// Holds the processes the program forks for child sessions, if the
+    /// client can start them; otherwise says that they run on their own.
+    async fn hold_forks(&mut self) -> Result<(), ErrorBody> {
+        if !self.support().start_debugging {
+            self.client
+                .important(
+                    "followForks: this client cannot start child sessions, so processes the \
+                     program forks run on their own",
+                )
+                .await?;
+            return Ok(());
+        }
+        let handle = self.target_handle()?;
+        self.held = Some(handle.hold_forks().await.map_err(error)?);
+        Ok(())
+    }
+
+    /// Asks the client to debug a forked process in a session of its own.
+    async fn follow(&mut self, child: uscope::HeldChild) -> Result<(), Closed> {
+        let Some(target) = self.target.as_ref() else {
+            return Ok(());
+        };
+        let program = target.handle.executable().file_name().map_or_else(
+            || target.handle.executable().display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let arguments = super::forks::start_arguments(&target.inherited, &program, &child);
+        self.client
+            .console(format!(
+                "process {} forked process {}, which is debugged in a session of its own",
+                child.parent(),
+                child.process().process_id
+            ))
+            .await?;
+        self.follows.retain(|follow| !follow.is_finished());
+        self.follows.push(tokio::spawn(super::forks::follow(
+            self.client.clone(),
+            arguments,
+            child,
+        )));
+        Ok(())
     }
 
     /// Presents values with the configuration's view files and the
@@ -1010,7 +1092,9 @@ impl Session {
         }
     }
 
-    /// Releases what the session holds once it is over.
+    /// Releases what the session holds once it is over. Children held but
+    /// not yet offered to the client are released; those offered wait for
+    /// its answer.
     async fn release(&mut self) {
         if let Some(target) = self.target.as_mut() {
             if let Some(debugger) = target.debugger.take() {
@@ -1019,6 +1103,10 @@ impl Session {
             for pump in target.pumps.drain(..) {
                 pump.abort();
             }
+        }
+        self.held = None;
+        for follow in self.follows.drain(..) {
+            let _ = follow.await;
         }
     }
 
@@ -2145,6 +2233,15 @@ fn capabilities() -> Value {
 enum Input {
     Message(Inbound),
     Event(Result<DebuggerEvent, broadcast::error::RecvError>),
+    /// A child the program forked, or none once the debugger is gone.
+    Held(Option<uscope::HeldChild>),
+}
+
+async fn next_held(held: &mut Option<uscope::HeldChildren>) -> Option<uscope::HeldChild> {
+    match held {
+        Some(held) => held.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn next_event(

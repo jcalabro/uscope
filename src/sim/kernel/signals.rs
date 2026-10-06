@@ -4,11 +4,17 @@
 use nix::errno::Errno;
 use nix::libc;
 
-use super::{ExitStatus, Happening, Kernel, SigInfo, State, StopKind, Tid, WaitStatus};
+use super::{
+    ExitStatus, Happening, Kernel, Parent, SigInfo, State, StopKind, Thread, Tid, Tracing,
+    WaitStatus,
+};
+#[cfg(test)]
+use crate::sim::world::Sabotage;
 
 pub const SIGTRAP: i32 = libc::SIGTRAP;
 pub const SIGKILL: i32 = libc::SIGKILL;
 pub const SIGSTOP: i32 = libc::SIGSTOP;
+pub const SIGCONT: i32 = libc::SIGCONT;
 
 /// `si_code` of a signal sent by `kill`.
 pub const SI_USER: i32 = libc::SI_USER;
@@ -52,6 +58,11 @@ impl Pending {
         self.0[(signal - 1).cast_unsigned() as usize].is_some()
     }
 
+    /// Forgets `signal`, if it is pending.
+    pub(super) const fn remove(&mut self, signal: i32) {
+        self.0[(signal - 1).cast_unsigned() as usize] = None;
+    }
+
     /// Takes the signal the kernel delivers next: synchronous signals
     /// first, then the lowest-numbered.
     fn take_next(&mut self) -> Option<SigInfo> {
@@ -62,6 +73,9 @@ impl Pending {
         self.0[(signal - 1).cast_unsigned() as usize].take()
     }
 }
+
+/// The signals that stop a process by default.
+const STOPPING: [i32; 4] = [SIGSTOP, libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU];
 
 /// What a signal does when the program has no handler for it.
 /// Signals that dump core terminate too: core dumps are off, as with a zero
@@ -90,36 +104,137 @@ pub fn name(signal: i32) -> String {
 }
 
 impl Kernel {
-    /// `kill(tgid, SIGKILL)`, sent by the tracer.
+    /// `kill(tgid, signal)`, sent by the tracer: SIGKILL, or SIGCONT.
     pub fn kill(&mut self, group: Tid, signal: i32) -> Result<(), Errno> {
         if !self.processes.contains_key(&group) {
             return Err(Errno::ESRCH);
         }
-        if signal != SIGKILL {
-            self.gap(format!("kill with {}", name(signal)));
-            return Err(Errno::ENOSYS);
+        match signal {
+            SIGKILL => self.kill_process(group, ExitStatus::Signal(SIGKILL, false)),
+            SIGCONT => self.continue_process(group),
+            _ => {
+                self.gap(format!("kill with {}", name(signal)));
+                return Err(Errno::ENOSYS);
+            }
         }
-        self.kill_process(group, ExitStatus::Signal(SIGKILL, false));
         Ok(())
     }
 
-    /// `tgkill(tgid, tid, SIGSTOP)`, sent by the tracer. K-INT-2: a thread
-    /// that has not been reaped, even a zombie, accepts it.
-    pub fn tgkill(&mut self, group: Tid, tid: Tid, signal: i32) -> Result<(), Errno> {
-        let tracer = self.tracer;
-        let Some(thread) = self
-            .threads
-            .get_mut(&tid)
-            .filter(|thread| thread.tgid == group)
-        else {
-            return Err(Errno::ESRCH);
+    /// SIGCONT from the tracer to `group` (K-STOP-3). It flushes every
+    /// pending stop signal and ends the process's job-control stop, which
+    /// its parent hears of once one of its threads next runs. It
+    /// interrupts each seized thread, as `PTRACE_INTERRUPT` does. Queued
+    /// for the process when its leader is traced, it is otherwise
+    /// discarded, as an ignored signal is (Linux's `sig_ignored`).
+    fn continue_process(&mut self, group: Tid) {
+        let sender = self.caller();
+        #[cfg(test)]
+        let sender = if self.sabotage == Some(Sabotage::MisattributeContinues) {
+            0
+        } else {
+            sender
         };
+        let process = self.processes.get_mut(&group).expect("the process lives");
+        for signal in STOPPING {
+            process.shared.remove(signal);
+        }
+        let ended = process.stopped.take().is_some();
+        process.continued |= ended;
+        for thread in self
+            .threads
+            .values_mut()
+            .filter(|thread| thread.tgid == group)
+        {
+            for signal in STOPPING {
+                thread.pending.remove(signal);
+            }
+            if thread.state == State::JobStopped {
+                thread.state = State::Running;
+            }
+            if let Tracing::Seized { interrupted, .. } = &mut thread.tracing
+                && !thread.state.exiting()
+            {
+                *interrupted = true;
+            }
+        }
+        if ended {
+            self.happenings.push(Happening::Continued { tgid: group });
+        }
+        if self.threads.get(&group).is_some_and(Thread::traced) {
+            self.processes
+                .get_mut(&group)
+                .expect("the process lives")
+                .shared
+                .insert(SigInfo {
+                    signal: SIGCONT,
+                    code: SI_USER,
+                    pid: sender,
+                    address: 0,
+                });
+        }
+    }
+
+    /// Tells a parent its child continued, once a thread of the child's
+    /// that SIGCONT woke runs (K-STOP-3).
+    pub(super) fn report_continued(&mut self, tid: Tid) {
+        let group = self.threads[&tid].tgid;
+        let Some(process) = self
+            .processes
+            .get_mut(&group)
+            .filter(|process| process.continued)
+        else {
+            return;
+        };
+        process.continued = false;
+        self.notify_parent(group, libc::CLD_CONTINUED);
+    }
+
+    /// Queues SIGCHLD with `code` for `group`'s parent, if a live process.
+    pub(super) fn notify_parent(&mut self, group: Tid, code: i32) {
+        let Some(Parent::Process(parent)) =
+            self.processes.get(&group).map(|process| process.parent)
+        else {
+            return;
+        };
+        if let Some(parent) = self.processes.get_mut(&parent) {
+            parent.shared.insert(SigInfo {
+                signal: libc::SIGCHLD,
+                code,
+                pid: group,
+                address: 0,
+            });
+        }
+    }
+
+    /// `tgkill(tgid, tid, SIGSTOP)`, sent by the tracer. K-INT-2: a thread
+    /// that has not been reaped, even a zombie, accepts it. K-STOP-3: it
+    /// flushes a pending SIGCONT.
+    pub fn tgkill(&mut self, group: Tid, tid: Tid, signal: i32) -> Result<(), Errno> {
+        let tracer = self.caller();
+        if self
+            .threads
+            .get(&tid)
+            .is_none_or(|thread| thread.tgid != group)
+        {
+            return Err(Errno::ESRCH);
+        }
         if signal != SIGSTOP {
             self.gap(format!("tgkill with {}", name(signal)));
             return Err(Errno::ENOSYS);
         }
+        if let Some(process) = self.processes.get_mut(&group) {
+            process.shared.remove(SIGCONT);
+        }
+        for thread in self
+            .threads
+            .values_mut()
+            .filter(|thread| thread.tgid == group)
+        {
+            thread.pending.remove(SIGCONT);
+        }
         // K-SIG-1: delivered at the thread's next chance as a stop from
         // the tracer.
+        let thread = self.threads.get_mut(&tid).expect("the thread exists");
         thread.pending.insert(SigInfo {
             signal,
             code: SI_TKILL,
@@ -151,9 +266,9 @@ impl Kernel {
             .filter(|thread| thread.tgid == group)
         {
             match thread.state {
-                State::Running => thread.state = State::Exiting(exit),
+                State::Running | State::JobStopped => thread.state = State::Exiting(exit),
                 State::Stopped {
-                    kind: StopKind::Signal(_) | StopKind::Event(..),
+                    kind: StopKind::Signal(_) | StopKind::Event(..) | StopKind::Group(_),
                     ..
                 } => {
                     thread.state = State::Exiting(exit);
@@ -196,7 +311,7 @@ impl Kernel {
         }) else {
             return false;
         };
-        if info.signal != SIGSTOP && info.signal != libc::SIGCHLD {
+        if ![SIGSTOP, SIGCONT, libc::SIGCHLD].contains(&info.signal) {
             self.gap(format!("delivering pending {}", name(info.signal)));
             return true;
         }
@@ -208,6 +323,17 @@ impl Kernel {
     /// to it, or suppressed when `None`.
     pub(super) fn resume_with(&mut self, tid: Tid, signal: Option<i32>) {
         let thread = self.threads.get_mut(&tid).expect("resumed thread exists");
+        if let State::Stopped {
+            kind: StopKind::Signal(stopped),
+            ..
+        } = thread.state
+            && signal.is_none()
+        {
+            self.happenings.push(Happening::Suppressed {
+                tid,
+                signal: stopped,
+            });
+        }
         thread.state = State::Running;
         thread.report = None;
         if let Some(signal) = signal {
@@ -216,17 +342,44 @@ impl Kernel {
     }
 
     /// Takes a thread through `signal`'s default action, as if no debugger
-    /// were there: SIGCHLD is ignored, and a trap or fault ends its process
-    /// (K-FORK-2).
+    /// were there: SIGCHLD and SIGCONT are ignored, a trap or fault ends its
+    /// process (K-FORK-2), and SIGSTOP stops an untraced process with one
+    /// thread (K-STOP-1).
     pub(super) fn act_by_default(&mut self, tid: Tid, signal: i32) {
+        self.happenings.push(Happening::Delivered { tid, signal });
         match default_action(signal) {
             DefaultAction::Ignore => {}
             DefaultAction::Terminate => {
                 let group = self.threads[&tid].tgid;
                 self.kill_process(group, ExitStatus::Signal(signal, false));
             }
-            DefaultAction::Stop => self.gap(format!("group-stop by {}", name(signal))),
+            DefaultAction::Stop => self.stop_process(tid, signal),
         }
+    }
+
+    /// Stops `tid`'s process for `signal`, untraced, and tells its parent
+    /// (K-STOP-1). Group-stops of a traced thread, or of a process with
+    /// several threads, are not modeled.
+    fn stop_process(&mut self, tid: Tid, signal: i32) {
+        let thread = &self.threads[&tid];
+        let group = thread.tgid;
+        if thread.traced() {
+            self.gap(format!("group-stop of a traced thread by {}", name(signal)));
+            return;
+        }
+        if self.threads_of(group).count() > 1 {
+            self.gap(format!(
+                "group-stop of a process with several threads by {}",
+                name(signal)
+            ));
+            return;
+        }
+        self.threads.get_mut(&tid).expect("the thread").state = State::JobStopped;
+        let process = self.processes.get_mut(&group).expect("the process lives");
+        process.stopped = Some(signal);
+        process.continued = false;
+        self.happenings.push(Happening::JobStopped { tid });
+        self.notify_parent(group, libc::CLD_STOPPED);
     }
 
     /// Takes an exiting thread to its exit: the exit event stop when exits

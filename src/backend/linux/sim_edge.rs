@@ -21,7 +21,8 @@ use tokio::sync::{broadcast, mpsc};
 use super::memory::MemoryAccessError;
 use super::modules::{ModuleMapping, ProcessMappings, load_bias_in, process_mappings_in};
 use super::native::{
-    InspectionOps, LinuxTraceOps, maps_executable, siginfo_has_fault_address, siginfo_names_sender,
+    InspectionOps, LinuxTraceOps, SignalQueue, maps_executable, siginfo_has_fault_address,
+    siginfo_names_sender,
 };
 use super::registers::Fxsave;
 use super::signals::{Signal, WaitEvent};
@@ -31,7 +32,7 @@ use crate::backend::{ControllerChannels, ControllerMessage, ExecutableSource, Fi
 use crate::debug_info::DebugInfo;
 use crate::protocol::{DebuggerEvent, LaunchOptions, Request, StopId};
 use crate::sim::cpu::Registers;
-use crate::sim::kernel::{Kernel, Options, SigInfo, Thread, Tid, WaitStatus};
+use crate::sim::kernel::{Kernel, Options, SigInfo, Tid, WaitStatus};
 use crate::sim::loader::Image;
 use crate::{Error, Result, VirtualAddress};
 
@@ -56,6 +57,9 @@ pub struct SimExecutable {
     pub path: Arc<str>,
     pub data: Arc<[u8]>,
     pub inode: u64,
+    /// The start time of the process a session attaches to, which it
+    /// checks, as it checks a held child's.
+    pub start_time: Option<u64>,
 }
 
 /// Lets the rest of the simulated machine act before a call the controller
@@ -66,10 +70,12 @@ pub trait Preemption {
     fn before_call(&self);
 }
 
-/// The simulated waiter thread: it reaps statuses as `waitpid` does and
-/// queues them for the controller, holding one while the queue is full.
-#[derive(Default)]
+/// The simulated waiter thread: it reaps its tracer's statuses as
+/// `waitpid` does and queues them for the controller, holding one while the
+/// queue is full.
 pub struct SimWaiter {
+    /// The tracer whose tracees' statuses it reaps.
+    tracer: i32,
     /// The controller's queue, once the controller starts its waiter.
     messages: Option<mpsc::Sender<ControllerMessage>>,
     /// A status reaped but not yet queued.
@@ -85,6 +91,16 @@ pub struct Collected {
 }
 
 impl SimWaiter {
+    /// The waiter of `tracer`'s controller, which has not started it yet.
+    #[must_use]
+    pub const fn new(tracer: i32) -> Self {
+        Self {
+            tracer,
+            messages: None,
+            hand: None,
+        }
+    }
+
     /// Whether the controller started its waiter.
     #[must_use]
     pub const fn started(&self) -> bool {
@@ -109,7 +125,7 @@ impl SimWaiter {
         };
         match self.hand {
             Some(_) => messages.capacity() > 0,
-            None => kernel.reportable().next().is_some(),
+            None => kernel.reportable(self.tracer).next().is_some(),
         }
     }
 
@@ -122,7 +138,7 @@ impl SimWaiter {
     ) -> Collected {
         let mut reaped = None;
         if self.hand.is_none() {
-            let ready = kernel.reportable().collect::<Vec<_>>();
+            let ready = kernel.reportable(self.tracer).collect::<Vec<_>>();
             let status = kernel
                 .collect(choose(&ready))
                 .expect("a reportable thread reports");
@@ -145,8 +161,10 @@ impl SimWaiter {
     }
 }
 
-/// Answers the controller's host requests from the simulated kernel.
+/// Answers the controller's host requests from the simulated kernel, as
+/// the process identifier `tracer`.
 pub struct SimTrace {
+    tracer: i32,
     kernel: Rc<RefCell<Kernel>>,
     launch: SimLaunch,
     waiter: Rc<RefCell<SimWaiter>>,
@@ -195,15 +213,20 @@ impl SimTrace {
         Err(system(Errno::ENOSYS))
     }
 
-    /// The kernel, once anything due before this call has happened.
+    /// The kernel, serving this tracer, once anything due before this call
+    /// has happened.
     fn kernel(&self) -> std::cell::Ref<'_, Kernel> {
         self.preemption.before_call();
-        self.kernel.borrow()
+        let kernel = self.kernel.borrow();
+        kernel.serve(self.tracer);
+        kernel
     }
 
     fn kernel_mut(&self) -> std::cell::RefMut<'_, Kernel> {
         self.preemption.before_call();
-        self.kernel.borrow_mut()
+        let kernel = self.kernel.borrow_mut();
+        kernel.serve(self.tracer);
+        kernel
     }
 
     /// The memory map of `pid`'s process, as production's `read_maps`
@@ -307,6 +330,9 @@ fn wait_event(status: WaitStatus) -> WaitEvent {
         WaitStatus::Signaled(_, number, core) => WaitEvent::Signaled(pid, signal(number), core),
         WaitStatus::Stopped(_, number) => WaitEvent::Stopped(pid, signal(number)),
         WaitStatus::Event(_, event) => WaitEvent::PtraceEvent(pid, Signal::SIGTRAP, event),
+        WaitStatus::GroupStop(_, number) => {
+            WaitEvent::PtraceEvent(pid, signal(number), libc::PTRACE_EVENT_STOP)
+        }
     }
 }
 
@@ -317,6 +343,11 @@ fn wait_status(event: &WaitEvent) -> String {
             WaitStatus::Signaled(pid.as_raw(), signal.number(), core)
         }
         WaitEvent::Stopped(pid, signal) => WaitStatus::Stopped(pid.as_raw(), signal.number()),
+        WaitEvent::PtraceEvent(pid, signal, libc::PTRACE_EVENT_STOP)
+            if signal != Signal::SIGTRAP =>
+        {
+            WaitStatus::GroupStop(pid.as_raw(), signal.number())
+        }
         WaitEvent::PtraceEvent(pid, _, event) => WaitStatus::Event(pid.as_raw(), event),
         WaitEvent::PtraceSyscall(pid) | WaitEvent::Continued(pid) => {
             return format!("{event:?} for {pid}");
@@ -425,7 +456,12 @@ impl LinuxTraceOps for SimTrace {
         kernel
             .children(tid(thread))
             .into_iter()
-            .filter(|child| kernel.threads.get(child).is_some_and(Thread::traced))
+            .filter(|child| {
+                kernel
+                    .threads
+                    .get(child)
+                    .is_some_and(|child| child.tracer() == Some(self.tracer))
+            })
             .map(Pid::from_raw)
             .collect()
     }
@@ -488,14 +524,15 @@ impl LinuxTraceOps for SimTrace {
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound).into())
     }
 
-    fn process_start_time(&self, _process: Pid) -> Option<u64> {
-        let _ = self.gap::<()>("process start time");
-        None
+    fn process_start_time(&self, process: Pid) -> Option<u64> {
+        self.kernel()
+            .processes
+            .get(&tid(process))
+            .map(|process| process.start_time)
     }
 
     fn tracer_process(&self) -> i32 {
-        // Not a host call: nothing happens meanwhile.
-        self.kernel.borrow().tracer()
+        self.tracer
     }
 
     fn allocate_stop_id(&self) -> StopId {
@@ -579,14 +616,32 @@ impl LinuxTraceOps for SimTrace {
         self.kernel().signal_info(tid(pid)).map(signal_metadata)
     }
 
+    fn signal_mask(&self, pid: Pid) -> Result<u64> {
+        self.kernel().signal_mask(tid(pid)).map_err(system)
+    }
+
+    fn set_signal_mask(&self, pid: Pid, mask: u64) -> Result<()> {
+        self.kernel_mut()
+            .set_signal_mask(tid(pid), mask)
+            .map_err(system)
+    }
+
+    /// The world receives every child held, and releases those no session
+    /// adopts itself, through the simulated kernel.
+    fn held_release(&self) -> Option<fn(&crate::HeldProcess) -> Result<bool>> {
+        None
+    }
+
     fn request_stop(&self, process: Pid, thread: Pid) -> Result<()> {
         self.kernel_mut()
             .tgkill(tid(process), tid(thread), libc::SIGSTOP)
             .map_err(system)
     }
 
-    fn queued_trap(&self, pid: Pid) -> Result<bool> {
-        Ok(self.kernel().trap_queued(tid(pid)))
+    fn queued_signal(&self, pid: Pid, signal: Signal, queue: SignalQueue) -> Result<bool> {
+        Ok(self
+            .kernel()
+            .signal_queued(tid(pid), signal.number(), queue == SignalQueue::Process))
     }
 
     fn executable(&self, pid: Pid, address: VirtualAddress) -> Result<bool> {
@@ -683,6 +738,8 @@ pub struct Delivery {
 
 /// Everything a simulated controller is built from.
 pub struct SimParts {
+    /// The process identifier the controller traces as.
+    pub tracer: i32,
     pub kernel: Rc<RefCell<Kernel>>,
     pub waiter: Rc<RefCell<SimWaiter>>,
     pub preemption: Rc<dyn Preemption>,
@@ -703,6 +760,7 @@ impl SimController {
         let (sender, receiver) = mpsc::channel(parts.queue_capacity);
         let (events, _) = broadcast::channel(parts.event_capacity);
         let trace = SimTrace {
+            tracer: parts.tracer,
             kernel: parts.kernel,
             launch: parts.launch,
             waiter: parts.waiter,
@@ -721,7 +779,7 @@ impl SimController {
                 identity: FileIdentity {
                     inode: executable.inode,
                 },
-                process_start_time: None,
+                process_start_time: executable.start_time,
             },
             parts.debug_info,
             ControllerChannels {

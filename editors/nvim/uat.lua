@@ -23,29 +23,36 @@ local function expect(condition, message)
   end
 end
 
--- The adapter's events since the last wait, by kind.
+-- The adapter's events since the last wait, by kind, with their sessions.
 local seen = {}
 for _, name in ipairs({ 'stopped', 'exited', 'terminated', 'process' }) do
-  dap.listeners.after['event_' .. name]['uat'] = function(_, body)
-    table.insert(seen, { event = name, body = body })
+  dap.listeners.after['event_' .. name]['uat'] = function(session, body)
+    table.insert(seen, { event = name, body = body, session = session })
   end
 end
 
---- Waits for an event the predicate accepts, consuming those before it.
-local function event(name, predicate)
-  local found
+--- Waits for an event the predicate accepts, consuming those before it;
+--- with a session, only that session's. Returns its body and session.
+local function event(name, predicate, session)
+  local found, from
   local ok = vim.wait(TIMEOUT, function()
-    while #seen > 0 do
-      local next = table.remove(seen, 1)
-      if next.event == name and (predicate == nil or predicate(next.body)) then
-        found = next.body
-        return true
+    local index = 1
+    while index <= #seen do
+      local next = seen[index]
+      if session == nil or next.session == session then
+        table.remove(seen, index)
+        if next.event == name and (predicate == nil or predicate(next.body)) then
+          found, from = next.body, next.session
+          return true
+        end
+      else
+        index = index + 1
       end
     end
     return false
   end, 10)
   expect(ok, 'timed out waiting for a ' .. name .. ' event')
-  return found
+  return found, from
 end
 
 --- Waits until nvim-dap has fetched the stopped thread's frames.
@@ -135,6 +142,43 @@ expect(event('exited').exitCode == 2, 'the terminal program exited with its argu
 event('terminated')
 local lines = table.concat(vim.api.nvim_buf_get_lines(terminal, 0, -1, false), '\n')
 expect(lines:find('argument 1: one', 1, true) ~= nil, 'the terminal shows the output: ' .. lines)
+
+-- With followForks, nvim-dap starts a child session for a forked process at
+-- the adapter's request. The child stops at the breakpoint after its fork,
+-- having run nothing untraced, and each session ends as its process does.
+dap.adapters.uscope = function(callback, config, parent)
+  local name = parent and (parent.config.name .. '.child') or config.name
+  callback({ type = 'executable', command = 'uscope', args = { 'dap', '--log', record .. '/' .. name .. '.log' } })
+end
+breakpoint(source('fork.c'), 'work_done += 1;')
+dap.run({
+  type = 'uscope', request = 'launch', name = 'nvim-fork', program = fixture('fork'), cwd = root,
+  followForks = true,
+})
+local stops = {}
+for _ = 1, 2 do
+  local body, session = event('stopped')
+  expect(body.reason == 'breakpoint', 'stopped at the breakpoint, not ' .. body.reason)
+  stops[session.parent and 'child' or 'parent'] = { session = session, thread = body.threadId }
+end
+expect(stops.parent and stops.child, 'both processes stopped')
+expect(stops.child.session.parent == stops.parent.session, 'the child session is the parent session\'s')
+expect(stops.child.session.config.request == 'attach', 'the child session attached')
+for _, which in ipairs({ 'child', 'parent' }) do
+  local stop = stops[which]
+  dap.set_session(stop.session)
+  local trace = request('stackTrace', { threadId = stop.thread, levels = 1 })
+  expect(trace.stackFrames[1].name == 'shared_work', which .. ' stopped in shared_work')
+end
+dap.clear_breakpoints()
+-- The child runs to its end, and then its parent, which waited for it.
+for _, which in ipairs({ 'child', 'parent' }) do
+  local session = stops[which].session
+  dap.set_session(session)
+  dap.continue()
+  expect(event('exited', nil, session).exitCode == 0, 'the ' .. which .. ' exited with 0')
+  event('terminated', nil, session)
+end
 
 print('uat: nvim-dap passed')
 os.exit(0)

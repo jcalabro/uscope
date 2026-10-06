@@ -120,6 +120,8 @@ pub enum Error {
     ProcessIdentityUnavailable(u64),
     #[error("the target process changed while the debugger was attaching")]
     TargetChangedDuringAttach,
+    #[error("process {0} is no longer the process that was held")]
+    HeldProcessGone(u64),
     #[error("the inferior has not been launched")]
     NotRunning,
     #[error("the inferior is not stopped")]

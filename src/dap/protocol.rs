@@ -232,6 +232,7 @@ pub struct InitializeArguments {
     pub columns_start_at1: Option<bool>,
     pub supports_variable_type: Option<bool>,
     pub supports_run_in_terminal_request: Option<bool>,
+    pub supports_start_debugging_request: Option<bool>,
     pub supports_memory_references: Option<bool>,
     pub supports_progress_reporting: Option<bool>,
     pub supports_invalidated_event: Option<bool>,
