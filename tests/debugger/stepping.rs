@@ -502,11 +502,9 @@ async fn steps_from_marked_epilogues_complete_in_the_caller() {
     }
 }
 
-/// Stepping over a function's last line returns to its caller and stops
-/// there, even when the caller's line calls the function again at the same
-/// stack depth before it reaches a statement: the second call is a new
-/// frame, not the one the step began in. The simulator found such steps
-/// stopping inside the second call.
+/// Stepping over a function's last line stops in its caller, even when the
+/// caller's line calls the function again at the same stack depth before
+/// reaching a statement: the second call is a new frame.
 #[tokio::test]
 async fn stepping_over_a_return_stops_in_the_caller_before_a_second_call() {
     let line_of = |marker| source_line("tests/fixtures/c/repeated-calls.c", marker);
@@ -563,13 +561,10 @@ async fn stepping_over_a_return_stops_in_the_caller_before_a_second_call() {
     }
 }
 
-/// A source step from the last line of a function called by one that
-/// returns right after the call goes back through that caller, which has
-/// no statement left, and on into its caller: it does not run on to the
-/// program's exit. A step over never stops in the caller's next call of
-/// the same function, a new frame where the old one was. The simulator
-/// found steps running past the outer caller's line, and stopping in its
-/// next call.
+/// A source step from a function's last line returns through a caller with
+/// no statement left into that caller's caller, rather than running to the
+/// program's exit; a step over never stops in the next call of the same
+/// function, a new frame where the old one was.
 #[tokio::test]
 async fn source_steps_return_through_a_caller_with_nothing_left_to_run() {
     let line_of = |marker| source_line("tests/fixtures/c/repeated-calls.c", marker);
@@ -657,10 +652,9 @@ async fn source_steps_return_through_a_caller_with_nothing_left_to_run() {
 
 /// A step over that returns through the frame it returned to goes on from
 /// that frame's caller. The golden runtime's `rt_start` calls `rt_exit_group`
-/// with what `main` returns, at the depth `main` was, with no statement
-/// between: stepping over `main`'s last call, whose callee returns into
-/// `main`, which returns, must not stop in `rt_exit_group` as though it
-/// were `main`. The simulator found steps stopping there.
+/// at the depth `main` was, with no statement between, so stepping over
+/// `main`'s last call must not stop in `rt_exit_group` as though it were
+/// `main`.
 #[tokio::test]
 async fn a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -716,10 +710,8 @@ async fn a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was() {
     scenario.shutdown().await;
 }
 
-/// A step out of a function called from code without debug information
-/// runs on from the return, to be ended by a stop the user sees. A later
-/// hit its breakpoint's hit condition declines is no such stop: the
-/// simulator found such steps completing there.
+/// A step out to code without debug information runs on until a stop the
+/// user sees, which a hit its hit condition declines is not.
 #[tokio::test]
 async fn a_step_out_to_undescribed_code_does_not_end_at_a_declined_hit() {
     let mut scenario = Scenario::launch("undescribed-caller");
@@ -752,8 +744,7 @@ async fn a_step_out_to_undescribed_code_does_not_end_at_a_declined_hit() {
 /// Stepping out to a return address no line describes goes on, by single
 /// steps, to the caller's first instruction a line describes. Clang marks
 /// the code after `main`'s call of `orphan_spawn` in the golden `frames`
-/// program as line 0. The simulator found such steps running freely past
-/// the caller instead.
+/// program as line 0.
 #[tokio::test]
 async fn a_step_out_to_undescribed_code_in_the_caller_stops_in_the_caller() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1512,9 +1503,7 @@ async fn source_next_steps_over_calls_but_preserves_user_breakpoints() {
 #[tokio::test]
 async fn source_steps_skip_non_statement_line_rows() {
     // GCC at -O2 marks the trailing rows of middle (line 13) and deepest
-    // (line 8) as non-statement rows; source steps must not stop on them.
-    // Clang does not emit new-line non-statement rows for this fixture, so
-    // only the GCC binary exercises the defect.
+    // (line 8) as non-statement rows, where source steps must not stop.
     let mut next = Scenario::new("next unwind-o2", Scenario::fixture("unwind-o2"));
     next.add_breakpoint("middle").await;
     next.run_to_stop().await;
@@ -1600,11 +1589,8 @@ async fn source_steps_skip_non_statement_line_rows() {
 
 #[tokio::test]
 async fn step_into_crosses_library_calls_without_line_info() {
-    // The function breakpoint lands post-prologue on line 6, which calls
-    // getpid() through the PLT. Its call-frame information uses a DWARF CFA
-    // expression and its code has no line rows. A source step must cross the
-    // library call and stop at line 7 instead of stopping inside the PLT or
-    // failing the unwind.
+    // Line 6 calls getpid() through the PLT, which has no line rows and whose
+    // call-frame information is a DWARF expression.
     let mut scenario = Scenario::new("step over libc", Scenario::fixture("step-over-libc"));
     scenario.add_breakpoint("call_libc").await;
     scenario.run_to_stop().await;
@@ -1958,12 +1944,10 @@ async fn stepping_over_from_undescribed_code_stops_at_the_first_source_statement
 }
 
 /// Breakpoints on two nested inlined functions that begin at one
-/// instruction hit there together: `rt_exit_group` and the `rt_syscall3`
-/// inlined into it, at the loop clang builds for the inlined `exit_group`
-/// that follows `main` in the simulator's golden runtime. One chain of calls
-/// holds both, so the stop presents the innermost, as gdb does, and
-/// backtraces and source steps work there. The stop was presented as
-/// ambiguous, which refused them.
+/// instruction, `rt_exit_group` and the `rt_syscall3` inlined into it in the
+/// golden runtime, hit together. One chain of calls holds both, so the stop
+/// presents the innermost, as gdb does, and backtraces and source steps
+/// work there.
 #[tokio::test]
 async fn nested_inline_breakpoints_hit_together_present_the_innermost() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

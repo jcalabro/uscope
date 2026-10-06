@@ -816,7 +816,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
     ));
     let huge = scenario
         .operation(
-            "inspect array above the former eager limit",
+            "inspect a large array",
             scenario.handle().variable("huge_array"),
         )
         .await;
@@ -2634,7 +2634,7 @@ async fn text_running_into_an_unmapped_page_stops_at_the_page() {
 /// unoptimized code bases locations on `rbp`, which still holds the zero
 /// a program's entry point left in it. A location computed from it wraps
 /// the address space, so the variable is unavailable, and the others are
-/// still shown. The simulator found the whole inspection failing there.
+/// still shown.
 #[tokio::test]
 async fn a_variable_whose_location_wraps_the_address_space_is_unavailable() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
