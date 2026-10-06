@@ -129,6 +129,13 @@ marks! {
     /// A store left watched bytes as they were, which a watchpoint on
     /// stores reports and one on changes does not.
     UnchangedStore,
+    /// A watchpoint counted a hit that did not stop.
+    WatchHitDeclined,
+    /// A watchpoint stopped at a hit its hit condition or condition, as
+    /// the client knew, let stop.
+    WatchConditionHeld,
+    /// The client changed a watchpoint's hit condition or condition.
+    WatchAmended,
     /// A new thread could not be armed, its slots busy.
     WatchArmFailed,
     /// The debugger refused to run while a thread could not be armed.

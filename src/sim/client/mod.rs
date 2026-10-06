@@ -484,7 +484,7 @@ impl Client {
         events: &mut broadcast::Receiver<DebuggerEvent>,
         breakpoints: &mut Vec<Added>,
     ) -> Result<(), Failure> {
-        match self.draw(7) {
+        match self.draw(if self.script.watching { 8 } else { 7 }) {
             0 => {
                 self.note("pause");
                 match self.handle.pause().await {
@@ -510,6 +510,7 @@ impl Client {
                 self.kill(true).await?;
             }
             4 => self.amend_breakpoint(breakpoints).await?,
+            7 => self.amend_watch().await?,
             _ => {
                 // A thread running alone may wait forever for a sibling
                 // that stays stopped, as the program's own lock would make
@@ -537,7 +538,7 @@ impl Client {
             unreachable!("the client acts while stopped on a stopped snapshot")
         };
         let scope = ResumeScope::Process(process_id);
-        match self.draw(if self.script.watching { 20 } else { 16 }) {
+        match self.draw(if self.script.watching { 21 } else { 16 }) {
             0 => {
                 self.note("resume");
                 match self.handle.resume().await {
@@ -582,6 +583,7 @@ impl Client {
             12 => self.amend_breakpoint(breakpoints).await?,
             13 | 16..=18 => self.add_watch().await?,
             14 | 19 => self.remove_watch().await?,
+            20 => self.amend_watch().await?,
             _ => {
                 if let Some(stale) = stale {
                     self.continue_stale(stale, scope).await?;

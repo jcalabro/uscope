@@ -673,6 +673,85 @@ fn batch_mode_sets_and_clears_breakpoint_conditions() {
 }
 
 #[test]
+fn batch_mode_sets_amends_and_skips_watchpoint_conditions() {
+    let stdout = batch(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "break caller",
+            "run",
+            "delete all",
+            "watch last_call if call % 10 == 0",
+            "continue",
+            "ignore w1 15",
+            "watchpoints",
+            "continue",
+            "condition w1",
+            "hits w1 ==32",
+            "continue",
+            "hits w1 always",
+            "condition w1 no_such_value > 1",
+            "continue",
+            "unwatch all",
+            "continue",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "watchpoint 1 set on last_call: 8 bytes at 0x",
+            " using 1 hardware slot, stops where call % 10 == 0\n",
+            "stopped by watchpoint 1 (change, hit 10) on last_call in thread ",
+            "\n  old: 9\n  new: 10\n",
+            "watchpoint 1 ignores its next 15 hits\n",
+            "  hit 10 times  stops at hits >=26  where call % 10 == 0\n",
+            "stopped by watchpoint 1 (change, hit 30) on last_call",
+            "\n  old: 29\n  new: 30\n",
+            "watchpoint 1 stops unconditionally\n",
+            "watchpoint 1 stops at hits ==32, hit 30 times so far\n",
+            "stopped by watchpoint 1 (change, hit 32) on last_call",
+            "\n  old: 31\n  new: 32\n",
+            "watchpoint 1 stops at every hit, hit 32 times so far\n",
+            "watchpoint 1 stops where no_such_value > 1 holds\n",
+            "warning: the condition of watchpoint 1 could not be evaluated: \
+             no variable is named `no_such_value` here\n",
+            "stopped by watchpoint 1 (change, hit 33) on last_call",
+            "deleted 1 watchpoint\n",
+            "inferior exited with status 0\n",
+        ],
+    );
+}
+
+#[test]
+fn watchpoint_condition_commands_explain_rejected_input() {
+    let (_, stderr) = piped(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "break caller",
+            "run",
+            "condition w9 x > 1",
+            "hits w9 >=2",
+            "ignore w9 2",
+            "hits wx >=2",
+            "watch last_call if",
+            "watch last_call when call > 2",
+            "watch last_call if call = 3",
+        ],
+    );
+    assert_in_order(
+        &stderr,
+        &[
+            "watchpoint 9 was not found",
+            "watchpoint 9 was not found",
+            "watchpoint 9 was not found",
+            "usage: hits <id> <hit-condition|always>",
+            "usage: watch [-w] <expression|0xaddress:byte-count> [if condition...]",
+            "usage: watch [-w] <expression|0xaddress:byte-count> [if condition...]",
+            "invalid condition: conditions and log messages cannot assign; compare with `==`",
+        ],
+    );
+}
+
+#[test]
 fn hit_condition_commands_explain_rejected_input() {
     let (stdout, stderr) = piped(
         &["build/test-programs/hit-counts-gcc-o0"],
@@ -707,7 +786,7 @@ fn hit_condition_commands_explain_rejected_input() {
             "invalid hit condition: no hit can satisfy ==0",
             "usage: ignore <id> <count>",
             "usage: hits <id> <hit-condition|always>",
-            "invalid condition: a breakpoint's expressions cannot assign; compare with `==`",
+            "invalid condition: conditions and log messages cannot assign; compare with `==`",
         ],
     );
     assert_in_order(
@@ -2014,13 +2093,13 @@ fn watch_script_reports_values_lists_and_deletes_watchpoints() {
     // compare-exchange's store of the value already there.
     assert_eq!(
         stdout
-            .matches("stopped by watchpoint 1 (change) on watch_i32 in thread ")
+            .matches("stopped by watchpoint 1 (change, hit ")
             .count(),
         3
     );
     assert_eq!(
         stdout
-            .matches("stopped by watchpoint 2 (write) on watch_u64 in thread ")
+            .matches("stopped by watchpoint 2 (write, hit ")
             .count(),
         2
     );
@@ -2058,7 +2137,7 @@ fn access_and_location_watchpoints_render_their_kind_and_slots() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("stopped by watchpoint 1 (read/write) on watch_i32"),
+        stdout.contains("stopped by watchpoint 1 (read/write, hit 1) on watch_i32"),
         "{stdout}"
     );
     assert!(stdout.contains("\n  value: 42 (unchanged)\n"), "{stdout}");

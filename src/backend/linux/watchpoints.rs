@@ -12,8 +12,9 @@ use crate::backend::linux::debug_registers;
 use crate::debug_info::StorageClass;
 use crate::debug_info::VariableRuntimeError;
 use crate::protocol::{
-    DebuggerEvent, FrameScopeEvidence, InvalidatedWatchpoint, StopReason, WatchAccess, WatchScope,
-    Watchpoint, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointSpec,
+    ConditionOwner, DebuggerEvent, FrameScopeEvidence, HitCondition, InvalidatedWatchpoint,
+    StopReason, WatchAccess, WatchScope, Watchpoint, WatchpointHit, WatchpointId,
+    WatchpointInvalidation, WatchpointOptions, WatchpointSpec,
 };
 use crate::unwind::{CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext};
 use crate::{
@@ -37,6 +38,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         &mut self,
         spec: WatchpointSpec,
         access: WatchAccess,
+        options: WatchpointOptions,
     ) -> Result<Watchpoint> {
         let slot_access = match access {
             // A change is judged after the store that the hardware traps.
@@ -106,6 +108,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 })
                 .collect::<Vec<_>>()
                 .into(),
+            hit_condition: options.hit_condition,
+            condition: options.condition,
+            hit_count: 0,
         };
         self.inferior
             .as_mut()
@@ -123,6 +128,118 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.next_watchpoint_id = next_id;
         self.publish_watchpoints_changed();
         Ok(watchpoint)
+    }
+
+    /// Replaces a watchpoint's hit condition, keeping the hits it counted.
+    pub(super) fn set_watchpoint_hit_condition(
+        &mut self,
+        id: WatchpointId,
+        hit_condition: Option<HitCondition>,
+    ) -> Result<Watchpoint> {
+        self.edit_watchpoint(id, |watchpoint| watchpoint.hit_condition = hit_condition)
+    }
+
+    pub(super) fn set_watchpoint_condition(
+        &mut self,
+        id: WatchpointId,
+        condition: Option<crate::Condition>,
+    ) -> Result<Watchpoint> {
+        self.edit_watchpoint(id, |watchpoint| watchpoint.condition = condition)
+    }
+
+    /// Changes controller state only, so no stop is required.
+    fn edit_watchpoint(
+        &mut self,
+        id: WatchpointId,
+        edit: impl FnOnce(&mut Watchpoint),
+    ) -> Result<Watchpoint> {
+        let record = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.watch.watchpoints.get_mut(&id))
+            .ok_or(Error::WatchpointNotFound(id.get()))?;
+        edit(&mut record.watchpoint);
+        let watchpoint = record.watchpoint.clone();
+        self.publish_watchpoints_changed();
+        Ok(watchpoint)
+    }
+
+    /// Counts a hit for each watchpoint among `owners` that reports thread
+    /// `pid`'s access, and returns those the hit stops at, with each hit's
+    /// number: its hit condition and condition are met. A condition that
+    /// cannot be evaluated stops, as a breakpoint's does.
+    ///
+    /// A declined hit's bytes become the watchpoint's last observed bytes,
+    /// as gdb's old value does, so the next hit reports, and a change is
+    /// judged, from them. While another thread's hit on the same watchpoint
+    /// waits for every thread to stop, the bytes stay those that hit
+    /// reports from.
+    pub(super) fn stopping_watch_hits(
+        &mut self,
+        pid: Pid,
+        owners: BTreeSet<WatchpointId>,
+    ) -> Result<BTreeMap<WatchpointId, u64>> {
+        let reason = StopReason::Watchpoint {
+            hits: Arc::from([]),
+        };
+        let mut stopping = BTreeMap::new();
+        for id in self.reportable_watch_hits(owners)? {
+            let Some(watchpoint) = self
+                .inferior
+                .as_mut()
+                .and_then(|inferior| inferior.watch.watchpoints.get_mut(&id))
+                .map(|record| &mut record.watchpoint)
+            else {
+                continue;
+            };
+            watchpoint.hit_count = watchpoint.hit_count.saturating_add(1);
+            let hit_count = watchpoint.hit_count;
+            let condition = watchpoint
+                .hit_condition
+                .is_none_or(|condition| condition.is_met(hit_count))
+                .then(|| watchpoint.condition.clone());
+            let stops = match condition {
+                None => false,
+                Some(None) => true,
+                Some(Some(condition)) => self
+                    .judge_condition(pid, &condition, &reason, ConditionOwner::Watchpoint(id))
+                    .unwrap_or(true),
+            };
+            if stops {
+                stopping.insert(id, hit_count);
+            } else {
+                self.observe_declined_hit(id)?;
+            }
+        }
+        Ok(stopping)
+    }
+
+    /// Takes the bytes a declined hit left as a watchpoint's last observed
+    /// bytes, unless another thread's hit on it awaits the stop.
+    fn observe_declined_hit(&mut self, id: WatchpointId) -> Result<()> {
+        let Some(inferior) = self.inferior.as_ref() else {
+            return Ok(());
+        };
+        let Some(record) = inferior.watch.watchpoints.get(&id) else {
+            return Ok(());
+        };
+        if inferior
+            .threads
+            .values()
+            .any(|thread| thread.watch_hits.contains_key(&id))
+        {
+            return Ok(());
+        }
+        let observed =
+            self.read_watched_bytes(record.watchpoint.address, record.watchpoint.byte_size)?;
+        if let Some(record) = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.watch.watchpoints.get_mut(&id))
+        {
+            record.observed = observed;
+        }
+        Ok(())
     }
 
     pub(super) fn remove_watchpoint(&mut self, id: WatchpointId) -> Result<Watchpoint> {
@@ -370,7 +487,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let hit = inferior
             .threads
             .values()
-            .flat_map(|thread| thread.watch_hits.iter().copied())
+            .flat_map(|thread| thread.watch_hits.keys().copied())
             .filter(|id| !invalid.contains_key(id))
             .collect::<BTreeSet<_>>();
         let current = hit
@@ -403,11 +520,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             let hits = owners
                 .iter()
-                .filter_map(|id| {
+                .filter_map(|(id, &hit_count)| {
                     let record = inferior.watch.watchpoints.get(id)?;
                     current.get(id).map(|bytes| WatchpointHit {
                         watchpoint: *id,
                         thread: debug_thread_id(pid),
+                        hit_count,
                         previous: record.observed.clone(),
                         current: bytes.clone(),
                     })
@@ -417,7 +535,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 StopReason::WatchpointInvalidated {
                     invalidated: invalidated
                         .iter()
-                        .filter(|entry| owners.contains(&entry.watchpoint.id))
+                        .filter(|entry| owners.contains_key(&entry.watchpoint.id))
                         .cloned()
                         .collect::<Vec<_>>()
                         .into(),

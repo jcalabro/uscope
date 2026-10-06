@@ -652,6 +652,8 @@ pub struct Truth {
     pub threads: BTreeSet<Tid>,
     /// The user's breakpoints, by identifier.
     pub breakpoints: BTreeMap<u64, UserBreakpoint>,
+    /// The hits each watchpoint counted, by identifier.
+    pub watchpoints: BTreeMap<u64, u64>,
     /// Each stopped thread's own reason, as the controller holds it.
     pub reasons: BTreeMap<Tid, crate::StopReason>,
 }
@@ -863,6 +865,12 @@ impl SimController {
                 .filter_map(|(pid, thread)| Some((pid.as_raw(), thread.reason.clone()?)))
                 .collect(),
             breakpoints,
+            watchpoints: inferior
+                .watch
+                .watchpoints
+                .iter()
+                .map(|(id, record)| (id.get(), record.watchpoint.hit_count))
+                .collect(),
         }
     }
 }

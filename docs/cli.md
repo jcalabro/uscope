@@ -80,6 +80,9 @@ it inherited. A program that calls `exec` is followed, with its breakpoints.
 | `hits` *id* *hit-condition*\|`always` | Replace the hit condition, keeping the count. |
 | `ignore` *id* *count* | Skip the next *count* hits. |
 
+`condition`, `hits`, and `ignore` change a watchpoint too, named by `w` and
+its id: `condition w2 counter > 10`, `hits w2 %100`.
+
 Addresses are always `0x`-prefixed, so `break add` names a function. Functions
 without debug information, such as libc's, break at their symbol, and
 breakpoints in a shared library wait until it loads.
@@ -100,10 +103,10 @@ thread stops briefly for the change and resumes without a reported stop.
 
 | Command | |
 | --- | --- |
-| `watch` *target* | Stop when a store changes the value. |
-| `watch -w` *target* | Stop at every store, even of the same value. |
-| `awatch` *target* | Stop at every load or store. |
-| `watchpoints`, `info watchpoints` | List watchpoints. |
+| `watch` *target* [`if` *condition*] | Stop when a store changes the value. |
+| `watch -w` *target* [`if` *condition*] | Stop at every store, even of the same value. |
+| `awatch` *target* [`if` *condition*] | Stop at every load or store. |
+| `watchpoints`, `info watchpoints` | List watchpoints and their hit counts. |
 | `unwatch` *id*\|`all` | Delete watchpoints. |
 
 The *target* is an expression, or `0xaddress:byte-count` for raw bytes. A stop
@@ -121,6 +124,16 @@ debugger observed.
 `watch` traps every store and compares the bytes with those last observed;
 when they are equal, the storing thread resumes at once without stopping the
 others. A debugger write with `set` counts as observed.
+
+Watchpoints take conditions and hit conditions as breakpoints do, as in
+`watch counter if counter % 100 == 0`. Every access the watchpoint reports
+is a hit: every store or access, or for `watch`, every store that changes
+the value. The condition is evaluated in the accessing thread's innermost
+frame, after the access, so it sees the new value; a condition naming
+another function's locals fails there, and a condition that cannot be
+evaluated stops and says why. A hit that does not stop is invisible, like
+a breakpoint's, and what it stored becomes the value last observed, so the
+next stop reports the change from it, as gdb does.
 
 A watchpoint on an expression keeps watching the address it first resolved to.
 It ends with its storage, and the end is reported: a static when its module

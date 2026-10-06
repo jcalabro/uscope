@@ -312,7 +312,7 @@ fn conditions_stop_only_where_they_hold() {
     assert_eq!(invalid["verified"], false);
     assert_eq!(
         invalid["message"],
-        "invalid condition: a breakpoint's expressions cannot assign; compare with `==`"
+        "invalid condition: conditions and log messages cannot assign; compare with `==`"
     );
     let mut mark = dap.send("continue", json!({"threadId": entry.thread})).mark;
     for expected in ["10", "20", "30", "38", "39", "40"] {

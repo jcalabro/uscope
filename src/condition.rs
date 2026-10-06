@@ -1,5 +1,5 @@
-//! Breakpoint conditions and log messages, in the expression language
-//! (`docs/expressions.md`).
+//! Breakpoint and watchpoint conditions, and breakpoint log messages, in the
+//! expression language (`docs/expressions.md`).
 //!
 //! A condition is an expression with a truth value, which cannot assign;
 //! `&&` and `||` short-circuit, so `p != null && p->x > 3` is safe. A log
@@ -15,7 +15,7 @@ use crate::{Error, Result};
 /// The longest condition or log message accepted, in bytes.
 const MAX_TEXT_BYTES: usize = 4096;
 
-/// A parsed breakpoint condition.
+/// A parsed breakpoint or watchpoint condition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Condition {
     expression: Expression,
@@ -40,7 +40,7 @@ fn read_only(text: &str, invalid: fn(String) -> Error) -> Result<Expression> {
     });
     if assigns {
         return Err(invalid(
-            "a breakpoint's expressions cannot assign; compare with `==`".to_owned(),
+            "conditions and log messages cannot assign; compare with `==`".to_owned(),
         ));
     }
     Ok(expression)

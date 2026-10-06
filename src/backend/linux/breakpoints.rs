@@ -9,12 +9,12 @@ use nix::unistd::Pid;
 use super::signals::Signal;
 
 use crate::protocol::{
-    Breakpoint, BreakpointHit, BreakpointId, BreakpointSpec, DebuggerEvent, ExecutionId,
-    HitCondition, ResolvedBreakpointLocation,
+    Breakpoint, BreakpointHit, BreakpointId, BreakpointSpec, ConditionOwner, DebuggerEvent,
+    ExecutionId, HitCondition, ResolvedBreakpointLocation, StopReason,
 };
 use crate::{BreakpointLocation, Error, Result, VirtualAddress};
 
-use super::native::LinuxTraceOps;
+use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{BreakpointOwner, Controller, Inferior, LinuxError, backend_error};
 
 /// The logical breakpoints clients requested, in creation order, counted by
@@ -384,29 +384,26 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ));
             }
         }
+        let reason = StopReason::Breakpoint {
+            address,
+            hits: Arc::from([]),
+        };
         let mut stopping = Vec::new();
         for (hit, condition, log_message) in candidates {
             if let Some(condition) = condition {
-                match self.condition_met(pid, &condition) {
-                    Ok(true) => {}
-                    Ok(false) => continue,
-                    Err(error) => {
-                        self.publish_hit_event(pid, |revision, process_id, thread_id| {
-                            DebuggerEvent::ConditionFailed {
-                                revision,
-                                process_id,
-                                thread_id,
-                                breakpoint: hit.breakpoint,
-                                error: error.into(),
-                            }
-                        });
+                let owner = ConditionOwner::Breakpoint(hit.breakpoint);
+                match self.judge_condition(pid, &condition, &reason, owner) {
+                    Some(true) => {}
+                    Some(false) => continue,
+                    // A breakpoint that logs stops too.
+                    None => {
                         stopping.push(hit);
                         continue;
                     }
                 }
             }
             if let Some(message) = log_message {
-                let parts = self.log_parts(pid, &message);
+                let parts = self.log_parts(pid, &message, &reason);
                 self.publish_hit_event(pid, |revision, process_id, thread_id| {
                     DebuggerEvent::LogMessage {
                         revision,
@@ -424,21 +421,54 @@ impl<P: LinuxTraceOps> Controller<P> {
         stopping.into()
     }
 
+    /// Whether `condition` holds in the innermost frame of thread `pid`, as
+    /// a hit's stop `reason` presents it, or `None` when it cannot be
+    /// evaluated, which is published. Such a hit stops, as gdb does, since
+    /// skipping it could hide what the user asked to see. A thread SIGKILL
+    /// took out of its stop meanwhile stops too, and its exit, not the
+    /// condition, is what clients hear of.
+    pub(super) fn judge_condition(
+        &mut self,
+        pid: Pid,
+        condition: &crate::Condition,
+        reason: &StopReason,
+        owner: ConditionOwner,
+    ) -> Option<bool> {
+        match self.condition_met(pid, condition, reason) {
+            Ok(holds) => Some(holds),
+            Err(None) => None,
+            Err(Some(error)) => {
+                self.publish_hit_event(pid, |revision, process_id, thread_id| {
+                    DebuggerEvent::ConditionFailed {
+                        revision,
+                        process_id,
+                        thread_id,
+                        owner,
+                        error: error.into(),
+                    }
+                });
+                None
+            }
+        }
+    }
+
     /// Evaluates a condition in the innermost frame of a thread stopped at a
-    /// hit.
+    /// hit: its truth, or why it has none, or `Err(None)` when the thread
+    /// left its stop.
     fn condition_met(
         &self,
         pid: Pid,
         condition: &crate::Condition,
-    ) -> std::result::Result<bool, String> {
+        reason: &StopReason,
+    ) -> std::result::Result<bool, Option<String>> {
         let expression = condition.expression();
-        match self.evaluate_at_hit(pid, expression, true) {
+        match self.evaluate_at_hit(pid, expression, true, reason) {
             Ok(crate::Evaluation::Value { value, cause }) => match value.state {
                 crate::VariableState::Available {
                     value: crate::VariableValue::Scalar(crate::ScalarValue::Boolean(holds)),
                     ..
                 } => Ok(holds),
-                crate::VariableState::Unavailable(reason) => Err(cause.map_or_else(
+                crate::VariableState::Unavailable(reason) => Err(Some(cause.map_or_else(
                     || format!("the condition is unavailable: {reason}"),
                     |cause| {
                         format!(
@@ -446,23 +476,29 @@ impl<P: LinuxTraceOps> Controller<P> {
                             cause.text(expression.text())
                         )
                     },
-                )),
-                state => Err(format!("the condition has no truth value: {state:?}")),
+                ))),
+                state => Err(Some(format!("the condition has no truth value: {state:?}"))),
             },
-            Ok(_) => Err("the condition has no truth value".to_owned()),
-            Err(error) => Err(error.to_string()),
+            Ok(_) => Err(Some("the condition has no truth value".to_owned())),
+            Err(error) if is_vanished_tracee(&error) => Err(None),
+            Err(error) => Err(Some(error.to_string())),
         }
     }
 
     /// Reads the values a log message shows, as the hitting thread sees them.
-    fn log_parts(&self, pid: Pid, message: &crate::LogMessage) -> Arc<[crate::LogPart]> {
+    fn log_parts(
+        &self,
+        pid: Pid,
+        message: &crate::LogMessage,
+        reason: &StopReason,
+    ) -> Arc<[crate::LogPart]> {
         message
             .segments()
             .iter()
             .map(|segment| match segment {
                 crate::LogSegment::Text(text) => crate::LogPart::Text(Arc::clone(text)),
                 crate::LogSegment::Value(expression) => {
-                    match self.evaluate_at_hit(pid, expression, false) {
+                    match self.evaluate_at_hit(pid, expression, false, reason) {
                         Ok(crate::Evaluation::Value { value, .. }) => crate::LogPart::Value {
                             expression: expression.clone(),
                             type_info: value.type_info,

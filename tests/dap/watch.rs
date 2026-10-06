@@ -193,7 +193,7 @@ fn values_that_cannot_be_watched_say_why_without_failing() {
         json!({"breakpoints": [
             {"dataId": info["dataId"], "accessType": "read"},
             {"dataId": "made-up"},
-            {"dataId": info["dataId"], "condition": "x > 1"},
+            {"dataId": info["dataId"], "condition": "x = 1"},
         ]}),
     );
     let set = breakpoints(&set);
@@ -210,7 +210,7 @@ fn values_that_cannot_be_watched_say_why_without_failing() {
     );
     assert_eq!(
         set[2]["message"],
-        "conditions on data breakpoints are not supported"
+        "invalid condition: conditions and log messages cannot assign; compare with `==`"
     );
     dap.finish();
 }
@@ -351,6 +351,164 @@ fn data_breakpoints_before_a_program_is_loaded_wait_unverified() {
             &breakpoints(&set)[0]["reason"]
         ),
         (&json!(false), &json!("failed"))
+    );
+    dap.finish();
+}
+
+/// The value of `call` in the innermost frame of a stopped thread.
+fn call_of(dap: &mut Dap, thread: i64) -> String {
+    let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 1}));
+    let frame = trace["stackFrames"][0]["id"].clone();
+    dap.request(
+        "evaluate",
+        json!({"expression": "call", "frameId": frame, "context": "watch"}),
+    )["result"]
+        .as_str()
+        .expect("result")
+        .to_owned()
+}
+
+#[test]
+fn conditions_and_hit_counts_choose_which_changes_stop_and_are_amended_in_place() {
+    let mut dap = Dap::start("data breakpoint conditions");
+    let (stop, frame) = stopped_in(&mut dap, "hit-counts-gcc-o0", "caller");
+    dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
+    let calls = dap.request(
+        "dataBreakpointInfo",
+        json!({"name": "last_call", "frameId": frame["id"]}),
+    )["dataId"]
+        .clone();
+    let set = dap.request(
+        "setDataBreakpoints",
+        json!({"breakpoints": [{"dataId": calls, "condition": "call % 10 == 0"}]}),
+    );
+    let id = breakpoints(&set)[0]["id"].clone();
+    assert_eq!(breakpoints(&set)[0]["verified"], true);
+    assert_eq!(
+        next_change(&mut dap, stop.thread, &id),
+        "last_call changed from 9 to 10"
+    );
+    assert_eq!(call_of(&mut dap, stop.thread), "10");
+
+    // New conditions apply to the same data breakpoint, which keeps its id
+    // and its count: the hit condition counts every change since it was set.
+    let set = dap.request(
+        "setDataBreakpoints",
+        json!({"breakpoints": [
+            {"dataId": calls, "condition": "call % 10 == 5", "hitCondition": ">=12"},
+        ]}),
+    );
+    assert_eq!(breakpoints(&set)[0]["id"], id);
+    assert_eq!(breakpoints(&set)[0]["verified"], true);
+    assert_eq!(
+        next_change(&mut dap, stop.thread, &id),
+        "last_call changed from 14 to 15"
+    );
+
+    // A condition that cannot be evaluated stops and says why.
+    dap.request(
+        "setDataBreakpoints",
+        json!({"breakpoints": [{"dataId": calls, "condition": "no_such_value > 1"}]}),
+    );
+    let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+    dap.success(resumed);
+    let stopped = dap.stopped(resumed.mark);
+    assert_eq!(stopped.body["hitBreakpointIds"], json!([id]));
+    assert_eq!(
+        dap.output_containing(resumed.mark, "important", "condition"),
+        format!(
+            "data breakpoint {id} stopped because its condition could not be evaluated: \
+             no variable is named `no_such_value` here\n"
+        )
+    );
+    assert_eq!(call_of(&mut dap, stop.thread), "16");
+
+    // Conditions that do not parse leave their data breakpoints unverified
+    // and unarmed, so the program runs to its end.
+    let frame =
+        dap.request("stackTrace", json!({"threadId": stop.thread}))["stackFrames"][0].clone();
+    let totals = dap.request(
+        "dataBreakpointInfo",
+        json!({"name": "shared_total", "frameId": frame["id"]}),
+    )["dataId"]
+        .clone();
+    let set = dap.request(
+        "setDataBreakpoints",
+        json!({"breakpoints": [
+            {"dataId": calls, "condition": "call = 3"},
+            {"dataId": totals, "hitCondition": "5"},
+        ]}),
+    );
+    let rows = breakpoints(&set);
+    assert_eq!(rows[0]["id"], id);
+    for (row, message) in [
+        (
+            &rows[0],
+            "invalid condition: conditions and log messages cannot assign; compare with `==`",
+        ),
+        (
+            &rows[1],
+            "invalid hit condition: a bare count is ambiguous; write ==5 to stop only at that \
+             hit or >=5 to stop at it and every later hit",
+        ),
+    ] {
+        assert_eq!(
+            (&row["verified"], &row["message"]),
+            (&json!(false), &json!(message))
+        );
+    }
+    let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+    dap.success(resumed);
+    assert_eq!(
+        dap.event(resumed.mark, "exited", |_| true),
+        json!({"exitCode": 0})
+    );
+    dap.finish();
+}
+
+/// Debug registers are scarce, so a data breakpoint whose new conditions
+/// leave it unarmed releases its register before new ones are armed.
+#[test]
+fn conditions_that_unarm_a_data_breakpoint_free_its_register_for_new_ones() {
+    let mut dap = Dap::start("data breakpoint registers");
+    let (_, frame) = stopped_in(&mut dap, "hit-counts-gcc-o0", "caller");
+    let reference = dap.request(
+        "evaluate",
+        json!({"expression": "last_call", "frameId": frame["id"], "context": "watch"}),
+    )["memoryReference"]
+        .as_str()
+        .expect("last_call is in memory")
+        .to_owned();
+    let address = u64::from_str_radix(reference.trim_start_matches("0x"), 16).expect("hex");
+    // Each byte takes a register of its own.
+    let mut bytes = (0..5)
+        .map(|offset| {
+            let info = dap.request(
+                "dataBreakpointInfo",
+                json!({"name": format!("{:#x}", address + offset), "asAddress": true, "bytes": 1}),
+            );
+            json!({"dataId": info["dataId"], "accessType": "write"})
+        })
+        .collect::<Vec<_>>();
+    let set = dap.request("setDataBreakpoints", json!({"breakpoints": bytes[..4]}));
+    assert!(
+        breakpoints(&set)
+            .iter()
+            .all(|row| row["verified"] == json!(true)),
+        "{set}"
+    );
+    let id = breakpoints(&set)[0]["id"].clone();
+
+    // The new data breakpoint comes first.
+    bytes[0]["condition"] = json!("last_call = 3");
+    bytes.rotate_right(1);
+    let set = dap.request("setDataBreakpoints", json!({"breakpoints": bytes}));
+    let rows = breakpoints(&set);
+    assert_eq!(rows[1]["id"], id);
+    assert_eq!(
+        (&rows[0]["verified"], &rows[1]["verified"]),
+        (&json!(true), &json!(false)),
+        "{set}"
     );
     dap.finish();
 }
