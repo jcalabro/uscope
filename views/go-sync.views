@@ -71,3 +71,13 @@ view go `sync/atomic`.Pointer[T] {
 view go `sync/atomic`.Value {
     show value(v)
 }
+
+# A wait group's state word holds its counter in its top 32 bits and the
+# goroutines waiting for it in its low 31 (waitgroup.go).
+view go sync.WaitGroup {
+    show record { counter = state.v >> 32, waiters = state.v & 0x7fffffff }
+}
+
+view go sync.Once {
+    show if done.v != 0 { empty("done") } else { empty("not done") }
+}

@@ -766,6 +766,7 @@ async fn go_library_values_present_as_go_shows_them() {
         "go-sync.views",
         "go-text.views",
         "go-errors.views",
+        "go-containers.views",
     ] {
         assert_every_view_binds(library, &seen);
     }

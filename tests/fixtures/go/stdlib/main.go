@@ -7,9 +7,12 @@ package main
 
 import (
 	"bytes"
+	"container/list"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"os"
 	"reflect"
 	"runtime"
@@ -54,6 +57,15 @@ var (
 
 	base, wrapped, both, joined, missing error
 	errno                                syscall.Errno
+
+	idleGroup, busyGroup sync.WaitGroup
+	once, notOnce        sync.Once
+
+	numbers, noNumbers list.List
+
+	small, negativeBig, twoWords, zeroBig, huge big.Int
+
+	raw json.RawMessage
 )
 
 // view prints the marker of a value.
@@ -117,7 +129,7 @@ func monotonic(t time.Time) time.Duration {
 
 func main() {
 	// Values the program never otherwise uses, which the linker would drop.
-	runtime.KeepAlive([]any{&unlocked, &rwUnlocked, &emptyValue})
+	runtime.KeepAlive([]any{&unlocked, &rwUnlocked, &emptyValue, &idleGroup, &notOnce, &noNumbers, &zeroBig})
 
 	second = 1500 * time.Millisecond
 	negative = -(2*time.Minute + 3500*time.Millisecond)
@@ -247,6 +259,42 @@ func main() {
 	view("main.missing", fmt.Sprintf("%s *{Op: %s, Path: %s, Err: %s %s}", typeName(missing),
 		quoted(pathError.Op), quoted(pathError.Path), typeName(pathError.Err), quoted(pathError.Err.Error())))
 	view("main.errno", quoted(errno.Error()))
+
+	// Three tasks, and a goroutine waiting for them.
+	busyGroup.Add(3)
+	go busyGroup.Wait()
+	parked("sync.WaitGroup.Wait", 1)
+	view("main.idleGroup", "{counter: 0, waiters: 0}")
+	view("main.busyGroup", "{counter: 3, waiters: 1}")
+	once.Do(func() {})
+	view("main.once", "done")
+	view("main.notOnce", "not done")
+
+	for _, number := range []int{1, 2, 3} {
+		numbers.PushBack(number)
+	}
+	listed := []string{}
+	for element := numbers.Front(); element != nil; element = element.Next() {
+		listed = append(listed, fmt.Sprintf("%s %v", typeName(element.Value), element.Value))
+	}
+	view("main.numbers", fmt.Sprintf("len=%d [%s]", numbers.Len(), strings.Join(listed, ", ")))
+	view("main.noNumbers", "len=0 []")
+
+	// Integers of up to two words are numbers; longer ones are words.
+	small.SetInt64(12345)
+	negativeBig.SetInt64(-9876543210)
+	twoWords.Lsh(big.NewInt(3), 70)
+	huge.Lsh(big.NewInt(1), 130)
+	for _, number := range []struct {
+		name  string
+		value *big.Int
+	}{{"small", &small}, {"negativeBig", &negativeBig}, {"twoWords", &twoWords}, {"zeroBig", &zeroBig}} {
+		view("main."+number.name, number.value.String())
+	}
+	view("main.huge", "{neg: false, abs: […]}")
+
+	raw = json.RawMessage(`{"a":1}`)
+	view("main.raw", quoted(string(raw)))
 	barrier(1)
 
 	// Formatting a local time loads the local zone, and the time Now
