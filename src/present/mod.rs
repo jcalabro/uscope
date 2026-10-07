@@ -136,6 +136,13 @@ pub enum Filter {
 }
 
 impl Window {
+    /// Every row.
+    pub const ALL: Self = Self {
+        start: 0,
+        count: u64::MAX,
+        filter: None,
+    };
+
     pub fn slice<T>(self, items: impl Iterator<Item = T>) -> impl Iterator<Item = T> {
         items
             .skip(usize::try_from(self.start).unwrap_or(usize::MAX))

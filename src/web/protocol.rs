@@ -84,6 +84,19 @@ pub enum Request {
     RemoveBreakpoint(BreakpointRef),
     /// Writes to the program's standard input, or closes it.
     Input(Input),
+    /// A frame's arguments and locals, and the statics of its source file.
+    Scopes(FrameAt),
+    /// A window of what a row expands to.
+    Children(ChildrenOf),
+    /// Evaluates an expression in a frame without changing the program.
+    Evaluate(Evaluate),
+    /// Assigns a value to what a path names.
+    SetValue(SetValue),
+    /// Completes a console line.
+    Complete(Complete),
+    /// Runs a console line: an expression, which may assign, or one of
+    /// uscope's commands, in the tab's frame.
+    Console(ConsoleLine),
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,6 +227,77 @@ pub struct ThreadAt {
     pub thread: u64,
 }
 
+/// A frame of a thread at a stop, counting from the innermost.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FrameAt {
+    pub stop: u64,
+    pub thread: u64,
+    pub frame: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ChildrenOf {
+    /// A row's `children.handle`, which belongs to this connection and the
+    /// row's stop.
+    pub handle: u64,
+    pub start: u64,
+    pub count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Evaluate {
+    #[serde(flatten)]
+    pub at: FrameAt,
+    pub expression: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SetValue {
+    #[serde(flatten)]
+    pub at: FrameAt,
+    /// The expression that names what changes, a row's `path`.
+    pub path: String,
+    /// An expression for the new value.
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Complete {
+    /// The line up to the cursor.
+    pub text: String,
+    /// The frame whose names complete; absent when nothing is stopped.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub stop: Option<u64>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub thread: Option<u64>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub frame: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ConsoleLine {
+    pub line: String,
+    /// The frame the line runs in; absent when nothing is stopped.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub stop: Option<u64>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub thread: Option<u64>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub frame: Option<u32>,
+}
+
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SourcePath {
@@ -328,6 +412,9 @@ pub struct State {
     pub breakpoints: Vec<Breakpoint>,
     /// The latest stops of this session, oldest first.
     pub stops: Vec<StopEntry>,
+    /// Counts changes made to the program's values, which make values read
+    /// earlier at the same stop out of date.
+    pub writes: u64,
 }
 
 impl State {
@@ -342,6 +429,7 @@ impl State {
             threads: Vec::new(),
             breakpoints: Vec::new(),
             stops: Vec::new(),
+            writes: 0,
         }
     }
 }
@@ -643,6 +731,95 @@ pub struct BreakpointAdded {
     pub id: u64,
 }
 
+/// The answer to `scopes`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Scopes {
+    pub scopes: Vec<Scope>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Scope {
+    pub key: ScopeKey,
+    pub name: String,
+    pub rows: Vec<Row>,
+    /// Why the scope's rows could not be read, when they could not.
+    pub problem: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum ScopeKey {
+    Args,
+    Locals,
+    Statics,
+}
+
+/// One value, as the value tree, watches, and the console show it.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Row {
+    pub name: String,
+    /// The value's summary, or why there is none.
+    pub text: String,
+    #[serde(rename = "type")]
+    pub type_name: Option<String>,
+    /// An expression that evaluates the value again.
+    pub path: Option<String>,
+    pub children: Option<Children>,
+    /// Whether `setValue` can change it.
+    pub editable: bool,
+    /// The address of its natural memory, as hexadecimal.
+    pub memory: Option<String>,
+    /// A row that only says where reading stopped short.
+    pub truncated: bool,
+}
+
+/// What a row expands to.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Children {
+    pub handle: u64,
+    /// How many children are elements, when it is known.
+    pub indexed: Option<u64>,
+    /// How many are named, when it is known.
+    pub named: Option<u64>,
+}
+
+/// The answer to `children`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Rows {
+    pub rows: Vec<Row>,
+}
+
+/// The answer to `complete`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Completions {
+    /// Where the completed part starts, in characters.
+    pub start: u64,
+    pub items: Vec<Completion>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Completion {
+    pub label: String,
+    /// `keyword`, `value`, `variable`, or `field`.
+    pub kind: String,
+}
+
+/// The answer to `console`: a command's output, or an expression's value.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ConsoleResult {
+    pub output: Option<String>,
+    pub row: Option<Row>,
+}
+
 /// The answer to `share`.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -713,6 +890,21 @@ mod tests {
             SourceFiles::decl(&config),
             SourceText::decl(&config),
             BreakpointAdded::decl(&config),
+            FrameAt::decl(&config),
+            ChildrenOf::decl(&config),
+            Evaluate::decl(&config),
+            SetValue::decl(&config),
+            Complete::decl(&config),
+            ConsoleLine::decl(&config),
+            Scopes::decl(&config),
+            Scope::decl(&config),
+            ScopeKey::decl(&config),
+            Row::decl(&config),
+            Children::decl(&config),
+            Rows::decl(&config),
+            Completions::decl(&config),
+            Completion::decl(&config),
+            ConsoleResult::decl(&config),
         ];
         let mut text = format!(
             "// Generated from src/web/protocol.rs by `cargo test`; do not edit.\n\n\

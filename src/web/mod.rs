@@ -14,6 +14,7 @@ mod picker;
 mod protocol;
 mod session;
 pub mod terminal;
+mod values;
 
 use std::ffi::OsString;
 use std::io::Write as _;

@@ -35,6 +35,12 @@ export interface Results {
   editBreakpoint: null;
   removeBreakpoint: null;
   input: null;
+  scopes: P.Scopes;
+  children: P.Rows;
+  evaluate: P.Row;
+  setValue: P.Row;
+  complete: P.Completions;
+  console: P.ConsoleResult;
 }
 
 // Fails to compile when a method has no entry in Results, or Results names
