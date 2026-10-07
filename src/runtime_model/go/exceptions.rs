@@ -105,6 +105,9 @@ pub struct Layout {
     signals: ImageAddress,
     signal_stride: u64,
     signal_name: u64,
+    /// `errorAddressString.msg`, the text of the runtime's error for a
+    /// fault at an address, which a program that never faults may lack.
+    address_error_text: Option<u64>,
 }
 
 /// The kinds `printpanicval` prints by value.
@@ -167,6 +170,7 @@ impl Layout {
             signals: symbol(image, "runtime.sigtable")?,
             signal_stride: member(image, "runtime.sigTabT", &[])?.size,
             signal_name: offset(image, "runtime.sigTabT", &["name"], 16)?,
+            address_error_text: offset(image, "runtime.errorAddressString", &["msg"], 16).ok(),
         })
     }
 }
@@ -282,7 +286,8 @@ impl Reader<'_> {
     /// A panic as it is raised. The runtime turns an error or a stringer
     /// into its text only as a panic ends the program, by calling the
     /// program's own method, so a value of a type that may have methods is
-    /// named only by its type; a predeclared type has none.
+    /// named only by its type; a predeclared type has none, and the
+    /// runtime's own errors carry their text as their methods return it.
     fn raised(&self, ty: u64, data: u64) -> Result<String, Arc<str>> {
         if ty == 0 {
             return Ok("panic: nil".to_owned());
@@ -291,7 +296,18 @@ impl Reader<'_> {
         if PREDECLARED.contains(&name.as_str()) {
             return Ok(format!("panic: {}", self.panic_value(ty, data)?));
         }
-        Ok(format!("panic with a {name}"))
+        let text = |address: u64| match self.scalar(self.layout.kinds.string, address)? {
+            Some(Scalar::Text(text)) => Ok(indented(&text)),
+            _ => Err(Arc::<str>::from("the runtime error's text is unreadable")),
+        };
+        Ok(match (name.as_str(), self.layout.address_error_text) {
+            ("runtime.plainError", _) => format!("panic: {}", text(data)?),
+            ("runtime.errorString", _) => format!("panic: runtime error: {}", text(data)?),
+            ("runtime.errorAddressString", Some(offset)) => {
+                format!("panic: runtime error: {}", text(data.wrapping_add(offset))?)
+            }
+            _ => format!("panic with a {name}"),
+        })
     }
 
     /// What `printpanicval` prints for the value an `any` holds, given its

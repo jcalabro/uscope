@@ -20,6 +20,7 @@ mod lifecycle;
 mod memory;
 mod output;
 mod robustness;
+mod server;
 mod sources;
 mod terminal;
 mod traffic;
