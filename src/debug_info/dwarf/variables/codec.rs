@@ -6,6 +6,7 @@ use gimli::{Reader as _, RunTimeEndian, Value};
 
 use crate::debug_info::VariableRuntime;
 use crate::debug_info::dwarf::Reader;
+use crate::model::FloatLayout;
 use crate::{
     Architecture, BaseType, BaseTypeEncoding, ByteOrder, FloatValue, IntegerValue, ScalarValue,
     TargetDescription, VariableInvalidReason, VariableUnavailableReason, VirtualAddress,
@@ -534,13 +535,9 @@ pub(super) fn unsigned_value(
 /// apart.
 fn is_x87_extended(type_info: &BaseType, target: TargetDescription) -> bool {
     type_info.byte_size == 16
-        && type_info.encoding == BaseTypeEncoding::Floating
+        && type_info.float_layout() == Some(FloatLayout::X87Extended)
         && target.architecture == Architecture::X86_64
         && target.byte_order == ByteOrder::Little
-        && matches!(
-            type_info.base_name.as_ref(),
-            "long double" | "__float80" | "_Float64x" | "f80" | "c_longdouble"
-        )
 }
 
 /// How many leading bytes of a scalar's storage hold its value: all of
@@ -558,7 +555,16 @@ fn decode_float(
     bytes: &[u8],
     target: TargetDescription,
 ) -> std::result::Result<FloatValue, ScalarDecodeError> {
+    let layout = type_info.float_layout();
+    let word = || unsigned_value(bytes, target.byte_order).map_err(ScalarDecodeError::Malformed);
     match bytes.len() {
+        2 if layout == Some(FloatLayout::Binary16) => Ok(FloatValue::Binary16(
+            u16::try_from(word()?).expect("two bytes fit u16"),
+        )),
+        2 if layout == Some(FloatLayout::BFloat16) => Ok(FloatValue::BFloat16(
+            u16::try_from(word()?).expect("two bytes fit u16"),
+        )),
+        16 if layout == Some(FloatLayout::Binary128) => Ok(FloatValue::Binary128(word()?)),
         4 => Ok(FloatValue::Binary32(
             u32::try_from(
                 unsigned_value(bytes, target.byte_order).map_err(ScalarDecodeError::Malformed)?,

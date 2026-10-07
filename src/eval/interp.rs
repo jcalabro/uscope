@@ -580,6 +580,13 @@ impl<M: Machine> Interpreter<'_, M> {
             Category::Pointer(_) => Value::Pointer(u64::try_from(raw).unwrap_or(u64::MAX)),
             Category::Float(format) => {
                 let value = match format {
+                    FloatFormat::Binary16 => {
+                        crate::FloatValue::Binary16(u16::try_from(raw).unwrap_or_default())
+                    }
+                    FloatFormat::BFloat16 => {
+                        crate::FloatValue::BFloat16(u16::try_from(raw).unwrap_or_default())
+                    }
+                    FloatFormat::Binary128 => crate::FloatValue::Binary128(raw),
                     FloatFormat::Binary32 => {
                         crate::FloatValue::Binary32(u32::try_from(raw).unwrap_or_default())
                     }
@@ -1179,6 +1186,8 @@ impl<M: Machine> Interpreter<'_, M> {
 /// A float's bit pattern, zero-extended.
 fn float_bits(value: crate::FloatValue) -> u128 {
     match value {
+        crate::FloatValue::Binary16(bits) | crate::FloatValue::BFloat16(bits) => u128::from(bits),
+        crate::FloatValue::Binary128(bits) => bits,
         crate::FloatValue::Binary32(bits) => u128::from(bits),
         crate::FloatValue::Binary64(bits) => u128::from(bits),
         crate::FloatValue::X87Extended {

@@ -995,6 +995,16 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let mut enumerators = Vec::new();
         for child in self.children(unit_index, entry.offset())? {
             let child = child?;
+            // rustc declares an enumeration's methods inside it, and its
+            // generic arguments, none of which change its values.
+            if matches!(
+                child.tag(),
+                gimli::DW_TAG_subprogram
+                    | gimli::DW_TAG_template_type_parameter
+                    | gimli::DW_TAG_template_value_parameter
+            ) {
+                continue;
+            }
             if child.tag() != gimli::DW_TAG_enumerator {
                 return Err(format!(
                     "enumeration contains unsupported direct child {:?}",
