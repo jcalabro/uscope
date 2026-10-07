@@ -80,6 +80,7 @@ uscope dap                         # serve DAP on stdio
 - [docs/expressions.md](docs/expressions.md): the expression language.
 - [docs/views.md](docs/views.md) and [docs/writing-views.md](docs/writing-views.md): views.
 - [docs/dap.md](docs/dap.md): editor setup and DAP support.
+- [docs/go.md](docs/go.md): how uscope debugs Go programs.
 - [AGENTS.md](AGENTS.md): architecture and development rules.
 
 ## Development
