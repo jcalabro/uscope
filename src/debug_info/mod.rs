@@ -238,6 +238,19 @@ pub struct TailCallChain {
     /// The linker name of each function entered: the call's target, then
     /// each link's. Another module may define one under the same name.
     pub functions: Arc<[Option<Arc<str>>]>,
+    /// Where each link jumped from, when its call site says.
+    pub jumps: Arc<[Option<TailJump>]>,
+}
+
+/// Where a tail call jumped from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TailJump {
+    /// The jump's address, or the one after it where only that is
+    /// described.
+    pub instruction: ImageAddress,
+    /// An address within the jump, whose code and source are the jumping
+    /// function's.
+    pub lookup: ImageAddress,
 }
 
 /// The function a call site calls.

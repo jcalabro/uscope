@@ -12,7 +12,8 @@ mod flags;
 mod ops;
 
 use iced_x86::{
-    Decoder, DecoderOptions, Formatter as _, GasFormatter, Instruction, Mnemonic, Register,
+    Decoder, DecoderOptions, FlowControl, Formatter as _, GasFormatter, Instruction, Mnemonic,
+    Register,
 };
 
 use super::memory::{AddressSpace, MemoryFault};
@@ -109,6 +110,12 @@ pub enum Flow {
     },
     /// A return, to the address now in `rip`.
     Return,
+    /// A jump taken from the instruction at `from`, which ends at `next`,
+    /// to the address now in `rip`.
+    Jump {
+        from: u64,
+        next: u64,
+    },
 }
 
 /// A data access an instruction made.
@@ -190,6 +197,19 @@ pub fn execute(registers: &mut Registers, memory: &mut AddressSpace) -> Executed
                     slot: registers.general[RSP],
                 },
                 Mnemonic::Ret => Flow::Return,
+                _ if registers.rip != instruction.next_ip()
+                    && matches!(
+                        instruction.flow_control(),
+                        FlowControl::UnconditionalBranch
+                            | FlowControl::ConditionalBranch
+                            | FlowControl::IndirectBranch
+                    ) =>
+                {
+                    Flow::Jump {
+                        from: instruction.ip(),
+                        next: instruction.next_ip(),
+                    }
+                }
                 _ => Flow::Other,
             };
             Executed {

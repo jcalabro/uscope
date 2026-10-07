@@ -7,7 +7,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::debug_info::{
-    CallSiteId, CallTarget, EntryParameter, VariableRegister, VariableRuntime, VariableRuntimeError,
+    CallSiteId, CallTarget, EntryParameter, TailCallChain, TailJump, VariableRegister,
+    VariableRuntime, VariableRuntimeError,
 };
 use crate::inspection::InspectionBudget;
 use crate::{
@@ -65,6 +66,23 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
         })
     }
 
+    /// The callers of a stack already unwound, as far as `requested`
+    /// activations.
+    pub(super) fn with_stack(
+        controller: &'a Controller<P>,
+        inferior: &'a Inferior,
+        root: StackRoot,
+        stack: PhysicalStack,
+        requested: usize,
+    ) -> Rc<Self> {
+        Rc::new(Self {
+            controller,
+            inferior,
+            root,
+            stack: RefCell::new(Some((stack, requested))),
+        })
+    }
+
     /// The physical activation at `index`, unwinding further if needed.
     fn activation(&self, index: usize) -> Result<Option<PhysicalFrame>, VariableRuntimeError> {
         let mut stack = self.stack.borrow_mut();
@@ -119,6 +137,74 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
         if frame.depth >= MAX_ENTRY_VALUE_DEPTH {
             return Err(VariableUnavailableReason::EvaluationLimit.into());
         }
+        let frame_module = self.module(module)?;
+        let entry = self.entry(frame, module, budget)?;
+        self.with_caller(
+            entry.caller,
+            &entry.caller_frame,
+            entry.caller_at,
+            |caller_runtime| {
+                let mut chain = Chain {
+                    callee: frame_module,
+                    caller: entry.caller,
+                    site: entry.site,
+                    caller_runtime,
+                };
+                chain.value(&entry.tail_calls.links, parameter, module, budget)
+            },
+        )
+        .map_err(|error| match error {
+            // What the caller cannot provide, the entry value cannot.
+            VariableRuntimeError::Unavailable(reason)
+                if !matches!(
+                    reason,
+                    VariableUnavailableReason::EntryValue(_)
+                        | VariableUnavailableReason::EvaluationLimit
+                        | VariableUnavailableReason::InspectionLimit(_)
+                ) =>
+            {
+                unavailable(EntryValueUnavailableReason::Caller(Box::new(reason)))
+            }
+            error => error,
+        })
+    }
+
+    /// Where each function that left by a tail call between the call that
+    /// entered the activation at `activation` and its function jumped from,
+    /// the last one first. There are none unless the debug information
+    /// allows exactly one chain of tail calls, and says where each jumped.
+    pub(super) fn tail_jumps(
+        self: &Rc<Self>,
+        activation: usize,
+        code: (ModuleId, ImageAddress),
+    ) -> Vec<TailJump> {
+        let frame = FrameAt {
+            activation,
+            code: Some(code),
+            depth: 0,
+        };
+        let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
+        let Ok(entry) = self.entry(frame, code.0, &mut budget) else {
+            return Vec::new();
+        };
+        entry
+            .tail_calls
+            .jumps
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default()
+    }
+
+    /// The call that entered the function of the frame at `frame`, whose
+    /// location `module` describes, and the one chain of tail calls since.
+    fn entry(
+        self: &Rc<Self>,
+        frame: FrameAt,
+        module: ModuleId,
+        budget: &mut InspectionBudget,
+    ) -> Result<Entry<'a>, VariableRuntimeError> {
         // Only a frame's own function has entry values.
         let Some((_, code)) = frame.code.filter(|(code_module, _)| *code_module == module) else {
             return Err(unavailable(EntryValueUnavailableReason::NoCaller));
@@ -153,14 +239,49 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             code: Some((caller.loaded.id, caller_code)),
             depth: frame.depth + 1,
         };
+        let site = self
+            .with_caller(caller, &caller_frame, caller_at, |caller_runtime| {
+                caller
+                    .variables
+                    .call_site(caller_return, caller_runtime, budget)
+            })?
+            .ok_or_else(|| unavailable(EntryValueUnavailableReason::NoCallSite))?;
+        let target = self.call_target(caller, site.target)?;
+        let from = frame_module
+            .loaded
+            .image_address(target)
+            .ok()
+            .filter(|address| frame_module.image.contains_address(*address))
+            .ok_or_else(|| unavailable(EntryValueUnavailableReason::TargetMismatch))?;
+        let tail_calls = frame_module.variables.tail_calls(from, code)?;
+        self.entered_as_described(module, &tail_calls.functions)?;
+        Ok(Entry {
+            caller,
+            caller_frame,
+            caller_at,
+            site: site.id,
+            tail_calls,
+        })
+    }
+
+    /// Runs `read` with a runtime that reads `caller_frame`, which runs
+    /// `caller`'s code.
+    fn with_caller<T>(
+        self: &Rc<Self>,
+        caller: &RuntimeModule,
+        caller_frame: &PhysicalFrame,
+        caller_at: FrameAt,
+        read: impl FnOnce(&mut LinuxVariableRuntime<'_, P>) -> T,
+    ) -> T {
+        let modules = self.controller.unwind_modules(self.inferior);
         let reader = self.root.reader();
         let cfa =
             self.controller
                 .frame_cfa(reader, &modules, caller_at.code, &caller_frame.registers);
         let below_stack_pointer =
             self.controller
-                .below_stack_pointer(self.inferior, &self.root, &caller_frame);
-        let caller_registers = FrameRegisters::Caller(caller_frame.registers);
+                .below_stack_pointer(self.inferior, &self.root, caller_frame);
+        let caller_registers = FrameRegisters::Caller(caller_frame.registers.clone());
         let mut caller_runtime = LinuxVariableRuntime {
             ptrace: &self.controller.ptrace,
             pid: reader,
@@ -176,42 +297,7 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             callers: Some(Rc::clone(self)),
             below_stack_pointer,
         };
-
-        let site = caller
-            .variables
-            .call_site(caller_return, &mut caller_runtime, budget)?
-            .ok_or_else(|| unavailable(EntryValueUnavailableReason::NoCallSite))?;
-        let target = self.call_target(caller, site.target)?;
-        let from = frame_module
-            .loaded
-            .image_address(target)
-            .ok()
-            .filter(|address| frame_module.image.contains_address(*address))
-            .ok_or_else(|| unavailable(EntryValueUnavailableReason::TargetMismatch))?;
-        let tail_calls = frame_module.variables.tail_calls(from, code)?;
-        self.entered_as_described(module, &tail_calls.functions)?;
-        let mut chain = Chain {
-            callee: frame_module,
-            caller,
-            site: site.id,
-            caller_runtime: &mut caller_runtime,
-        };
-        chain
-            .value(&tail_calls.links, parameter, module, budget)
-            .map_err(|error| match error {
-                // What the caller cannot provide, the entry value cannot.
-                VariableRuntimeError::Unavailable(reason)
-                    if !matches!(
-                        reason,
-                        VariableUnavailableReason::EntryValue(_)
-                            | VariableUnavailableReason::EvaluationLimit
-                            | VariableUnavailableReason::InspectionLimit(_)
-                    ) =>
-                {
-                    unavailable(EntryValueUnavailableReason::Caller(Box::new(reason)))
-                }
-                error => error,
-            })
+        read(&mut caller_runtime)
     }
 
     /// Where a call site in `caller` calls.
@@ -318,6 +404,16 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
         }
         found
     }
+}
+
+/// The call that entered a frame's function, from the frame that made it,
+/// and the tail calls since.
+struct Entry<'a> {
+    caller: &'a RuntimeModule,
+    caller_frame: PhysicalFrame,
+    caller_at: FrameAt,
+    site: CallSiteId,
+    tail_calls: TailCallChain,
 }
 
 /// The call that entered a frame's function, and the tail calls after it.

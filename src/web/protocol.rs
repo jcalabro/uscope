@@ -866,6 +866,8 @@ pub enum FrameKind {
     Inline,
     /// A signal handler's trampoline.
     Signal,
+    /// A function that left by a tail call to the frame below it.
+    TailCall,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

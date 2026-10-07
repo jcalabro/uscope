@@ -243,3 +243,51 @@ fn step_out_shows_what_a_c_function_returned() {
     assert_eq!(value("i"), Some(json!("42")), "{members:?}");
     finish_running(dap, thread);
 }
+
+/// The functions that left by tail calls stand between a frame and its
+/// caller in a stack trace, and their scopes show what was passed to them.
+#[test]
+fn stack_traces_show_the_functions_that_left_by_tail_calls() {
+    let program = "tail-frames-gcc-o2";
+    let mut dap = Dap::start(program);
+    let (thread, _) = stop(
+        &mut dap,
+        program,
+        &Configuration {
+            functions: vec!["leaf".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 4}));
+    let frames = trace["stackFrames"].as_array().expect("frames");
+    let line = |marker: &str| {
+        i64::try_from(crate::support::source_line(
+            "tests/fixtures/c/tail-frames.c",
+            marker,
+        ))
+        .expect("a line fits")
+    };
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| (frame["name"].clone(), frame["line"].clone()))
+            .skip(1)
+            .collect::<Vec<_>>(),
+        [
+            (json!("middle [tail call]"), json!(line("frames: middle"))),
+            (json!("top [tail call]"), json!(line("frames: top"))),
+            (json!("main"), json!(line("frames: call top"))),
+        ],
+        "{frames:#?}"
+    );
+    let variables = frame_variables(&mut dap, &frames[1]);
+    assert_eq!(variables["value"]["value"], "6", "{variables:?}");
+
+    // Through `either`, which may have reached `leaf` two ways.
+    let resumed = dap.send("continue", json!({"threadId": thread}));
+    dap.success(resumed);
+    dap.stopped(resumed.mark);
+    let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 2}));
+    assert_eq!(trace["stackFrames"][1]["name"], "main", "{trace:#?}");
+    finish_running(dap, thread);
+}

@@ -805,6 +805,32 @@ impl<'a> World<'a> {
         Ok(format!("deliver {description}"))
     }
 
+    /// Judges a backtrace of the current stop: its activations, and the
+    /// functions it shows as having left by tail calls.
+    fn judge_backtrace(&self, backtrace: &crate::Backtrace) -> Result<(), Failure> {
+        let kernel = self.machine.kernel.borrow();
+        let unwound = semantics::backtrace(&kernel, backtrace)
+            .map_err(|message| Failure::debugger("backtrace", message))?;
+        let tails = semantics::tail_frames(
+            &kernel,
+            &self.variant.facts,
+            self.variant.image.bias(),
+            backtrace,
+        )
+        .map_err(|message| Failure::debugger("tail calls", message))?;
+        let mut marks = self.machine.marks.borrow_mut();
+        if tails > 0 {
+            marks.hit(Mark::TailCallFrames);
+        }
+        match unwound {
+            Some(Unwound::Whole) => marks.hit(Mark::WholeBacktrace),
+            Some(Unwound::Truncated) => marks.hit(Mark::TruncatedBacktrace),
+            Some(Unwound::Corrupt) => marks.hit(Mark::CorruptCaller),
+            None => {}
+        }
+        Ok(())
+    }
+
     /// Judges what the client saw since the last poll by the semantic
     /// oracles. Nothing the client saw at a stop is judged once the stop is
     /// over, or while its process is ending, which moves its threads.
@@ -813,15 +839,7 @@ impl<'a> World<'a> {
         for observation in observations {
             match observation {
                 Observation::Backtrace { stop, backtrace } if self.still_at(stop) => {
-                    let unwound = semantics::backtrace(&self.machine.kernel.borrow(), &backtrace)
-                        .map_err(|message| Failure::debugger("backtrace", message))?;
-                    let mark = match unwound {
-                        Some(Unwound::Whole) => Mark::WholeBacktrace,
-                        Some(Unwound::Truncated) => Mark::TruncatedBacktrace,
-                        Some(Unwound::Corrupt) => Mark::CorruptCaller,
-                        None => continue,
-                    };
-                    self.machine.marks.borrow_mut().hit(mark);
+                    self.judge_backtrace(&backtrace)?;
                 }
                 Observation::StepBegins {
                     thread,

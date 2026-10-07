@@ -692,6 +692,7 @@ impl Kernel {
         Shadow {
             base,
             calls: Vec::new(),
+            jumps: Vec::new(),
             lost: false,
         }
     }

@@ -519,6 +519,16 @@ are demangled. The vDSO, the code the kernel maps into every process for
 calls such as `clock_gettime`, is the module `[vdso]`; no file backs it, so
 it is read from the process's memory.
 
+A function that left by a tail call, jumping to another instead of calling
+it, has no frame of its own, but a backtrace shows it between the function it
+jumped to and the caller, marked `[tail call]`, where the debug information
+allows only one chain of tail calls from the call the caller made: the same
+chains that recover entry values. The frame is at the jump. The jump
+discarded its registers and its place on the stack, so they are
+unavailable, as `print $pc` there says; what was passed to it is recovered
+as an entry value where the call site that passed it says how. Where more
+than one chain is possible, no such frame is shown rather than one guessed.
+
 A Go thread runs the runtime's code on a stack of its own, and signal
 handlers on another, and a backtrace follows the runtime from them onto the
 goroutine's stack. When a backtrace crosses stacks, each run of frames is

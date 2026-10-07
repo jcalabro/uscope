@@ -349,8 +349,10 @@ impl Session {
         } else {
             crate::cli::format::code_name(frame.function.as_ref(), frame.symbol.as_ref())
         };
-        if frame.kind == uscope::FrameKind::Inline {
-            name.push_str(" [inlined]");
+        match frame.kind {
+            uscope::FrameKind::Inline => name.push_str(" [inlined]"),
+            uscope::FrameKind::TailCall => name.push_str(" [tail call]"),
+            uscope::FrameKind::Physical | uscope::FrameKind::Signal => {}
         }
         let mut body = json!({
             "id": id,

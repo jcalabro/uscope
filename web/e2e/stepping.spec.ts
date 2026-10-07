@@ -125,10 +125,7 @@ test("Shift+J moves the thread to the cursor's line without running it", async (
   await expect(page.getByTestId("stops")).toContainText("jump · kvstore.c:91");
 });
 
-test("i lists the calls of the line, and steps into the one chosen", async ({
-  page,
-  uscope,
-}) => {
+test("i lists the calls of the line, and steps into the one chosen", async ({ page, uscope }) => {
   await join(page, uscope.link);
   await breakInHandleRequest(page);
   await stepOver(page);

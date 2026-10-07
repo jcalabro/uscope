@@ -169,6 +169,7 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
     fn registers(&self) -> Option<&RegisterSnapshot> {
         self.registers
             .get_or_init(|| {
+                let discarded = crate::unwind::RegisterFile::new([]);
                 let (native, caller) = match &self.resolved.registers {
                     FrameRegisters::Caller(registers) => {
                         let native = self
@@ -176,6 +177,14 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
                             .thread()
                             .map(|pid| self.controller.ptrace.registers(pid));
                         (native.transpose().ok()?, Some(registers))
+                    }
+                    // A tail call discarded every register of the frame.
+                    FrameRegisters::Discarded => {
+                        let native = self
+                            .root
+                            .thread()
+                            .map(|pid| self.controller.ptrace.registers(pid));
+                        (native.transpose().ok()?, Some(&discarded))
                     }
                     FrameRegisters::Thread(native) => (Some(*native), None),
                 };
@@ -1001,9 +1010,14 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         })?;
         let value = &snapshot.registers[usize::from(register.number)];
         let Some(bytes) = &value.bytes else {
-            return Err(Stop::missing(VariableState::Unavailable(
-                VariableUnavailableReason::RegisterNotSaved(Arc::clone(&value.register.name)),
-            )));
+            let reason = if matches!(self.frame.resolved.registers, FrameRegisters::Discarded) {
+                VariableUnavailableReason::CallFrameUnavailable(
+                    crate::CallFrameUnavailableReason::TailCall,
+                )
+            } else {
+                VariableUnavailableReason::RegisterNotSaved(Arc::clone(&value.register.name))
+            };
+            return Err(Stop::missing(VariableState::Unavailable(reason)));
         };
         let mut wide = [0_u8; 16];
         let length = bytes.len().min(16);

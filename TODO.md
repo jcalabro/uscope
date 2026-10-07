@@ -2,8 +2,6 @@
 
 ## Debugger
 
-- Show the frames of tail calls in backtraces, as the chains entry values follow find them.
-
 ## Languages and platforms
 
 - First-class tokio support.

@@ -75,6 +75,7 @@ pub async fn backtrace(
                 FrameKind::Physical => protocol::FrameKind::Physical,
                 FrameKind::Inline => protocol::FrameKind::Inline,
                 FrameKind::Signal => protocol::FrameKind::Signal,
+                FrameKind::TailCall => protocol::FrameKind::TailCall,
             },
             address: hex(frame.instruction.get()),
             module: image

@@ -1657,6 +1657,9 @@ pub enum CallFrameUnavailableReason {
     NoInstructionContext,
     /// Unwinding terminated without producing a CFA.
     UnwindTerminated(Arc<str>),
+    /// The frame's function left by a tail call, which gave its place on
+    /// the stack to the function it jumped to.
+    TailCall,
 }
 
 /// Why the value a parameter held on entry cannot be recovered from the
@@ -1871,6 +1874,9 @@ impl fmt::Display for VariableUnavailableReason {
             }
             Self::CallFrameUnavailable(CallFrameUnavailableReason::UnwindTerminated(reason)) => {
                 write!(formatter, "the call-frame address is unavailable: {reason}")
+            }
+            Self::CallFrameUnavailable(CallFrameUnavailableReason::TailCall) => {
+                formatter.write_str("a tail call discarded the frame")
             }
             Self::EntryValue(reason) => {
                 write!(formatter, "the entry value is unavailable: {reason}")
@@ -3203,6 +3209,11 @@ pub enum FrameKind {
     Inline,
     /// A signal trampoline activation.
     Signal,
+    /// A function that left by a tail call, which replaced its activation
+    /// with the frame's below it. Only the debug information's one chain
+    /// of tail calls between a call and the frame it entered shows it, and
+    /// its state is gone but for what was passed to it.
+    TailCall,
 }
 
 /// A platform-independent stack frame.

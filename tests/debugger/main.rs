@@ -20,6 +20,7 @@ mod names;
 mod signals;
 mod step_targets;
 mod stepping;
+mod tail_frames;
 mod unwind;
 mod values;
 mod variables;
