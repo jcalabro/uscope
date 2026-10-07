@@ -15,7 +15,7 @@ const SOURCE: &str = "tests/fixtures/go/ranges/main.go";
 
 /// A program stopped at the first pass of a loop's body, at `marker`.
 async fn in_the_body(fixture: &str, marker: &str) -> Scenario {
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = crate::invariants::checked(fixture);
     let breakpoint = scenario
         .add_breakpoint_spec(BreakpointSpec::Source {
             path: "ranges/main.go".into(),
@@ -166,7 +166,7 @@ async fn stepping_over_a_loop_enters_its_body() {
             ),
         ] {
             let context = format!("{fixture} {function}");
-            let mut scenario = Scenario::launch(fixture);
+            let mut scenario = crate::invariants::checked(fixture);
             let breakpoint = scenario.add_breakpoint(function).await;
             scenario
                 .run_with_to_stop(LaunchOptions {

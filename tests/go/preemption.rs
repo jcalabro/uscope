@@ -19,7 +19,7 @@ const ROUNDS: usize = 100;
 /// A program spinning at a breakpoint in its loop, with SIGURG reported so
 /// a test can tell the runtime sent it.
 async fn spinning(fixture: &str) -> (Scenario, Receiver<DebuggerEvent>, VirtualAddress) {
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = crate::invariants::checked(fixture);
     scenario
         .operation(
             "report SIGURG",

@@ -79,7 +79,7 @@ impl GoSession {
         let output = scratch.path().join("stdout");
         let file = std::fs::File::create(&output).expect("create the fixture's output");
         let errors = file.try_clone().expect("share the fixture's output");
-        let mut scenario = Scenario::launch(fixture);
+        let mut scenario = crate::invariants::checked(fixture);
         scenario.add_breakpoint("main.reached").await;
         let reason = scenario
             .run_with_to_stop(LaunchOptions {

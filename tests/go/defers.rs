@@ -17,7 +17,7 @@ fn line(marker: &str) -> u64 {
 
 /// A fixture stopped at a marked line, with no breakpoint left.
 async fn stopped_at(fixture: &str, marker: &str) -> Scenario {
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = crate::invariants::checked(fixture);
     let breakpoint = scenario
         .add_breakpoint_spec(BreakpointSpec::Source {
             path: "defers/main.go".into(),

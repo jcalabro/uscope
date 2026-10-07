@@ -9,6 +9,7 @@ mod support;
 mod cores;
 mod defers;
 mod failing;
+mod invariants;
 mod preemption;
 mod ranges;
 mod siblings;

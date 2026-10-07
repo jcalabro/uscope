@@ -18,7 +18,7 @@ fn line(marker: &str) -> u64 {
 /// A fixture stopped at the first line of `main.run`'s walk, with no
 /// breakpoint left, and the goroutine it runs in.
 async fn at_the_walk(fixture: &str) -> (Scenario, i128) {
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = crate::invariants::checked(fixture);
     let breakpoint = scenario
         .add_breakpoint_spec(BreakpointSpec::Source {
             path: "steps/main.go".into(),
