@@ -21,11 +21,15 @@ fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name)
 }
 
-/// A uscope command that reads no settings files, so that a developer's
-/// own can never change a test's outcome.
+/// A uscope command that reads the tests' settings file rather than the
+/// developer's, so that neither theirs nor their locale can change a test's
+/// outcome.
 fn uscope_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
-    command.env("USCOPE_CONFIG", "");
+    command.env(
+        "USCOPE_CONFIG",
+        fixture("tests/support/settings/ascii.toml"),
+    );
     command
 }
 
@@ -696,9 +700,12 @@ fn batch_mode_sets_lists_and_deletes_source_and_file_function_breakpoints() {
             "info breakpoints",
         ],
     );
-    assert!(stdout.contains("1  basic.c:11  1 location"), "{stdout}");
     assert!(
-        stdout.contains("2  basic.c:breakpoint_target  1 location"),
+        stdout.contains("1   +      0  main at tests/fixtures/c/basic.c:11\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("2   +      0  breakpoint_target at tests/fixtures/c/basic.c:6\n"),
         "{stdout}"
     );
     assert!(stdout.contains("deleted breakpoint 1"), "{stdout}");
@@ -733,20 +740,77 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
             "breakpoint 2 set at 2 locations, stops at hits %4\n",
             // The fourth hit is the second inline site of the second call.
             "stopped at breakpoint 2 (hit 4) at ",
-            "1  counted  1 location  hit 2 times  stops at hits ==3\n",
-            "2  shared  2 locations  hit 4 times  stops at hits %4\n",
+            "1   +      2  counted at tests/fixtures/c/hit-counts.c:11  hits ==3\n",
+            "2   +      4  shared, 2 locations                          hits %4\n",
             "stopped at breakpoint 1 (hit 3) at ",
             "breakpoint 1 ignores its next 5 hits\n",
             "breakpoint 2 stops at every hit, hit 4 times so far\n",
-            "1  counted  1 location  hit 3 times  stops at hits >=9\n",
-            "2  shared  2 locations  hit 4 times\n",
+            "1   +      3  counted at tests/fixtures/c/hit-counts.c:11  hits >=9\n",
+            "2   +      4  shared, 2 locations\n",
             "deleted breakpoint 2\n",
             "stopped at breakpoint 1 (hit 9) at ",
             "breakpoint 1 stops at hits ==2 (no later hit can stop), hit 9 times so far\n",
             "inferior exited with status 0\n",
-            "1  counted  1 location  hit 40 times  stops at hits ==2 (no later hit can stop)\n",
+            "1   +     40  counted at tests/fixtures/c/hit-counts.c:11  hits ==2 (no later hit can stop)\n",
         ],
     );
+}
+
+#[test]
+fn breakpoint_and_watchpoint_tables_show_each_ones_state_place_and_options() {
+    let stdout = batch(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "break counted hits ==3 if call > 1",
+            "break shared log \"total {shared_total}\"",
+            "break caller",
+            "tbreak counted",
+            "disable 2",
+            "run",
+            "watch last_call if last_call > 5",
+            "disable w1",
+            "breakpoints",
+            "watchpoints",
+        ],
+    );
+    let (_, tables) = stdout
+        .split_once("disabled watchpoint 1\n")
+        .expect("tables");
+    let path = "tests/fixtures/c/hit-counts.c";
+    let lines = tables.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines[..3],
+        [
+            "Id  On  Hits  Where                                        Options",
+            &format!("1   +      0  counted at {path}:11  hits ==3  if call > 1"),
+            "2   -      0  shared, 2 locations                          log \"total {shared_total}\"",
+        ],
+        "{tables}"
+    );
+    // Several locations are listed beneath, each with its address.
+    assert!(lines[3].starts_with("              |- 0x"), "{tables}");
+    assert!(
+        lines[3].ends_with(&format!("  shared at {path}:16")),
+        "{tables}"
+    );
+    assert!(lines[4].starts_with("              `- 0x"), "{tables}");
+    assert_eq!(
+        lines[5..7],
+        [
+            format!("3   +      1  caller at {path}:20"),
+            format!("4   +      0  counted at {path}:11  temporary"),
+        ],
+        "{tables}"
+    );
+    assert_eq!(
+        lines[7], "Id  On  Hits  Watching   Where                      Options",
+        "{tables}"
+    );
+    assert!(
+        lines[8].starts_with("1   -      0  last_call  8 bytes at 0x"),
+        "{tables}"
+    );
+    assert!(lines[8].ends_with("  change  if last_call > 5"), "{tables}");
 }
 
 #[test]
@@ -835,19 +899,19 @@ fn breakpoints_and_watchpoints_are_disabled_enabled_and_advanced_past() {
             "temporary breakpoint 1 set at counted at tests/fixtures/c/hit-counts.c:11, stops at \
              hits ==3\n",
             "disabled breakpoint 2\n",
-            "1  counted  1 location  hit 0 times  stops at hits ==3  temporary\n",
-            "2  caller  1 location  hit 0 times  disabled\n",
+            "1   +      0  counted at tests/fixtures/c/hit-counts.c:11  hits ==3  temporary\n",
+            "2   -      0  caller at tests/fixtures/c/hit-counts.c:20\n",
             "stopped at breakpoint 1 (hit 3) at ",
             "deleted temporary breakpoint 1\n",
-            "2  caller  1 location  hit 0 times  disabled\n",
+            "2   -      0  caller at tests/fixtures/c/hit-counts.c:20\n",
             "enabled breakpoint 2\n",
             // Hits while disabled are not counted.
             "stopped at breakpoint 2 (hit 1) at ",
             "stopped after advance\n",
             "(uint64_t) call = 4\n",
             "disabled breakpoint 2 and watchpoint 1\n",
-            "1  change  last_call  8 bytes at 0x",
-            "  hit 0 times  disabled\n",
+            "1   -      0  last_call  8 bytes at 0x",
+            "  change\n",
             "enabled breakpoint 2 and watchpoint 1\n",
             "stopped by watchpoint 1 (change, hit 1) on last_call",
             "\n  old: 3\n  new: 4\n",
@@ -885,7 +949,7 @@ fn batch_mode_sets_and_clears_breakpoint_conditions() {
             "breakpoint 1 stops where call % 10 == 0 && last_call == call - 1 holds\n",
             "stopped at breakpoint 1 (hit 10) at ",
             "(uint64_t) call = 10\n",
-            "1  counted  1 location  hit 10 times  where call % 10 == 0 && last_call == call - 1\n",
+            "1   +     10  counted at tests/fixtures/c/hit-counts.c:11  if call % 10 == 0 && last_call == call - 1\n",
             "breakpoint 1 stops unconditionally\n",
             "stopped at breakpoint 1 (hit 11) at ",
             "(uint64_t) call = 11\n",
@@ -924,7 +988,8 @@ fn batch_mode_sets_amends_and_skips_watchpoint_conditions() {
             "stopped by watchpoint 1 (change, hit 10) on last_call in thread ",
             "\n  old: 9\n  new: 10\n",
             "watchpoint 1 ignores its next 15 hits\n",
-            "  hit 10 times  stops at hits >=26  where call % 10 == 0\n",
+            "1   +     10  last_call  8 bytes at 0x",
+            "  change  hits >=26  if call % 10 == 0\n",
             "stopped by watchpoint 1 (change, hit 30) on last_call",
             "\n  old: 29\n  new: 30\n",
             "watchpoint 1 stops unconditionally\n",
@@ -2294,15 +2359,17 @@ fn watch_script_reports_values_lists_and_deletes_watchpoints() {
         .unwrap_or_else(|| panic!("missing set confirmation:\n{stdout}"));
     assert!(set.ends_with("using 1 hardware slot"), "{set}");
     assert!(
-        stdout
-            .lines()
-            .any(|line| line.starts_with("1  change  watch_i32  4 bytes at 0x")),
+        stdout.lines().any(
+            |line| line.starts_with("1   +      0  watch_i32  4 bytes at 0x")
+                && line.ends_with("  change")
+        ),
         "{stdout}"
     );
     assert!(
-        stdout
-            .lines()
-            .any(|line| line.starts_with("2  write  watch_u64  8 bytes at 0x")),
+        stdout.lines().any(
+            |line| line.starts_with("2   +      0  watch_u64  8 bytes at 0x")
+                && line.ends_with("  write")
+        ),
         "{stdout}"
     );
     for (old, new) in [(0, 1), (1, 2), (2, 42)] {
@@ -2352,7 +2419,13 @@ fn access_and_location_watchpoints_render_their_kind_and_slots() {
             "unwatch all",
         ],
     );
-    assert!(stdout.contains("1  read/write  watch_i32"), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("1   +      0  watch_i32 ")
+                && line.ends_with("  read/write")),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("watchpoint 2 set on watch_packed.field: 4 bytes at 0x")
             && stdout.contains("using 3 hardware slots"),

@@ -264,7 +264,6 @@ pub struct Look {
     /// The project root relative paths are shown from.
     pub root: Option<PathBuf>,
     /// Whether output may use symbols such as `●` beyond ASCII.
-    #[expect(dead_code, reason = "the breakpoint tables use it next")]
     pub unicode: bool,
     /// Whether `file:line` locations are OSC 8 links to their files.
     pub hyperlinks: bool,
@@ -295,6 +294,11 @@ impl Renderer {
 
     pub const fn with_look(color: bool, look: &'static Look) -> Self {
         Self { color, look }
+    }
+
+    /// Whether output may use symbols beyond ASCII.
+    pub const fn unicode(self) -> bool {
+        self.look.unicode
     }
 
     pub const fn is_colored(self) -> bool {

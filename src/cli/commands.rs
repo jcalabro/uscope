@@ -747,14 +747,32 @@ impl Cli {
     /// Where each of a breakpoint's locations is, as far as its module
     /// tells.
     pub(super) async fn placed(&self, breakpoint: &uscope::Breakpoint) -> Vec<format::Placed> {
+        // The program's own module, whose image addresses a running process
+        // shows at their runtime addresses.
+        let main = self
+            .debugger
+            .loaded_modules()
+            .await
+            .ok()
+            .and_then(|loaded| {
+                loaded
+                    .modules
+                    .iter()
+                    .find(|record| record.path.as_path() == self.debugger.module_image().path())
+                    .map(|record| record.module)
+            });
         let mut placed = Vec::new();
         for resolved in breakpoint.locations.iter() {
-            placed.push(self.place(resolved.location).await);
+            placed.push(self.place(resolved.location, main).await);
         }
         placed
     }
 
-    async fn place(&self, location: uscope::BreakpointLocation) -> format::Placed {
+    async fn place(
+        &self,
+        location: uscope::BreakpointLocation,
+        main: Option<uscope::LoadedModule>,
+    ) -> format::Placed {
         let mut placed = format::Placed {
             location,
             function: None,
@@ -762,10 +780,15 @@ impl Cli {
             module: None,
         };
         let (image, address) = match location {
-            uscope::BreakpointLocation::Image(address) => (
-                Some(std::sync::Arc::clone(self.debugger.module_image())),
-                address,
-            ),
+            uscope::BreakpointLocation::Image(address) => {
+                if let Some(runtime) = main.and_then(|main| main.virtual_address(address).ok()) {
+                    placed.location = uscope::BreakpointLocation::Virtual(runtime);
+                }
+                (
+                    Some(std::sync::Arc::clone(self.debugger.module_image())),
+                    address,
+                )
+            }
             uscope::BreakpointLocation::Virtual(address) => {
                 let Ok(description) = self.debugger.describe_address(address).await else {
                     return placed;
@@ -1040,10 +1063,12 @@ impl Cli {
     }
 
     async fn list_breakpoints(&self) -> Result<String> {
-        Ok(format::breakpoints(
-            &self.debugger.snapshot().await?.breakpoints,
-            self.renderers.stdout,
-        ))
+        let snapshot = self.debugger.snapshot().await?;
+        let mut rows = Vec::new();
+        for breakpoint in snapshot.breakpoints.iter() {
+            rows.push((breakpoint, self.placed(breakpoint).await));
+        }
+        Ok(format::breakpoints(&rows, self.renderers.stdout))
     }
 
     async fn list_watchpoints(&self) -> Result<String> {
