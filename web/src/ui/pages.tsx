@@ -17,6 +17,10 @@ export function Home() {
   if (state.session) {
     return <Navigate to="/s/$session" params={{ session: state.session }} replace />;
   }
+  // The program uscope started with is loading; its session comes next.
+  if (state.busy) {
+    return <div className="page muted">{state.busy}…</div>;
+  }
   return <Navigate to="/pick" replace />;
 }
 

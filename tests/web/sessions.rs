@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{ExternalProcess, Scenario};
+use crate::support::{ExternalProcess, Scenario, ScratchDir};
 use crate::web::{Web, exists, wait_gone};
 
 fn fixture(name: &str) -> String {
@@ -261,6 +261,30 @@ async fn interrupting_the_server_kills_the_program_it_launched() {
     let status = web.interrupt();
     assert!(status.success(), "{status}");
     wait_gone(pid);
+}
+
+#[tokio::test]
+async fn the_page_is_served_while_the_program_loads() {
+    let scratch = ScratchDir::new("web-loading");
+    let program = scratch.path().join("kvstore");
+    // Loading reads the FIFO, which blocks until something writes it.
+    nix::unistd::mkfifo(&program, nix::sys::stat::Mode::S_IRWXU).expect("create FIFO");
+    let web = Web::start("loading", &[program.to_str().expect("a UTF-8 path")]);
+    let mut tab = web.control("tab").await;
+    tab.state("the program loading", |state| {
+        state["busy"]
+            .as_str()
+            .is_some_and(|busy| busy.starts_with("Loading"))
+    })
+    .await;
+
+    let bytes = std::fs::read(Scenario::fixture("kvstore")).expect("read kvstore");
+    tokio::task::spawn_blocking(move || std::fs::write(program, bytes))
+        .await
+        .expect("the writer")
+        .expect("write the program");
+    tab.state("the program loaded", |state| state["session"].is_string())
+        .await;
 }
 
 #[tokio::test]

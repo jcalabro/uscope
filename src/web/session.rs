@@ -1037,6 +1037,16 @@ impl Session {
 
     /// Makes `start` the session's target, ending a current one when
     /// `replace` allows.
+    /// Says that `start` is under way, before anything is debugged.
+    pub fn loading(&self, start: &Start) {
+        let busy = match start {
+            Start::Launch { spec, .. } => format!("Loading {}", spec.program.display()),
+            Start::Attach(process) => format!("Attaching to process {process}"),
+            Start::Core(options) => format!("Opening {}", options.core.display()),
+        };
+        self.state.send_replace(Arc::new(State::idle(Some(busy))));
+    }
+
     pub async fn start(&self, start: Start, replace: bool) -> Result<(), Failure> {
         let mut target = self.target.lock().await;
         if let Some(current) = target.as_ref()
@@ -1047,16 +1057,11 @@ impl Session {
                 format!("{} is being debugged; replace it to continue", current.name),
             ));
         }
-        let busy = match &start {
-            Start::Launch { spec, .. } => format!("Loading {}", spec.program.display()),
-            Start::Attach(process) => format!("Attaching to process {process}"),
-            Start::Core(options) => format!("Opening {}", options.core.display()),
-        };
         if let Some(current) = target.take() {
             let _ = self.end(current).await;
         }
         self.history.lock().expect("history lock").clear();
-        self.state.send_replace(Arc::new(State::idle(Some(busy))));
+        self.loading(&start);
         let opened = open(&start).await;
         let debugger = match opened {
             Ok(debugger) => debugger,
