@@ -135,11 +135,18 @@ fn settings_layer_flags_environment_local_project_user_and_defaults() {
     // The local file's context, the project's hidden bytes, and the flag's
     // syntax over the user's.
     let plain = session(&["--disassembly-syntax", "intel"], true);
+    // After the breakpoint's line and the stop's header, `list`'s.
     let listing = plain
         .split("basic.c:10\n")
-        .nth(2)
+        .nth(3)
         .expect("the listing after the stop's");
-    assert!(listing.starts_with("=> 10 |"), "{plain}");
+    // The line has a breakpoint, which the margin marks.
+    assert!(
+        listing
+            .trim_start_matches(['+', '\u{25cf}'])
+            .starts_with("=> 10 |"),
+        "{plain}"
+    );
     assert!(
         !listing.contains("   9 |") && !listing.contains("  11 |"),
         "{plain}"

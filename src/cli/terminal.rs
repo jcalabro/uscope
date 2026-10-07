@@ -282,18 +282,29 @@ static DEFAULT_LOOK: Look = Look {
 pub struct Renderer {
     color: bool,
     look: &'static Look,
+    /// Whether values are drawn as having changed.
+    changed: bool,
 }
 
 impl Renderer {
     pub const fn new(color: bool) -> Self {
-        Self {
-            color,
-            look: &DEFAULT_LOOK,
-        }
+        Self::with_look(color, &DEFAULT_LOOK)
     }
 
     pub const fn with_look(color: bool, look: &'static Look) -> Self {
-        Self { color, look }
+        Self {
+            color,
+            look,
+            changed: false,
+        }
+    }
+
+    /// This renderer drawing values in the `changed` role.
+    pub const fn changed(self) -> Self {
+        Self {
+            changed: true,
+            ..self
+        }
     }
 
     /// Whether output may use symbols beyond ASCII.
@@ -306,6 +317,11 @@ impl Renderer {
     }
 
     pub fn paint<T>(self, role: Role, value: T) -> Painted<T> {
+        let role = if self.changed && role == Role::Value {
+            Role::Changed
+        } else {
+            role
+        };
         Painted {
             style: self.color.then(|| self.look.palette.style(role)),
             value,
@@ -343,6 +359,31 @@ impl Renderer {
         let url = file_url(path);
         format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
     }
+}
+
+/// `text` without its escape sequences: colours, and the links around
+/// locations.
+pub fn plain(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('\x1b') {
+        plain.push_str(&rest[..start]);
+        let sequence = &rest[start + 1..];
+        let length = match sequence.chars().next() {
+            // A control sequence ends at its first final byte.
+            Some('[') => sequence[1..]
+                .find(|character: char| ('@'..='~').contains(&character))
+                .map_or(sequence.len(), |end| end + 2),
+            // An operating system command ends at the string terminator.
+            Some(']') => sequence
+                .find("\x1b\\")
+                .map_or(sequence.len(), |end| end + 2),
+            _ => 0,
+        };
+        rest = &sequence[length..];
+    }
+    plain.push_str(rest);
+    plain
 }
 
 /// A `file://` URL, percent-encoding what a URL cannot hold.

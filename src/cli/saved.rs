@@ -42,12 +42,31 @@ const fn is_enabled(enabled: &bool) -> bool {
     *enabled
 }
 
+/// One display as `display` would recreate it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct SavedDisplay {
+    pub expression: String,
+    /// The format letters, as `display/` takes them.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub format: String,
+}
+
+/// What a project keeps for its next session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Contents {
+    pub breakpoints: Vec<Saved>,
+    pub displays: Vec<SavedDisplay>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct File {
     version: u32,
     #[serde(default, rename = "breakpoint", skip_serializing_if = "Vec::is_empty")]
     breakpoints: Vec<Saved>,
+    #[serde(default, rename = "display", skip_serializing_if = "Vec::is_empty")]
+    displays: Vec<SavedDisplay>,
 }
 
 /// Where a project keeps its saved state.
@@ -55,16 +74,16 @@ pub fn state_directory(root: &Path) -> PathBuf {
     root.join(".uscope/state")
 }
 
-/// Where a project keeps its breakpoints.
+/// Where a project keeps its breakpoints and displays.
 pub fn path(root: &Path) -> PathBuf {
     state_directory(root).join("breakpoints.toml")
 }
 
-/// The breakpoints saved at `path`, none when there is no file, or why the
+/// What is saved at `path`, nothing when there is no file, or why the
 /// file cannot be read.
-pub fn read(path: &Path) -> Result<Vec<Saved>, String> {
+pub fn read(path: &Path) -> Result<Contents, String> {
     let Some(text) = super::config::read_text(path)? else {
-        return Ok(Vec::new());
+        return Ok(Contents::default());
     };
     let file: File = toml::from_str(&text).map_err(|error| error.to_string().trim().to_owned())?;
     if file.version != VERSION {
@@ -73,13 +92,16 @@ pub fn read(path: &Path) -> Result<Vec<Saved>, String> {
             file.version
         ));
     }
-    Ok(file.breakpoints)
+    Ok(Contents {
+        breakpoints: file.breakpoints,
+        displays: file.displays,
+    })
 }
 
-/// Writes `breakpoints` to `path` through a temporary file renamed into
+/// Writes `contents` to `path` through a temporary file renamed into
 /// place, creating the state directory with a `.gitignore` that keeps it
 /// out of the project's history.
-pub fn write(path: &Path, breakpoints: &[Saved]) -> io::Result<()> {
+pub fn write(path: &Path, contents: &Contents) -> io::Result<()> {
     let directory = path.parent().expect("a state file has a directory");
     if !directory.is_dir() {
         std::fs::create_dir_all(directory)?;
@@ -87,7 +109,8 @@ pub fn write(path: &Path, breakpoints: &[Saved]) -> io::Result<()> {
     }
     let text = toml::to_string(&File {
         version: VERSION,
-        breakpoints: breakpoints.to_vec(),
+        breakpoints: contents.breakpoints.clone(),
+        displays: contents.displays.clone(),
     })
     .map_err(io::Error::other)?;
     let temporary = path.with_extension("toml.tmp");
@@ -163,7 +186,7 @@ pub struct Kept {
     /// Whether the file could not be read, so that nothing overwrites it.
     pub blocked: bool,
     /// What the file holds now.
-    pub written: Vec<Saved>,
+    pub written: Contents,
     /// Breakpoints the file holds that this session could not restore,
     /// which it keeps writing back.
     pub unrestored: Vec<Saved>,

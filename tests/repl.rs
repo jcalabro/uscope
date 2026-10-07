@@ -285,6 +285,11 @@ fn an_interactive_session_keeps_its_breakpoints_for_the_next_one() {
         "tests/fixtures/c/hit-counts.c:11, stops at hits >=2 where call > 2",
     );
     run(&mut session, "disable 1", "disabled breakpoint 1");
+    run(
+        &mut session,
+        "display/x last_call",
+        "display 1: /x last_call",
+    );
     // Temporary breakpoints belong to one stop, and are not kept.
     run(&mut session, "tbreak caller", "temporary breakpoint 2 set");
     quit(session);
@@ -293,7 +298,8 @@ fn an_interactive_session_keeps_its_breakpoints_for_the_next_one() {
         text,
         "version = 1\n\n[[breakpoint]]\nlocation = \"hit-counts.c:11\"\n\
          condition = \"call > 2\"\nhits = \">=2\"\nenabled = false\n\
-         line-text = \"    last_call = call;\"\n",
+         line-text = \"    last_call = call;\"\n\n\
+         [[display]]\nexpression = \"last_call\"\nformat = \"x\"\n",
         "{text}"
     );
     assert_eq!(
@@ -301,8 +307,14 @@ fn an_interactive_session_keeps_its_breakpoints_for_the_next_one() {
         "*\n"
     );
 
-    // The next session restores it, disabled and conditional as it was.
-    let mut session = kept_session(&project, scratch.path(), &["restored 1 breakpoint"]);
+    // The next session restores it, disabled and conditional as it was,
+    // and the display.
+    let mut session = kept_session(
+        &project,
+        scratch.path(),
+        &["restored 1 breakpoint and 1 display"],
+    );
+    run(&mut session, "display", "1: /x last_call");
     run(
         &mut session,
         "breakpoints",

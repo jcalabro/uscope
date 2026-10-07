@@ -2136,6 +2136,9 @@ pub struct VariableSnapshot {
     pub stack_frame: StackFrameId,
     /// The logical frame whose source scope selected these variables.
     pub frame: crate::PresentedFrame,
+    /// The canonical frame address of the inspected activation, which
+    /// identifies it while it lives, when its unwind information gives one.
+    pub frame_address: Option<VirtualAddress>,
     /// Target data representation used for decoding.
     pub target: TargetDescription,
     /// Visible parameters followed by local variables in source declaration order.

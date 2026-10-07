@@ -10,6 +10,7 @@ pub mod help;
 mod repl;
 mod saved;
 pub mod session;
+mod stops;
 mod suggest;
 pub mod terminal;
 pub mod value;
@@ -224,6 +225,10 @@ pub struct Cli {
     kept: std::sync::OnceLock<std::sync::Mutex<saved::Kept>>,
     /// The terminal's width as the line editor last measured it, or 0.
     columns: std::sync::atomic::AtomicUsize,
+    /// The expressions every stop prints.
+    displays: std::sync::Mutex<stops::Displays>,
+    /// The values the last stops showed, which a stop marks changes from.
+    changes: std::sync::Mutex<stops::Changes>,
 }
 
 /// The view files a session loads: those it was given or loaded, most
@@ -253,6 +258,8 @@ impl Cli {
             }),
             kept: std::sync::OnceLock::new(),
             columns: std::sync::atomic::AtomicUsize::new(0),
+            displays: std::sync::Mutex::default(),
+            changes: std::sync::Mutex::default(),
         }
     }
 
@@ -561,9 +568,9 @@ impl Cli {
                 ));
                 kept.blocked = true;
             }
-            Ok(entries) => {
+            Ok(contents) => {
                 let mut restored = 0;
-                for entry in &entries {
+                for entry in &contents.breakpoints {
                     match self.restore_breakpoint(entry, source_paths).await {
                         Ok(changed) => {
                             restored += 1;
@@ -586,12 +593,33 @@ impl Cli {
                         }
                     }
                 }
-                kept.written = entries;
-                if restored > 0 {
+                let mut displays = 0;
+                for display in &contents.displays {
+                    match self.layout(commands::Command::Print, &display.format) {
+                        Ok(_) => {
+                            self.displays
+                                .lock()
+                                .expect("the displays are whole")
+                                .add(&display.format, &display.expression);
+                            displays += 1;
+                        }
+                        Err(error) => self.warn(&format!(
+                            "cannot restore the display of {}: {error:#}",
+                            display.expression
+                        )),
+                    }
+                }
+                kept.written = contents;
+                let restored = [(restored, "breakpoint"), (displays, "display")]
+                    .into_iter()
+                    .filter(|(count, _)| *count > 0)
+                    .map(|(count, noun)| format::plural(count, noun))
+                    .collect::<Vec<_>>();
+                if !restored.is_empty() {
                     let _ = emit(&format!(
                         "{} {}",
                         self.renderers.stdout.paint(Role::Success, "restored"),
-                        format::plural(restored, "breakpoint")
+                        restored.join(" and ")
                     ));
                 }
             }
@@ -694,12 +722,26 @@ impl Cli {
         let (path, error) = {
             let mut kept = kept.lock().expect("the kept state is whole");
             entries.extend(kept.unrestored.iter().cloned());
-            if entries == kept.written {
+            let contents = saved::Contents {
+                breakpoints: entries,
+                displays: self
+                    .displays
+                    .lock()
+                    .expect("the displays are whole")
+                    .list
+                    .iter()
+                    .map(|display| saved::SavedDisplay {
+                        expression: display.expression.clone(),
+                        format: display.format.clone(),
+                    })
+                    .collect(),
+            };
+            if contents == kept.written {
                 return;
             }
-            match saved::write(&kept.path, &entries) {
+            match saved::write(&kept.path, &contents) {
                 Ok(()) => {
-                    kept.written = entries;
+                    kept.written = contents;
                     return;
                 }
                 Err(error) => {

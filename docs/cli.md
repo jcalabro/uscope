@@ -286,7 +286,8 @@ with their conditions, hit conditions, log messages, and whether they are
 enabled; hit counts belong to one process and are not saved, nor are
 temporary or address breakpoints. A source breakpoint records the text of
 its line, and a session that finds it reading differently restores it
-where it was and warns that it changed. A file that does not parse is
+where it was and warns that it changed. Displays are kept in the same file,
+as `[[display]]` entries. A file that does not parse is
 reported and never overwritten; the session saves nothing until it is
 fixed or deleted. Two sessions in one project each save their own
 breakpoints, and the last to change them wins. `[breakpoints] save =
@@ -347,10 +348,40 @@ process exits or execs, and cleared before detaching.
 | `frame`, `fr` [*level*] | Show the selected frame, or select one by level. |
 | `up` / `down` [*count*] | Select a caller / callee frame. |
 | `where` | Show the selected frame's location and module. |
-| `list`, `l` | Show source around the selected frame's line. |
+| `list`, `l` | Show source around the selected frame's line, with breakpoint lines marked in the margin. |
 | `registers`, `regs` | Show the selected frame's general registers. |
+| `context`, `ctx` | Print the sections a stop prints again, in the selected frame. |
+| `display` [*expression*] | Print an expression at every stop, with `print`'s formats, as in `display/x n`; alone, list the displays. |
+| `undisplay` *ids* | Remove displays: numbers, ranges such as `1-3`, or `all`. |
 
-Breakpoint, step, and watchpoint stops print three source lines on each side.
+A stop's first line says why and where, in words, and names its thread when
+the process has more than one; a resume that ran over a second says how long:
+
+```text
+stopped at breakpoint 1 (hit 3) in parse_header at src/parse.c:41 [thread 41672 of 4] (ran 1.42s)
+```
+
+Breakpoint, step, watchpoint, signal, and pause stops then print the sections
+`[stop] show` lists, in order: `source`, the lines around the stop as `list`
+shows them; `locals`, as `print` alone; `displays`; `registers`;
+`disassembly`, `[stop] disassembly-instructions` around the instruction;
+`backtrace`, its first `[stop] backtrace-frames` frames; and `threads`. The
+default is `["source"]`. Displays print after the sections when the list
+leaves them out. A section that fails prints its error and the others still
+print; a stop where no source line is known prints no source, since the
+header has given its address.
+
+A display prints as `print` would, after its number, in the selected frame. One
+that cannot be evaluated there prints its error, dimmed, rather than
+vanishing. Displays are kept with breakpoints, above.
+
+With `[stop] highlight-changes`, a local, display, or register whose value
+differs from what the last stop showed of the same activation, the same
+function at the same frame address in the same thread, is drawn in the
+`changed` role, or followed by `*` without colour. A value is compared only
+with itself, so after `up` the caller's values are not compared with its
+callee's, and one that was unavailable is never marked.
+
 Backtraces unwind through every loaded module using its own call-frame
 information. Frames without debug information are named `symbol+offset` from
 the module's ELF symbol tables, including MiniDebugInfo; code no symbol covers
