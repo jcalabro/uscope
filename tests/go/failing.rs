@@ -93,6 +93,9 @@ async fn listed(scenario: &Scenario, number: u64) -> Option<TaskSnapshot> {
 #[tokio::test]
 async fn failing_programs_stop_where_the_runtime_reports_them() {
     for fixture in BUILDS {
+        // One session launches every case in turn, since loading the
+        // build's debug information is most of what a case costs.
+        let mut scenario = crate::invariants::checked(fixture);
         for (case, expected) in CASES {
             let context = format!("{fixture} {case}");
             let (status, output, printed) = alone(fixture, case);
@@ -100,7 +103,6 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
             let scratch = ScratchDir::new("failing");
             let errors = scratch.path().join("stderr");
             let out = scratch.path().join("stdout");
-            let mut scenario = crate::invariants::checked(fixture);
             let reason = scenario
                 .run_with_to_stop(LaunchOptions {
                     arguments: vec![case.into()],
@@ -187,8 +189,8 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                     "{context}: {debugged}"
                 );
             }
-            scenario.shutdown().await;
         }
+        scenario.shutdown().await;
     }
 }
 

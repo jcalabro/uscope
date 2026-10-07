@@ -217,7 +217,8 @@ pub struct Scenario {
     handle: DebuggerHandle,
     events: broadcast::Receiver<DebuggerEvent>,
     transcript: Vec<String>,
-    process_id: Option<ProcessId>,
+    /// Every inferior launched, the latest last.
+    process_ids: Vec<ProcessId>,
     last_revision: u64,
     last_exit: Option<ExitStatus>,
     stop_check: Option<StopCheck>,
@@ -275,7 +276,7 @@ impl Scenario {
             handle,
             events,
             transcript: Vec::new(),
-            process_id: None,
+            process_ids: Vec::new(),
             last_revision: 0,
             last_exit: None,
             stop_check: None,
@@ -377,7 +378,7 @@ impl Scenario {
 
     /// Launches the inferior the first time and resumes it afterwards.
     pub async fn resume_or_run(&mut self) -> StopReason {
-        self.run_request(self.process_id.is_none()).await
+        self.run_request(self.process_ids.is_empty()).await
     }
 
     pub async fn resume_with_exception(&mut self, disposition: ExceptionDisposition) -> StopReason {
@@ -659,7 +660,7 @@ impl Scenario {
         }
         self.last_revision = revision;
         if let DebuggerEvent::InferiorLaunched { process_id, .. } = event {
-            self.process_id = Some(*process_id);
+            self.process_ids.push(*process_id);
         }
         if let DebuggerEvent::InferiorExited { status, .. } = event {
             self.last_exit = Some(status.clone());
@@ -681,7 +682,7 @@ impl Scenario {
     }
 
     fn assert_reaped(&self) {
-        if let Some(process_id) = self.process_id {
+        for process_id in &self.process_ids {
             let path = PathBuf::from(format!("/proc/{process_id}"));
             if path.exists() {
                 self.fail(&format!("inferior {process_id} was not reaped"));
