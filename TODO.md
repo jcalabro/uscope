@@ -12,6 +12,7 @@
 - Show the frames of tail calls in backtraces, as the chains entry values follow find them.
 - Model function types, so function pointers show their signature.
 - Accept C base type names in casts, such as `(unsigned char)x`, when the program's debug information lacks them.
+- Fix a bug where a variable name that is a reserved word (i.e. a variable named `long` can't be displayed via `p long`)
 
 ## Languages and platforms
 
