@@ -1399,7 +1399,10 @@ and exit status match the native run's, a goroutine's panic lists the
 others, a deadlock gives main's wait reason, and an overflowing stack's
 backtrace ends at its typed depth limit. The `GOTRACEBACK=crash` row is
 in `tests/go/cores.rs`: live, the panic stops and then SIGABRT does, and
-the core shows every goroutine.)*
+the core shows every goroutine. The corrupted-state row is
+`tests/go/corrupted.rs`: the program finds its victim's `g` through its
+own DWARF, and the model refuses a parked goroutine whose saved stack
+pointer is outside its stack.)*
 
 | Program | Expected stop | After continuing |
 |---|---|---|

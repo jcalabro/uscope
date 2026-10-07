@@ -9,6 +9,7 @@ mod support;
 mod attach;
 mod cgo;
 mod cores;
+mod corrupted;
 mod defers;
 mod failing;
 mod hosted;
