@@ -1,8 +1,12 @@
 //! Go function locations, written the ways Go programmers write them.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use uscope::{BreakpointId, BreakpointSpec, Error, ExitStatus, LineNumber, StopReason};
+use uscope::{
+    BreakpointHit, BreakpointId, BreakpointSpec, Error, ExecutionContext, ExitStatus,
+    InferiorState, LineNumber, StackFrameId, StopContext, StopReason, ThreadId, ThreadState,
+};
 
 use crate::support::{Scenario, source_line};
 
@@ -120,28 +124,32 @@ async fn go_function_locations_stop_in_every_function_they_name() {
         let mut reason = scenario.run_to_stop().await;
         for _ in 0..1000 {
             match reason {
-                StopReason::Breakpoint { ref hits, .. } => {
-                    let (function, file, line) = stopped_frame(&scenario).await;
-                    for breakpoint in hits.iter().map(|hit| hit.breakpoint) {
-                        let entry = named[&breakpoint];
-                        assert!(
-                            entry.functions.contains(&function.as_str())
-                                && file.ends_with(entry.file),
-                            "{fixture}: {} stopped in {function} at {file}:{line}",
-                            entry.location
-                        );
-                        if let Some((path, marker)) = entry.lines {
-                            let begins = source_line(path, &format!("names: {marker} begins"));
-                            let ends = source_line(path, &format!("names: {marker} ends"));
+                // Each thread that hit a breakpoint at once with the one the
+                // stop reports keeps its own hit as its reason.
+                StopReason::Breakpoint { .. } => {
+                    for (thread, hits) in thread_hits(&scenario).await {
+                        let (function, file, line) = stopped_frame(&scenario, thread).await;
+                        for breakpoint in hits.iter().map(|hit| hit.breakpoint) {
+                            let entry = named[&breakpoint];
                             assert!(
-                                (begins..=ends).contains(&line),
-                                "{fixture}: {} stopped at line {line}, outside {begins}..={ends}",
+                                entry.functions.contains(&function.as_str())
+                                    && file.ends_with(entry.file),
+                                "{fixture}: {} stopped in {function} at {file}:{line}",
                                 entry.location
                             );
+                            if let Some((path, marker)) = entry.lines {
+                                let begins = source_line(path, &format!("names: {marker} begins"));
+                                let ends = source_line(path, &format!("names: {marker} ends"));
+                                assert!(
+                                    (begins..=ends).contains(&line),
+                                    "{fixture}: {} stopped at line {line}, outside {begins}..={ends}",
+                                    entry.location
+                                );
+                            }
+                            hit.entry(breakpoint).or_default().insert(function.clone());
                         }
-                        hit.entry(breakpoint).or_default().insert(function.clone());
+                        reason = scenario.resume_to_stop().await;
                     }
-                    reason = scenario.resume_to_stop().await;
                 }
                 // The runtime's preemption signal.
                 StopReason::Exception(ref exception) if exception.code == 23 => {
@@ -250,9 +258,38 @@ async fn go_locations_that_name_too_much_or_nothing_say_why() {
 }
 
 /// The function, file, and line of the stopped frame.
-async fn stopped_frame(scenario: &Scenario) -> (String, String, u64) {
+/// Each stopped thread whose own reason is a breakpoint hit, with its
+/// hits.
+async fn thread_hits(scenario: &Scenario) -> Vec<(ThreadId, Arc<[BreakpointHit]>)> {
+    scenario
+        .operation("snapshot", scenario.handle().snapshot())
+        .await
+        .threads
+        .iter()
+        .filter_map(|thread| match &thread.state {
+            ThreadState::Stopped {
+                reason: Some(StopReason::Breakpoint { hits, .. }),
+            } => Some((thread.id, Arc::clone(hits))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The function, file, and line `thread` is stopped at.
+async fn stopped_frame(scenario: &Scenario, thread: ThreadId) -> (String, String, u64) {
+    let snapshot = scenario
+        .operation("snapshot", scenario.handle().snapshot())
+        .await;
+    let InferiorState::Stopped { stop_id, .. } = snapshot.inferior else {
+        panic!("the program is not stopped");
+    };
+    let at = StopContext {
+        stop: stop_id,
+        execution: ExecutionContext::Thread(thread),
+        frame: StackFrameId::INNERMOST,
+    };
     let backtrace = scenario
-        .operation("backtrace", scenario.handle().backtrace())
+        .operation("backtrace", scenario.handle().at(at).backtrace())
         .await;
     let frame = &backtrace.frames[0];
     let function = frame
