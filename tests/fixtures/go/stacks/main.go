@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"unsafe"
 )
 
 // sink keeps calls the compiler would otherwise drop.
@@ -68,6 +69,31 @@ func grow(depth int) int {
 	return grow(depth-1) + pad[depth%64]
 }
 
+// below returns where its own local was, which is free once it returns.
+//
+//go:noinline
+func below() uintptr {
+	local := 7
+	return uintptr(unsafe.Pointer(&local))
+}
+
+// hold reads the pointer stale holds.
+//
+//go:noinline
+func hold(slot **int) {
+	sink += int(uintptr(unsafe.Pointer(*slot)))
+}
+
+// stale holds a pointer below its own stack pointer, into memory its
+// callees reuse, as a slot the runtime leaves unadjusted when it moves a
+// stack does (go#75124).
+//
+//go:noinline
+func stale() {
+	pointer := (*int)(unsafe.Pointer(below()))
+	hold(&pointer)
+}
+
 // awaitParked yields until the runtime's dump shows a goroutine that
 // began in `function` waiting in `status`.
 func awaitParked(function, status string) {
@@ -89,6 +115,7 @@ func main() {
 	if !fault() {
 		os.Exit(1)
 	}
+	stale()
 	// A goroutine that parks once, and stays parked.
 	never := make(chan int)
 	go func() {

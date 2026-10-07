@@ -4,8 +4,8 @@
 use uscope::{
     Backtrace, BreakpointSpec, CodeRole, Evaluation, ExecutionContext, Expression, FrameKind,
     InferiorState, ScalarValue, StackFrameId, StackSegment, StopContext, StopId, StopReason,
-    ThreadActivity, ThreadId, ThreadState, UnwindTermination, VariableState, VariableValue,
-    VirtualAddress,
+    ThreadActivity, ThreadId, ThreadState, UnwindTermination, VariableState,
+    VariableUnavailableReason, VariableValue, VirtualAddress,
 };
 
 use crate::support::{self, Scenario};
@@ -524,4 +524,46 @@ async fn a_fault_unwinds_onto_the_instruction_that_faulted() {
 
 fn names(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+/// A pointer below its frame's stack pointer points at memory only the
+/// frame's callees use, which they may have freed: the pointer is stale,
+/// and what it pointed at is not shown as if it were still there.
+#[tokio::test]
+async fn a_pointer_below_its_frames_stack_pointer_is_stale() {
+    for fixture in BUILDS {
+        let (scenario, trace) = stop_in(fixture, "main.hold", |_| true).await;
+        scenario
+            .operation(
+                "select stale",
+                scenario.handle().select_frame(trace.frames[1].id),
+            )
+            .await;
+        let evaluate = |text: &'static str| {
+            let expression = Expression::parse(text).expect("an expression");
+            let handle = scenario.handle().clone();
+            async move { handle.evaluate(&expression).await.expect(text) }
+        };
+        let Evaluation::Value { value, .. } = evaluate("pointer").await else {
+            panic!("{fixture}: pointer is no value");
+        };
+        let VariableState::Available {
+            value: VariableValue::Address(pointer),
+            ..
+        } = value.state
+        else {
+            panic!("{fixture}: {value:?}");
+        };
+        let Evaluation::Value { value, .. } = evaluate("*pointer").await else {
+            panic!("{fixture}: *pointer is no value");
+        };
+        assert_eq!(
+            value.state,
+            VariableState::Unavailable(VariableUnavailableReason::BelowStackPointer {
+                address: pointer.address,
+            }),
+            "{fixture}"
+        );
+        scenario.shutdown().await;
+    }
 }

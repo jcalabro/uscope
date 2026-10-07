@@ -107,6 +107,7 @@ impl<P: InspectionOps> Controller<P> {
             floating: None,
             cfa: frame.cfa.clone(),
             link_map: module.link_map,
+            below_stack_pointer: frame.below_stack_pointer.clone(),
         }
     }
 
@@ -561,6 +562,9 @@ pub(super) struct LinuxVariableRuntime<'a, P> {
     pub(super) floating: Option<std::result::Result<Fxsave, Arc<str>>>,
     pub(super) cfa: std::result::Result<VirtualAddress, VariableRuntimeError>,
     pub(super) link_map: Option<VirtualAddress>,
+    /// Where the frame's task stack is below its stack pointer, which the
+    /// frame's values may not read.
+    pub(super) below_stack_pointer: Option<std::ops::Range<u64>>,
 }
 
 impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
@@ -644,6 +648,17 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
         address: VirtualAddress,
         size: usize,
     ) -> std::result::Result<Arc<[u8]>, VariableRuntimeError> {
+        let end = address
+            .get()
+            .saturating_add(u64::try_from(size).unwrap_or(u64::MAX));
+        if let Some(below) = &self.below_stack_pointer
+            && address.get() < below.end
+            && below.start < end
+        {
+            return Err(VariableRuntimeError::Unavailable(
+                VariableUnavailableReason::BelowStackPointer { address },
+            ));
+        }
         let read = read_logical_memory(self.ptrace, self.pid, self.breakpoints, address, size)
             .map_err(|error| match error {
                 // A location computed from a meaningless frame base, as

@@ -338,6 +338,23 @@ impl<P: InspectionOps> Controller<P> {
                 high: bounds.end,
             })
     }
+
+    /// The bounds of a task's stack now, or `None` when its runtime has no
+    /// such task.
+    pub(super) fn task_stack_bounds(
+        &self,
+        inferior: &Inferior,
+        task: TaskId,
+    ) -> std::result::Result<Option<std::ops::Range<u64>>, Arc<str>> {
+        let runtime = self
+            .runtimes(inferior)
+            .into_iter()
+            .find(|runtime| runtime.id == task.runtime)
+            .ok_or("the task's runtime is no longer loaded")?;
+        self.with_runtime_stop(inferior, &runtime, inferior.memory_thread(), |stop| {
+            runtime.model.task_stack(stop, task.number)
+        })
+    }
 }
 
 impl<P: InspectionOps> Controller<P> {
@@ -377,11 +394,25 @@ impl<P: InspectionOps> Controller<P> {
             .as_ref()
             .ok_or(Error::NotStopped)?
             .triggering_thread;
-        let runtime = self
+        self.task_root(inferior, task, reader)?
+            .ok_or(Error::UnknownTask(task))
+    }
+
+    /// Where a task's frames begin, its memory read through the stopped
+    /// thread `reader`, or `None` when its runtime has no such task.
+    pub(super) fn task_root(
+        &self,
+        inferior: &Inferior,
+        task: TaskId,
+        reader: Pid,
+    ) -> Result<Option<StackRoot>> {
+        let Some(runtime) = self
             .runtimes(inferior)
             .into_iter()
             .find(|runtime| runtime.id == task.runtime)
-            .ok_or(Error::UnknownTask(task))?;
+        else {
+            return Ok(None);
+        };
         let found = self.with_runtime_stop(inferior, &runtime, reader, |stop| {
             runtime.model.task_context(stop, task.number)
         });
@@ -395,10 +426,13 @@ impl<P: InspectionOps> Controller<P> {
                 after_call,
                 reader,
             },
-            Ok(None) => return Err(Error::UnknownTask(task)),
+            Ok(None) => return Ok(None),
             Err(reason) => return Err(Error::TaskUnavailable { task, reason }),
         };
-        Ok(StackRoot { context, origin })
+        Ok(Some(StackRoot {
+            context: ExecutionContext::Task(task),
+            origin,
+        }))
     }
 }
 

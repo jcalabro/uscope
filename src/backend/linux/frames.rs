@@ -390,6 +390,7 @@ impl<P: InspectionOps> Controller<P> {
                 registers: stack.registers(0),
                 cfa: self.frame_cfa(root.reader(), &modules, code, &innermost.registers),
                 activation: 0,
+                below_stack_pointer: self.below_stack_pointer(inferior, root, innermost),
             });
         }
 
@@ -434,7 +435,31 @@ impl<P: InspectionOps> Controller<P> {
             registers: stack.registers(activation),
             cfa: self.frame_cfa(root.reader(), &modules, code, &physical.registers),
             activation,
+            below_stack_pointer: self.below_stack_pointer(inferior, root, physical),
         })
+    }
+
+    /// The part of a frame's task stack below the frame's stack pointer,
+    /// for a frame on its task's own stack whose stack pointer is known.
+    /// Code a runtime runs on its own stacks may handle any task's memory.
+    fn below_stack_pointer(
+        &self,
+        inferior: &Inferior,
+        root: &StackRoot,
+        frame: &PhysicalFrame,
+    ) -> Option<std::ops::Range<u64>> {
+        if frame.segment != StackSegment::Task {
+            return None;
+        }
+        let stack_pointer = frame.registers.get(X86_64_RSP)?;
+        let low = match (root.thread(), root.context) {
+            (Some(pid), _) => self.task_stack(inferior, pid)?.low,
+            (None, ExecutionContext::Task(task)) => {
+                self.task_stack_bounds(inferior, task).ok()??.start
+            }
+            (None, ExecutionContext::Thread(_)) => return None,
+        };
+        Some(low..stack_pointer)
     }
 
     /// Computes the canonical frame address of the activation executing
@@ -1099,6 +1124,10 @@ pub(super) struct ResolvedFrame {
     pub(super) cfa: std::result::Result<VirtualAddress, VariableRuntimeError>,
     /// The index of the physical activation containing the frame.
     pub(super) activation: usize,
+    /// For a frame on its task's own stack, the part of that stack below
+    /// the frame's stack pointer: only the frame's callees use it, so a
+    /// pointer of the frame's to it is stale.
+    pub(super) below_stack_pointer: Option<std::ops::Range<u64>>,
 }
 
 /// Finds the module whose image describes `address`.

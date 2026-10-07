@@ -13,25 +13,22 @@
 //! watching memory their objects left.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Range;
-use std::sync::Arc;
 
 use nix::unistd::Pid;
 
 use crate::protocol::{
     FrameScopeEvidence, InvalidatedWatchpoint, WatchScope, WatchpointId, WatchpointInvalidation,
 };
-use crate::runtime_model::TaskContext;
 use crate::unwind::DEFAULT_MAX_FRAMES;
-use crate::{AddressRange, Error, ExecutionContext, Result, RuntimeId, TaskId, VirtualAddress};
+use crate::{AddressRange, Error, Result, RuntimeId, TaskId, VirtualAddress};
 
 use super::activation::{Activation, StackView, TaskStack};
 use super::breakpoints::remove_breakpoint_owner_from;
 use super::debug_registers::{self, SlotAccess};
-use super::frames::{RootOrigin, StackRoot};
+use super::frames::StackRoot;
 use super::native::{InspectionOps, LinuxTraceOps};
 use super::registers::x86_64_registers;
-use super::{BreakpointOwner, Controller, Edit, Inferior, WatchRecord, debug_pid};
+use super::{BreakpointOwner, Controller, Edit, Inferior, WatchRecord};
 
 /// Where a watch on a task's stack is: how far below the top of the task's
 /// stack the watched bytes begin.
@@ -82,23 +79,6 @@ struct Move {
 }
 
 impl<P: InspectionOps> Controller<P> {
-    /// The bounds of a task's stack now, or `None` when its runtime has no
-    /// such task.
-    pub(super) fn task_stack_bounds(
-        &self,
-        inferior: &Inferior,
-        task: TaskId,
-    ) -> std::result::Result<Option<Range<u64>>, Arc<str>> {
-        let runtime = self
-            .runtimes(inferior)
-            .into_iter()
-            .find(|runtime| runtime.id == task.runtime)
-            .ok_or("the task's runtime is no longer loaded")?;
-        self.with_runtime_stop(inferior, &runtime, inferior.memory_thread(), |stop| {
-            runtime.model.task_stack(stop, task.number)
-        })
-    }
-
     /// Where on its task's stack a watch of the object at `address` is, for
     /// a watch with a task's scope: how far below the stack's top, which
     /// the runtime's moves keep.
@@ -158,7 +138,7 @@ impl<P: InspectionOps> Controller<P> {
             record!("task {task}'s stack moved unseen to {bounds:#x?}");
             return Ok(Some(WatchpointInvalidation::StackMoved));
         }
-        let Some(root) = self.task_root(inferior, task)? else {
+        let Some(root) = self.task_root(inferior, task, inferior.memory_thread())? else {
             return Ok(Some(WatchpointInvalidation::ScopeExited));
         };
         let view = StackView::task(
@@ -177,39 +157,6 @@ impl<P: InspectionOps> Controller<P> {
             evidence,
         )?;
         Ok((!live).then_some(WatchpointInvalidation::ScopeExited))
-    }
-
-    /// Where a task's frames begin: the thread running it, or the registers
-    /// its runtime saved. `None` when the runtime has no such task.
-    fn task_root(&self, inferior: &Inferior, task: TaskId) -> Result<Option<StackRoot>> {
-        let Some(runtime) = self
-            .runtimes(inferior)
-            .into_iter()
-            .find(|runtime| runtime.id == task.runtime)
-        else {
-            return Ok(None);
-        };
-        let reader = inferior.memory_thread();
-        let found = self.with_runtime_stop(inferior, &runtime, reader, |stop| {
-            runtime.model.task_context(stop, task.number)
-        });
-        let origin = match found {
-            Ok(Some(TaskContext::OnThread(thread))) => RootOrigin::Thread(debug_pid(thread)?),
-            Ok(Some(TaskContext::Saved {
-                registers,
-                after_call,
-            })) => RootOrigin::Saved {
-                registers,
-                after_call,
-                reader,
-            },
-            Ok(None) => return Ok(None),
-            Err(reason) => return Err(Error::TaskUnavailable { task, reason }),
-        };
-        Ok(Some(StackRoot {
-            context: ExecutionContext::Task(task),
-            origin,
-        }))
     }
 
     /// Whether the activation that declared an object still runs on a
