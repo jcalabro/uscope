@@ -11,8 +11,9 @@ use crate::protocol::{
 };
 use crate::unwind::{CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext};
 use crate::{
-    CodeInstanceKind, Error, ImageAddress, ImageLocation, InlineFrameLookup, LoadedModule, Result,
-    SourceLocation, StackFrameId, StackSegment, TaskId, ThreadActivity, VirtualAddress,
+    CodeInstanceKind, CodeRole, Error, ImageAddress, ImageLocation, InlineFrameLookup,
+    LoadedModule, Result, SourceLocation, StackFrameId, StackSegment, TaskId, ThreadActivity,
+    VirtualAddress,
 };
 
 use super::activation::{Activation, StackPosition};
@@ -147,7 +148,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.continue_thread(pid);
         }
         if matches!(kind, StepKind::IntoSource | StepKind::OverSource)
-            && self.stopped_outside_described_code(pid)?
+            && (self.stopped_outside_described_code(pid)? || self.stopped_where_step_leaves(pid)?)
             && self.escape_undescribed_code(pid)?
         {
             return Ok(());
@@ -162,6 +163,31 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(self
             .image_location(VirtualAddress::new(registers.rip))
             .is_none_or(|location| undescribed(&location)))
+    }
+
+    /// Whether the thread is stopped in code a source step leaves for its
+    /// caller rather than stepping through: a stack switch, whose call-frame
+    /// information cannot follow it, or the runtime's own machinery when
+    /// the step did not begin there.
+    fn stopped_where_step_leaves(&self, pid: Pid) -> Result<bool> {
+        let registers = self.ptrace.registers(pid)?;
+        let began_in_runtime = self.step_began_in_runtime();
+        Ok(self
+            .image_location(VirtualAddress::new(registers.rip))
+            .and_then(|location| location.function)
+            .is_some_and(|function| match function.role {
+                CodeRole::StackSwitch => true,
+                role => is_runtime_role(role) && !began_in_runtime,
+            }))
+    }
+
+    fn step_began_in_runtime(&self) -> bool {
+        self.inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .is_some_and(|active| {
+                matches!(&active.kind, ActiveKind::Step { start, .. } if start.began_in_runtime)
+            })
     }
 
     /// Runs to the caller instead of single-stepping through code without
@@ -1031,8 +1057,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         start: &StepStart,
     ) -> Result<bool> {
         let location = self.image_location(VirtualAddress::new(registers.rip));
-        // Undescribed instructions are not source-step destinations.
-        if location.as_ref().is_none_or(undescribed) {
+        // Undescribed instructions are not source-step destinations, and
+        // neither is code the program's author did not write.
+        if location.as_ref().is_none_or(undescribed)
+            || location
+                .as_ref()
+                .and_then(|location| location.function.as_ref())
+                .is_some_and(|function| passes_over(function.role, start))
+        {
             return Ok(false);
         }
         let presentation = self.presentation_for_thread(
@@ -1206,6 +1238,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             stack_pointer: Some(self.stack_position(pid, &registers)),
             plan_addresses,
             call_return,
+            began_in_runtime: location
+                .as_ref()
+                .and_then(|location| location.function.as_ref())
+                .is_some_and(|function| is_runtime_role(function.role)),
             ..StepStart::default()
         })
     }
@@ -1461,6 +1497,25 @@ const fn innermost_frame(native: &libc::user_regs_struct) -> FrameContext {
         instruction: VirtualAddress::new(native.rip),
         cfa: None,
         signal_frame: false,
+    }
+}
+
+/// Whether code in this role is a language runtime's own: its machinery,
+/// its outermost frames, and what it enters by a trap.
+const fn is_runtime_role(role: CodeRole) -> bool {
+    matches!(
+        role,
+        CodeRole::RuntimeInternal | CodeRole::Outermost | CodeRole::TrapEntry
+    )
+}
+
+/// Whether a source step goes on through code in this role rather than
+/// end there: code the program's author did not write, except the
+/// runtime's own when the step began in it.
+const fn passes_over(role: CodeRole, start: &StepStart) -> bool {
+    match role {
+        CodeRole::Wrapper | CodeRole::StackSwitch => true,
+        role => is_runtime_role(role) && !start.began_in_runtime,
     }
 }
 

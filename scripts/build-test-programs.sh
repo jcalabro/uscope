@@ -1261,6 +1261,9 @@ build_go_fixture "$go_fixtures_dir/spin" "$output_dir/spin-go-o2"
 build_go_fixture "$go_fixtures_dir/siblings" "$output_dir/siblings-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/siblings" "$output_dir/siblings-go-o2"
+build_go_fixture "$go_fixtures_dir/steps" "$output_dir/steps-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/steps" "$output_dir/steps-go-o2"
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/panic" "$output_dir/panic-go-o0" \
