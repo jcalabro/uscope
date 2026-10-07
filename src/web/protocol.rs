@@ -328,6 +328,18 @@ pub struct Disassemble {
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub address: Option<String>,
+    /// Intel unless AT&T is asked for.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub syntax: Option<Syntax>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum Syntax {
+    Intel,
+    Att,
 }
 
 #[derive(Debug, Deserialize)]
@@ -888,6 +900,7 @@ pub enum ScopeKey {
 /// One value, as the value tree, watches, and the console show it.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
 pub struct Row {
     pub name: String,
     /// The value's summary, or why there is none.
@@ -901,6 +914,8 @@ pub struct Row {
     pub editable: bool,
     /// The address of its natural memory, as hexadecimal.
     pub memory: Option<String>,
+    /// How many bytes the value occupies there, when it is stored there.
+    pub memory_bytes: Option<u64>,
     /// A row that only says where reading stopped short.
     pub truncated: bool,
 }
@@ -1164,6 +1179,7 @@ mod tests {
             EditWatchpoint::decl(&config),
             WatchpointRef::decl(&config),
             WatchAccess::decl(&config),
+            Syntax::decl(&config),
             SignalPolicy::decl(&config),
             Watchpoint::decl(&config),
             Disassembled::decl(&config),

@@ -416,6 +416,10 @@ editable: boolean,
  */
 memory: string | null, 
 /**
+ * How many bytes the value occupies there, when it is stored there.
+ */
+memoryBytes: number | null, 
+/**
  * A row that only says where reading stopped short.
  */
 truncated: boolean, };
@@ -451,7 +455,11 @@ export type Disassemble = {
  * The address to show, as hexadecimal; the frame's own code when
  * absent.
  */
-address?: string | null, stop: number, thread: number, frame: number, };
+address?: string | null, 
+/**
+ * Intel unless AT&T is asked for.
+ */
+syntax?: Syntax | null, stop: number, thread: number, frame: number, };
 
 export type ReadMemory = { 
 /**
@@ -485,6 +493,8 @@ export type WatchpointRef = { id: number, };
 
 export type WatchAccess = "change" | "write" | "readWrite" | "read";
 
+export type Syntax = "intel" | "att";
+
 export type SignalPolicy = { signal: number, 
 /**
  * Such as `SIGUSR1`; filled in by the server.
@@ -497,7 +507,8 @@ export type Watchpoint = { id: number, access: WatchAccess,
  */
 expression: string | null, address: string, bytes: number, 
 /**
- * Such as `frame 2 of thread 41872` for a local, which ends with it.
+ * Such as `thread 41872's frame at 0x7ffe…, until it returns` for a
+ * local, which ends with its frame; empty for a global.
  */
 scope: string, condition: string | null, hitCondition: string | null, hits: number, };
 

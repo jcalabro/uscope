@@ -149,9 +149,11 @@ impl Reader<'_> {
         let mut children = None;
         let mut editable = false;
         let mut memory = None;
+        let mut memory_bytes = None;
         if let Some(details) = row.details {
             editable = details.editable;
             memory = details.memory.map(|address| format!("{address:#x}"));
+            memory_bytes = details.memory_bytes;
             let (node, counts) = match details.expand {
                 Some(Expand::Children {
                     reference, counts, ..
@@ -195,6 +197,7 @@ impl Reader<'_> {
             children,
             editable,
             memory,
+            memory_bytes,
             truncated: false,
         })
     }
@@ -212,6 +215,7 @@ impl Reader<'_> {
                     children: None,
                     editable: false,
                     memory: None,
+                    memory_bytes: None,
                     truncated: true,
                 }),
             })
@@ -395,6 +399,7 @@ impl Reader<'_> {
                     }),
                     editable: false,
                     memory: None,
+                    memory_bytes: None,
                     truncated: false,
                 })
             }

@@ -79,6 +79,9 @@ pub struct Details {
     /// The value's natural memory: what a pointer points to, or where the
     /// value is stored.
     pub memory: Option<u64>,
+    /// How many bytes the value occupies at `memory`, when it is stored
+    /// there and its size is known: a pointer's pointee has none.
+    pub memory_bytes: Option<u64>,
     /// Whether assigning to the row's path can change it: numbers,
     /// enumerations, and pointers in memory, or whole variables in the
     /// innermost frame's registers.
@@ -252,11 +255,19 @@ impl Presenter<'_> {
                     (_, VariableValueSource::Memory(address)) => Some(address.get()),
                     _ => None,
                 };
+                let memory_bytes = match (value, source) {
+                    (VariableValue::Address(_), _) => None,
+                    (_, VariableValueSource::Memory(_)) => {
+                        item.type_info.and_then(|info| info.byte_size)
+                    }
+                    _ => None,
+                };
                 let whole = item.path.as_ref().is_some_and(Expression::is_name);
                 Some(Details {
                     expand,
                     code,
                     memory,
+                    memory_bytes,
                     editable: editable(source, value, context, whole, item.path.is_some()),
                     constant: matches!(source, VariableValueSource::Constant),
                     text_view: presented

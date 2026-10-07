@@ -96,6 +96,17 @@ async fn disassembly_shows_each_frames_function_and_where_it_is() {
     assert_eq!(elsewhere["function"], "table_find");
     assert_eq!(elsewhere["marked"], Value::Null);
 
+    // AT&T syntax, for those who read it.
+    let mut att = at.clone();
+    att["syntax"] = "att".into();
+    let att = tab.ok("disassemble", att).await;
+    assert!(
+        instructions(&att)
+            .iter()
+            .any(|instruction| instruction["tokens"].to_string().contains('%')),
+        "{att}"
+    );
+
     let registers = tab.ok("registers", at.clone()).await;
     let rip = registers["registers"]
         .as_array()
@@ -125,6 +136,12 @@ async fn memory_reads_and_writes_at_the_stop_it_names() {
     key["expression"] = "req->key".into();
     let key = tab.ok("evaluate", key).await;
     let address = key["memory"].clone();
+    // The array is stored in the request, sixteen bytes of it.
+    assert_eq!(key["memoryBytes"], 16, "{key}");
+    // A pointer's memory is its pointee, whose size it does not know.
+    let mut req = at.clone();
+    req["expression"] = "req".into();
+    assert_eq!(tab.ok("evaluate", req).await["memoryBytes"], Value::Null);
 
     let read = tab
         .ok(
@@ -216,7 +233,9 @@ async fn watchpoints_follow_expressions_and_addresses() {
     // Bytes at an address are watched without a frame.
     let mut gets = at.clone();
     gets["expression"] = "s->stats.gets".into();
-    let address = tab.ok("evaluate", gets).await["memory"].clone();
+    let gets = tab.ok("evaluate", gets).await;
+    assert_eq!(gets["memoryBytes"], 8, "{gets}");
+    let address = gets["memory"].clone();
     let target = format!("{}:8", address.as_str().expect("an address"));
     tab.ok(
         "addWatchpoint",
