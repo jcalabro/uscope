@@ -2586,6 +2586,11 @@ pub enum CodeRole {
     /// The signal-return trampoline a handler returns to: the interrupted
     /// registers are in the kernel's signal frame above it.
     SignalTrampoline,
+    /// The runtime's code that gives the thread to a task, which may be
+    /// another than the task that switched to the stack it runs on. That
+    /// task may have left the thread, so a stack it switched from ends at
+    /// the switch.
+    Dispatch,
 }
 
 /// Describes whether a function instance is emitted out of line or inlined.

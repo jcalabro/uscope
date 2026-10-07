@@ -1819,7 +1819,7 @@ pub(super) const fn innermost_frame(native: &libc::user_regs_struct) -> FrameCon
 const fn is_runtime_role(role: CodeRole) -> bool {
     matches!(
         role,
-        CodeRole::RuntimeInternal | CodeRole::Outermost | CodeRole::TrapEntry
+        CodeRole::RuntimeInternal | CodeRole::Outermost | CodeRole::TrapEntry | CodeRole::Dispatch
     )
 }
 
