@@ -7,6 +7,7 @@
 mod support;
 
 mod cores;
+mod defers;
 mod preemption;
 mod siblings;
 mod stacks;

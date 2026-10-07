@@ -147,8 +147,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         if uses_plan_breakpoints {
             return self.continue_thread(pid);
         }
-        if matches!(kind, StepKind::IntoSource | StepKind::OverSource)
-            && (self.stopped_outside_described_code(pid)? || self.stopped_where_step_leaves(pid)?)
+        if matches!(
+            self.step_mode(kind),
+            StepKind::IntoSource | StepKind::OverSource
+        ) && (self.stopped_outside_described_code(pid)?
+            || self.stopped_where_step_leaves(pid)?)
             && self.escape_undescribed_code(pid)?
         {
             return Ok(());
@@ -172,13 +175,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     fn stopped_where_step_leaves(&self, pid: Pid) -> Result<bool> {
         let registers = self.ptrace.registers(pid)?;
         let began_in_runtime = self.step_began_in_runtime();
-        Ok(self
-            .image_location(VirtualAddress::new(registers.rip))
-            .and_then(|location| location.function)
-            .is_some_and(|function| match function.role {
-                CodeRole::StackSwitch => true,
-                role => is_runtime_role(role) && !began_in_runtime,
-            }))
+        Ok(match self.code_role(VirtualAddress::new(registers.rip)) {
+            Some(CodeRole::StackSwitch) => true,
+            Some(role) => is_runtime_role(role) && !began_in_runtime,
+            None => false,
+        })
     }
 
     fn step_began_in_runtime(&self) -> bool {
@@ -270,6 +271,141 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    /// The kind of step an active step now takes: a step in, once a step
+    /// over or out follows the runtime's calls into the program.
+    pub(super) fn step_mode(&self, kind: StepKind) -> StepKind {
+        let following = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .is_some_and(
+                |active| matches!(&active.kind, ActiveKind::Step { start, .. } if start.following),
+            );
+        if following {
+            StepKind::IntoSource
+        } else {
+            kind
+        }
+    }
+
+    /// The entries of the code that begins a panic, in every image.
+    fn panic_entries(&self, inferior: &Inferior) -> BTreeSet<VirtualAddress> {
+        self.unwind_modules(inferior)
+            .into_iter()
+            .flat_map(|module| {
+                module
+                    .image
+                    .functions()
+                    .iter()
+                    .filter(|function| function.role == CodeRole::Panic)
+                    .flat_map(|function| module.image.instances_for_function(function.id))
+                    .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+                    .filter_map(|instance| instance.ranges.first())
+                    .filter_map(|range| module.loaded.virtual_address(range.start).ok())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Turns a step over or out into one that follows the runtime's calls
+    /// into the program, when its task began a panic, or its frame returned
+    /// into a wrapper, such as the one that calls a function's deferred
+    /// functions as it returns. The program's code those call runs as the
+    /// step's own, so the step goes on as a step in does, from here, to the
+    /// next statement the program runs. Returns whether it began following.
+    ///
+    /// A deferred function may recover, and the runtime then resumes the
+    /// function that deferred it, which returns. Guards on the return
+    /// addresses of the task's frames catch that return.
+    pub(super) fn begin_following(&mut self, pid: Pid, kind: StepKind) -> Result<bool> {
+        if !matches!(kind, StepKind::OverSource | StepKind::Out) {
+            return Ok(false);
+        }
+        let Some((following, frame)) = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match &active.kind {
+                ActiveKind::Step { owner, start, .. } if self.runs_step(*owner, pid) => {
+                    Some((start.following, start.returned_to.or(start.activation)))
+                }
+                _ => None,
+            })
+        else {
+            return Ok(false);
+        };
+        if following {
+            return Ok(false);
+        }
+        let registers = self.ptrace.registers(pid)?;
+        let position = self.stack_position(pid, &registers);
+        let Some(location) = self.image_location(VirtualAddress::new(registers.rip)) else {
+            return Ok(false);
+        };
+        let role = self
+            .code_role(VirtualAddress::new(registers.rip))
+            .unwrap_or_default();
+        let returned = frame.is_some_and(|frame| frame.has_returned(position));
+        let enters = match role {
+            CodeRole::Panic => true,
+            CodeRole::Wrapper => returned,
+            _ => false,
+        };
+        if !enters {
+            return Ok(false);
+        }
+        record!(
+            "step {kind:?} follows the runtime's calls from {}",
+            location
+                .function
+                .as_ref()
+                .map_or("unnamed code", |function| function.name.as_ref())
+        );
+        let execution = self.active_execution()?;
+        self.cleanup_plan_breakpoints(execution)?;
+        let guards = self.frame_return_guards(pid);
+        self.install_additional_plan_breakpoints(execution, &guards)?;
+        let activation = self.top_activation(pid, &registers).ok();
+        let start = self
+            .active_step_mut()
+            .expect("the step remained active while it began following");
+        *start = StepStart {
+            source: location.source.clone(),
+            code_instance: location.physical_instance,
+            physical_instance: location.physical_instance,
+            activation,
+            stack_pointer: Some(position),
+            following: true,
+            ..StepStart::default()
+        };
+        Ok(true)
+    }
+
+    /// The return addresses in the program's own code of a stopped
+    /// thread's frames: where the task goes on when a frame returns,
+    /// however the code between got there.
+    fn frame_return_guards(&self, pid: Pid) -> BTreeSet<VirtualAddress> {
+        let Some(inferior) = self.inferior.as_ref() else {
+            return BTreeSet::new();
+        };
+        let Ok(stack) =
+            self.physical_stack(inferior, &StackRoot::of_thread(pid), DEFAULT_MAX_FRAMES)
+        else {
+            return BTreeSet::new();
+        };
+        stack
+            .frames
+            .iter()
+            .skip(1)
+            .map(|frame| frame.context.instruction)
+            .filter(|address| {
+                self.image_location(*address)
+                    .is_some_and(|location| location.physical_instance.is_some())
+                    && self.code_role(*address) == Some(CodeRole::Ordinary)
+            })
+            .collect()
+    }
+
     /// The task a step begun on a stopped thread follows, whichever thread
     /// runs it: the task whose own stack the thread is on. Code on the
     /// thread's own stacks, such as a runtime's scheduler, stays on the
@@ -337,16 +473,20 @@ impl<P: LinuxTraceOps> Controller<P> {
     fn advance_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
         self.retire_return_guard()?;
         self.retire_epilogue_return_guard()?;
-        self.note_returned_activation(pid, kind)?;
+        let mode = self.step_mode(kind);
+        self.note_returned_activation(pid, mode)?;
+        if self.begin_following(pid, kind)? {
+            return self.start_user_step(pid, kind);
+        }
         self.retire_returned_plan(pid)?;
         if !steps_instructions(kind) && self.begin_epilogue_traversal(pid)? {
             return self.start_user_step(pid, kind);
         }
-        if self.source_step_returned_to_undescribed_code(pid, kind)? {
+        if self.source_step_returned_to_undescribed_code(pid, mode)? {
             self.let_step_run_on()?;
             return self.continue_thread(pid);
         }
-        if matches!(kind, StepKind::OverSource | StepKind::Out) && !self.step_frame_returned() {
+        if matches!(mode, StepKind::OverSource | StepKind::Out) && !self.step_frame_returned() {
             match self.begin_return_traversal(pid) {
                 Ok(true) => return self.start_user_step(pid, kind),
                 Ok(false) => {}
@@ -577,7 +717,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                     active.id,
                     start.epilogue_traversal.is_some() || start.return_traversal.is_some(),
                     start.source.clone(),
-                    *kind,
+                    if start.following {
+                        StepKind::IntoSource
+                    } else {
+                        *kind
+                    },
                     start.activation,
                 )),
                 _ => None,
@@ -926,6 +1070,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         match kind {
             StepKind::Instruction | StepKind::OverInstruction => Ok(true),
             StepKind::IntoSource => self.step_into_source_is_complete(pid, &registers, start),
+            _ if start.following => self.step_into_source_is_complete(pid, &registers, start),
             // Begun in code no debug information describes, a step over
             // has no source line to step over: it ends at the first source
             // statement it reaches, as stepping in does, and needs no frame.
@@ -1060,10 +1205,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         // Undescribed instructions are not source-step destinations, and
         // neither is code the program's author did not write.
         if location.as_ref().is_none_or(undescribed)
-            || location
-                .as_ref()
-                .and_then(|location| location.function.as_ref())
-                .is_some_and(|function| passes_over(function.role, start))
+            || self
+                .code_role(VirtualAddress::new(registers.rip))
+                .is_some_and(|role| passes_over(role, start))
         {
             return Ok(false);
         }
@@ -1228,6 +1372,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             plan_addresses.extend(return_address);
         }
 
+        let panic_guards = if matches!(kind, StepKind::OverSource | StepKind::Out) {
+            self.panic_entries(inferior)
+        } else {
+            BTreeSet::new()
+        };
         Ok(StepStart {
             source,
             code_instance,
@@ -1238,10 +1387,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             stack_pointer: Some(self.stack_position(pid, &registers)),
             plan_addresses,
             call_return,
-            began_in_runtime: location
-                .as_ref()
-                .and_then(|location| location.function.as_ref())
-                .is_some_and(|function| is_runtime_role(function.role)),
+            panic_guards,
+            began_in_runtime: self
+                .code_role(VirtualAddress::new(registers.rip))
+                .is_some_and(is_runtime_role),
             ..StepStart::default()
         })
     }
@@ -1355,6 +1504,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             activation: Some(activation),
             stack_pointer: Some(self.stack_position(pid, registers)),
             plan_addresses,
+            panic_guards: self.panic_entries(inferior),
             ..StepStart::default()
         })
     }
@@ -1485,6 +1635,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    /// What the physical function holding `address` is to stepping, not
+    /// any function inlined into it there.
+    fn code_role(&self, address: VirtualAddress) -> Option<CodeRole> {
+        let inferior = self.inferior.as_ref()?;
+        let image = inferior.loaded_module.image_address(address).ok()?;
+        Some(self.module_image.code_role(image))
+    }
+
     pub(super) fn image_location(&self, address: VirtualAddress) -> Option<ImageLocation> {
         let inferior = self.inferior.as_ref()?;
         let image = inferior.loaded_module.image_address(address).ok()?;
@@ -1511,10 +1669,11 @@ const fn is_runtime_role(role: CodeRole) -> bool {
 
 /// Whether a source step goes on through code in this role rather than
 /// end there: code the program's author did not write, except the
-/// runtime's own when the step began in it.
+/// runtime's own machinery when the step began in it. Wrappers and the
+/// code that begins a panic are stepped through to what they call.
 const fn passes_over(role: CodeRole, start: &StepStart) -> bool {
     match role {
-        CodeRole::Wrapper | CodeRole::StackSwitch => true,
+        CodeRole::Wrapper | CodeRole::StackSwitch | CodeRole::Panic => true,
         role => is_runtime_role(role) && !start.began_in_runtime,
     }
 }

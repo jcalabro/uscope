@@ -138,7 +138,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let mut installed = Vec::new();
         let mut failure = None;
         if let ActiveKind::Step { start, .. } = &kind {
-            for &address in &start.plan_addresses {
+            for &address in start.plan_addresses.union(&start.panic_guards) {
                 if let Err(error) =
                     install_plan_breakpoint(&self.ptrace, inferior, address, execution_id)
                 {
@@ -671,28 +671,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             if self.reach_signal_guard(pid, address)? {
                 return Ok(());
             }
+            if self.begin_following(pid, kind)? {
+                // The step goes on by single steps.
+                return self.go_on_without_plan(pid, address, Some(kind));
+            }
+            let mode = self.step_mode(kind);
             if !steps_instructions(kind) {
                 self.begin_epilogue_traversal(pid)?;
             }
-            self.note_returned_activation(pid, kind)?;
-            if self.source_step_returned_to_undescribed_code(pid, kind)? {
+            self.note_returned_activation(pid, mode)?;
+            if self.source_step_returned_to_undescribed_code(pid, mode)? {
                 self.let_step_run_on()?;
-                // A user breakpoint that declined this hit still owns the
-                // site, which the thread then steps over.
-                let lifted = self
-                    .inferior
-                    .as_ref()
-                    .ok_or(Error::NotRunning)?
-                    .thread(pid)?
-                    .stopped_at_breakpoint
-                    .is_none();
-                return if !lifted {
-                    self.repair_when_alone(pid, address)
-                } else if self.barrier_active() {
-                    self.finish_barrier_if_ready()
-                } else {
-                    self.continue_thread(pid)
-                };
+                return self.go_on_without_plan(pid, address, None);
             }
             if let Some(reason) = self.user_step_stop(pid, kind)? {
                 // The plan's sites, this one among them, are removed when
@@ -718,6 +708,34 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.finish_barrier_if_ready()
         } else {
             self.repair_when_alone(pid, address)
+        }
+    }
+
+    /// Goes on from a site at which a step removed its own plan: a user
+    /// breakpoint that declined this hit still owns the site, which the
+    /// thread then steps over; otherwise the thread goes on by single
+    /// steps of `stepping`, or runs.
+    fn go_on_without_plan(
+        &mut self,
+        pid: Pid,
+        address: VirtualAddress,
+        stepping: Option<StepKind>,
+    ) -> Result<()> {
+        let lifted = self
+            .inferior
+            .as_ref()
+            .ok_or(Error::NotRunning)?
+            .thread(pid)?
+            .stopped_at_breakpoint
+            .is_none();
+        if !lifted {
+            self.repair_when_alone(pid, address)
+        } else if self.barrier_active() {
+            self.finish_barrier_if_ready()
+        } else if let Some(kind) = stepping {
+            self.start_user_step(pid, kind)
+        } else {
+            self.continue_thread(pid)
         }
     }
 
