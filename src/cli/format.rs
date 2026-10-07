@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use uscope::{
@@ -10,10 +11,10 @@ use uscope::{
     CoreModuleState, DecodedInstruction, DisassembledInstruction, Disassembly, DisassemblyBlock,
     DisassemblyView, ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, HitCondition,
     IndirectTarget, InstructionContent, InstructionReferenceKind, InstructionTokenKind,
-    InvalidatedWatchpoint, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId,
-    ModuleIdentity, ModuleImage, RegisterSnapshot, SourceContext, StackFrame, StateSnapshot,
-    StepKind, StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary, ThreadState,
-    VirtualAddress, WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
+    InvalidatedWatchpoint, LineNumber, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
+    ModuleId, ModuleIdentity, ModuleImage, RegisterSnapshot, SourceContext, StackFrame,
+    StateSnapshot, StepKind, StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary,
+    ThreadState, VirtualAddress, WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
 
 use super::commands::{COMMANDS, CommandSpec};
@@ -185,7 +186,7 @@ pub fn condition_owner(owner: ConditionOwner) -> String {
     }
 }
 
-pub fn breakpoint(breakpoint: &Breakpoint, renderer: Renderer) -> String {
+pub fn breakpoint(breakpoint: &Breakpoint, placed: &[Placed], renderer: Renderer) -> String {
     let heading = format!(
         "{} {} set",
         renderer.paint(
@@ -198,28 +199,101 @@ pub fn breakpoint(breakpoint: &Breakpoint, renderer: Renderer) -> String {
         ),
         renderer.paint(Role::Metadata, breakpoint.id),
     );
-    let condition = hit_condition(breakpoint.hit_condition, breakpoint.hit_count, renderer)
-        .map(|condition| format!(", {condition}"))
-        .unwrap_or_default();
-    if let [resolved] = breakpoint.locations.as_ref() {
-        return format!(
-            "{heading} at {}{condition}",
-            breakpoint_location(resolved.location, renderer)
-        );
+    let mut options = String::new();
+    let stops = hit_condition(breakpoint.hit_condition, breakpoint.hit_count, renderer);
+    match (stops, &breakpoint.condition) {
+        (Some(stops), Some(condition)) => write!(
+            options,
+            ", {stops} where {}",
+            renderer.paint(Role::Value, condition)
+        ),
+        (Some(stops), None) => write!(options, ", {stops}"),
+        (None, Some(condition)) => write!(
+            options,
+            ", stops where {}",
+            renderer.paint(Role::Value, condition)
+        ),
+        (None, None) => Ok(()),
     }
-    let mut output = format!(
-        "{heading} at {} locations{condition}",
-        breakpoint.locations.len()
-    );
-    for resolved in breakpoint.locations.iter() {
+    .expect("writing to a String cannot fail");
+    if let Some(message) = &breakpoint.log_message {
         write!(
-            output,
-            "\n  {}",
-            breakpoint_location(resolved.location, renderer)
+            options,
+            ", logs \"{}\"",
+            renderer.paint(Role::Value, message)
         )
         .expect("writing to a String cannot fail");
     }
+    if let [only] = placed {
+        return format!("{heading} at {}{options}", self::placed(only, renderer));
+    }
+    let mut output = if placed.is_empty() {
+        format!("{heading}, pending until a module with its code loads{options}")
+    } else {
+        format!("{heading} at {} locations{options}", placed.len())
+    };
+    for location in placed {
+        let described = self::placed(location, renderer);
+        if location.function.is_none() && location.source.is_none() {
+            write!(output, "\n  {described}")
+        } else {
+            write!(
+                output,
+                "\n  {}  {described}",
+                breakpoint_address(location.location, renderer)
+            )
+        }
+        .expect("writing to a String cannot fail");
+    }
     output
+}
+
+/// Where one breakpoint location is, as far as its module tells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placed {
+    pub location: BreakpointLocation,
+    /// The innermost function, inline or not, containing it.
+    pub function: Option<Arc<str>>,
+    pub source: Option<(Arc<PathBuf>, LineNumber)>,
+    /// The module containing it, unless it is the program's own.
+    pub module: Option<Arc<PathBuf>>,
+}
+
+/// `parse_header at parse.c:41 in libparse.so`, saying as much as is known
+/// and the address when no source line is.
+pub fn placed(placed: &Placed, renderer: Renderer) -> String {
+    let mut output = match (&placed.function, &placed.source) {
+        (Some(function), Some((path, line))) => format!(
+            "{} at {}",
+            renderer.paint(Role::Name, function),
+            renderer.paint(Role::Metadata, renderer.location(path, line))
+        ),
+        (None, Some((path, line))) => renderer
+            .paint(Role::Metadata, renderer.location(path, line))
+            .to_string(),
+        (Some(function), None) => format!(
+            "{} at {}",
+            renderer.paint(Role::Name, function),
+            breakpoint_address(placed.location, renderer)
+        ),
+        (None, None) => breakpoint_location(placed.location, renderer),
+    };
+    if let Some(module) = &placed.module {
+        let name = module.file_name().map_or_else(
+            || module.display().to_string(),
+            |name| name.display().to_string(),
+        );
+        write!(output, " in {}", renderer.paint(Role::Name, name))
+            .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+fn breakpoint_address(location: BreakpointLocation, renderer: Renderer) -> String {
+    match location {
+        BreakpointLocation::Image(address) => renderer.paint(Role::Metadata, address).to_string(),
+        BreakpointLocation::Virtual(address) => renderer.paint(Role::Metadata, address).to_string(),
+    }
 }
 
 /// Describes a breakpoint whose hit condition changed.

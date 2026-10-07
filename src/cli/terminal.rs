@@ -316,10 +316,12 @@ impl Renderer {
                 || path.display().to_string(),
                 |name| name.display().to_string(),
             ),
+            // A root of `/` holds every path, so paths stay absolute there.
             PathStyle::Relative => self
                 .look
                 .root
                 .as_deref()
+                .filter(|root| root.parent().is_some())
                 .and_then(|root| path.strip_prefix(root).ok())
                 .filter(|relative| !relative.as_os_str().is_empty())
                 .unwrap_or(path)
