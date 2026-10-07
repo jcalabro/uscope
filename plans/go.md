@@ -1462,7 +1462,12 @@ pointer is outside its stack.)*
 
 ### Narrow tests, only where logic is intricate
 
-- **The runtime model on cores and fake memory.**
+- **The runtime model on cores and fake memory.** *(Done:
+  `src/runtime_model/go/tests.rs` binds the model to a real runtime's
+  layout and static data, and writes goroutines and threads: `_Gscan`
+  masking, an unreadable goroutine among readable ones, both ways of
+  keeping a thread's goroutine, and a missing name. Cores are
+  `tests/go/cores.rs`, and the stack switches `tests/go/stacks.rs`.)*
   - The stack-switch table, the TLS formulas per build mode, `_Gscan`
     masking, and partial results.
   - Checkpoint cores are the preferred input, since they are real memory.
@@ -1474,15 +1479,20 @@ pointer is outside its stack.)*
   - That reference output is recorded at build time for a normal and a
     stripped binary.
   - The reader also gets a fuzz target.
-- **`Activation`'s predicates** across a moved stack.
-- **A sabotage test for each new oracle.**
+- **`Activation`'s predicates** across a moved stack. *(Done:
+  `src/backend/linux/activation.rs`.)*
+- **A sabotage test for each new oracle.** *(Done:
+  `the_truth_fails_on_the_lies_it_looks_for` and
+  `the_checks_fail_on_the_faults_they_look_for`.)*
   - The `TRUTH` comparator and `check_go_stop` must fail on a dropped
     frame, a missing goroutine, a wrong value, and a step that changed
     `me`, as AGENTS.md requires of oracles.
 - **The contract, sabotaged.** A runtime image missing a field makes the
   feature that needs it unavailable, with the field's name in the reason.
+  *(Done: `a_missing_name_makes_only_what_needs_it_unavailable`.)*
 - **Following a task across threads with a fake runtime model on
   `FakeTrace`,** so the generic run-control code is tested without Go.
+  *(Done: `a_step_follows_its_task_to_another_thread_and_passes_the_others`.)*
 - **The two boundary tests.**
 
 ### DAP
