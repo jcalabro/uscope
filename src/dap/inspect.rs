@@ -4,12 +4,8 @@
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
-use uscope::{
-    InspectionLimits, StackFrame, StopContext, StopReason, UnwindTermination, ValueChildQuery,
-    VariableKind, VariableState,
-};
+use uscope::{StackFrame, StopContext, StopReason, UnwindTermination, VariableKind};
 
-use super::complete::Completing;
 use super::handles::{Location, Variables};
 use super::protocol::{
     CompletionsArguments, ErrorBody, EvaluateArguments, ExceptionInfoArguments, LocationsArguments,
@@ -17,12 +13,11 @@ use super::protocol::{
     StackTraceArguments, ValueFormat, VariablesArguments,
 };
 use super::session::{Session, Stop, error, parse, signal_text, thread_id};
-use super::values::{self, Item, Options};
+use super::values::{self, Options};
+use crate::present::{self, Filter, Item, ListError, Listed, Presenter, Window, complete};
 
 /// The most children one `variables` request returns.
 const MAX_CHILDREN: u64 = 1024;
-/// The most children one debugger request reads.
-const PAGE: u64 = 256;
 /// The most completions one request offers.
 const MAX_COMPLETIONS: usize = 1000;
 
@@ -208,7 +203,7 @@ impl Session {
                                 if names {
                                     text.push_str(" = ");
                                 }
-                                text.push_str(&values::text(
+                                text.push_str(&present::text(
                                     variable.type_info.as_ref(),
                                     &variable.state,
                                     hex,
@@ -318,6 +313,7 @@ impl Session {
             .variables_of(arguments.variables_reference)
             .cloned()
             .ok_or_else(|| stale("variables", arguments.variables_reference))?;
+        let options = self.value_options(arguments.format.as_ref());
         let window = Window {
             start: u64::try_from(arguments.start.unwrap_or(0)).unwrap_or(0),
             count: arguments
@@ -326,7 +322,6 @@ impl Session {
                 .filter(|count| *count != 0)
                 .unwrap_or(u64::MAX)
                 .min(MAX_CHILDREN),
-            options: self.value_options(arguments.format.as_ref()),
             filter: match arguments.filter.as_deref() {
                 Some("indexed") => Some(Filter::Indexed),
                 Some("named") => Some(Filter::Named),
@@ -342,44 +337,7 @@ impl Session {
         }
         let list = arguments.variables_reference;
         let context = variables.context();
-        let rows = match variables {
-            Variables::Scope { context, kind } => self.scope_rows(context, kind, window).await?,
-            Variables::Registers { context } => {
-                let handle = self.target_handle()?;
-                let registers = handle.at(context).registers().await.map_err(error)?;
-                window
-                    .slice(registers.registers.iter())
-                    .map(|value| values::register(value, registers.target.byte_order))
-                    .collect()
-            }
-            Variables::Statics {
-                context,
-                module,
-                file,
-            } => self.static_rows(context, module, file, window).await?,
-            Variables::Children {
-                context,
-                reference,
-                path,
-                ..
-            } => {
-                self.children(context, reference, path.as_ref(), window)
-                    .await?
-            }
-            Variables::Pointee {
-                context,
-                reference,
-                name,
-                path,
-            } => {
-                self.pointee_rows(context, reference, &name, path, window)
-                    .await?
-            }
-            Variables::Range {
-                context,
-                expression,
-            } => self.range_rows(context, &expression, window).await?,
-        };
+        let rows = self.rows(variables, window, options).await?;
         // Data breakpoints name rows by their list and name.
         for row in &rows {
             if let (Some(name), Some(path)) = (
@@ -395,100 +353,86 @@ impl Session {
         Ok(json!({"variables": rows}))
     }
 
+    /// The rows of one list of variables.
+    async fn rows(
+        &mut self,
+        variables: Variables,
+        window: Window,
+        options: Options,
+    ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
+        let context = variables.context();
+        let handle = self.target_handle()?;
+        let code = self.code();
+        let presenter = presenter(&handle, &code, options);
+        let listed = match variables {
+            Variables::Scope { context, kind } => {
+                return self.scope_rows(context, kind, window, options).await;
+            }
+            Variables::Registers { context } => {
+                let registers = handle.at(context).registers().await.map_err(error)?;
+                return Ok(window
+                    .slice(registers.registers.iter())
+                    .map(|value| values::register(value, registers.target.byte_order))
+                    .collect());
+            }
+            Variables::Statics {
+                context,
+                module,
+                file,
+            } => {
+                let image = self
+                    .image(module)
+                    .await
+                    .ok_or_else(|| ErrorBody::new("the frame's module is no longer loaded"))?;
+                presenter
+                    .statics(context, &image, module, file, window)
+                    .await
+            }
+            Variables::Children {
+                context,
+                reference,
+                path,
+                ..
+            } => {
+                presenter
+                    .children(context, reference, path.as_ref(), window)
+                    .await
+            }
+            Variables::Pointee {
+                context,
+                reference,
+                name,
+                path,
+            } => {
+                presenter
+                    .pointee(context, reference, &name, path, window)
+                    .await
+            }
+            Variables::Range {
+                context,
+                expression,
+            } => presenter.range(context, &expression, window).await,
+        }
+        .map_err(list_error)?;
+        self.present_all(listed, context, options)
+    }
+
     /// Presents a frame's parameters or locals.
     async fn scope_rows(
         &mut self,
         context: StopContext,
         kind: VariableKind,
         window: Window,
+        options: Options,
     ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
         let snapshot = self.frame_variables(context).await?;
         let module = self.frame_file(context).await.map(|(module, _)| module);
-        let unnamed = self.unnamed_variables(context, &snapshot).await;
-        let mut rows = Vec::new();
-        for (index, variable) in window.slice(
-            snapshot
-                .variables
-                .iter()
-                .enumerate()
-                .filter(|(_, variable)| variable.kind == kind),
-        ) {
-            let path = if unnamed.contains(&index) {
-                None
-            } else {
-                uscope::Expression::name(&variable.name)
-            };
-            rows.push(self.present(
-                Item {
-                    name: &variable.name,
-                    path,
-                    raw: false,
-                    type_info: variable.type_info.as_ref(),
-                    state: &variable.state,
-                    declaration: module.zip(variable.declaration.clone()),
-                },
-                context,
-                window.options,
-            )?);
-        }
-        if kind == VariableKind::Local
-            && let Some(exhaustion) = snapshot.completion.exhaustion()
-        {
-            rows.push(values::truncation(format!(
-                "not every variable was read: the {:?} limit is {}",
-                exhaustion.resource, exhaustion.limit
-            )));
-        }
-        Ok(rows)
-    }
-
-    /// The frame's variables their names do not reach, because another of
-    /// the frame's variables has the same name, such as one an inner block
-    /// hides: all but the one the name binds, told apart by their storage,
-    /// or all of them when their storage cannot tell.
-    async fn unnamed_variables(
-        &self,
-        context: StopContext,
-        snapshot: &uscope::VariableSnapshot,
-    ) -> std::collections::BTreeSet<usize> {
-        let storage = |state: &VariableState| match state {
-            VariableState::Available {
-                source:
-                    source @ (uscope::VariableValueSource::Memory(_)
-                    | uscope::VariableValueSource::Register(_)),
-                ..
-            } => Some(source.clone()),
-            _ => None,
-        };
-        let mut by_name = std::collections::BTreeMap::<&str, Vec<usize>>::new();
-        for (index, variable) in snapshot.variables.iter().enumerate() {
-            by_name.entry(&variable.name).or_default().push(index);
-        }
-        let mut unnamed = std::collections::BTreeSet::new();
-        for (name, indices) in by_name.into_iter().filter(|(_, indices)| indices.len() > 1) {
-            let bound = if let (Ok(handle), Some(expression)) =
-                (self.target_handle(), uscope::Expression::name(name))
-                && let Ok(uscope::Evaluation::Value { value, .. }) =
-                    handle.at(context).evaluate(&expression).await
-            {
-                storage(&value.state)
-            } else {
-                None
-            };
-            let matching = indices
-                .iter()
-                .copied()
-                .filter(|index| {
-                    bound.is_some() && storage(&snapshot.variables[*index].state) == bound
-                })
-                .collect::<Vec<_>>();
-            for index in indices {
-                if matching != [index] {
-                    unnamed.insert(index);
-                }
-            }
-        }
-        unnamed
+        let handle = self.target_handle()?;
+        let code = self.code();
+        let listed = presenter(&handle, &code, options)
+            .scope(context, &snapshot, kind, module, window)
+            .await;
+        self.present_all(listed, context, options)
     }
 
     /// The module and source file of a frame's location, when it has one.
@@ -505,204 +449,25 @@ impl Session {
         Some((frame.module?, frame.source.as_ref()?.file))
     }
 
-    /// Presents the static variables declared in a frame's source file, as
-    /// the frame's thread sees them.
-    async fn static_rows(
+    /// Presents what the shared presenter listed as the client's variables.
+    fn present_all(
         &mut self,
+        listed: Vec<Listed>,
         context: StopContext,
-        module: uscope::ModuleId,
-        file: uscope::SourceFileId,
-        window: Window,
+        options: Options,
     ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
-        let image = self
-            .image(module)
-            .await
-            .ok_or_else(|| ErrorBody::new("the frame's module is no longer loaded"))?;
-        let handle = self.target_handle()?;
-        let mut rows = Vec::new();
-        let declared = image.globals().iter().filter(|global| {
-            global
-                .declaration
-                .as_ref()
-                .is_some_and(|declaration| declaration.file == file)
-        });
-        for global in window.slice(declared) {
-            let variable = handle
-                .at(context)
-                .global_with_limits(
-                    uscope::GlobalVariableReference {
-                        module,
-                        image: image.id(),
-                        variable: global.id,
-                    },
-                    InspectionLimits::default(),
-                )
-                .await
-                .map_err(error)?;
-            rows.push(
-                self.present(
-                    Item {
-                        name: &variable.name,
-                        path: global_expression(&image, global),
-                        raw: false,
-                        type_info: variable.type_info.as_ref(),
-                        state: &variable.state,
-                        declaration: global
-                            .declaration
-                            .clone()
-                            .map(|declaration| (module, declaration)),
-                    },
+        listed
+            .into_iter()
+            .map(|entry| match entry {
+                Listed::Value(row) => Ok(values::variable(
+                    *row,
                     context,
-                    window.options,
-                )?,
-            );
-        }
-        Ok(rows)
-    }
-
-    /// Presents what a pointer points to: an aggregate's members directly,
-    /// or else the one value.
-    async fn pointee_rows(
-        &mut self,
-        context: StopContext,
-        reference: uscope::DereferenceReference,
-        name: &str,
-        path: Option<uscope::Expression>,
-        window: Window,
-    ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
-        let handle = self.target_handle()?;
-        let pointee = handle.dereference(reference).await.map_err(error)?;
-        let path = path.and_then(|path| path.dereferenced());
-        if let VariableState::Available {
-            children,
-            presentation,
-            ..
-        } = &pointee.state
-        {
-            let children = presentation
-                .as_deref()
-                .filter(|presentation| presentation.shape != uscope::PresentedShape::Raw)
-                .map_or(children, |presentation| &presentation.children);
-            if let uscope::ValueChildren::Available(children) = children {
-                return self
-                    .children(context, children.clone(), path.as_ref(), window)
-                    .await;
-            }
-        }
-        if window.start != 0 {
-            return Ok(Vec::new());
-        }
-        Ok(vec![self.present(
-            Item {
-                name: &format!("*{name}"),
-                path,
-                raw: false,
-                type_info: Some(&pointee.type_info),
-                state: &pointee.state,
-                declaration: None,
-            },
-            context,
-            window.options,
-        )?])
-    }
-
-    /// Presents a window of an evaluated range's elements.
-    async fn range_rows(
-        &mut self,
-        context: StopContext,
-        expression: &uscope::Expression,
-        window: Window,
-    ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
-        let handle = self.target_handle()?;
-        let evaluation = handle
-            .at(context)
-            .evaluate(expression)
-            .await
-            .map_err(error)?;
-        let uscope::Evaluation::Range(page) = evaluation else {
-            return Err(ErrorBody::new("the range no longer evaluates to elements"));
-        };
-        let base = expression.range_base();
-        let mut rows = Vec::new();
-        let start = usize::try_from(window.start).unwrap_or(usize::MAX);
-        let count = usize::try_from(window.count).unwrap_or(usize::MAX);
-        for child in page.children.iter().skip(start).take(count) {
-            rows.push(self.present(
-                Item {
-                    name: &values::child_name(child),
-                    path: values::child_path(base.as_ref(), child),
-                    raw: false,
-                    type_info: Some(&child.type_info),
-                    state: &child.state,
-                    declaration: None,
-                },
-                context,
-                window.options,
-            )?);
-        }
-        if let Some(exhaustion) = page.completion.exhaustion() {
-            rows.push(values::truncation(limit_text(exhaustion)));
-        }
-        Ok(rows)
-    }
-
-    /// Presents a window of an aggregate's children, reading them in pages.
-    async fn children(
-        &mut self,
-        context: StopContext,
-        reference: std::sync::Arc<uscope::ValueChildrenReference>,
-        path: Option<&uscope::Expression>,
-        window: Window,
-    ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
-        let handle = self.target_handle()?;
-        // A view's elements come first and its named children after them;
-        // anything else's children are all of one kind.
-        let (start, end) = match (window.filter, reference.elements()) {
-            (Some(Filter::Indexed), Some(elements)) => (window.start, elements),
-            (Some(Filter::Named), Some(elements)) => {
-                (elements.saturating_add(window.start), reference.total())
-            }
-            _ => (window.start, reference.total()),
-        };
-        let end = end.min(start.saturating_add(window.count));
-        let mut rows = Vec::new();
-        let mut offset = start;
-        while offset < end {
-            let limit = (end - offset).min(PAGE);
-            let page = handle
-                .value_children(
-                    reference.clone(),
-                    ValueChildQuery {
-                        offset,
-                        limit: u32::try_from(limit).expect("pages are small"),
-                    },
-                )
-                .await
-                .map_err(error)?;
-            for child in page.children.iter().filter(|child| values::shown(child)) {
-                rows.push(self.present(
-                    Item {
-                        name: &values::child_name(child),
-                        path: values::child_path(path, child),
-                        raw: matches!(child.relationship, uscope::ValueChildRelationship::Raw),
-                        type_info: Some(&child.type_info),
-                        state: &child.state,
-                        declaration: None,
-                    },
-                    context,
-                    window.options,
-                )?);
-            }
-            if let Some(exhaustion) = page.completion.exhaustion() {
-                rows.push(values::truncation(limit_text(exhaustion)));
-                break;
-            }
-            if page.children.is_empty() {
-                break;
-            }
-            offset += page.children.len() as u64;
-        }
-        Ok(rows)
+                    options,
+                    &mut self.references,
+                )?),
+                Listed::Truncated(description) => Ok(values::truncation(description)),
+            })
+            .collect()
     }
 
     fn present(
@@ -711,13 +476,14 @@ impl Session {
         context: StopContext,
         options: Options,
     ) -> Result<Map<String, Value>, ErrorBody> {
+        let handle = self.target_handle()?;
         let code = self.code();
+        let row = presenter(&handle, &code, options).row(item, context);
         Ok(values::variable(
-            item,
+            row,
             context,
             options,
             &mut self.references,
-            &code,
         )?)
     }
 
@@ -775,7 +541,7 @@ impl Session {
             Ok(evaluation) => evaluation,
             // The frame does not know the command's name, so it is the command.
             Err(uscope::Error::Expression(failure))
-                if command.is_some_and(|(_, name)| names_only(&failure, name)) =>
+                if command.is_some_and(|(_, name)| present::names_only(&failure, name)) =>
             {
                 return self.console_line(expression, Some(context)).await;
             }
@@ -947,31 +713,6 @@ impl Session {
     }
 }
 
-/// The part of a list of variables a request asks for, and how to show it.
-#[derive(Clone, Copy)]
-struct Window {
-    start: u64,
-    count: u64,
-    options: Options,
-    /// Which children the client asked for: a view's elements, which it
-    /// calls indexed, or its named children.
-    filter: Option<Filter>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Filter {
-    Indexed,
-    Named,
-}
-
-impl Window {
-    fn slice<T>(self, items: impl Iterator<Item = T>) -> impl Iterator<Item = T> {
-        items
-            .skip(usize::try_from(self.start).unwrap_or(usize::MAX))
-            .take(usize::try_from(self.count).unwrap_or(usize::MAX))
-    }
-}
-
 impl Session {
     pub(super) async fn set_variable(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<SetVariableArguments>(arguments, "setVariable arguments")?;
@@ -1075,19 +816,35 @@ impl Session {
             Some(frame) => self.references.frame_context(frame),
             None => self.stop.as_ref().map(Stop::innermost),
         };
-        let (completing, partial, start) = super::complete::completing(typed);
+        let (completing, partial, start) = complete::completing(typed);
         let command = typed.split_whitespace().next().unwrap_or_default();
-        let candidates = self
-            .completion_candidates(completing, partial, command, context)
-            .await;
+        let variables = match (context, completing) {
+            (Some(context), complete::Completing::Name { .. }) => {
+                self.frame_variables(context).await.ok()
+            }
+            _ => None,
+        };
+        let handle = self.target_handle().ok();
+        let code = self.code();
+        let candidates = match &handle {
+            Some(handle) => {
+                complete::candidates(
+                    &presenter(handle, &code, Options::default()),
+                    completing,
+                    partial,
+                    command,
+                    context,
+                    variables.as_deref(),
+                )
+                .await
+            }
+            None => Vec::new(),
+        };
         let start = u64::try_from(typed[..start].chars().count()).unwrap_or(0)
             + u64::from(self.support().columns_start_at1);
         let length = partial.chars().count();
-        let mut seen = std::collections::BTreeSet::new();
-        let targets = candidates
+        let targets = complete::matching(candidates, partial, MAX_COMPLETIONS)
             .into_iter()
-            .filter(|(label, _)| label.starts_with(partial) && seen.insert(label.clone()))
-            .take(MAX_COMPLETIONS)
             .map(|(label, kind)| {
                 json!({
                     "label": label,
@@ -1099,190 +856,6 @@ impl Session {
             .collect::<Vec<_>>();
         Ok(json!({"targets": targets}))
     }
-
-    /// What may complete the part being completed, before filtering by it.
-    async fn completion_candidates(
-        &mut self,
-        completing: Completing<'_>,
-        partial: &str,
-        command: &str,
-        context: Option<StopContext>,
-    ) -> Vec<(String, &'static str)> {
-        let mut candidates = Vec::new();
-        match completing {
-            Completing::Name { first: false } if command == "info" => {
-                for subcommand in crate::cli::commands::INFO_SUBCOMMANDS {
-                    candidates.push((subcommand.to_owned(), "value"));
-                }
-            }
-            Completing::Name { first: false } if command == "handle" => {
-                for code in uscope::signal_codes() {
-                    if let Some(name) = uscope::signal_name(code) {
-                        candidates.push((name, "value"));
-                    }
-                }
-            }
-            Completing::Name { first } => {
-                if first {
-                    for spec in crate::cli::commands::COMMANDS {
-                        candidates.push((spec.name.to_owned(), "keyword"));
-                    }
-                }
-                if let Some(context) = context
-                    && let Ok(snapshot) = self.frame_variables(context).await
-                {
-                    for variable in snapshot.variables.iter() {
-                        candidates.push((variable.name.to_string(), "variable"));
-                    }
-                }
-                for (_, image) in self.code().modules() {
-                    for global in image.globals() {
-                        if global.name == global.qualified_name {
-                            candidates.push((global.name.to_string(), "variable"));
-                        } else if global.qualified_name.starts_with(partial) {
-                            candidates.push((global.qualified_name.to_string(), "variable"));
-                        }
-                    }
-                }
-            }
-            Completing::Qualified { qualifier } => {
-                let prefix = if qualifier.is_empty() {
-                    String::new()
-                } else {
-                    format!("{qualifier}::")
-                };
-                for (_, image) in self.code().modules() {
-                    for global in image.globals() {
-                        if let Some(rest) = global.qualified_name.strip_prefix(prefix.as_str()) {
-                            candidates.push((rest.to_owned(), "variable"));
-                        }
-                    }
-                }
-            }
-            Completing::Member { base } => {
-                if let Some(context) = context {
-                    for member in self.member_names(context, base).await {
-                        candidates.push((member, "field"));
-                    }
-                }
-            }
-            Completing::Register => {
-                if let Some(context) = context
-                    && let Ok(handle) = self.target_handle()
-                    && let Ok(registers) = handle.at(context).registers().await
-                {
-                    for register in registers.registers.iter() {
-                        candidates.push((register.register.name.to_string(), "variable"));
-                    }
-                }
-            }
-            Completing::Nothing => {}
-        }
-        candidates
-    }
-
-    /// The names of the members of the value an expression names, or of
-    /// what it points to. None when it names no aggregate.
-    async fn member_names(&self, context: StopContext, base: &str) -> Vec<String> {
-        let (Ok(handle), Ok(expression)) = (self.target_handle(), uscope::Expression::parse(base))
-        else {
-            return Vec::new();
-        };
-        let Ok(uscope::Evaluation::Value { value, .. }) = handle
-            .at(context)
-            .evaluate_with(
-                &expression,
-                uscope::EvaluationMode::Read,
-                InspectionLimits::default(),
-            )
-            .await
-        else {
-            return Vec::new();
-        };
-        let mut state = value.state;
-        if let VariableState::Available {
-            children: uscope::ValueChildren::NotApplicable,
-            dereference: uscope::DereferenceState::Available(reference),
-            ..
-        } = &state
-            && let Ok(pointee) = handle.dereference(reference.clone()).await
-        {
-            state = pointee.state;
-        }
-        let VariableState::Available {
-            children: uscope::ValueChildren::Available(children),
-            ..
-        } = state
-        else {
-            return Vec::new();
-        };
-        let Ok(page) = handle
-            .value_children(
-                children,
-                ValueChildQuery {
-                    offset: 0,
-                    limit: u32::try_from(PAGE).expect("pages are small"),
-                },
-            )
-            .await
-        else {
-            return Vec::new();
-        };
-        page.children
-            .iter()
-            .filter(|child| values::shown(child))
-            .filter_map(|child| match &child.relationship {
-                uscope::ValueChildRelationship::Member(member) => {
-                    member.name.as_deref().map(str::to_owned)
-                }
-                _ => None,
-            })
-            .collect()
-    }
-}
-
-/// A name that reaches a global from any frame, which the frame's own
-/// locals cannot shadow: its qualified name, or, when other files declare
-/// the same, that name qualified by its file's name or path.
-fn global_expression(
-    image: &uscope::ModuleImage,
-    global: &uscope::GlobalVariableInfo,
-) -> Option<uscope::Expression> {
-    let mut selectors = vec![global.qualified_name.to_string()];
-    if let Some(file) = global
-        .declaration
-        .as_ref()
-        .and_then(|declaration| image.source_file(declaration.file))
-    {
-        if let Some(name) = file.path.file_name() {
-            selectors.push(format!(
-                "{}::{}",
-                name.to_string_lossy(),
-                global.qualified_name
-            ));
-        }
-        selectors.push(format!(
-            "{}::{}",
-            file.path.display(),
-            global.qualified_name
-        ));
-    }
-    selectors
-        .into_iter()
-        .find(|selector| {
-            image
-                .global_named(selector)
-                .is_ok_and(|found| found.id == global.id)
-        })
-        .and_then(|selector| uscope::Expression::outermost(&selector))
-}
-
-/// Whether an evaluation failed only because the frame does not know the
-/// name that starts the text.
-fn names_only(failure: &uscope::ExpressionError, name: &str) -> bool {
-    failure.kind == uscope::ExpressionErrorKind::UnknownName
-        && failure.span.start == 0
-        && failure.span.end as usize == name.len()
 }
 
 /// An expression's mistake: in the console, pointing at the text it is
@@ -1301,9 +874,21 @@ fn stale(kind: &str, id: i64) -> ErrorBody {
     ))
 }
 
-fn limit_text(exhaustion: uscope::InspectionExhaustion) -> String {
-    format!(
-        "inspection stopped at its {:?} limit of {}",
-        exhaustion.resource, exhaustion.limit
-    )
+const fn presenter<'a>(
+    handle: &'a uscope::DebuggerHandle,
+    code: &'a present::Code,
+    options: Options,
+) -> Presenter<'a> {
+    Presenter {
+        handle,
+        code,
+        hex: options.hex,
+    }
+}
+
+fn list_error(failure: ListError) -> ErrorBody {
+    match failure {
+        ListError::Debugger(failure) => error(failure),
+        ListError::Changed(message) => ErrorBody::new(message),
+    }
 }

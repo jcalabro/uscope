@@ -2,6 +2,7 @@
 
 mod cli;
 mod dap;
+mod present;
 mod web;
 
 use std::ffi::OsString;
