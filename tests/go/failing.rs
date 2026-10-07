@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 use uscope::{
     Evaluation, ExceptionStops, ExitStatus, Expression, LanguageExceptionKind, LaunchOptions,
-    StopReason, VariableState,
+    StopReason, TaskSnapshot, UnwindTermination, VariableState,
 };
 
 use crate::stops::{integer, place};
@@ -64,8 +64,9 @@ const CASES: [(&str, Expected); 18] = [
     ("exit", Expected::Nothing),
 ];
 
-/// How a case ends when it runs alone: its exit code and standard error.
-fn alone(fixture: &str, case: &str) -> (Option<i32>, String) {
+/// How a case ends when it runs alone: its exit code, standard output,
+/// and standard error.
+fn alone(fixture: &str, case: &str) -> (Option<i32>, String, String) {
     let output = Command::new(Scenario::fixture(fixture))
         .arg(case)
         .stdin(Stdio::null())
@@ -73,8 +74,20 @@ fn alone(fixture: &str, case: &str) -> (Option<i32>, String) {
         .expect("run the fixture alone");
     (
         output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+/// The task numbered `number`, if it is listed.
+async fn listed(scenario: &Scenario, number: u64) -> Option<TaskSnapshot> {
+    let page = scenario
+        .operation("tasks", scenario.handle().tasks(None, 64))
+        .await;
+    page.tasks
+        .iter()
+        .find(|task| task.id.number == number)
+        .cloned()
 }
 
 #[tokio::test]
@@ -82,15 +95,18 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
     for fixture in BUILDS {
         for (case, expected) in CASES {
             let context = format!("{fixture} {case}");
-            let (status, printed) = alone(fixture, case);
+            let (status, output, printed) = alone(fixture, case);
 
             let scratch = ScratchDir::new("failing");
             let errors = scratch.path().join("stderr");
+            let out = scratch.path().join("stdout");
             let mut scenario = crate::invariants::checked(fixture);
             let reason = scenario
                 .run_with_to_stop(LaunchOptions {
                     arguments: vec![case.into()],
-                    stdout: Some(Stdio::null()),
+                    stdout: Some(Stdio::from(
+                        std::fs::File::create(&out).expect("create standard output"),
+                    )),
                     stderr: Some(Stdio::from(
                         std::fs::File::create(&errors).expect("create standard error"),
                     )),
@@ -146,6 +162,7 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                     } else {
                         assert_eq!(exception.kind, LanguageExceptionKind::Fatal);
                     }
+                    check_case(&scenario, case, &context).await;
                     scenario.resume_to_stop().await
                 }
             };
@@ -160,6 +177,10 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                 assert_eq!(debugged, "", "{context}");
             } else {
                 assert_eq!(Some(code), status.map(i64::from), "{context}");
+                // What the program printed, as a recovered panic's handler,
+                // or nothing from the deferred calls `os.Exit` skips.
+                let shown = std::fs::read_to_string(&out).expect("read standard output");
+                assert_eq!(shown, output, "{context}");
                 assert_eq!(
                     debugged.lines().next(),
                     printed.lines().next(),
@@ -168,6 +189,38 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
             }
             scenario.shutdown().await;
         }
+    }
+}
+
+/// What holds at a case's stop beyond its message and frame.
+async fn check_case(scenario: &Scenario, case: &str, context: &str) {
+    match case {
+        // The other goroutines are listed.
+        "goroutine" => {
+            assert!(listed(scenario, 1).await.is_some(), "{context}");
+        }
+        // Each says what it waits for.
+        "deadlock" => assert_eq!(
+            listed(scenario, 1)
+                .await
+                .and_then(|task| task.detail)
+                .as_deref(),
+            Some("select (no cases)"),
+            "{context}"
+        ),
+        // The overflowing stack is deeper than a backtrace goes, which
+        // says so.
+        "overflow" => {
+            let trace = scenario
+                .operation("backtrace", scenario.handle().backtrace())
+                .await;
+            assert_eq!(
+                trace.termination,
+                UnwindTermination::DepthLimit,
+                "{context}"
+            );
+        }
+        _ => {}
     }
 }
 

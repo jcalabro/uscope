@@ -1,11 +1,12 @@
 //! A Go program's core, read against the dump of every goroutine the
-//! runtime printed as it crashed.
+//! runtime printed as it crashed, and the crash itself, live.
 
 use std::collections::BTreeMap;
+use std::process::Stdio;
 
 use uscope::{
-    CoreDumpOptions, ExecutionContext, InferiorState, StackFrameId, StopContext, TaskSnapshot,
-    TaskState, UnwindTermination,
+    CoreDumpOptions, ExecutionContext, InferiorState, LanguageExceptionKind, LaunchOptions,
+    StackFrameId, StopContext, StopReason, TaskSnapshot, TaskState, UnwindTermination,
 };
 
 use crate::support::Scenario;
@@ -190,6 +191,43 @@ async fn a_goroutines_profiler_labels_are_its_own() {
             labelled += usize::from(!labels.is_empty());
         }
         assert_eq!(labelled, 1, "{fixture}");
+        scenario.shutdown().await;
+    }
+}
+
+/// Live, the program the cores come from stops at its panic, then at the
+/// SIGABRT the runtime raises to dump core. The session ends there, before
+/// the signal makes a core of its own.
+#[tokio::test]
+async fn a_crashing_panic_stops_then_raises_sigabrt() {
+    for fixture in BUILDS {
+        let mut scenario = crate::invariants::checked(fixture);
+        let reason = scenario
+            .run_with_to_stop(LaunchOptions {
+                environment: vec![("GOTRACEBACK".into(), Some("crash".into()))],
+                stdout: Some(Stdio::null()),
+                stderr: Some(Stdio::null()),
+                ..LaunchOptions::default()
+            })
+            .await;
+        let StopReason::LanguageException(exception) = &reason else {
+            panic!("{fixture}: {reason:?}");
+        };
+        assert_eq!(
+            exception.kind,
+            LanguageExceptionKind::Unhandled,
+            "{fixture}"
+        );
+        assert_eq!(
+            exception.message.as_ref(),
+            "panic: the workers are waiting",
+            "{fixture}"
+        );
+        let reason = scenario.resume_to_stop().await;
+        assert!(
+            matches!(&reason, StopReason::Exception(exception) if exception.code == 6),
+            "{fixture}: {reason:?}"
+        );
         scenario.shutdown().await;
     }
 }

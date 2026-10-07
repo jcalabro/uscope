@@ -1394,6 +1394,12 @@ at every stop.
 For each program below, the session ends the way the native run did.
 Where a stop is expected, it reports the runtime's own message, selects
 the right goroutine and frame, and leaves the backtrace intact.
+*(Done in `tests/go/failing.rs`: each case's standard output and error
+and exit status match the native run's, a goroutine's panic lists the
+others, a deadlock gives main's wait reason, and an overflowing stack's
+backtrace ends at its typed depth limit. The `GOTRACEBACK=crash` row is
+in `tests/go/cores.rs`: live, the panic stops and then SIGABRT does, and
+the core shows every goroutine.)*
 
 | Program | Expected stop | After continuing |
 |---|---|---|
