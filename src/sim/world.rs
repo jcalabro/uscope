@@ -793,6 +793,9 @@ impl<'a> World<'a> {
             }
             arrival.counted.extend(counted);
         }
+        for arrival in self.arrivals.values_mut() {
+            oracles::still_counting(&mut arrival.counted, &after, arrival.address);
+        }
         Ok(format!("deliver {description}"))
     }
 

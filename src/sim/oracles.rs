@@ -180,7 +180,7 @@ pub struct HeardTrap {
     pub address: u64,
     /// When the thread executes the trap again, having executed nothing
     /// since it last trapped there, the breakpoints that counted its
-    /// arrival.
+    /// arrival and have owned the site ever since.
     pub again: Option<BTreeSet<u64>>,
     /// Whether the controller had begun to shut down.
     pub in_shutdown: bool,
@@ -190,8 +190,9 @@ pub struct HeardTrap {
 /// the trap it reports, one hit for every user breakpoint owning the site.
 /// The same arrival again (a signal interrupted the step over the trap)
 /// counts nothing for a breakpoint that counted it, and at most one for one
-/// that came to the site since: whether the thread ever ran there, a
-/// debugger can only guess. A new inferior starts every count again. A trap
+/// that came to the site since, a breakpoint that left the site and came
+/// back among them: whether the thread ever ran there, a debugger can only
+/// guess. A new inferior starts every count again. A trap
 /// may go uncounted once its process is exiting as a whole, and one heard
 /// during a shutdown is no hit: the controller kills a launched process and
 /// releases an attached one with the thread rewound.
@@ -244,6 +245,15 @@ pub fn hit_counts(
         }
     }
     Ok(())
+}
+
+/// Keeps, of the breakpoints that counted a thread's arrival at `address`,
+/// those that still own the site there. One that left it, because it was
+/// disabled or lost the location, has come to the site since if it comes
+/// back.
+pub fn still_counting(counted: &mut BTreeSet<u64>, truth: &Truth, address: u64) {
+    let owners = truth.sites.get(&address).map(|site| &site.users);
+    counted.retain(|id| owners.is_some_and(|users| users.contains(id)));
 }
 
 /// Breakpoint accounting, ownership: while a stop is published, every
@@ -659,6 +669,17 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    /// An arrival stays counted by the breakpoints that still own its site.
+    #[test]
+    fn arrivals_stay_counted_only_by_breakpoints_that_stay() {
+        let truth = with_hits([0, 0, 0]);
+        let mut counted = BTreeSet::from([1, 2, 3]);
+        still_counting(&mut counted, &truth, 0x1000);
+        assert_eq!(counted, BTreeSet::from([1, 2]));
+        still_counting(&mut counted, &truth, 0x2000);
+        assert!(counted.is_empty());
     }
 
     /// Every breakpoint the user was told exists owns an installed site at
