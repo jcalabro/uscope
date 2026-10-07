@@ -335,7 +335,7 @@ build_rust_fixture() {
 }
 
 # Builds a Go package without cgo. GO_CGO=1 enables cgo, which an external
-# link needs.
+# link needs; GO_CC and GO_CFLAGS then choose its C compiler and flags.
 build_go_fixture() {
     local package_dir="$1"
     local output="$2"
@@ -349,7 +349,8 @@ build_go_fixture() {
         exit 1
     fi
     local -a command=(
-        env "CGO_ENABLED=${GO_CGO:-0}" go build -buildvcs=false "$@" -o "$output" "${sources[@]}"
+        env "CGO_ENABLED=${GO_CGO:-0}" ${GO_CC:+"CC=$GO_CC"} ${GO_CFLAGS:+"CGO_CFLAGS=$GO_CFLAGS"}
+        go build -buildvcs=false "$@" -o "$output" "${sources[@]}"
     )
     if [[ -z "$go_version" ]]; then
         go_version=$(go version)
@@ -1264,6 +1265,11 @@ build_go_fixture "$go_fixtures_dir/siblings" "$output_dir/siblings-go-o2"
 build_go_fixture "$go_fixtures_dir/watched" "$output_dir/watched-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/watched" "$output_dir/watched-go-o2"
+# Go calls C, which calls back into Go, with each C compiler.
+GO_CGO=1 GO_CC=gcc GO_CFLAGS="-g -O0" build_go_fixture "$go_fixtures_dir/cgo" \
+    "$output_dir/cgo-go-gcc" -buildmode=pie "-gcflags=all=-N -l"
+GO_CGO=1 GO_CC=clang GO_CFLAGS="-g -O2" build_go_fixture "$go_fixtures_dir/cgo" \
+    "$output_dir/cgo-go-clang"
 build_go_fixture "$go_fixtures_dir/steps" "$output_dir/steps-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/steps" "$output_dir/steps-go-o2"

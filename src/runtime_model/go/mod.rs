@@ -27,6 +27,7 @@ const VERIFIED: (u64, u64) = (1, 27);
 /// x86-64's DWARF register numbers.
 const RAX: u16 = 0;
 const RSI: u16 = 4;
+const RDI: u16 = 5;
 const RBP: u16 = 6;
 const RSP: u16 = 7;
 const R12: u16 = 12;
@@ -99,6 +100,10 @@ struct GoRuntime {
     /// `runtime.copystack(gp *g, newsize uintptr)`, which moves a
     /// goroutine's stack to grow or shrink it.
     copystack: Option<ImageAddress>,
+    /// The functions cgo calls between Go and C through, each with the
+    /// register that holds what it calls: `runtime.cgocall(fn, arg)` calls
+    /// C, and `crosscall2(fn, a, n, ctxt)` the Go that C calls.
+    call_outs: Vec<(ImageAddress, u16, &'static str)>,
 }
 
 impl GoRuntime {
@@ -135,6 +140,12 @@ impl GoRuntime {
             exceptions: exceptions::Layout::bind(image.as_ref()),
             interfaces: types::Interfaces::bind(image.as_ref()),
             copystack: layout::symbol(image.as_ref(), "runtime.copystack").ok(),
+            call_outs: [("runtime.cgocall", RAX, "rax"), ("crosscall2", RDI, "rdi")]
+                .into_iter()
+                .filter_map(|(name, register, register_name)| {
+                    Some((code(name)?.start, register, register_name))
+                })
+                .collect(),
             image,
             unverified,
             starting,
@@ -443,6 +454,23 @@ impl RuntimeModel for GoRuntime {
             .ok_or_else(|| format!("copystack moves {g:#x}, which runs no goroutine").into())
     }
 
+    fn call_out(
+        &self,
+        entry: ImageAddress,
+        registers: &RegisterFile,
+    ) -> Option<Result<VirtualAddress, Arc<str>>> {
+        let (_, register, name) = self
+            .call_outs
+            .iter()
+            .find(|(address, ..)| *address == entry)?;
+        Some(
+            registers
+                .get(*register)
+                .map(VirtualAddress::new)
+                .ok_or_else(|| format!("the function cgo calls, in {name}, is unknown").into()),
+        )
+    }
+
     fn task_stack(
         &self,
         stop: &dyn RuntimeStop,
@@ -497,6 +525,7 @@ impl RuntimeModel for GoRuntime {
         stop: &dyn RuntimeStop,
         thread: ThreadId,
         frame: &RegisterFile,
+        after_call: bool,
     ) -> Result<Crossing, Arc<str>> {
         let pc = frame.get(RIP).ok_or("the frame's instruction is unknown")?;
         let name = self
@@ -508,7 +537,11 @@ impl RuntimeModel for GoRuntime {
                 .ok_or_else(|| Arc::<str>::from(format!("the frame's {name} is unknown")))
         };
         let switch = match name.as_deref() {
-            Some("runtime.systemstack" | "runtime.asmcgocall") => Switch::Returns,
+            Some("runtime.systemstack") => Switch::Returns,
+            Some("runtime.asmcgocall") => {
+                return self.cross_cgo_call(stop, thread, frame, after_call);
+            }
+            Some("runtime.cgocallback") => return self.cross_callback(stop, thread, frame),
             Some("runtime.morestack" | "runtime.mcall") => Switch::Abandons,
             // A vDSO call keeps the goroutine's stack pointer in r12, which
             // C preserves, while it runs on the system stack.
@@ -590,6 +623,93 @@ impl RuntimeModel for GoRuntime {
                 Crossing::Continue(registers)
             }
         })
+    }
+}
+
+impl GoRuntime {
+    /// `asmcgocall` runs C on the system stack and returns to the
+    /// goroutine's stack, as `systemstack` does. But Go that the C calls
+    /// back runs on the goroutine meanwhile and saves its registers anew,
+    /// so the goroutine's place is in `asmcgocall`'s frame on the system
+    /// stack instead: the goroutine at 8(SP), and at 0(SP) how far below
+    /// its stack's top its stack pointer was, which a callback's move of
+    /// the stack keeps. Called on the system stack, it stores no goroutine
+    /// and its caller's stack pointer instead. It stores them once it has
+    /// switched, so only a frame in its call to C has them.
+    fn cross_cgo_call(
+        &self,
+        stop: &dyn RuntimeStop,
+        thread: ThreadId,
+        frame: &RegisterFile,
+        after_call: bool,
+    ) -> Result<Crossing, Arc<str>> {
+        let sp = frame.get(RSP).ok_or("the frame's rsp is unknown")?;
+        let gs = self
+            .thread_gs(stop, thread)?
+            .ok_or("the thread runs no goroutine")?;
+        if !self.stack(stop, gs.g0)?.contains(&sp) {
+            return Ok(Crossing::Stay);
+        }
+        if !after_call {
+            return Err("asmcgocall is between a goroutine's stack and the system stack".into());
+        }
+        let read = |address: u64, what: &str| {
+            word(stop, VirtualAddress::new(address))
+                .ok_or_else(|| Arc::<str>::from(format!("asmcgocall's {what} is unreadable")))
+        };
+        let g = read(sp.wrapping_add(8), "goroutine")?;
+        let saved = read(sp, "saved stack pointer")?;
+        let caller = if g == 0 {
+            saved
+        } else {
+            self.listed(stop, g)?;
+            let stack = self.stack(stop, g)?;
+            stack
+                .end
+                .checked_sub(saved)
+                .filter(|caller| stack.contains(caller))
+                .ok_or_else(|| {
+                    format!("asmcgocall's goroutine {g:#x} was {saved:#x} deep in no stack it has")
+                })?
+        };
+        let mut registers = frame.clone();
+        registers.set(RSP, caller);
+        Ok(Crossing::Resume(registers))
+    }
+
+    /// `cgocallback` runs Go that C calls on the goroutine's stack, in a
+    /// frame like the one it made on the system stack, whose stack pointer
+    /// it saved in `m.g0.sched.sp`. Unwinding goes on there, through the C
+    /// that called, rather than skip to the goroutine's frames before the
+    /// C, as the runtime's own traceback does.
+    fn cross_callback(
+        &self,
+        stop: &dyn RuntimeStop,
+        thread: ThreadId,
+        frame: &RegisterFile,
+    ) -> Result<Crossing, Arc<str>> {
+        let sp = frame.get(RSP).ok_or("the frame's rsp is unknown")?;
+        let gs = self
+            .thread_gs(stop, thread)?
+            .ok_or("the thread runs no goroutine")?;
+        let system = self.stack(stop, gs.g0)?;
+        if system.contains(&sp) {
+            return Ok(Crossing::Stay);
+        }
+        let layout = self.goroutines()?;
+        let saved = word(
+            stop,
+            VirtualAddress::new(gs.g0.wrapping_add(layout.sched_sp)),
+        )
+        .ok_or("the system stack's saved stack pointer is unreadable")?;
+        if !system.contains(&saved) {
+            return Err(
+                format!("cgocallback's frame at {saved:#x} is not on the system stack").into(),
+            );
+        }
+        let mut registers = frame.clone();
+        registers.set(RSP, saved);
+        Ok(Crossing::Resume(registers))
     }
 }
 

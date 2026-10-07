@@ -1234,10 +1234,13 @@ fn assign_go_function_roles(
     instances: &[CodeInstanceInfo],
     go_table: Option<&super::gopclntab::GoTable>,
 ) {
+    let cgo = super::roles::cgo_generated(functions, source_files);
+    let runtime_c = super::roles::cgo_runtime(functions, source_files);
     let generated = super::roles::abi_wrappers(functions, source_files)
         .into_iter()
         .zip(trampolines)
-        .map(|(abi_wrapper, trampoline)| abi_wrapper || *trampoline)
+        .zip(&cgo)
+        .map(|((abi_wrapper, trampoline), cgo)| abi_wrapper || *trampoline || *cgo)
         .collect::<Vec<_>>();
     let mut facts = vec![None; functions.len()];
     if let Some(table) = go_table {
@@ -1254,10 +1257,20 @@ fn assign_go_function_roles(
                 .map(|function| function.facts);
         }
     }
-    for (function, (facts, generated)) in functions.iter_mut().zip(facts.into_iter().zip(generated))
+    for ((function, (facts, generated)), runtime_c) in functions
+        .iter_mut()
+        .zip(facts.into_iter().zip(generated))
+        .zip(runtime_c)
     {
         if function.language == SourceLanguage::Go {
             function.role = super::roles::go_role(&function.name, facts, generated);
+        } else if function.role == crate::CodeRole::Ordinary {
+            if generated {
+                // cgo's C, such as the code that Go's calls to C enter.
+                function.role = crate::CodeRole::Wrapper;
+            } else if runtime_c && go_table.is_some() {
+                function.role = crate::CodeRole::RuntimeInternal;
+            }
         }
     }
 }

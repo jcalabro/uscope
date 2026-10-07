@@ -6,6 +6,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod cgo;
 mod cores;
 mod defers;
 mod failing;

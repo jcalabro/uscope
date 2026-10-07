@@ -251,10 +251,46 @@ impl<P: InspectionOps> Controller<P> {
         root: &StackRoot,
         max_frames: usize,
     ) -> Result<PhysicalStack> {
+        let (native, after_call, (frames, termination)) =
+            self.walk_stack(inferior, root, None, |provider, initial| {
+                collect_frames(
+                    initial,
+                    provider,
+                    |_, context, provider| PhysicalFrame {
+                        context: context.clone(),
+                        registers: provider.dwarf.registers.clone(),
+                        segment: provider.segment(),
+                    },
+                    max_frames,
+                )
+            })?;
+        Ok(PhysicalStack {
+            native,
+            after_call,
+            frames,
+            termination,
+        })
+    }
+
+    /// Unwinds a stack a frame at a time, across the stacks its runtimes
+    /// switch between: `walk` gets the unwinder and the innermost frame.
+    /// A thread's stack begins at `native`, or else its live registers.
+    /// Returns, beside what `walk` does, the thread's registers and whether
+    /// the innermost instruction is a return address.
+    pub(super) fn walk_stack<T>(
+        &self,
+        inferior: &Inferior,
+        root: &StackRoot,
+        native: Option<&libc::user_regs_struct>,
+        walk: impl FnOnce(&mut RoleCallerProvider<'_, '_>, FrameContext) -> T,
+    ) -> Result<(Option<libc::user_regs_struct>, bool, T)> {
         let runtimes = self.runtimes(inferior);
         let (native, registers, after_call, stacks) = match &root.origin {
             RootOrigin::Thread(pid) => {
-                let native = self.ptrace.registers(*pid)?;
+                let native = match native {
+                    Some(native) => *native,
+                    None => self.ptrace.registers(*pid)?,
+                };
                 let stacks = self.thread_stacks(inferior, &runtimes, *pid);
                 (Some(native), x86_64_registers(&native), false, stacks)
             }
@@ -273,7 +309,7 @@ impl<P: InspectionOps> Controller<P> {
             cfa: None,
             signal_frame: false,
         };
-        let mut cross = |module: ModuleId, registers: &RegisterFile| {
+        let mut cross = |module: ModuleId, registers: &RegisterFile, after_call: bool| {
             let runtime = runtimes
                 .iter()
                 .find(|runtime| runtime.module.id == module)?;
@@ -282,7 +318,9 @@ impl<P: InspectionOps> Controller<P> {
                 return Some(Ok(Crossing::Stay));
             };
             Some(self.with_runtime_stop(inferior, runtime, pid, |stop| {
-                runtime.model.cross(stop, debug_thread_id(pid), registers)
+                runtime
+                    .model
+                    .cross(stop, debug_thread_id(pid), registers, after_call)
             }))
         };
         let mut provider = RoleCallerProvider {
@@ -302,24 +340,9 @@ impl<P: InspectionOps> Controller<P> {
                 StackSegment::Task
             },
             cross: &mut cross,
+            carried: None,
         };
-        let (frames, termination) = collect_frames(
-            initial,
-            &mut provider,
-            |_, context, provider| PhysicalFrame {
-                context: context.clone(),
-                registers: provider.dwarf.registers.clone(),
-                segment: provider.segment(),
-            },
-            max_frames,
-        );
-
-        Ok(PhysicalStack {
-            native,
-            after_call,
-            frames,
-            termination,
-        })
+        Ok((native, after_call, walk(&mut provider, initial)))
     }
 
     /// The stacks a thread runs on for the process's runtimes, and whose
@@ -938,6 +961,9 @@ fn expand_activation(
                 .expect("inline chain references a known instance");
             let function = module_image.function(instance.function).cloned();
             let level = u32::try_from(frames.len()).expect("frame count fits in u32");
+            let role = function
+                .as_ref()
+                .map_or(CodeRole::Ordinary, |function| function.role);
 
             frames.push(StackFrame::from_parts(
                 level,
@@ -949,6 +975,7 @@ fn expand_activation(
                     function,
                     source,
                     symbol: None,
+                    role,
                 },
             ));
             source = call_site(instance);
@@ -981,6 +1008,7 @@ fn expand_activation(
                 symbol.offset += context.instruction.get() - lookup.get();
                 symbol
             }),
+            role: module_image.code_role(image_address),
         },
     ));
     Ok(())
@@ -1173,12 +1201,22 @@ pub(super) struct RoleCallerProvider<'a, 'c> {
     /// Whose stack a frame on none of them is on.
     pub(super) other: StackSegment,
     pub(super) cross: &'c mut CrossStacks<'c>,
+    /// Whose stack the current frame is on, when its callee's is: a frame
+    /// is on its callee's stack unless the callee switched stacks or a
+    /// signal interrupted it. A runtime knows its stacks' bounds only
+    /// roughly where the system gave them, as the top of a thread's.
+    pub(super) carried: Option<StackSegment>,
 }
 
 impl RoleCallerProvider<'_, '_> {
-    /// Whose stack the current frame is on, by where its stack pointer
-    /// points.
+    /// Whose stack the current frame is on: its callee's, or else where
+    /// its stack pointer points.
     pub(super) fn segment(&self) -> StackSegment {
+        self.carried.unwrap_or_else(|| self.bounded_segment())
+    }
+
+    /// Whose stack holds the current frame's stack pointer.
+    fn bounded_segment(&self) -> StackSegment {
         self.dwarf
             .registers
             .get(X86_64_RSP)
@@ -1218,6 +1256,7 @@ impl RoleCallerProvider<'_, '_> {
         let instruction = registers.get(X86_64_RIP).unwrap_or(0);
         self.dwarf.first = false;
         self.dwarf.registers = registers;
+        self.carried = None;
         CallerResult::Caller(FrameContext {
             instruction: VirtualAddress::new(instruction),
             cfa: Some(VirtualAddress::new(context)),
@@ -1237,11 +1276,12 @@ const SIGCONTEXT_REGISTERS: [u16; 17] = [8, 9, 10, 11, 12, 13, 14, 15, 5, 4, 6, 
 /// Asks the runtime whose module holds a frame's code where the frame,
 /// with these registers, goes on past the stack switch it makes; `None`
 /// when no runtime model reads the module's runtime.
-pub(super) type CrossStacks<'c> =
-    dyn FnMut(ModuleId, &RegisterFile) -> Option<std::result::Result<Crossing, Arc<str>>> + 'c;
+pub(super) type CrossStacks<'c> = dyn FnMut(ModuleId, &RegisterFile, bool) -> Option<std::result::Result<Crossing, Arc<str>>>
+    + 'c;
 
 impl CallerProvider for RoleCallerProvider<'_, '_> {
     fn caller(&mut self, current: &FrameContext) -> CallerResult {
+        self.carried = Some(self.segment());
         // A handler returns to its signal trampoline's first instruction,
         // so the trampoline is named by its own address, not the one
         // before it, as glibc's alone allows with a byte to spare.
@@ -1274,7 +1314,8 @@ impl RoleCallerProvider<'_, '_> {
         match role {
             Some((_, CodeRole::Outermost)) => CallerResult::Finished(UnwindTermination::Complete),
             Some((module, CodeRole::StackSwitch)) => {
-                match (self.cross)(module, &self.dwarf.registers) {
+                let after_call = !self.dwarf.first && !current.signal_frame;
+                match (self.cross)(module, &self.dwarf.registers, after_call) {
                     None => unresolved("no runtime model reads the module's runtime".into()),
                     Some(Err(reason)) => unresolved(reason),
                     Some(Ok(Crossing::Stay)) => self.dwarf.caller(current),
@@ -1283,6 +1324,7 @@ impl RoleCallerProvider<'_, '_> {
                     }
                     Some(Ok(Crossing::Resume(registers))) => {
                         self.dwarf.registers = registers;
+                        self.carried = None;
                         self.dwarf.caller(current)
                     }
                     Some(Ok(Crossing::Continue(registers))) => {
@@ -1291,6 +1333,7 @@ impl RoleCallerProvider<'_, '_> {
                         };
                         self.dwarf.first = false;
                         self.dwarf.registers = registers;
+                        self.carried = None;
                         CallerResult::Caller(FrameContext {
                             instruction: VirtualAddress::new(instruction),
                             cfa: None,

@@ -184,19 +184,19 @@ impl Builder<'_, '_> {
         let name = table.name(function)?;
         let positions = table.positions(function)?;
         let inlined = table.inline_runs(function)?;
-        let declaration = match positions
+        let declared = positions
             .iter()
             .find(|(pcs, _)| value_at(&inlined, pcs.start) < 0)
-        {
-            Some((_, position)) => {
-                let file = Arc::clone(&position.file);
-                self.location(&file, function.start_line)
-            }
-            None => None,
-        };
+            .map(|(_, position)| Arc::clone(&position.file));
+        let declaration = declared
+            .as_ref()
+            .and_then(|file| self.location(file, function.start_line));
         let go = function.is_go();
+        let cgo = declared
+            .as_deref()
+            .is_some_and(|file| crate::debug_info::roles::cgo_wrote(std::path::Path::new(file)));
         let role = if go {
-            crate::debug_info::roles::go_role(&name, Some(function.facts), false)
+            crate::debug_info::roles::go_role(&name, Some(function.facts), cgo)
         } else {
             crate::debug_info::roles::symbol_role(&name)
         };

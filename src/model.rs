@@ -2939,6 +2939,9 @@ pub struct StackFrame {
     /// its offset measured to [`Self::instruction`]. Inline frames carry no
     /// symbol because they are source-level expansions within one.
     pub symbol: Option<SymbolLocation>,
+    /// What the frame's code is to stepping and unwinding: its function's
+    /// role, or its symbol's where no function describes it.
+    pub role: CodeRole,
 }
 
 pub struct FrameMetadata {
@@ -2946,6 +2949,7 @@ pub struct FrameMetadata {
     pub function: Option<FunctionInfo>,
     pub source: Option<SourceLocation>,
     pub symbol: Option<SymbolLocation>,
+    pub role: CodeRole,
 }
 
 impl StackFrame {
@@ -2965,6 +2969,7 @@ impl StackFrame {
                 function: None,
                 source: None,
                 symbol: None,
+                role: CodeRole::Ordinary,
             },
         )
     }
@@ -2987,6 +2992,7 @@ impl StackFrame {
             function: metadata.function,
             source: metadata.source,
             symbol: metadata.symbol,
+            role: metadata.role,
         }
     }
 }
@@ -3073,12 +3079,9 @@ impl Backtrace {
     /// runtime's own traceback shows a task: where it waits, not how.
     #[must_use]
     pub fn user_frame(&self) -> Option<&StackFrame> {
-        self.frames.iter().find(|frame| {
-            frame
-                .function
-                .as_ref()
-                .is_none_or(|function| function.role == CodeRole::Ordinary)
-        })
+        self.frames
+            .iter()
+            .find(|frame| frame.role == CodeRole::Ordinary)
     }
 
     /// For each frame, the level of the frame whose loop it runs as an

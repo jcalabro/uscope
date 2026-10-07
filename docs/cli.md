@@ -87,7 +87,10 @@ call that a panic runs. The body of a loop over an iterator function is a
 function the iterator calls, which steps treat as the loop's own code:
 `next` enters the body from the loop's line, goes from one pass of the body
 to the next and on past the loop, and `finish` in the body runs the rest of
-the loop. None of them stops in the iterator.
+the loop. None of them stops in the iterator. In a Go program that calls C,
+steps go between Go and C as between functions of one language, through
+cgo's code and the runtime's: `step` at a call enters the function called,
+and `finish` in Go that C called stops in the C.
 
 A forked child is not followed: it runs on its own, without the breakpoints
 it inherited. A program that calls `exec` is followed, with its breakpoints.
@@ -226,6 +229,9 @@ handlers on another, and a backtrace follows the runtime from them onto the
 goroutine's stack. When a backtrace crosses stacks, each run of frames is
 headed by whose stack it is on: the task's (the goroutine's), the runtime's,
 the signal stack, or the thread's. The runtime's own functions are dimmed.
+Go's calls into C run the C on the runtime's stack, and C's calls back into
+Go run the Go on the goroutine's, so a backtrace from either shows the
+frames of both languages between them.
 The body of a Go `range` over a function is a function of its own, named
 like `main.counted-range1`, which the iterator calls; the iterator's frames
 between the body and its loop's function say so, as `(the iterator of #2's
@@ -324,7 +330,7 @@ over that. What the runtime then reports stops instead:
 
 - a panic nothing recovered, as it ends the program;
 - a fatal error, such as `all goroutines are asleep - deadlock!`, or a
-  fault the runtime cannot turn into a panic.
+  fault the runtime cannot turn into a panic, as one in C is.
 
 The stop prints the message the runtime prints, chained panics and all, and
 selects the frame that panicked or faulted, below the runtime's own. A
