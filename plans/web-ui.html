@@ -1053,7 +1053,15 @@ td .q { color: var(--accent); }
     <section id="keys">
       <span class="eyebrow">Keyboard</span>
       <h2>Keys</h2>
-      <div class="prose"><p>VS Code's debugger keys by default. Single letters work whenever no text box has focus, since browsers reserve some function keys and every action needs a key that always works.</p></div>
+      <div class="prose">
+        <p>VS Code's debugger keys by default. A page can claim function keys by cancelling their <code>keydown</code>; pressed on a real keyboard in Chrome on 2026-10-06, F5 ran the page's handler without reloading and F11 without going fullscreen. So:</p>
+        <ul>
+          <li><b>The app claims</b> <kbd>F5</kbd> <kbd>F6</kbd> <kbd>F9</kbd> <kbd>F10</kbd> <kbd>F11</kbd> and their Shift forms while it is open. <kbd>Ctrl</kbd>+<kbd>R</kbd> still reloads, and <kbd>F12</kbd> still opens DevTools.</li>
+          <li><b>Function keys work everywhere, letter keys only outside text boxes.</b> Nothing types a function key, so it acts on the debugger even while the console has focus.</li>
+          <li><b>Nothing else is possible.</b> Browsers never give pages <kbd>Ctrl</kbd>+<kbd>W</kbd>, <kbd>Ctrl</kbd>+<kbd>T</kbd>, <kbd>Ctrl</kbd>+<kbd>N</kbd>, or <kbd>Ctrl</kbd>+<kbd>Tab</kbd>, so no default uses them.</li>
+          <li><b>A key test runs in the end-to-end suite</b> for Chromium and Firefox, and every action keeps a letter key, for keyboards without function keys.</li>
+        </ul>
+      </div>
       <div class="keys">
         <div><span>Continue</span><span><kbd>F5</kbd> <kbd>c</kbd></span></div>
         <div><span>Pause</span><span><kbd>F6</kbd></span></div>
