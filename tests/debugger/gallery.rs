@@ -124,6 +124,65 @@ async fn check_gallery(gallery: &Gallery<'_>) {
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 }
 
+/// The gallery's check fails on a value other than the program's, and on
+/// a variable listed where the program says there is none.
+#[tokio::test]
+async fn the_gallery_check_fails_on_values_its_program_did_not_report() {
+    let fixture = "values-go-o0";
+    let scratch = ScratchDir::new("gallery");
+    let output_path = scratch.path().join("stdout");
+    let output = std::fs::File::create(&output_path).expect("create the gallery's output");
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_breakpoint("main.reached").await;
+    let mut reason = scenario
+        .run_with_to_stop(LaunchOptions {
+            stdout: Some(Stdio::from(output)),
+            ..LaunchOptions::default()
+        })
+        .await;
+    while matches!(&reason, StopReason::Exception(exception) if exception.code == 23) {
+        reason = scenario.resume_to_stop().await;
+    }
+    assert!(
+        matches!(reason, StopReason::Breakpoint { .. }),
+        "{reason:?}"
+    );
+    let printed = std::fs::read_to_string(&output_path).expect("read the gallery's output");
+    let truths = truths(&printed);
+    let checkpoint = truths.last().expect("a truth").checkpoint.clone();
+    let variables = checkpoint_variables(&mut scenario, fixture, &checkpoint).await;
+    let truth = truths
+        .iter()
+        .find(|truth| {
+            truth.checkpoint == checkpoint
+                && !["absent", "hidden", "result", "type"].contains(&truth.kind.as_str())
+        })
+        .expect("a truth of a value");
+    check_truth(&scenario, &variables, truth, false)
+        .await
+        .expect("the program's own value");
+    let wrong = Truth {
+        value: format!("{}1", truth.value),
+        ..truth.clone()
+    };
+    assert!(
+        check_truth(&scenario, &variables, &wrong, false)
+            .await
+            .is_err()
+    );
+    let absent = Truth {
+        path: truth.path.split('.').next().expect("a name").to_owned(),
+        kind: "absent".to_owned(),
+        ..truth.clone()
+    };
+    assert!(
+        check_truth(&scenario, &variables, &absent, false)
+            .await
+            .is_err()
+    );
+    scenario.shutdown().await;
+}
+
 /// The variables a checkpoint's truths are about: those of `reached`'s
 /// caller, or of the stopped frame elsewhere, or, for a `returned-`
 /// checkpoint, what that caller returned once it is finished.

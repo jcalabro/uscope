@@ -21,27 +21,24 @@ async fn goroutines_are_listed_as_the_runtime_lists_them() {
         let (tasks, gaps) = session.tasks(3).await;
         assert!(gaps.is_empty(), "{fixture}: {gaps:?}");
 
-        // The program's goroutines are exactly those of the runtime's dump,
-        // which leaves out the runtime's own.
-        let program = tasks
-            .iter()
-            .filter(|task| !task.internal)
-            .collect::<Vec<_>>();
-        let ids = program
-            .iter()
-            .map(|task| task.id.number)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(ids.len(), program.len(), "{fixture}: a task listed twice");
-        assert_eq!(
-            ids,
-            truth.tasks.keys().copied().collect(),
-            "{fixture}: {tasks:#?}"
-        );
-        assert_eq!(program.len(), truth.count, "{fixture}");
+        truth
+            .check_tasks(&tasks)
+            .unwrap_or_else(|problem| panic!("{fixture}: {problem}: {tasks:#?}"));
         assert!(
-            tasks.len() > program.len(),
+            tasks.iter().any(|task| task.internal),
             "{fixture}: the runtime's own goroutines are listed too"
         );
+        // The check fails on a goroutine left out, or in another state.
+        let mut sabotaged = tasks.clone();
+        let dropped = sabotaged
+            .iter()
+            .position(|task| !task.internal && task.id.number != truth.main.0)
+            .expect("a goroutine besides main");
+        sabotaged.remove(dropped);
+        assert!(truth.check_tasks(&sabotaged).is_err(), "{fixture}");
+        let mut sabotaged = tasks.clone();
+        sabotaged[dropped].detail = Some("running".into());
+        assert!(truth.check_tasks(&sabotaged).is_err(), "{fixture}");
 
         for task in &tasks {
             let context = format!("{fixture}: {task:#?}");
@@ -58,24 +55,11 @@ async fn goroutines_are_listed_as_the_runtime_lists_them() {
             let Some(dumped) = truth.tasks.get(&task.id.number) else {
                 continue;
             };
-            // The runtime describes a goroutine by what it waits for, or
-            // by its status.
-            assert_eq!(
-                task.detail.as_deref(),
-                Some(dumped.status.as_str()),
-                "{context}"
-            );
-            let expected = match dumped.status.as_str() {
-                "running" | "syscall" => TaskState::Running,
-                "runnable" => TaskState::Runnable,
-                _ => TaskState::Blocked,
-            };
-            assert_eq!(task.state, expected, "{context}");
             // Only a goroutine on a thread has one, and a parked one says
             // where it resumes.
             assert_eq!(
                 task.thread.is_some(),
-                expected == TaskState::Running,
+                task.state == TaskState::Running,
                 "{context}"
             );
             assert_eq!(task.resume.is_some(), task.thread.is_none(), "{context}");
@@ -188,7 +172,11 @@ async fn parked_goroutines_show_the_frames_the_runtime_dumps() {
                     (!runtime_hides(&name)).then(|| (name, format!("{file}:{}", source.line)))
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(shown, dumped.frames, "{fixture}: {task:#?}\n{trace:#?}");
+            dumped
+                .check_frames(&shown)
+                .unwrap_or_else(|problem| panic!("{fixture}: {problem}: {task:#?}\n{trace:#?}"));
+            // The check fails on a frame left out.
+            assert!(dumped.check_frames(&shown[1..]).is_err(), "{fixture}");
             compared += 1;
 
             // A parked worker's arguments are on its own stack.

@@ -5,11 +5,11 @@
 //! runtime's own goroutine dump, so they stay right when the toolchain
 //! moves.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use uscope::{LaunchOptions, StopReason, TaskPage, TaskSnapshot};
+use uscope::{LaunchOptions, StopReason, TaskPage, TaskSnapshot, TaskState};
 
 use crate::support::{Scenario, ScratchDir};
 
@@ -61,6 +61,60 @@ impl Checkpoint {
             }
         }
         checkpoint
+    }
+
+    /// Whether the program's goroutines among `tasks` are exactly those
+    /// the runtime dumped, each in the state the dump gives it. The
+    /// runtime's own goroutines, which the dump leaves out, are not
+    /// compared.
+    pub fn check_tasks(&self, tasks: &[TaskSnapshot]) -> Result<(), String> {
+        let program = tasks
+            .iter()
+            .filter(|task| !task.internal)
+            .collect::<Vec<_>>();
+        let ids = program
+            .iter()
+            .map(|task| task.id.number)
+            .collect::<BTreeSet<_>>();
+        if ids.len() != program.len() {
+            return Err("a goroutine is listed twice".to_owned());
+        }
+        let dumped = self.tasks.keys().copied().collect::<BTreeSet<_>>();
+        if ids != dumped {
+            return Err(format!("lists goroutines {ids:?}, not {dumped:?}"));
+        }
+        if program.len() != self.count {
+            return Err(format!("lists {}, not {}", program.len(), self.count));
+        }
+        for task in program {
+            let dumped = &self.tasks[&task.id.number];
+            // The runtime describes a goroutine by what it waits for, or
+            // by its status.
+            if task.detail.as_deref() != Some(dumped.status.as_str()) {
+                return Err(format!("describes {task:?} unlike {dumped:?}"));
+            }
+            let expected = match dumped.status.as_str() {
+                "running" | "syscall" => TaskState::Running,
+                "runnable" => TaskState::Runnable,
+                _ => TaskState::Blocked,
+            };
+            if task.state != expected {
+                return Err(format!("gives {task:?} a state unlike {dumped:?}"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl DumpedTask {
+    /// Whether frames shown as functions and `file:line`, innermost first,
+    /// are those the dump shows.
+    pub fn check_frames(&self, shown: &[(String, String)]) -> Result<(), String> {
+        if shown == self.frames.as_slice() {
+            Ok(())
+        } else {
+            Err(format!("shows {shown:?}, not {:?}", self.frames))
+        }
     }
 }
 
