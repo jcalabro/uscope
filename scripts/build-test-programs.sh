@@ -1275,6 +1275,8 @@ GO_CGO=1 GO_CC=clang GO_CFLAGS="-g -O2" build_go_fixture "$go_fixtures_dir/cgo" 
 build_go_fixture "$go_fixtures_dir/server" "$output_dir/server-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/server" "$output_dir/server-go-trimpath" -trimpath
+# A server to attach to.
+build_go_fixture "$go_fixtures_dir/served" "$output_dir/served-go" -buildmode=pie
 # A C program that hosts a Go library and calls into its runtime.
 GO_CGO=1 GO_CC=gcc GO_CFLAGS="-g -O0" build_go_fixture "$go_fixtures_dir/hosted" \
     "$output_dir/libgo-hosted.so" -buildmode=c-shared "-gcflags=all=-N -l"
