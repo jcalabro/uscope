@@ -641,9 +641,12 @@ A type's view is the first that binds, from these sources in order:
    adapter's `viewFiles`, and those `views load FILE` loads, the latest
    first. `views clear` forgets those loaded, and `views` lists them all.
 2. **The project's and the user's files**: every `*.views` file in
-   `.uscope/views` under the working directory, then in
+   `.uscope/views` at the project root, then in
    `$XDG_CONFIG_HOME/uscope/views` (or `~/.config/uscope/views`), each
-   directory's in name order.
+   directory's in name order. The project root is the nearest directory,
+   from the one uscope runs in upwards (for the debug adapter, the launch
+   request's `cwd`), that holds `.uscope/`, then the nearest that holds
+   `.git`, so a session started anywhere in a project finds its views.
 3. **The program's own**: views a module carries in its
    `.debug_uscope_views` section, which present only that module's own
    types, so that one library never restyles another's.

@@ -1,10 +1,9 @@
 //! The interactive line-editing REPL.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::{env, thread};
+use std::thread;
 
 use anyhow::{Context as _, Result, anyhow};
 use rustyline::config::Configurer as _;
@@ -12,10 +11,9 @@ use rustyline::error::ReadlineError;
 use rustyline::{ColorMode, DefaultEditor};
 
 use super::commands::command_named;
+use super::config::state_directory;
 use super::terminal::Role;
 use super::{Cli, Renderers};
-
-const PROMPT: &str = "(uscope) ";
 
 enum Input {
     Line(String),
@@ -32,9 +30,19 @@ pub async fn run(cli: &Cli) -> Result<()> {
     let (input_sender, mut inputs) = tokio::sync::mpsc::channel(1);
     let (ack_sender, acknowledgements) = mpsc::channel::<bool>();
     let renderers = cli.renderers;
+    let prompt = cli.settings.config.ui.prompt.clone();
+    let history_size = cli.settings.config.history.size;
     let editor = thread::Builder::new()
         .name("uscope-line-editor".to_owned())
-        .spawn(move || line_editor(&input_sender, &acknowledgements, renderers))?;
+        .spawn(move || {
+            line_editor(
+                &input_sender,
+                &acknowledgements,
+                renderers,
+                &prompt,
+                history_size,
+            );
+        })?;
 
     let mut outcome = Ok(());
     let mut last_repeatable = None;
@@ -46,7 +54,10 @@ pub async fn run(cli: &Cli) -> Result<()> {
                 let command = if entered.is_empty() {
                     last_repeatable.clone().unwrap_or_default()
                 } else {
-                    let repeatable = entered
+                    let expanded = cli.expand_alias(entered);
+                    let repeatable = expanded
+                        .as_deref()
+                        .unwrap_or(entered)
                         .split_whitespace()
                         .next()
                         .and_then(command_named)
@@ -87,6 +98,8 @@ fn line_editor(
     input: &tokio::sync::mpsc::Sender<Input>,
     acknowledgements: &mpsc::Receiver<bool>,
     renderers: Renderers,
+    prompt: &str,
+    history_size: u32,
 ) {
     let warn = |message: String| {
         eprintln!(
@@ -109,11 +122,13 @@ fn line_editor(
     } else {
         ColorMode::Disabled
     });
-    let history = history_path(
-        env::var_os("XDG_STATE_HOME").as_deref(),
-        env::var_os("HOME").as_deref(),
-    );
-    if history.exists()
+    let history = history_path(state_directory());
+    let keep = usize::try_from(history_size).unwrap_or(usize::MAX);
+    if let Err(error) = editor.set_max_history_size(keep) {
+        warn(format!("failed to limit command history: {error}"));
+    }
+    if keep != 0
+        && history.exists()
         && let Err(error) = editor.load_history(&history)
     {
         warn(format!(
@@ -121,9 +136,9 @@ fn line_editor(
             history.display()
         ));
     }
-    let styled_prompt = renderers.stdout.paint(Role::Prompt, PROMPT).to_string();
+    let styled_prompt = renderers.stdout.paint(Role::Prompt, prompt).to_string();
     loop {
-        match editor.readline(&(PROMPT, &styled_prompt)) {
+        match editor.readline(&(prompt, &styled_prompt)) {
             Ok(line) => {
                 if !line.trim().is_empty()
                     && let Err(error) = editor.add_history_entry(line.as_str())
@@ -148,24 +163,19 @@ fn line_editor(
             }
         }
     }
-    if let Err(error) = persist_history(&mut editor, &history) {
+    if keep != 0
+        && let Err(error) = persist_history(&mut editor, &history)
+    {
         warn(error);
     }
 }
 
-/// Locates the history file under `$XDG_STATE_HOME`, falling back to
-/// `~/.local/state` and then the current directory. Per the XDG spec, a
-/// relative `$XDG_STATE_HOME` is ignored.
-fn history_path(xdg_state_home: Option<&OsStr>, home: Option<&OsStr>) -> PathBuf {
-    if let Some(state) = xdg_state_home
-        .map(Path::new)
-        .filter(|path| path.is_absolute())
-    {
-        return state.join("uscope/history");
-    }
-    home.map_or_else(
+/// Locates the history file in the user's state directory, falling back to
+/// the current directory.
+fn history_path(state: Option<PathBuf>) -> PathBuf {
+    state.map_or_else(
         || PathBuf::from(".uscope_history"),
-        |home| Path::new(home).join(".local/state/uscope/history"),
+        |state| state.join("history"),
     )
 }
 
@@ -184,25 +194,4 @@ fn persist_history(editor: &mut DefaultEditor, path: &Path) -> Result<(), String
         editor.save_history(path)
     }
     .map_err(|error| format!("failed to save command history {}: {error}", path.display()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn history_uses_absolute_xdg_then_home_then_a_local_fallback() {
-        let home = Some(OsStr::new("/home/user"));
-        assert_eq!(
-            history_path(Some(OsStr::new("/state")), home),
-            PathBuf::from("/state/uscope/history")
-        );
-        for ignored in [None, Some(OsStr::new("")), Some(OsStr::new("relative"))] {
-            assert_eq!(
-                history_path(ignored, home),
-                PathBuf::from("/home/user/.local/state/uscope/history")
-            );
-        }
-        assert_eq!(history_path(None, None), PathBuf::from(".uscope_history"));
-    }
 }

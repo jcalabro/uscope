@@ -4,9 +4,12 @@
 //! requests, and renders replies. Debugger semantics live in the library.
 
 pub mod commands;
+pub mod config;
 pub mod format;
 pub mod help;
 mod repl;
+pub mod session;
+mod suggest;
 pub mod terminal;
 pub mod value;
 
@@ -21,9 +24,11 @@ use clap::ValueEnum;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use uscope::{AssemblySyntax, DebuggerHandle, Error, LaunchOptions, StopReason};
 
-use crate::Args;
+use config::{Settings, Toggle};
+use session::Session;
 use terminal::{
-    ColorChoice, ColorEnvironment, Renderer, Role, color_enabled, terminal_control_enabled,
+    ColorChoice, ColorEnvironment, Look, Palette, Renderer, Role, color_enabled,
+    terminal_control_enabled,
 };
 
 /// Renderers for each output stream.
@@ -36,15 +41,6 @@ pub struct Renderers {
 }
 
 impl Renderers {
-    /// Renderers for every stream, with or without color.
-    pub const fn uniform(color: bool) -> Self {
-        Self {
-            stdout: Renderer::new(color),
-            stderr: Renderer::new(color),
-            stdout_control: false,
-        }
-    }
-
     /// Detects color and terminal support from the streams and environment.
     pub fn detect(choice: ColorChoice, batch: bool) -> Self {
         let environment = ColorEnvironment::current();
@@ -66,10 +62,93 @@ impl Renderers {
             stdout_control: terminal_control_enabled(&environment, stdout_is_terminal),
         }
     }
+
+    /// Renderers for a debug adapter's console: paths relative to the
+    /// project root, as the CLI shows them, and Unicode, which every editor
+    /// shows.
+    pub fn console(color: bool, root: PathBuf) -> Self {
+        // One look per session, which lives as long as the adapter.
+        let look: &'static Look = Box::leak(Box::new(Look {
+            palette: Palette::new(
+                terminal::ThemeName::Default,
+                &terminal::ThemeOverrides::default(),
+            ),
+            paths: terminal::PathStyle::Relative,
+            root: Some(root),
+            unicode: true,
+            hyperlinks: false,
+        }));
+        Self {
+            stdout: Renderer::with_look(color, look),
+            stderr: Renderer::with_look(color, look),
+            stdout_control: false,
+        }
+    }
+
+    /// Renderers in the look the settings describe, colored as they and
+    /// the streams allow.
+    pub fn configured(settings: &Settings, batch: bool) -> Self {
+        let ui = &settings.config.ui;
+        let detected = Self::detect(ui.color, batch);
+        let stdout_is_terminal = io::stdout().is_terminal();
+        let look: &'static Look = Box::leak(Box::new(Look {
+            palette: Palette::new(ui.theme, &settings.config.theme),
+            paths: ui.paths,
+            root: Some(settings.root.clone()),
+            unicode: match ui.unicode {
+                Toggle::Always => true,
+                Toggle::Never => false,
+                Toggle::Auto => locale_is_utf8(),
+            },
+            hyperlinks: match ui.hyperlinks {
+                Toggle::Always => true,
+                Toggle::Never => false,
+                Toggle::Auto => !batch && stdout_is_terminal && terminal_has_hyperlinks(),
+            },
+        }));
+        Self {
+            stdout: Renderer::with_look(detected.stdout.is_colored(), look),
+            stderr: Renderer::with_look(detected.stderr.is_colored(), look),
+            stdout_control: detected.stdout_control,
+        }
+    }
+}
+
+/// Whether the locale's character set is UTF-8, by the first of `LC_ALL`,
+/// `LC_CTYPE`, and `LANG` that is set.
+fn locale_is_utf8() -> bool {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .is_some_and(|locale| {
+            let locale = locale.to_ascii_lowercase();
+            locale.contains("utf-8") || locale.contains("utf8")
+        })
+}
+
+/// Whether the terminal is one known to show OSC 8 hyperlinks.
+fn terminal_has_hyperlinks() -> bool {
+    let variable = |name| std::env::var(name).unwrap_or_default();
+    let program = variable("TERM_PROGRAM");
+    let term = variable("TERM");
+    matches!(
+        program.as_str(),
+        "iTerm.app" | "WezTerm" | "vscode" | "ghostty" | "Hyper" | "rio"
+    ) || ["kitty", "foot", "alacritty", "ghostty", "wezterm"]
+        .iter()
+        .any(|name| term.contains(name))
+        || std::env::var_os("WT_SESSION").is_some()
+        || std::env::var_os("KITTY_WINDOW_ID").is_some()
+        || variable("VTE_VERSION")
+            .parse::<u32>()
+            .is_ok_and(|version| version >= 5000)
 }
 
 /// The assembly syntax `disassemble` renders.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub enum DisassemblySyntax {
     /// Intel syntax: destination first, `qword ptr [rbp-0x8]`.
     #[default]
@@ -83,6 +162,15 @@ impl From<DisassemblySyntax> for AssemblySyntax {
         match syntax {
             DisassemblySyntax::Intel => Self::Intel,
             DisassemblySyntax::Att => Self::Att,
+        }
+    }
+}
+
+impl From<AssemblySyntax> for DisassemblySyntax {
+    fn from(syntax: AssemblySyntax) -> Self {
+        match syntax {
+            AssemblySyntax::Intel => Self::Intel,
+            AssemblySyntax::Att => Self::Att,
         }
     }
 }
@@ -127,6 +215,7 @@ impl LaunchSettings {
 pub struct Cli {
     debugger: DebuggerHandle,
     renderers: Renderers,
+    settings: Settings,
     syntax: AssemblySyntax,
     launch: LaunchSettings,
     views: std::sync::Mutex<ViewSources>,
@@ -141,16 +230,17 @@ struct ViewSources {
 }
 
 impl Cli {
-    pub const fn new(
+    pub fn new(
         debugger: DebuggerHandle,
         renderers: Renderers,
-        syntax: AssemblySyntax,
+        settings: Settings,
         launch: LaunchSettings,
     ) -> Self {
         Self {
             debugger,
             renderers,
-            syntax,
+            syntax: settings.config.disassembly.syntax.into(),
+            settings,
             launch,
             views: std::sync::Mutex::new(ViewSources {
                 session: Vec::new(),
@@ -159,16 +249,15 @@ impl Cli {
         }
     }
 
-    /// Loads the project's and the user's view files, under
-    /// `working_directory`, and the session files at `paths`, and returns
-    /// a warning for each file or view it could not use, the program's own
-    /// included.
+    /// Loads the project's view files, under `project_root`, and the
+    /// user's, and the session files at `paths`, and returns a warning for
+    /// each file or view it could not use, the program's own included.
     pub async fn load_view_sources(
         &self,
-        working_directory: &std::path::Path,
+        project_root: &std::path::Path,
         paths: &[PathBuf],
     ) -> Vec<String> {
-        let (discovered, mut warnings) = uscope::view_files::discover(working_directory);
+        let (discovered, mut warnings) = uscope::view_files::discover(project_root);
         let mut session = Vec::new();
         for path in paths {
             match uscope::view_files::read(path) {
@@ -194,8 +283,8 @@ impl Cli {
 
     /// Loads view files as [`Self::load_view_sources`] does and warns about
     /// each one that cannot be used. Returns whether every one could be used.
-    pub async fn load_views(&self, working_directory: &std::path::Path, paths: &[PathBuf]) -> bool {
-        let warnings = self.load_view_sources(working_directory, paths).await;
+    pub async fn load_views(&self, project_root: &std::path::Path, paths: &[PathBuf]) -> bool {
+        let warnings = self.load_view_sources(project_root, paths).await;
         for warning in &warnings {
             self.warn(&format!("views: {warning}"));
         }
@@ -233,8 +322,8 @@ impl Cli {
 
     /// Runs the session's scripts and then its REPL, pausing the inferior on
     /// Ctrl-C.
-    pub async fn run(&self, args: &Args) -> Result<()> {
-        let session = self.run_inputs(args);
+    pub async fn run(&self, session: &Session) -> Result<()> {
+        let session = self.run_inputs(session);
         tokio::pin!(session);
         loop {
             tokio::select! {
@@ -256,16 +345,19 @@ impl Cli {
         }
     }
 
-    async fn run_inputs(&self, args: &Args) -> Result<()> {
+    async fn run_inputs(&self, args: &Session) -> Result<()> {
         self.announce(args)?;
-        // The project is where the program runs.
-        let working_directory = self
-            .launch
-            .working_directory
-            .clone()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        self.load_views(&working_directory, &args.views).await;
+        self.load_views(&self.settings.root, &args.views).await;
+        self.apply_signal_settings().await?;
 
+        for command in &args.startup {
+            if !self
+                .run_scripted(&command.text, &command.label, OnError::Abort)
+                .await?
+            {
+                return Ok(());
+            }
+        }
         for path in &args.command_files {
             let contents = fs::read_to_string(path)
                 .with_context(|| format!("failed to read command file {}", path.display()))?;
@@ -295,7 +387,20 @@ impl Cli {
         Ok(())
     }
 
-    fn announce(&self, args: &Args) -> Result<()> {
+    /// Applies the settings' `[signals]`, as `handle` would.
+    async fn apply_signal_settings(&self) -> Result<()> {
+        for (name, actions) in &self.settings.config.signals {
+            let code = uscope::signal_named(name).expect("checked when read");
+            let mut policy = self.debugger.signal_policy(code).await?;
+            for action in actions.actions() {
+                commands::apply_signal_action(&mut policy, action)?;
+            }
+            self.debugger.set_signal_policy(code, policy).await?;
+        }
+        Ok(())
+    }
+
+    fn announce(&self, args: &Session) -> Result<()> {
         let stdout = self.renderers.stdout;
         if let Some(core) = self.debugger.core_dump() {
             if !args.batch {
@@ -318,7 +423,7 @@ impl Cli {
                 self.warn(&warning);
             }
         } else if !args.batch {
-            let action = if args.attach.is_some() {
+            let action = if args.attached().is_some() {
                 "attached to"
             } else {
                 "debugging"
@@ -327,7 +432,7 @@ impl Cli {
                 "{} {}{}",
                 stdout.paint(Role::Success, action),
                 stdout.paint(Role::Metadata, self.debugger.executable().display()),
-                args.attach
+                args.attached()
                     .map(|pid| format!(" (process {pid})"))
                     .unwrap_or_default()
             ))?;

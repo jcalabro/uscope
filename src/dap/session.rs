@@ -679,10 +679,21 @@ impl Session {
         let core = matches!(start, Start::Core(_));
         let handle = debugger.handle().with_source_paths(source_paths.clone());
         self.events = Some(handle.subscribe());
+        // The console's commands read no settings files: an editor's
+        // sessions take their settings from its launch arguments.
+        let root = crate::cli::config::project_root(
+            &working_directory
+                .clone()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_default(),
+        );
+        let renderers = Renderers::console(self.support().ansi, root.clone());
+        let mut settings = crate::cli::config::Settings::defaults(root);
+        settings.config.disassembly.syntax = syntax.into();
         let console = Cli::new(
             handle.clone(),
-            Renderers::uniform(self.support().ansi),
-            syntax,
+            renderers,
+            settings,
             LaunchSettings::default(),
         );
         let mut default_policies = HashMap::new();
@@ -791,7 +802,10 @@ impl Session {
             .unwrap_or_default();
         let warnings = target
             .console
-            .load_view_sources(&working_directory, view_files)
+            .load_view_sources(
+                &crate::cli::config::project_root(&working_directory),
+                view_files,
+            )
             .await;
         for warning in warnings {
             self.client.important(format!("views: {warning}")).await?;

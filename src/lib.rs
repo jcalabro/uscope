@@ -165,6 +165,13 @@ pub fn is_built_in_view(name: &ViewName) -> bool {
         .any(|view| view.source == name.source && view.line == name.line)
 }
 
+/// The processes named `name`, matched exactly as `pgrep -x` matches:
+/// by the command name the platform records, or by the file name the
+/// process was started as. The calling process is never one of them.
+pub fn processes_named(name: &str) -> Result<Vec<ProcessId>> {
+    backend::processes_named(name)
+}
+
 /// Finds a signal's exception code by name, with or without its `SIG`
 /// prefix and in any case, or by number: `SIGUSR1`, `usr1`, `10`, `SIG34`.
 #[must_use]
