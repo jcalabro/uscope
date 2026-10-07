@@ -103,7 +103,8 @@ impl<P: LinuxTraceOps> Controller<P> {
     fn reresolve_breakpoints(&mut self, mut changed: bool) -> Result<()> {
         for index in 0..self.breakpoints.len() {
             let breakpoint = &self.breakpoints[index];
-            if matches!(breakpoint.spec, BreakpointSpec::Address(_)) {
+            // A disabled breakpoint is resolved again when it is enabled.
+            if !breakpoint.enabled || matches!(breakpoint.spec, BreakpointSpec::Address(_)) {
                 continue;
             }
             let resolved = self

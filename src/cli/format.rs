@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use uscope::{
@@ -10,10 +11,10 @@ use uscope::{
     CoreModuleState, DecodedInstruction, DisassembledInstruction, Disassembly, DisassemblyBlock,
     DisassemblyView, ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, HitCondition,
     IndirectTarget, InstructionContent, InstructionReferenceKind, InstructionTokenKind,
-    InvalidatedWatchpoint, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId,
-    ModuleIdentity, ModuleImage, RegisterSnapshot, SourceContext, StackFrame, StateSnapshot,
-    StepKind, StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary, ThreadState,
-    VirtualAddress, WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
+    InvalidatedWatchpoint, LineNumber, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
+    ModuleId, ModuleIdentity, ModuleImage, RegisterSnapshot, SourceContext, SourceLine, StackFrame,
+    StateSnapshot, StepKind, StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary,
+    ThreadState, VirtualAddress, WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
 
 use super::commands::{COMMANDS, CommandSpec};
@@ -49,20 +50,7 @@ pub fn plural(count: u64, noun: &str) -> String {
     format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
 }
 
-/// Joins the lines produced by `line`, or returns `empty` when there are none.
-fn lines_or<T>(
-    items: &[T],
-    empty: &str,
-    renderer: Renderer,
-    line: impl Fn(&T) -> String,
-) -> String {
-    if items.is_empty() {
-        return renderer.paint(Role::Metadata, empty).to_string();
-    }
-    items.iter().map(line).collect::<Vec<_>>().join("\n")
-}
-
-pub fn help(renderer: Renderer) -> String {
+pub fn help(aliases: &BTreeMap<String, String>, renderer: Renderer) -> String {
     let name_width = COMMANDS.iter().map(|command| command.name.len()).max();
     let alias_width = COMMANDS
         .iter()
@@ -86,6 +74,18 @@ pub fn help(renderer: Renderer) -> String {
             command.summary
         )
         .expect("writing to a String cannot fail");
+    }
+    if !aliases.is_empty() {
+        let width = aliases.keys().map(String::len).max().unwrap_or(0);
+        output.push_str("\n\naliases from the settings:");
+        for (alias, expansion) in aliases {
+            write!(
+                output,
+                "\n  {}  {expansion}",
+                renderer.paint(Role::Alias, format_args!("{alias:<width$}"))
+            )
+            .expect("writing to a String cannot fail");
+        }
     }
     output.push_str("\n\nUse `help <command>` for aliases and usage.");
     output
@@ -147,24 +147,6 @@ fn hit_condition(
     Some(text)
 }
 
-/// Appends a breakpoint's or watchpoint's hit condition and condition, two
-/// spaces before each, as listings show them.
-fn append_conditions(
-    output: &mut String,
-    hit: Option<HitCondition>,
-    hit_count: u64,
-    condition: Option<&Condition>,
-    renderer: Renderer,
-) {
-    if let Some(text) = hit_condition(hit, hit_count, renderer) {
-        write!(output, "  {text}").expect("writing to a String cannot fail");
-    }
-    if let Some(condition) = condition {
-        write!(output, "  where {}", renderer.paint(Role::Value, condition))
-            .expect("writing to a String cannot fail");
-    }
-}
-
 /// Names the breakpoint or watchpoint a condition belongs to.
 pub fn condition_owner(owner: ConditionOwner) -> String {
     match owner {
@@ -173,34 +155,114 @@ pub fn condition_owner(owner: ConditionOwner) -> String {
     }
 }
 
-pub fn breakpoint(breakpoint: &Breakpoint, renderer: Renderer) -> String {
+pub fn breakpoint(breakpoint: &Breakpoint, placed: &[Placed], renderer: Renderer) -> String {
     let heading = format!(
         "{} {} set",
-        renderer.paint(Role::Success, "breakpoint"),
+        renderer.paint(
+            Role::Success,
+            if breakpoint.temporary {
+                "temporary breakpoint"
+            } else {
+                "breakpoint"
+            }
+        ),
         renderer.paint(Role::Metadata, breakpoint.id),
     );
-    let condition = hit_condition(breakpoint.hit_condition, breakpoint.hit_count, renderer)
-        .map(|condition| format!(", {condition}"))
-        .unwrap_or_default();
-    if let [resolved] = breakpoint.locations.as_ref() {
-        return format!(
-            "{heading} at {}{condition}",
-            breakpoint_location(resolved.location, renderer)
-        );
+    let mut options = String::new();
+    let stops = hit_condition(breakpoint.hit_condition, breakpoint.hit_count, renderer);
+    match (stops, &breakpoint.condition) {
+        (Some(stops), Some(condition)) => write!(
+            options,
+            ", {stops} where {}",
+            renderer.paint(Role::Value, condition)
+        ),
+        (Some(stops), None) => write!(options, ", {stops}"),
+        (None, Some(condition)) => write!(
+            options,
+            ", stops where {}",
+            renderer.paint(Role::Value, condition)
+        ),
+        (None, None) => Ok(()),
     }
-    let mut output = format!(
-        "{heading} at {} locations{condition}",
-        breakpoint.locations.len()
-    );
-    for resolved in breakpoint.locations.iter() {
+    .expect("writing to a String cannot fail");
+    if let Some(message) = &breakpoint.log_message {
         write!(
-            output,
-            "\n  {}",
-            breakpoint_location(resolved.location, renderer)
+            options,
+            ", logs \"{}\"",
+            renderer.paint(Role::Value, message)
         )
         .expect("writing to a String cannot fail");
     }
+    if let [only] = placed {
+        return format!("{heading} at {}{options}", self::placed(only, renderer));
+    }
+    let mut output = if placed.is_empty() {
+        format!("{heading}, pending until a module with its code loads{options}")
+    } else {
+        format!("{heading} at {} locations{options}", placed.len())
+    };
+    for location in placed {
+        let described = self::placed(location, renderer);
+        if location.function.is_none() && location.source.is_none() {
+            write!(output, "\n  {described}")
+        } else {
+            write!(
+                output,
+                "\n  {}  {described}",
+                breakpoint_address(location.location, renderer)
+            )
+        }
+        .expect("writing to a String cannot fail");
+    }
     output
+}
+
+/// Where one breakpoint location is, as far as its module tells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placed {
+    pub location: BreakpointLocation,
+    /// The innermost function, inline or not, containing it.
+    pub function: Option<Arc<str>>,
+    pub source: Option<(Arc<PathBuf>, LineNumber)>,
+    /// The module containing it, unless it is the program's own.
+    pub module: Option<Arc<PathBuf>>,
+}
+
+/// `parse_header at parse.c:41 in libparse.so`, saying as much as is known
+/// and the address when no source line is.
+pub fn placed(placed: &Placed, renderer: Renderer) -> String {
+    let mut output = match (&placed.function, &placed.source) {
+        (Some(function), Some((path, line))) => format!(
+            "{} at {}",
+            renderer.paint(Role::Name, function),
+            renderer.paint(Role::Metadata, renderer.location(path, line))
+        ),
+        (None, Some((path, line))) => renderer
+            .paint(Role::Metadata, renderer.location(path, line))
+            .to_string(),
+        (Some(function), None) => format!(
+            "{} at {}",
+            renderer.paint(Role::Name, function),
+            breakpoint_address(placed.location, renderer)
+        ),
+        (None, None) => breakpoint_location(placed.location, renderer),
+    };
+    if let Some(module) = &placed.module {
+        let name = module.file_name().map_or_else(
+            || module.display().to_string(),
+            |name| name.display().to_string(),
+        );
+        write!(output, " in {}", renderer.paint(Role::Name, name))
+            .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+fn breakpoint_address(location: BreakpointLocation, renderer: Renderer) -> String {
+    match location {
+        BreakpointLocation::Image(address) => renderer.paint(Role::Metadata, address).to_string(),
+        BreakpointLocation::Virtual(address) => renderer.paint(Role::Metadata, address).to_string(),
+    }
 }
 
 /// Describes a breakpoint whose hit condition changed.
@@ -227,40 +289,228 @@ pub fn watchpoint_hit_condition(watchpoint: &Watchpoint, renderer: Renderer) -> 
     )
 }
 
-pub fn breakpoints(breakpoints: &[Breakpoint], renderer: Renderer) -> String {
-    lines_or(breakpoints, "no breakpoints", renderer, |breakpoint| {
-        let mut output = format!(
-            "{}  {}  {}  hit {}",
-            renderer.paint(Role::Metadata, breakpoint.id),
-            renderer.paint(Role::Name, &breakpoint.spec),
-            plural(breakpoint.locations.len() as u64, "location"),
-            plural(breakpoint.hit_count, "time"),
-        );
-        append_conditions(
-            &mut output,
+/// A table of breakpoints: whether each is enabled, its hits, where it
+/// is, and its options, with several locations listed beneath it.
+pub fn breakpoints(rows: &[(&Breakpoint, Vec<Placed>)], renderer: Renderer) -> String {
+    if rows.is_empty() {
+        return renderer.paint(Role::Metadata, "no breakpoints").to_string();
+    }
+    let (branch, last) = if renderer.unicode() {
+        ("\u{251c} ", "\u{2514} ")
+    } else {
+        ("|- ", "`- ")
+    };
+    let mut table = Table::new(&["Id", "On", "Hits", "Where", "Options"], &[2]);
+    for (breakpoint, placed) in rows {
+        let place = match placed.as_slice() {
+            [only] => self::placed(only, renderer),
+            [] => renderer.paint(Role::Name, &breakpoint.spec).to_string(),
+            several => format!(
+                "{}, {} locations",
+                renderer.paint(Role::Name, &breakpoint.spec),
+                several.len()
+            ),
+        };
+        let mut options = counted_options(
             breakpoint.hit_condition,
             breakpoint.hit_count,
             breakpoint.condition.as_ref(),
             renderer,
         );
         if let Some(message) = &breakpoint.log_message {
-            write!(
-                output,
-                "  logs \"{}\"",
-                renderer.paint(Role::Value, message)
-            )
-            .expect("writing to a String cannot fail");
+            options.push(format!("log \"{}\"", renderer.paint(Role::Value, message)));
         }
-        for resolved in breakpoint.locations.iter() {
-            write!(
-                output,
-                "\n  {}",
-                breakpoint_location(resolved.location, renderer)
-            )
-            .expect("writing to a String cannot fail");
+        if breakpoint.temporary {
+            options.push("temporary".to_owned());
         }
-        output
-    })
+        if placed.is_empty() {
+            options.push(renderer.paint(Role::Warning, "pending").to_string());
+        }
+        table.row(
+            vec![
+                renderer.paint(Role::Metadata, breakpoint.id).to_string(),
+                enabled_mark(breakpoint.enabled, renderer),
+                breakpoint.hit_count.to_string(),
+                place,
+                options.join("  "),
+            ],
+            if placed.len() > 1 {
+                placed
+                    .iter()
+                    .enumerate()
+                    .map(|(index, location)| {
+                        format!(
+                            "{}{}  {}",
+                            if index + 1 == placed.len() {
+                                last
+                            } else {
+                                branch
+                            },
+                            breakpoint_address(location.location, renderer),
+                            self::placed(location, renderer)
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        );
+    }
+    table.render(3, renderer)
+}
+
+/// `+` or `●` for enabled, `-` or `○` for disabled.
+fn enabled_mark(enabled: bool, renderer: Renderer) -> String {
+    match (enabled, renderer.unicode()) {
+        (true, true) => renderer.paint(Role::Success, "\u{25cf}").to_string(),
+        (true, false) => renderer.paint(Role::Success, "+").to_string(),
+        (false, true) => renderer.paint(Role::Muted, "\u{25cb}").to_string(),
+        (false, false) => renderer.paint(Role::Muted, "-").to_string(),
+    }
+}
+
+/// A breakpoint's or watchpoint's hit condition and condition, as `break`
+/// takes them.
+fn counted_options(
+    hit: Option<HitCondition>,
+    hit_count: u64,
+    condition: Option<&Condition>,
+    renderer: Renderer,
+) -> Vec<String> {
+    let mut options = Vec::new();
+    if let Some(hit) = hit {
+        let mut text = format!("hits {}", renderer.paint(Role::Name, hit));
+        if !hit.may_stop_after(hit_count) {
+            text.push_str(" (no later hit can stop)");
+        }
+        options.push(text);
+    }
+    if let Some(condition) = condition {
+        options.push(format!("if {}", renderer.paint(Role::Value, condition)));
+    }
+    options
+}
+
+/// Rows of cells padded into columns by their visible width, each with
+/// lines beneath it that start where the column `beneath` does.
+struct Table {
+    headings: Vec<String>,
+    /// The columns aligned right, as counts are.
+    right: &'static [usize],
+    rows: Vec<(Vec<String>, Vec<String>)>,
+}
+
+impl Table {
+    fn new(headings: &[&str], right: &'static [usize]) -> Self {
+        Self {
+            headings: headings.iter().map(|&heading| heading.to_owned()).collect(),
+            right,
+            rows: Vec::new(),
+        }
+    }
+
+    fn row(&mut self, cells: Vec<String>, beneath: Vec<String>) {
+        self.rows.push((cells, beneath));
+    }
+
+    fn render(self, beneath: usize, renderer: Renderer) -> String {
+        let columns = self.headings.len();
+        // A last column every row leaves empty is not shown.
+        let shown = if self
+            .rows
+            .iter()
+            .all(|(cells, _)| cells[columns - 1].is_empty())
+        {
+            columns - 1
+        } else {
+            columns
+        };
+        let widths = (0..shown)
+            .map(|column| {
+                self.rows
+                    .iter()
+                    .map(|(cells, _)| visible_width(&cells[column]))
+                    .chain([self.headings[column].len()])
+                    .max()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        let indent = widths[..beneath]
+            .iter()
+            .map(|width| width + 2)
+            .sum::<usize>();
+        let line = |cells: &[String]| {
+            let mut line = String::new();
+            for (column, cell) in cells.iter().take(shown).enumerate() {
+                let padding = " ".repeat(widths[column] - visible_width(cell));
+                if column > 0 {
+                    line.push_str("  ");
+                }
+                if self.right.contains(&column) {
+                    line.push_str(&padding);
+                    line.push_str(cell);
+                } else {
+                    line.push_str(cell);
+                    if column + 1 < shown {
+                        line.push_str(&padding);
+                    }
+                }
+            }
+            line.trim_end().to_owned()
+        };
+        let headings = self
+            .headings
+            .iter()
+            .map(|heading| renderer.paint(Role::Muted, heading).to_string())
+            .collect::<Vec<_>>();
+        let mut lines = vec![line(&headings)];
+        for (cells, under) in &self.rows {
+            lines.push(line(cells));
+            lines.extend(
+                under
+                    .iter()
+                    .map(|text| format!("{}{text}", " ".repeat(indent))),
+            );
+        }
+        lines.join("\n")
+    }
+}
+
+/// The width a terminal shows `text` in, without its color and link
+/// escapes.
+fn visible_width(text: &str) -> usize {
+    let mut width = 0;
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            width += 1;
+            continue;
+        }
+        match characters.next() {
+            // A control sequence ends at its final byte.
+            Some('[') => {
+                for character in characters.by_ref() {
+                    if ('@'..='~').contains(&character) {
+                        break;
+                    }
+                }
+            }
+            // An operating system command, such as a link, ends at ST.
+            Some(']') => {
+                while let Some(character) = characters.next() {
+                    if character == '\u{7}' {
+                        break;
+                    }
+                    if character == '\u{1b}' && characters.peek() == Some(&'\\') {
+                        characters.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    width
 }
 
 /// Names a watchpoint by the expression that resolved it, or by its bytes.
@@ -317,27 +567,41 @@ pub fn watchpoint_condition(watchpoint: &Watchpoint, renderer: Renderer) -> Stri
     )
 }
 
+/// A table of watchpoints: whether each is enabled, its hits, what and
+/// where it watches, and its options.
 pub fn watchpoints(watchpoints: &[Watchpoint], renderer: Renderer) -> String {
-    lines_or(watchpoints, "no watchpoints", renderer, |watchpoint| {
-        let mut output = format!(
-            "{}  {}  {}  {} at {}{}  hit {}",
-            renderer.paint(Role::Metadata, watchpoint.id),
-            watchpoint.access,
-            renderer.paint(Role::Name, watch_subject(watchpoint)),
-            plural(watchpoint.byte_size, "byte"),
-            renderer.paint(Role::Metadata, watchpoint.address),
-            watch_scope_suffix(&watchpoint.scope),
-            plural(watchpoint.hit_count, "time"),
-        );
-        append_conditions(
-            &mut output,
+    if watchpoints.is_empty() {
+        return renderer.paint(Role::Metadata, "no watchpoints").to_string();
+    }
+    let mut table = Table::new(&["Id", "On", "Hits", "Watching", "Where", "Options"], &[2]);
+    for watchpoint in watchpoints {
+        let mut options = vec![watchpoint.access.to_string()];
+        options.extend(counted_options(
             watchpoint.hit_condition,
             watchpoint.hit_count,
             watchpoint.condition.as_ref(),
             renderer,
+        ));
+        table.row(
+            vec![
+                renderer.paint(Role::Metadata, watchpoint.id).to_string(),
+                enabled_mark(watchpoint.enabled, renderer),
+                watchpoint.hit_count.to_string(),
+                renderer
+                    .paint(Role::Name, watch_subject(watchpoint))
+                    .to_string(),
+                format!(
+                    "{} at {}{}",
+                    plural(watchpoint.byte_size, "byte"),
+                    renderer.paint(Role::Metadata, watchpoint.address),
+                    watch_scope_suffix(&watchpoint.scope),
+                ),
+                options.join("  "),
+            ],
+            Vec::new(),
         );
-        output
-    })
+    }
+    table.render(3, renderer)
 }
 
 fn watchpoint_invalidations(invalidated: &[InvalidatedWatchpoint], renderer: Renderer) -> String {
@@ -369,22 +633,31 @@ pub const fn invalidation_text(reason: WatchpointInvalidation) -> &'static str {
 }
 
 /// Describes each hit with the watched value before and after the access.
+/// Renders the watchpoints a stop hit, the first hit's line ending with
+/// `first` and each other's naming its thread.
 pub fn watchpoint_hits(
     hits: &[WatchpointHit],
     watchpoints: &[Watchpoint],
     image: Option<&ModuleImage>,
+    first: &str,
     renderer: Renderer,
 ) -> String {
     hits.iter()
-        .map(|hit| {
+        .enumerate()
+        .map(|(index, hit)| {
             let watchpoint = watchpoints
                 .iter()
                 .find(|watchpoint| watchpoint.id == hit.watchpoint);
             let type_info = watchpoint.and_then(|watchpoint| watchpoint.type_info.as_ref());
             let old = value::watched_bytes(hit.previous.as_deref(), type_info, image);
             let new = value::watched_bytes(hit.current.as_deref(), type_info, image);
+            let thread = if index == 0 {
+                first.to_owned()
+            } else {
+                format!(" in thread {}", renderer.paint(Role::Metadata, hit.thread))
+            };
             format!(
-                "{} by {}{} in thread {}{}",
+                "{} by {}{}{thread}{}",
                 renderer.paint(Role::Current, "stopped"),
                 renderer.paint(Role::Metadata, format!("watchpoint {}", hit.watchpoint)),
                 watchpoint.map_or_else(
@@ -396,7 +669,6 @@ pub fn watchpoint_hits(
                         renderer.paint(Role::Name, watch_subject(watchpoint))
                     )
                 ),
-                renderer.paint(Role::Metadata, hit.thread),
                 if hit.changed() {
                     format!("\n  old: {old}\n  new: {new}")
                 } else {
@@ -433,15 +705,14 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
     match reason {
         StopReason::Attach => format!("{} after attaching", stopped(Role::Current)),
         StopReason::Entry => format!("{} at the program entry", stopped(Role::Current)),
-        StopReason::Breakpoint { address, hits } => format!(
-            "{} at {} at {}",
+        StopReason::Breakpoint { hits, .. } => format!(
+            "{} at {}",
             stopped(Role::Current),
             numbered_hits(
                 "breakpoint",
                 hits.iter().map(|hit| (hit.breakpoint.get(), hit.hit_count)),
                 renderer
-            ),
-            renderer.paint(Role::Metadata, address)
+            )
         ),
         StopReason::Watchpoint { hits } => format!(
             "{} by {}",
@@ -528,6 +799,7 @@ const fn step_name(kind: StepKind) -> &'static str {
         StepKind::IntoSource => "source step",
         StepKind::OverSource => "source next",
         StepKind::Out => "frame return",
+        StepKind::Advance => "advance",
     }
 }
 
@@ -678,16 +950,33 @@ pub fn memory_read(read: &MemoryRead, renderer: Renderer) -> String {
     bound_output(&lines.join("\n"))
 }
 
-pub fn source_context(context: &SourceContext, renderer: Renderer) -> String {
+/// Renders source lines around a location, after the location itself when
+/// `located`, with a margin marking each line in `breakpoints`, enabled or
+/// not, when any shown line has one, and each line's text as `text` draws
+/// it.
+pub fn source_context(
+    context: &SourceContext,
+    breakpoints: &BTreeMap<LineNumber, bool>,
+    located: bool,
+    text: &dyn Fn(&SourceLine) -> String,
+    renderer: Renderer,
+) -> String {
     let line_width = context
         .lines
         .last()
         .map_or(1, |line| line.number.to_string().len());
-    let mut output = format!(
-        "{}:{}",
-        renderer.paint(Role::Metadata, context.path.display()),
-        renderer.paint(Role::Current, context.location.line)
-    );
+    let margin = context
+        .lines
+        .iter()
+        .any(|line| breakpoints.contains_key(&line.number));
+    let mut lines = Vec::with_capacity(context.lines.len() + 1);
+    if located {
+        lines.push(format!(
+            "{}:{}",
+            renderer.paint(Role::Metadata, renderer.path(&context.path)),
+            renderer.paint(Role::Current, context.location.line)
+        ));
+    }
     for line in context.lines.iter() {
         let current = line.number == context.location.line;
         let (marker, role) = if current {
@@ -698,15 +987,18 @@ pub fn source_context(context: &SourceContext, renderer: Renderer) -> String {
         } else {
             ("  ".to_owned(), Role::Metadata)
         };
-        write!(
-            output,
-            "\n{marker} {} | {}",
+        let breakpoint = match breakpoints.get(&line.number) {
+            Some(enabled) => enabled_mark(*enabled, renderer),
+            None if margin => " ".to_owned(),
+            None => String::new(),
+        };
+        lines.push(format!(
+            "{breakpoint}{marker} {} | {}",
             renderer.paint(role, format_args!("{:>line_width$}", line.number)),
-            line.text
-        )
-        .expect("writing to a String cannot fail");
+            text(line)
+        ));
     }
-    output
+    lines.join("\n")
 }
 
 pub fn core_dump(core: &CoreDumpInfo, renderer: Renderer) -> String {
@@ -900,6 +1192,7 @@ pub fn disassembly(
     program_counter: Option<VirtualAddress>,
     modules: &LoadedModuleSnapshot,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    show_bytes: bool,
     renderer: Renderer,
 ) -> String {
     let mut lines = Vec::new();
@@ -941,6 +1234,7 @@ pub fn disassembly(
                     program_counter,
                     modules,
                     images,
+                    show_bytes,
                     renderer,
                 );
             }
@@ -967,6 +1261,7 @@ pub fn disassembly(
                 program_counter,
                 modules,
                 images,
+                show_bytes,
                 renderer,
             );
         }
@@ -984,6 +1279,7 @@ fn disassembly_block(
     program_counter: Option<VirtualAddress>,
     modules: &LoadedModuleSnapshot,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    show_bytes: bool,
     renderer: Renderer,
 ) {
     let place = |instruction: &DisassembledInstruction| {
@@ -1003,19 +1299,14 @@ fn disassembly_block(
         .map(|instruction| place(instruction).len())
         .max()
         .unwrap_or_default();
-    let bytes_width = block
-        .instructions
-        .iter()
-        .map(|instruction| instruction.bytes.len().min(ALIGNED_INSTRUCTION_BYTES) * 3)
-        .max()
-        .unwrap_or_default();
+    let bytes_width = bytes_column_width(block);
 
     let mut source = None;
     for instruction in block.instructions.iter() {
         let module = instruction.location.module.as_ref();
         let current_source = instruction.source.as_ref().and_then(|location| {
             let file = images.get(&module?.module)?.source_file(location.file)?;
-            Some(format!("{}:{}", file.path.display(), location.line))
+            Some(renderer.location(&file.path, location.line))
         });
         if current_source.is_some() && current_source != source {
             lines.push(
@@ -1034,7 +1325,7 @@ fn disassembly_block(
         } else {
             "  ".to_owned()
         };
-        let bytes = instruction_bytes(&instruction.bytes);
+        let bytes = instruction_bytes(&instruction.bytes, show_bytes.then_some(bytes_width));
         let text = match &instruction.content {
             InstructionContent::Decoded(decoded) => instruction_text(
                 decoded,
@@ -1049,7 +1340,7 @@ fn disassembly_block(
                 .to_string(),
         };
         lines.push(format!(
-            "{marker} {}{} {bytes:<bytes_width$} {text}",
+            "{marker} {}{}{bytes} {text}",
             renderer.paint(
                 Role::Metadata,
                 format_args!("{:#018x}", instruction.address)
@@ -1088,6 +1379,16 @@ fn disassembly_block(
     }
 }
 
+/// The width of the bytes column, which fits all but the longest encodings.
+fn bytes_column_width(block: &DisassemblyBlock) -> usize {
+    block
+        .instructions
+        .iter()
+        .map(|instruction| instruction.bytes.len().min(ALIGNED_INSTRUCTION_BYTES) * 3)
+        .max()
+        .unwrap_or_default()
+}
+
 fn conflict_note(conflict: &BoundaryConflict) -> String {
     if conflict.evidence == BoundaryEvidence::RangeEnd {
         format!(
@@ -1102,11 +1403,17 @@ fn conflict_note(conflict: &BoundaryConflict) -> String {
     }
 }
 
-fn instruction_bytes(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut text, byte| {
+/// An instruction's bytes, padded to the column's width after a space, or
+/// nothing when the column is hidden.
+fn instruction_bytes(bytes: &[u8], width: Option<usize>) -> String {
+    let Some(width) = width else {
+        return String::new();
+    };
+    let text = bytes.iter().fold(String::new(), |mut text, byte| {
         write!(text, "{byte:02x} ").expect("writing to a String cannot fail");
         text
-    })
+    });
+    format!(" {text:<width$}")
 }
 
 /// Renders an instruction's text with each encoded address named.
@@ -1299,15 +1606,19 @@ pub fn module_name(modules: &LoadedModuleSnapshot, module: ModuleId) -> Option<S
 }
 
 /// Renders a backtrace, highlighting the selected frame's level.
+/// Renders a backtrace, or its first `limit` frames and how many more
+/// there are.
 pub fn backtrace(
     trace: &Backtrace,
     selected: u32,
+    limit: Option<usize>,
     modules: Option<&LoadedModuleSnapshot>,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
     renderer: Renderer,
 ) -> String {
-    let mut lines = Vec::with_capacity(trace.frames.len() + 1);
-    for frame in trace.frames.iter() {
+    let shown = limit.unwrap_or(usize::MAX).min(trace.frames.len());
+    let mut lines = Vec::with_capacity(shown + 1);
+    for frame in &trace.frames[..shown] {
         lines.push(stack_frame(
             frame,
             modules,
@@ -1316,11 +1627,24 @@ pub fn backtrace(
             renderer,
         ));
     }
-    lines.push(format!(
-        "{}: {}",
-        renderer.paint(Role::Metadata, "unwind stopped"),
-        trace.termination
-    ));
+    let more = trace.frames.len() - shown;
+    lines.push(if more == 0 {
+        format!(
+            "{}: {}",
+            renderer.paint(Role::Metadata, "unwind stopped"),
+            trace.termination
+        )
+    } else {
+        renderer
+            .paint(
+                Role::Muted,
+                format!(
+                    "{}; `bt` shows every one",
+                    plural(more as u64, "more frame")
+                ),
+            )
+            .to_string()
+    });
     lines.join("\n")
 }
 
@@ -1337,7 +1661,7 @@ pub fn stack_frame(
         images
             .get(&frame.module?)?
             .source_file(source.file)
-            .map(|file| format!("{}:{}", file.path.display(), source.line))
+            .map(|file| renderer.location(&file.path, source.line))
     });
     let place = source.map_or_else(
         || {
@@ -1655,7 +1979,7 @@ mod tests {
     #[test]
     fn generated_help_lists_every_command_and_shows_usage_only_for_arguments() {
         let renderer = Renderer::new(false);
-        let overview = help(renderer);
+        let overview = help(&BTreeMap::new(), renderer);
         for command in COMMANDS {
             // Each command has one overview row: its name, aliases, summary.
             let row = overview

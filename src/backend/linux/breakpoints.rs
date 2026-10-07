@@ -64,6 +64,8 @@ impl UserBreakpoints {
                 && breakpoint.hit_condition == options.hit_condition
                 && breakpoint.condition == options.condition
                 && breakpoint.log_message == options.log_message
+                && breakpoint.enabled == options.enabled
+                && breakpoint.temporary == options.temporary
         })
     }
 }
@@ -122,10 +124,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             hit_condition: options.hit_condition,
             condition: options.condition,
             log_message: options.log_message,
+            enabled: options.enabled,
+            temporary: options.temporary,
             ..self.resolve_breakpoint(id, spec, options.pending)?
         };
 
-        if self.sites_live() {
+        if breakpoint.enabled && self.sites_live() {
             let inferior = self.inferior.as_mut().expect("live sites have an inferior");
             install_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
             self.step_over_where_threads_trapped(&breakpoint)?;
@@ -165,6 +169,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             condition: None,
             log_message: None,
             hit_count: 0,
+            enabled: true,
+            temporary: false,
         })
     }
 
@@ -260,13 +266,93 @@ impl<P: LinuxTraceOps> Controller<P> {
             .position(|breakpoint| breakpoint.id == id)
             .ok_or(Error::BreakpointNotFound(id.get()))?;
         let breakpoint = self.breakpoints[index].clone();
-        if self.sites_live() {
+        if breakpoint.enabled && self.sites_live() {
             let inferior = self.inferior.as_mut().expect("live sites have an inferior");
             remove_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
         }
         self.breakpoints.remove(index);
         self.publish_breakpoints_changed();
         Ok(breakpoint)
+    }
+
+    /// Enables or disables a breakpoint. Disabling releases its sites as
+    /// removing it does, keeping the locations it last resolved to.
+    /// Enabling resolves its spec again, as adding does: code moved or
+    /// unloaded while it owned no sites never updated those locations, and
+    /// a trap written there could land in memory that now holds something
+    /// else.
+    pub(super) fn set_breakpoint_enabled(
+        &mut self,
+        id: BreakpointId,
+        enabled: bool,
+    ) -> Result<Breakpoint> {
+        let index = self
+            .breakpoints
+            .iter()
+            .position(|breakpoint| breakpoint.id == id)
+            .ok_or(Error::BreakpointNotFound(id.get()))?;
+        let current = &self.breakpoints[index];
+        if current.enabled == enabled {
+            return Ok(current.clone());
+        }
+        let mut breakpoint = current.clone();
+        breakpoint.enabled = enabled;
+        if enabled {
+            // A spec that resolves nowhere now is kept pending, as one
+            // whose library unloaded is.
+            breakpoint.locations = self
+                .resolve_breakpoint(id, breakpoint.spec.clone(), true)?
+                .locations;
+        }
+        if self.sites_live() {
+            let inferior = self.inferior.as_mut().expect("live sites have an inferior");
+            if enabled {
+                install_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
+                self.step_over_where_threads_trapped(&breakpoint)?;
+            } else {
+                remove_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
+            }
+        }
+        self.breakpoints[index] = breakpoint.clone();
+        self.publish_breakpoints_changed();
+        Ok(breakpoint)
+    }
+
+    /// Deletes the temporary breakpoints a stop's hits name, as part of
+    /// publishing that stop, and returns whether any was. The hits stay in
+    /// the threads' stop reasons.
+    pub(super) fn remove_stopped_temporaries(&mut self) -> Result<bool> {
+        let Some(inferior) = self.inferior.as_ref() else {
+            return Ok(false);
+        };
+        let hit = inferior
+            .threads
+            .values()
+            .filter_map(|thread| match &thread.reason {
+                Some(StopReason::Breakpoint { hits, .. }) => Some(hits.iter()),
+                _ => None,
+            })
+            .flatten()
+            .map(|hit| hit.breakpoint)
+            .collect::<BTreeSet<_>>();
+        let stopped =
+            |breakpoint: &Breakpoint| breakpoint.temporary && hit.contains(&breakpoint.id);
+        // Every trap is lifted before any breakpoint is forgotten, so one
+        // that fails to lift leaves them all.
+        let inferior = self.inferior.as_mut().expect("inferior exists");
+        for breakpoint in self
+            .breakpoints
+            .iter()
+            .filter(|breakpoint| breakpoint.enabled && stopped(breakpoint))
+        {
+            remove_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
+        }
+        let mut removed = false;
+        while let Some(index) = self.breakpoints.iter().position(stopped) {
+            self.breakpoints.remove(index);
+            removed = true;
+        }
+        Ok(removed)
     }
 
     pub(super) fn remove_all_breakpoints(&mut self) -> Result<Arc<[Breakpoint]>> {
@@ -281,7 +367,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .map(|(&pid, thread)| (pid, thread.stopped_at_breakpoint))
                 .collect::<Vec<_>>();
             let mut removed = Vec::new();
-            for breakpoint in &self.breakpoints {
+            for breakpoint in self
+                .breakpoints
+                .iter()
+                .filter(|breakpoint| breakpoint.enabled)
+            {
                 if let Err(cause) = remove_logical_breakpoint(&self.ptrace, inferior, breakpoint) {
                     for prior in removed.iter().rev() {
                         if let Err(recovery) =

@@ -165,6 +165,13 @@ pub fn is_built_in_view(name: &ViewName) -> bool {
         .any(|view| view.source == name.source && view.line == name.line)
 }
 
+/// The processes named `name`, matched exactly as `pgrep -x` matches:
+/// by the command name the platform records, or by the file name the
+/// process was started as. The calling process is never one of them.
+pub fn processes_named(name: &str) -> Result<Vec<ProcessId>> {
+    backend::processes_named(name)
+}
+
 /// Finds a signal's exception code by name, with or without its `SIG`
 /// prefix and in any case, or by number: `SIGUSR1`, `usr1`, `10`, `SIG34`.
 #[must_use]
@@ -594,6 +601,18 @@ impl DebuggerHandle {
         .await
     }
 
+    /// Enables or disables a breakpoint, keeping its definition and count.
+    /// Like adding and removing breakpoints, this stops every running
+    /// thread briefly, without a reported stop.
+    pub async fn set_breakpoint_enabled(
+        &self,
+        id: BreakpointId,
+        enabled: bool,
+    ) -> Result<Breakpoint> {
+        self.request(|reply| Request::SetBreakpointEnabled { id, enabled, reply })
+            .await
+    }
+
     /// Removes one logical breakpoint and returns its prior definition.
     pub async fn remove_breakpoint(&self, id: BreakpointId) -> Result<Breakpoint> {
         self.request(|reply| Request::RemoveBreakpoint { id, reply })
@@ -699,6 +718,18 @@ impl DebuggerHandle {
             reply,
         })
         .await
+    }
+
+    /// Enables or disables a watchpoint. A disabled one releases its debug
+    /// registers; enabling it plans them again, and fails, leaving it
+    /// disabled, when other watchpoints hold them.
+    pub async fn set_watchpoint_enabled(
+        &self,
+        id: WatchpointId,
+        enabled: bool,
+    ) -> Result<Watchpoint> {
+        self.request(|reply| Request::SetWatchpointEnabled { id, enabled, reply })
+            .await
     }
 
     /// Disarms one watchpoint and returns its prior definition.
@@ -926,6 +957,29 @@ impl DebuggerHandle {
                 ResumeScope::Process(selection.process),
                 ExceptionDisposition::Pass,
             )
+            .await?;
+
+        self.wait_for_execution(&mut events, execution).await
+    }
+
+    /// Runs, every thread with it, until the selected thread reaches a
+    /// location `spec` resolves to, stopping with [`StepKind::Advance`], or
+    /// the selected frame returns first, stopping as [`StepKind::Out`]
+    /// does. Nothing it plants outlives the stop that ends it.
+    pub async fn advance(&self, spec: BreakpointSpec) -> Result<StopReason> {
+        let selection = self.stopped_selection().await?;
+        let mut events = self.subscribe();
+        let execution = self
+            .request(|reply| Request::Advance {
+                process_id: selection.process,
+                stop_id: selection.stop,
+                thread_id: selection.thread,
+                frame: selection.frame,
+                spec,
+                scope: ResumeScope::Process(selection.process),
+                exception: ExceptionDisposition::Pass,
+                reply,
+            })
             .await?;
 
         self.wait_for_execution(&mut events, execution).await

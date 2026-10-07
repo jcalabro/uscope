@@ -100,9 +100,14 @@ pub struct Shared {
     /// Processes that began to end as a whole, killed or exiting their
     /// group, which the world records as it happens.
     pub ending: Rc<RefCell<BTreeSet<Tid>>>,
-    /// The user's breakpoints the debugger said it made, and the client has
-    /// not asked to remove, with the image addresses of their locations.
+    /// The user's breakpoints the debugger said it made enabled, and the
+    /// client has not asked to remove or disable, with the image addresses
+    /// of their locations. Temporary ones, which a stop may delete, are not
+    /// among them.
     pub breakpoints: Rc<RefCell<BTreeMap<u64, BTreeSet<u64>>>>,
+    /// The breakpoints the debugger said are disabled, which the client has
+    /// not asked to enable or remove since.
+    pub disabled: Rc<RefCell<BTreeSet<u64>>>,
     /// What the client saw that the world's oracles judge, in order.
     pub observations: Rc<RefCell<Vec<Observation>>>,
     /// The events about breakpoint hits the debugger published, which the
@@ -129,6 +134,8 @@ pub enum Observation {
         thread: ThreadId,
         kind: StepKind,
         presentation: Option<FramePresentation>,
+        /// For an advance, the image addresses it runs to.
+        targets: BTreeSet<u64>,
     },
     /// What the step ended with, when it ended without failing.
     StepEnded(Option<StopReason>),
@@ -219,6 +226,13 @@ pub struct Client {
     /// What the client saw at the last stop, which the hits since are
     /// judged against.
     pub baseline: RefCell<Option<Baseline>>,
+    /// The watchpoints the debugger said it disabled, with the hits each
+    /// had counted then, which it counts no more.
+    pub disabled_watches: RefCell<BTreeMap<u64, (Intent, u64)>>,
+    /// Whether the client disabled a watchpoint while the program ran
+    /// since the last stop, freeing slots a thread that could not be
+    /// armed may since have taken.
+    pub released_while_running: Cell<bool>,
 }
 
 fn protocol(message: impl Into<String>) -> Failure {
@@ -228,6 +242,11 @@ fn protocol(message: impl Into<String>) -> Failure {
 impl Client {
     fn draw(&self, bound: u64) -> u64 {
         self.choices.borrow_mut().below(Stream::Client, bound)
+    }
+
+    /// A choice about enabling, temporary breakpoints, or advancing.
+    fn control(&self, bound: u64) -> u64 {
+        self.choices.borrow_mut().below(Stream::Control, bound)
     }
 
     fn note(&self, note: impl Into<String>) {
@@ -371,7 +390,8 @@ impl Client {
                         // The semantic oracles judge every stop.
                         let result = self.inspect(stop_id).await;
                         self.excuse(process_id, result)?;
-                        if matches!(reason, StopReason::WatchpointArmFailed { .. }) {
+                        let released = self.released_while_running.replace(false);
+                        if matches!(reason, StopReason::WatchpointArmFailed { .. }) && !released {
                             let result = self.resume_unarmed().await;
                             self.excuse(process_id, result)?;
                         }
@@ -516,6 +536,14 @@ impl Client {
         events: &mut broadcast::Receiver<DebuggerEvent>,
         breakpoints: &mut Vec<Added>,
     ) -> Result<(), Failure> {
+        if self.control(8) == 0 {
+            if self.script.watching && self.control(2) == 0 {
+                self.toggle_watch(true).await?;
+            } else if self.toggle_breakpoint(breakpoints).await? {
+                self.mark(Mark::EditWhileRunning);
+            }
+            return Ok(());
+        }
         match self.draw(if self.script.watching { 8 } else { 7 }) {
             0 => {
                 self.note("pause");
@@ -570,6 +598,16 @@ impl Client {
             unreachable!("the client acts while stopped on a stopped snapshot")
         };
         let scope = ResumeScope::Process(process_id);
+        if self.control(6) == 0 {
+            match self.control(if self.script.watching { 3 } else { 2 }) {
+                0 => {
+                    self.toggle_breakpoint(breakpoints).await?;
+                }
+                1 => self.advance(breakpoints).await?,
+                _ => self.toggle_watch(false).await?,
+            }
+            return Ok(());
+        }
         match self.draw(if self.script.watching { 21 } else { 16 }) {
             0 => {
                 self.note("resume");

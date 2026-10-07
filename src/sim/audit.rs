@@ -86,6 +86,7 @@ impl Auditor {
                         )));
                     }
                     self.stop = stop_id.get();
+                    self.published.borrow_mut().stops.insert(stop_id.get());
                 }
                 DebuggerEvent::ThreadExited {
                     thread_id, status, ..

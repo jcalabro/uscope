@@ -886,6 +886,7 @@ impl Controller<CoreTarget> {
                 }
                 Request::AddBreakpoint { reply, .. }
                 | Request::RemoveBreakpoint { reply, .. }
+                | Request::SetBreakpointEnabled { reply, .. }
                 | Request::SetBreakpointHitCondition { reply, .. }
                 | Request::SetBreakpointCondition { reply, .. }
                 | Request::SetBreakpointLogMessage { reply, .. } => reject(reply),
@@ -893,12 +894,14 @@ impl Controller<CoreTarget> {
                 Request::ResolveWatchTarget { reply, .. } => reject(reply),
                 Request::AddWatchpoint { reply, .. }
                 | Request::RemoveWatchpoint { reply, .. }
+                | Request::SetWatchpointEnabled { reply, .. }
                 | Request::SetWatchpointHitCondition { reply, .. }
                 | Request::SetWatchpointCondition { reply, .. } => reject(reply),
                 Request::RemoveAllWatchpoints { reply } => reject(reply),
                 Request::Launch { reply, .. }
                 | Request::Continue { reply, .. }
                 | Request::Step { reply, .. }
+                | Request::Advance { reply, .. }
                 | Request::Pause { reply, .. } => reject(reply),
                 Request::Attach { reply, .. } => reject(reply),
                 Request::Kill { reply }

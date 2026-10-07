@@ -11,20 +11,23 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
-use uscope::{CoreDumpOptions, Debugger, ProcessId, SourcePathMap};
+use uscope::Debugger;
 
+use cli::session::{Session, Target};
 use cli::terminal::{ColorChoice, Role};
 use cli::{Cli, DisassemblySyntax, LaunchSettings, Renderers};
 
 const COMMON_FORMS: &str = "\
 Common forms:
   uscope EXECUTABLE [-- ARGS...]
-  uscope --attach PID [EXECUTABLE]
+  uscope --attach PID|NAME [EXECUTABLE]
   uscope --core CORE [EXECUTABLE]
+  uscope --launch NAME              a launch configuration of the project
 
-Use `uscope --help` for every option.";
+Use `uscope --help` for every option, and `uscope config` for settings.";
 
 #[derive(Parser)]
+#[expect(clippy::struct_excessive_bools, reason = "each is a flag")]
 #[command(
     version,
     about = "Debug Linux x86-64 programs, processes, and core dumps",
@@ -39,30 +42,38 @@ struct Args {
     ///
     /// With --attach or --core, the executable is normally discovered but
     /// can be supplied when automatic discovery is unavailable.
-    #[arg(
-        value_name = "EXECUTABLE",
-        required_unless_present_any = ["attach", "core"],
-        help_heading = "Target"
-    )]
+    #[arg(value_name = "EXECUTABLE", help_heading = "Target")]
     executable: Option<PathBuf>,
 
-    /// Attach to a running process.
+    /// Attach to a running process, by its id or by its name, which must
+    /// name exactly one process.
     ///
     /// The executable is discovered through /proc by default.
     #[arg(
         short = 'p',
         long,
-        value_name = "PID",
+        value_name = "PID|NAME",
         conflicts_with = "core",
         help_heading = "Target"
     )]
-    attach: Option<u64>,
+    attach: Option<String>,
 
     /// Inspect a core dump.
     ///
     /// The executable recorded in the dump is used by default.
     #[arg(long, value_name = "CORE", help_heading = "Target")]
     core: Option<PathBuf>,
+
+    /// Start the project's launch configuration NAME, from its
+    /// .uscope/config.toml. A project with one starts it by default.
+    #[arg(
+        short = 'l',
+        long,
+        value_name = "NAME",
+        conflicts_with_all = ["executable", "attach", "core"],
+        help_heading = "Target"
+    )]
+    launch: Option<String>,
 
     /// Execute commands from a file. May be repeated.
     #[arg(
@@ -85,6 +96,29 @@ struct Args {
     /// Execute commands without starting the interactive REPL.
     #[arg(long, help_heading = "Startup")]
     batch: bool,
+
+    /// Read FILE instead of the user's settings file.
+    #[arg(
+        long,
+        value_name = "FILE",
+        hide_short_help = true,
+        help_heading = "Settings"
+    )]
+    config: Option<PathBuf>,
+
+    /// Read no settings files, neither the user's nor the project's.
+    #[arg(
+        long,
+        conflicts_with = "config",
+        hide_short_help = true,
+        help_heading = "Settings"
+    )]
+    no_config: bool,
+
+    /// Use the project's startup commands, aliases, and launch
+    /// configurations in this session without being asked.
+    #[arg(long, hide_short_help = true, help_heading = "Settings")]
+    trust_project: bool,
 
     /// Look up the core dump's recorded module paths inside DIR, a copy of the
     /// files of the machine that wrote it, instead of on this machine.
@@ -170,25 +204,13 @@ struct Args {
     )]
     arguments: Vec<OsString>,
 
-    /// Control colored terminal output.
-    #[arg(
-        long,
-        value_enum,
-        default_value_t,
-        hide_short_help = true,
-        help_heading = "Display"
-    )]
-    color: ColorChoice,
+    /// Control colored terminal output, over [ui] color.
+    #[arg(long, value_enum, hide_short_help = true, help_heading = "Display")]
+    color: Option<ColorChoice>,
 
-    /// The assembly syntax `disassemble` renders.
-    #[arg(
-        long,
-        value_enum,
-        default_value_t,
-        hide_short_help = true,
-        help_heading = "Display"
-    )]
-    disassembly_syntax: DisassemblySyntax,
+    /// The assembly syntax `disassemble` renders, over [disassembly] syntax.
+    #[arg(long, value_enum, hide_short_help = true, help_heading = "Display")]
+    disassembly_syntax: Option<DisassemblySyntax>,
 
     #[command(subcommand)]
     tool: Option<Tool>,
@@ -203,6 +225,8 @@ enum Tool {
     Views(ViewsArgs),
     /// Serve a debugger to web browsers.
     Web(web::WebArgs),
+    /// Show, check, and create settings files, and trust projects.
+    Config(ConfigArgs),
 }
 
 fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsString), String> {
@@ -230,6 +254,11 @@ fn main() -> ExitCode {
     }
     #[cfg(debug_assertions)]
     start_flight_recording();
+    // SAFETY: the process has no other thread yet.
+    #[allow(unsafe_code, reason = "the environment can only be edited unsafely")]
+    unsafe {
+        cli::config::take_environment();
+    }
     match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime.block_on(async_main()),
         Err(error) => {
@@ -304,11 +333,29 @@ async fn async_main() -> ExitCode {
                 }
             };
         }
+        Some(Tool::Config(config)) => {
+            return match run_config(config) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::FAILURE,
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         None => {}
     }
-    let renderers = Renderers::detect(args.color, args.batch);
+    let early = Renderers::detect(args.color.unwrap_or_default(), args.batch);
+    let session = match cli::session::prepare(&args, early.stderr) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("{}: {error:#}", early.stderr.paint(Role::Error, "error"));
+            return ExitCode::FAILURE;
+        }
+    };
+    let renderers = Renderers::configured(&session.settings, args.batch);
 
-    match run(&args, renderers).await {
+    match run(session, renderers).await {
         Ok(()) => ExitCode::SUCCESS,
         // A closed stdout pipe, such as `uscope ... | head`, is a normal end.
         Err(error) if cli::is_broken_pipe(&error) => ExitCode::SUCCESS,
@@ -324,7 +371,9 @@ async fn async_main() -> ExitCode {
 
 fn parse_args() -> Args {
     let mut arguments = std::env::args_os().collect::<Vec<_>>();
-    if arguments.len() == 1 {
+    // Alone, uscope starts the project's launch configuration, or, with
+    // none, shows its short help.
+    if arguments.len() == 1 && !project_launches() {
         arguments.push("-h".into());
     }
     let color = cli::help::color_choice(&arguments);
@@ -333,27 +382,32 @@ fn parse_args() -> Args {
     Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
 }
 
-async fn run(args: &Args, renderers: Renderers) -> Result<()> {
-    let mut source_paths = SourcePathMap::new();
-    for [from, to] in args.source_map.as_chunks::<2>().0 {
-        source_paths
-            .push(from, to)
-            .context("invalid --source-map rule")?;
-    }
-    let debugger = open_debugger(args).await?;
-    let handle = debugger.handle().with_source_paths(source_paths);
-    let launch = LaunchSettings {
-        arguments: args.arguments.clone(),
-        environment: args
-            .environment
-            .iter()
-            .map(|(name, value)| (name.clone(), Some(value.clone())))
-            .collect(),
-        working_directory: args.cwd.clone(),
+/// Whether the project of the working directory describes how to start
+/// its program, so that `uscope` alone starts it. Settings that cannot be
+/// read describe nothing here; starting reports why.
+fn project_launches() -> bool {
+    let Ok(start) = std::env::current_dir() else {
+        return false;
     };
-    let result = Cli::new(handle, renderers, args.disassembly_syntax.into(), launch)
-        .run(args)
-        .await;
+    let user = cli::config::UserFile::choose(false, None);
+    cli::config::Files::read(&start, &user)
+        .and_then(|files| files.settings(true))
+        .is_ok_and(|settings| !settings.config.launch.is_empty())
+}
+
+async fn run(session: Session, renderers: Renderers) -> Result<()> {
+    let debugger = open_debugger(&session.target).await?;
+    let handle = debugger
+        .handle()
+        .with_source_paths(session.source_paths.clone());
+    let result = Cli::new(
+        handle,
+        renderers,
+        session.settings.clone(),
+        session.launch.clone(),
+    )
+    .run(&session)
+    .await;
     let shutdown = debugger
         .shutdown()
         .await
@@ -467,16 +521,16 @@ async fn run_views(args: &ViewsArgs) -> Result<bool> {
     let debugger = Debugger::new(program)
         .with_context(|| format!("failed to initialize debugger for {}", program.display()))?;
     let renderers = Renderers::detect(ColorChoice::Auto, true);
+    let root = cli::config::project_root(&std::env::current_dir().unwrap_or_default());
     let console = Cli::new(
         debugger.handle(),
         renderers,
-        uscope::AssemblySyntax::Intel,
+        cli::config::Settings::defaults(root.clone()),
         LaunchSettings::default(),
     );
-    let working_directory = std::env::current_dir().unwrap_or_default();
     // A file that could not be used fails either command, as a view that
     // binds nothing fails a check.
-    let usable = console.load_views(&working_directory, views).await;
+    let usable = console.load_views(&root, views).await;
     let handle = debugger.handle();
     let reported: Result<bool> = async {
         Ok(match &args.command {
@@ -507,34 +561,177 @@ async fn run_views(args: &ViewsArgs) -> Result<bool> {
     Ok(succeeded && usable)
 }
 
-async fn open_debugger(args: &Args) -> Result<Debugger> {
-    if let Some(core) = &args.core {
-        return Debugger::open_core(&CoreDumpOptions {
-            core: core.clone(),
-            executable: args.executable.clone(),
-            sysroot: args.sysroot.clone(),
-            module_paths: args.module_paths.clone(),
-            allow_module_mismatch: args.allow_module_mismatch,
-        })
-        .with_context(|| format!("failed to open core dump {}", core.display()));
+async fn open_debugger(target: &Target) -> Result<Debugger> {
+    match target {
+        Target::Core(options) => Debugger::open_core(options)
+            .with_context(|| format!("failed to open core dump {}", options.core.display())),
+        Target::Attach {
+            process,
+            executable: Some(executable),
+        } => Debugger::attach_with_executable(*process, executable)
+            .await
+            .with_context(|| format!("failed to attach to process {process}")),
+        Target::Attach {
+            process,
+            executable: None,
+        } => Debugger::attach(*process).await.with_context(|| {
+            format!(
+                "failed to attach to process {process}; if automatic /proc executable discovery is unavailable, pass EXECUTABLE explicitly"
+            )
+        }),
+        Target::Program(executable) => Debugger::new(executable).with_context(|| {
+            format!("failed to initialize debugger for {}", executable.display())
+        }),
     }
-    if let Some(pid) = args.attach {
-        let process = ProcessId::new(pid);
-        return match &args.executable {
-            Some(executable) => Debugger::attach_with_executable(process, executable)
-                .await
-                .with_context(|| format!("failed to attach to process {pid}")),
-            None => Debugger::attach(process).await.with_context(|| {
-                format!(
-                    "failed to attach to process {pid}; if automatic /proc executable discovery is unavailable, pass EXECUTABLE explicitly"
-                )
-            }),
-        };
+}
+
+/// Shows, checks, and creates settings files, and trusts projects.
+#[derive(clap::Args)]
+struct ConfigArgs {
+    /// Read FILE instead of the user's settings file.
+    #[arg(long, value_name = "FILE", global = true)]
+    config: Option<PathBuf>,
+    #[command(subcommand)]
+    command: ConfigCommand,
+}
+
+#[derive(clap::Subcommand)]
+enum ConfigCommand {
+    /// Print the project root and the settings and state files a session
+    /// in this directory reads, and which exist.
+    Path,
+    /// Print every setting in effect and where it comes from.
+    Show,
+    /// Check every settings file, failing at the first error, as for a
+    /// project's CI.
+    Check,
+    /// Write the user's settings file with every setting at its default,
+    /// commented out. Refuses to overwrite one.
+    Init,
+    /// Trust the project's startup commands, aliases, and launch
+    /// configurations until they change.
+    Trust,
+    /// Forget that the project is trusted.
+    Untrust,
+    /// List the trusted projects.
+    Trusted,
+}
+
+/// Prints the project root and the files a session started in `start`
+/// reads and writes.
+fn print_config_paths(start: &std::path::Path, user: Option<&std::path::Path>) {
+    let exists = |path: &std::path::Path| if path.exists() { "" } else { " (missing)" };
+    let root = cli::config::project_root(start);
+    println!("project root: {}", root.display());
+    match user {
+        Some(path) => println!("user:         {}{}", path.display(), exists(path)),
+        None => println!("user:         none (USCOPE_CONFIG is empty)"),
     }
-    let executable = args
-        .executable
-        .as_ref()
-        .expect("clap requires an executable unless --attach or --core is present");
-    Debugger::new(executable)
-        .with_context(|| format!("failed to initialize debugger for {}", executable.display()))
+    let mut files = vec![
+        ("project:", root.join(".uscope/config.toml")),
+        ("local:", root.join(".uscope/config.local.toml")),
+        ("views:", root.join(".uscope/views")),
+        ("breakpoints:", root.join(".uscope/state/breakpoints.toml")),
+    ];
+    if let Some(state) = cli::config::state_directory() {
+        files.push(("trust:", state.join("trust.toml")));
+        files.push(("history:", state.join("history")));
+    }
+    for (name, path) in files {
+        println!("{name:<13} {}{}", path.display(), exists(&path));
+    }
+}
+
+/// Runs `uscope config` and returns whether it succeeded.
+fn run_config(args: &ConfigArgs) -> Result<bool> {
+    use cli::config::{self, Files, TrustStore, UserFile};
+    let start = std::env::current_dir().context("cannot read the working directory")?;
+    let user = UserFile::choose(false, args.config.as_deref());
+    let user_path = match &user {
+        UserFile::Named(path) => Some(path.clone()),
+        UserFile::Standard => {
+            config::user_directory().map(|directory| directory.join("config.toml"))
+        }
+        UserFile::Disabled => None,
+    };
+    match args.command {
+        ConfigCommand::Path => {
+            print_config_paths(&start, user_path.as_deref());
+            Ok(true)
+        }
+        ConfigCommand::Show | ConfigCommand::Check => {
+            let files = Files::read(&start, &user)?;
+            let settings = files.settings(true)?;
+            if matches!(args.command, ConfigCommand::Show) {
+                println!("{}", settings.show());
+            } else {
+                for file in &files.read {
+                    println!("{}: ok", file.path.display());
+                }
+                if files.read.is_empty() {
+                    println!("no settings files exist");
+                }
+            }
+            Ok(true)
+        }
+        ConfigCommand::Init => {
+            let path = user_path.context("no user settings file: set XDG_CONFIG_HOME or HOME")?;
+            if path.exists() {
+                anyhow::bail!("{} already exists; it was left as it is", path.display());
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("cannot create {}", parent.display()))?;
+            }
+            std::fs::write(&path, config::commented_defaults())
+                .with_context(|| format!("cannot write {}", path.display()))?;
+            println!("wrote {}", path.display());
+            Ok(true)
+        }
+        ConfigCommand::Trust => {
+            let files = Files::read(&start, &user)?;
+            let Some(acting) = files.acting() else {
+                println!(
+                    "the project at {} has no startup commands, aliases, or launch configurations to trust",
+                    files.root.display()
+                );
+                return Ok(true);
+            };
+            let mut store = TrustStore::load()?;
+            store
+                .trust(&files.root, &acting)
+                .map_err(anyhow::Error::msg)?;
+            println!(
+                "trusted the project at {}:
+",
+                files.root.display()
+            );
+            for line in acting.lines() {
+                println!("    {line}");
+            }
+            Ok(true)
+        }
+        ConfigCommand::Untrust => {
+            let root = config::project_root(&start);
+            let mut store = TrustStore::load()?;
+            if store.untrust(&root).map_err(anyhow::Error::msg)? {
+                println!("forgot the project at {}", root.display());
+            } else {
+                println!("the project at {} was not trusted", root.display());
+            }
+            Ok(true)
+        }
+        ConfigCommand::Trusted => {
+            let store = TrustStore::load()?;
+            let mut any = false;
+            for root in store.roots() {
+                println!("{}", root.display());
+                any = true;
+            }
+            if !any {
+                println!("no project is trusted");
+            }
+            Ok(true)
+        }
+    }
 }

@@ -21,9 +21,21 @@ fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name)
 }
 
+/// A uscope command that reads the tests' settings file rather than the
+/// developer's, so that neither theirs nor their locale can change a test's
+/// outcome.
+fn uscope_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
+    command.env(
+        "USCOPE_CONFIG",
+        fixture("tests/support/settings/ascii.toml"),
+    );
+    command
+}
+
 /// Runs uscope in the repository with no standard input.
 fn uscope(arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_uscope"))
+    uscope_command()
         .args(arguments)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::null())
@@ -50,7 +62,7 @@ fn batch(arguments: &[&str], commands: &[&str]) -> String {
 /// Runs `commands` through uscope's standard input, which reports each
 /// failed command and carries on, and returns stdout and stderr.
 fn piped(arguments: &[&str], commands: &[&str]) -> (String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let mut child = uscope_command()
         .args(arguments)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::piped())
@@ -289,8 +301,9 @@ fn help_is_task_oriented_and_progressive() {
     );
     for invocation in [
         "uscope EXECUTABLE [-- ARGS...]",
-        "uscope --attach PID [EXECUTABLE]",
+        "uscope --attach PID|NAME [EXECUTABLE]",
         "uscope --core CORE [EXECUTABLE]",
+        "uscope --launch NAME",
     ] {
         assert!(short.contains(invocation), "{short}");
     }
@@ -316,7 +329,7 @@ fn help_is_task_oriented_and_progressive() {
     }
     assert!(!long.contains("uscope dap ["), "{long}");
 
-    for subcommand in ["dap", "views"] {
+    for subcommand in ["dap", "views", "config"] {
         assert!(short.contains(subcommand), "{short}");
         let own = assert_success(uscope(&[subcommand, "--help"]));
         assert!(own.contains(&format!("uscope {subcommand}")), "{own}");
@@ -409,6 +422,33 @@ fn pid_only_attach_discovers_the_executable_and_quit_detaches() {
     assert_eq!(target.wait().code(), Some(23));
 }
 
+/// `--attach NAME` attaches to the one process of that name, and refuses
+/// to choose among several.
+#[test]
+fn attach_by_name_needs_exactly_one_process_of_that_name() {
+    let directory = support::ScratchDir::new("cli-attach-name");
+    let name = format!("named-{}", std::process::id());
+    let copy = directory.path().join(&name);
+    fs::copy(fixture("build/test-programs/attach"), &copy).expect("copy the fixture");
+    let mut target = support::ExternalProcess::spawn(&copy);
+    let stdout = batch(&["--attach", &name], &["quit"]);
+    assert!(stdout.is_empty(), "{stdout}");
+    target.release();
+    assert_eq!(target.wait().code(), Some(23));
+
+    let first = support::ExternalProcess::spawn(&copy);
+    let second = support::ExternalProcess::spawn(&copy);
+    let output = batch_output(&["--attach", &name], &["quit"]);
+    for process in [&first, &second] {
+        assert_failure(&output, &process.process_id().to_string());
+    }
+    assert_failure(&output, &format!("2 processes are named '{name}'"));
+    assert_failure(
+        &batch_output(&["--attach", "no-such-process-name"], &["quit"]),
+        "no process is named 'no-such-process-name'",
+    );
+}
+
 #[test]
 fn color_follows_the_choice_and_the_environment_on_both_streams() {
     // Redirected output is plain unless color is forced, and `never` wins
@@ -416,14 +456,14 @@ fn color_follows_the_choice_and_the_environment_on_both_streams() {
     assert_no_sgr(&batch(&[BASIC], &["help"]));
     let colored_help = assert_success(uscope(&["--color", "always", "-h"]));
     assert!(colored_help.contains("\x1b["), "{colored_help:?}");
-    let plain_help = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let plain_help = uscope_command()
         .env("CLICOLOR_FORCE", "1")
         .args(["--color", "never", "-h"])
         .output()
         .expect("run uscope help with color disabled");
     assert_no_sgr(&assert_success(plain_help));
 
-    let never = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let never = uscope_command()
         .env("CLICOLOR_FORCE", "1")
         .args(["--batch", "--color", "never", "--eval", "help"])
         .arg(fixture(BASIC))
@@ -448,19 +488,20 @@ fn color_follows_the_choice_and_the_environment_on_both_streams() {
     for plain in ["commands", "Set a breakpoint", "Use `help <command>`"] {
         assert!(!stdout.contains(&format!("\x1b[2m{plain}")), "{stdout:?}");
     }
-    // Source metadata is styled, but never the source text.
+    // Source metadata is styled, and the source's keywords, but not its
+    // names.
     let current = stdout
         .lines()
-        .find(|line| line.contains("uint64_t breakpoint_target(void)"))
+        .find(|line| line.contains("uint64_t breakpoint_target("))
         .expect("current source line");
-    let (_, source) = current.split_once("| ").expect("source separator");
+    let (margin, source) = current.split_once("| ").expect("source separator");
     assert!(
-        current.contains("\x1b["),
+        margin.contains("\x1b["),
         "metadata was not styled: {current:?}"
     );
     assert!(
-        !source.contains("\x1b["),
-        "source text was styled: {current:?}"
+        source.contains("uint64_t breakpoint_target(\x1b[") && source.contains("void\x1b[0m)"),
+        "the keyword was not highlighted: {current:?}"
     );
     // A failed command ends the batch, naming the command.
     assert!(
@@ -534,7 +575,8 @@ fn command_errors_show_the_usage_or_the_reason() {
         &stderr,
         &[
             "usage: run\n",
-            "usage: break <function|0xaddress|file:line|file:function>",
+            "no frame is selected to take a line from (the inferior has not been launched); \
+             name a location",
             info,
             info,
             info,
@@ -567,14 +609,14 @@ fn help_lists_every_command_and_details_one_by_name_or_alias() {
         "  break        b       Set a breakpoint",
         "  finish       fin, f  Run until the selected frame returns",
         "  continue     c       Continue execution",
-        "  delete       del, d  Delete logical breakpoints",
+        "  delete       del, d  Delete breakpoints, and watchpoints wID",
         "  clear        cls     Clear and redraw the terminal",
         "  help         h, ?    Show command help",
         "  Clear and redraw the terminal\n  aliases: cls",
-        "delete <id|all>",
+        "delete <ids...>",
         "aliases: del, d",
         "  Run until the selected frame returns to its caller\n  aliases: fin, f",
-        "  Set a breakpoint, optionally stopping only at hits such as >=5, ==3, or %10\n  aliases: b\n  usage: break <function|0xaddress|file:line|file:function> [hit-condition]",
+        "  aliases: b\n  usage: break [location] [if condition...] [hits hit-condition] [log message] [disabled]",
         "  Show the selected frame's execution location",
         "  Continue execution\n  aliases: c",
     ] {
@@ -602,7 +644,15 @@ fn batch_mode_prints_every_location_of_an_inline_breakpoint() {
         stdout.contains("breakpoint 1 set at 6 locations"),
         "{stdout}"
     );
-    assert_eq!(stdout.matches("  image address ").count(), 6, "{stdout}");
+    // Inline copies of one line differ by address.
+    assert_eq!(
+        stdout
+            .matches(" leaf at tests/fixtures/c/inline.c:")
+            .count(),
+        6,
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches("  0x").count(), 6, "{stdout}");
 }
 
 #[test]
@@ -622,7 +672,8 @@ fn library_breakpoints_resolve_at_runtime_and_frames_show_their_own_sources() {
     assert_in_order(
         &stdout,
         &[
-            "breakpoint 2 set at virtual address 0x",
+            "breakpoint 2 set at dso_apply at tests/fixtures/c/module-frames/library.c:5 in \
+             libmodule-frames.so\n",
             "stopped at breakpoint 2 (hit 1)",
             "module-frames/library.c:5",
             "stopped at breakpoint 3 (hit 1)",
@@ -650,9 +701,12 @@ fn batch_mode_sets_lists_and_deletes_source_and_file_function_breakpoints() {
             "info breakpoints",
         ],
     );
-    assert!(stdout.contains("1  basic.c:11  1 location"), "{stdout}");
     assert!(
-        stdout.contains("2  basic.c:breakpoint_target  1 location"),
+        stdout.contains("1   +      0  main at tests/fixtures/c/basic.c:11\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("2   +      0  breakpoint_target at tests/fixtures/c/basic.c:6\n"),
         "{stdout}"
     );
     assert!(stdout.contains("deleted breakpoint 1"), "{stdout}");
@@ -683,23 +737,572 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
     assert_in_order(
         &stdout,
         &[
-            "breakpoint 1 set at image address ",
-            ", stops at hits ==3\n",
+            "breakpoint 1 set at counted at tests/fixtures/c/hit-counts.c:11, stops at hits ==3\n",
             "breakpoint 2 set at 2 locations, stops at hits %4\n",
             // The fourth hit is the second inline site of the second call.
-            "stopped at breakpoint 2 (hit 4) at ",
-            "1  counted  1 location  hit 2 times  stops at hits ==3\n",
-            "2  shared  2 locations  hit 4 times  stops at hits %4\n",
-            "stopped at breakpoint 1 (hit 3) at ",
+            "stopped at breakpoint 2 (hit 4) in ",
+            "1   +      2  counted at tests/fixtures/c/hit-counts.c:11  hits ==3\n",
+            "2   +      4  shared, 2 locations                          hits %4\n",
+            "stopped at breakpoint 1 (hit 3) in ",
             "breakpoint 1 ignores its next 5 hits\n",
             "breakpoint 2 stops at every hit, hit 4 times so far\n",
-            "1  counted  1 location  hit 3 times  stops at hits >=9\n",
-            "2  shared  2 locations  hit 4 times\n",
+            "1   +      3  counted at tests/fixtures/c/hit-counts.c:11  hits >=9\n",
+            "2   +      4  shared, 2 locations\n",
             "deleted breakpoint 2\n",
-            "stopped at breakpoint 1 (hit 9) at ",
+            "stopped at breakpoint 1 (hit 9) in ",
             "breakpoint 1 stops at hits ==2 (no later hit can stop), hit 9 times so far\n",
             "inferior exited with status 0\n",
-            "1  counted  1 location  hit 40 times  stops at hits ==2 (no later hit can stop)\n",
+            "1   +     40  counted at tests/fixtures/c/hit-counts.c:11  hits ==2 (no later hit can stop)\n",
+        ],
+    );
+}
+
+/// Runs `commands` in batch mode with the settings file `settings`.
+fn batch_with_settings(settings: &str, arguments: &[&str], commands: &[&str]) -> String {
+    let directory = support::ScratchDir::new("cli-settings");
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, settings).expect("write the settings");
+    let mut all = vec!["--batch"];
+    for command in commands {
+        all.extend(["--eval", command]);
+    }
+    all.extend_from_slice(arguments);
+    assert_success(
+        uscope_command()
+            .env("USCOPE_CONFIG", &path)
+            .args(all)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .stdin(Stdio::null())
+            .output()
+            .expect("run uscope"),
+    )
+}
+
+#[test]
+fn pp_lays_values_out_to_the_width_and_print_formats_combine() {
+    let records = ["build/test-programs/records-c-gcc-o0"];
+    let commands = ["break inspect_records", "run", "pp *records", "up", "pp"];
+    let wide = batch(&records, &commands);
+    assert!(
+        wide.contains(
+            "(outer_record[2]) *records = [\n\
+             \x20 {inner = {signed_value = 1, unsigned_value = 2}, values = [3, 4]},\n\
+             \x20 {inner = {signed_value = 5, unsigned_value = 6}, values = [43, 44]},\n\
+             ]\n"
+        ),
+        "{wide}"
+    );
+    // With no expression, every local of the frame, expanded.
+    assert!(
+        wide.contains("(bit_fields) bits = {negative = -3, first = 5, second = 42}\n"),
+        "{wide}"
+    );
+    let narrow = batch_with_settings("[print]\nwidth = 40\n", &records, &commands);
+    assert!(
+        narrow.contains(
+            "(outer_record[2]) *records = [\n\
+             \x20 {\n\
+             \x20   inner = {\n\
+             \x20     signed_value = 1,\n\
+             \x20     unsigned_value = 2,\n\
+             \x20   },\n\
+             \x20   values = [3, 4],\n\
+             \x20 },\n"
+        ),
+        "{narrow}"
+    );
+
+    let (stdout, stderr) = piped(
+        &records,
+        &[
+            "break inspect_records",
+            "run",
+            "print/x *record",
+            "pp/x record->values",
+            "print/pl *record",
+            "print/q *record",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "(outer_record) *record = {inner = {signed_value = 0xfffffff9, unsigned_value = 0x9}, \
+             values = [0x14, 0x16]}\n",
+            "(int32_t[2]) record->values = [0x14, 0x16]\n",
+        ],
+    );
+    assert_in_order(
+        &stderr,
+        &[
+            "/p prints a value laid out and /l on one line; choose one",
+            "unknown format '/q'; print takes /x, /d, /r, /p, and /l",
+        ],
+    );
+
+    // `[print]` chooses what `print` does, and its formats override it.
+    let configured = batch_with_settings(
+        "[print]\nstyle = \"pretty\"\nradix = \"hexadecimal\"\nwidth = 40\n",
+        &records,
+        &[
+            "break inspect_records",
+            "run",
+            "print record->inner",
+            "print/l record->inner",
+            "print/d record->values",
+        ],
+    );
+    assert_in_order(
+        &configured,
+        &[
+            "(inner_record) record->inner = {\n  signed_value = 0xfffffff9,\n  unsigned_value = 0x9,\n}\n",
+            "(inner_record) record->inner = {signed_value = 0xfffffff9, unsigned_value = 0x9}\n",
+            "(int32_t[2]) record->values = [20, 22]\n",
+        ],
+    );
+}
+
+/// A long sequence of leaves fills its lines, and a map puts each entry on
+/// a line of its own.
+#[test]
+fn pp_fills_long_sequences_and_breaks_maps_by_width() {
+    let commands = ["break barrier", "run", "up", "pp many"];
+    let rust = ["build/test-programs/containers-rust-o0"];
+    let cpp = ["build/test-programs/containers-cpp-gcc-o0"];
+    let narrow = "[print]\nwidth = 30\n";
+    assert!(batch_with_settings(narrow, &rust, &commands).contains(
+        "(Vec<u32, alloc::alloc::Global>) many = len=300 [\n\
+             \x20 0, 1, 2, 3, 4, 5, 6, 7, 8,\n\
+             \x20 9, 10, 11, 12, 13, 14, 15,\n"
+    ));
+    let wide = batch(&rust, &commands);
+    assert!(
+        wide.contains(
+            "  249, 250, <truncated: MemoryReads limit 256 after 256; requested 1>,\n\
+             \x20 <49 omitted>,\n\
+             ]\n"
+        ),
+        "{wide}"
+    );
+
+    let commands = ["break barrier", "run", "up", "pp ordered", "pp/x forward"];
+    let ordered = "ordered = len=3 {\n  1: 10,\n  2: 20,\n  3: 30,\n}\n";
+    let narrow = batch_with_settings(narrow, &cpp, &commands);
+    assert_in_order(&narrow, &[ordered, "forward = len=2 [\n  0x4, 0x5,\n]\n"]);
+    let wide = batch(&cpp, &commands);
+    assert_in_order(&wide, &[ordered, "forward = len=2 [0x4, 0x5]\n"]);
+}
+
+/// A stop says where in words, then prints the sections `[stop] show`
+/// names, in order, and `context` prints them again.
+#[test]
+fn a_stop_prints_the_sections_its_settings_name_and_context_prints_them_again() {
+    let settings = "[ui]\nunicode = \"never\"\n[stop]\n\
+        show = [\"source\", \"locals\", \"displays\", \"registers\", \"disassembly\", \
+        \"backtrace\", \"threads\"]\n\
+        backtrace-frames = 1\n\
+        disassembly-instructions = 2\n";
+    let stdout = batch_with_settings(
+        settings,
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "break caller",
+            "display/x call",
+            "display missing + 1",
+            "display",
+            "run",
+            "undisplay 2",
+            "context",
+        ],
+    );
+    let stop = [
+        "stopped at breakpoint 1 (hit 1) in caller at tests/fixtures/c/hit-counts.c:20\n",
+        // The header names the line, so the source does not again.
+        "    19 | __attribute__((noinline)) void caller(uint64_t call) {\n\
+         +=> 20 |     counted(call);\n",
+        "(uint64_t) call = 1\n",
+        "1: (uint64_t) call = 0x1\n",
+        "2: missing + 1: ",
+        "\nrip ",
+        "=> 0x",
+        "#0  ",
+        " more frames; `bt` shows every one\n",
+        "* ",
+    ];
+    let mut expected = vec![
+        "breakpoint 1 set at caller at tests/fixtures/c/hit-counts.c:20\n",
+        "display 1: /x call\n",
+        "1: /x call\n2: missing + 1\n",
+    ];
+    expected.extend(stop);
+    expected.extend([
+        "removed 1 display\n",
+        "tests/fixtures/c/hit-counts.c:20\n    17 | }\n",
+        "(uint64_t) call = 1\n",
+        "1: (uint64_t) call = 0x1\n",
+        "\nrip ",
+    ]);
+    assert_in_order(&stdout, &expected);
+    assert_eq!(stdout.matches("2: missing + 1:").count(), 1, "{stdout}");
+}
+
+/// A stop in a process of several threads names the one it is in.
+#[test]
+fn a_stop_names_its_thread_when_the_process_has_several() {
+    let stdout = batch(
+        &["build/test-programs/hit-count-threads"],
+        &["break contended", "run"],
+    );
+    let header = stdout
+        .lines()
+        .find(|line| line.starts_with("stopped at breakpoint 1 (hit 1) in contended at "))
+        .unwrap_or_else(|| panic!("no stop in:\n{stdout}"));
+    // Every worker is running when the first reaches the breakpoint.
+    assert!(header.ends_with(" of 5]"), "{header}");
+    assert!(
+        header.contains("hit-count-threads.c:16 [thread "),
+        "{header}"
+    );
+}
+
+/// A value that differs from what the last stop showed of the same
+/// activation is marked; a caller's value is compared only with itself.
+#[test]
+fn a_stop_marks_the_values_that_changed_in_the_same_activation() {
+    let settings = "[stop]\nshow = [\"locals\"]\n";
+    let program = ["build/test-programs/hit-counts-gcc-o0"];
+    let stdout = batch_with_settings(
+        settings,
+        &program,
+        &["break caller", "run", "continue", "up", "context"],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "(uint64_t) call = 1\n",
+            "(uint64_t) call = 2*\n",
+            // main's own `call` was not shown before, so it is not marked
+            // although caller's read 1.
+            "#1 ",
+            "(uint64_t) call = 2\n",
+        ],
+    );
+
+    let stdout = batch_with_settings(
+        settings,
+        &program,
+        &["break hit-counts.c:27", "run", "next", "next"],
+    );
+    assert_in_order(
+        &stdout,
+        &["(uint64_t) call = 1\n", "(uint64_t) call = 2*\n"],
+    );
+    assert!(!stdout.contains("expected = 0*"), "{stdout}");
+}
+
+/// A prefix that names one command runs it, an alias wins over a prefix,
+/// and a prefix of several names them.
+#[test]
+fn unique_prefixes_run_their_command_and_aliases_win() {
+    let directory = support::ScratchDir::new("cli-prefixes");
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "[aliases]\nfini = \"info breakpoints\"\n").expect("write the settings");
+    let mut child = uscope_command()
+        .env("USCOPE_CONFIG", &path)
+        .arg(BASIC)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start uscope");
+    let mut stdin = child.stdin.take().expect("uscope's stdin");
+    for command in ["break main", "fini", "watchp", "dis", "undisp all"] {
+        writeln!(stdin, "{command}").expect("write a command");
+    }
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for uscope");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = assert_success(output);
+    assert_in_order(
+        &stdout,
+        &[
+            "breakpoint 1 set",
+            "Id  On",
+            "no watchpoints",
+            "removed 0 displays",
+        ],
+    );
+    assert!(
+        stderr.contains("ambiguous command 'dis': disable, disassemble, display"),
+        "{stderr}"
+    );
+}
+
+/// `edit` opens the editor the settings name at the selected line.
+#[test]
+fn edit_opens_the_editor_at_the_selected_line() {
+    let stdout = batch_with_settings(
+        "[ui]\neditor = \"echo editing {path} at {line}\"\n",
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &["break counted", "run", "edit", "up", "edit"],
+    );
+    let source = format!(
+        "{}/tests/fixtures/c/hit-counts.c",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            &format!("editing {source} at 11\n"),
+            &format!("editing {source} at 20\n"),
+        ],
+    );
+}
+
+#[test]
+fn saved_breakpoint_commands_recreate_the_breakpoints() {
+    let directory = support::ScratchDir::new("cli-save-breakpoints");
+    let file = directory.path().join("breakpoints.uscope");
+    let file_name = file.to_str().expect("a UTF-8 path");
+    let stdout = batch(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "break counted hits ==3 if call > 1",
+            r#"break shared log "total \"{shared_total}\"" disabled"#,
+            "tbreak caller",
+            &format!("save breakpoints {file_name}"),
+        ],
+    );
+    assert!(
+        stdout.contains(&format!("saved 3 breakpoints to {file_name}")),
+        "{stdout}"
+    );
+    let text = std::fs::read_to_string(&file).expect("the file was written");
+    assert_eq!(
+        text,
+        "break counted hits ==3 if call > 1\n\
+         break shared log \"total \\\"{shared_total}\\\"\" disabled\n\
+         tbreak caller\n"
+    );
+    let table = |stdout: String| stdout[stdout.find("Id  On").expect("a table")..].to_owned();
+    let program = "build/test-programs/hit-counts-gcc-o0";
+    let restored = table(batch(&["-c", file_name, program], &["breakpoints"]));
+    let mut commands = text.lines().collect::<Vec<_>>();
+    commands.push("breakpoints");
+    assert_eq!(restored, table(batch(&[program], &commands)));
+    assert!(
+        restored.contains("2   -      0  shared, 2 locations"),
+        "{restored}"
+    );
+}
+
+#[test]
+fn rbreak_breaks_at_matching_functions_and_misspelled_names_suggest_near_ones() {
+    let (stdout, stderr) = piped(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "rbreak ^(counted|caller)$",
+            "rbreak ^zzz",
+            "rbreak (",
+            "break countd",
+            "break hit-count.c:11",
+            "run",
+            // libc is loaded now, with far more functions than one pattern
+            // may break at.
+            "rbreak .",
+            "breakpoints",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "breakpoint 1 set at caller at tests/fixtures/c/hit-counts.c:20\n",
+            "breakpoint 2 set at counted at tests/fixtures/c/hit-counts.c:11\n",
+            "stopped at breakpoint 1 (hit 1) in ",
+        ],
+    );
+    assert!(!stdout.contains("breakpoint 3 set"), "{stdout}");
+    assert_in_order(
+        &stderr,
+        &[
+            "no function matches '^zzz'",
+            "invalid pattern '(': ",
+            "no function named 'countd' was found; did you mean 'counted'?",
+            "no source file matching 'hit-count.c' was found; did you mean 'hit-counts.c'?",
+            "'.' matches ",
+            " functions; rbreak sets at most 200, so narrow the pattern",
+        ],
+    );
+}
+
+#[test]
+fn breakpoint_and_watchpoint_tables_show_each_ones_state_place_and_options() {
+    let stdout = batch(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "break counted hits ==3 if call > 1",
+            "break shared log \"total {shared_total}\"",
+            "break caller",
+            "tbreak counted",
+            "disable 2",
+            "run",
+            "watch last_call if last_call > 5",
+            "disable w1",
+            "breakpoints",
+            "watchpoints",
+        ],
+    );
+    let (_, tables) = stdout
+        .split_once("disabled watchpoint 1\n")
+        .expect("tables");
+    let path = "tests/fixtures/c/hit-counts.c";
+    let lines = tables.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines[..3],
+        [
+            "Id  On  Hits  Where                                        Options",
+            &format!("1   +      0  counted at {path}:11  hits ==3  if call > 1"),
+            "2   -      0  shared, 2 locations                          log \"total {shared_total}\"",
+        ],
+        "{tables}"
+    );
+    // Several locations are listed beneath, each with its address.
+    assert!(lines[3].starts_with("              |- 0x"), "{tables}");
+    assert!(
+        lines[3].ends_with(&format!("  shared at {path}:16")),
+        "{tables}"
+    );
+    assert!(lines[4].starts_with("              `- 0x"), "{tables}");
+    assert_eq!(
+        lines[5..7],
+        [
+            format!("3   +      1  caller at {path}:20"),
+            format!("4   +      0  counted at {path}:11  temporary"),
+        ],
+        "{tables}"
+    );
+    assert_eq!(
+        lines[7], "Id  On  Hits  Watching   Where                      Options",
+        "{tables}"
+    );
+    assert!(
+        lines[8].starts_with("1   -      0  last_call  8 bytes at 0x"),
+        "{tables}"
+    );
+    assert!(lines[8].ends_with("  change  if last_call > 5"), "{tables}");
+}
+
+#[test]
+fn breakpoints_take_options_inline_and_lines_from_the_selected_frame() {
+    let (stdout, stderr) = piped(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "break counted hits ==3 if call > 1",
+            "run",
+            "break",
+            "break +1",
+            "break 20",
+            "break counted if",
+            "break +x",
+            "break 0",
+            "delete 9 2",
+            "delete 2-3 4",
+            "watch last_call",
+            "watch shared_total",
+            "unwatch 1-2",
+            "break caller hits ==5 log \"caller {call} of {last_call}\"",
+            "continue",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "breakpoint 1 set at ",
+            ", stops at hits ==3 where call > 1\n",
+            "stopped at breakpoint 1 (hit 3) in ",
+            "breakpoint 2 set at counted at tests/fixtures/c/hit-counts.c:11\n",
+            "breakpoint 3 set at counted at tests/fixtures/c/hit-counts.c:12\n",
+            "breakpoint 4 set at caller at tests/fixtures/c/hit-counts.c:20\n",
+            "deleted breakpoints 2, 3, 4\n",
+            "deleted watchpoints 1, 2\n",
+            "breakpoint 5 set at ",
+            ", stops at hits ==5, logs \"caller {call} of {last_call}\"\n",
+            // Its fifth hit is the fifth call after the stop at the third.
+            "caller 8 of 7\n",
+            "inferior exited with status 0\n",
+        ],
+    );
+    assert_in_order(
+        &stderr,
+        &[
+            "usage: break [location] [if condition...] [hits hit-condition] [log message] [disabled]",
+            "invalid line offset '+x'",
+            "source line numbers are one-based",
+            // A list naming a missing id deletes nothing.
+            "breakpoint 9 was not found",
+        ],
+    );
+}
+
+#[test]
+fn breakpoints_and_watchpoints_are_disabled_enabled_and_advanced_past() {
+    let (stdout, stderr) = piped(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "tbreak counted ==3",
+            "break caller",
+            "disable 2",
+            "breakpoints",
+            "run",
+            "breakpoints",
+            "enable 2",
+            "continue",
+            "adv counted",
+            "print call",
+            "watch last_call",
+            "disable w1 2",
+            "watchpoints",
+            "enable all",
+            // A list naming a missing id changes nothing, so the watchpoint
+            // still stops the next continue.
+            "disable 9 w1",
+            "disable 3-1",
+            "disable x",
+            "advance",
+            "continue",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "temporary breakpoint 1 set at counted at tests/fixtures/c/hit-counts.c:11, stops at \
+             hits ==3\n",
+            "disabled breakpoint 2\n",
+            "1   +      0  counted at tests/fixtures/c/hit-counts.c:11  hits ==3  temporary\n",
+            "2   -      0  caller at tests/fixtures/c/hit-counts.c:20\n",
+            "stopped at breakpoint 1 (hit 3) in ",
+            "deleted temporary breakpoint 1\n",
+            "2   -      0  caller at tests/fixtures/c/hit-counts.c:20\n",
+            "enabled breakpoint 2\n",
+            // Hits while disabled are not counted.
+            "stopped at breakpoint 2 (hit 1) in ",
+            "stopped after advance in counted at tests/fixtures/c/hit-counts.c:11\n",
+            "(uint64_t) call = 4\n",
+            "disabled breakpoint 2 and watchpoint 1\n",
+            "1   -      0  last_call  8 bytes at 0x",
+            "  change\n",
+            "enabled breakpoint 2 and watchpoint 1\n",
+            "stopped by watchpoint 1 (change, hit 1) on last_call",
+            "\n  old: 3\n  new: 4\n",
+        ],
+    );
+    assert_in_order(
+        &stderr,
+        &[
+            "breakpoint 9 was not found",
+            "range 3-1 is empty",
+            "usage: disable <ids...>",
+            "usage: advance <function|0xaddress|file:line|file:function>",
         ],
     );
 }
@@ -723,11 +1326,11 @@ fn batch_mode_sets_and_clears_breakpoint_conditions() {
         &stdout,
         &[
             "breakpoint 1 stops where call % 10 == 0 && last_call == call - 1 holds\n",
-            "stopped at breakpoint 1 (hit 10) at ",
+            "stopped at breakpoint 1 (hit 10) in ",
             "(uint64_t) call = 10\n",
-            "1  counted  1 location  hit 10 times  where call % 10 == 0 && last_call == call - 1\n",
+            "1   +     10  counted at tests/fixtures/c/hit-counts.c:11  if call % 10 == 0 && last_call == call - 1\n",
             "breakpoint 1 stops unconditionally\n",
-            "stopped at breakpoint 1 (hit 11) at ",
+            "stopped at breakpoint 1 (hit 11) in ",
             "(uint64_t) call = 11\n",
         ],
     );
@@ -761,10 +1364,12 @@ fn batch_mode_sets_amends_and_skips_watchpoint_conditions() {
         &[
             "watchpoint 1 set on last_call: 8 bytes at 0x",
             " using 1 hardware slot, stops where call % 10 == 0\n",
-            "stopped by watchpoint 1 (change, hit 10) on last_call in thread ",
+            "stopped by watchpoint 1 (change, hit 10) on last_call in counted at \
+             tests/fixtures/c/hit-counts.c:12",
             "\n  old: 9\n  new: 10\n",
             "watchpoint 1 ignores its next 15 hits\n",
-            "  hit 10 times  stops at hits >=26  where call % 10 == 0\n",
+            "1   +     10  last_call  8 bytes at 0x",
+            "  change  hits >=26  if call % 10 == 0\n",
             "stopped by watchpoint 1 (change, hit 30) on last_call",
             "\n  old: 29\n  new: 30\n",
             "watchpoint 1 stops unconditionally\n",
@@ -854,7 +1459,7 @@ fn hit_condition_commands_explain_rejected_input() {
         &stdout,
         &[
             "breakpoint 1 stops at its next hit\n",
-            "stopped at breakpoint 1 (hit 1) at ",
+            "stopped at breakpoint 1 (hit 1) in ",
         ],
     );
 }
@@ -1011,13 +1616,16 @@ fn view_files_come_from_the_session_the_project_and_the_user() {
     )
     .expect("write a broken view file");
     let load_broken = format!("views load {}", broken.display());
-    // The project is where the program runs, wherever uscope does.
-    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+    // The project is the one uscope runs in, from any of its directories,
+    // wherever the program runs.
+    let subdirectory = directory.path().join("src");
+    fs::create_dir_all(&subdirectory).expect("make a project subdirectory");
+    let output = uscope_command()
+        .current_dir(&subdirectory)
         .env("XDG_CONFIG_HOME", directory.path().join("config"))
         .arg("--batch")
         .arg("--cwd")
-        .arg(directory.path())
+        .arg("/")
         .arg("--views")
         .arg(&session)
         .args(["-e", "break barrier", "-e", "run", "-e", "up"])
@@ -1075,7 +1683,7 @@ fn views_check_and_explain_a_programs_types_without_a_process() {
         "/build/test-programs/embedded-views"
     );
     let run = |arguments: &[&std::ffi::OsStr]| {
-        Command::new(env!("CARGO_BIN_EXE_uscope"))
+        uscope_command()
             .current_dir(directory.path())
             .env("XDG_CONFIG_HOME", directory.path().join("config"))
             .arg("views")
@@ -1166,7 +1774,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
     let record = format!("views record {} family", runs.display());
     let load_junk = format!("views load {}", junk.display());
     let program = format!("{root}/build/test-programs/tutorial");
-    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let output = uscope_command()
         .current_dir(root)
         .env("XDG_CONFIG_HOME", directory.path().join("config"))
         .arg("--batch")
@@ -1202,7 +1810,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
         "{stderr}"
     );
     let replay = |arguments: &[&std::ffi::OsStr]| {
-        Command::new(env!("CARGO_BIN_EXE_uscope"))
+        uscope_command()
             .args(["views".as_ref(), "replay".as_ref(), runs.as_os_str()])
             .args(arguments)
             .stdin(Stdio::null())
@@ -1606,7 +2214,7 @@ fn batch_mode_lists_threads_and_steps_one_instruction() {
 
 #[test]
 fn stops_and_list_show_source_from_any_working_directory() {
-    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let output = uscope_command()
         .current_dir("/")
         .args([
             "--batch",
@@ -1621,11 +2229,10 @@ fn stops_and_list_show_source_from_any_working_directory() {
         .output()
         .expect("run uscope");
     let stdout = assert_success(output);
-    assert_eq!(
-        stdout.matches("tests/fixtures/c/basic.c:6").count(),
-        2,
-        "{stdout}"
-    );
+    let line = format!("{}:6", fixture("tests/fixtures/c/basic.c").display());
+    // The breakpoint, the stop, and the listing; a root of `/` holds every
+    // path, so they stay absolute.
+    assert_eq!(stdout.matches(&line).count(), 3, "{stdout}");
     assert_eq!(
         stdout.matches("=> 6 |     return uscope_value;").count(),
         2,
@@ -1636,8 +2243,8 @@ fn stops_and_list_show_source_from_any_working_directory() {
 
 #[test]
 fn source_maps_read_sources_recorded_under_another_directory() {
-    let commands = ["break breakpoint_target", "run"];
-    let unmapped = batch(&["build/test-programs/basic-relocated"], &commands);
+    let commands = ["break breakpoint_target", "run", "list"];
+    let unmapped = batch(&["build/test-programs/basic-relocated"], &commands[..2]);
     assert!(
         unmapped.contains(
             "source unavailable: source file /nonexistent/uscope/tests/fixtures/c/basic.c does not exist"
@@ -1655,8 +2262,9 @@ fn source_maps_read_sources_recorded_under_another_directory() {
         ],
         &commands,
     );
+    // The mapped file is the repository's, shown relative to it.
     assert!(
-        stdout.contains(&format!("{repository}/tests/fixtures/c/basic.c:6")),
+        stdout.contains("\ntests/fixtures/c/basic.c:6\n"),
         "{stdout}"
     );
     assert!(
@@ -1667,9 +2275,7 @@ fn source_maps_read_sources_recorded_under_another_directory() {
 
 #[test]
 fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
-    let mut uscope = Uscope::spawn(
-        Command::new(env!("CARGO_BIN_EXE_uscope")).arg(fixture("build/test-programs/spin")),
-    );
+    let mut uscope = Uscope::spawn(uscope_command().arg(fixture("build/test-programs/spin")));
     uscope.send("break main\nrun\nthreads\n");
     uscope.line("the breakpoint stop", |line| {
         line.starts_with("stopped at breakpoint 1")
@@ -1693,7 +2299,9 @@ fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
         Signal::SIGINT,
     )
     .expect("pause uscope");
-    uscope.line("the pause", |line| line == "inferior paused");
+    uscope.line("the pause", |line| {
+        line.starts_with("inferior paused in main at ")
+    });
 
     // End of input shuts the session down, killing and reaping the inferior.
     uscope.send("where\n");
@@ -2133,15 +2741,17 @@ fn watch_script_reports_values_lists_and_deletes_watchpoints() {
         .unwrap_or_else(|| panic!("missing set confirmation:\n{stdout}"));
     assert!(set.ends_with("using 1 hardware slot"), "{set}");
     assert!(
-        stdout
-            .lines()
-            .any(|line| line.starts_with("1  change  watch_i32  4 bytes at 0x")),
+        stdout.lines().any(
+            |line| line.starts_with("1   +      0  watch_i32  4 bytes at 0x")
+                && line.ends_with("  change")
+        ),
         "{stdout}"
     );
     assert!(
-        stdout
-            .lines()
-            .any(|line| line.starts_with("2  write  watch_u64  8 bytes at 0x")),
+        stdout.lines().any(
+            |line| line.starts_with("2   +      0  watch_u64  8 bytes at 0x")
+                && line.ends_with("  write")
+        ),
         "{stdout}"
     );
     for (old, new) in [(0, 1), (1, 2), (2, 42)] {
@@ -2191,7 +2801,13 @@ fn access_and_location_watchpoints_render_their_kind_and_slots() {
             "unwatch all",
         ],
     );
-    assert!(stdout.contains("1  read/write  watch_i32"), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("1   +      0  watch_i32 ")
+                && line.ends_with("  read/write")),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("watchpoint 2 set on watch_packed.field: 4 bytes at 0x")
             && stdout.contains("using 3 hardware slots"),
@@ -2665,7 +3281,7 @@ fn a_killed_session_leaves_its_flight_recording() {
     let recording = scratch.path().join("recording.log");
     // uscope keeps reading its open standard input after the script.
     let uscope = Uscope::spawn(
-        Command::new(env!("CARGO_BIN_EXE_uscope"))
+        uscope_command()
             .env("USCOPE_FLIGHT_RECORDING", &recording)
             .args(["--eval", "break main", "--eval", "run"])
             .arg(fixture("build/test-programs/basic")),

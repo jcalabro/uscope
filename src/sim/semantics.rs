@@ -20,7 +20,7 @@ use super::loader::Image;
 use super::markers::{Marker, Verdict};
 use super::marks::Mark;
 use crate::{
-    Backtrace, FrameKind, PresentedFrame, ScalarValue, StepKind, UnwindTermination,
+    Backtrace, FrameKind, PresentedFrame, ScalarValue, StepKind, StopReason, UnwindTermination,
     VariableSnapshot, VariableState, VariableValue, VariableValueSource,
 };
 
@@ -150,6 +150,8 @@ pub struct Begun {
     /// hid below it.
     pub frame: Option<PresentedFrame>,
     pub hidden_inline_frames: u32,
+    /// For an advance, the addresses it runs to.
+    pub targets: BTreeSet<u64>,
 }
 
 impl Begun {
@@ -170,6 +172,7 @@ impl Begun {
             frame: presentation.map(|presentation| presentation.frame.clone()),
             hidden_inline_frames: presentation
                 .map_or(0, |presentation| presentation.hidden_inline_frames),
+            targets: BTreeSet::new(),
         }
     }
 }
@@ -294,6 +297,78 @@ pub fn step(
         StepKind::IntoSource | StepKind::OverSource => {
             source_step(begun, thread, retired, positions, variant).map(Some)
         }
+        StepKind::Advance => Err("an advance is judged by `advance`".to_owned()),
+    }
+}
+
+/// Advancing: the advancing thread executes no instruction at its
+/// location, except the one it stood at, which it steps over first, once.
+/// One that reached its location stopped there; one whose frame returned
+/// first ended as stepping out of the frame does. `stopped` is whether the
+/// stop that ended it is still published.
+///
+/// The path is judged whatever ended the advance, since every instruction
+/// the thread completed was one it ran under the advance.
+pub fn advance(
+    kernel: &Kernel,
+    begun: &Begun,
+    positions: &[Position],
+    reason: Option<&StopReason>,
+    stopped: bool,
+    variant: &Variant,
+) -> Result<Option<Judged>, String> {
+    let mut stood = false;
+    for position in positions {
+        if !begun.targets.contains(&position.rip) {
+            continue;
+        }
+        if position.rip == begun.rip && !stood {
+            stood = true;
+            continue;
+        }
+        return Err(format!(
+            "thread {} advancing to {:#x?} executed the instruction at {:#x}, where it had to \
+             stop",
+            begun.tid, begun.targets, position.rip
+        ));
+    }
+    if !stopped {
+        return Ok(None);
+    }
+    match reason {
+        Some(StopReason::Step {
+            kind: StepKind::Advance,
+        }) => {
+            let Some(thread) = kernel
+                .threads
+                .get(&begun.tid)
+                .filter(|thread| matches!(thread.state, State::Stopped { .. }))
+            else {
+                return Err(format!(
+                    "the advance of thread {} completed, but the thread is not stopped",
+                    begun.tid
+                ));
+            };
+            if !begun.targets.contains(&thread.registers.rip) {
+                return Err(format!(
+                    "thread {} advancing to {:#x?} stopped at {:#x}",
+                    begun.tid, begun.targets, thread.registers.rip
+                ));
+            }
+            Ok(Some(Judged::Instructions))
+        }
+        Some(StopReason::Step {
+            kind: StepKind::Out,
+        }) => step(
+            kernel,
+            &Begun {
+                kind: StepKind::Out,
+                ..begun.clone()
+            },
+            positions,
+            variant,
+        ),
+        _ => Ok(None),
     }
 }
 
@@ -916,6 +991,39 @@ mod tests {
     use crate::sim::corpus::Corpus;
     use crate::sim::kernel::shadow::Call;
     use crate::{StackFrame, ThreadId, VirtualAddress};
+
+    /// An advance stops where it first reaches its location: running the
+    /// location's instruction, except once where it stood, passes it.
+    #[test]
+    fn advances_stop_where_they_first_reach_their_location() {
+        let corpus = Corpus::load().expect("load the golden corpus");
+        let variant = &corpus.programs[0].variants[0];
+        let (kernel, tid) = kernel_with_calls(variant, &[]);
+        let rip = kernel.threads[&tid].registers.rip;
+        let begun = Begun {
+            targets: BTreeSet::from([rip, 0x9999]),
+            ..Begun::new(&kernel.threads[&tid], StepKind::Advance, None)
+        };
+        let at = |rip| Position {
+            rip,
+            depth: 0,
+            activation: 0,
+        };
+        let advanced = StopReason::Step {
+            kind: StepKind::Advance,
+        };
+        let judge = |begun: &Begun, positions: &[Position], reason: Option<&StopReason>| {
+            advance(&kernel, begun, positions, reason, true, variant)
+        };
+        assert!(judge(&begun, &[at(rip), at(rip + 1)], Some(&advanced)).is_ok());
+        assert!(judge(&begun, &[at(rip), at(rip + 1), at(rip)], Some(&advanced)).is_err());
+        assert!(judge(&begun, &[at(rip + 1), at(0x9999)], None).is_err());
+        let elsewhere = Begun {
+            targets: BTreeSet::from([0x9999]),
+            ..begun
+        };
+        assert!(judge(&elsewhere, &[], Some(&advanced)).is_err());
+    }
 
     /// A stopped thread of `variant` at its entry, `calls` deep, with each
     /// call's return address on its stack.

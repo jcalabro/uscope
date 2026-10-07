@@ -80,17 +80,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             .next_watchpoint_id
             .checked_add(1)
             .ok_or_else(|| backend_error(LinuxError::WatchpointIdExhausted))?;
-        let plan = inferior
-            .watch
-            .plan
-            .with_watchpoint(id, &chunks, slot_access)
-            .map_err(|error| Error::WatchpointCapacity {
-                required: u64::try_from(error.required).expect("slot count fits u64"),
-                available: u64::try_from(error.available).expect("slot count fits u64"),
-            })?;
+        let plan = options
+            .enabled
+            .then(|| planned_with(&inferior.watch.plan, id, &chunks, slot_access))
+            .transpose()?;
         // Read before arming, so a failed read leaves nothing armed.
         let observed = self.read_watched_bytes(address, byte_size)?;
-        self.arm_all_threads(plan)?;
+        if let Some(plan) = plan {
+            self.arm_all_threads(plan)?;
+        }
 
         let watchpoint = Watchpoint {
             id,
@@ -111,6 +109,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             hit_condition: options.hit_condition,
             condition: options.condition,
             hit_count: 0,
+            enabled: options.enabled,
         };
         self.inferior
             .as_mut()
@@ -240,6 +239,68 @@ impl<P: LinuxTraceOps> Controller<P> {
             record.observed = observed;
         }
         Ok(())
+    }
+
+    /// Enables or disables a watchpoint. A disabled one releases its debug
+    /// registers but stays recorded, so its storage's end still ends it.
+    /// Enabling plans its registers again, failing when others took them,
+    /// and takes the bytes it finds as the last observed ones, so stores
+    /// made while it was disabled are not reported as a change.
+    pub(super) fn set_watchpoint_enabled(
+        &mut self,
+        id: WatchpointId,
+        enabled: bool,
+    ) -> Result<Watchpoint> {
+        let inferior = self
+            .inferior
+            .as_ref()
+            .ok_or(Error::WatchpointNotFound(id.get()))?;
+        let record = inferior
+            .watch
+            .watchpoints
+            .get(&id)
+            .ok_or(Error::WatchpointNotFound(id.get()))?;
+        if record.watchpoint.enabled == enabled {
+            return Ok(record.watchpoint.clone());
+        }
+        if !self.sites_live() {
+            return Err(Error::NotStopped);
+        }
+        let watchpoint = &record.watchpoint;
+        let (plan, observed) = if enabled {
+            let slot_access = match watchpoint.access {
+                WatchAccess::ReadWrite => SlotAccess::ReadWrite,
+                _ => SlotAccess::Write,
+            };
+            let chunks =
+                debug_registers::split_range(watchpoint.address.get(), watchpoint.byte_size)
+                    .map_err(|error| {
+                        watch_range_error(
+                            watchpoint.address,
+                            watchpoint.byte_size,
+                            error,
+                            inferior.watch.plan.free_slots(),
+                        )
+                    })?;
+            let plan = planned_with(&inferior.watch.plan, id, &chunks, slot_access)?;
+            let observed = self.read_watched_bytes(watchpoint.address, watchpoint.byte_size)?;
+            (plan, Some(observed))
+        } else {
+            (inferior.watch.plan.without_watchpoint(id), None)
+        };
+        self.arm_all_threads(plan)?;
+        let record = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.watch.watchpoints.get_mut(&id))
+            .expect("armed watchpoint is recorded");
+        record.watchpoint.enabled = enabled;
+        if let Some(observed) = observed {
+            record.observed = observed;
+        }
+        let watchpoint = record.watchpoint.clone();
+        self.publish_watchpoints_changed();
+        Ok(watchpoint)
     }
 
     pub(super) fn remove_watchpoint(&mut self, id: WatchpointId) -> Result<Watchpoint> {
@@ -893,6 +954,20 @@ pub(super) fn watchable_storage(value: &InspectedValue) -> Result<(VirtualAddres
         .filter(|size| *size > 0)
         .ok_or_else(|| Error::WatchTargetUnsupported("the value's size is unknown".into()))?;
     Ok((address, byte_size))
+}
+
+/// `plan` with a watchpoint's slots added, or the capacity error.
+fn planned_with(
+    plan: &DebugRegisterPlan,
+    id: WatchpointId,
+    chunks: &[debug_registers::Chunk],
+    access: SlotAccess,
+) -> Result<DebugRegisterPlan> {
+    plan.with_watchpoint(id, chunks, access)
+        .map_err(|error| Error::WatchpointCapacity {
+            required: u64::try_from(error.required).expect("slot count fits u64"),
+            available: u64::try_from(error.available).expect("slot count fits u64"),
+        })
 }
 
 fn watch_range_error(

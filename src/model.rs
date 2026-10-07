@@ -2136,6 +2136,9 @@ pub struct VariableSnapshot {
     pub stack_frame: StackFrameId,
     /// The logical frame whose source scope selected these variables.
     pub frame: crate::PresentedFrame,
+    /// The canonical frame address of the inspected activation, which
+    /// identifies it while it lives, when its unwind information gives one.
+    pub frame_address: Option<VirtualAddress>,
     /// Target data representation used for decoding.
     pub target: TargetDescription,
     /// Visible parameters followed by local variables in source declaration order.
@@ -2517,6 +2520,15 @@ pub struct SymbolLocation {
     /// How the end of the symbol's extent or storage was determined. An
     /// unsized data symbol named at its own address is `Inferred`.
     pub provenance: SymbolExtentProvenance,
+}
+
+impl SymbolInfo {
+    /// Returns the source-level spelling of a Rust or C++ mangled name, or
+    /// `None` when the name is not mangled in a recognized scheme.
+    #[must_use]
+    pub fn demangled_name(&self) -> Option<String> {
+        crate::demangle::demangle(&self.name)
+    }
 }
 
 impl SymbolLocation {

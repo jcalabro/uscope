@@ -1,0 +1,90 @@
+# uscope's settings, each at its default. Uncomment a setting to change it.
+#
+# This file is the user's, for every project. A project's
+# .uscope/config.toml, usually committed, and .uscope/config.local.toml,
+# for one person, override it there; `uscope config show` says where each
+# setting in effect comes from. Keys are kebab-case, and an unknown key is
+# an error rather than ignored.
+
+[ui]
+color = "auto"            # auto | always | never; --color and NO_COLOR win
+theme = "default"         # default (dark backgrounds) | light
+unicode = "auto"          # auto (from the locale) | always | never
+hyperlinks = "auto"       # auto | always | never: make file:line a link (OSC 8)
+paths = "relative"        # relative (to the project root) | absolute | name
+pager = "auto"            # auto ($PAGER, or less -FRX) | never | a command
+editor = ""               # for `edit`, as "code -g {path}:{line}"; empty uses $VISUAL or $EDITOR
+prompt = "(uscope) "
+confirm-quit = true       # ask before `quit` kills a launched program
+
+[theme]                   # one role's style, over the theme's: a color (red, bright-red,
+                          # 0-255, #rrggbb), bold, dim, italic, underline, reverse, on COLOR.
+                          # Roles: prompt, command, alias, muted, name, type, value,
+                          # metadata, current, success, warning, error, changed, keyword,
+                          # string, comment, number.
+# changed = "bold yellow"
+
+[source]
+context = [3, 3]          # lines before and after the current line, at stops and in `list`
+highlight = true          # color keywords, strings, comments, and numbers
+tab-width = 8
+
+[stop]
+show = ["source"]         # printed after each stop, in order: source, locals, displays,
+                          # registers, disassembly, backtrace, threads
+backtrace-frames = 5      # frames of the `backtrace` section
+disassembly-instructions = 6
+highlight-changes = true  # mark values that changed since the last stop
+elapsed = true            # "ran 1.42s" after a resume that took over a second
+
+[print]
+style = "compact"         # compact | pretty: what `p` does; `pp` is always pretty
+radix = "decimal"         # decimal | hexadecimal
+width = "terminal"        # "terminal" (80 when not one), or a column count
+indent = 2
+max-depth = 64            # aggregate levels expanded, at most 64
+max-elements = 256        # children shown per aggregate, at most 512
+
+[disassembly]
+syntax = "intel"          # intel | att; --disassembly-syntax wins
+show-bytes = true
+
+[breakpoints]
+save = true               # keep breakpoints and displays in the project's .uscope/state
+
+[history]
+size = 10000              # lines kept in $XDG_STATE_HOME/uscope/history
+
+# [signals]               # as `handle` takes them
+# SIGUSR1 = "nostop noprint pass"
+
+# [[source-map]]          # read sources recorded under `from` from `to`
+# from = "/build"
+# to = "."                # relative to the project root
+
+# [aliases]               # a word that stands for a command line
+# bm = "break main"
+
+[startup]
+commands = []             # run at startup, after the user's, the project's, and the local file's
+
+[projects]                # the user's file only
+trust = "ask"             # ask | always | never: run a project's startup commands,
+                          # aliases, and launch configurations
+
+# [[launch]]              # how a project's program is debugged: `uscope --launch server`
+# name = "server"
+# program = "build/server" # relative to the project root, as every path here is
+# args = ["--port", "8080"]
+# env = { RUST_LOG = "debug" }
+# cwd = "."               # the project root by default
+# startup = ["break handle_request", "run"]
+#
+# [[launch]]
+# name = "attached"
+# attach = "server"       # a process id, or a process name, matched exactly
+#
+# [[launch]]
+# name = "crash"
+# core = "core.server"
+# program = "build/server"
