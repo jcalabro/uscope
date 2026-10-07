@@ -291,6 +291,12 @@ impl Session {
                 }
             };
             let mut body = self.stack_frame(stop.id, context, frame).await?;
+            // Clients focus the first frame whose source is not
+            // deemphasized, so the frames above the one the debugger
+            // selected at the stop are.
+            if context == stop.context && frame.id < stop.selected && body["source"].is_object() {
+                body["source"]["presentationHint"] = "deemphasize".into();
+            }
             // An iterator recedes behind the loop whose body it runs.
             if let Some(level) = iterates {
                 body["name"] = format!(

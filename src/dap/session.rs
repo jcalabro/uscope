@@ -257,6 +257,9 @@ pub(super) struct Stop {
     /// thread runs, when the client's threads are tasks, or the thread.
     pub context: ExecutionContext,
     pub reason: StopReason,
+    /// The frame of the stopped context the debugger selected, as at an
+    /// exception the frame that raised it; the innermost otherwise.
+    pub selected: StackFrameId,
 }
 
 impl Stop {
@@ -1332,7 +1335,16 @@ impl Session {
         reason: StopReason,
     ) -> Result<(), Closed> {
         self.leave_stop();
-        let context = self.stopped_context(thread).await;
+        let snapshot = match self.target_handle() {
+            Ok(handle) => handle.snapshot().await.ok(),
+            Err(_) => None,
+        };
+        let context = self.stopped_context(snapshot.as_ref(), thread);
+        let selected = snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.selected == Some(ExecutionContext::Thread(thread)))
+            .and_then(|snapshot| snapshot.selected_frame)
+            .unwrap_or(StackFrameId::INNERMOST);
         self.announce(context).await?;
         let mut body = json!({
             "allThreadsStopped": true,
@@ -1390,6 +1402,7 @@ impl Session {
             thread,
             context,
             reason,
+            selected,
         });
         self.client.event("stopped", body).await
     }
@@ -1463,16 +1476,17 @@ impl Session {
 
     /// What the client knows as a stopped thread: the task it runs, when
     /// the client's threads are tasks and it runs one, or the thread.
-    async fn stopped_context(&self, thread: ThreadId) -> ExecutionContext {
+    fn stopped_context(
+        &self,
+        snapshot: Option<&uscope::StateSnapshot>,
+        thread: ThreadId,
+    ) -> ExecutionContext {
         let lists_tasks = self
             .target
             .as_ref()
             .is_some_and(|target| target.threads.tasks);
-        let snapshot = match self.target_handle() {
-            Ok(handle) if lists_tasks => handle.snapshot().await.ok(),
-            _ => None,
-        };
         snapshot
+            .filter(|_| lists_tasks)
             .and_then(|snapshot| {
                 snapshot
                     .threads
