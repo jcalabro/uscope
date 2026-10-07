@@ -593,7 +593,8 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
 #[tokio::test]
 async fn go_code_roles_follow_the_runtimes_traceback() {
     use uscope::CodeRole::{
-        Ordinary, Outermost, RuntimeInternal, SignalTrampoline, StackSwitch, TrapEntry, Wrapper,
+        Ordinary, Outermost, Panic, RuntimeInternal, SignalTrampoline, StackSwitch, TrapEntry,
+        Wrapper,
     };
     for fixture in ["callers-go", "callers-go-stripped"] {
         let image = load_fixture_image(fixture).await;
@@ -628,6 +629,7 @@ async fn go_code_roles_follow_the_runtimes_traceback() {
             // trampoline as its return address, so it is not outermost.
             ("runtime.sigtramp", &[RuntimeInternal]),
             ("runtime.deferreturn", &[Wrapper]),
+            ("runtime.gopanic", &[Panic]),
             ("runtime.mallocgc", &[RuntimeInternal]),
             ("runtime.(*mheap).alloc", &[RuntimeInternal]),
             (

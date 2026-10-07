@@ -416,6 +416,13 @@ struct StepStart {
     /// Whether the step began in a language runtime's own code, where it
     /// may then stop, as it may not when it began elsewhere.
     began_in_runtime: bool,
+    /// Where a step over or out traps a panic its task begins: the entries
+    /// of the runtime's code that starts one.
+    panic_guards: BTreeSet<VirtualAddress>,
+    /// Whether a step over or out follows the runtime's calls into the
+    /// program, as a step in does, since its task began a panic or its
+    /// frame returned into code that calls deferred functions.
+    following: bool,
 }
 
 /// Whether a step kind executes machine instructions rather than source

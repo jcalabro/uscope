@@ -2554,6 +2554,9 @@ pub enum CodeRole {
     /// The language runtime's own machinery: a step passes through it to
     /// user code it calls, and a backtrace marks it.
     RuntimeInternal,
+    /// The runtime's code that begins a panic, which calls the program's
+    /// deferred functions as it unwinds: a step goes through it into them.
+    Panic,
     /// Continues on another stack; only a runtime model can say where.
     StackSwitch,
     /// The outermost frame of any stack: unwinding ends here, complete.
