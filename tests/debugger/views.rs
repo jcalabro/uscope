@@ -26,8 +26,8 @@ enum Expected {
     Count(u64),
     /// The view refuses the value, saying this.
     Problem(String),
-    /// The presented value's children, each `name = summary`, `[i] =
-    /// summary`, or `key: summary`, and `[raw]`.
+    /// The presented value's children, each `name = summary` (a field or
+    /// a member), `[i] = summary`, or `key: summary`, and `[raw]`.
     Children(String),
     /// No view presents the value, and it holds no text.
     Stored,
@@ -375,6 +375,10 @@ async fn check_listed_children(
                     uscope::value_summary(Some(&key.type_info), &key.state)
                 ),
                 ValueChildRelationship::Field { name } => format!("{name} = {value}"),
+                ValueChildRelationship::Member(member) => format!(
+                    "{} = {value}",
+                    member.name.as_deref().unwrap_or("<anonymous>")
+                ),
                 ValueChildRelationship::Raw => "[raw]".to_owned(),
                 other => format!("{other:?} = {value}"),
             }
