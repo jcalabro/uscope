@@ -323,6 +323,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.edit_breakpoint(id, |breakpoint| breakpoint.condition = condition)
     }
 
+    pub(super) fn set_breakpoint_log_message(
+        &mut self,
+        id: BreakpointId,
+        log_message: Option<crate::LogMessage>,
+    ) -> Result<Breakpoint> {
+        self.edit_breakpoint(id, |breakpoint| breakpoint.log_message = log_message)
+    }
+
     /// Changes controller state only, so no stop is required.
     fn edit_breakpoint(
         &mut self,

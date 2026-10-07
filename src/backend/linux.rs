@@ -1238,6 +1238,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => {
                 let _ = reply.send(self.set_breakpoint_hit_condition(id, hit_condition));
             }
+            Request::SetBreakpointLogMessage {
+                id,
+                log_message,
+                reply,
+            } => {
+                let _ = reply.send(self.set_breakpoint_log_message(id, log_message));
+            }
             Request::RemoveBreakpoint { id, reply } => {
                 self.edit(Edit::RemoveBreakpoint { id, reply });
             }
@@ -1654,6 +1661,7 @@ impl<P: InspectionOps> Controller<P> {
             Request::AddBreakpoint { .. }
             | Request::SetBreakpointHitCondition { .. }
             | Request::SetBreakpointCondition { .. }
+            | Request::SetBreakpointLogMessage { .. }
             | Request::RemoveBreakpoint { .. }
             | Request::RemoveAllBreakpoints { .. }
             | Request::AddWatchpoint { .. }
