@@ -1,14 +1,17 @@
-//! Signals as exception breakpoint filters.
+//! Signals and the exceptions language runtimes report, as exception
+//! breakpoint filters.
 //!
-//! Each filter stops on one group of signals. Their defaults reproduce the
-//! debugger's default signal policy, so a client that never changes them
-//! sees the same stops as the console. A filter's `condition`, when the
-//! client supports filter options, replaces its group with a
-//! comma-separated list of signals.
+//! Each signal filter stops on one group of signals, and each exception
+//! filter on one kind of exception. Their defaults reproduce the
+//! debugger's defaults, so a client that never changes them sees the same
+//! stops as the console. A signal filter's `condition`, when the client
+//! supports filter options, replaces its group with a comma-separated list
+//! of signals.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
+use uscope::{ExceptionStops, LanguageExceptionKind};
 
 use super::protocol::SetExceptionBreakpointsArguments;
 
@@ -25,7 +28,9 @@ const FILTERS: [Filter; 4] = [
     Filter {
         id: "fatal",
         label: "Fatal signals",
-        description: "Stop on SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGSYS, and SIGTRAP",
+        description: "Stop on SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGSYS, and SIGTRAP, \
+                      except those a language runtime handles itself, such as faults it turns \
+                      into exceptions",
         default: true,
         signals: Some(&[
             "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGABRT", "SIGSYS", "SIGTRAP",
@@ -65,27 +70,66 @@ const FILTERS: [Filter; 4] = [
     },
 ];
 
-/// The filters `initialize` advertises.
-pub fn filters() -> Value {
-    FILTERS
-        .iter()
-        .map(|filter| {
-            json!({
-                "filter": filter.id,
-                "label": filter.label,
-                "description": filter.description,
-                "default": filter.default,
-                "supportsCondition": true,
-                "conditionDescription": "Comma-separated signals to stop on instead, such as SIGUSR1,SIGUSR2",
-            })
-        })
-        .collect()
+/// A filter for one kind of exception that language runtimes report.
+struct ExceptionFilter {
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    kind: LanguageExceptionKind,
 }
 
-/// Which signals stop, as the exception filters select them.
+const EXCEPTION_FILTERS: [ExceptionFilter; 3] = [
+    ExceptionFilter {
+        id: "unhandled",
+        label: "Unhandled exceptions",
+        description: "Stop where an exception nothing handled ends the program, such as a panic \
+                      nothing recovered, with the frame that raised it selected",
+        kind: LanguageExceptionKind::Unhandled,
+    },
+    ExceptionFilter {
+        id: "runtime-fatal",
+        label: "Fatal runtime errors",
+        description: "Stop where the language runtime ends the program with a fatal error, such \
+                      as a deadlock",
+        kind: LanguageExceptionKind::Fatal,
+    },
+    ExceptionFilter {
+        id: "raised",
+        label: "Raised exceptions",
+        description: "Stop wherever an exception is raised, such as every panic, whether or not \
+                      the program then recovers from it",
+        kind: LanguageExceptionKind::Raised,
+    },
+];
+
+/// The filters `initialize` advertises.
+pub fn filters() -> Value {
+    let signals = FILTERS.iter().map(|filter| {
+        json!({
+            "filter": filter.id,
+            "label": filter.label,
+            "description": filter.description,
+            "default": filter.default,
+            "supportsCondition": true,
+            "conditionDescription": "Comma-separated signals to stop on instead, such as SIGUSR1,SIGUSR2",
+        })
+    });
+    let exceptions = EXCEPTION_FILTERS.iter().map(|filter| {
+        json!({
+            "filter": filter.id,
+            "label": filter.label,
+            "description": filter.description,
+            "default": ExceptionStops::default().stops(filter.kind),
+        })
+    });
+    signals.chain(exceptions).collect()
+}
+
+/// Which signals and exceptions stop, as the exception filters select them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     stopping: BTreeSet<u64>,
+    exceptions: ExceptionStops,
 }
 
 impl Default for Selection {
@@ -95,7 +139,10 @@ impl Default for Selection {
             .filter(|filter| filter.default)
             .map(|filter| (filter.id, None))
             .collect();
-        Self::from_filters(&enabled)
+        Self {
+            exceptions: ExceptionStops::default(),
+            ..Self::from_filters(&enabled)
+        }
     }
 }
 
@@ -105,10 +152,20 @@ impl Selection {
         self.stopping.contains(&code)
     }
 
+    /// Which exceptions that runtimes report stop.
+    pub const fn exceptions(&self) -> ExceptionStops {
+        self.exceptions
+    }
+
     /// Reads a `setExceptionBreakpoints` request, returning the selection
     /// and one breakpoint per filter and filter option, in request order.
     pub fn parse(arguments: &SetExceptionBreakpointsArguments) -> (Self, Vec<Value>) {
         let mut enabled = BTreeMap::new();
+        let mut exceptions = ExceptionStops {
+            raised: false,
+            unhandled: false,
+            fatal: false,
+        };
         let mut breakpoints = Vec::new();
         let options = arguments.filter_options.iter().flatten().map(|option| {
             (
@@ -125,6 +182,21 @@ impl Selection {
             .map(|id| (id.as_str(), None))
             .chain(options)
         {
+            if let Some(filter) = EXCEPTION_FILTERS.iter().find(|filter| filter.id == id) {
+                if condition.is_some() {
+                    breakpoints.push(unverified(&format!(
+                        "exception filter '{id}' takes no condition"
+                    )));
+                    continue;
+                }
+                match filter.kind {
+                    LanguageExceptionKind::Raised => exceptions.raised = true,
+                    LanguageExceptionKind::Unhandled => exceptions.unhandled = true,
+                    LanguageExceptionKind::Fatal => exceptions.fatal = true,
+                }
+                breakpoints.push(json!({"verified": true}));
+                continue;
+            }
             let Some(filter) = FILTERS.iter().find(|filter| filter.id == id) else {
                 breakpoints.push(unverified(&format!("unknown exception filter '{id}'")));
                 continue;
@@ -139,7 +211,13 @@ impl Selection {
             enabled.insert(filter.id, signals);
             breakpoints.push(json!({"verified": true}));
         }
-        (Self::from_filters(&enabled), breakpoints)
+        (
+            Self {
+                exceptions,
+                ..Self::from_filters(&enabled)
+            },
+            breakpoints,
+        )
     }
 
     fn from_filters(enabled: &BTreeMap<&str, Option<BTreeSet<u64>>>) -> Self {
@@ -163,7 +241,10 @@ impl Selection {
                 },
             }
         }
-        Self { stopping }
+        Self {
+            stopping,
+            exceptions: ExceptionStops::default(),
+        }
     }
 }
 
@@ -232,6 +313,14 @@ mod tests {
             ]),
         });
         assert!(selection.stops(code("SIGSEGV")));
+        assert_eq!(
+            selection.exceptions(),
+            ExceptionStops {
+                raised: false,
+                unhandled: false,
+                fatal: false,
+            }
+        );
         assert!(selection.stops(code("SIGUSR1")) && selection.stops(code("SIGUSR2")));
         assert!(!selection.stops(code("SIGTERM")) && !selection.stops(code("SIGINT")));
         assert!(!selection.stops(code("SIGALRM")));

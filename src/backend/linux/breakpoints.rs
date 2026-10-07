@@ -400,7 +400,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             .iter()
             .filter_map(|owner| match owner {
                 BreakpointOwner::User(id) => Some(*id),
-                BreakpointOwner::Plan(_) | BreakpointOwner::Loader => None,
+                BreakpointOwner::Plan(_) | BreakpointOwner::Loader | BreakpointOwner::Runtime => {
+                    None
+                }
             })
             .collect::<BTreeSet<_>>();
         let mut candidates = Vec::new();
@@ -758,6 +760,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                         }
                     }
                     BreakpointOwner::Loader => inferior.loader_site = None,
+                    BreakpointOwner::Runtime => {
+                        inferior.runtime_hooks.remove(&address);
+                    }
                 }
             }
         }

@@ -69,6 +69,7 @@ mod frames;
 mod glibc_tls;
 mod inspection;
 mod internal_stops;
+mod language_exceptions;
 mod libraries;
 mod lifecycle;
 mod memory;
@@ -218,6 +219,8 @@ enum BreakpointOwner {
     Plan(ExecutionId),
     /// The dynamic loader's report of each change to the loaded libraries.
     Loader,
+    /// A language runtime's report of an exception.
+    Runtime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,6 +384,9 @@ enum ClassifiedStop {
     /// modules were refreshed; it has been rewound to the trap, which the
     /// refresh takes out.
     CarriedTrap,
+    /// The thread executed a trap instruction of the program's own, at
+    /// this address, which no breakpoint of the debugger's owns.
+    ProgramTrap(VirtualAddress),
     /// SIGKILL took the thread out of the reported stop; its exit follows.
     Superseded,
     Unclassifiable(RawStopRecord),
@@ -564,6 +570,10 @@ enum Edit {
     RemoveAllWatchpoints {
         reply: Reply<Arc<[Watchpoint]>>,
     },
+    SetExceptionStops {
+        stops: crate::ExceptionStops,
+        reply: Reply<crate::ExceptionStops>,
+    },
     /// Bring modules and breakpoints up to date after the loader changed
     /// the loaded libraries.
     RefreshModules,
@@ -648,6 +658,8 @@ struct Inferior {
     exec_unsupported: bool,
     /// The loader's breakpoint, once the loader is known.
     loader_site: Option<VirtualAddress>,
+    /// The runtime functions whose entry stops for an exception.
+    runtime_hooks: BTreeMap<VirtualAddress, language_exceptions::HookSite>,
     watch: WatchState,
     /// The signal the debugger sent to end the inferior, which never stops
     /// it whatever its policy.
@@ -695,6 +707,7 @@ impl Inferior {
             next_execution: 0,
             exec_unsupported: false,
             loader_site: None,
+            runtime_hooks: BTreeMap::new(),
             watch: WatchState::default(),
             terminating: None,
         }
@@ -1024,6 +1037,8 @@ struct Controller<P: InspectionOps> {
     /// A launch or attach waiting for those children to be released.
     deferred_start: Option<Start>,
     signals: SignalPolicies,
+    /// Which exceptions that runtimes report stop the program.
+    exception_stops: crate::ExceptionStops,
     /// The language runtime each image carries, bound on first need.
     runtime_models: runtimes::RuntimeCache,
     revision: u64,
@@ -1124,6 +1139,7 @@ impl<P: InspectionOps> Controller<P> {
             orphans: None,
             deferred_start: None,
             signals: SignalPolicies::default(),
+            exception_stops: crate::ExceptionStops::default(),
             runtime_models: RefCell::default(),
             revision: 0,
         }
@@ -1283,6 +1299,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             Request::RemoveAllWatchpoints { reply } => {
                 self.edit(Edit::RemoveAllWatchpoints { reply });
+            }
+            Request::SetExceptionStops { stops, reply } => {
+                self.edit(Edit::SetExceptionStops { stops, reply });
             }
             Request::Launch { options, reply } => self.start(Start::Launch(*options, reply)),
             Request::Attach { process_id, reply } => self.start(Start::Attach(process_id, reply)),
@@ -1672,6 +1691,7 @@ impl<P: InspectionOps> Controller<P> {
             | Request::SetWatchpointHitCondition { .. }
             | Request::RemoveWatchpoint { .. }
             | Request::RemoveAllWatchpoints { .. }
+            | Request::SetExceptionStops { .. }
             | Request::Launch { .. }
             | Request::Attach { .. }
             | Request::LaunchByExec { .. }

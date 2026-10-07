@@ -701,7 +701,7 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
             fault_address: None,
         })
     };
-    let classify = |signal, siginfo, expected: &ExpectedStop, breakpoint| {
+    let classify_trap = |signal, siginfo, expected: &ExpectedStop, breakpoint, program_trap| {
         classify_stop_evidence(
             signal,
             "raw-status".to_owned(),
@@ -711,8 +711,12 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
             false,
             breakpoint,
             false,
+            program_trap,
             WatchStatus::Absent,
         )
+    };
+    let classify = |signal, siginfo, expected: &ExpectedStop, breakpoint| {
+        classify_trap(signal, siginfo, expected, breakpoint, None)
     };
     let stepping = ExpectedStop::UserStep {
         kind: StepKind::Instruction,
@@ -768,6 +772,22 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
             Some(VirtualAddress::new(0x1234)),
         ),
         ClassifiedStop::Breakpoint(address) if address == VirtualAddress::new(0x1234)
+    ));
+    // An int3 of the program's own is reported as a trap, never delivered
+    // as a signal; an int3 with no evidence for either cannot be explained.
+    assert!(matches!(
+        classify_trap(
+            Signal::SIGTRAP,
+            metadata(libc::SI_KERNEL),
+            &none,
+            None,
+            Some(VirtualAddress::new(0x1233)),
+        ),
+        ClassifiedStop::ProgramTrap(address) if address == VirtualAddress::new(0x1233)
+    ));
+    assert!(matches!(
+        classify(Signal::SIGTRAP, metadata(libc::SI_KERNEL), &none, None),
+        ClassifiedStop::Unclassifiable(_)
     ));
     // SIGKILL wakes a thread from a reported stop: its siginfo vanishes and
     // then describes its exit event.

@@ -111,6 +111,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             Edit::RemoveAllWatchpoints { reply } => {
                 let _ = reply.send(self.remove_all_watchpoints());
             }
+            Edit::SetExceptionStops { stops, reply } => {
+                let _ = reply.send(self.set_exception_stops(stops));
+            }
             Edit::RefreshModules => {
                 // A failed refresh leaves the previous modules; the next stop
                 // refreshes them again.
@@ -326,6 +329,9 @@ impl Edit {
                 let _ = reply.send(Err(error));
             }
             Self::RemoveAllWatchpoints { reply } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::SetExceptionStops { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             Self::RefreshModules => {}

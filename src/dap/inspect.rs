@@ -1149,6 +1149,27 @@ impl Session {
             StopReason::WatchpointArmFailed { description, .. } => {
                 ("watchpoint failure".to_owned(), description.to_string())
             }
+            StopReason::LanguageException(exception) => {
+                let id = super::session::language_exception_text(exception.kind).to_owned();
+                let mut body = json!({
+                    "exceptionId": id,
+                    "description": exception.message.as_ref(),
+                    "breakMode": if exception.kind == uscope::LanguageExceptionKind::Raised {
+                        "always"
+                    } else {
+                        "unhandled"
+                    },
+                    "details": {"message": exception.message.as_ref(), "typeName": id},
+                });
+                if let Some(value) = &exception.value {
+                    body["details"]["evaluateName"] = value.as_ref().into();
+                }
+                return Ok(body);
+            }
+            StopReason::ProgramBreakpoint { address } => (
+                "program breakpoint".to_owned(),
+                format!("the program executed a breakpoint instruction at {address}"),
+            ),
             _ => return Err(ErrorBody::new("the stop was not caused by an exception")),
         };
         Ok(json!({

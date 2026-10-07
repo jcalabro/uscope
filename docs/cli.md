@@ -281,6 +281,20 @@ steps, steps over a breakpoint, or runs without the others waits until the
 thread continues with them, since its handler could wait for the stopped
 threads.
 
+A language runtime that handles signals itself changes their defaults:
+`SIGSEGV`, `SIGBUS`, and `SIGFPE` are delivered silently to a Go program,
+whose runtime turns a fault into a panic. A `handle` command still applies
+over that. What the runtime then reports stops instead:
+
+- a panic nothing recovered, as it ends the program;
+- a fatal error, such as `all goroutines are asleep - deadlock!`, or a
+  fault the runtime cannot turn into a panic.
+
+The stop prints the message the runtime prints, chained panics and all, and
+selects the frame that panicked or faulted, below the runtime's own. A
+breakpoint instruction of the program's own, such as Go's
+`runtime.Breakpoint()`, stops too, and the program goes on past it.
+
 ## Core dumps
 
 `--core` opens a dump written by the kernel or gdb's `gcore` as one permanent

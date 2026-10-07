@@ -237,6 +237,7 @@ struct Target {
     /// The policy each signal had before the session changed it.
     default_policies: HashMap<u64, SignalPolicy>,
     applied_policies: HashMap<u64, SignalPolicy>,
+    applied_exceptions: uscope::ExceptionStops,
     console: Cli,
     syntax: uscope::AssemblySyntax,
     images: HashMap<ModuleId, Arc<ModuleImage>>,
@@ -673,6 +674,7 @@ impl Session {
             signals,
             applied_policies: default_policies.clone(),
             default_policies,
+            applied_exceptions: uscope::ExceptionStops::default(),
             console,
             syntax,
             images: HashMap::new(),
@@ -1987,12 +1989,22 @@ impl Session {
         Ok(json!({"breakpoints": breakpoints}))
     }
 
-    /// Makes the debugger stop on the signals the exception filters select,
-    /// with the configuration's per-signal handling applied over them.
+    /// Makes the debugger stop on the signals and exceptions the exception
+    /// filters select, with the configuration's per-signal handling
+    /// applied over them.
     async fn apply_signal_policies(&mut self) -> Result<(), ErrorBody> {
         let Some(target) = self.target.as_mut() else {
             return Ok(());
         };
+        let exceptions = self.exceptions.exceptions();
+        if target.applied_exceptions != exceptions {
+            target
+                .handle
+                .set_exception_stops(exceptions)
+                .await
+                .map_err(error)?;
+            target.applied_exceptions = exceptions;
+        }
         for code in uscope::signal_codes() {
             let mut policy = target.default_policies[&code];
             policy.stop = self.exceptions.stops(code);
@@ -2334,6 +2346,18 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
         ),
         StopReason::Pause => ("pause", None, None),
         StopReason::Entry | StopReason::Attach => ("entry", None, None),
+        StopReason::LanguageException(exception) => (
+            "exception",
+            Some(exception.message.to_string()),
+            Some(language_exception_text(exception.kind).to_owned()),
+        ),
+        StopReason::ProgramBreakpoint { address } => (
+            "exception",
+            Some(format!(
+                "the program executed a breakpoint instruction at {address}"
+            )),
+            Some("program breakpoint".to_owned()),
+        ),
         StopReason::Exception(info)
         | StopReason::CoreDump {
             exception: Some(info),
@@ -2381,6 +2405,15 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
         | StopReason::Watchpoint { .. }
         | StopReason::WatchpointInvalidated { .. }
         | StopReason::Exited(_) => unreachable!("the session describes these stops"),
+    }
+}
+
+/// What a client shows for each kind of exception a runtime reports.
+pub(super) const fn language_exception_text(kind: uscope::LanguageExceptionKind) -> &'static str {
+    match kind {
+        uscope::LanguageExceptionKind::Raised => "exception raised",
+        uscope::LanguageExceptionKind::Unhandled => "unhandled exception",
+        uscope::LanguageExceptionKind::Fatal => "fatal error",
     }
 }
 

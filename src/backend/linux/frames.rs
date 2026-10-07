@@ -147,7 +147,7 @@ impl<P: InspectionOps> Controller<P> {
 
         for id in site.owners.iter().filter_map(|owner| match owner {
             BreakpointOwner::User(id) => Some(*id),
-            BreakpointOwner::Plan(_) | BreakpointOwner::Loader => None,
+            BreakpointOwner::Plan(_) | BreakpointOwner::Loader | BreakpointOwner::Runtime => None,
         }) {
             // A breakpoint removed while sites could not be edited, as SIGKILL
             // tears the process down, leaves its owner on the trap.
