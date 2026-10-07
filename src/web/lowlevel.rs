@@ -64,7 +64,10 @@ pub async fn disassemble(
     };
     let query = |range| DisassemblyQuery {
         range,
-        syntax: uscope::AssemblySyntax::Intel,
+        syntax: match request.syntax {
+            Some(protocol::Syntax::Att) => uscope::AssemblySyntax::Att,
+            Some(protocol::Syntax::Intel) | None => uscope::AssemblySyntax::Intel,
+        },
     };
     let disassembly = match view
         .disassemble(query(DisassemblyRange::Function(shown)))

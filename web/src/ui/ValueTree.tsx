@@ -331,6 +331,7 @@ export function messageRow(name: string, text: string): Row {
     children: null,
     editable: false,
     memory: null,
+    memoryBytes: null,
     truncated: false,
   };
 }
