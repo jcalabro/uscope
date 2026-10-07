@@ -828,7 +828,9 @@ impl SimController {
                             super::BreakpointOwner::User(id) => {
                                 users.insert(id.get());
                             }
-                            super::BreakpointOwner::Loader | super::BreakpointOwner::Runtime => {}
+                            super::BreakpointOwner::Loader
+                            | super::BreakpointOwner::Runtime
+                            | super::BreakpointOwner::StackMove => {}
                         }
                     }
                     (

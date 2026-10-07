@@ -25,6 +25,7 @@ use crate::{AddressRange, ImageAddress, StackSegment, TaskState, ThreadId, Virtu
 /// unverified.
 const VERIFIED: (u64, u64) = (1, 27);
 /// x86-64's DWARF register numbers.
+const RAX: u16 = 0;
 const RSI: u16 = 4;
 const RBP: u16 = 6;
 const RSP: u16 = 7;
@@ -95,6 +96,9 @@ struct GoRuntime {
     exceptions: Result<exceptions::Layout, Missing>,
     /// How interface values hold their dynamic values.
     interfaces: Result<types::Interfaces, Missing>,
+    /// `runtime.copystack(gp *g, newsize uintptr)`, which moves a
+    /// goroutine's stack to grow or shrink it.
+    copystack: Option<ImageAddress>,
 }
 
 impl GoRuntime {
@@ -130,6 +134,7 @@ impl GoRuntime {
             hooks: exceptions::Hooks::bind(image.as_ref()),
             exceptions: exceptions::Layout::bind(image.as_ref()),
             interfaces: types::Interfaces::bind(image.as_ref()),
+            copystack: layout::symbol(image.as_ref(), "runtime.copystack").ok(),
             image,
             unverified,
             starting,
@@ -413,6 +418,39 @@ impl RuntimeModel for GoRuntime {
 
     fn task_noun(&self) -> &'static str {
         TASK_NOUN.0
+    }
+
+    fn stack_mover(&self) -> Option<ImageAddress> {
+        self.copystack
+    }
+
+    /// `copystack` takes the goroutine in rax, which may be any goroutine:
+    /// its own as it grows, or another the collector shrinks.
+    fn moving_task(
+        &self,
+        stop: &dyn RuntimeStop,
+        registers: &RegisterFile,
+    ) -> Result<u64, Arc<str>> {
+        let g = registers
+            .get(RAX)
+            .ok_or("the goroutine copystack moves is unavailable")?;
+        if !self.allgs(stop)?.contains(&g) {
+            return Err(format!("copystack moves {g:#x}, which is no goroutine").into());
+        }
+        let names = self.names(stop);
+        self.goroutine(stop, names, g)?
+            .map(|task| task.number)
+            .ok_or_else(|| format!("copystack moves {g:#x}, which runs no goroutine").into())
+    }
+
+    fn task_stack(
+        &self,
+        stop: &dyn RuntimeStop,
+        number: u64,
+    ) -> Result<Option<std::ops::Range<u64>>, Arc<str>> {
+        self.find(stop, number)?
+            .map(|(g, _)| self.stack(stop, g))
+            .transpose()
     }
 
     fn dynamic_value(

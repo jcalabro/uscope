@@ -285,6 +285,10 @@ fn watch_scope_suffix(scope: &WatchScope) -> String {
         WatchScope::Frame { thread, activation } => {
             format!(" (frame {activation} of thread {thread})")
         }
+        // The watch follows the task's stack wherever its runtime moves it.
+        WatchScope::Task { task, activation } => {
+            format!(" (frame {activation:#x} below the top of task {task}'s stack)")
+        }
     }
 }
 
@@ -372,6 +376,9 @@ pub const fn invalidation_text(reason: WatchpointInvalidation) -> &'static str {
         WatchpointInvalidation::ScopeExited => "its frame or block is no longer active",
         WatchpointInvalidation::OwnerThreadExited => "the thread owning it exited",
         WatchpointInvalidation::ModuleUnloaded => "the module owning it was unloaded",
+        WatchpointInvalidation::StackMoved => {
+            "its runtime moved its stack where the debugger could not follow"
+        }
     }
 }
 

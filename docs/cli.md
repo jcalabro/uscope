@@ -192,9 +192,14 @@ next stop reports the change from it, as gdb does.
 A watchpoint on an expression keeps watching the address it first resolved to.
 It ends with its storage, and the end is reported: a static when its module
 unloads, thread-local storage when its thread exits, and a local when its
-frame returns or its block is left. Register values, bit-fields, constants,
-and Go stack objects cannot be watched. Watchpoints are discarded when the
-process exits or execs, and cleared before detaching.
+frame returns or its block is left. A goroutine's local belongs to its
+goroutine, and moves with it: when the runtime copies the goroutine's stack
+elsewhere to grow or shrink it, the watchpoint stops watching during the
+copy and then watches the local at its new address, which `info watchpoints`
+shows. A copy the debugger cannot follow ends the watchpoint and says so.
+Register values, bit-fields, and constants cannot be watched. Watchpoints
+are discarded when the process exits or execs, and cleared before
+detaching.
 
 ### Stack and frames
 

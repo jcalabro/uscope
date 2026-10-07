@@ -290,6 +290,23 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         representation: &str,
         value: StoredValue<'_>,
     ) -> Option<Result<DynamicValue, Arc<str>>>;
+    /// The runtime function that moves a task's stack to another, which
+    /// the move has finished once it returns.
+    fn stack_mover(&self) -> Option<ImageAddress>;
+    /// The number of the task whose stack a stopped thread entering the
+    /// stack mover, given its registers there, is moving.
+    fn moving_task(
+        &self,
+        stop: &dyn RuntimeStop,
+        registers: &RegisterFile,
+    ) -> Result<u64, Arc<str>>;
+    /// The bounds of the stack of the task numbered `number`, or `None`
+    /// when the runtime has no such task.
+    fn task_stack(
+        &self,
+        stop: &dyn RuntimeStop,
+        number: u64,
+    ) -> Result<Option<std::ops::Range<u64>>, Arc<str>>;
     /// What the runtime calls one of its tasks.
     fn task_noun(&self) -> &'static str;
 }

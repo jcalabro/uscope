@@ -871,6 +871,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.repairs.clear();
         inferior.loader_site = None;
         inferior.runtime_hooks.clear();
+        inferior.stack_moves.clear();
         // exec(2) flushes every debug register; the new image's addresses
         // have no relation to the old watchpoints.
         self.discard_watchpoints();
