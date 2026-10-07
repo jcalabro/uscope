@@ -1360,6 +1360,7 @@ at every stop.
        function it is given, which the runtime model names.
      - A step's walks to its activation cross stacks as backtraces do.
 7. **Attach to a running server.** The server is an `ExternalProcess`.
+   *(Done: `tests/go/attach.rs`.)*
    - Its goroutines are listed, and a breakpoint is hit by a request.
    - Detaching leaves it serving: a second request succeeds.
 8. **Scale.** 100,000 parked goroutines.
