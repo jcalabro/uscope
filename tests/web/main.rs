@@ -8,6 +8,7 @@ mod web;
 
 mod access;
 mod inspecting;
+mod lowlevel;
 mod running;
 mod sessions;
 mod terminal;
