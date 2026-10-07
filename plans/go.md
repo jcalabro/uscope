@@ -512,12 +512,22 @@ following:
   reported as stale. Go leaves dead slots holding pre-copy addresses
   (go#75124).
 
-**Watchpoints on Go stack objects move with the stack.**
+**Watchpoints on Go stack objects move with the stack** *(done)*.
 
-- A watched local's identity is its task and its offset below stack.hi.
-- An internal breakpoint at `runtime.copystack`'s return, matched to the
-  task being copied, moves the debug registers.
-- Leaving the frame ends the watch, as for C locals.
+- A watched local's identity is its task and its offset below stack.hi
+  (`WatchScope::Task`).
+- While a goroutine has a watched local, an internal breakpoint at
+  `runtime.copystack`'s entry reads the goroutine being copied from rax.
+  An internal all-stop sets that goroutine's watches aside, so the copy's
+  reads and writes never stop, and plants a breakpoint at the return
+  address. When the same thread returns there with the same stack
+  pointer, another all-stop places the watches at the new stack's
+  `hi - offset` and publishes the new addresses.
+- Leaving the frame ends the watch, as for C locals. Liveness walks the
+  task's frames across stacks and compares each activation by its offset
+  below stack.hi.
+- A copy whose goroutine cannot be named, or a stack found where no
+  followed copy put it, ends the task's watches with `StackMoved`.
 - Debug registers are already armed on every thread, so the watch follows
   the goroutine across threads.
 

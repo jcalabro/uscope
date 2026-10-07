@@ -1789,6 +1789,52 @@ fn finish_shows_what_the_function_returned() {
 }
 
 #[test]
+fn a_watched_goroutine_local_names_its_goroutine_and_follows_its_stack() {
+    let stdout = batch(
+        &["build/test-programs/watched-go-o0"],
+        &[
+            "break main.bump",
+            "run",
+            "up",
+            "watch counter",
+            "delete 1",
+            "continue",
+            "continue",
+            "continue",
+            "continue",
+            "info watchpoints",
+            "continue",
+            "continue",
+        ],
+    );
+    // The address the watch is at, from its line.
+    let watched = |prefix: &str| {
+        let line = stdout
+            .lines()
+            .find(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no {prefix:?}:\n{stdout}"));
+        assert!(line.contains(" below the top of task "), "{line}");
+        line[prefix.len()..]
+            .split_whitespace()
+            .next()
+            .expect("an address")
+            .to_owned()
+    };
+    let set = watched("watchpoint 1 set on counter: 8 bytes at ");
+    let listed = watched("1  change  counter  8 bytes at ");
+    // Each round's deep calls grew the stack, which the runtime moved.
+    assert_ne!(set, listed, "{stdout}");
+    assert_in_order(
+        &stdout,
+        &[
+            "new: 10",
+            "deleted watchpoint 1 counter: its frame or block is no longer active",
+            "inferior exited with status 0",
+        ],
+    );
+}
+
+#[test]
 fn backtraces_mark_the_iterators_of_a_loop_whose_body_runs() {
     let stdout = batch(
         &["build/test-programs/ranges-go-o0"],

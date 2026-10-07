@@ -1650,7 +1650,7 @@ async fn watchpoints_work_across_the_rust_and_zig_matrix() {
 }
 
 #[tokio::test]
-async fn go_watchpoints_follow_goroutines_onto_new_threads_and_refuse_stack_objects() {
+async fn go_watchpoints_follow_goroutines_onto_new_threads() {
     let mut scenario = Scenario::launch("watch-go-o0");
     scenario.add_breakpoint("main.watchReady").await;
     let mut reason = scenario.run_to_stop().await;
@@ -1698,14 +1698,6 @@ async fn go_watchpoints_follow_goroutines_onto_new_threads_and_refuse_stack_obje
     assert_eq!(hit_count, 21);
     assert!(writers.len() >= 2, "goroutines ran on several threads");
 
-    let refused = scenario
-        .handle()
-        .watch(&expression("local"), WatchAccess::Write)
-        .await;
-    assert!(
-        matches!(refused, Err(Error::WatchTargetUnsupported(_))),
-        "Go may move goroutine stacks: {refused:?}"
-    );
     scenario
         .operation("remove all", scenario.handle().remove_all_watchpoints())
         .await;

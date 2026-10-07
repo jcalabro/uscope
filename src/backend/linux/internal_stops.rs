@@ -119,7 +119,37 @@ impl<P: LinuxTraceOps> Controller<P> {
                 // refreshes them again.
                 let _ = self.refresh_libraries();
             }
+            Edit::FollowStacks => self.follow_stacks(),
         }
+    }
+
+    /// Applies an edit of the debugger's own once every thread is stopped,
+    /// by an internal stop unless one is already under way. An edit already
+    /// queued is applied once.
+    pub(super) fn queue_internal_edit(&mut self, edit: Edit) -> Result<()> {
+        if self
+            .inferior
+            .as_ref()
+            .ok_or(Error::NotRunning)?
+            .barrier
+            .is_none()
+        {
+            self.begin_internal_stop()?;
+        }
+        let barrier = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.barrier.as_mut())
+            .expect("an internal stop has a barrier");
+        let kind = std::mem::discriminant(&edit);
+        if !barrier
+            .edits
+            .iter()
+            .any(|queued| std::mem::discriminant(queued) == kind)
+        {
+            barrier.edits.push(edit);
+        }
+        Ok(())
     }
 
     /// Starts stopping every running thread without a reason to publish,
@@ -334,7 +364,7 @@ impl Edit {
             Self::SetExceptionStops { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
-            Self::RefreshModules => {}
+            Self::RefreshModules | Self::FollowStacks => {}
         }
     }
 }

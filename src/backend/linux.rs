@@ -89,6 +89,7 @@ mod runtimes;
 mod signals;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim_edge;
+mod stack_watches;
 mod stepping;
 mod thread_db;
 mod vdso;
@@ -223,6 +224,9 @@ enum BreakpointOwner {
     Loader,
     /// A language runtime's report of an exception.
     Runtime,
+    /// The entry or a return of a language runtime's code that moves a
+    /// watched task's stack.
+    StackMove,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,6 +314,8 @@ struct WatchRecord {
     frame: Option<FrameScopeEvidence>,
     /// The watched bytes when the debugger last observed them.
     observed: Option<Arc<[u8]>>,
+    /// For a watch on a task's stack, where on the stack it is.
+    task: Option<stack_watches::TaskWatch>,
 }
 
 #[derive(Clone, Copy)]
@@ -590,6 +596,9 @@ enum Edit {
     /// Bring modules and breakpoints up to date after the loader changed
     /// the loaded libraries.
     RefreshModules,
+    /// Set aside the watches of tasks whose stacks a runtime is moving, and
+    /// place those whose moves finished on their new stacks.
+    FollowStacks,
 }
 
 struct PublicStop {
@@ -675,6 +684,7 @@ struct Inferior {
     loader_site: Option<VirtualAddress>,
     /// The runtime functions whose entry stops for an exception.
     runtime_hooks: BTreeMap<VirtualAddress, language_exceptions::HookSite>,
+    stack_moves: stack_watches::StackMoves,
     watch: WatchState,
     /// The signal the debugger sent to end the inferior, which never stops
     /// it whatever its policy.
@@ -723,6 +733,7 @@ impl Inferior {
             exec_unsupported: false,
             loader_site: None,
             runtime_hooks: BTreeMap::new(),
+            stack_moves: stack_watches::StackMoves::default(),
             watch: WatchState::default(),
             terminating: None,
         }

@@ -641,6 +641,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if self.is_loader_site(address) {
             self.queue_module_refresh()?;
         }
+        self.note_stack_move(pid, address)?;
         let stopping = self.record_breakpoint_hits(pid, address);
         if !stopping.is_empty() {
             return self.begin_visible_stop(

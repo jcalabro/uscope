@@ -16,4 +16,5 @@ mod stacks;
 mod steps;
 mod stops;
 mod truth;
+mod watches;
 mod workers;

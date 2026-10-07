@@ -63,28 +63,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Brings modules and breakpoints up to date once every thread is
     /// stopped, after the loader reported a change.
     pub(super) fn queue_module_refresh(&mut self) -> Result<()> {
-        if self
-            .inferior
-            .as_ref()
-            .ok_or(Error::NotRunning)?
-            .barrier
-            .is_none()
-        {
-            self.begin_internal_stop()?;
-        }
-        let barrier = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.barrier.as_mut())
-            .expect("an internal stop has a barrier");
-        if !barrier
-            .edits
-            .iter()
-            .any(|edit| matches!(edit, Edit::RefreshModules))
-        {
-            barrier.edits.push(Edit::RefreshModules);
-        }
-        Ok(())
+        self.queue_internal_edit(Edit::RefreshModules)
     }
 
     /// Brings the module registry, the loader's breakpoint, and every
@@ -93,6 +72,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let lost_locations = self.refresh_modules()?;
         self.ensure_loader_breakpoint()?;
         self.sync_runtime_hooks()?;
+        self.sync_stack_movers()?;
         self.reresolve_breakpoints(lost_locations)
     }
 

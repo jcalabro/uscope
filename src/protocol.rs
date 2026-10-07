@@ -498,6 +498,16 @@ pub enum WatchScope {
         /// The activation's canonical frame address.
         activation: VirtualAddress,
     },
+    /// A local variable or parameter of one activation on a task's stack,
+    /// which the task's runtime may move elsewhere to grow or shrink it.
+    /// The watch moves with the stack, on whichever thread runs the task.
+    Task {
+        /// The task whose stack holds the activation.
+        task: crate::TaskId,
+        /// How far below the top of the task's stack the activation's
+        /// canonical frame address is, which a move keeps.
+        activation: u64,
+    },
 }
 
 /// Debugger-internal evidence used to decide whether a frame-scoped object
@@ -653,6 +663,9 @@ pub enum WatchpointInvalidation {
     OwnerThreadExited,
     /// The module owning the object was unloaded.
     ModuleUnloaded,
+    /// The language runtime moved the stack holding the object somewhere
+    /// the debugger could not follow.
+    StackMoved,
 }
 
 /// A watchpoint that was removed because its storage's lifetime ended.

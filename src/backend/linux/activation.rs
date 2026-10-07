@@ -57,6 +57,24 @@ pub(super) struct Activation {
 }
 
 impl Activation {
+    /// The activation on a task's stack whose canonical frame address is
+    /// `below_top` bytes below the stack's top, wherever the stack is.
+    pub(super) const fn on_task(task: TaskId, below_top: u64) -> Self {
+        Self {
+            owner: StackOwner::Task(task),
+            depth: Depth::BelowTop(below_top),
+        }
+    }
+
+    /// The task whose stack holds this activation, and how far below the
+    /// stack's top it is, for an activation on a task's stack.
+    pub(super) const fn on_task_stack(self) -> Option<(TaskId, u64)> {
+        match (self.owner, self.depth) {
+            (StackOwner::Task(task), Depth::BelowTop(below_top)) => Some((task, below_top)),
+            _ => None,
+        }
+    }
+
     /// Whether this activation is deeper on the same stack than `other`: a
     /// callee `other` made, directly or through others.
     pub(super) fn is_callee_of(self, other: Self) -> bool {
