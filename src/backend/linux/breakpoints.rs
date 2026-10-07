@@ -999,7 +999,7 @@ fn symbol_locations(
         .symbols()
         .iter()
         .filter(|symbol| {
-            &*symbol.name == name
+            (&*symbol.name == name || symbol.unversioned_name() == name)
                 && symbol.kind == crate::SymbolKind::Function
                 && symbol.extent.is_some()
         })
