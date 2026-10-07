@@ -20,6 +20,7 @@ mod siblings;
 mod stacks;
 mod steps;
 mod stops;
+mod stripped;
 mod truth;
 mod watches;
 mod workers;

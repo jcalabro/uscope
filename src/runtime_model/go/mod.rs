@@ -42,6 +42,8 @@ const SIGURG: i32 = 23;
 const SIGBUS: i32 = 7;
 const SIGFPE: i32 = 8;
 const SIGSEGV: i32 = 11;
+/// Why goroutines cannot be read from a program without debug information.
+const STRIPPED: &str = "the program has no debug information describing Go's runtime";
 /// The first release whose runtime the model can read at all.
 const OLDEST: (u64, u64) = (1, 20);
 /// The most goroutines one list reads, so a corrupted `allglen` cannot
@@ -54,10 +56,18 @@ const MAX_LABELS: u64 = 64;
 pub fn detect(
     image: Arc<dyn RuntimeImage + Send + Sync>,
 ) -> Option<Result<Arc<dyn RuntimeModel>, Arc<str>>> {
-    let version = image
+    let Some(version) = image
         .producers()
         .iter()
-        .find_map(|producer| version(producer))?;
+        .find_map(|producer| version(producer))
+    else {
+        // A program whose debug information was stripped still names the
+        // runtime's code in Go's own function table, but nothing describes
+        // the runtime's data.
+        return image
+            .has_function("runtime.goexit")
+            .then(|| Err(STRIPPED.into()));
+    };
     Some(GoRuntime::bind(image, version).map(|model| Arc::new(model) as Arc<dyn RuntimeModel>))
 }
 

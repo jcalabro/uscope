@@ -318,7 +318,11 @@ thread it is on. A goroutine of only the runtime's code is named by the
 function it began in. A core dump's goroutines are listed as a live
 program's are. A Go library that a C program hosts carries a runtime of
 its own, whose goroutines are listed once it loads; a thread of the host's
-that calls into Go runs a goroutine for the call. Selecting a goroutine,
+that calls into Go runs a goroutine for the call. A Go program built
+without debug information (`-ldflags=-w`, or `-s -w`) still has its frames
+named and unwound by Go's own function table, and its function and line
+breakpoints and steps work by it, but its goroutines cannot be read, which
+`goroutines` and `$task` say. Selecting a goroutine,
 parked or running, points `backtrace`, `frame`, `print`, `registers`, and
 the other inspecting commands at it, and `$task` in an expression is its id.
 `goroutine` *id* *command* runs one of those commands in the goroutine and

@@ -96,15 +96,10 @@ impl<P: InspectionOps> RuntimeStop for ProcessStop<'_, P> {
 
 impl<P: InspectionOps> Controller<P> {
     /// Every loaded module carrying a runtime a model knows, with the model
-    /// bound to it. A module whose runtime cannot be bound has none.
+    /// bound to it. A module whose runtime cannot be bound has none; see
+    /// [`Self::unbound_runtimes`].
     pub(super) fn runtimes(&self, inferior: &Inferior) -> Vec<BoundRuntime> {
-        let images = std::iter::once((inferior.loaded_module, &self.module_image)).chain(
-            self.modules
-                .values()
-                .filter(|module| module.loaded.id != inferior.loaded_module.id)
-                .map(|module| (module.loaded, &module.image)),
-        );
-        images
+        self.loaded_images(inferior)
             .filter_map(|(module, image)| {
                 let model = self.bind_runtime(image)?.ok()?;
                 Some(BoundRuntime {
@@ -114,6 +109,26 @@ impl<P: InspectionOps> Controller<P> {
                 })
             })
             .collect()
+    }
+
+    /// Why each loaded module carrying a runtime a model knows cannot have
+    /// it bound, as when its debug information is stripped.
+    pub(super) fn unbound_runtimes(&self, inferior: &Inferior) -> Vec<Arc<str>> {
+        self.loaded_images(inferior)
+            .filter_map(|(_, image)| self.bind_runtime(image)?.err())
+            .collect()
+    }
+
+    fn loaded_images<'a>(
+        &'a self,
+        inferior: &'a Inferior,
+    ) -> impl Iterator<Item = (LoadedModule, &'a Arc<ModuleImage>)> {
+        std::iter::once((inferior.loaded_module, &self.module_image)).chain(
+            self.modules
+                .values()
+                .filter(|module| module.loaded.id != inferior.loaded_module.id)
+                .map(|module| (module.loaded, &module.image)),
+        )
     }
 
     fn bind_runtime(
@@ -165,7 +180,12 @@ impl<P: InspectionOps> Controller<P> {
             position: 0,
         });
         let mut tasks = Vec::new();
-        let mut gaps = Vec::new();
+        // A runtime that cannot be read leaves its tasks out of every page.
+        let mut gaps = if from.is_none() {
+            self.unbound_runtimes(inferior)
+        } else {
+            Vec::new()
+        };
         while let Some(runtime) = runtimes.get(cursor.runtime) {
             let page = self.with_runtime_stop(inferior, runtime, reader, |stop| {
                 runtime
@@ -289,7 +309,15 @@ impl<P: InspectionOps> Controller<P> {
 
     fn read_thread_activity(&self, inferior: &Inferior, pid: Pid) -> Option<ThreadActivity> {
         let runtimes = self.runtimes(inferior);
-        let mut found = (!runtimes.is_empty()).then_some(ThreadActivity::Idle);
+        // A thread may run the tasks of a runtime that cannot be read.
+        let mut found = self
+            .unbound_runtimes(inferior)
+            .into_iter()
+            .next()
+            .map_or_else(
+                || (!runtimes.is_empty()).then_some(ThreadActivity::Idle),
+                |reason| Some(ThreadActivity::Unknown(reason)),
+            );
         for runtime in &runtimes {
             let activity = self.with_runtime_stop(inferior, runtime, pid, |stop| {
                 runtime.model.thread_activity(stop, debug_thread_id(pid))

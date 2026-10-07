@@ -1706,6 +1706,20 @@ fn step_goroutine_enters_the_goroutine_the_line_starts() {
     assert_failure(&failure, "usage: step [task]");
 }
 
+/// A program stripped of its debug information has goroutines nobody can
+/// read, which `goroutines` says rather than listing none.
+#[test]
+fn a_stripped_programs_goroutines_are_unavailable() {
+    let failure = batch_output(
+        &["build/test-programs/callers-go-stripped"],
+        &["break main.reached", "run", "goroutines"],
+    );
+    assert_failure(
+        &failure,
+        "goroutines could not be read: the program has no debug information describing Go's runtime",
+    );
+}
+
 #[test]
 fn a_goroutine_is_selected_or_inspected_by_its_id() {
     let stdout = at_go_checkpoint(&[
