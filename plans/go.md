@@ -1327,13 +1327,22 @@ at every stop.
    Each is marked with `VIEW:` or `TRUTH`, and checked in both builds by
    the never-wrong invariant.
 6. **cgo.** *(Done: `tests/go/cgo.rs`, Go built with and without
-   optimization against C from gcc and clang.)*
+   optimization against C from gcc and clang, whose C has thread-locals
+   of its own.)*
    - Go calls C, which calls back into Go.
    - A backtrace from C reaches the Go frames above `asmcgocall`, and
      one from the callback shows the C frames between.
    - `step` from Go into C and back, and from C into the Go it calls;
      `finish` from that Go stops in the C; a fault in C is fatal there.
+   - A C program hosts a `c-shared` Go library: its goroutines are listed,
+     and the host's thread calling into Go runs one, below which its C
+     shows (`tests/go/hosted.rs`).
    - What it took:
+     - Each image says where a thread's copy of each of its thread-locals
+       is (`ThreadLocal`): an executable's at a fixed offset from the
+       thread pointer, past the C's own in an externally linked program,
+       and a library's at the offset the loader writes to its
+       `R_X86_64_TPOFF64` GOT slot. The runtime reads g there.
      - `asmcgocall` saves the goroutine and its depth below the stack's
        top at the base of the C frame, so its caller is found on the
        goroutine's stack even after the stack moved; `cgocallback`'s

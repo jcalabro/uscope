@@ -9,14 +9,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Arc;
 
+use object::read::elf::{Dyn as _, FileHeader as _, ProgramHeader as _};
 use object::{
-    Object, ObjectSection, ObjectSegment, ObjectSymbol, SectionFlags, SegmentFlags, SymbolFlags,
-    SymbolSection, elf,
+    Object, ObjectSection, ObjectSegment, ObjectSymbol, ObjectSymbolTable, SectionFlags,
+    SegmentFlags, SymbolFlags, SymbolSection, elf,
 };
 
 use crate::{
     AddressRange, EmbeddedSymbolTable, ImageAddress, SectionId, SectionInfo, SymbolBinding,
     SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolTableSources,
+    ThreadLocal,
 };
 
 /// Bounds the decompressed size of an embedded symbol table so a malformed or
@@ -77,6 +79,143 @@ pub fn load_symbols(
             runtime_function_table: EmbeddedSymbolTable::Absent,
         },
     }
+}
+
+/// Where each thread's copy of each thread-local variable the image
+/// defines is, as the image's code finds it on x86-64.
+///
+/// A symbol's value is its offset in the image's block of thread-local
+/// storage. A library's code reaches a variable through a GOT slot that the
+/// loader fills, by an `R_X86_64_TPOFF64` relocation, with the variable's
+/// offset from the thread pointer. An executable's block lies just below
+/// the thread pointer, at the block's size rounded up to its alignment.
+pub fn load_thread_locals(
+    object: &object::File<'_>,
+) -> BTreeMap<Arc<str>, Result<ThreadLocal, Arc<str>>> {
+    let object::File::Elf64(elf) = object else {
+        return BTreeMap::new();
+    };
+    if object.architecture() != object::Architecture::X86_64 {
+        return BTreeMap::new();
+    }
+    let endian = elf.endian();
+    let mut offsets = BTreeMap::<Arc<str>, Option<u64>>::new();
+    for symbol in object.symbols().chain(object.dynamic_symbols()) {
+        if symbol.kind() != object::SymbolKind::Tls
+            || !matches!(symbol.section(), SymbolSection::Section(_))
+        {
+            continue;
+        }
+        let Ok(name) = symbol.name() else {
+            continue;
+        };
+        // Two variables of one name, such as two files' statics, are told
+        // apart by neither.
+        let address = symbol.address();
+        offsets
+            .entry(name.into())
+            .and_modify(|offset| {
+                if *offset != Some(address) {
+                    *offset = None;
+                }
+            })
+            .or_insert(Some(address));
+    }
+    if offsets.is_empty() {
+        return BTreeMap::new();
+    }
+
+    // The GOT slots the loader fills, by the offset in the block each is
+    // for.
+    let mut slots = BTreeMap::new();
+    for (address, relocation) in object.dynamic_relocations().into_iter().flatten() {
+        if relocation.flags()
+            != (object::RelocationFlags::Elf {
+                r_type: elf::R_X86_64_TPOFF64,
+            })
+        {
+            continue;
+        }
+        let base = match relocation.target() {
+            object::RelocationTarget::Absolute => Some(0),
+            object::RelocationTarget::Symbol(index) => object
+                .dynamic_symbol_table()
+                .and_then(|table| table.symbol_by_index(index).ok())
+                .filter(|symbol| matches!(symbol.section(), SymbolSection::Section(_)))
+                .map(|symbol| symbol.address()),
+            _ => None,
+        };
+        if let Some(offset) = base.and_then(|base| base.checked_add_signed(relocation.addend())) {
+            slots.insert(offset, ImageAddress::new(address));
+        }
+    }
+
+    let tls = elf
+        .elf_program_headers()
+        .iter()
+        .find(|header| header.p_type(endian) == elf::PT_TLS)
+        .map(|header| {
+            (
+                header.p_vaddr(endian),
+                header.p_memsz(endian),
+                header.p_align(endian).max(1),
+            )
+        });
+    let executable = is_executable(elf);
+    let fixed = |offset: u64| -> Result<ThreadLocal, Arc<str>> {
+        if !executable {
+            return Err("the library's code reaches it only through the loader".into());
+        }
+        let (start, size, align) = tls.ok_or("the image has no thread-local storage")?;
+        if start % align != 0 {
+            return Err("the image's thread-local storage is misaligned".into());
+        }
+        let block = size
+            .checked_next_multiple_of(align)
+            .and_then(|block| i64::try_from(block).ok())
+            .ok_or("the image's thread-local storage is too large")?;
+        let offset = i64::try_from(offset).map_err(|_| "its offset is too large")?;
+        Ok(ThreadLocal::Offset(offset - block))
+    };
+    offsets
+        .into_iter()
+        .map(|(name, offset)| {
+            let place = offset.map_or_else(
+                || Err("several thread-local variables have its name".into()),
+                |offset| {
+                    slots
+                        .get(&offset)
+                        .map_or_else(|| fixed(offset), |slot| Ok(ThreadLocal::Slot(*slot)))
+                },
+            );
+            (name, place)
+        })
+        .collect()
+}
+
+/// Whether an ELF image is an executable rather than a library: one the
+/// system links as such, or one that names a loader or says it is a
+/// position-independent executable.
+fn is_executable(elf: &object::read::elf::ElfFile64<'_>) -> bool {
+    let endian = elf.endian();
+    if elf.elf_header().e_type(endian) == elf::ET_EXEC
+        || elf
+            .elf_program_headers()
+            .iter()
+            .any(|header| header.p_type(endian) == elf::PT_INTERP)
+    {
+        return true;
+    }
+    elf.elf_section_table()
+        .dynamic(endian, elf.data())
+        .ok()
+        .flatten()
+        .is_some_and(|(entries, _)| {
+            entries.iter().any(|entry| {
+                entry.d_tag(endian) == elf::DT_FLAGS_1
+                    && entry.d_val(endian) & u64::from(elf::DF_1_PIE) != 0
+            })
+        })
 }
 
 /// Collects the symbols of a `MiniDebugInfo` section: an xz-compressed ELF
@@ -528,6 +667,7 @@ pub(super) fn fuzz(data: &[u8]) {
             constants: std::collections::BTreeMap::new(),
             producers: Vec::new(),
             packages: Vec::new(),
+            thread_locals: load_thread_locals(&object),
         },
     );
     fuzz_lookups(&image, &symbols, data);

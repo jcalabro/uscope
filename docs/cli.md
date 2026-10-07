@@ -309,7 +309,9 @@ gives the goroutine's id, that place, what it does in the runtime's words,
 such as `chan receive`, its profiler labels, as in `{job: resize}`, and the
 thread it is on. A goroutine of only the runtime's code is named by the
 function it began in. A core dump's goroutines are listed as a live
-program's are. Selecting a goroutine,
+program's are. A Go library that a C program hosts carries a runtime of
+its own, whose goroutines are listed once it loads; a thread of the host's
+that calls into Go runs a goroutine for the call. Selecting a goroutine,
 parked or running, points `backtrace`, `frame`, `print`, `registers`, and
 the other inspecting commands at it, and `$task` in an expression is its id.
 `goroutine` *id* *command* runs one of those commands in the goroutine and

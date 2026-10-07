@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use super::super::{Member, RuntimeImage};
-use crate::{ImageAddress, IntegerValue};
+use crate::{ImageAddress, IntegerValue, ThreadLocal};
 
 /// A missing name, which makes a feature unavailable.
 pub type Missing = Arc<str>;
@@ -142,9 +142,9 @@ impl Goroutines {
 /// What finding a thread's goroutine needs.
 #[derive(Debug, Clone)]
 pub struct Threads {
-    /// Where the current goroutine is stored relative to a thread's
+    /// Where a thread's current goroutine is stored relative to its
     /// thread pointer.
-    pub tls_g: i64,
+    pub tls_g: ThreadLocal,
     pub g_m: u64,
     /// The bounds of a g's stack, `[lo, hi)`.
     pub g_stack_lo: u64,
@@ -158,18 +158,20 @@ impl Threads {
     fn bind(image: &dyn RuntimeImage) -> Result<Self, Missing> {
         // An executable linked by Go's own linker keeps g in the last word
         // of its thread-local block, just below the thread pointer.
-        // External linking places it at `runtime.tlsg` within the block
-        // instead, which needs the module's TLS layout.
-        if image.symbol("runtime.tlsg").is_some() {
-            return Err(
-                "reading g through runtime.tlsg, as an externally linked program \
-                        keeps it, is not supported yet"
-                    .into(),
-            );
-        }
+        // External linking places it at `runtime.tlsg` within the block,
+        // among the C's thread-locals, or a library's loader decides.
+        let tls_g = match image.thread_local("runtime.tlsg") {
+            None => ThreadLocal::Offset(-8),
+            Some(Ok(place)) => place,
+            Some(Err(reason)) => {
+                return Err(
+                    format!("the goroutine's place, runtime.tlsg, is unknown: {reason}").into(),
+                );
+            }
+        };
         let m = |path: &[&str]| offset(image, "runtime.m", path, 8);
         Ok(Self {
-            tls_g: -8,
+            tls_g,
             g_m: offset(image, "runtime.g", &["m"], 8)?,
             g_stack_lo: offset(image, "runtime.g", &["stack", "lo"], 8)?,
             g_stack_hi: offset(image, "runtime.g", &["stack", "hi"], 8)?,

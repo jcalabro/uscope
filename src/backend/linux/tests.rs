@@ -636,6 +636,7 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
             constants: std::collections::BTreeMap::new(),
             producers: Vec::new(),
             packages: Vec::new(),
+            thread_locals: std::collections::BTreeMap::new(),
         },
     ))
 }

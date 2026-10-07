@@ -18,7 +18,7 @@ const CALLBACK: &str = "tests/fixtures/go/cgo/callback.go";
 
 /// The selected thread's backtrace, as runs of function names by stack.
 /// cgo names its code with a hash, here `#`.
-async fn segments(scenario: &Scenario) -> Vec<(StackSegment, Vec<String>)> {
+pub async fn segments(scenario: &Scenario) -> Vec<(StackSegment, Vec<String>)> {
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
         .await;
@@ -48,7 +48,7 @@ fn unhashed(name: &str) -> String {
     name.to_owned()
 }
 
-fn names(names: &[&str]) -> Vec<String> {
+pub fn names(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
 

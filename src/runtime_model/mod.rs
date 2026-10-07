@@ -17,8 +17,8 @@ use std::sync::Arc;
 use crate::unwind::RegisterFile;
 use crate::{
     EntryProvenance, ImageAddress, IntegerValue, LanguageExceptionKind, ModuleImage,
-    RecordMemberLayout, StackSegment, TaskState, ThreadId, TypeInfo, TypeKind, TypeNode,
-    VirtualAddress,
+    RecordMemberLayout, StackSegment, TaskState, ThreadId, ThreadLocal, TypeInfo, TypeKind,
+    TypeNode, VirtualAddress,
 };
 
 /// A result with the reasons it may be incomplete, such as a task whose
@@ -60,6 +60,9 @@ pub trait RuntimeImage: std::fmt::Debug {
     fn member(&self, type_name: &str, path: &[&str]) -> Option<Member>;
     /// The name of the function whose code holds an image address.
     fn function_name(&self, address: ImageAddress) -> Option<Arc<str>>;
+    /// Where each thread's copy of the named thread-local variable is, or
+    /// why that is unknown; `None` when the image defines none by the name.
+    fn thread_local(&self, name: &str) -> Option<Result<ThreadLocal, Arc<str>>>;
 }
 
 /// One validated stop of the process a runtime runs in.
@@ -392,6 +395,10 @@ impl RuntimeImage for ModuleImage {
             offset,
             size: representation(self, ty)?.byte_size?,
         })
+    }
+
+    fn thread_local(&self, name: &str) -> Option<Result<ThreadLocal, Arc<str>>> {
+        Self::thread_local(self, name)
     }
 
     fn function_name(&self, address: ImageAddress) -> Option<Arc<str>> {
