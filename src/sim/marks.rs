@@ -134,6 +134,8 @@ marks! {
     AdvanceReturned,
     /// The stepping oracle judged where an advance ended.
     AdvanceJudged,
+    /// A thread moved to where it stood, which published its stop again.
+    JumpedInPlace,
     /// The debugger armed a watchpoint.
     WatchAdded,
     /// The debug registers refused a watchpoint, discarding writes or with

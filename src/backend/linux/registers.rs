@@ -135,6 +135,33 @@ pub(super) fn x86_64_caller_variable_register(
     Err(VariableUnavailableReason::Unsupported(UnsupportedVariableFeature::RegisterClass).into())
 }
 
+/// The id of the program counter's descriptor.
+pub(super) const PROGRAM_COUNTER: u32 = 16;
+
+pub(super) const fn is_program_counter(register: RegisterId) -> bool {
+    register.get() == PROGRAM_COUNTER
+}
+
+/// The field of any register a snapshot presents, by its descriptor's id:
+/// a general register, or one of [`SPECIAL_REGISTERS`] after them.
+pub(super) const fn x86_64_register_slot(
+    registers: &mut libc::user_regs_struct,
+    register: RegisterId,
+) -> Option<&mut u64> {
+    Some(match register.get() {
+        18 => &mut registers.cs,
+        19 => &mut registers.ss,
+        20 => &mut registers.ds,
+        21 => &mut registers.es,
+        22 => &mut registers.fs,
+        23 => &mut registers.gs,
+        24 => &mut registers.fs_base,
+        25 => &mut registers.gs_base,
+        26 => &mut registers.orig_rax,
+        _ => return x86_64_general_register_slot(registers, register),
+    })
+}
+
 /// The field of a general register, by its descriptor's id.
 pub(super) const fn x86_64_general_register_slot(
     registers: &mut libc::user_regs_struct,

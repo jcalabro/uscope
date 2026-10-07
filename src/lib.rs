@@ -1060,6 +1060,42 @@ impl DebuggerHandle {
         self.wait_for_execution(&mut events, execution).await
     }
 
+    /// Moves one stopped thread, without running it, to resume at the one
+    /// location `spec` resolves to in the function it is stopped in, and
+    /// publishes the stop again there with [`StopReason::Jump`] under a new
+    /// stop. A breakpoint at the new location stops the thread as it
+    /// resumes, before it runs anything. A location with no code in the function, or with code in
+    /// several places of it, is refused; to move a thread anywhere, assign
+    /// `$pc`.
+    pub async fn start_jump(
+        &self,
+        stop_id: StopId,
+        context: impl Into<ExecutionContext>,
+        spec: BreakpointSpec,
+    ) -> Result<ExecutionId> {
+        let process_id = self.stopped_selection().await?.process;
+        let context = context.into();
+        self.request(|reply| Request::Jump {
+            process_id,
+            stop_id,
+            context,
+            spec,
+            reply,
+        })
+        .await
+    }
+
+    /// Moves the selected thread to resume at `spec`, as
+    /// [`Self::start_jump`] does, and waits for the stop it publishes.
+    pub async fn jump(&self, spec: BreakpointSpec) -> Result<StopReason> {
+        let selection = self.stopped_selection().await?;
+        let mut events = self.subscribe();
+        let execution = self
+            .start_jump(selection.stop, selection.execution, spec)
+            .await?;
+        self.wait_for_execution(&mut events, execution).await
+    }
+
     /// Pauses a running process and waits for a coherent all-stop snapshot.
     ///
     /// A process that is still launching stops at its initial exec stop

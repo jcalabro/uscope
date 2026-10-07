@@ -1347,6 +1347,8 @@ build_fixture gcc "$c_fixtures_dir/thread-stress.c" "$output_dir/thread-stress" 
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/step.c" "$output_dir/step" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/jump.c" "$output_dir/jump" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/stepping-boundaries.c" "$output_dir/stepping-boundaries-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/stepping-boundaries.c" "$output_dir/stepping-boundaries-clang-o0" \

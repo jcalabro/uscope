@@ -68,6 +68,7 @@ pub enum Command {
     Next,
     Finish,
     Advance,
+    Jump,
     Examine,
     Disassemble,
     Address,
@@ -402,6 +403,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Run until the selected thread reaches a location, or the selected frame returns first"
     ),
     command!(
+        Jump,
+        "jump",
+        ["j"],
+        "jump <line|+offset|-offset|0xaddress|file:line>",
+        "Move the selected thread, without running it, to resume at a location in its function"
+    ),
+    command!(
         Examine,
         "x",
         [],
@@ -683,6 +691,7 @@ impl Cli {
             Command::Next => self.step(StepKind::OverSource).await?,
             Command::Finish => self.step(StepKind::Out).await?,
             Command::Advance => self.advance(arguments[0], spec).await?,
+            Command::Jump => self.jump(arguments[0], spec).await?,
             Command::Examine => {
                 let address = parse_address(arguments[0])?;
                 let byte_count = parse_memory_byte_count(arguments.get(1).copied(), spec)?;
@@ -725,6 +734,16 @@ impl Cli {
         let location = parse_breakpoint_location(location)?.ok_or_else(|| spec.usage_error())?;
         self.execute_until_stop(self.debugger.advance(location))
             .await
+    }
+
+    /// Moves the selected thread to resume at a line of the selected
+    /// frame's file, or at another location in its function.
+    async fn jump(&self, written: &str, spec: &CommandSpec) -> Result<String> {
+        let location = match frame_line(written)? {
+            Some(line) => self.frame_source(line).await?,
+            None => parse_breakpoint_location(written)?.ok_or_else(|| spec.usage_error())?,
+        };
+        self.execute_until_stop(self.debugger.jump(location)).await
     }
 
     /// Runs `info` with its `arguments`, `rest` being them as written.

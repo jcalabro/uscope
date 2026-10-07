@@ -864,11 +864,16 @@ impl Dap {
             }
             Some("stopped") => {
                 if !checks.relaxed {
-                    if checks.stopped {
+                    // A thread moved without running stops again, after the
+                    // response to the request that moved it.
+                    if checks.stopped && body["reason"] != "goto" {
                         return Err("a second stopped event without a resume between".to_owned());
                     }
                     if let Some(command) = self.outstanding.values().find(|command| {
-                        matches!(command.as_str(), "continue" | "next" | "stepIn" | "stepOut")
+                        matches!(
+                            command.as_str(),
+                            "continue" | "next" | "stepIn" | "stepOut" | "goto"
+                        )
                     }) {
                         return Err(format!("a stop preceded the response to {command}"));
                     }

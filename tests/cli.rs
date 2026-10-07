@@ -4108,3 +4108,42 @@ fn info_modules_names_separate_debug_files_and_why_one_is_unusable() {
         ],
     );
 }
+
+/// `jump` moves the stopped thread to a line of its function without
+/// running it, by number, by offset, or as `file:line`, and refuses a
+/// location outside the function; `set var` assigns registers.
+#[test]
+fn jump_moves_the_thread_to_resume_elsewhere_in_its_function() {
+    let line = |marker: &str| support::source_line("tests/fixtures/c/jump.c", marker);
+    let (output, errors) = piped(
+        &["build/test-programs/jump"],
+        &[
+            &format!("break jump.c:{}", line("jump: start")),
+            "run",
+            &format!("jump {}", line("jump: target")),
+            "print status",
+            "jump elsewhere",
+            "set var $rax = 5",
+            "print $rax",
+            "jump +1",
+            "continue",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "stopped at breakpoint 1 (hit 1) in checked",
+            "stopped where the thread was moved to resume in checked at tests/fixtures/c/jump.c:17",
+            " => 17 |     status += 100; // jump: target",
+            "(volatile int) status = 0",
+            "(u64) $rax = 5",
+            "stopped where the thread was moved to resume in checked at tests/fixtures/c/jump.c:18",
+            // Neither `status = value` nor `status += 100` ran.
+            "inferior exited with status 0",
+        ],
+    );
+    assert_in_order(
+        &errors,
+        &["error: stdin:5: elsewhere has no code in the function the thread is stopped in"],
+    );
+}

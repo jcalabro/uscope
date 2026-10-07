@@ -530,6 +530,18 @@ impl World {
         self.registers.insert(name, Some(value));
     }
 
+    /// Stores an assignment's bytes in the register a scope named.
+    pub fn write_register(&mut self, register: &Register, bytes: &[u8]) {
+        let value = self
+            .registers
+            .values_mut()
+            .nth(usize::from(register.number))
+            .expect("a register the scope named");
+        let mut wide = [0_u8; 16];
+        wide[..bytes.len()].copy_from_slice(bytes);
+        *value = Some(u128::from_le_bytes(wide));
+    }
+
     /// A register unwinding could not recover.
     pub fn lost_register(&mut self, name: &'static str) {
         self.registers.insert(name, None);

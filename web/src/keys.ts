@@ -8,6 +8,7 @@ export type Command =
   | ActionName
   | "toggleBreakpoint"
   | "editBreakpoint"
+  | "jumpToCursor"
   | "frameUp"
   | "frameDown"
   | "copyLink"
@@ -36,6 +37,7 @@ export const LABELS: Record<Command, string> = {
   overInstruction: "Step over one instruction",
   toggleBreakpoint: "Toggle breakpoint",
   editBreakpoint: "Edit breakpoint condition",
+  jumpToCursor: "Jump to cursor",
   frameUp: "Frame up",
   frameDown: "Frame down",
   copyLink: "Copy link",
@@ -92,6 +94,7 @@ export const BINDINGS: readonly Binding[] = [
     ["N", "overInstruction", true],
     ["S", "instruction", true],
     ["b", "toggleBreakpoint"],
+    ["J", "jumpToCursor", true],
     ["u", "frameUp"],
     ["d", "frameDown"],
     ["w", "watchSelection"],

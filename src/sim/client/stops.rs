@@ -16,6 +16,34 @@ use crate::{
     VariableState, VariableValue, VariableValueSource, VirtualAddress,
 };
 
+/// Assigns `$pc` in a frame, and checks it reads back as assigned.
+async fn assign_pc(view: &crate::StopView<'_>, pc: u64) -> Result<(), Failure> {
+    let assignment = Expression::parse(&format!("$pc = {pc:#x}")).expect("an assignment");
+    let assigned = view
+        .evaluate_with(
+            &assignment,
+            crate::EvaluationMode::Assign,
+            crate::InspectionLimits::default(),
+        )
+        .await
+        .map_err(|error| protocol(format!("assigning $pc failed: {error}")))?;
+    let crate::eval::Evaluation::Value { value, .. } = assigned else {
+        return Err(protocol(format!("assigning $pc gave {assigned:?}")));
+    };
+    if !matches!(
+        value.state,
+        VariableState::Available {
+            value: VariableValue::Scalar(ScalarValue::Unsigned(read)),
+            ..
+        } if read == u128::from(pc)
+    ) {
+        return Err(protocol(format!(
+            "$pc read {value:?} once assigned {pc:#x}"
+        )));
+    }
+    Ok(())
+}
+
 impl Client {
     /// Takes a backtrace, which a stop whose inline frame is ambiguous
     /// cannot present.
@@ -206,6 +234,97 @@ impl Client {
                 return Err(protocol(format!("advance to {spec} failed: {error}")));
             }
         }
+        Ok(())
+    }
+
+    /// Moves the selected thread to where it stands, by a jump to its own
+    /// address or by assigning `$pc` its own value, which publishes the
+    /// stop again and changes nothing the program computes. A thread in a
+    /// system call stays, since moving it ends the kernel's restart of the
+    /// call.
+    pub(super) async fn jump_in_place(&self) -> Result<(), Failure> {
+        let before = self.snapshot().await?;
+        let (Some(stop), Some(ExecutionContext::Thread(thread))) =
+            (before.stop_id, before.selected)
+        else {
+            return Ok(());
+        };
+        if presented_ambiguously(&before) {
+            return Ok(());
+        }
+        let view = self.handle.at(StopContext {
+            stop,
+            execution: thread.into(),
+            frame: StackFrameId::INNERMOST,
+        });
+        let registers = view
+            .registers()
+            .await
+            .map_err(|error| protocol(format!("registers failed: {error}")))?;
+        let value = |name: &str| {
+            let value = registers
+                .registers
+                .iter()
+                .find(|value| &*value.register.name == name)?;
+            Some(u64::from_le_bytes(value.bytes.as_deref()?.try_into().ok()?))
+        };
+        let (Some(pc), Some(call)) = (value("rip"), value("orig_rax")) else {
+            return Err(protocol(format!(
+                "the innermost frame lacks rip or orig_rax: {registers:?}"
+            )));
+        };
+        if call != u64::MAX {
+            self.note(format!(
+                "thread {thread} is in system call {call}; not moved"
+            ));
+            return Ok(());
+        }
+        let by_jump = self.control(2) == 0;
+        if by_jump {
+            match self
+                .handle
+                .start_jump(
+                    stop,
+                    thread,
+                    BreakpointSpec::Address(VirtualAddress::new(pc)),
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(Error::JumpWithoutFunction) => {
+                    self.note(format!(
+                        "a jump at {pc:#x}, in no described function, refused"
+                    ));
+                    return self.unchanged_by_refusal(&before, "jump").await;
+                }
+                Err(error) => return Err(protocol(format!("a jump in place failed: {error}"))),
+            }
+        } else {
+            assign_pc(&view, pc).await?;
+        }
+        let after = self.snapshot().await?;
+        if after.stop_id == Some(stop)
+            || !matches!(
+                after.inferior,
+                crate::InferiorState::Stopped {
+                    reason: StopReason::Jump,
+                    ..
+                }
+            )
+        {
+            return Err(protocol(format!(
+                "a move in place did not publish the stop again: {after:?}"
+            )));
+        }
+        self.note(format!(
+            "moved thread {thread} in place at {pc:#x}, {}",
+            if by_jump {
+                "by a jump"
+            } else {
+                "by assigning $pc"
+            }
+        ));
+        self.mark(Mark::JumpedInPlace);
         Ok(())
     }
 

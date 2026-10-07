@@ -657,6 +657,26 @@ assign: s = s          => error type at `s`
 assign: r = 3          => 3 : int
 ```
 
+A register is assigned the same way. It holds an unsigned number of its own
+width, which the value must fit, or a pointer. Only the innermost frame's
+registers belong to the thread; a caller's are what unwinding recovered, and
+are refused. Assigning `$pc` moves where the thread resumes: the stop is
+published again at its new place, under a new stop.
+
+```uscope-example
+world: memory
+assign: $rsp = 0x7ffe0010    => 2147352592 : u64
+assign: $sp -= 16            => 2147352560 : u64
+assign: $pc = 0x401010       => 4198416 : u64
+assign: $rsp = (u64)-1       => 18446744073709551615 : u64
+assign: $rsp = -1            => error assignment at `-1`
+assign: $rsp = 1.5           => error assignment at `1.5`
+assign: $rsp = s             => error type at `s`
+assign: $rsp + 1 = 2         => error not-an-lvalue at `$rsp + 1`
+assign: $rbp += 1            => unavailable at `$rbp`
+$rsp = 1                     => error mode at `$rsp = 1`
+```
+
 ## Limits
 
 An expression may be at most 4096 bytes long, nest at most 64 deep, and have

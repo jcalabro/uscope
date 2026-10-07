@@ -188,7 +188,10 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// The addresses an advance's location resolves to.
-    fn advance_targets(&self, spec: crate::BreakpointSpec) -> Result<BTreeSet<VirtualAddress>> {
+    pub(super) fn advance_targets(
+        &self,
+        spec: crate::BreakpointSpec,
+    ) -> Result<BTreeSet<VirtualAddress>> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         self.resolve_breakpoint(crate::BreakpointId::new(0), spec, false)?
             .locations

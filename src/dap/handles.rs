@@ -95,6 +95,8 @@ pub struct References {
     paths: HashMap<(i64, String), (StopContext, uscope::Expression)>,
     /// What each location reference names.
     locations: HashMap<i64, Location>,
+    /// The source line each goto target names.
+    targets: HashMap<i64, uscope::BreakpointSpec>,
 }
 
 /// A place in the program's source a location reference names.
@@ -129,6 +131,7 @@ impl Default for References {
             variables: HashMap::new(),
             paths: HashMap::new(),
             locations: HashMap::new(),
+            targets: HashMap::new(),
         }
     }
 }
@@ -179,6 +182,18 @@ impl References {
     /// The place a location reference names.
     pub fn location_of(&self, id: i64) -> Option<&Location> {
         self.locations.get(&id)
+    }
+
+    /// Returns a new reference to a location a thread may be moved to.
+    pub fn goto_target(&mut self, location: uscope::BreakpointSpec) -> Result<i64, Exhausted> {
+        let id = self.allocate()?;
+        self.targets.insert(id, location);
+        Ok(id)
+    }
+
+    /// The location a goto target names.
+    pub fn target_of(&self, id: i64) -> Option<&uscope::BreakpointSpec> {
+        self.targets.get(&id)
     }
 
     pub fn frame_context(&self, id: i64) -> Option<StopContext> {
@@ -244,6 +259,10 @@ impl References {
                 context,
                 expression,
             } => Some((*context, row(&expression.range_base()?, name)?)),
+            Variables::Registers { context } => Some((
+                *context,
+                uscope::Expression::parse(&format!("${name}")).ok()?,
+            )),
             _ => None,
         }
     }
@@ -255,6 +274,7 @@ impl References {
         self.variables.clear();
         self.paths.clear();
         self.locations.clear();
+        self.targets.clear();
     }
 }
 

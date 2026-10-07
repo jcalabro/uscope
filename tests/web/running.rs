@@ -346,3 +346,90 @@ async fn breakpoints_without_debug_information_show_the_symbols_they_stop_in() {
         .unwrap_or_default();
     assert!(function.starts_with("__strlen_"), "{stopped}");
 }
+
+/// A tab moves a thread, without running it, to a line of its function, and
+/// every tab follows it to a new stop there; the innermost frame's
+/// registers change through their rows.
+#[tokio::test]
+async fn a_thread_jumps_to_a_line_and_registers_change_through_their_rows() {
+    let web = Web::start("jump", &[&fixture("jump")]);
+    let mut tab = web.control("tab").await;
+    tab.state("the program loaded", |state| state["session"].is_string())
+        .await;
+    let files = tab.ok("sources", json!(null)).await;
+    let path = source_named(&files, "jump.c");
+    let line = |marker: &str| {
+        crate::support::source_line("tests/fixtures/c/jump.c", &format!("jump: {marker}"))
+    };
+    tab.ok(
+        "addBreakpoint",
+        json!({"location": format!("{path}:{}", line("start"))}),
+    )
+    .await;
+    tab.ok("continue", json!({})).await;
+    let stopped = tab.inferior("stopped").await;
+    let (stop, thread) = (
+        stopped["inferior"]["stop"].clone(),
+        stopped["inferior"]["thread"].clone(),
+    );
+
+    let (kind, message) = tab
+        .request(
+            "jump",
+            json!({"stop": stop, "thread": thread, "location": "elsewhere"}),
+        )
+        .await
+        .expect_err("a jump out of the function");
+    assert!(
+        message.contains("has no code in the function"),
+        "{kind}: {message}"
+    );
+    tab.ok(
+        "jump",
+        json!({"stop": stop, "thread": thread, "location": format!("{path}:{}", line("target"))}),
+    )
+    .await;
+    let moved = tab
+        .state("the jump", |state| {
+            state["inferior"]["state"] == "stopped" && state["inferior"]["stop"] != stop
+        })
+        .await;
+    assert_eq!(moved["inferior"]["reason"]["kind"], "jump", "{moved}");
+    assert_eq!(
+        moved["inferior"]["place"]["line"],
+        line("target"),
+        "{moved}"
+    );
+    let (kind, _) = tab
+        .request(
+            "jump",
+            json!({"stop": stop, "thread": thread, "location": format!("{path}:{}", line("start"))}),
+        )
+        .await
+        .expect_err("a jump from an earlier stop");
+    assert_eq!(kind, "staleStop");
+
+    let at = json!({"stop": moved["inferior"]["stop"], "thread": thread, "frame": 0});
+    let mut set = at.clone();
+    set["path"] = "$rbx".into();
+    set["value"] = "0x2a".into();
+    tab.ok("setValue", set).await;
+    let registers = tab.ok("registers", at).await;
+    let rbx = registers["registers"]
+        .as_array()
+        .expect("registers")
+        .iter()
+        .find(|register| register["name"] == "rbx")
+        .expect("rbx")
+        .clone();
+    assert_eq!(rbx["value"], "0x000000000000002a", "{rbx}");
+
+    // Only `status += 100` ran.
+    tab.ok("continue", json!({"stop": moved["inferior"]["stop"]}))
+        .await;
+    let exited = tab.inferior("exited").await;
+    assert!(
+        exited["inferior"].to_string().contains("with status 100"),
+        "{exited}"
+    );
+}

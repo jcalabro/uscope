@@ -1527,6 +1527,18 @@ impl<P: LinuxTraceOps> Controller<P> {
                     let _ = reply.send(Err(error));
                 }
             },
+            Request::Jump {
+                process_id,
+                stop_id,
+                context,
+                spec,
+                reply,
+            } => match self.context_thread(stop_id, context) {
+                Ok(pid) => self.jump(process_id, stop_id, pid, spec, reply),
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            },
             Request::Pause { process_id, reply } => {
                 let _ = reply.send(self.begin_pause(process_id));
             }
@@ -1551,7 +1563,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let result = self.stack_root(stop_id, context).and_then(|root| {
                     self.evaluate_assigning(stop_id, &root, frame, &expression, limits)
                 });
-                let _ = reply.send(result);
+                match result {
+                    Ok((evaluation, moved)) => {
+                        let _ = reply.send(Ok(evaluation));
+                        if let Some(moved) = moved {
+                            let _ = self.events.send(moved);
+                        }
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
             }
             Request::Shutdown { reply } => {
                 self.begin_shutdown(Some(reply));
@@ -1893,6 +1915,7 @@ impl<P: InspectionOps> Controller<P> {
             | Request::Continue { .. }
             | Request::Step { .. }
             | Request::Advance { .. }
+            | Request::Jump { .. }
             | Request::Pause { .. }
             | Request::WriteMemory { .. }
             | Request::Kill { .. }

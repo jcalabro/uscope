@@ -25,8 +25,8 @@ use super::config::{self, Configuration, Start};
 use super::handles::References;
 use super::output;
 use super::protocol::{
-    self, ErrorBody, Outgoing, SetBreakpointsArguments, SetExceptionBreakpointsArguments,
-    SetFunctionBreakpointsArguments, ThreadArguments,
+    self, ErrorBody, GotoArguments, Outgoing, SetBreakpointsArguments,
+    SetExceptionBreakpointsArguments, SetFunctionBreakpointsArguments, ThreadArguments,
 };
 use super::signals::Selection;
 use super::sources::source_json;
@@ -501,6 +501,8 @@ impl Session {
             "modules" => self.modules(arguments).await?,
             "loadedSources" => self.loaded_sources().await?,
             "breakpointLocations" => self.breakpoint_locations(arguments)?,
+            "gotoTargets" => self.goto_targets(arguments)?,
+            "goto" => self.goto(arguments).await?,
             "completions" => self.completions(arguments).await?,
             "setDataBreakpoints" => self.set_data_breakpoints(arguments).await?,
             "disassemble" => self.disassemble(arguments).await?,
@@ -1278,6 +1280,25 @@ impl Session {
                 json!({"threadId": arguments.thread_id, "allThreadsContinued": !single}),
             )
             .await?;
+        Ok(json!({}))
+    }
+
+    /// Moves a thread to a target `gotoTargets` named, without running it;
+    /// the stop it publishes again follows as a `goto` stop.
+    async fn goto(&self, arguments: Value) -> Result<Value, ErrorBody> {
+        let arguments = parse::<GotoArguments>(arguments, "goto arguments")?;
+        let stop = self.current_stop()?;
+        let context = self.thread_ids.context(arguments.thread_id)?;
+        let target = self
+            .references
+            .target_of(arguments.target_id)
+            .cloned()
+            .ok_or_else(|| ErrorBody::new("the goto target belongs to an earlier stop"))?;
+        let handle = self.target_handle()?;
+        handle
+            .start_jump(stop.id, context, target)
+            .await
+            .map_err(error)?;
         Ok(json!({}))
     }
 
@@ -2391,6 +2412,7 @@ fn capabilities() -> Value {
         "supportsModulesRequest": true,
         "supportsLoadedSourcesRequest": true,
         "supportsBreakpointLocationsRequest": true,
+        "supportsGotoTargetsRequest": true,
         "supportsValueFormattingOptions": true,
         "supportsCompletionsRequest": true,
         "completionTriggerCharacters": [" ", ".", ">", "$"],
@@ -2485,6 +2507,7 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
             Some("step incomplete".to_owned()),
         ),
         StopReason::Pause => ("pause", None, None),
+        StopReason::Jump => ("goto", None, None),
         StopReason::Entry | StopReason::Attach => ("entry", None, None),
         StopReason::LanguageException(exception) => (
             "exception",

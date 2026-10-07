@@ -11,7 +11,7 @@ use super::ir::{Capacity, Comparison, Constant, Conversion, Length, Node, Op, Pr
 use super::number::{Bits, Exact, Float, FloatFormat, IntType, Integer, NumberError};
 use super::syntax::Span;
 use super::syntax::ast::BinaryOp;
-use super::target::{Key, Machine, Refusal, Stop};
+use super::target::{Key, Machine, Refusal, Register, Stop};
 use super::types::{Category, Ty, category, size_of, type_info};
 use crate::{
     ByteOrder, DereferenceState, InspectedValue, ScalarValue, TextCompletion,
@@ -35,6 +35,12 @@ pub enum Outcome<P> {
         target: P,
         bytes: Vec<u8>,
         whole: bool,
+        span: Span,
+    },
+    /// A value to store in a register: its bytes, as wide as the register.
+    AssignRegister {
+        register: Register,
+        bytes: Vec<u8>,
         span: Span,
     },
     /// `base[start..end]`: the array or slice, and the range to page through.
@@ -797,6 +803,13 @@ impl<M: Machine> Interpreter<'_, M> {
         span: Span,
     ) -> Result<Outcome<M::Place>, Halt> {
         let fitted = self.eval(value)?;
+        if let Op::Register(register) = &target.op {
+            return Ok(Outcome::AssignRegister {
+                register: register.clone(),
+                bytes: self.encode(&fitted, usize::from(register.width / 8)),
+                span,
+            });
+        }
         let place = self.place(target)?;
         let size = size_of(self.machine, &target.ty)
             .and_then(|size| usize::try_from(size).ok())

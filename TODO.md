@@ -2,7 +2,6 @@
 
 ## Debugger
 
-- Write registers, for assigning `$rax` and DAP's `goto` (VS Code's Jump to Cursor).
 - Step into a chosen call on a line (DAP `stepInTargets`), and show a C, C++, Rust, or Zig function's return value after `finish`, as Go's is.
 - Show the frames of tail calls in backtraces, as the chains entry values follow find them.
 

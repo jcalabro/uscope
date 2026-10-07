@@ -265,10 +265,11 @@ fn caller_frames_registers_and_hexadecimal_values() {
         .to_owned();
     let number = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("hex");
     assert_eq!(number(&rip), number(&pointer));
-    // A register's row names it as an expression, and cannot be changed.
+    // A register's row names it as an expression; the innermost frame's
+    // can be changed, as the thread's own.
     let row = named(&registers, "rip");
     assert_eq!(row["evaluateName"], "$rip");
-    assert_eq!(row["presentationHint"]["attributes"], json!(["readOnly"]));
+    assert_eq!(row["presentationHint"]["attributes"], json!([]));
     let watched = dap.request(
         "evaluate",
         json!({"expression": "$rip", "frameId": frames[0]["id"], "context": "watch", "format": {"hex": true}}),

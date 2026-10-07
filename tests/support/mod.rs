@@ -415,6 +415,15 @@ impl Scenario {
         self.wait_for_request(task, "advance").await
     }
 
+    /// Moves the selected thread, without running it, to resume at a
+    /// location, and waits for the stop that publishes.
+    pub async fn jump_to_stop(&mut self, spec: BreakpointSpec) -> StopReason {
+        let task = self.spawn_request(&format!("jump {spec:?}"), move |handle| async move {
+            handle.jump(spec).await
+        });
+        self.wait_for_request(task, "jump").await
+    }
+
     /// Steps the selected thread while every other thread stays stopped.
     pub async fn step_alone_to_stop(&mut self, kind: StepKind) -> StopReason {
         let task = self.spawn_request(&format!("step {kind:?} alone"), move |handle| async move {

@@ -107,6 +107,24 @@ test("a breakpoint stops the program where the page shows, and steps replace the
   await expect(page.locator(".cm-pc-line")).toContainText("handle_request(&server, &req)");
 });
 
+test("Shift+J moves the thread to the cursor's line without running it", async ({
+  page,
+  uscope,
+}) => {
+  await join(page, uscope.link);
+  await breakInHandleRequest(page);
+  await stepOver(page);
+  await stepOver(page);
+  await expect(page.locator(".cm-pc-line")).toContainText("int status = 0;");
+  // Back to the lookup, to run it again.
+  const before = page.url();
+  await line(page, "table_find(&s->table, req->key)").click();
+  await page.keyboard.press("Shift+J");
+  await expect(page).not.toHaveURL(before);
+  await expect(page.locator(".cm-pc-line")).toContainText("table_find(&s->table, req->key)");
+  await expect(page.getByTestId("stops")).toContainText("jump · kvstore.c:91");
+});
+
 test("the gutter sets and clears breakpoints, and conditions narrow them", async ({
   page,
   uscope,

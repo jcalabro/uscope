@@ -774,6 +774,10 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             step_name(*kind)
         ),
         StopReason::Pause => format!("inferior {}", renderer.paint(Role::Current, "paused")),
+        StopReason::Jump => format!(
+            "{} where the thread was moved to resume",
+            stopped(Role::Current)
+        ),
         StopReason::Exception(info) => format!(
             "{} by {}",
             stopped(Role::Error),

@@ -599,11 +599,12 @@ impl Client {
         };
         let scope = ResumeScope::Process(process_id);
         if self.control(6) == 0 {
-            match self.control(if self.script.watching { 3 } else { 2 }) {
+            match self.control(if self.script.watching { 4 } else { 3 }) {
                 0 => {
                     self.toggle_breakpoint(breakpoints).await?;
                 }
                 1 => self.advance(breakpoints).await?,
+                2 => self.jump_in_place().await?,
                 _ => self.toggle_watch(false).await?,
             }
             return Ok(());
