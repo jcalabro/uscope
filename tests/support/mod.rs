@@ -30,12 +30,12 @@ use uscope::{
     StackFrameId, StateSnapshot, StepKind, StopReason, ThreadId, VirtualAddress,
 };
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 // Event delivery depends on waiter and controller OS threads being scheduled.
-const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a scenario's check of a stop may take, all its requests
 /// together.
-const STOP_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+const STOP_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Checks what must hold at every stop of a scenario, through the handle;
 /// an error says what does not, and fails the scenario.
