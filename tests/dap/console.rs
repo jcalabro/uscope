@@ -211,8 +211,15 @@ fn console_commands_print_what_the_cli_prints_at_the_same_stop() {
     dap.finish();
 
     for (command, console) in commands.iter().zip(console) {
+        // The console may always show Unicode, so the CLI is told to.
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_uscope"))
-            .env("USCOPE_CONFIG", "")
+            .env(
+                "USCOPE_CONFIG",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/support/settings/unicode.toml"
+                ),
+            )
             .arg(fixture("variables-gcc-o0"))
             .args([
                 "--batch",

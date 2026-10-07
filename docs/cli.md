@@ -230,6 +230,21 @@ location, as in `break counted ==3`, is the same as `hits ==3`. Lists of
 ids, as `delete 1 3-5 w2`, name only breakpoints and watchpoints that
 exist, or the command changes nothing.
 
+`breakpoints` lists them in a table: whether each is on (`●`, or `+`
+without Unicode) or off (`○`, `-`), its hits, where it is, and its
+options as `break` takes them. A breakpoint with several locations lists
+them beneath it, each with its address; once the program runs, those are
+its runtime addresses. `watchpoints` lists watchpoints the same way.
+
+```text
+Id  On  Hits  Where                                 Options
+1   ●      3  main at src/basic.c:10                if x > 3
+2   ○      0  parse_header, 2 locations             hits >=2  log "len={len}"
+              ├ 0x401136  parse_header at src/parse.c:41
+              └ 0x7ffff7fb9136  parse_header at src/parse.c:41 in libparse.so
+3   ●      0  render at src/view.c:88               temporary
+```
+
 Addresses are always `0x`-prefixed, so `break add` names a function. Functions
 without debug information, such as libc's, break at their symbol, and
 breakpoints in a shared library wait until it loads.
