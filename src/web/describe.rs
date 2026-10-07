@@ -1,0 +1,423 @@
+//! The debugger's state as the page receives it: where the program stopped,
+//! its breakpoints and where they landed, and the stops so far.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use uscope::{
+    BreakpointLocation, BreakpointSpec, DebuggerHandle, ImageAddress, InferiorState, ModuleId,
+    ModuleImage, StackFrame, StackFrameId, StateSnapshot, StopContext, StopReason, VirtualAddress,
+};
+
+use super::protocol::{self, Inferior, Place, State, StopEntry, Thread};
+use crate::cli::format;
+use crate::cli::terminal::Renderer;
+
+/// The most stops a state lists.
+const STOP_HISTORY: usize = 100;
+
+/// The module images a debugger has loaded, kept once fetched.
+pub struct Images {
+    handle: DebuggerHandle,
+    cache: Mutex<HashMap<ModuleId, Arc<ModuleImage>>>,
+}
+
+impl Images {
+    pub fn new(handle: DebuggerHandle) -> Self {
+        Self {
+            handle,
+            cache: Mutex::default(),
+        }
+    }
+
+    /// Forgets every image: a new process numbers its modules again.
+    pub fn clear(&self) {
+        self.cache.lock().expect("images lock").clear();
+    }
+
+    pub async fn get(&self, module: ModuleId) -> Option<Arc<ModuleImage>> {
+        if let Some(image) = self.cache.lock().expect("images lock").get(&module) {
+            return Some(Arc::clone(image));
+        }
+        let image = self.handle.loaded_module_image(module).await.ok()?;
+        self.cache
+            .lock()
+            .expect("images lock")
+            .insert(module, Arc::clone(&image));
+        Some(image)
+    }
+
+    /// Each loaded module's load bias and image; before the program runs,
+    /// only the executable, at no bias.
+    pub async fn loaded(&self) -> Vec<(u64, Arc<ModuleImage>)> {
+        let records = self
+            .handle
+            .loaded_modules()
+            .await
+            .map(|snapshot| snapshot.modules)
+            .unwrap_or_default();
+        let mut loaded = Vec::new();
+        for record in records.iter() {
+            if let Some(image) = self.get(record.module.id).await {
+                loaded.push((record.module.load_bias, image));
+            }
+        }
+        if loaded.is_empty() {
+            loaded.push((0, Arc::clone(self.handle.module_image())));
+        }
+        loaded
+    }
+
+    /// The images that have source files: the executable's and each loaded
+    /// module's, once each.
+    pub async fn with_sources(&self) -> Vec<Arc<ModuleImage>> {
+        let mut images = vec![Arc::clone(self.handle.module_image())];
+        for (_, image) in self.loaded().await {
+            if !images.iter().any(|known| known.path() == image.path()) {
+                images.push(image);
+            }
+        }
+        images
+    }
+
+    /// Where a frame's code is.
+    pub async fn place_of_frame(&self, frame: &StackFrame) -> Place {
+        let image = match frame.module {
+            Some(module) => self.get(module).await,
+            None => None,
+        };
+        let path = frame.source.as_ref().and_then(|location| {
+            let file = image.as_ref()?.source_file(location.file)?;
+            Some(file.path.display().to_string())
+        });
+        Place {
+            address: hex(frame.instruction.get()),
+            function: Some(frame_name(frame, image.as_deref())),
+            line: path
+                .as_ref()
+                .and(frame.source.as_ref())
+                .map(|location| location.line.get()),
+            path,
+        }
+    }
+}
+
+/// A frame's name: its function or symbol, or else its address and module.
+pub fn frame_name(frame: &StackFrame, image: Option<&ModuleImage>) -> String {
+    if frame.function.is_some() || frame.symbol.is_some() {
+        return format::code_name(frame.function.as_ref(), frame.symbol.as_ref());
+    }
+    let module = image
+        .and_then(|image| image.path().file_name())
+        .map(|name| format!(" in {}", name.to_string_lossy()))
+        .unwrap_or_default();
+    format!("{:#x}{module}", frame.instruction.get())
+}
+
+pub fn hex(address: u64) -> String {
+    format!("{address:#x}")
+}
+
+/// Who last ran the program, and how, for the stop that run ends at.
+#[derive(Debug, Clone)]
+pub struct Cause {
+    pub name: String,
+    pub action: String,
+}
+
+/// Builds each [`State`] for one debugger, remembering its stops.
+pub struct Describer {
+    pub id: String,
+    pub target: protocol::Target,
+    pub images: Arc<Images>,
+    pub handle: DebuggerHandle,
+    /// Set as a tab runs the program; taken by the stop that ends the run.
+    pub cause: Arc<Mutex<Option<Cause>>>,
+    stops: Vec<StopEntry>,
+    pub ended: Ended,
+}
+
+impl Describer {
+    pub fn new(
+        id: String,
+        target: protocol::Target,
+        handle: DebuggerHandle,
+        cause: Arc<Mutex<Option<Cause>>>,
+    ) -> Self {
+        Self {
+            id,
+            target,
+            images: Arc::new(Images::new(handle.clone())),
+            handle,
+            cause,
+            stops: Vec::new(),
+            ended: Ended::default(),
+        }
+    }
+
+    pub async fn describe(&mut self, snapshot: &StateSnapshot) -> State {
+        let inferior = match &snapshot.inferior {
+            InferiorState::NotRunning => match (self.ended.detached, &self.ended.exited) {
+                (Some(pid), _) => Inferior::Detached { pid },
+                (None, Some(description)) => Inferior::Exited {
+                    description: description.clone(),
+                },
+                (None, None) => Inferior::NotStarted,
+            },
+            InferiorState::Running { process_id, .. } => Inferior::Running {
+                pid: process_id.get(),
+            },
+            InferiorState::Stopped {
+                process_id,
+                stop_id,
+                thread_id,
+                reason,
+            } => {
+                let entry = self
+                    .stop_entry(stop_id.get(), thread_id.get(), reason)
+                    .await;
+                Inferior::Stopped {
+                    pid: process_id.get(),
+                    stop: stop_id.get(),
+                    thread: thread_id.get(),
+                    reason: entry.reason,
+                    place: entry.place,
+                }
+            }
+        };
+        let mut breakpoints = Vec::with_capacity(snapshot.breakpoints.len());
+        for breakpoint in snapshot.breakpoints.iter() {
+            breakpoints.push(self.breakpoint(breakpoint).await);
+        }
+        State {
+            session: Some(self.id.clone()),
+            target: Some(self.target.clone()),
+            busy: None,
+            revision: snapshot.revision,
+            inferior,
+            threads: snapshot
+                .threads
+                .iter()
+                .map(|thread| Thread {
+                    id: thread.id.get(),
+                    name: thread.name.as_deref().map(str::to_owned),
+                    stopped: matches!(thread.state, uscope::ThreadState::Stopped { .. }),
+                })
+                .collect(),
+            breakpoints,
+            stops: self.stops.clone(),
+        }
+    }
+
+    /// The history's entry for a stop, made when the stop is first seen.
+    async fn stop_entry(&mut self, stop: u64, thread: u64, reason: &StopReason) -> StopEntry {
+        if let Some(entry) = self.stops.iter().rev().find(|entry| entry.stop == stop) {
+            return entry.clone();
+        }
+        let context = StopContext {
+            stop: uscope::StopId::new(stop),
+            thread: uscope::ThreadId::new(thread),
+            frame: StackFrameId::INNERMOST,
+        };
+        let place = match self.handle.at(context).backtrace().await {
+            Ok(trace) => match trace.frames.first() {
+                Some(frame) => Some(self.images.place_of_frame(frame).await),
+                None => None,
+            },
+            Err(_) => None,
+        };
+        let cause = self.cause.lock().expect("cause lock").take();
+        let entry = StopEntry {
+            stop,
+            thread,
+            reason: protocol::StopReason {
+                kind: reason_kind(reason).to_owned(),
+                description: plain(reason),
+            },
+            place,
+            by: cause.as_ref().map(|cause| cause.name.clone()),
+            action: cause.map(|cause| cause.action),
+        };
+        self.stops.push(entry.clone());
+        if self.stops.len() > STOP_HISTORY {
+            self.stops.remove(0);
+        }
+        entry
+    }
+
+    async fn breakpoint(&self, breakpoint: &uscope::Breakpoint) -> protocol::Breakpoint {
+        let mut places = Vec::with_capacity(breakpoint.locations.len());
+        for location in breakpoint.locations.iter() {
+            places.push(self.breakpoint_place(breakpoint, location).await);
+        }
+        protocol::Breakpoint {
+            id: breakpoint.id.get(),
+            location: breakpoint.spec.to_string(),
+            condition: breakpoint.condition.as_ref().map(ToString::to_string),
+            hit_condition: breakpoint
+                .hit_condition
+                .map(|condition| condition.to_string()),
+            log_message: breakpoint.log_message.as_ref().map(ToString::to_string),
+            hits: breakpoint.hit_count,
+            places,
+        }
+    }
+
+    /// Where one of a breakpoint's locations is: its address and source
+    /// line, with a line breakpoint keeping the file it names.
+    async fn breakpoint_place(
+        &self,
+        breakpoint: &uscope::Breakpoint,
+        resolved: &uscope::ResolvedBreakpointLocation,
+    ) -> Place {
+        let (image, address, shown) = match (resolved.location, resolved.library) {
+            (BreakpointLocation::Image(address), _) => (
+                Some(Arc::clone(self.handle.module_image())),
+                address,
+                // Before the program runs, there is no virtual address yet.
+                self.main_bias()
+                    .await
+                    .map_or_else(|| address.get(), |bias| address.get().wrapping_add(bias)),
+            ),
+            (BreakpointLocation::Virtual(address), Some(library)) => {
+                let bias = self.bias_of(library).await;
+                match (self.images.get(library).await, bias) {
+                    (Some(image), Some(bias)) => (
+                        Some(image),
+                        ImageAddress::new(address.get().wrapping_sub(bias)),
+                        address.get(),
+                    ),
+                    _ => (None, ImageAddress::new(0), address.get()),
+                }
+            }
+            (BreakpointLocation::Virtual(address), None) => {
+                return self.place_of_address(address).await;
+            }
+        };
+        let mut place = Place {
+            address: hex(shown),
+            function: None,
+            path: None,
+            line: None,
+        };
+        let Some(image) = image else {
+            return place;
+        };
+        let located = image.locate(address);
+        place.function = located.function.map(|function| function.name.to_string());
+        if let Some(location) = image.source_location(address)
+            && let Some(file) = image.source_file(location.file)
+        {
+            let (path, line) = match &breakpoint.spec {
+                BreakpointSpec::Source { path, line } => image
+                    .source_file_matching(path)
+                    .ok()
+                    .and_then(|named| Some((named, image.breakpoint_line(named.id, *line)?)))
+                    .map_or((file, location.line), |(named, line)| (named, line)),
+                _ => (file, location.line),
+            };
+            place.path = Some(path.path.display().to_string());
+            place.line = Some(line.get());
+        }
+        place
+    }
+
+    async fn place_of_address(&self, address: VirtualAddress) -> Place {
+        let mut place = Place {
+            address: hex(address.get()),
+            function: None,
+            path: None,
+            line: None,
+        };
+        for (bias, image) in self.images.loaded().await {
+            let Some(image_address) = address.get().checked_sub(bias).map(ImageAddress::new) else {
+                continue;
+            };
+            if !image.contains_address(image_address) {
+                continue;
+            }
+            let located = image.locate(image_address);
+            place.function = located.function.map(|function| function.name.to_string());
+            if let Some(location) = located.source
+                && let Some(file) = image.source_file(location.file)
+            {
+                place.path = Some(file.path.display().to_string());
+                place.line = Some(location.line.get());
+            }
+            break;
+        }
+        place
+    }
+
+    /// The executable's load bias, once it is loaded: modules are listed
+    /// by identifier, and the executable's comes first.
+    async fn main_bias(&self) -> Option<u64> {
+        let snapshot = self.handle.loaded_modules().await.ok()?;
+        snapshot
+            .modules
+            .first()
+            .map(|record| record.module.load_bias)
+    }
+
+    async fn bias_of(&self, module: ModuleId) -> Option<u64> {
+        let snapshot = self.handle.loaded_modules().await.ok()?;
+        snapshot
+            .modules
+            .iter()
+            .find(|record| record.module.id == module)
+            .map(|record| record.module.load_bias)
+    }
+}
+
+/// How the program last ended, which snapshots no longer say.
+#[derive(Default)]
+pub struct Ended {
+    exited: Option<String>,
+    detached: Option<u64>,
+}
+
+impl Ended {
+    pub fn observe(&mut self, event: &uscope::DebuggerEvent) {
+        use uscope::DebuggerEvent;
+        match event {
+            DebuggerEvent::InferiorExited { status, .. } => {
+                self.exited = Some(plain(&StopReason::Exited(status.clone())));
+            }
+            DebuggerEvent::InferiorDetached { process_id, .. } => {
+                self.detached = Some(process_id.get());
+            }
+            DebuggerEvent::InferiorLaunched { .. } | DebuggerEvent::InferiorAttached { .. } => {
+                *self = Self::default();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Why the program stopped, as the CLI says it but without "inferior":
+/// the page names the program.
+pub fn plain(reason: &StopReason) -> String {
+    let text = format::stop(reason, Renderer::new(false));
+    text.strip_prefix("inferior ")
+        .map_or_else(|| text.clone(), str::to_owned)
+}
+
+const fn reason_kind(reason: &StopReason) -> &'static str {
+    match reason {
+        StopReason::Attach => "attach",
+        StopReason::Entry => "entry",
+        StopReason::Breakpoint { .. } => "breakpoint",
+        StopReason::Watchpoint { .. } => "watchpoint",
+        StopReason::WatchpointInvalidated { .. } => "watchpointInvalidated",
+        StopReason::WatchpointArmFailed { .. } => "watchpointArmFailed",
+        StopReason::Step { .. } => "step",
+        StopReason::StepIncomplete { .. } => "stepIncomplete",
+        StopReason::Pause => "pause",
+        StopReason::Exception(_) => "exception",
+        StopReason::Exec { .. } => "exec",
+        StopReason::ThreadExited { .. } => "threadExited",
+        StopReason::Unclassifiable { .. } => "unclassifiable",
+        StopReason::Exited(_) => "exited",
+        StopReason::CoreDump { .. } => "coreDump",
+    }
+}

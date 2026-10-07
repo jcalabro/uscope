@@ -18,22 +18,26 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::unix::pipe;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use uscope::{
-    CoreDumpOptions, Debugger, DebuggerEvent, DebuggerHandle, ExceptionDisposition, InferiorState,
-    LaunchOptions, ProcessId, ResumeScope, StopId, StopReason,
+    BreakpointOptions, CoreDumpOptions, Debugger, DebuggerEvent, DebuggerHandle,
+    ExceptionDisposition, InferiorState, LaunchOptions, ProcessId, ResumeScope, StopId,
 };
 
 use super::auth::{Tokens, random_hex};
-use super::picker;
+use super::describe::{Cause, Describer, Images};
 use super::protocol::{
-    self, ErrorBody, ErrorKind, Inferior, Output, PathCompletions, Person, Presence, Processes,
-    Request, Role, ServerMessage, ShareLink, State, Stream, TargetKind, Thread,
+    self, BreakpointAdded, ErrorBody, ErrorKind, Inferior, Output, PathCompletions, Person,
+    Presence, Processes, Request, Role, ServerMessage, ShareLink, State, StepKind, Stream,
+    TargetKind,
 };
+use super::{inspect, picker};
 use crate::cli::format;
 use crate::cli::terminal::Renderer;
 use crate::dap::output;
@@ -43,6 +47,9 @@ const OUTPUT_HISTORY: usize = 256 * 1024;
 
 /// The most bytes one `output` message carries.
 const OUTPUT_CHUNK: usize = 32 * 1024;
+
+/// How long writing the program's input may wait for it to read.
+const INPUT_WAIT: Duration = Duration::from_secs(5);
 
 /// How a launched program starts.
 #[derive(Debug, Clone, Default)]
@@ -88,6 +95,7 @@ impl From<uscope::Error> for Failure {
             | Error::AlreadyRunning
             | Error::AlreadyStopped => ErrorKind::NotStopped,
             Error::PostMortemTarget => ErrorKind::Unsupported,
+            Error::InvalidHitCondition(_) | Error::Expression(_) => ErrorKind::Invalid,
             _ => ErrorKind::Failed,
         };
         Self::new(kind, error.to_string())
@@ -95,6 +103,12 @@ impl From<uscope::Error> for Failure {
 }
 
 type Answer = Result<Value, Failure>;
+
+/// What a picker request produced: an answer, or a change to announce.
+enum Chosen {
+    Answer(Value),
+    Notice(String),
+}
 
 /// The session every connection shares.
 pub struct Session {
@@ -115,12 +129,17 @@ pub struct Session {
     history: Arc<Mutex<History>>,
     people: Mutex<BTreeMap<u32, Person>>,
     next_connection: AtomicU32,
+    /// Who last ran the program, for the stop the run ends at.
+    cause: Arc<Mutex<Option<Cause>>>,
 }
 
 struct Target {
     debugger: Option<Debugger>,
     handle: DebuggerHandle,
+    images: Arc<Images>,
     launch: Option<LaunchSpec>,
+    /// The launched program's standard input, until closed.
+    input: Arc<tokio::sync::Mutex<Option<pipe::Sender>>>,
     pump: JoinHandle<()>,
     readers: Vec<JoinHandle<()>>,
     name: String,
@@ -161,6 +180,7 @@ impl Session {
             history: Arc::default(),
             people: Mutex::default(),
             next_connection: AtomicU32::new(1),
+            cause: Arc::default(),
         })
     }
 
@@ -207,6 +227,7 @@ impl Session {
                 connection,
                 name: name.clone(),
                 role,
+                focus: None,
             },
         );
         self.announce_presence();
@@ -259,42 +280,99 @@ impl Session {
 
     /// Serves one request from `connection`.
     pub async fn handle(&self, connection: u32, role: Role, request: Request) -> Answer {
-        let controls = !matches!(request, Request::SetName(_) | Request::Share(_));
-        if controls && role != Role::Control {
+        let reads = matches!(
+            request,
+            Request::SetName(_)
+                | Request::Share(_)
+                | Request::SetFocus(_)
+                | Request::Backtrace(_)
+                | Request::Sources
+                | Request::Source(_)
+        );
+        if !reads && role != Role::Control {
             return Err(Failure::new(
                 ErrorKind::Forbidden,
                 "this link can only view the session; ask for a control link",
             ));
         }
+        if reads {
+            return self.read(connection, role, request).await;
+        }
         let notice = match request {
+            Request::CompletePath(_)
+            | Request::Processes
+            | Request::Launch(_)
+            | Request::Attach(_)
+            | Request::OpenCore(_)
+            | Request::End => match self.choose(request).await? {
+                Chosen::Answer(answer) => return Ok(answer),
+                Chosen::Notice(text) => Some(text),
+            },
+            Request::AddBreakpoint(_)
+            | Request::EditBreakpoint(_)
+            | Request::RemoveBreakpoint(_) => {
+                return self.breakpoints(connection, request).await;
+            }
+            request => self.control(connection, request).await?,
+        };
+        if let Some(text) = notice {
+            self.notice(connection, text);
+        }
+        Ok(Value::Null)
+    }
+
+    /// Answers a request that changes nothing in the program.
+    async fn read(&self, connection: u32, role: Role, request: Request) -> Answer {
+        match request {
             Request::SetName(protocol::SetName { name }) => {
                 self.rename(connection, &name)?;
-                None
+                Ok(Value::Null)
             }
-            Request::Share(protocol::Share { role: wanted, to }) => {
-                return self.share(role, wanted, &to);
+            Request::SetFocus(protocol::SetFocus { focus }) => {
+                self.refocus(connection, focus)?;
+                Ok(Value::Null)
             }
+            Request::Share(protocol::Share { role: wanted, to }) => self.share(role, wanted, &to),
+            Request::Backtrace(at) => {
+                let (handle, images) = self.current_images().await?;
+                Ok(to_value(&inspect::backtrace(&handle, &images, at).await?))
+            }
+            Request::Sources => {
+                let (_, images) = self.current_images().await?;
+                Ok(to_value(&inspect::sources(&images).await))
+            }
+            Request::Source(protocol::SourcePath { path }) => {
+                let (handle, images) = self.current_images().await?;
+                Ok(to_value(&inspect::source(&handle, &images, &path).await?))
+            }
+            _ => unreachable!("only reads are read"),
+        }
+    }
+
+    /// Serves the picker: what there is to debug, and choosing it.
+    async fn choose(&self, request: Request) -> Result<Chosen, Failure> {
+        Ok(Chosen::Notice(match request {
             Request::CompletePath(protocol::CompletePath { text }) => {
                 let entries = picker::complete(&text, &self.cwd, self.home.as_deref());
-                return Ok(to_value(&PathCompletions { entries }));
+                return Ok(Chosen::Answer(to_value(&PathCompletions { entries })));
             }
             Request::Processes => {
-                return Ok(to_value(&Processes {
+                return Ok(Chosen::Answer(to_value(&Processes {
                     processes: picker::processes(Path::new("/proc")),
                     ptrace_scope: picker::ptrace_scope(),
-                }));
+                })));
             }
             Request::Launch(launch) => {
                 let (replace, run) = (launch.replace, launch.run);
                 let spec = self.launch_spec(launch);
                 let name = spec.program.display().to_string();
                 self.start(Start::Launch { spec, run }, replace).await?;
-                Some(format!("launched {name}"))
+                format!("launched {name}")
             }
             Request::Attach(protocol::Attach { pid, replace }) => {
                 self.start(Start::Attach(ProcessId::new(pid)), replace)
                     .await?;
-                Some(format!("attached to process {pid}"))
+                format!("attached to process {pid}")
             }
             Request::OpenCore(protocol::OpenCore {
                 core,
@@ -307,27 +385,147 @@ impl Session {
                     .filter(|path| !path.is_empty())
                     .map(|path| resolve(&path));
                 self.start(Start::Core(options), replace).await?;
-                Some(format!("opened {core}"))
+                format!("opened {core}")
             }
-            Request::End => Some(self.end_current().await?),
-            Request::Continue(protocol::Continue { stop }) => Some(self.resume(stop).await?),
+            Request::End => self.end_current().await?,
+            _ => unreachable!("only the picker's requests choose"),
+        }))
+    }
+
+    /// Runs, stops, or feeds the program, returning what to tell others.
+    async fn control(&self, connection: u32, request: Request) -> Result<Option<String>, Failure> {
+        Ok(Some(match request {
+            Request::Continue(protocol::Continue { stop }) => self.resume(connection, stop).await?,
+            Request::Step(step) => self.step(connection, step).await?,
             Request::Pause => {
-                self.current_handle().await?.pause().await?;
-                Some("paused".to_owned())
+                let handle = self.current_handle().await?;
+                self.caused(connection, "paused");
+                handle.pause().await?;
+                "paused".to_owned()
             }
             Request::Kill => {
                 self.current_handle().await?.kill().await?;
-                Some("killed the program".to_owned())
+                "killed the program".to_owned()
             }
             Request::Restart => {
-                self.restart().await?;
-                Some("restarted the program".to_owned())
+                self.restart(connection).await?;
+                "restarted the program".to_owned()
             }
-        };
-        if let Some(text) = notice {
-            self.notice(connection, text);
+            Request::Input(input) => {
+                self.input(input).await?;
+                return Ok(None);
+            }
+            _ => unreachable!("only run control controls"),
+        }))
+    }
+
+    async fn breakpoints(&self, connection: u32, request: Request) -> Answer {
+        let handle = self.current_handle().await?;
+        match request {
+            Request::AddBreakpoint(add) => {
+                let spec = crate::cli::commands::parse_breakpoint_location(add.location.trim())
+                    .map_err(|error| Failure::new(ErrorKind::Invalid, format!("{error:#}")))?
+                    .ok_or_else(|| {
+                        Failure::new(
+                            ErrorKind::Invalid,
+                            "a breakpoint goes at a function, FILE:LINE, FILE:FUNCTION, or 0xADDRESS",
+                        )
+                    })?;
+                let options = options(add.condition, add.hit_condition, add.log_message)?;
+                let breakpoint = handle.add_breakpoint_with(spec, options).await?;
+                self.notice(connection, format!("set breakpoint {}", breakpoint.id));
+                return Ok(to_value(&BreakpointAdded {
+                    id: breakpoint.id.get(),
+                }));
+            }
+            Request::EditBreakpoint(edit) => edit_breakpoint(&handle, edit).await?,
+            Request::RemoveBreakpoint(protocol::BreakpointRef { id }) => {
+                handle
+                    .remove_breakpoint(uscope::BreakpointId::new(id))
+                    .await?;
+                self.notice(connection, format!("removed breakpoint {id}"));
+            }
+            _ => unreachable!("only breakpoint requests change breakpoints"),
         }
         Ok(Value::Null)
+    }
+
+    /// Records who runs the program next, and how.
+    fn caused(&self, connection: u32, action: &str) {
+        *self.cause.lock().expect("cause lock") = Some(Cause {
+            name: self.name_of(connection),
+            action: action.to_owned(),
+        });
+    }
+
+    async fn step(&self, connection: u32, step: protocol::Step) -> Result<String, Failure> {
+        let handle = self.current_handle().await?;
+        let InferiorState::Stopped { process_id, .. } = handle.snapshot().await?.inferior else {
+            return Err(Failure::new(
+                ErrorKind::NotStopped,
+                "the program is not stopped",
+            ));
+        };
+        let (kind, action) = match step.kind {
+            StepKind::Over => (uscope::StepKind::OverSource, "stepped over"),
+            StepKind::Into => (uscope::StepKind::IntoSource, "stepped into"),
+            StepKind::Out => (uscope::StepKind::Out, "stepped out"),
+            StepKind::Instruction => (uscope::StepKind::Instruction, "stepped an instruction"),
+            StepKind::OverInstruction => (
+                uscope::StepKind::OverInstruction,
+                "stepped over an instruction",
+            ),
+        };
+        let frame = if step.kind == StepKind::Out {
+            step.frame
+        } else {
+            0
+        };
+        let context = inspect::context(&handle, step.stop, step.thread, frame).await?;
+        self.caused(connection, action);
+        handle
+            .start_step(
+                context.stop,
+                context.thread,
+                context.frame,
+                kind,
+                ResumeScope::Process(process_id),
+                ExceptionDisposition::Pass,
+            )
+            .await?;
+        Ok(action.to_owned())
+    }
+
+    async fn input(&self, input: protocol::Input) -> Result<(), Failure> {
+        let writer = self
+            .target
+            .lock()
+            .await
+            .as_ref()
+            .map(|target| Arc::clone(&target.input))
+            .ok_or_else(|| Failure::new(ErrorKind::Invalid, "nothing is being debugged"))?;
+        let mut open = writer.lock().await;
+        let Some(pipe) = open.as_mut() else {
+            return Err(Failure::new(
+                ErrorKind::Invalid,
+                "the program's input is closed; it reads input only while it runs",
+            ));
+        };
+        let written = tokio::time::timeout(INPUT_WAIT, pipe.write_all(input.text.as_bytes()))
+            .await
+            .map_err(|_| Failure::new(ErrorKind::Failed, "the program is not reading its input"))?;
+        if let Err(error) = written {
+            *open = None;
+            return Err(Failure::new(
+                ErrorKind::Failed,
+                format!("the program's input closed: {error}"),
+            ));
+        }
+        if input.eof {
+            *open = None;
+        }
+        drop(open);
+        Ok(())
     }
 
     fn rename(&self, connection: u32, name: &str) -> Result<(), Failure> {
@@ -347,6 +545,31 @@ impl Session {
             name.clone_into(&mut person.name);
         }
         self.announce_presence();
+        Ok(())
+    }
+
+    fn refocus(&self, connection: u32, focus: Option<protocol::Focus>) -> Result<(), Failure> {
+        if focus.as_ref().is_some_and(|focus| {
+            !focus.url.starts_with('/') || focus.url.len() > 4096 || focus.label.len() > 200
+        }) {
+            return Err(Failure::new(
+                ErrorKind::Invalid,
+                "a focus is a page path and a short label",
+            ));
+        }
+        let changed = self
+            .people
+            .lock()
+            .expect("people lock")
+            .get_mut(&connection)
+            .is_some_and(|person| {
+                let changed = person.focus != focus;
+                person.focus = focus;
+                changed
+            });
+        if changed {
+            self.announce_presence();
+        }
         Ok(())
     }
 
@@ -400,7 +623,7 @@ impl Session {
 
     /// Continues the stop named, or starts a launched program that is not
     /// running.
-    async fn resume(&self, stop: Option<u64>) -> Result<String, Failure> {
+    async fn resume(&self, connection: u32, stop: Option<u64>) -> Result<String, Failure> {
         let (handle, launch, started) = self.current_launch().await?;
         if let Some(stop) = stop {
             let InferiorState::Stopped { process_id, .. } = handle.snapshot().await?.inferior
@@ -410,6 +633,7 @@ impl Session {
                     "the program is not stopped",
                 ));
             };
+            self.caused(connection, "continued");
             handle
                 .continue_execution(
                     StopId::new(stop),
@@ -431,11 +655,12 @@ impl Session {
                 "the program has already started; name the stop to continue",
             ));
         }
+        self.caused(connection, "started the program");
         self.run(&handle, &spec).await?;
         Ok("started the program".to_owned())
     }
 
-    async fn restart(&self) -> Result<(), Failure> {
+    async fn restart(&self, connection: u32) -> Result<(), Failure> {
         let (handle, launch, _) = self.current_launch().await?;
         let Some(spec) = launch else {
             return Err(Failure::new(
@@ -447,7 +672,17 @@ impl Session {
             Ok(()) | Err(uscope::Error::NotRunning) => {}
             Err(error) => return Err(error.into()),
         }
+        self.caused(connection, "restarted the program");
         self.run(&handle, &spec).await
+    }
+
+    async fn current_images(&self) -> Result<(DebuggerHandle, Arc<Images>), Failure> {
+        self.target
+            .lock()
+            .await
+            .as_ref()
+            .map(|target| (target.handle.clone(), Arc::clone(&target.images)))
+            .ok_or_else(|| Failure::new(ErrorKind::Invalid, "nothing is being debugged"))
     }
 
     async fn current_handle(&self) -> Result<DebuggerHandle, Failure> {
@@ -508,42 +743,7 @@ impl Session {
             }
         };
         let handle = debugger.handle();
-        let (info, launch, run) = match start {
-            Start::Launch { spec, run } => (
-                protocol::Target {
-                    kind: TargetKind::Launch,
-                    program: handle.executable().display().to_string(),
-                    arguments: spec
-                        .arguments
-                        .iter()
-                        .map(|argument| argument.to_string_lossy().into_owned())
-                        .collect(),
-                    pid: None,
-                },
-                Some(spec),
-                run,
-            ),
-            Start::Attach(process) => (
-                protocol::Target {
-                    kind: TargetKind::Attach,
-                    program: handle.executable().display().to_string(),
-                    arguments: Vec::new(),
-                    pid: Some(process.get()),
-                },
-                None,
-                false,
-            ),
-            Start::Core(_) => (
-                protocol::Target {
-                    kind: TargetKind::Core,
-                    program: handle.executable().display().to_string(),
-                    arguments: Vec::new(),
-                    pid: handle.core_dump().map(|core| core.process_id.get()),
-                },
-                None,
-                false,
-            ),
-        };
+        let (info, launch, run) = describe_target(start, &handle);
         let id =
             random_hex(4).map_err(|error| Failure::new(ErrorKind::Failed, error.to_string()))?;
         let name = Path::new(&info.program).file_name().map_or_else(
@@ -554,37 +754,42 @@ impl Session {
         // so a page can open it; the pump takes every later change.
         let events = handle.subscribe();
         let snapshot = handle.snapshot().await?;
+        self.cause.lock().expect("cause lock").take();
+        let mut describer = Describer::new(id, info, handle.clone(), Arc::clone(&self.cause));
         self.state
-            .send_replace(Arc::new(describe(&id, &info, &snapshot, &Ended::default())));
-        let pump = tokio::spawn(pump(
-            Arc::clone(&self.state),
-            id,
-            info,
-            handle.clone(),
-            events,
-        ));
+            .send_replace(Arc::new(describer.describe(&snapshot).await));
+        let images = Arc::clone(&describer.images);
+        let outlet = Outlet {
+            history: Arc::clone(&self.history),
+            messages: self.messages.clone(),
+        };
+        let pump = tokio::spawn(pump(Arc::clone(&self.state), describer, events, outlet));
         *target = Some(Target {
             debugger: Some(debugger),
             handle: handle.clone(),
+            images,
             launch: launch.clone(),
+            input: Arc::default(),
             pump,
             readers: Vec::new(),
             name,
         });
         if run && let Some(spec) = launch {
-            let readers = self.launch(&handle, &spec).await?;
+            let (readers, input) = self.launch(&handle, &spec).await?;
             if let Some(target) = target.as_mut() {
                 target.readers = readers;
+                *target.input.lock().await = Some(input);
             }
         }
         Ok(())
     }
 
-    /// Starts a launched program, recording its output readers.
+    /// Starts a launched program, recording its output readers and input.
     async fn run(&self, handle: &DebuggerHandle, spec: &LaunchSpec) -> Result<(), Failure> {
-        let readers = self.launch(handle, spec).await?;
+        let (readers, input) = self.launch(handle, spec).await?;
         if let Some(target) = self.target.lock().await.as_mut() {
             target.readers.extend(readers);
+            *target.input.lock().await = Some(input);
         }
         Ok(())
     }
@@ -593,10 +798,12 @@ impl Session {
         &self,
         handle: &DebuggerHandle,
         spec: &LaunchSpec,
-    ) -> Result<Vec<JoinHandle<()>>, Failure> {
+    ) -> Result<(Vec<JoinHandle<()>>, pipe::Sender), Failure> {
         let failed = |error: std::io::Error| Failure::new(ErrorKind::Failed, error.to_string());
+        let (stdin_read, stdin_write) = output::pipe().map_err(failed)?;
         let (stdout_read, stdout_write) = output::pipe().map_err(failed)?;
         let (stderr_read, stderr_write) = output::pipe().map_err(failed)?;
+        let input = pipe::Sender::from_owned_fd(stdin_write).map_err(failed)?;
         let options = LaunchOptions {
             arguments: spec.arguments.clone(),
             environment: spec
@@ -605,7 +812,7 @@ impl Session {
                 .map(|(name, value)| (name.clone(), Some(value.clone())))
                 .collect(),
             working_directory: spec.cwd.clone(),
-            stdin: Some(std::process::Stdio::null()),
+            stdin: Some(stdin_read.into()),
             stdout: Some(stdout_write.into()),
             stderr: Some(stderr_write.into()),
             stop_at_entry: spec.stop_at_entry,
@@ -616,41 +823,27 @@ impl Session {
                 format!("failed to launch {}: {error}", spec.program.display()),
             )
         })?;
-        Ok(
-            [(stdout_read, Stream::Stdout), (stderr_read, Stream::Stderr)]
-                .into_iter()
-                .filter_map(|(read, stream)| self.read_output(read, stream).ok())
-                .collect(),
-        )
+        let readers = [(stdout_read, Stream::Stdout), (stderr_read, Stream::Stderr)]
+            .into_iter()
+            .filter_map(|(read, stream)| self.read_output(read, stream).ok())
+            .collect();
+        Ok((readers, input))
     }
 
     /// Forwards a program stream to every tab until its writers close it.
     fn read_output(&self, read: OwnedFd, stream: Stream) -> std::io::Result<JoinHandle<()>> {
-        let mut receiver = tokio::net::unix::pipe::Receiver::from_owned_fd(read)?;
-        let history = Arc::clone(&self.history);
-        let messages = self.messages.clone();
+        let mut receiver = pipe::Receiver::from_owned_fd(read)?;
+        let outlet = Outlet {
+            history: Arc::clone(&self.history),
+            messages: self.messages.clone(),
+        };
         Ok(tokio::spawn(async move {
             let mut pending = Vec::with_capacity(OUTPUT_CHUNK);
             let mut buffer = vec![0; OUTPUT_CHUNK];
             loop {
                 let read = receiver.read(&mut buffer).await.unwrap_or(0);
                 pending.extend_from_slice(&buffer[..read]);
-                let text = output::decode(&mut pending, read == 0);
-                for piece in output::pieces(&text, OUTPUT_CHUNK) {
-                    let message = ServerMessage::Output(Output {
-                        stream,
-                        text: piece.to_owned(),
-                    });
-                    let text: Arc<str> = serde_json::to_string(&message)
-                        .expect("messages serialize")
-                        .into();
-                    // Publishing under the lock keeps joining tabs from
-                    // missing or repeating a piece.
-                    let mut history = history.lock().expect("history lock");
-                    history.push(Arc::clone(&text));
-                    let _ = messages.send(text);
-                    drop(history);
-                }
+                outlet.publish(stream, &output::decode(&mut pending, read == 0));
                 if read == 0 {
                     return;
                 }
@@ -701,6 +894,115 @@ impl History {
     }
 }
 
+async fn edit_breakpoint(
+    handle: &DebuggerHandle,
+    edit: protocol::EditBreakpoint,
+) -> Result<(), Failure> {
+    let id = uscope::BreakpointId::new(edit.id);
+    let wanted = options(edit.condition, edit.hit_condition, edit.log_message)?;
+    let current = handle
+        .snapshot()
+        .await?
+        .breakpoints
+        .iter()
+        .find(|breakpoint| breakpoint.id == id)
+        .cloned()
+        .ok_or_else(|| {
+            Failure::new(
+                ErrorKind::Invalid,
+                format!("there is no breakpoint {}", edit.id),
+            )
+        })?;
+    if current.log_message != wanted.log_message {
+        // A message is part of what a breakpoint is: the debugger keeps
+        // it from creation, so changing it makes the breakpoint again.
+        return Err(Failure::new(
+            ErrorKind::Unsupported,
+            "remove the breakpoint and add it again to change its message",
+        ));
+    }
+    if current.hit_condition != wanted.hit_condition {
+        handle
+            .set_breakpoint_hit_condition(id, wanted.hit_condition)
+            .await?;
+    }
+    if current.condition != wanted.condition {
+        handle
+            .set_breakpoint_condition(id, wanted.condition)
+            .await?;
+    }
+    Ok(())
+}
+
+/// What is being debugged, and how a launched program starts.
+fn describe_target(
+    start: Start,
+    handle: &DebuggerHandle,
+) -> (protocol::Target, Option<LaunchSpec>, bool) {
+    let program = handle.executable().display().to_string();
+    match start {
+        Start::Launch { spec, run } => (
+            protocol::Target {
+                kind: TargetKind::Launch,
+                program,
+                arguments: spec
+                    .arguments
+                    .iter()
+                    .map(|argument| argument.to_string_lossy().into_owned())
+                    .collect(),
+                pid: None,
+            },
+            Some(spec),
+            run,
+        ),
+        Start::Attach(process) => (
+            protocol::Target {
+                kind: TargetKind::Attach,
+                program,
+                arguments: Vec::new(),
+                pid: Some(process.get()),
+            },
+            None,
+            false,
+        ),
+        Start::Core(_) => (
+            protocol::Target {
+                kind: TargetKind::Core,
+                program,
+                arguments: Vec::new(),
+                pid: handle.core_dump().map(|core| core.process_id.get()),
+            },
+            None,
+            false,
+        ),
+    }
+}
+
+/// Breakpoint options from the page's text, where empty text means none.
+fn options(
+    condition: Option<String>,
+    hit_condition: Option<String>,
+    log_message: Option<String>,
+) -> Result<BreakpointOptions, Failure> {
+    let given = |text: Option<String>| text.filter(|text| !text.trim().is_empty());
+    let invalid = |error: uscope::Error| Failure::new(ErrorKind::Invalid, error.to_string());
+    Ok(BreakpointOptions {
+        condition: given(condition)
+            .map(|text| uscope::Condition::parse(&text))
+            .transpose()
+            .map_err(invalid)?,
+        hit_condition: given(hit_condition)
+            .map(|text| text.parse())
+            .transpose()
+            .map_err(invalid)?,
+        log_message: given(log_message)
+            .map(|text| uscope::LogMessage::parse(&text))
+            .transpose()
+            .map_err(invalid)?,
+        pending: false,
+    })
+}
+
 fn to_value<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).unwrap_or_else(|error| json!({ "error": error.to_string() }))
 }
@@ -730,36 +1032,63 @@ async fn open(start: &Start) -> Result<Debugger, String> {
     }
 }
 
-/// Publishes the debugger's state after every burst of its events.
+/// Where program output and logged messages go: every tab, and the history
+/// a tab that joins later receives.
+#[derive(Clone)]
+struct Outlet {
+    history: Arc<Mutex<History>>,
+    messages: broadcast::Sender<Arc<str>>,
+}
+
+impl Outlet {
+    fn publish(&self, stream: Stream, text: &str) {
+        for piece in output::pieces(text, OUTPUT_CHUNK) {
+            let message = ServerMessage::Output(Output {
+                stream,
+                text: piece.to_owned(),
+            });
+            let text: Arc<str> = serde_json::to_string(&message)
+                .expect("messages serialize")
+                .into();
+            // Publishing under the lock keeps joining tabs from missing or
+            // repeating a piece.
+            let mut history = self.history.lock().expect("history lock");
+            history.push(Arc::clone(&text));
+            let _ = self.messages.send(text);
+            drop(history);
+        }
+    }
+}
+
+/// Publishes the debugger's state after every burst of its events, and
+/// what its logpoints and conditions say.
 async fn pump(
     state: Arc<watch::Sender<Arc<State>>>,
-    id: String,
-    target: protocol::Target,
-    handle: DebuggerHandle,
+    mut describer: Describer,
     mut events: broadcast::Receiver<DebuggerEvent>,
+    outlet: Outlet,
 ) {
-    let mut ended = Ended::default();
     loop {
-        let Ok(snapshot) = handle.snapshot().await else {
+        let Ok(snapshot) = describer.handle.snapshot().await else {
             return;
         };
-        let described = describe(&id, &target, &snapshot, &ended);
+        let next = describer.describe(&snapshot).await;
         state.send_if_modified(|current| {
-            let changed = **current != described;
+            let changed = **current != next;
             if changed {
-                *current = Arc::new(described);
+                *current = Arc::new(next);
             }
             changed
         });
         match events.recv().await {
-            Ok(event) => ended.observe(&event),
+            Ok(event) => observe(&mut describer, &outlet, &event),
             Err(broadcast::error::RecvError::Lagged(_)) => {}
             Err(broadcast::error::RecvError::Closed) => return,
         }
         // Take every event already queued, so the burst publishes once.
         loop {
             match events.try_recv() {
-                Ok(event) => ended.observe(&event),
+                Ok(event) => observe(&mut describer, &outlet, &event),
                 Err(broadcast::error::TryRecvError::Lagged(_)) => {}
                 Err(_) => break,
             }
@@ -767,104 +1096,35 @@ async fn pump(
     }
 }
 
-/// How the program last ended, which snapshots no longer say.
-#[derive(Default)]
-struct Ended {
-    exited: Option<String>,
-    detached: Option<u64>,
-}
-
-impl Ended {
-    fn observe(&mut self, event: &DebuggerEvent) {
-        match event {
-            DebuggerEvent::InferiorExited { status, .. } => {
-                self.exited = Some(plain(&StopReason::Exited(status.clone())));
-            }
-            DebuggerEvent::InferiorDetached { process_id, .. } => {
-                self.detached = Some(process_id.get());
-            }
-            DebuggerEvent::InferiorLaunched { .. } | DebuggerEvent::InferiorAttached { .. } => {
-                *self = Self::default();
-            }
-            _ => {}
+fn observe(describer: &mut Describer, outlet: &Outlet, event: &DebuggerEvent) {
+    describer.ended.observe(event);
+    match event {
+        DebuggerEvent::InferiorLaunched { .. }
+        | DebuggerEvent::InferiorAttached { .. }
+        | DebuggerEvent::InferiorExited { .. } => describer.images.clear(),
+        DebuggerEvent::LogMessage { parts, .. } => {
+            outlet.publish(Stream::Log, &(format::log_message(parts) + "\n"));
         }
-    }
-}
-
-/// Why the program stopped, as the CLI says it but without "inferior":
-/// the page names the program.
-fn plain(reason: &StopReason) -> String {
-    let text = format::stop(reason, Renderer::new(false));
-    text.strip_prefix("inferior ")
-        .map_or_else(|| text.clone(), str::to_owned)
-}
-
-fn describe(
-    id: &str,
-    target: &protocol::Target,
-    snapshot: &uscope::StateSnapshot,
-    ended: &Ended,
-) -> State {
-    let inferior = match &snapshot.inferior {
-        InferiorState::NotRunning => match (ended.detached, &ended.exited) {
-            (Some(pid), _) => Inferior::Detached { pid },
-            (None, Some(description)) => Inferior::Exited {
-                description: description.clone(),
-            },
-            (None, None) => Inferior::NotStarted,
-        },
-        InferiorState::Running { process_id, .. } => Inferior::Running {
-            pid: process_id.get(),
-        },
-        InferiorState::Stopped {
-            process_id,
-            stop_id,
+        DebuggerEvent::ConditionFailed { owner, error, .. } => {
+            let owner = match owner {
+                uscope::ConditionOwner::Breakpoint(id) => format!("breakpoint {id}"),
+                uscope::ConditionOwner::Watchpoint(id) => format!("watchpoint {id}"),
+            };
+            outlet.publish(
+                Stream::Log,
+                &format!("the condition of {owner} failed, so it stopped: {error}\n"),
+            );
+        }
+        DebuggerEvent::SignalReceived {
             thread_id,
-            reason,
-        } => Inferior::Stopped {
-            pid: process_id.get(),
-            stop: stop_id.get(),
-            thread: thread_id.get(),
-            reason: protocol::StopReason {
-                kind: reason_kind(reason).to_owned(),
-                description: plain(reason),
-            },
-        },
-    };
-    State {
-        session: Some(id.to_owned()),
-        target: Some(target.clone()),
-        busy: None,
-        revision: snapshot.revision,
-        inferior,
-        threads: snapshot
-            .threads
-            .iter()
-            .map(|thread| Thread {
-                id: thread.id.get(),
-                name: thread.name.as_deref().map(str::to_owned),
-                stopped: matches!(thread.state, uscope::ThreadState::Stopped { .. }),
-            })
-            .collect(),
-    }
-}
-
-const fn reason_kind(reason: &StopReason) -> &'static str {
-    match reason {
-        StopReason::Attach => "attach",
-        StopReason::Entry => "entry",
-        StopReason::Breakpoint { .. } => "breakpoint",
-        StopReason::Watchpoint { .. } => "watchpoint",
-        StopReason::WatchpointInvalidated { .. } => "watchpointInvalidated",
-        StopReason::WatchpointArmFailed { .. } => "watchpointArmFailed",
-        StopReason::Step { .. } => "step",
-        StopReason::StepIncomplete { .. } => "stepIncomplete",
-        StopReason::Pause => "pause",
-        StopReason::Exception(_) => "exception",
-        StopReason::Exec { .. } => "exec",
-        StopReason::ThreadExited { .. } => "threadExited",
-        StopReason::Unclassifiable { .. } => "unclassifiable",
-        StopReason::Exited(_) => "exited",
-        StopReason::CoreDump { .. } => "coreDump",
+            exception,
+            ..
+        } => {
+            outlet.publish(
+                Stream::Log,
+                &(format::signal_received(*thread_id, exception, Renderer::new(false)) + "\n"),
+            );
+        }
+        _ => {}
     }
 }

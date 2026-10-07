@@ -6,6 +6,8 @@
 //! TypeScript side, `web/src/protocol.gen.ts`, is generated from these types
 //! by a test that fails when the checked-in file is stale.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -65,6 +67,23 @@ pub enum Request {
     Kill,
     /// Kills the program and starts it again.
     Restart,
+    /// Steps one thread of a stop.
+    Step(Step),
+    /// Says where this tab is looking, for everyone's presence list.
+    SetFocus(SetFocus),
+    /// A thread's stack at a stop.
+    Backtrace(ThreadAt),
+    /// Every source file the debug information names.
+    Sources,
+    /// One source file's text, and the lines a breakpoint can stop at.
+    Source(SourcePath),
+    /// Adds a breakpoint.
+    AddBreakpoint(AddBreakpoint),
+    /// Replaces a breakpoint's condition, hit condition, and log message.
+    EditBreakpoint(EditBreakpoint),
+    RemoveBreakpoint(BreakpointRef),
+    /// Writes to the program's standard input, or closes it.
+    Input(Input),
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +160,111 @@ pub struct Continue {
     pub stop: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Step {
+    /// The stop being stepped from, which must still be current.
+    pub stop: u64,
+    pub thread: u64,
+    /// The frame a step out leaves; every other step starts from the
+    /// innermost frame.
+    #[serde(default)]
+    pub frame: u32,
+    pub kind: StepKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum StepKind {
+    /// To the next source line, running calls through.
+    Over,
+    /// To the next source line, entering calls.
+    Into,
+    /// Until the frame returns.
+    Out,
+    /// One instruction, entering calls.
+    Instruction,
+    /// One instruction, running calls through.
+    OverInstruction,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SetFocus {
+    /// Absent when the tab looks at nothing in particular.
+    pub focus: Option<Focus>,
+}
+
+/// Where a person is looking: a page address and a few words for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Focus {
+    /// The page path and query, such as `/s/k7q2/stop/12/t/41872/f/1`.
+    pub url: String,
+    /// Such as `frame 1, serve_conn`.
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ThreadAt {
+    pub stop: u64,
+    pub thread: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SourcePath {
+    /// A path as the debug information records it.
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct AddBreakpoint {
+    /// A function, `FILE:LINE`, `FILE:FUNCTION`, or `0xADDRESS`.
+    pub location: String,
+    #[serde(default)]
+    pub condition: Option<String>,
+    /// Which hits stop, such as `>=5` or `%10`.
+    #[serde(default)]
+    pub hit_condition: Option<String>,
+    /// A message to log instead of stopping, with expressions in braces.
+    #[serde(default)]
+    pub log_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct EditBreakpoint {
+    pub id: u64,
+    /// Absent to remove.
+    #[serde(default)]
+    pub condition: Option<String>,
+    #[serde(default)]
+    pub hit_condition: Option<String>,
+    #[serde(default)]
+    pub log_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct BreakpointRef {
+    pub id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Input {
+    pub text: String,
+    /// Close the input after the text, so the program reads its end.
+    #[serde(default)]
+    pub eof: bool,
+}
+
 /// Everything the server sends.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -149,7 +273,7 @@ pub enum ServerMessage {
     /// The first message on every connection.
     Hello(Hello),
     /// The whole debugger state, sent on connecting and at every change.
-    State(State),
+    State(Arc<State>),
     /// A request succeeded.
     Result {
         id: u64,
@@ -194,6 +318,9 @@ pub struct State {
     pub revision: u64,
     pub inferior: Inferior,
     pub threads: Vec<Thread>,
+    pub breakpoints: Vec<Breakpoint>,
+    /// The latest stops of this session, oldest first.
+    pub stops: Vec<StopEntry>,
 }
 
 impl State {
@@ -206,6 +333,8 @@ impl State {
             revision: 0,
             inferior: Inferior::NotStarted,
             threads: Vec::new(),
+            breakpoints: Vec::new(),
+            stops: Vec::new(),
         }
     }
 }
@@ -248,6 +377,8 @@ pub enum Inferior {
         /// The thread whose event caused the stop.
         thread: u64,
         reason: StopReason,
+        /// Where that thread stopped.
+        place: Option<Place>,
     },
     /// The program ended; it can be started again.
     Exited {
@@ -266,6 +397,48 @@ pub struct StopReason {
     pub kind: String,
     /// The reason as the CLI says it.
     pub description: String,
+}
+
+/// A place in the program's code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Place {
+    /// The instruction's address, in hexadecimal.
+    pub address: String,
+    pub function: Option<String>,
+    /// The source file, as the debug information records it.
+    pub path: Option<String>,
+    pub line: Option<u64>,
+}
+
+/// One stop in the session's history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct StopEntry {
+    pub stop: u64,
+    pub thread: u64,
+    pub reason: StopReason,
+    pub place: Option<Place>,
+    /// Who ran the program to it, when someone did.
+    pub by: Option<String>,
+    /// What they did, such as `stepped over`.
+    pub action: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct Breakpoint {
+    pub id: u64,
+    /// What it was set at, as it was asked for.
+    pub location: String,
+    pub condition: Option<String>,
+    pub hit_condition: Option<String>,
+    pub log_message: Option<String>,
+    /// Hits in the current process, including those that did not stop.
+    pub hits: u64,
+    /// Where it resolved; none while no loaded code has it.
+    pub places: Vec<Place>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -319,6 +492,8 @@ pub struct Output {
 pub enum Stream {
     Stdout,
     Stderr,
+    /// Messages logpoints wrote.
+    Log,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -333,6 +508,7 @@ pub struct Person {
     pub connection: u32,
     pub name: String,
     pub role: Role,
+    pub focus: Option<Focus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -388,6 +564,76 @@ pub struct Process {
     pub command: String,
 }
 
+/// The answer to `backtrace`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Backtrace {
+    pub frames: Vec<Frame>,
+    /// Why the stack ends early, when the unwinder could not finish it.
+    pub incomplete: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Frame {
+    /// Its number, counting from the innermost frame.
+    pub index: u32,
+    /// The function, symbol, or address.
+    pub name: String,
+    pub kind: FrameKind,
+    /// The instruction or return address, in hexadecimal.
+    pub address: String,
+    /// The file name of the module the code is in.
+    pub module: Option<String>,
+    pub source: Option<SourceLine>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum FrameKind {
+    Physical,
+    /// A call the compiler inlined into the frame below it.
+    Inline,
+    /// A signal handler's trampoline.
+    Signal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SourceLine {
+    pub path: String,
+    pub line: u64,
+    pub column: Option<u64>,
+}
+
+/// The answer to `sources`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SourceFiles {
+    /// Paths as the debug information records them, sorted.
+    pub files: Vec<String>,
+}
+
+/// The answer to `source`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SourceText {
+    pub path: String,
+    /// The file read, which a source map may have moved.
+    pub read: String,
+    pub text: String,
+    /// The lines a breakpoint can stop at, in order.
+    pub breakable: Vec<u64>,
+}
+
+/// The answer to `addBreakpoint`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct BreakpointAdded {
+    pub id: u64,
+}
+
 /// The answer to `share`.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -417,6 +663,16 @@ mod tests {
             Attach::decl(&config),
             OpenCore::decl(&config),
             Continue::decl(&config),
+            Step::decl(&config),
+            StepKind::decl(&config),
+            SetFocus::decl(&config),
+            Focus::decl(&config),
+            ThreadAt::decl(&config),
+            SourcePath::decl(&config),
+            AddBreakpoint::decl(&config),
+            EditBreakpoint::decl(&config),
+            BreakpointRef::decl(&config),
+            Input::decl(&config),
             ServerMessage::decl(&config),
             Hello::decl(&config),
             State::decl(&config),
@@ -424,6 +680,9 @@ mod tests {
             TargetKind::decl(&config),
             Inferior::decl(&config),
             StopReason::decl(&config),
+            Place::decl(&config),
+            StopEntry::decl(&config),
+            Breakpoint::decl(&config),
             Thread::decl(&config),
             ErrorBody::decl(&config),
             ErrorKind::decl(&config),
@@ -438,6 +697,13 @@ mod tests {
             Processes::decl(&config),
             Process::decl(&config),
             ShareLink::decl(&config),
+            Backtrace::decl(&config),
+            Frame::decl(&config),
+            FrameKind::decl(&config),
+            SourceLine::decl(&config),
+            SourceFiles::decl(&config),
+            SourceText::decl(&config),
+            BreakpointAdded::decl(&config),
         ];
         let mut text = format!(
             "// Generated from src/web/protocol.rs by `cargo test`; do not edit.\n\n\

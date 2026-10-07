@@ -7,5 +7,6 @@ mod support;
 mod web;
 
 mod access;
+mod running;
 mod sessions;
 mod terminal;

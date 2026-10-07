@@ -26,6 +26,15 @@ export interface Results {
   pause: null;
   kill: null;
   restart: null;
+  step: null;
+  setFocus: null;
+  backtrace: P.Backtrace;
+  sources: P.SourceFiles;
+  source: P.SourceText;
+  addBreakpoint: P.BreakpointAdded;
+  editBreakpoint: null;
+  removeBreakpoint: null;
+  input: null;
 }
 
 // Fails to compile when a method has no entry in Results, or Results names
