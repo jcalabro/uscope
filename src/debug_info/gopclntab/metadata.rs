@@ -149,6 +149,7 @@ impl Builder<'_, '_> {
             declaration,
             language,
             role,
+            enclosing: None,
         });
         Ok(id)
     }

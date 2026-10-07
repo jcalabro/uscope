@@ -15,6 +15,7 @@ use crate::{Error, Result, StackFrameId, VirtualAddress};
 
 use super::breakpoints::{install_plan_breakpoint, remove_breakpoint_owner_from};
 use super::classify::{format_raw_stop, visible_stop_priority};
+use super::loops::LoopReach;
 use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{
     ActiveExecution, ActiveKind, BreakpointOwner, ClassifiedStop, Controller, ExpectedStop,
@@ -682,8 +683,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             if self.reach_signal_guard(pid, address)? {
                 return Ok(());
             }
-            if self.begin_following(pid, kind)? {
-                // The step goes on by single steps.
+            match self.reach_loop(pid, address, kind)? {
+                LoopReach::Elsewhere => {}
+                LoopReach::Complete => {
+                    return self.begin_visible_stop(pid, StopReason::Step { kind });
+                }
+                LoopReach::Pass => return self.repair_when_alone(pid, address),
+                LoopReach::Restarted => {
+                    return self.go_on_without_plan(pid, address, Some(kind));
+                }
+            }
+            if self.begin_following(pid, kind)? || self.wait_for_loop(pid, kind)? {
+                // The step goes on by single steps, or by its new plan.
                 return self.go_on_without_plan(pid, address, Some(kind));
             }
             let mode = self.step_mode(kind);

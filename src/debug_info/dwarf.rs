@@ -261,6 +261,7 @@ fn load_debug_info(
         go_table = None;
     }
 
+    super::roles::link_loop_bodies(&mut function_metadata.functions);
     refine_proved_prologue_entries(
         &object,
         target,
@@ -1150,6 +1151,7 @@ fn load_function_metadata(
             declaration,
             language: origin.language,
             role,
+            enclosing: None,
         });
         function_ids.insert(definition, id);
     }

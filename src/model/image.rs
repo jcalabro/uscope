@@ -1326,6 +1326,7 @@ mod tests {
                 declaration: None,
                 language: crate::SourceLanguage::C,
                 role: CodeRole::Ordinary,
+                enclosing: None,
             })
             .collect()
     }

@@ -7,7 +7,8 @@ use nix::libc;
 use nix::unistd::Pid;
 
 use crate::protocol::{
-    DebuggerEvent, ExecutionId, PresentedFrame, ProcessId, StepKind, StopId, StopReason,
+    DebuggerEvent, ExecutionId, FramePresentation, PresentedFrame, ProcessId, StepKind, StopId,
+    StopReason,
 };
 use crate::unwind::{CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext};
 use crate::{
@@ -23,6 +24,7 @@ use super::frames::{
     make_presentation, presentation_visible_count, selected_code_instance,
     source_for_code_instance, source_line_changed, source_step_destination,
 };
+use super::loops::{StepLoops, inline_loop_step_is_complete};
 use super::memory::PtraceMemory;
 use super::native::LinuxTraceOps;
 use super::registers::x86_64_registers;
@@ -294,7 +296,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// The entries of the code that begins a panic, in every image.
-    fn panic_entries(&self, inferior: &Inferior) -> BTreeSet<VirtualAddress> {
+    pub(super) fn panic_entries(&self, inferior: &Inferior) -> BTreeSet<VirtualAddress> {
         self.unwind_modules(inferior)
             .into_iter()
             .flat_map(|module| {
@@ -480,9 +482,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.retire_epilogue_return_guard()?;
         let mode = self.step_mode(kind);
         self.note_returned_activation(pid, mode)?;
-        if self.begin_following(pid, kind)? {
+        if self.begin_following(pid, kind)? || self.wait_for_loop(pid, kind)? {
             return self.start_user_step(pid, kind);
         }
+        self.note_loop_progress(pid)?;
         self.retire_returned_plan(pid)?;
         if !steps_instructions(kind) && self.begin_epilogue_traversal(pid)? {
             return self.start_user_step(pid, kind);
@@ -1038,7 +1041,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 _ => None,
             })
             .expect("source step has a starting state");
-        if start.running_on {
+        // Waiting for its loop, a step completes only at its plan's
+        // breakpoints.
+        if start.running_on || start.loops.as_ref().is_some_and(StepLoops::waits) {
             return Ok(false);
         }
         if kind == StepKind::OverInstruction {
@@ -1098,6 +1103,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                         source_step_destination(&self.module_image, &location, kind)
                     }));
                 };
+                if let Some(complete) =
+                    inline_loop_step_is_complete(&self.module_image, &location, start, kind)
+                {
+                    return Ok(complete);
+                }
                 if !code_instance_is_active(&location, code_instance) {
                     // A different physical frame at the same live CFA is a
                     // tail-called replacement, not the caller. Keep stepping
@@ -1296,17 +1306,30 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !matches!(thread.state, NativeThreadState::Stopped) {
             return Err(Error::NotStopped);
         }
-        let registers = self.ptrace.registers(pid)?;
         if frame.get() != 0 {
+            let registers = self.ptrace.registers(pid)?;
             return self.outer_step_out_start(pid, &registers, frame);
         }
+        self.innermost_step_start(pid, kind, || self.presentation_for_stopped_thread(pid))
+    }
+
+    /// How a step from a stopped thread's innermost activation begins, in
+    /// the logical frame `presentation` selects.
+    pub(super) fn innermost_step_start(
+        &self,
+        pid: Pid,
+        kind: StepKind,
+        presentation: impl FnOnce() -> Result<FramePresentation>,
+    ) -> Result<StepStart> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let registers = self.ptrace.registers(pid)?;
         let location = self.image_location(VirtualAddress::new(registers.rip));
         // An instruction step executes one instruction whichever frame is
         // presented, so only source steps need the selected one.
         let code_instance = if steps_instructions(kind) {
             None
         } else {
-            let presentation = self.presentation_for_stopped_thread(pid)?;
+            let presentation = presentation()?;
             location
                 .as_ref()
                 .map(|location| selected_code_instance(location, &presentation))
@@ -1382,6 +1405,21 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             BTreeSet::new()
         };
+        let loops = if matches!(kind, StepKind::OverSource | StepKind::Out) {
+            self.step_loops(
+                pid,
+                &registers,
+                kind,
+                code_instance,
+                activation,
+                &mut plan_addresses,
+            )?
+        } else {
+            None
+        };
+        if let Some(loops) = &loops {
+            record!("step {kind:?} treats loops as its own code: {loops:?}");
+        }
         Ok(StepStart {
             source,
             code_instance,
@@ -1396,6 +1434,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             began_in_runtime: self
                 .code_role(VirtualAddress::new(registers.rip))
                 .is_some_and(is_runtime_role),
+            loops,
             ..StepStart::default()
         })
     }
@@ -1524,7 +1563,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// The canonical frame address of a stopped thread's innermost frame.
-    fn top_cfa(&self, pid: Pid, native: &libc::user_regs_struct) -> Result<VirtualAddress> {
+    pub(super) fn top_cfa(
+        &self,
+        pid: Pid,
+        native: &libc::user_regs_struct,
+    ) -> Result<VirtualAddress> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         self.stack_unwinder(inferior, pid, native)
             .frame_cfa(&innermost_frame(native))
@@ -1623,7 +1666,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// Unwinds `pid`'s stack from `native` through every loaded module's
     /// call-frame information.
-    fn stack_unwinder<'a>(
+    pub(super) fn stack_unwinder<'a>(
         &'a self,
         inferior: &Inferior,
         pid: Pid,
@@ -1655,7 +1698,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 }
 
-const fn innermost_frame(native: &libc::user_regs_struct) -> FrameContext {
+pub(super) const fn innermost_frame(native: &libc::user_regs_struct) -> FrameContext {
     FrameContext {
         instruction: VirtualAddress::new(native.rip),
         cfa: None,

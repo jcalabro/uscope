@@ -66,6 +66,23 @@ call that returns to the same address from a deeper activation keeps running.
 It supports frames of the main executable and inline frames of the innermost
 activation. Stepping always starts from the innermost frame.
 
+In a program whose language runtime schedules tasks, such as Go's
+goroutines, a step belongs to the task it began in. It follows the task to
+whichever thread the runtime resumes it on, other tasks that run the same
+code meanwhile never end it, and its frames are followed when the runtime
+moves the task's stack.
+
+`step` stops only in code the program's author wrote: it passes through
+the runtime's private machinery, compiler-generated wrappers, and stack
+switches to the code they call, and steps out of them where they call none.
+A step begun in the runtime may stop there. `step` at a `return` enters the
+deferred calls it runs; `next` and `finish` run them, but stop in a deferred
+call that a panic runs. The body of a loop over an iterator function is a
+function the iterator calls, which steps treat as the loop's own code:
+`next` enters the body from the loop's line, goes from one pass of the body
+to the next and on past the loop, and `finish` in the body runs the rest of
+the loop. None of them stops in the iterator.
+
 A forked child is not followed: it runs on its own, without the breakpoints
 it inherited. A program that calls `exec` is followed, with its breakpoints.
 

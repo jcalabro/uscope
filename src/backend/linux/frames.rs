@@ -24,6 +24,7 @@ use crate::{
 
 use super::activation::{StackPosition, StackView};
 use super::breakpoints::runtime_breakpoint_address;
+use super::loops::is_loop_body;
 use super::memory::PtraceMemory;
 use super::native::InspectionOps;
 use super::registers::x86_64_registers;
@@ -680,7 +681,15 @@ pub(super) fn default_inline_visible_count(
             // `position` is a zero-based frame index; presentation uses a
             // count. Source `step` reveals the newly entered frame, while
             // `next`, `finish`, and instruction stops remain in its parent.
-            index + usize::from(reveal_new_inline)
+            // A loop body is its enclosing function's own code, so any stop
+            // where one begins shows it.
+            inline_chain[index..]
+                .iter()
+                .position(|instance| is_loop_body(module_image, *instance))
+                .map_or_else(
+                    || index + usize::from(reveal_new_inline),
+                    |body| index + body + 1,
+                )
         })
 }
 
