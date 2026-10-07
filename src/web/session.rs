@@ -35,11 +35,11 @@ use uscope::{
 use super::auth::{Tokens, random_hex};
 use super::describe::{Cause, Describer, Images};
 use super::protocol::{
-    self, BreakpointAdded, ConsoleResult, ErrorBody, ErrorKind, FrameAt, Inferior, Output,
-    PathCompletions, Person, Presence, Processes, Request, Role, ServerMessage, ShareLink, State,
-    StepKind, Stream, TargetKind,
+    self, Added, ConsoleResult, ErrorBody, ErrorKind, FrameAt, Inferior, Output, PathCompletions,
+    Person, Presence, Processes, Request, Role, ServerMessage, ShareLink, State, StepKind, Stream,
+    TargetKind,
 };
-use super::{inspect, picker, values};
+use super::{inspect, lowlevel, picker, values};
 use crate::cli::format;
 use crate::cli::terminal::Renderer;
 use crate::cli::{Cli, LaunchSettings, Renderers};
@@ -98,8 +98,26 @@ impl From<uscope::Error> for Failure {
             | Error::NotRunning
             | Error::AlreadyRunning
             | Error::AlreadyStopped => ErrorKind::NotStopped,
-            Error::PostMortemTarget => ErrorKind::Unsupported,
-            Error::InvalidHitCondition(_) | Error::Expression(_) => ErrorKind::Invalid,
+            Error::PostMortemTarget
+            | Error::UnsupportedWatchAccess(..)
+            | Error::DisassemblyUnsupported(..)
+            | Error::HardwareWatchpointsUnavailable(..)
+            | Error::WatchTargetUnsupported(_) => ErrorKind::Unsupported,
+            Error::InvalidHitCondition(_)
+            | Error::Expression(_)
+            | Error::InvalidCondition(_)
+            | Error::UnknownSignal(_)
+            | Error::AddressOverflow
+            | Error::MemoryReadTooLarge { .. }
+            | Error::MemoryWriteTooLarge { .. }
+            | Error::MemoryNotWritable(_)
+            | Error::WatchpointNotFound(_)
+            | Error::InvalidWatchRange { .. }
+            | Error::WatchpointCapacity { .. }
+            | Error::WatchTargetNotInMemory(_)
+            | Error::WatchTargetUnavailable(_)
+            | Error::InvalidDisassemblyWindow { .. }
+            | Error::NoFunctionContainsAddress(_) => ErrorKind::Invalid,
             _ => ErrorKind::Failed,
         };
         Self::new(kind, error.to_string())
@@ -156,6 +174,9 @@ struct Target {
     console: Arc<tokio::sync::Mutex<Cli>>,
     /// Counts the changes tabs make to the program's values.
     writes: Arc<AtomicU64>,
+    /// Counts changes to settings no event announces, such as signal
+    /// policies.
+    settings: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -308,6 +329,11 @@ impl Session {
                 | Request::Evaluate(_)
                 | Request::Complete(_)
                 | Request::Console(_)
+                | Request::Disassemble(_)
+                | Request::ReadMemory(_)
+                | Request::Registers(_)
+                | Request::Signals
+                | Request::Modules
         );
         if !reads && role != Role::Control {
             return Err(Failure::new(
@@ -333,6 +359,11 @@ impl Session {
             | Request::RemoveBreakpoint(_) => {
                 return self.breakpoints(connection, request).await;
             }
+            Request::WriteMemory(_)
+            | Request::AddWatchpoint(_)
+            | Request::EditWatchpoint(_)
+            | Request::RemoveWatchpoint(_)
+            | Request::SetSignal(_) => return self.low_level(connection, request).await,
             Request::SetValue(set) => {
                 let row = self
                     .reader(connection)
@@ -400,6 +431,27 @@ impl Session {
                 ))
             }
             Request::Console(line) => Ok(to_value(&self.console(connection, role, line).await?)),
+            Request::Disassemble(disassemble) => {
+                let (handle, images) = self.current_images().await?;
+                Ok(to_value(
+                    &lowlevel::disassemble(&handle, &images, &disassemble).await?,
+                ))
+            }
+            Request::ReadMemory(read) => Ok(to_value(
+                &lowlevel::read_memory(&self.current_handle().await?, &read).await?,
+            )),
+            Request::Registers(at) => Ok(to_value(&protocol::Registers {
+                registers: lowlevel::registers(&self.current_handle().await?, at).await?,
+            })),
+            Request::Signals => Ok(to_value(&protocol::Signals {
+                signals: lowlevel::signals(&self.current_handle().await?).await?,
+            })),
+            Request::Modules => {
+                let (handle, images) = self.current_images().await?;
+                Ok(to_value(&protocol::Modules {
+                    modules: lowlevel::modules(&handle, &images).await?,
+                }))
+            }
             _ => unreachable!("only reads are read"),
         }
     }
@@ -489,7 +541,7 @@ impl Session {
                 let options = options(add.condition, add.hit_condition, add.log_message)?;
                 let breakpoint = handle.add_breakpoint_with(spec, options).await?;
                 self.notice(connection, format!("set breakpoint {}", breakpoint.id));
-                return Ok(to_value(&BreakpointAdded {
+                return Ok(to_value(&Added {
                     id: breakpoint.id.get(),
                 }));
             }
@@ -502,6 +554,46 @@ impl Session {
             }
             _ => unreachable!("only breakpoint requests change breakpoints"),
         }
+        Ok(Value::Null)
+    }
+
+    /// Changes memory, watchpoints, or signal policies, and says so.
+    async fn low_level(&self, connection: u32, request: Request) -> Answer {
+        let handle = self.current_handle().await?;
+        let notice = match request {
+            Request::WriteMemory(write) => {
+                let written = lowlevel::write_memory(&handle, &write).await?;
+                self.wrote().await;
+                format!("wrote {written} bytes at {}", write.address)
+            }
+            Request::AddWatchpoint(add) => {
+                let id = lowlevel::add_watchpoint(&handle, add).await?;
+                self.notice(connection, format!("set watchpoint {id}"));
+                return Ok(to_value(&Added { id }));
+            }
+            Request::EditWatchpoint(edit) => {
+                let id = edit.id;
+                lowlevel::edit_watchpoint(&handle, edit).await?;
+                format!("changed watchpoint {id}")
+            }
+            Request::RemoveWatchpoint(protocol::WatchpointRef { id }) => {
+                handle
+                    .remove_watchpoint(uscope::WatchpointId::new(id))
+                    .await?;
+                format!("removed watchpoint {id}")
+            }
+            Request::SetSignal(policy) => {
+                let name = lowlevel::set_signal(&handle, &policy).await?;
+                self.count(
+                    |target| &target.settings,
+                    |state, count| state.settings = count,
+                )
+                .await;
+                format!("changed how {name} is handled")
+            }
+            _ => unreachable!("only low-level requests change the program below its source"),
+        };
+        self.notice(connection, notice);
         Ok(Value::Null)
     }
 
@@ -777,19 +869,26 @@ impl Session {
 
     /// Tells every tab that values it read at this stop may have changed.
     async fn wrote(&self) {
-        let Some(writes) = self
+        self.count(|target| &target.writes, |state, count| state.writes = count)
+            .await;
+    }
+
+    /// Bumps one of the target's counters into the state, so tabs that read
+    /// what it counts read again.
+    async fn count(&self, counter: fn(&Target) -> &Arc<AtomicU64>, set: fn(&mut State, u64)) {
+        let Some(counter) = self
             .target
             .lock()
             .await
             .as_ref()
-            .map(|target| Arc::clone(&target.writes))
+            .map(|target| Arc::clone(counter(target)))
         else {
             return;
         };
-        let count = writes.fetch_add(1, Ordering::Relaxed) + 1;
+        let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
         self.state.send_modify(|state| {
             let mut next = State::clone(state);
-            next.writes = count;
+            set(&mut next, count);
             *state = Arc::new(next);
         });
     }
@@ -984,6 +1083,7 @@ impl Session {
             .send_replace(Arc::new(describer.describe(&snapshot).await));
         let images = Arc::clone(&describer.images);
         let writes = Arc::clone(&describer.writes);
+        let settings = Arc::clone(&describer.settings);
         let outlet = Outlet {
             history: Arc::clone(&self.history),
             messages: self.messages.clone(),
@@ -1004,6 +1104,7 @@ impl Session {
             id: session,
             console: Arc::new(tokio::sync::Mutex::new(console)),
             writes,
+            settings,
             debugger: Some(debugger),
             handle: handle.clone(),
             images,

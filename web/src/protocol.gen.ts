@@ -8,9 +8,9 @@ export type Envelope = {
 /**
  * Chosen by the tab; the answer carries it back.
  */
-id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine });
+id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" });
 
-export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine };
+export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" };
 
 export type SetName = { name: string, };
 
@@ -171,7 +171,12 @@ stops: Array<StopEntry>,
  * Counts changes made to the program's values, which make values read
  * earlier at the same stop out of date.
  */
-writes: number, };
+writes: number, watchpoints: Array<Watchpoint>, 
+/**
+ * Counts changes to settings that publish nothing else, such as
+ * signal policies.
+ */
+settings: number, };
 
 export type Target = { kind: TargetKind, 
 /**
@@ -344,7 +349,7 @@ read: string, text: string,
  */
 breakable: Array<number>, };
 
-export type BreakpointAdded = { id: number, };
+export type Added = { id: number, };
 
 export type FrameAt = { stop: number, thread: number, frame: number, };
 
@@ -440,3 +445,150 @@ export type Completion = { label: string,
 kind: string, };
 
 export type ConsoleResult = { output: string | null, row: Row | null, };
+
+export type Disassemble = { 
+/**
+ * The address to show, as hexadecimal; the frame's own code when
+ * absent.
+ */
+address?: string | null, stop: number, thread: number, frame: number, };
+
+export type ReadMemory = { 
+/**
+ * The stop the bytes are read at, which must be current.
+ */
+stop: number, 
+/**
+ * As hexadecimal, such as `0x7ffff7a3e010`.
+ */
+address: string, count: number, };
+
+export type WriteMemory = { stop: number, address: string, 
+/**
+ * The bytes, as pairs of hexadecimal digits.
+ */
+bytes: string, };
+
+export type AddWatchpoint = { 
+/**
+ * An expression in the frame, or `0xADDRESS:BYTES`.
+ */
+target: string, access: WatchAccess, 
+/**
+ * The frame an expression is resolved in; an address range needs none.
+ */
+stop?: number | null, thread?: number | null, frame?: number | null, condition?: string | null, hitCondition?: string | null, };
+
+export type EditWatchpoint = { id: number, condition?: string | null, hitCondition?: string | null, };
+
+export type WatchpointRef = { id: number, };
+
+export type WatchAccess = "change" | "write" | "readWrite" | "read";
+
+export type SignalPolicy = { signal: number, 
+/**
+ * Such as `SIGUSR1`; filled in by the server.
+ */
+name: string, stop: boolean, print: boolean, pass: boolean, };
+
+export type Watchpoint = { id: number, access: WatchAccess, 
+/**
+ * The expression it watches, when it was given one.
+ */
+expression: string | null, address: string, bytes: number, 
+/**
+ * Such as `frame 2 of thread 41872` for a local, which ends with it.
+ */
+scope: string, condition: string | null, hitCondition: string | null, hits: number, };
+
+export type Disassembled = { 
+/**
+ * The function shown, when the code shown is one.
+ */
+function: string | null, 
+/**
+ * The frame's instruction: its program counter, or, in a caller, the
+ * call it returns to after.
+ */
+marked: string | null, instructions: Array<Instruction>, 
+/**
+ * What the code shown leaves out, such as unreadable memory.
+ */
+notes: Array<string>, };
+
+export type Instruction = { address: string, 
+/**
+ * Its bytes, as hexadecimal pairs separated by spaces.
+ */
+bytes: string, 
+/**
+ * Its text in pieces; empty when the bytes decode to nothing.
+ */
+tokens: Array<Token>, 
+/**
+ * Why there is no instruction, when there is none.
+ */
+invalid: string | null, 
+/**
+ * Where a branch goes, which a page can follow.
+ */
+target: BranchTarget | null, 
+/**
+ * What its operands name, such as a function or a global.
+ */
+comment: string | null, 
+/**
+ * The symbol it is in, with its offset, such as `main+12`.
+ */
+symbol: string | null, 
+/**
+ * Its source line, when it starts one.
+ */
+source: SourceLine | null, };
+
+export type Token = { 
+/**
+ * `mnemonic`, `prefix`, `keyword`, `register`, `number`, `address`,
+ * `punctuation`, or `text`.
+ */
+kind: string, text: string, };
+
+export type BranchTarget = { address: string, name: string | null, };
+
+export type Memory = { address: string, 
+/**
+ * The bytes read, as hexadecimal pairs with no separator.
+ */
+bytes: string, 
+/**
+ * The first address that could not be read, when the read stopped
+ * short.
+ */
+unreadable: string | null, };
+
+export type Registers = { registers: Array<Register>, };
+
+export type Register = { name: string, 
+/**
+ * As hexadecimal; absent where a caller's frame did not save it.
+ */
+value: string | null, bits: number, 
+/**
+ * `pc`, `sp`, or `fp`.
+ */
+role: string | null, };
+
+export type Signals = { signals: Array<SignalPolicy>, };
+
+export type Modules = { modules: Array<Module>, };
+
+export type Module = { id: number, name: string, path: string, 
+/**
+ * Where it is loaded, as hexadecimal.
+ */
+start: string | null, end: string | null, 
+/**
+ * `debug` with debug information, `symbols` with only a symbol table,
+ * or `none`.
+ */
+symbols: string, };

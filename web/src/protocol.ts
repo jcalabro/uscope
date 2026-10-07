@@ -31,7 +31,7 @@ export interface Results {
   backtrace: P.Backtrace;
   sources: P.SourceFiles;
   source: P.SourceText;
-  addBreakpoint: P.BreakpointAdded;
+  addBreakpoint: P.Added;
   editBreakpoint: null;
   removeBreakpoint: null;
   input: null;
@@ -41,6 +41,16 @@ export interface Results {
   setValue: P.Row;
   complete: P.Completions;
   console: P.ConsoleResult;
+  disassemble: P.Disassembled;
+  readMemory: P.Memory;
+  writeMemory: null;
+  registers: P.Registers;
+  addWatchpoint: P.Added;
+  editWatchpoint: null;
+  removeWatchpoint: null;
+  signals: P.Signals;
+  setSignal: null;
+  modules: P.Modules;
 }
 
 // Fails to compile when a method has no entry in Results, or Results names

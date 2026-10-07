@@ -10,6 +10,7 @@ mod auth;
 mod connection;
 mod describe;
 mod inspect;
+mod lowlevel;
 mod picker;
 mod protocol;
 mod session;

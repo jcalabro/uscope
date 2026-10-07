@@ -119,6 +119,34 @@ pub fn hex(address: u64) -> String {
     format!("{address:#x}")
 }
 
+/// A watchpoint as tabs show it.
+fn watchpoint(watchpoint: &uscope::Watchpoint) -> protocol::Watchpoint {
+    protocol::Watchpoint {
+        id: watchpoint.id.get(),
+        access: watch_access(watchpoint.access),
+        expression: watchpoint.expression.as_ref().map(ToString::to_string),
+        address: hex(watchpoint.address.get()),
+        bytes: watchpoint.byte_size,
+        scope: match &watchpoint.scope {
+            uscope::WatchScope::ThreadLocal { thread } => format!("thread {thread}'s instance"),
+            uscope::WatchScope::Frame { .. } => "until its function returns".to_owned(),
+            _ => String::new(),
+        },
+        condition: watchpoint.condition.as_ref().map(ToString::to_string),
+        hit_condition: watchpoint.hit_condition.as_ref().map(ToString::to_string),
+        hits: watchpoint.hit_count,
+    }
+}
+
+pub const fn watch_access(access: uscope::WatchAccess) -> protocol::WatchAccess {
+    match access {
+        uscope::WatchAccess::Change => protocol::WatchAccess::Change,
+        uscope::WatchAccess::Write => protocol::WatchAccess::Write,
+        uscope::WatchAccess::Read => protocol::WatchAccess::Read,
+        uscope::WatchAccess::ReadWrite => protocol::WatchAccess::ReadWrite,
+    }
+}
+
 /// Who last ran the program, and how, for the stop that run ends at.
 #[derive(Debug, Clone)]
 pub struct Cause {
@@ -138,6 +166,9 @@ pub struct Describer {
     pub ended: Ended,
     /// Counts the changes tabs make to the program's values.
     pub writes: Arc<AtomicU64>,
+    /// Counts changes to settings that publish no event, such as signal
+    /// policies.
+    pub settings: Arc<AtomicU64>,
 }
 
 impl Describer {
@@ -156,6 +187,7 @@ impl Describer {
             stops: Vec::new(),
             ended: Ended::default(),
             writes: Arc::default(),
+            settings: Arc::default(),
         }
     }
 
@@ -211,6 +243,8 @@ impl Describer {
             breakpoints,
             stops: self.stops.clone(),
             writes: self.writes.load(Ordering::Relaxed),
+            watchpoints: snapshot.watchpoints.iter().map(watchpoint).collect(),
+            settings: self.settings.load(Ordering::Relaxed),
         }
     }
 

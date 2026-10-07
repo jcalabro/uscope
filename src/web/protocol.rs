@@ -97,6 +97,26 @@ pub enum Request {
     /// Runs a console line: an expression, which may assign, or one of
     /// uscope's commands, in the tab's frame.
     Console(ConsoleLine),
+    /// The instructions of the function holding an address, or around it.
+    Disassemble(Disassemble),
+    /// Bytes of the program's memory at a stop.
+    ReadMemory(ReadMemory),
+    /// Writes bytes to the program's memory at a stop.
+    WriteMemory(WriteMemory),
+    /// A frame's registers.
+    Registers(FrameAt),
+    /// Stops when memory an expression names, or an address range, changes
+    /// or is accessed.
+    AddWatchpoint(AddWatchpoint),
+    /// Replaces a watchpoint's condition and hit condition.
+    EditWatchpoint(EditWatchpoint),
+    RemoveWatchpoint(WatchpointRef),
+    /// What the debugger does with each signal.
+    Signals,
+    /// Changes what the debugger does with one signal.
+    SetSignal(SignalPolicy),
+    /// The modules the program has loaded.
+    Modules,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,6 +320,108 @@ pub struct ConsoleLine {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Disassemble {
+    #[serde(flatten)]
+    pub at: FrameAt,
+    /// The address to show, as hexadecimal; the frame's own code when
+    /// absent.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub address: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ReadMemory {
+    /// The stop the bytes are read at, which must be current.
+    pub stop: u64,
+    /// As hexadecimal, such as `0x7ffff7a3e010`.
+    pub address: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct WriteMemory {
+    pub stop: u64,
+    pub address: String,
+    /// The bytes, as pairs of hexadecimal digits.
+    pub bytes: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct AddWatchpoint {
+    /// An expression in the frame, or `0xADDRESS:BYTES`.
+    pub target: String,
+    pub access: WatchAccess,
+    /// The frame an expression is resolved in; an address range needs none.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub stop: Option<u64>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub thread: Option<u64>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub frame: Option<u32>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub condition: Option<String>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub hit_condition: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct EditWatchpoint {
+    pub id: u64,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub condition: Option<String>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub hit_condition: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct WatchpointRef {
+    pub id: u64,
+}
+
+/// What stops a watchpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum WatchAccess {
+    /// A store that changes the value.
+    Change,
+    /// Every store, even of the same value.
+    Write,
+    /// Every load or store.
+    ReadWrite,
+    Read,
+}
+
+/// What the debugger does with one signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SignalPolicy {
+    pub signal: u64,
+    /// Such as `SIGUSR1`; filled in by the server.
+    #[serde(default)]
+    pub name: String,
+    pub stop: bool,
+    pub print: bool,
+    pub pass: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SourcePath {
     /// A path as the debug information records it.
     pub path: String,
@@ -415,6 +537,10 @@ pub struct State {
     /// Counts changes made to the program's values, which make values read
     /// earlier at the same stop out of date.
     pub writes: u64,
+    pub watchpoints: Vec<Watchpoint>,
+    /// Counts changes to settings that publish nothing else, such as
+    /// signal policies.
+    pub settings: u64,
 }
 
 impl State {
@@ -430,6 +556,8 @@ impl State {
             breakpoints: Vec::new(),
             stops: Vec::new(),
             writes: 0,
+            watchpoints: Vec::new(),
+            settings: 0,
         }
     }
 }
@@ -724,10 +852,10 @@ pub struct SourceText {
     pub breakable: Vec<u64>,
 }
 
-/// The answer to `addBreakpoint`.
+/// The answer to `addBreakpoint` and `addWatchpoint`: what was added.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
-pub struct BreakpointAdded {
+pub struct Added {
     pub id: u64,
 }
 
@@ -820,6 +948,129 @@ pub struct ConsoleResult {
     pub row: Option<Row>,
 }
 
+/// A watchpoint, as every tab shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct Watchpoint {
+    pub id: u64,
+    pub access: WatchAccess,
+    /// The expression it watches, when it was given one.
+    pub expression: Option<String>,
+    pub address: String,
+    pub bytes: u64,
+    /// Such as `frame 2 of thread 41872` for a local, which ends with it.
+    pub scope: String,
+    pub condition: Option<String>,
+    pub hit_condition: Option<String>,
+    pub hits: u64,
+}
+
+/// The answer to `disassemble`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Disassembled {
+    /// The function shown, when the code shown is one.
+    pub function: Option<String>,
+    /// The frame's instruction: its program counter, or, in a caller, the
+    /// call it returns to after.
+    pub marked: Option<String>,
+    pub instructions: Vec<Instruction>,
+    /// What the code shown leaves out, such as unreadable memory.
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Instruction {
+    pub address: String,
+    /// Its bytes, as hexadecimal pairs separated by spaces.
+    pub bytes: String,
+    /// Its text in pieces; empty when the bytes decode to nothing.
+    pub tokens: Vec<Token>,
+    /// Why there is no instruction, when there is none.
+    pub invalid: Option<String>,
+    /// Where a branch goes, which a page can follow.
+    pub target: Option<BranchTarget>,
+    /// What its operands name, such as a function or a global.
+    pub comment: Option<String>,
+    /// The symbol it is in, with its offset, such as `main+12`.
+    pub symbol: Option<String>,
+    /// Its source line, when it starts one.
+    pub source: Option<SourceLine>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Token {
+    /// `mnemonic`, `prefix`, `keyword`, `register`, `number`, `address`,
+    /// `punctuation`, or `text`.
+    pub kind: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct BranchTarget {
+    pub address: String,
+    pub name: Option<String>,
+}
+
+/// The answer to `readMemory`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Memory {
+    pub address: String,
+    /// The bytes read, as hexadecimal pairs with no separator.
+    pub bytes: String,
+    /// The first address that could not be read, when the read stopped
+    /// short.
+    pub unreadable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Registers {
+    pub registers: Vec<Register>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Register {
+    pub name: String,
+    /// As hexadecimal; absent where a caller's frame did not save it.
+    pub value: Option<String>,
+    pub bits: u16,
+    /// `pc`, `sp`, or `fp`.
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Signals {
+    pub signals: Vec<SignalPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Modules {
+    pub modules: Vec<Module>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Module {
+    pub id: u64,
+    pub name: String,
+    pub path: String,
+    /// Where it is loaded, as hexadecimal.
+    pub start: Option<String>,
+    pub end: Option<String>,
+    /// `debug` with debug information, `symbols` with only a symbol table,
+    /// or `none`.
+    pub symbols: String,
+}
+
 /// The answer to `share`.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -889,7 +1140,7 @@ mod tests {
             SourceLine::decl(&config),
             SourceFiles::decl(&config),
             SourceText::decl(&config),
-            BreakpointAdded::decl(&config),
+            Added::decl(&config),
             FrameAt::decl(&config),
             ChildrenOf::decl(&config),
             Evaluate::decl(&config),
@@ -905,6 +1156,25 @@ mod tests {
             Completions::decl(&config),
             Completion::decl(&config),
             ConsoleResult::decl(&config),
+            Disassemble::decl(&config),
+            ReadMemory::decl(&config),
+            WriteMemory::decl(&config),
+            AddWatchpoint::decl(&config),
+            EditWatchpoint::decl(&config),
+            WatchpointRef::decl(&config),
+            WatchAccess::decl(&config),
+            SignalPolicy::decl(&config),
+            Watchpoint::decl(&config),
+            Disassembled::decl(&config),
+            Instruction::decl(&config),
+            Token::decl(&config),
+            BranchTarget::decl(&config),
+            Memory::decl(&config),
+            Registers::decl(&config),
+            Register::decl(&config),
+            Signals::decl(&config),
+            Modules::decl(&config),
+            Module::decl(&config),
         ];
         let mut text = format!(
             "// Generated from src/web/protocol.rs by `cargo test`; do not edit.\n\n\
