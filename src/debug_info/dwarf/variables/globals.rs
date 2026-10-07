@@ -257,6 +257,8 @@ pub(super) fn load_globals<'data>(
                 lexical_depth: 0,
                 order: *order,
                 type_info: type_info.clone(),
+                escaped: None,
+                hidden: false,
                 value,
                 frame_base: Metadata::Absent(MetadataAbsence::NotApplicable),
                 malformed,

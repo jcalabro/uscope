@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
-use uscope::{StackFrame, StopContext, StopReason, UnwindTermination, VariableKind};
+use uscope::{
+    ExecutionContext, StackFrame, StopContext, StopReason, UnwindTermination, VariableKind,
+};
 
 use super::handles::{Location, Variables};
 use super::protocol::{
@@ -12,7 +14,7 @@ use super::protocol::{
     ScopesArguments, SetExpressionArguments, SetVariableArguments, StackFrameFormat,
     StackTraceArguments, ValueFormat, VariablesArguments,
 };
-use super::session::{Session, Stop, error, parse, signal_text, thread_id};
+use super::session::{Session, Stop, error, parse, signal_text};
 use super::values::{self, Options};
 use crate::present::{self, Filter, Item, ListError, Listed, Presenter, Window, complete};
 
@@ -20,27 +22,55 @@ use crate::present::{self, Filter, Item, ListError, Listed, Presenter, Window, c
 const MAX_CHILDREN: u64 = 1024;
 /// The most completions one request offers.
 const MAX_COMPLETIONS: usize = 1000;
+/// How many tasks one debugger request lists.
+const TASK_PAGE: usize = 1024;
+
+/// A thread's name in a list of tasks, which it is in because it stopped
+/// running none.
+fn thread_name(
+    snapshot: &uscope::StateSnapshot,
+    context: ExecutionContext,
+    stopped: Option<String>,
+) -> String {
+    let thread = context
+        .as_thread()
+        .expect("an entry without a task is a thread");
+    let detail = stopped
+        .map(|detail| format!(" — {detail}"))
+        .unwrap_or_default();
+    snapshot
+        .threads
+        .iter()
+        .find(|listed| listed.id == thread)
+        .and_then(|listed| listed.name.as_deref())
+        .map_or_else(
+            || format!("Thread {thread}{detail}"),
+            |name| format!("{name} ({thread}){detail}"),
+        )
+}
 
 impl Session {
-    pub(super) async fn threads(&self) -> Result<Value, ErrorBody> {
+    pub(super) async fn threads(&mut self) -> Result<Value, ErrorBody> {
+        if let Some(stop) = self.stop.clone()
+            && let Some(threads) = self.task_threads(&stop).await?
+        {
+            return Ok(json!({"threads": threads}));
+        }
         let handle = self.target_handle().ok();
         let snapshot = match &handle {
             Some(handle) => Some(handle.snapshot().await.map_err(error)?),
             None => None,
         };
-        let threads = snapshot
-            .iter()
-            .flat_map(|snapshot| snapshot.threads.iter())
-            .map(|thread| {
-                json!({
-                    "id": thread.id.get(),
-                    "name": thread.name.as_deref().map_or_else(
-                        || format!("Thread {}", thread.id),
-                        |name| format!("{name} ({})", thread.id)
-                    ),
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut threads = Vec::new();
+        for thread in snapshot.iter().flat_map(|snapshot| snapshot.threads.iter()) {
+            threads.push(json!({
+                "id": self.thread_ids.id(ExecutionContext::Thread(thread.id))?,
+                "name": thread.name.as_deref().map_or_else(
+                    || format!("Thread {}", thread.id),
+                    |name| format!("{name} ({})", thread.id)
+                ),
+            }));
+        }
         if !threads.is_empty() {
             return Ok(json!({"threads": threads}));
         }
@@ -58,13 +88,183 @@ impl Session {
         Ok(json!({"threads": [{"id": 1, "name": name}]}))
     }
 
+    /// The tasks of a stop as the client's threads, or `None` when the
+    /// program has none or the client's threads are the system's.
+    ///
+    /// DAP cannot page threads, so the list is ordered by what a user looks
+    /// for first: the task that stopped, the tasks on threads and any
+    /// thread that stopped running none, then the program's tasks, and
+    /// with `runtimeTasks` the runtime's. It is cut at `maxTasks`, and a
+    /// last entry counts the rest.
+    async fn task_threads(&mut self, stop: &Stop) -> Result<Option<Vec<Value>>, ErrorBody> {
+        let Some(listing) = self.thread_listing().filter(|listing| listing.tasks) else {
+            return Ok(None);
+        };
+        let handle = self.target_handle()?;
+        // The runtime's own tasks are left out before paging when they are
+        // not shown, unless the stop is in one.
+        let mut tasks = all_tasks(&handle, !listing.runtime_tasks).await?;
+        if let ExecutionContext::Task(stopped) = stop.context
+            && !tasks.iter().any(|task| task.id == stopped)
+        {
+            tasks = all_tasks(&handle, false).await?;
+        }
+        if tasks.is_empty() {
+            return Ok(None);
+        }
+        // A closed client has no use for the list either.
+        let _ = self.forget_tasks(&tasks).await;
+        let snapshot = handle.snapshot().await.map_err(error)?;
+        let stopped = |thread: uscope::ThreadId| {
+            snapshot
+                .threads
+                .iter()
+                .find(|listed| listed.id == thread)
+                .and_then(|listed| match &listed.state {
+                    uscope::ThreadState::Stopped { reason } => reason.clone(),
+                    uscope::ThreadState::Running => None,
+                })
+        };
+        let rank = |context: ExecutionContext, on_thread: bool, internal: bool| {
+            if context == stop.context {
+                0
+            } else if on_thread {
+                1
+            } else if internal {
+                3
+            } else {
+                2
+            }
+        };
+        let mut entries = tasks
+            .iter()
+            .filter(|task| {
+                listing.runtime_tasks
+                    || !task.internal
+                    || stop.context == ExecutionContext::Task(task.id)
+            })
+            .map(|task| {
+                let context = ExecutionContext::Task(task.id);
+                (
+                    rank(context, task.thread.is_some(), task.internal),
+                    Some(task),
+                    context,
+                )
+            })
+            .collect::<Vec<_>>();
+        // A thread that stopped for a reason of its own but runs no task is
+        // there too, so its stop can be inspected.
+        for thread in snapshot.threads.iter() {
+            let runs_task = matches!(thread.activity, Some(uscope::ThreadActivity::Task { .. }));
+            if !runs_task && stopped(thread.id).is_some() {
+                let context = ExecutionContext::Thread(thread.id);
+                entries.push((rank(context, true, false), None, context));
+            }
+        }
+        entries.sort_by_key(|(rank, _, _)| *rank);
+        let omitted = entries.len().saturating_sub(listing.max_tasks);
+        entries.truncate(listing.max_tasks);
+
+        let mut threads = Vec::with_capacity(entries.len() + 1);
+        for (_, task, context) in entries {
+            let thread = task.map_or_else(|| context.as_thread(), |task| task.thread);
+            let reason = thread
+                .and_then(stopped)
+                .map(|reason| self.stopped_detail(&reason));
+            let name = match task {
+                Some(task) => self.task_name(stop, task, reason).await,
+                None => thread_name(&snapshot, context, reason),
+            };
+            threads.push(json!({"id": self.thread_ids.id(context)?, "name": name}));
+        }
+        if omitted > 0 {
+            let noun = format!("more {}", tasks[0].noun);
+            threads.push(json!({
+                "id": self.thread_ids.placeholder()?,
+                "name": format!(
+                    "{} not shown; maxTasks lists {}",
+                    crate::cli::format::plural(omitted as u64, &noun),
+                    listing.max_tasks
+                ),
+            }));
+        }
+        Ok(Some(threads))
+    }
+
+    /// A task's name as a thread: its number, the function the program
+    /// wrote that it is in, what it does or why it stopped, and its thread.
+    async fn task_name(
+        &mut self,
+        stop: &Stop,
+        task: &uscope::TaskSnapshot,
+        stopped: Option<String>,
+    ) -> String {
+        let place = self
+            .backtrace(stop, ExecutionContext::Task(task.id))
+            .await
+            .ok()
+            .and_then(|trace| crate::cli::format::task_function(task, &trace))
+            .unwrap_or_else(|| "?".to_owned());
+        let detail = stopped
+            .or_else(|| task.detail.as_deref().map(str::to_owned))
+            .map(|detail| format!(" — {detail}"))
+            .unwrap_or_default();
+        let labels = crate::cli::format::task_labels(task)
+            .map(|labels| format!(" {labels}"))
+            .unwrap_or_default();
+        let thread = task
+            .thread
+            .map(|thread| format!(" (thread {thread})"))
+            .unwrap_or_default();
+        format!("[{}] {place}{detail}{labels}{thread}", task.id.number)
+    }
+
+    /// What stopped a thread, in a thread's name.
+    fn stopped_detail(&self, reason: &StopReason) -> String {
+        match reason {
+            StopReason::Breakpoint { hits, .. } => {
+                let (ids, _) = self.breakpoints.hit(hits);
+                let ids = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+                format!("at breakpoint {}", ids.join(", "))
+            }
+            StopReason::Watchpoint { hits } => {
+                let ids = self.data.hit(hits);
+                let ids = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+                format!("at data breakpoint {}", ids.join(", "))
+            }
+            other => format!("stopped: {}", super::session::stop_kind(other)),
+        }
+    }
+
     pub(super) async fn stack_trace(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<StackTraceArguments>(arguments, "stackTrace arguments")?;
         let stop = self.current_stop()?;
-        let thread = thread_id(arguments.thread_id)?;
-        let trace = self.backtrace(&stop, thread).await?;
-        let abnormal = trace.termination != UnwindTermination::Complete;
-        let total = trace.frames.len() + usize::from(abnormal);
+        let context = self.thread_ids.context(arguments.thread_id)?;
+        let trace = self.backtrace(&stop, context).await?;
+        // Where a stack goes on on another, a label heads each run of
+        // frames saying whose stack it is on, and a stack cut short says
+        // so instead of looking complete.
+        let switches = trace
+            .frames
+            .windows(2)
+            .any(|pair| pair[0].segment != pair[1].segment);
+        let mut entries = Vec::with_capacity(trace.frames.len() + 2);
+        let mut segment = None;
+        let iterators = trace.loop_iterators();
+        for (frame, iterates) in trace.frames.iter().zip(iterators) {
+            if switches && segment != Some(frame.segment) {
+                segment = Some(frame.segment);
+                entries.push(Err(format!(
+                    "on {}",
+                    crate::cli::format::stack_owner(frame.segment)
+                )));
+            }
+            entries.push(Ok((frame, iterates)));
+        }
+        if trace.termination != UnwindTermination::Complete {
+            entries.push(Err(format!("<backtrace stopped: {}>", trace.termination)));
+        }
+        let total = entries.len();
         let start = usize::try_from(arguments.start_frame.unwrap_or(0)).unwrap_or(0);
         let levels = arguments
             .levels
@@ -73,31 +273,48 @@ impl Session {
             .unwrap_or(usize::MAX);
         let format = arguments.format.unwrap_or_default();
         let mut frames = Vec::new();
-        for frame in trace.frames.iter().skip(start).take(levels) {
-            let mut body = self.stack_frame(stop.id, thread, frame).await?;
+        for entry in entries.into_iter().skip(start).take(levels) {
+            let (frame, iterates) = match entry {
+                Ok(entry) => entry,
+                Err(label) => {
+                    frames.push(json!({
+                        "id": self.references.label()?,
+                        "name": label,
+                        "line": 0,
+                        "column": 0,
+                        "presentationHint": "label",
+                    }));
+                    continue;
+                }
+            };
+            let mut body = self.stack_frame(stop.id, context, frame).await?;
+            // Clients focus the first frame whose source is not
+            // deemphasized, so the frames above the one the debugger
+            // selected at the stop are.
+            if context == stop.context && frame.id < stop.selected && body["source"].is_object() {
+                body["source"]["presentationHint"] = "deemphasize".into();
+            }
+            // An iterator recedes behind the loop whose body it runs.
+            if let Some(level) = iterates {
+                body["name"] = format!(
+                    "{} [iterator of #{level}'s loop]",
+                    body["name"].as_str().unwrap_or_default()
+                )
+                .into();
+                body["presentationHint"] = "subtle".into();
+            }
             self.decorate(
                 &mut body,
                 frame,
                 &format,
                 StopContext {
                     stop: stop.id,
-                    thread,
+                    execution: context,
                     frame: frame.id,
                 },
             )
             .await;
             frames.push(body);
-        }
-        if abnormal && start + frames.len() < total && frames.len() < levels {
-            // A stack cut short says so instead of looking complete.
-            let id = self.references.label()?;
-            frames.push(json!({
-                "id": id,
-                "name": format!("<backtrace stopped: {}>", trace.termination),
-                "line": 0,
-                "column": 0,
-                "presentationHint": "label",
-            }));
         }
         Ok(json!({"stackFrames": frames, "totalFrames": total}))
     }
@@ -105,12 +322,12 @@ impl Session {
     async fn stack_frame(
         &mut self,
         stop: uscope::StopId,
-        thread: uscope::ThreadId,
+        execution: ExecutionContext,
         frame: &StackFrame,
     ) -> Result<Value, ErrorBody> {
         let id = self.references.frame(StopContext {
             stop,
-            thread,
+            execution,
             frame: frame.id,
         })?;
         let mut name = if frame.function.is_none() && frame.symbol.is_none() {
@@ -162,6 +379,14 @@ impl Session {
                     .into();
             }
             None => body["presentationHint"] = "subtle".into(),
+        }
+        // A runtime's machinery and the wrappers a compiler writes recede.
+        if frame
+            .function
+            .as_ref()
+            .is_some_and(|function| function.role != uscope::CodeRole::Ordinary)
+        {
+            body["presentationHint"] = "subtle".into();
         }
         Ok(body)
     }
@@ -239,7 +464,7 @@ impl Session {
                     snapshot
                         .variables
                         .iter()
-                        .filter(|variable| variable.kind == kind)
+                        .filter(|variable| present::in_scope(kind, variable.kind))
                         .count()
                 };
                 let parameters = count(VariableKind::Parameter);
@@ -441,7 +666,7 @@ impl Session {
         context: StopContext,
     ) -> Option<(uscope::ModuleId, uscope::SourceFileId)> {
         let stop = self.current_stop().ok()?;
-        let trace = self.backtrace(&stop, context.thread).await.ok()?;
+        let trace = self.backtrace(&stop, context.execution).await.ok()?;
         let frame = trace
             .frames
             .iter()
@@ -603,7 +828,10 @@ impl Session {
         let console = self.console()?;
         if let Some(context) = context {
             let handle = self.target_handle()?;
-            handle.select_thread(context.thread).await.map_err(error)?;
+            handle
+                .select_context(context.execution)
+                .await
+                .map_err(error)?;
             handle.select_frame(context.frame).await.map_err(error)?;
         }
         let output = console
@@ -673,7 +901,8 @@ impl Session {
     pub(super) fn exception_info(&self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<ExceptionInfoArguments>(arguments, "exceptionInfo arguments")?;
         let stop = self.current_stop()?;
-        if thread_id(arguments.thread_id)? != stop.thread {
+        let context = self.thread_ids.context(arguments.thread_id)?;
+        if context != stop.context && context != ExecutionContext::Thread(stop.thread) {
             return Err(ErrorBody::new(format!(
                 "thread {} did not cause the stop",
                 arguments.thread_id
@@ -702,6 +931,27 @@ impl Session {
             StopReason::WatchpointArmFailed { description, .. } => {
                 ("watchpoint failure".to_owned(), description.to_string())
             }
+            StopReason::LanguageException(exception) => {
+                let id = super::session::language_exception_text(exception.kind).to_owned();
+                let mut body = json!({
+                    "exceptionId": id,
+                    "description": exception.message.as_ref(),
+                    "breakMode": if exception.kind == uscope::LanguageExceptionKind::Raised {
+                        "always"
+                    } else {
+                        "unhandled"
+                    },
+                    "details": {"message": exception.message.as_ref(), "typeName": id},
+                });
+                if let Some(value) = &exception.value {
+                    body["details"]["evaluateName"] = value.as_ref().into();
+                }
+                return Ok(body);
+            }
+            StopReason::ProgramBreakpoint { address } => (
+                "program breakpoint".to_owned(),
+                format!("the program executed a breakpoint instruction at {address}"),
+            ),
             _ => return Err(ErrorBody::new("the stop was not caused by an exception")),
         };
         Ok(json!({
@@ -890,5 +1140,27 @@ fn list_error(failure: ListError) -> ErrorBody {
     match failure {
         ListError::Debugger(failure) => error(failure),
         ListError::Changed(message) => ErrorBody::new(message),
+    }
+}
+
+/// Every task at the stop, or every one that runs the program's code.
+async fn all_tasks(
+    handle: &uscope::DebuggerHandle,
+    program_only: bool,
+) -> Result<Vec<uscope::TaskSnapshot>, ErrorBody> {
+    let mut tasks = Vec::new();
+    let mut from = None;
+    loop {
+        let page = if program_only {
+            handle.program_tasks(from, TASK_PAGE).await
+        } else {
+            handle.tasks(from, TASK_PAGE).await
+        }
+        .map_err(error)?;
+        tasks.extend(page.tasks.iter().cloned());
+        match page.next {
+            Some(next) => from = Some(next),
+            None => return Ok(tasks),
+        }
     }
 }

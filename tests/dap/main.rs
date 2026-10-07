@@ -15,11 +15,13 @@ mod faults;
 #[cfg(debug_assertions)]
 mod flight_recorder;
 mod forks;
+mod goroutines;
 mod languages;
 mod lifecycle;
 mod memory;
 mod output;
 mod robustness;
+mod server;
 mod sources;
 mod terminal;
 mod traffic;

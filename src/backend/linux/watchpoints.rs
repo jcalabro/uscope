@@ -23,11 +23,10 @@ use crate::{
 };
 
 use super::debug_registers::{DebugRegisterPlan, SlotAccess};
-use super::frames::{DwarfCallerProvider, frame_lookup_address};
+use super::frames::{DwarfCallerProvider, StackRoot, frame_lookup_address};
 use super::memory::{PtraceMemory, read_logical_memory};
 use super::native::{InspectionOps, LinuxTraceOps, is_vanished_tracee};
 use super::registers::x86_64_registers;
-use super::stepping::x86_64_activation_has_returned;
 use super::{
     Controller, Inferior, LinuxError, NativeThreadState, WatchRecord, backend_error, debug_pid,
     debug_thread_id, validate_image_current,
@@ -72,6 +71,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 (None, address, byte_size, None, WatchScope::Location, None)
             }
         };
+        let task = self.task_watch(inferior, &scope, address)?;
         let chunks = debug_registers::split_range(address.get(), byte_size).map_err(|error| {
             watch_range_error(address, byte_size, error, inferior.watch.plan.free_slots())
         })?;
@@ -122,10 +122,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                     watchpoint: watchpoint.clone(),
                     frame,
                     observed,
+                    task,
                 },
             );
         self.next_watchpoint_id = next_id;
         self.publish_watchpoints_changed();
+        if let Err(error) = self.sync_stack_movers() {
+            let _ = self.remove_watchpoint(id);
+            return Err(error);
+        }
         Ok(watchpoint)
     }
 
@@ -317,6 +322,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.watch.watchpoints.remove(&id))
             .expect("removed watchpoint was recorded");
         self.publish_watchpoints_changed();
+        self.sync_stack_movers()?;
         Ok(record.watchpoint)
     }
 
@@ -338,6 +344,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .watchpoints,
         );
         self.publish_watchpoints_changed();
+        self.sync_stack_movers()?;
         Ok(removed
             .into_values()
             .map(|record| record.watchpoint)
@@ -360,7 +367,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// resume. Rolling a thread back therefore only rewrites slots the plan
     /// it previously carried already reserved, so rollback needs no new
     /// kernel capacity.
-    fn arm_all_threads(&mut self, plan: DebugRegisterPlan) -> Result<()> {
+    pub(super) fn arm_all_threads(&mut self, plan: DebugRegisterPlan) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let previous = inferior.watch.plan.clone();
         let generation = inferior.watch.generation;
@@ -621,7 +628,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// Disarms and publishes watchpoints whose storage's lifetime ended.
-    fn remove_invalidated_watchpoints(
+    pub(super) fn remove_invalidated_watchpoints(
         &mut self,
         invalidated: Vec<InvalidatedWatchpoint>,
     ) -> Result<()> {
@@ -645,7 +652,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             invalidated: invalidated.into(),
         });
         self.publish_watchpoints_changed();
-        Ok(())
+        self.sync_stack_movers()
     }
 
     /// Discards the watchpoints of a process that no longer exists or whose
@@ -756,6 +763,13 @@ impl<P: InspectionOps> Controller<P> {
                     Some(WatchpointInvalidation::OwnerThreadExited)
                 }
             }
+            WatchScope::Task { task, activation } => {
+                let evidence = record
+                    .frame
+                    .as_ref()
+                    .expect("frame-scoped watchpoints carry scope evidence");
+                self.task_watch_invalidation(inferior, record, *task, *activation, evidence)?
+            }
         })
     }
 
@@ -795,14 +809,17 @@ impl<P: InspectionOps> Controller<P> {
             cfa: None,
             signal_frame: false,
         };
-        let unproven = !x86_64_activation_has_returned(native.rsp, activation);
+        let view = self.stack_view(pid);
+        let activation = view.activation(activation);
+        let unproven = !activation.has_returned(view.position(native.rsp));
         for level in 0..DEFAULT_MAX_FRAMES {
             let caller = match provider.caller(&context) {
                 CallerResult::Caller(caller) => caller,
                 CallerResult::Finished(UnwindTermination::Complete) => return Ok(false),
                 CallerResult::Finished(_) => return Ok(unproven),
             };
-            if caller.cfa == Some(activation) {
+            let frame = caller.cfa.map(|cfa| view.activation(cfa));
+            if frame == Some(activation) {
                 let level = u32::try_from(level).expect("frame limit fits u32");
                 let Some(image_address) = frame_lookup_address(level, &context)
                     .and_then(|address| module.loaded.image_address(address).ok())
@@ -817,7 +834,7 @@ impl<P: InspectionOps> Controller<P> {
                         .iter()
                         .any(|range| range.contains(image_address)));
             }
-            if caller.cfa.is_some_and(|cfa| cfa > activation) {
+            if frame.is_some_and(|frame| activation.is_callee_of(frame)) {
                 return Ok(false);
             }
             context = caller;
@@ -851,13 +868,7 @@ impl<P: InspectionOps> Controller<P> {
                     "the object's location changes within its scope".into(),
                 ))
             }
-            StorageClass::Frame {
-                moving_stack: true, ..
-            } => Err(Error::WatchTargetUnsupported(
-                "the language runtime may move this stack object; watch a heap or global object"
-                    .into(),
-            )),
-            StorageClass::Frame { .. } => {
+            StorageClass::Frame { moving_stack, .. } => {
                 let Some(address) = local else {
                     return Err(Error::WatchTargetUnsupported(
                         "a frame-relative global has no owning activation".into(),
@@ -868,37 +879,55 @@ impl<P: InspectionOps> Controller<P> {
                     .get(&module)
                     .ok_or(Error::ModuleNotLoaded(module))?
                     .image;
-                let activation =
-                    self.resolve_frame(inferior, pid, frame)?
-                        .cfa
-                        .map_err(|error| {
-                            let reason: Arc<str> = match error {
-                                VariableRuntimeError::Unavailable(reason) => {
-                                    reason.to_string().into()
-                                }
-                                VariableRuntimeError::Malformed(reason)
-                                | VariableRuntimeError::Fatal(reason) => reason,
-                            };
-                            Error::WatchTargetUnsupported(
-                                format!("the declaring activation is unavailable: {reason}").into(),
-                            )
-                        })?;
+                let activation = self
+                    .resolve_frame(inferior, &StackRoot::of_thread(pid), frame)?
+                    .cfa
+                    .map_err(|error| {
+                        let reason: Arc<str> = match error {
+                            VariableRuntimeError::Unavailable(reason) => reason.to_string().into(),
+                            VariableRuntimeError::Malformed(reason)
+                            | VariableRuntimeError::Fatal(reason) => reason,
+                        };
+                        Error::WatchTargetUnsupported(
+                            format!("the declaring activation is unavailable: {reason}").into(),
+                        )
+                    })?;
                 let function = image.locate(address).physical_instance.ok_or_else(|| {
                     Error::WatchTargetUnsupported(
                         "no function describes the declaring activation".into(),
                     )
                 })?;
-                Ok((
-                    WatchScope::Frame {
+                let evidence = FrameScopeEvidence {
+                    module,
+                    image: image.id(),
+                    function,
+                    ranges: storage.ranges,
+                };
+                if !moving_stack {
+                    let scope = WatchScope::Frame {
                         thread: debug_thread_id(pid),
                         activation,
+                    };
+                    return Ok((scope, Some(evidence)));
+                }
+                // A stack its runtime may move is watched as its task's,
+                // wherever the task's stack is.
+                let (task, below_top) = self
+                    .stack_view(pid)
+                    .activation(activation)
+                    .on_task_stack()
+                    .ok_or_else(|| {
+                        Error::WatchTargetUnsupported(
+                            "the language runtime may move this stack, and does not say whose it is"
+                                .into(),
+                        )
+                    })?;
+                Ok((
+                    WatchScope::Task {
+                        task,
+                        activation: below_top,
                     },
-                    Some(FrameScopeEvidence {
-                        module,
-                        image: image.id(),
-                        function,
-                        ranges: storage.ranges,
-                    }),
+                    Some(evidence),
                 ))
             }
         }

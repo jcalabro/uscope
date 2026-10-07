@@ -22,7 +22,7 @@ use gimli::RunTimeEndian;
 
 use crate::debug_info::{
     Accessed, CallSite, CallSiteId, EntryParameter, Located, ObjectKey, ObjectStorage, PlannedStep,
-    Step, VariableContext, VariableInfo, VariableRuntime, VariableRuntimeError,
+    Step, TextLocation, VariableContext, VariableInfo, VariableRuntime, VariableRuntimeError,
 };
 use crate::inspection::InspectionBudget;
 use crate::{
@@ -35,12 +35,13 @@ use crate::{
 
 use super::{DieKey, DwarfError, Reader, UnitCatalog, die_code_ranges, is_type_unit};
 use die::{
-    check_data_object_capacity, data_object_scope_ranges, debug_info_offset,
+    check_data_object_capacity, copy_name, data_object_scope_ranges, debug_info_offset,
     declaration_with_origins, is_type_scope, origin_chain, strict_flag, string_with_origins,
     type_with_origins, variable_order_key,
 };
 use evaluate::FrameBaseCache;
 use globals::{load_globals, public_global_type};
+pub(in crate::debug_info) use identity::source_language;
 pub(in crate::debug_info) use inspect::{PathStep, array_byte_offset};
 use inspect::{data_object, evaluate_error_state, inspected_value};
 use location::{
@@ -55,16 +56,19 @@ mod call_sites;
 mod codec;
 mod die;
 mod evaluate;
+mod generic;
 mod globals;
 mod identity;
 mod inspect;
 mod location;
 mod pieces;
+mod returns;
 mod shape;
 mod storage;
 mod text;
 mod types;
 mod variant;
+mod visibility;
 
 const MAX_SCALAR_BYTES: u64 = 16;
 const MAX_EVALUATION_ITERATIONS: u32 = 10_000;
@@ -127,6 +131,13 @@ struct CatalogDataObject {
     lexical_depth: u32,
     order: u64,
     type_info: TypeResolution,
+    /// For a variable Go moved to the heap, which its debug information
+    /// names `&name`, the type of the pointer its location holds; the
+    /// variable is what that points to.
+    escaped: Option<TypeId>,
+    /// Whether the compiler made it for itself, such as Go's `.dict` and
+    /// `#yield1`: listings leave it out, but its name still reaches it.
+    hidden: bool,
     value: Metadata<ValueDescription>,
     frame_base: Metadata<LocationDescription>,
     malformed: Option<Arc<str>>,
@@ -144,6 +155,12 @@ struct Scope {
     /// The innermost containing inline instance, or `None` when the scope
     /// belongs directly to the physical frame.
     instance: Option<CodeInstanceId>,
+    /// The code instance whose code the scope is in: `instance`, or the
+    /// physical frame's.
+    code_instance: Option<CodeInstanceId>,
+    /// The file declaring a Go function, and so its variables, whose
+    /// declarations give only their line.
+    go_file: Option<SourceFileId>,
     malformed: Option<Arc<str>>,
     /// Whether the scope is in a subprogram's definition, abstract or
     /// concrete, rather than in a declaration inside a type.
@@ -153,12 +170,33 @@ struct Scope {
 struct CatalogFunction {
     ranges: Arc<[AddressRange<ImageAddress>]>,
     objects: Vec<usize>,
+    /// The name a Go function value calling it shows.
+    name: Option<Arc<str>>,
+    /// The variables a Go closure captured, in its context, or why they
+    /// cannot be known.
+    captures: std::result::Result<Vec<Capture>, Arc<str>>,
+    /// How the function returns its values, when that is known.
+    returns: Option<returns::ReturnConvention>,
 }
 
 /// A `DW_TAG_dwarf_procedure`, which an implicit pointer may point into.
 struct CatalogProcedure {
     location: Metadata<LocationDescription>,
 }
+
+/// One variable a Go closure captured: a copy of its value, or, when its
+/// name begins with `&`, a pointer to the variable.
+#[derive(Clone)]
+struct Capture {
+    name: Arc<str>,
+    /// Its offset in the closure's context, past the code pointer.
+    offset: u64,
+    type_info: TypeResolution,
+}
+
+/// Go's `DW_AT_go_closure_offset`: where in a closure's context a captured
+/// variable is.
+const DW_AT_GO_CLOSURE_OFFSET: gimli::DwAt = gimli::DwAt(0x2907);
 
 pub(super) struct DwarfVariableInfo {
     objects: Arc<[CatalogDataObject]>,
@@ -168,6 +206,16 @@ pub(super) struct DwarfVariableInfo {
     evaluation_units: Arc<[EvaluationUnit]>,
     types: Arc<[TypeNode]>,
     dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
+    /// Go functions by the address their code begins at, which a func
+    /// value holds.
+    go_function_entries: HashMap<ImageAddress, usize>,
+    /// The float type of complex numbers' parts, by the part's name and size.
+    complex_parts: HashMap<(Arc<str>, u64), TypeId>,
+    /// Go's type parameters: the dictionary entry each shape typedef names.
+    go_dict_indices: HashMap<TypeId, u64>,
+    /// The first type, in identifier order, each Go runtime type descriptor
+    /// offset describes.
+    go_runtime_types: HashMap<u64, TypeId>,
     objects_by_debug_offset: HashMap<u64, usize>,
     procedures: HashMap<u64, CatalogProcedure>,
     call_sites: call_sites::CallSiteCatalog,
@@ -182,6 +230,111 @@ pub(super) struct LoadedVariables {
     /// Rust trait objects' vtables, by address, with the concrete type each
     /// is for.
     pub vtables: Vec<(ImageAddress, TypeReference)>,
+    /// Integer constants the units declare at their top level, by name.
+    pub constants: BTreeMap<Arc<str>, crate::IntegerValue>,
+}
+
+/// The producer a unit names.
+fn unit_producer(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+) -> std::result::Result<Option<Arc<str>>, DwarfError> {
+    let mut entries = unit.entries();
+    let Some(root) = entries.next_dfs()? else {
+        return Ok(None);
+    };
+    super::string_attribute(dwarf, unit, root, gimli::DW_AT_producer)
+}
+
+/// The file declaring a function or inlined call's function, if known.
+fn declared_file<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    units: &[gimli::Unit<Reader<'data>>],
+    unit_index: usize,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    source_files: &mut Vec<SourceFile>,
+    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+) -> Option<SourceFileId> {
+    let chain = origin_chain(units, unit_index, entry).ok()?;
+    declaration_with_origins(
+        dwarf,
+        units,
+        &units[unit_index],
+        entry,
+        &chain,
+        source_files,
+        source_file_ids,
+    )
+    .ok()
+    .flatten()
+    .map(|declaration| declaration.file)
+}
+
+/// Each Go lexical block's code fused with its nested blocks' and inlined
+/// calls', as Delve reads them: Go may place a nested block's code
+/// outside its parent's ranges. Only blocks the fusion changes are listed.
+fn fused_block_ranges(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+    code: &super::CodeRanges,
+) -> std::result::Result<HashMap<usize, Vec<AddressRange<ImageAddress>>>, DwarfError> {
+    struct Open {
+        depth: isize,
+        offset: usize,
+        block: bool,
+        /// Its own ranges, fused; a block with none takes its parent's.
+        own: Vec<AddressRange<ImageAddress>>,
+        ranges: Vec<AddressRange<ImageAddress>>,
+    }
+    fn close(
+        open: Open,
+        stack: &mut [Open],
+        fused: &mut HashMap<usize, Vec<AddressRange<ImageAddress>>>,
+    ) {
+        let ranges = visibility::fused(open.ranges);
+        if open.block && !open.own.is_empty() && ranges != open.own {
+            fused.insert(open.offset, ranges.clone());
+        }
+        if let Some(parent) = stack.last_mut() {
+            parent.ranges.extend(ranges);
+        }
+    }
+    let mut fused = HashMap::new();
+    let mut stack = Vec::<Open>::new();
+    let mut entries = unit.entries();
+    while let Some(entry) = entries.next_dfs()? {
+        let depth = entry.depth();
+        while stack.last().is_some_and(|open| open.depth >= depth) {
+            let open = stack.pop().expect("the stack is not empty");
+            close(open, &mut stack, &mut fused);
+        }
+        let ranges = match entry.tag() {
+            gimli::DW_TAG_subprogram
+            | gimli::DW_TAG_lexical_block
+            | gimli::DW_TAG_inlined_subroutine => die_code_ranges(dwarf, unit, entry, code)?,
+            _ => continue,
+        };
+        stack.push(Open {
+            depth,
+            offset: entry.offset().0,
+            block: entry.tag() == gimli::DW_TAG_lexical_block,
+            own: visibility::fused(ranges.clone()),
+            ranges,
+        });
+    }
+    while let Some(open) = stack.pop() {
+        close(open, &mut stack, &mut fused);
+    }
+    Ok(fused)
+}
+
+/// What the image knows of its code: the instance each function DIE
+/// becomes, and what decides where Go's variables are visible.
+#[derive(Clone, Copy)]
+pub(super) struct CodeMetadata<'a> {
+    pub(super) instance_ids: &'a HashMap<DieKey, CodeInstanceId>,
+    pub(super) lines: &'a [crate::model::LineEntry],
+    pub(super) instances: &'a [crate::CodeInstanceInfo],
 }
 
 #[expect(
@@ -193,16 +346,20 @@ pub(super) fn load_variable_info<'data>(
     catalog: &UnitCatalog<'data>,
     target: TargetDescription,
     image_id: ModuleImageId,
-    instance_ids: &HashMap<DieKey, CodeInstanceId>,
+    code: CodeMetadata<'_>,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
 ) -> std::result::Result<LoadedVariables, DwarfError> {
     let units = catalog.units.as_slice();
+    let instance_ids = code.instance_ids;
+    let lines = visibility::LineIndex::new(code.lines);
+    let inline_calls = visibility::InlineCalls::new(code.instances);
     let mut objects = Vec::new();
     let mut functions = Vec::new();
     let mut calls = call_sites::CallSiteBuilder::default();
     let mut procedures = HashMap::new();
     let mut vtables = Vec::new();
+    let mut go_function_entries = HashMap::new();
     let mut order = 0_u64;
     let evaluation_units = load_evaluation_units(units)?;
     let mut types = TypeArenaBuilder::new(
@@ -226,6 +383,21 @@ pub(super) fn load_variable_info<'data>(
         if is_type_unit(unit) {
             continue;
         }
+        let go = evaluation_units[unit_index].language == Some(gimli::DW_LANG_Go);
+        // Go names the register ABI its x86-64 code calls with among the
+        // flags of each unit's producer, as `go1.27.1; -N -l regabi`.
+        let go_registers = go
+            && target.architecture == crate::Architecture::X86_64
+            && unit_producer(dwarf, unit)?.is_some_and(|producer| {
+                producer
+                    .split_once(';')
+                    .is_some_and(|(_, flags)| flags.split_whitespace().any(|flag| flag == "regabi"))
+            });
+        let fused_blocks = if go {
+            fused_block_ranges(dwarf, unit, &catalog.code)?
+        } else {
+            HashMap::new()
+        };
         let mut entries = unit.entries();
         let mut scopes = Vec::<Option<Scope>>::new();
 
@@ -247,9 +419,45 @@ pub(super) fn load_variable_info<'data>(
                     let ranges =
                         die_code_ranges(dwarf, unit, entry, &catalog.code).map(Arc::<[_]>::from)?;
                     let function = functions.len();
+                    if go && defined {
+                        // A func value holds the address its code begins at.
+                        let entry_address = entry
+                            .attr_value(gimli::DW_AT_low_pc)
+                            .map(|value| dwarf.attr_address(unit, value))
+                            .transpose()?
+                            .flatten()
+                            .map(ImageAddress::new)
+                            .filter(|address| ranges.iter().any(|range| range.contains(*address)));
+                        if let Some(address) = entry_address {
+                            go_function_entries.insert(address, function);
+                        }
+                    }
                     functions.push(CatalogFunction {
                         ranges: Arc::clone(&ranges),
                         objects: Vec::new(),
+                        // An optimized closure's out-of-line code names
+                        // its abstract origin.
+                        name: if go {
+                            origin_chain(units, unit_index, entry)
+                                .ok()
+                                .and_then(|chain| {
+                                    string_with_origins(
+                                        dwarf,
+                                        units,
+                                        unit,
+                                        entry,
+                                        &chain,
+                                        gimli::DW_AT_name,
+                                    )
+                                    .ok()
+                                })
+                                .flatten()
+                        } else {
+                            None
+                        },
+                        captures: Ok(Vec::new()),
+                        returns: (go_registers && defined)
+                            .then_some(returns::ReturnConvention::GoRegisters),
                     });
                     let frame_base = copy_optional_location(
                         dwarf,
@@ -266,21 +474,39 @@ pub(super) fn load_variable_info<'data>(
                         routine: true,
                         function,
                         instance: None,
+                        code_instance: instance_ids
+                            .get(&DieKey {
+                                unit: unit_index,
+                                offset: entry.offset().0,
+                            })
+                            .copied(),
+                        go_file: if go {
+                            declared_file(
+                                dwarf,
+                                units,
+                                unit_index,
+                                entry,
+                                source_files,
+                                source_file_ids,
+                            )
+                        } else {
+                            None
+                        },
                         malformed: None,
                         defined,
                     })
                 }
                 gimli::DW_TAG_lexical_block => parent.as_ref().map(|parent| {
-                    let (ranges, malformed) =
-                        match die_code_ranges(dwarf, unit, entry, &catalog.code)
-                            .map(Arc::<[_]>::from)
-                        {
-                            Ok(ranges) if !ranges.is_empty() => (ranges, None),
-                            Ok(_) => (Arc::clone(&parent.ranges), None),
-                            Err(error) => {
-                                (Arc::clone(&parent.ranges), Some(error.to_string().into()))
-                            }
-                        };
+                    // A Go block's code includes its nested blocks'.
+                    let own = fused_blocks.get(&entry.offset().0).map_or_else(
+                        || die_code_ranges(dwarf, unit, entry, &catalog.code),
+                        |fused| Ok(fused.clone()),
+                    );
+                    let (ranges, malformed) = match own.map(Arc::<[_]>::from) {
+                        Ok(ranges) if !ranges.is_empty() => (ranges, None),
+                        Ok(_) => (Arc::clone(&parent.ranges), None),
+                        Err(error) => (Arc::clone(&parent.ranges), Some(error.to_string().into())),
+                    };
                     Scope {
                         ranges,
                         lexical_depth: parent.lexical_depth.saturating_add(1),
@@ -288,6 +514,8 @@ pub(super) fn load_variable_info<'data>(
                         routine: parent.routine,
                         function: parent.function,
                         instance: parent.instance,
+                        code_instance: parent.code_instance,
+                        go_file: parent.go_file,
                         malformed: malformed.or_else(|| parent.malformed.clone()),
                         defined: parent.defined,
                     }
@@ -327,6 +555,19 @@ pub(super) fn load_variable_info<'data>(
                         routine: true,
                         function: parent.function,
                         instance,
+                        code_instance: instance,
+                        go_file: if go {
+                            declared_file(
+                                dwarf,
+                                units,
+                                unit_index,
+                                entry,
+                                source_files,
+                                source_file_ids,
+                            )
+                        } else {
+                            None
+                        },
                         malformed: malformed.or_else(|| parent.malformed.clone()),
                         defined: parent.defined,
                     }
@@ -395,6 +636,31 @@ pub(super) fn load_variable_info<'data>(
                 gimli::DW_TAG_formal_parameter => Some(VariableKind::Parameter),
                 _ => None,
             };
+            if entry.tag() == gimli::DW_TAG_variable
+                && let Some(scope) = parent.as_ref().filter(|scope| scope.routine)
+                && let Some(offset) = entry.attr_value(DW_AT_GO_CLOSURE_OFFSET)
+            {
+                let (type_unit, type_value) = type_with_origins(unit_index, entry, &[]);
+                let capture = match (offset.udata_value(), copy_name(dwarf, unit, entry)) {
+                    (Some(offset), Ok(Some(name))) => Ok(Capture {
+                        name,
+                        offset,
+                        type_info: types.variable_type(type_unit, type_value),
+                    }),
+                    _ => Err(Arc::from("a closure's captured variable is malformed")),
+                };
+                // One capture it cannot describe leaves them all unknown,
+                // rather than the closure seeming to capture less.
+                let captures = &mut functions[scope.function].captures;
+                match capture {
+                    Ok(capture) => {
+                        if let Ok(captures) = captures {
+                            captures.push(capture);
+                        }
+                    }
+                    Err(reason) => *captures = Err(reason),
+                }
+            }
             if let Some(kind) = kind {
                 let owning_scope = parent.as_ref().filter(|scope| {
                     !scope.ranges.is_empty() && (kind == VariableKind::Local || scope.routine)
@@ -412,8 +678,27 @@ pub(super) fn load_variable_info<'data>(
                         Ok(chain) => (chain, None),
                         Err(error) => (Vec::new(), Some(Arc::from(error.to_string()))),
                     };
+                    // Go marks its results as variable parameters.
+                    let kind = if kind == VariableKind::Parameter
+                        && go
+                        && entry
+                            .attr_value(gimli::DW_AT_variable_parameter)
+                            .or_else(|| {
+                                chain.iter().find_map(|(_, origin)| {
+                                    origin.attr_value(gimli::DW_AT_variable_parameter)
+                                })
+                            })
+                            .is_some_and(|value| {
+                                matches!(value, gimli::AttributeValue::Flag(true))
+                                    || value.udata_value() == Some(1)
+                            }) {
+                        VariableKind::Result
+                    } else {
+                        kind
+                    };
                     let object_name = match kind {
                         VariableKind::Parameter => "parameter",
+                        VariableKind::Result | VariableKind::Returned => "result",
                         VariableKind::Local => "variable",
                         VariableKind::Global => "global",
                     };
@@ -446,9 +731,69 @@ pub(super) fn load_variable_info<'data>(
                         &chain,
                         source_files,
                         source_file_ids,
-                    );
+                    )
+                    .map(|declaration| {
+                        // Go gives a variable's line alone: its file is
+                        // its function's.
+                        declaration.or_else(|| {
+                            let line = entry
+                                .attr(gimli::DW_AT_decl_line)
+                                .and_then(gimli::Attribute::udata_value)
+                                .and_then(crate::LineNumber::new)?;
+                            Some(SourceLocation {
+                                file: scope.go_file?,
+                                line,
+                                column: None,
+                            })
+                        })
+                    });
                     let (ranges, scope_error) = data_object_scope_ranges(scope, entry);
+                    // A Go local exists from the line after its declaration.
+                    let ranges = match (go, kind, &declaration) {
+                        (true, VariableKind::Local, Ok(Some(declared))) => {
+                            visibility::after_declaration(
+                                &ranges,
+                                declared,
+                                &lines,
+                                inline_calls.within(scope.code_instance),
+                            )
+                            .into()
+                        }
+                        _ => ranges,
+                    };
                     let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
+                    let type_info = types.variable_type(type_unit, type_value);
+                    // Go names a variable it moved to the heap `&name`, and
+                    // describes the pointer to it.
+                    let (name, type_info, escaped) = match (go, name.strip_prefix('&')) {
+                        (true, Some(variable)) => {
+                            let variable = Arc::from(variable);
+                            match type_info {
+                                TypeResolution::Resolved(pointer) => match types.pointee(pointer) {
+                                    Some(target) => (
+                                        variable,
+                                        TypeResolution::Resolved(target),
+                                        Some(pointer),
+                                    ),
+                                    None => (
+                                        variable,
+                                        TypeResolution::Malformed(
+                                            "a variable Go moved to the heap is not described by a pointer"
+                                                .into(),
+                                        ),
+                                        None,
+                                    ),
+                                },
+                                malformed @ TypeResolution::Malformed(_) => {
+                                    (variable, malformed, None)
+                                }
+                            }
+                        }
+                        _ => (name, type_info, None),
+                    };
+                    // Go starts the names of its own variables with
+                    // characters no Go identifier can.
+                    let hidden = go && name.starts_with(['.', '#']);
                     check_data_object_capacity(objects.len())?;
                     functions[scope.function].objects.push(objects.len());
                     objects.push(CatalogDataObject {
@@ -460,7 +805,9 @@ pub(super) fn load_variable_info<'data>(
                         instance: scope.instance,
                         lexical_depth: scope.lexical_depth,
                         order,
-                        type_info: types.variable_type(type_unit, type_value),
+                        type_info,
+                        escaped,
+                        hidden,
                         value: copy_data_object_value(dwarf, unit_index, unit, entry),
                         frame_base: scope.frame_base.clone(),
                         malformed: declaration
@@ -494,6 +841,7 @@ pub(super) fn load_variable_info<'data>(
         .enumerate()
         .filter_map(|(index, object)| object.debug_info_offset.map(|offset| (offset, index)))
         .collect();
+    let constants = types.named_constants();
     types.populate_go_named_constants();
     types.populate_record_member_declarations(source_files, source_file_ids);
     types.finalize_type_graph();
@@ -526,6 +874,18 @@ pub(super) fn load_variable_info<'data>(
             }
         })
         .collect::<Arc<[_]>>();
+    let mut go_runtime_types = HashMap::new();
+    for node in finalized_types.iter() {
+        if let TypeNode::Resolved(info) = node
+            && let Some(offset) = info
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.go)
+                .and_then(|go| go.runtime_type)
+        {
+            go_runtime_types.entry(offset).or_insert(info.reference.id);
+        }
+    }
     Ok(LoadedVariables {
         info: Arc::new(DwarfVariableInfo {
             objects: objects.into(),
@@ -538,6 +898,10 @@ pub(super) fn load_variable_info<'data>(
             evaluation_units: evaluation_units.into(),
             types: Arc::clone(&finalized_types),
             dynamic_record_layouts: types.dynamic_record_layouts,
+            go_function_entries,
+            complex_parts: types.complex_parts,
+            go_dict_indices: types.go_dict_indices,
+            go_runtime_types,
             objects_by_debug_offset,
             procedures,
             call_sites: calls.finish(),
@@ -549,6 +913,7 @@ pub(super) fn load_variable_info<'data>(
         }),
         globals,
         types: finalized_types,
+        constants,
         vtables: vtables
             .into_iter()
             .map(|(address, id)| {
@@ -619,6 +984,7 @@ impl VariableInfo for DwarfVariableInfo {
                     .map(|&index| &self.objects[index])
                     .filter(|object| {
                         object.instance == selected
+                            && !object.hidden
                             && object.ranges.iter().any(|range| range.contains(address))
                     })
                     .collect()
@@ -693,6 +1059,12 @@ impl VariableInfo for DwarfVariableInfo {
                 ))));
             }
         };
+        // A generic value has its type argument, laid out as its shape.
+        let ty = match self.generic_type(ty, variable.instance, address, runtime, budget)? {
+            generic::Generic::Resolved(argument) => argument,
+            generic::Generic::Unresolved(shape, _) => shape,
+            generic::Generic::Plain => ty,
+        };
         match self.located_data_object(variable, address, runtime, &mut frame_base, budget) {
             Ok(storage) => Ok(Ok(Located { ty, storage })),
             Err(error) => {
@@ -754,6 +1126,25 @@ impl VariableInfo for DwarfVariableInfo {
         }
     }
 
+    fn text_span(
+        &self,
+        at: &Located,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<std::result::Result<Option<TextLocation>, VariableState>> {
+        let state = self.decode_state(at.ty, &at.storage, context, runtime, budget)?;
+        let VariableState::Available { value, .. } = state else {
+            return Ok(Err(state));
+        };
+        let Ok(shape) = self.value_shape(at.ty) else {
+            return Ok(Ok(None));
+        };
+        Ok(self
+            .text_location(at.ty, &shape, &value, &at.storage, runtime, budget)
+            .map_err(VariableState::Unavailable))
+    }
+
     fn materialize(
         &self,
         at: &Located,
@@ -804,6 +1195,15 @@ impl VariableInfo for DwarfVariableInfo {
         }
         let mut frame_base = FrameBaseCache::Empty;
         self.inspect_data_object(object, address, context, runtime, &mut frame_base, budget)
+    }
+
+    fn returned(
+        &self,
+        function: ImageAddress,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<Option<Vec<crate::debug_info::ReturnedValue>>> {
+        self.returned_values(function, runtime, budget)
     }
 
     fn dereference(
@@ -902,6 +1302,10 @@ pub(super) fn fuzz_expression(data: &[u8]) {
 
         fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>> {
             Ok(VirtualAddress::new(address.get()))
+        }
+
+        fn image_address(&self, address: VirtualAddress) -> Option<ImageAddress> {
+            Some(ImageAddress::new(address.get()))
         }
 
         fn read_memory(

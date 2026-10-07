@@ -7,7 +7,7 @@ use uscope::{
     BaseTypeEncoding, ByteOrder, DebuggerHandle, InspectionExhaustion, InspectionLimit,
     InspectionLimits, IntegerValue, ModuleImage, Presentation, PresentedCount, PresentedShape,
     ScalarValue, TypeInfo, TypeKind, ValueChildPage, ValueChildQuery, ValueChildRelationship,
-    ValueChildren, ValueChildrenReference, Variable, VariableSnapshot, VariableState,
+    ValueChildren, ValueChildrenReference, Variable, VariableKind, VariableSnapshot, VariableState,
     VariableValue,
 };
 
@@ -190,7 +190,16 @@ pub fn variables_marked(
     output.into_string()
 }
 
-fn variable_summary(variable: &Variable, renderer: Renderer) -> String {
+/// One variable on a line; a value a finished function returned says so.
+pub fn variable_summary(variable: &Variable, renderer: Renderer) -> String {
+    let line = variable_line(variable, renderer);
+    if variable.kind == VariableKind::Returned {
+        return format!("{} {line}", renderer.paint(Role::Metadata, "returned"));
+    }
+    line
+}
+
+fn variable_line(variable: &Variable, renderer: Renderer) -> String {
     let Some(type_info) = &variable.type_info else {
         return untyped(&variable.name, &variable.state, renderer);
     };
@@ -325,6 +334,13 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
             match matches.as_ref() {
                 [] => raw,
                 [enumerator] => format!("{} ({raw})", enumerator.name),
+                // Flags whose bitwise OR the value is.
+                flags if flags.iter().all(|flag| flag.value != *value) => {
+                    format!(
+                        "{} ({raw})",
+                        uscope::symbol_text(*value, flags).unwrap_or_default()
+                    )
+                }
                 aliases => format!(
                     "{raw} <{}>",
                     aliases
@@ -343,6 +359,9 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
             format!("0x{:0width$x}", value.address.get())
         }
         VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
+        VariableValue::Function { code, function } => {
+            uscope::function_text(*code, function.as_deref())
+        }
         VariableValue::Array { .. } => format!("[<{total} elements>]"),
         VariableValue::Slice { length, capacity } => capacity.map_or_else(
             || format!("[<{length} elements>]"),
@@ -755,18 +774,25 @@ pub async fn expanded(
         )
         .await?;
         let (opening, closing) = match value {
-            VariableValue::Array { .. } | VariableValue::Slice { .. } => ("[", "]".to_owned()),
+            VariableValue::Array { .. } | VariableValue::Slice { .. } => {
+                ("[".to_owned(), "]".to_owned())
+            }
+            // A closure is its function and what it captured.
+            VariableValue::Function { code, function } => (
+                format!("{} {{", uscope::function_text(*code, function.as_deref())),
+                "}".to_owned(),
+            ),
             VariableValue::Variant { active, .. } => (
-                "{",
+                "{".to_owned(),
                 active
                     .as_ref()
                     .and_then(|variant| variant.name.as_deref())
                     .map_or_else(|| "}".to_owned(), |name| format!("}}<{name}>")),
             ),
-            VariableValue::Union => ("{", "} <active member unknown>".to_owned()),
-            _ => ("{", "}".to_owned()),
+            VariableValue::Union => ("{".to_owned(), "} <active member unknown>".to_owned()),
+            _ => ("{".to_owned(), "}".to_owned()),
         };
-        output.open(opening.to_owned());
+        output.open(opening);
         work.push(Work::Close(closing));
         schedule_children(&mut work, reference.total(), page.as_ref(), depth + 1, raw);
     }
@@ -916,12 +942,12 @@ pub fn watched_bytes(
             }
         }
         (Some(WatchedScalar::Boolean), 1) => (bytes[0] != 0).to_string(),
-        (Some(WatchedScalar::Float), 4) => {
-            f32::from_le_bytes(bytes.try_into().expect("four bytes")).to_string()
-        }
-        (Some(WatchedScalar::Float), 8) => {
-            f64::from_le_bytes(bytes.try_into().expect("eight bytes")).to_string()
-        }
+        (Some(WatchedScalar::Float), 4) => uscope::float_text(uscope::FloatValue::Binary32(
+            u32::from_le_bytes(bytes.try_into().expect("four bytes")),
+        )),
+        (Some(WatchedScalar::Float), 8) => uscope::float_text(uscope::FloatValue::Binary64(
+            u64::from_le_bytes(bytes.try_into().expect("eight bytes")),
+        )),
         (Some(WatchedScalar::Address), 8) => format!("{:#x}", little_endian(bytes)),
         _ => register_bytes(bytes, ByteOrder::Little),
     }
@@ -941,6 +967,7 @@ fn watched_scalar(type_info: &TypeInfo, image: Option<&ModuleImage>) -> Option<W
                 return Some(match base.encoding {
                     BaseTypeEncoding::Boolean => WatchedScalar::Boolean,
                     BaseTypeEncoding::Floating => WatchedScalar::Float,
+                    BaseTypeEncoding::ComplexFloating => return None,
                     BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter => {
                         WatchedScalar::Integer { signed: true }
                     }
@@ -1166,6 +1193,32 @@ mod tests {
                 sign_exponent: 0x4000,
             }),
             "3.125"
+        );
+        // Shortest round-trip digits, with an exponent where plain digits
+        // would run to hundreds of zeros.
+        let double = |value: f64| float(uscope::FloatValue::Binary64(value.to_bits()));
+        assert_eq!(double(3e300), "3e300");
+        assert_eq!(double(1e21), "1e21");
+        assert_eq!(
+            double(123_456_789_012_345_680_000.0),
+            "123456789012345680000"
+        );
+        assert_eq!(double(0.000_001), "0.000001");
+        assert_eq!(double(-1.5e-7), "-1.5e-7");
+        assert_eq!(double(0.1), "0.1");
+        assert_eq!(
+            float(uscope::FloatValue::Binary32(f32::MAX.to_bits())),
+            "3.4028235e38"
+        );
+        assert_eq!(
+            uscope::scalar_text(
+                &ScalarValue::Complex {
+                    real: uscope::FloatValue::Binary64(1.5_f64.to_bits()),
+                    imaginary: uscope::FloatValue::Binary64((-2.0_f64).to_bits()),
+                },
+                false
+            ),
+            "(1.5-2i)"
         );
     }
 

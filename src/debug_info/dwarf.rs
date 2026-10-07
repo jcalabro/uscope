@@ -16,10 +16,10 @@ use crate::model::{LineEntry, ModuleMetadata};
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     AddressRange, Architecture, BreakpointEntry, ByteOrder, CodeInstanceId, CodeInstanceInfo,
-    CodeInstanceKind, ColumnNumber, EntryProvenance, Error, FunctionId, FunctionInfo, ImageAddress,
-    LineNumber, LineSequenceId, ModuleImage, PointerWidth, Result, SourceFile, SourceFileId,
-    SourceLocation, StatementFlags, StatementRow, TargetDescription, UnwindTermination,
-    VirtualAddress,
+    CodeInstanceKind, ColumnNumber, EmbeddedSymbolTable, EntryProvenance, Error, FunctionId,
+    FunctionInfo, ImageAddress, LineNumber, LineSequenceId, ModuleImage, PointerWidth, Result,
+    SourceFile, SourceFileId, SourceLanguage, SourceLocation, StatementFlags, StatementRow,
+    TargetDescription, UnwindTermination, VirtualAddress,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -137,6 +137,8 @@ pub(super) fn fuzz_expression(data: &[u8]) {
 struct DwarfUnwindInfo {
     eh_frame: Arc<[u8]>,
     debug_frame: Arc<[u8]>,
+    eh_frame_index: FdeIndex,
+    debug_frame_index: FdeIndex,
     endian: RunTimeEndian,
     address_size: u8,
     bases: BaseAddresses,
@@ -144,6 +146,9 @@ struct DwarfUnwindInfo {
     /// convention lets a callee overwrite registers the System V ABI
     /// preserves.
     go_code: Vec<AddressRange<ImageAddress>>,
+    /// Go's function table, which unwinds Go code no call-frame information
+    /// describes and says where Go frames saved the frame pointer.
+    go: Option<Arc<super::gopclntab::GoUnwind>>,
 }
 
 pub fn load(path: &Path, image_id: crate::ModuleImageId) -> Result<DebugInfo> {
@@ -155,6 +160,10 @@ pub fn load_bytes(path: &Path, data: &[u8], image_id: crate::ModuleImageId) -> R
     load_debug_info(path, data, image_id).map_err(Error::debug_info)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one loader assembles every table of an image from its sources"
+)]
 fn load_debug_info(
     path: &Path,
     data: &[u8],
@@ -200,8 +209,19 @@ fn load_debug_info(
         code: CodeRanges(super::elf::executable_ranges(&object)),
     };
 
-    let mut function_metadata =
-        load_function_metadata(&dwarf, &catalog, &mut source_files, &mut source_file_ids)?;
+    // Go's own function table, which the runtime reads and stripping keeps.
+    let (mut go_table, mut runtime_function_table) = match super::gopclntab::load(&object) {
+        Ok(Some(table)) => (Some(Arc::new(table)), EmbeddedSymbolTable::Loaded),
+        Ok(None) => (None, EmbeddedSymbolTable::Absent),
+        Err(error) => (None, unusable_table(&error)),
+    };
+    let mut function_metadata = load_function_metadata(
+        &dwarf,
+        &catalog,
+        go_table.as_deref(),
+        &mut source_files,
+        &mut source_file_ids,
+    )?;
 
     for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
         load_lines(
@@ -216,6 +236,32 @@ fn load_debug_info(
         )?;
     }
 
+    // Code no DWARF describes, such as a stripped image's, gets functions
+    // and lines from the function table.
+    let code = |address: u64, length: usize| {
+        code_bytes(&object, address, address.checked_add(length as u64)?)
+    };
+    if let Some(table) = &go_table
+        && let Err(error) = super::gopclntab::complete_metadata(
+            table,
+            code,
+            &mut super::gopclntab::Catalog {
+                functions: &mut function_metadata.functions,
+                code_instances: &mut function_metadata.code_instances,
+                statements: &mut statements,
+                lines: &mut lines,
+                next_sequence: &mut next_sequence,
+                source_file: &mut |path| {
+                    source_file_id(path, &mut source_files, &mut source_file_ids)
+                },
+            },
+        )
+    {
+        runtime_function_table = unusable_table(&error);
+        go_table = None;
+    }
+
+    super::roles::link_loop_bodies(&mut function_metadata.functions);
     refine_proved_prologue_entries(
         &object,
         target,
@@ -228,13 +274,24 @@ fn load_debug_info(
         &catalog,
         target,
         image_id,
-        &function_metadata.instance_ids,
+        variables::CodeMetadata {
+            instance_ids: &function_metadata.instance_ids,
+            lines: &lines,
+            instances: &function_metadata.code_instances,
+        },
         &mut source_files,
         &mut source_file_ids,
     )?;
     let go_code = go_code_ranges(&dwarf, &catalog)?;
-    let unwind = Arc::new(load_unwind_info(&object, target, go_code)?);
-    let symbols = super::elf::load_symbols(&object, &unwind.function_ranges());
+    let go_unwind = go_table
+        .as_ref()
+        .map(|table| Arc::new(super::gopclntab::GoUnwind::new(Arc::clone(table), code)));
+    let unwind = Arc::new(load_unwind_info(&object, target, go_code, go_unwind)?);
+    let mut symbols = super::elf::load_symbols(&object, &unwind.function_ranges());
+    symbols.sources.runtime_function_table = runtime_function_table;
+    if let Some(table) = &go_table {
+        assign_go_symbol_roles(table, &mut symbols.symbols);
+    }
     let image = Arc::new(
         ModuleImage::new(
             path.to_owned(),
@@ -248,11 +305,15 @@ fn load_debug_info(
                 globals: variables.globals,
                 types: variables.types,
                 vtables: variables.vtables,
+                constants: variables.constants,
+                producers: unit_producers(&dwarf, &catalog)?,
+                packages: go_packages(&dwarf, &catalog)?,
                 source_files,
                 statements,
                 lines,
                 sections: super::elf::load_sections(&object),
                 thread_local_storage: super::elf::has_thread_local_storage(&object),
+                thread_locals: super::elf::load_thread_locals(&object),
             },
         )
         .with_id(image_id)
@@ -279,6 +340,75 @@ fn embedded_views(
         .file_name()
         .map_or_else(|| "module".into(), |name| name.to_string_lossy());
     Ok(Arc::new(crate::view::embedded::view_set(&module, &bytes)))
+}
+
+/// The distinct producers the units name, in the order first named.
+fn unit_producers<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    catalog: &UnitCatalog<'data>,
+) -> std::result::Result<Vec<Arc<str>>, DwarfError> {
+    let mut producers = Vec::<Arc<str>>::new();
+    for unit in &catalog.units {
+        let mut entries = unit.entries();
+        let Some(root) = entries.next_dfs()? else {
+            continue;
+        };
+        if let Some(producer) = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?
+            && !producers.contains(&producer)
+        {
+            producers.push(producer);
+        }
+    }
+    Ok(producers)
+}
+
+/// Go's attribute naming the package a unit compiles, which its
+/// `DW_AT_name` names by import path.
+const DW_AT_GO_PACKAGE_NAME: gimli::DwAt = gimli::DwAt(0x2905);
+
+/// The Go packages the image has units for, with the names their code
+/// declares.
+fn go_packages(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    catalog: &UnitCatalog<'_>,
+) -> std::result::Result<Vec<crate::model::PackageInfo>, DwarfError> {
+    let mut packages = Vec::new();
+    for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
+        let mut entries = unit.entries();
+        let Some(root) = entries.next_dfs()? else {
+            continue;
+        };
+        if let (Some(path), Some(name)) = (
+            string_attribute(dwarf, unit, root, gimli::DW_AT_name)?,
+            string_attribute(dwarf, unit, root, DW_AT_GO_PACKAGE_NAME)?,
+        ) {
+            packages.push(crate::model::PackageInfo { path, name });
+        }
+    }
+    Ok(packages)
+}
+
+fn unusable_table(error: &super::gopclntab::PclntabError) -> EmbeddedSymbolTable {
+    EmbeddedSymbolTable::Unusable {
+        reason: error.to_string().into(),
+    }
+}
+
+/// Gives each symbol naming a Go function's entry the role the function
+/// table records for it. Its name is the table's, without the ELF symbol's
+/// ABI suffix.
+fn assign_go_symbol_roles(table: &super::gopclntab::GoTable, symbols: &mut [crate::SymbolInfo]) {
+    for symbol in symbols {
+        let Some(function) = table
+            .function_containing(symbol.address.get())
+            .filter(|function| function.entry == symbol.address.get() && function.is_go())
+        else {
+            continue;
+        };
+        if let Ok(name) = table.name(function) {
+            symbol.role = super::roles::go_role(&name, Some(function.facts), false);
+        }
+    }
 }
 
 /// Returns the code ranges of every unit written in Go, merged and sorted
@@ -383,6 +513,7 @@ fn load_unwind_info(
     object: &object::File<'_>,
     target: TargetDescription,
     go_code: Vec<AddressRange<ImageAddress>>,
+    go: Option<Arc<super::gopclntab::GoUnwind>>,
 ) -> std::result::Result<DwarfUnwindInfo, DwarfError> {
     let section_data = |name| -> std::result::Result<Arc<[u8]>, DwarfError> {
         Ok(object
@@ -404,9 +535,11 @@ fn load_unwind_info(
         bases = bases.set_got(section.address());
     }
 
-    Ok(DwarfUnwindInfo {
+    let mut unwind = DwarfUnwindInfo {
         eh_frame: section_data(".eh_frame")?,
         debug_frame: section_data(".debug_frame")?,
+        eh_frame_index: FdeIndex::default(),
+        debug_frame_index: FdeIndex::default(),
         endian: match target.byte_order {
             ByteOrder::Little => RunTimeEndian::Little,
             ByteOrder::Big => RunTimeEndian::Big,
@@ -414,7 +547,102 @@ fn load_unwind_info(
         address_size: target.pointer_width.bytes(),
         bases,
         go_code,
-    })
+        go,
+    };
+    unwind.eh_frame_index = FdeIndex::new(&unwind.eh_frame(), &unwind.bases);
+    unwind.debug_frame_index = FdeIndex::new(&unwind.debug_frame(), &unwind.bases);
+    Ok(unwind)
+}
+
+/// The frame description entries of one call-frame section, indexed once by
+/// address so that finding an address's entry is a binary search rather
+/// than a walk of the section. Lookups agree exactly with gimli's walk
+/// (`UnwindSection::fde_for_address`), which returns the first entry in
+/// section order that contains the address, or the first error before it.
+#[derive(Debug, Default)]
+struct FdeIndex {
+    /// Every entry that parses and covers some code, sorted by start.
+    entries: Vec<IndexedFde>,
+    /// The greatest end among `entries[..=i]`, which bounds how far back a
+    /// lookup must look when entries overlap.
+    reach: Vec<u64>,
+    /// The section offset of the first entry that fails to parse, or
+    /// `usize::MAX` when the section itself is malformed and enumeration
+    /// stops, with the error. A walk of the section stops there.
+    first_error: Option<(usize, gimli::Error)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IndexedFde {
+    start: u64,
+    end: u64,
+    offset: usize,
+}
+
+impl FdeIndex {
+    fn new<'data, S>(section: &S, bases: &BaseAddresses) -> Self
+    where
+        S: UnwindSection<Reader<'data>>,
+    {
+        let mut index = Self::default();
+        let mut entries = section.entries(bases);
+        loop {
+            let partial = match entries.next() {
+                Ok(Some(gimli::CieOrFde::Fde(partial))) => partial,
+                Ok(Some(gimli::CieOrFde::Cie(_))) => continue,
+                Ok(None) => break,
+                Err(error) => {
+                    index.first_error.get_or_insert((usize::MAX, error));
+                    break;
+                }
+            };
+            match partial.parse(S::cie_from_offset) {
+                Ok(fde) if fde.initial_address() < fde.end_address() => {
+                    index.entries.push(IndexedFde {
+                        start: fde.initial_address(),
+                        end: fde.end_address(),
+                        offset: fde.offset(),
+                    });
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    index
+                        .first_error
+                        .get_or_insert_with(|| (partial.offset(), error));
+                }
+            }
+        }
+        index
+            .entries
+            .sort_unstable_by_key(|fde| (fde.start, fde.offset));
+        index.reach = index
+            .entries
+            .iter()
+            .scan(0, |reach, fde| {
+                *reach = fde.end.max(*reach);
+                Some(*reach)
+            })
+            .collect();
+        index
+    }
+
+    /// The section offset of the entry describing `address`.
+    fn lookup(&self, address: u64) -> gimli::Result<usize> {
+        let after = self.entries.partition_point(|fde| fde.start <= address);
+        let first = (0..after)
+            .rev()
+            .take_while(|&index| self.reach[index] > address)
+            .map(|index| self.entries[index])
+            .filter(|fde| address < fde.end)
+            .map(|fde| fde.offset)
+            .min();
+        match (first, self.first_error) {
+            (Some(offset), Some((error_offset, _))) if offset < error_offset => Ok(offset),
+            (Some(offset), None) => Ok(offset),
+            (_, Some((_, error))) => Err(error),
+            (None, None) => Err(gimli::Error::NoUnwindInfoForAddress),
+        }
+    }
 }
 
 impl DwarfUnwindInfo {
@@ -422,10 +650,15 @@ impl DwarfUnwindInfo {
     /// describes. Enumeration stops at the first malformed entry, so the
     /// result is evidence of function boundaries rather than a complete map.
     fn function_ranges(&self) -> Vec<AddressRange<ImageAddress>> {
-        let mut ranges = Vec::new();
-        collect_function_ranges(&self.eh_frame(), &self.bases, &mut ranges);
-        collect_function_ranges(&self.debug_frame(), &self.bases, &mut ranges);
-        ranges
+        self.eh_frame_index
+            .entries
+            .iter()
+            .chain(&self.debug_frame_index.entries)
+            .map(|fde| AddressRange {
+                start: ImageAddress::new(fde.start),
+                end: ImageAddress::new(fde.end),
+            })
+            .collect()
     }
 
     fn eh_frame(&self) -> EhFrame<Reader<'_>> {
@@ -444,37 +677,12 @@ impl DwarfUnwindInfo {
     /// without saving them, by the calling convention it follows.
     fn call_clobbered_registers(&self, address: ImageAddress) -> &'static [u16] {
         let after = self.go_code.partition_point(|range| range.start <= address);
-        if after > 0 && self.go_code[after - 1].contains(address) {
+        if after > 0 && self.go_code[after - 1].contains(address)
+            || self.go.as_ref().is_some_and(|go| go.is_go(address.get()))
+        {
             &X86_64_GO_CALL_CLOBBERED_REGISTERS
         } else {
             &X86_64_SYSV_CALL_CLOBBERED_REGISTERS
-        }
-    }
-}
-
-fn collect_function_ranges<'data, S>(
-    section: &S,
-    bases: &BaseAddresses,
-    ranges: &mut Vec<AddressRange<ImageAddress>>,
-) where
-    S: UnwindSection<Reader<'data>>,
-{
-    let mut entries = section.entries(bases);
-    while let Ok(Some(entry)) = entries.next() {
-        let gimli::CieOrFde::Fde(partial) = entry else {
-            continue;
-        };
-        let Ok(fde) = partial.parse(S::cie_from_offset) else {
-            continue;
-        };
-        let start = fde.initial_address();
-        if let Some(end) = start.checked_add(fde.len())
-            && start < end
-        {
-            ranges.push(AddressRange {
-                start: ImageAddress::new(start),
-                end: ImageAddress::new(end),
-            });
         }
     }
 }
@@ -486,11 +694,32 @@ impl UnwindInfo for DwarfUnwindInfo {
         registers: &RegisterFile,
         memory: &mut dyn MemoryReader,
     ) -> std::result::Result<VirtualAddress, UnwindTermination> {
-        let result = cfa_from_section(&self.eh_frame(), &self.bases, address, registers, memory);
+        let result = cfa_from_section(
+            &self.eh_frame(),
+            &self.eh_frame_index,
+            &self.bases,
+            address,
+            registers,
+            memory,
+        );
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
-        cfa_from_section(&self.debug_frame(), &self.bases, address, registers, memory)
+        let result = cfa_from_section(
+            &self.debug_frame(),
+            &self.debug_frame_index,
+            &self.bases,
+            address,
+            registers,
+            memory,
+        );
+        if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
+            return result;
+        }
+        self.go
+            .as_ref()
+            .and_then(|go| go.cfa(address.get(), registers))
+            .unwrap_or(result)
     }
 
     fn unwind(
@@ -502,28 +731,45 @@ impl UnwindInfo for DwarfUnwindInfo {
         let clobbered = self.call_clobbered_registers(address);
         let result = unwind_from_section(
             &self.eh_frame(),
+            &self.eh_frame_index,
             &self.bases,
             address,
             registers,
             clobbered,
             memory,
         );
-        if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
+        let result = if matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
+            unwind_from_section(
+                &self.debug_frame(),
+                &self.debug_frame_index,
+                &self.bases,
+                address,
+                registers,
+                clobbered,
+                memory,
+            )
+        } else {
+            result
+        };
+        let Some(go) = &self.go else {
             return result;
-        }
-        unwind_from_section(
-            &self.debug_frame(),
-            &self.bases,
-            address,
-            registers,
-            clobbered,
-            memory,
-        )
+        };
+        let result = match result {
+            Err(UnwindTermination::NoUnwindInfo { .. }) => go
+                .unwind(address.get(), registers, clobbered, memory)
+                .unwrap_or(result),
+            result => result,
+        };
+        result.map(|mut step| {
+            go.recover_frame_pointer(address.get(), registers, &mut step, memory);
+            step
+        })
     }
 }
 
 fn cfa_from_section<'data, S>(
     section: &S,
+    index: &FdeIndex,
     bases: &BaseAddresses,
     address: ImageAddress,
     registers: &RegisterFile,
@@ -533,13 +779,14 @@ where
     S: UnwindSection<Reader<'data>>,
 {
     let mut context = UnwindContext::new();
-    let (fde, row) = unwind_row(section, bases, address, &mut context)?;
+    let (fde, row) = unwind_row(section, index, bases, address, &mut context)?;
     cfa_from_rule(row.cfa(), registers, section, fde.cie().encoding(), memory)
 }
 
 /// The call-frame row in effect at `address`, and the entry holding it.
 fn unwind_row<'data, 'context, S>(
     section: &S,
+    index: &FdeIndex,
     bases: &BaseAddresses,
     address: ImageAddress,
     context: &'context mut UnwindContext<usize>,
@@ -553,8 +800,9 @@ fn unwind_row<'data, 'context, S>(
 where
     S: UnwindSection<Reader<'data>>,
 {
-    let fde = section
-        .fde_for_address(bases, address.get(), S::cie_from_offset)
+    let fde = index
+        .lookup(address.get())
+        .and_then(|offset| section.fde_from_offset(bases, offset.into(), S::cie_from_offset))
         .map_err(|error| cfi_error(error, address))?;
     let row = fde
         .unwind_info_for_address(section, bases, context, address.get())
@@ -564,6 +812,7 @@ where
 
 fn unwind_from_section<'data, S>(
     section: &S,
+    index: &FdeIndex,
     bases: &BaseAddresses,
     address: ImageAddress,
     registers: &RegisterFile,
@@ -574,7 +823,7 @@ where
     S: UnwindSection<Reader<'data>>,
 {
     let mut context = UnwindContext::new();
-    let (fde, row) = unwind_row(section, bases, address, &mut context)?;
+    let (fde, row) = unwind_row(section, index, bases, address, &mut context)?;
     let return_register = fde.cie().return_address_register().0;
     let cfa = cfa_from_rule(row.cfa(), registers, section, fde.cie().encoding(), memory)?;
     let mut caller = registers.clone();
@@ -818,12 +1067,16 @@ enum RawFunctionKind {
 
 struct RawFunction {
     key: DieKey,
+    /// The language of the unit holding the DIE.
+    language: SourceLanguage,
     kind: RawFunctionKind,
     parent: Option<DieKey>,
     abstract_origin: Option<DieKey>,
     specification: Option<DieKey>,
     name: Option<Arc<str>>,
     linkage_name: Option<Arc<str>>,
+    /// Whether the DIE says the code only forwards to another function.
+    trampoline: bool,
     declaration: Option<SourceLocation>,
     call_site: Option<SourceLocation>,
     ranges: Vec<AddressRange<ImageAddress>>,
@@ -841,6 +1094,7 @@ struct FunctionMetadata {
 fn load_function_metadata(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     catalog: &UnitCatalog<'_>,
+    go_table: Option<&super::gopclntab::GoTable>,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
 ) -> std::result::Result<FunctionMetadata, DwarfError> {
@@ -851,6 +1105,7 @@ fn load_function_metadata(
         .map(|(index, function)| (function.key, index))
         .collect();
     let mut functions = Vec::new();
+    let mut trampolines = Vec::new();
     let mut function_ids = HashMap::new();
     // The definitions code belongs to. Clang also emits subprograms with
     // no code and no name, only to scope a function's local types.
@@ -885,12 +1140,20 @@ fn load_function_metadata(
         let id = FunctionId::new(
             u32::try_from(functions.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
         );
+        let role = super::roles::function_role(
+            linkage_name.as_deref().unwrap_or(&name),
+            origin.trampoline,
+        );
+        trampolines.push(origin.trampoline);
 
         functions.push(FunctionInfo {
             id,
             name,
             linkage_name,
             declaration,
+            language: origin.language,
+            role,
+            enclosing: None,
         });
         function_ids.insert(definition, id);
     }
@@ -911,20 +1174,6 @@ fn load_function_metadata(
         } else {
             None
         };
-        let explicit_entry = function
-            .entry
-            .filter(|entry| function.ranges.iter().any(|range| range.contains(*entry)));
-        let breakpoint_entry = explicit_entry
-            .map(|address| BreakpointEntry {
-                address,
-                provenance: EntryProvenance::Explicit,
-            })
-            .or_else(|| {
-                function.ranges.first().map(|range| BreakpointEntry {
-                    address: range.start,
-                    provenance: EntryProvenance::RangeStart,
-                })
-            });
 
         code_instances.push(CodeInstanceInfo {
             id,
@@ -939,16 +1188,93 @@ fn load_function_metadata(
                 },
             },
             ranges: function.ranges.clone().into(),
-            breakpoint_entry,
+            breakpoint_entry: breakpoint_entry(function),
         });
         instance_ids.insert(function.key, id);
     }
 
+    assign_go_function_roles(
+        &mut functions,
+        &trampolines,
+        source_files,
+        &code_instances,
+        go_table,
+    );
     Ok(FunctionMetadata {
         functions,
         code_instances,
         instance_ids,
     })
+}
+
+/// Where a breakpoint on a code instance goes: the entry its DIE names,
+/// when that lies in its code, or else where its code begins.
+fn breakpoint_entry(function: &RawFunction) -> Option<BreakpointEntry> {
+    function
+        .entry
+        .filter(|entry| function.ranges.iter().any(|range| range.contains(*entry)))
+        .map(|address| BreakpointEntry {
+            address,
+            provenance: EntryProvenance::Explicit,
+        })
+        .or_else(|| {
+            function.ranges.first().map(|range| BreakpointEntry {
+                address: range.start,
+                provenance: EntryProvenance::RangeStart,
+            })
+        })
+}
+
+/// Gives each Go function its role, from its name, whether the compiler
+/// generated it as a trampoline or an ABI wrapper, and what the function
+/// table records at its entry. An ABI wrapper shares its function's DWARF
+/// name but has its own entry.
+fn assign_go_function_roles(
+    functions: &mut [FunctionInfo],
+    trampolines: &[bool],
+    source_files: &[SourceFile],
+    instances: &[CodeInstanceInfo],
+    go_table: Option<&super::gopclntab::GoTable>,
+) {
+    let cgo = super::roles::cgo_generated(functions, source_files);
+    let runtime_c = super::roles::cgo_runtime(functions, source_files);
+    let generated = super::roles::abi_wrappers(functions, source_files)
+        .into_iter()
+        .zip(trampolines)
+        .zip(&cgo)
+        .map(|((abi_wrapper, trampoline), cgo)| abi_wrapper || *trampoline || *cgo)
+        .collect::<Vec<_>>();
+    let mut facts = vec![None; functions.len()];
+    if let Some(table) = go_table {
+        for instance in instances
+            .iter()
+            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+        {
+            let Some(entry) = instance.ranges.first().map(|range| range.start.get()) else {
+                continue;
+            };
+            facts[instance.function.index()] = table
+                .function_containing(entry)
+                .filter(|function| function.entry == entry)
+                .map(|function| function.facts);
+        }
+    }
+    for ((function, (facts, generated)), runtime_c) in functions
+        .iter_mut()
+        .zip(facts.into_iter().zip(generated))
+        .zip(runtime_c)
+    {
+        if function.language == SourceLanguage::Go {
+            function.role = super::roles::go_role(&function.name, facts, generated);
+        } else if function.role == crate::CodeRole::Ordinary {
+            if generated {
+                // cgo's C, such as the code that Go's calls to C enter.
+                function.role = crate::CodeRole::Wrapper;
+            } else if runtime_c && go_table.is_some() {
+                function.role = crate::CodeRole::RuntimeInternal;
+            }
+        }
+    }
 }
 
 fn collect_function_dies(
@@ -964,6 +1290,7 @@ fn collect_function_dies(
         if is_type_unit(unit) {
             continue;
         }
+        let language = unit_language(dwarf, unit)?;
         let mut entries = unit.entries();
         let mut scopes = Vec::<Option<DieKey>>::new();
 
@@ -986,6 +1313,7 @@ fn collect_function_dies(
                 let concrete_ranges = die_code_ranges(dwarf, unit, entry, &catalog.code)?;
                 functions.push(RawFunction {
                     key,
+                    language,
                     kind,
                     parent,
                     abstract_origin: die_reference(
@@ -1000,6 +1328,9 @@ fn collect_function_dies(
                     )?,
                     name: string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?,
                     linkage_name: string_attribute(dwarf, unit, entry, gimli::DW_AT_linkage_name)?,
+                    trampoline: entry
+                        .attr_value(gimli::DW_AT_trampoline)
+                        .is_some_and(|value| value != gimli::AttributeValue::Flag(false)),
                     declaration: entry_source_location(
                         dwarf,
                         unit,
@@ -1036,6 +1367,24 @@ fn collect_function_dies(
     }
 
     Ok(functions)
+}
+
+/// The language a unit is written in, by its root DIE.
+fn unit_language(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+) -> std::result::Result<SourceLanguage, DwarfError> {
+    let mut entries = unit.entries();
+    let Some(root) = entries.next_dfs()? else {
+        return Ok(SourceLanguage::Unknown);
+    };
+    let language = match root.attr_value(gimli::DW_AT_language) {
+        Some(gimli::AttributeValue::Language(language)) => Some(language),
+        _ => None,
+    };
+    let zig = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?
+        .is_some_and(|producer| producer.starts_with("zig "));
+    Ok(variables::source_language(language, zig))
 }
 
 fn string_attribute(
@@ -1899,5 +2248,168 @@ mod tests {
                 feature: "CFA expression: non-default memory address space".into()
             })
         );
+    }
+
+    /// Checks that looking an address up in an [`FdeIndex`] finds the entry
+    /// gimli's walk of the whole section finds, or fails as it does, at
+    /// every entry's edges and at `extra`.
+    fn check_fde_index<'data, S: UnwindSection<Reader<'data>>>(
+        section: &S,
+        bases: &BaseAddresses,
+        index: &FdeIndex,
+        extra: &[u64],
+    ) {
+        let mut probes = vec![0, u64::MAX];
+        probes.extend(extra);
+        for fde in &index.entries {
+            probes.extend([fde.start.wrapping_sub(1), fde.start, fde.start + 1]);
+            probes.extend([fde.end - 1, fde.end]);
+        }
+        for address in probes {
+            let walk = section
+                .fde_for_address(bases, address, S::cie_from_offset)
+                .map(|fde| fde.offset());
+            assert_eq!(index.lookup(address), walk, "address {address:#x}");
+        }
+    }
+
+    /// FDE lookups in real images agree with a walk of the section, and so
+    /// do lookups in a section cut short mid-entry.
+    #[test]
+    fn indexed_fde_lookups_match_a_walk_of_real_sections() {
+        let mut indexed = 0;
+        let mut truncations = 0;
+        for fixture in ["basic", "containers-cpp-gcc-o2", "callers-go"] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("build/test-programs")
+                .join(fixture);
+            let data = fs::read(&path).expect("run `just build-test-programs`");
+            let object = object::File::parse(&*data).expect("ELF");
+            let target = target_description(&object).expect("target");
+            let unwind = load_unwind_info(&object, target, Vec::new(), None).expect("CFI");
+            check_fde_index(
+                &unwind.eh_frame(),
+                &unwind.bases,
+                &unwind.eh_frame_index,
+                &[],
+            );
+            check_fde_index(
+                &unwind.debug_frame(),
+                &unwind.bases,
+                &unwind.debug_frame_index,
+                &[],
+            );
+            indexed += unwind.eh_frame_index.entries.len() + unwind.debug_frame_index.entries.len();
+
+            // Cut short mid-entry, a section's walk fails where it ends.
+            let probes: Vec<u64> = unwind
+                .function_ranges()
+                .iter()
+                .map(|range| range.start.get())
+                .collect();
+            let mut eh_frame = EhFrame::new(
+                &unwind.eh_frame[..unwind.eh_frame.len() / 2],
+                RunTimeEndian::Little,
+            );
+            eh_frame.set_address_size(8);
+            let debug_frame = DebugFrame::new(
+                &unwind.debug_frame[..unwind.debug_frame.len() / 2],
+                RunTimeEndian::Little,
+            );
+            let index = FdeIndex::new(&eh_frame, &unwind.bases);
+            truncations += usize::from(index.first_error.is_some());
+            check_fde_index(&eh_frame, &unwind.bases, &index, &probes);
+            let index = FdeIndex::new(&debug_frame, &unwind.bases);
+            truncations += usize::from(index.first_error.is_some());
+            check_fde_index(&debug_frame, &unwind.bases, &index, &probes);
+        }
+        assert!(indexed > 1000, "the fixtures describe {indexed} functions");
+        assert!(
+            truncations >= 2,
+            "only {truncations} sections ended mid-entry"
+        );
+    }
+
+    /// Where entries overlap, the first in section order wins, and an entry
+    /// that does not parse hides every entry after it, as in a walk.
+    #[test]
+    fn indexed_fde_lookups_follow_section_order() {
+        // Overlapping entries, in an order the section's walk must respect.
+        let mut table = gimli::write::FrameTable::default();
+        let cie = table.add_cie(gimli::write::CommonInformationEntry::new(
+            Encoding {
+                format: Format::Dwarf32,
+                version: 1,
+                address_size: 8,
+            },
+            1,
+            -8,
+            Register(16),
+        ));
+        for (start, length) in [
+            (0x1000, 0x100),
+            (0x1080, 0x180),
+            (0x0f00, 0x1100),
+            (0x1100, 0),
+            (0x1040, 0x10),
+            (0x3000, 0x100),
+        ] {
+            table.add_fde(
+                cie,
+                gimli::write::FrameDescriptionEntry::new(Address::Constant(start), length),
+            );
+        }
+        let mut written = gimli::write::DebugFrame(EndianVec::new(LittleEndian));
+        table.write_debug_frame(&mut written).expect("write");
+        let mut bytes = written.0.into_vec();
+        let bases = BaseAddresses::default();
+        let section = DebugFrame::new(&bytes, RunTimeEndian::Little);
+        let index = FdeIndex::new(&section, &bases);
+        assert_eq!(index.entries.len(), 5);
+        check_fde_index(&section, &bases, &index, &[0x1050, 0x1150, 0x1fff]);
+
+        // An entry whose CIE pointer leads nowhere stops the walk there, so
+        // later entries never match.
+        let mut offsets: Vec<usize> = index.entries.iter().map(|fde| fde.offset).collect();
+        offsets.sort_unstable();
+        let second = offsets[1];
+        bytes[second + 4..second + 8].copy_from_slice(&0x7fff_0000_u32.to_le_bytes());
+        let section = DebugFrame::new(&bytes, RunTimeEndian::Little);
+        let index = FdeIndex::new(&section, &bases);
+        assert!(index.first_error.is_some());
+        check_fde_index(&section, &bases, &index, &[0x1050, 0x1150, 0x1fff, 0x3050]);
+    }
+
+    /// Loading a large real program, gofmt, does work in proportion to its
+    /// debug information, counted as what the loading thread allocates: a
+    /// regression bound that a loader doing far more than it did fails.
+    /// Loading allocates about 100 bytes, in 0.47 blocks, for each byte of
+    /// gofmt's; the bounds are half again as much.
+    #[test]
+    fn loading_a_large_program_allocates_in_proportion_to_its_debug_information() {
+        use crate::test_memory::memory_cap::allocated;
+        use object::{Object, ObjectSection};
+
+        for fixture in ["gofmt-go-o0", "gofmt-go-o2"] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("build/test-programs")
+                .join(fixture);
+            let data = fs::read(&path).expect("run `just build-test-programs`");
+            let object = object::File::parse(&*data).expect("ELF");
+            let debug = object
+                .sections()
+                .filter(|section| section.name().is_ok_and(|name| name.starts_with(".debug_")))
+                .map(|section| section.uncompressed_data().expect("a section").len() as u64)
+                .sum::<u64>();
+            let before = allocated();
+            let info = load_bytes(&path, &data, crate::ModuleImageId::new(0)).expect("load");
+            let after = allocated();
+            let blocks = after.blocks - before.blocks;
+            let bytes = after.bytes - before.bytes;
+            assert!(info.image.functions().len() > 4000, "{fixture}");
+            let work = format!("{fixture}: {debug} debug bytes: {blocks} blocks, {bytes} bytes");
+            assert!(blocks <= debug * 7 / 10, "{work}");
+            assert!(bytes <= debug * 150, "{work}");
+        }
     }
 }

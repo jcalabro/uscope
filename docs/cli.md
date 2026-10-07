@@ -168,6 +168,7 @@ or `$VISUAL` or `$EDITOR` with `+line path`.
 | `run`, `r` | Launch the program. |
 | `continue`, `c` | Resume every thread. |
 | `step`, `s` / `next`, `n` | Step into / over calls, by source line. |
+| `step task` | Step into the task the line starts, such as a goroutine. |
 | `stepi`, `si` / `nexti`, `ni` | Step one instruction, into / over calls. |
 | `finish`, `fin` | Run until the selected frame returns. |
 | `advance`, `adv` *location* | Run until the selected thread reaches a location, or the selected frame returns. |
@@ -186,7 +187,39 @@ continues when the handler returns.
 `finish` runs until the selected frame returns to its caller, so a recursive
 call that returns to the same address from a deeper activation keeps running.
 It supports frames of the main executable and inline frames of the innermost
-activation. Stepping always starts from the innermost frame.
+activation. Stepping always starts from the innermost frame. When `finish`
+stops as the function returns, it shows what the function returned, as
+`returned (int) count = 42`, read where the function's calling convention
+leaves each result, so an optimized function's results show as well; `print`
+lists them with the frame's variables until the program runs again. Go's
+register ABI is the convention uscope knows; a function of another language
+shows nothing returned.
+
+In a program whose language runtime schedules tasks, such as Go's
+goroutines, a step belongs to the task it began in. It follows the task to
+whichever thread the runtime resumes it on, other tasks that run the same
+code meanwhile never end it, and its frames are followed when the runtime
+moves the task's stack. `step task`, or the runtime's own name for a task
+such as `step goroutine`, steps over the line, unless its task starts
+another task meanwhile, as a `go` statement does, even in a function the
+line calls: the step then belongs to the first task started, and stops
+where that task's function begins, through the wrapper that passes it its
+arguments. The started task is then selected. A line that starts no task
+ends as `next` does.
+
+`step` stops only in code the program's author wrote: it passes through
+the runtime's private machinery, compiler-generated wrappers, and stack
+switches to the code they call, and steps out of them where they call none.
+A step begun in the runtime may stop there. `step` at a `return` enters the
+deferred calls it runs; `next` and `finish` run them, but stop in a deferred
+call that a panic runs. The body of a loop over an iterator function is a
+function the iterator calls, which steps treat as the loop's own code:
+`next` enters the body from the loop's line, goes from one pass of the body
+to the next and on past the loop, and `finish` in the body runs the rest of
+the loop. None of them stops in the iterator. In a Go program that calls C,
+steps go between Go and C as between functions of one language, through
+cgo's code and the runtime's: `step` at a call enters the function called,
+and `finish` in Go that C called stops in the C.
 
 `advance` runs until the selected thread reaches any location the *location*
 names, as a breakpoint there would stop it, or until the selected frame
@@ -273,6 +306,29 @@ Addresses are always `0x`-prefixed, so `break add` names a function. Functions
 without debug information, such as libc's, break at their symbol, and
 breakpoints in a shared library wait until it loads.
 
+A function is first looked up by its whole name, and every function with
+that name and code gets a location, inlined copies included. Go functions
+can also be named as Go source names them:
+
+- by package name or import path: `http.(*Server).Serve` or
+  `net/http.(*Server).Serve`;
+- by the method's receiver, with or without its `*`: `(*T).M`, `T.M`, and
+  `pkg.T.M` all name `T`'s method `M`, whichever receiver it declares, as in
+  Delve, since a type has at most one method of a name;
+- by a generic function's name, which names every instantiation:
+  `main.Sum` breaks in `main.Sum[go.shape.int]` and the rest;
+- by a closure's compiler name, `main.main.func1`;
+- unqualified, `Serve` or `(*Server).Serve`. At a stop this first means the
+  selected frame's package, and the breakpoint keeps the qualified name,
+  such as `main.Serve`.
+
+A name that matches functions of more than one package, or more than one
+function of a package, is refused with each candidate's qualified name, so
+`break main` asks for `main.main` or `runtime.main`. Wrappers the compiler
+generates, such as ABI wrappers, are never chosen. A Go `file:line` with no
+statement is refused with the nearest lines that have one; in other
+languages, as in gdb, it moves to the next line with code in its function.
+
 A breakpoint is a trap byte written into the program's code, so it moves
 wherever that code moves. When a library's code or the vDSO moves, as under a
 checkpoint restore, a function breakpoint follows it, even when the program
@@ -351,15 +407,20 @@ next stop reports the change from it, as gdb does.
 A watchpoint on an expression keeps watching the address it first resolved to.
 It ends with its storage, and the end is reported: a static when its module
 unloads, thread-local storage when its thread exits, and a local when its
-frame returns or its block is left. Register values, bit-fields, constants,
-and Go stack objects cannot be watched. Watchpoints are discarded when the
-process exits or execs, and cleared before detaching.
+frame returns or its block is left. A goroutine's local belongs to its
+goroutine, and moves with it: when the runtime copies the goroutine's stack
+elsewhere to grow or shrink it, the watchpoint stops watching during the
+copy and then watches the local at its new address, which `info watchpoints`
+shows. A copy the debugger cannot follow ends the watchpoint and says so.
+Register values, bit-fields, and constants cannot be watched. Watchpoints
+are discarded when the process exits or execs, and cleared before
+detaching.
 
 ### Stack and frames
 
 | Command | |
 | --- | --- |
-| `backtrace`, `bt` | Show the selected thread's stack. |
+| `backtrace`, `bt` | Show the selected thread's or goroutine's stack. |
 | `frame`, `fr` [*level*] | Show the selected frame, or select one by level. |
 | `up` / `down` [*count*] | Select a caller / callee frame. |
 | `where` | Show the selected frame's location and module. |
@@ -405,9 +466,24 @@ are demangled. The vDSO, the code the kernel maps into every process for
 calls such as `clock_gettime`, is the module `[vdso]`; no file backs it, so
 it is read from the process's memory.
 
+A Go thread runs the runtime's code on a stack of its own, and signal
+handlers on another, and a backtrace follows the runtime from them onto the
+goroutine's stack. When a backtrace crosses stacks, each run of frames is
+headed by whose stack it is on: the task's (the goroutine's), the runtime's,
+the signal stack, or the thread's. The runtime's own functions are dimmed.
+Go's calls into C run the C on the runtime's stack, and C's calls back into
+Go run the Go on the goroutine's, so a backtrace from either shows the
+frames of both languages between them.
+The body of a Go `range` over a function is a function of its own, named
+like `main.counted-range1`, which the iterator calls; the iterator's frames
+between the body and its loop's function say so, as `(the iterator of #2's
+loop)`. The body's frame shows the variables of the loop's function it
+uses, and the function's frame shows the rest.
+
 The selected frame applies to `print`, `watch`, `where`, `list`,
 `disassemble`, `registers`, and `finish`. Each stop selects the innermost
-frame; each thread keeps its own selection until the next stop. An outer
+frame, except that a language runtime's exception selects the frame that
+raised it; each thread keeps its own selection until the next stop. An outer
 frame's variables are shown as they were at its call, read from where its
 callees saved them. A value in a register that callees may overwrite without
 saving is reported as not saved rather than shown with the callee's value.
@@ -451,7 +527,10 @@ decimal, overriding `[print] radix`, `/r` values as stored, without views,
 Expressions are described in [expressions.md](expressions.md). Every value has
 an explicit state: available, unavailable for a stated reason (optimized out,
 unreadable memory), or invalid for its type. Reads across unreadable memory
-report the address that failed.
+report the address that failed. A goroutine's frame holding a pointer below
+its own stack pointer, into memory only its callees use, holds a stale
+pointer, as a slot Go left unadjusted when it moved the stack does; what it
+points at is unavailable rather than shown from whatever is there now.
 
 ### Memory, symbols, and disassembly
 
@@ -479,15 +558,55 @@ nearest preceding symbol.
 
 | Command | |
 | --- | --- |
-| `threads` | List threads. |
+| `threads` | List threads, with the goroutine each runs. |
 | `thread` *id* | Select a thread. |
+| `tasks` [`-a`] [`-g`] [`-t`] | List a runtime's tasks, Go's goroutines: `-a` with the runtime's own, `-g` grouped by place, `-t` each with its stack. |
+| `task` [*id* [*command*]] | Show the selected task, select one, or run an inspecting command in one. |
 | `handle` *signal* [`stop`\|`nostop`] [`print`\|`noprint`] [`pass`\|`nopass`] | Change how a signal is handled. `stop` implies `print`, and `noprint` implies `nostop`. |
 | `info signals` | List every signal's policy. |
+
+Each runtime's own name for its tasks names these commands too:
+`goroutines` and `goroutine` in Go. A goroutine is listed where the code the
+program wrote has it, past the
+runtime's machinery, as the runtime's own goroutine dump shows it: a worker
+waiting on a channel is at its receive, not in `runtime.gopark`. Each line
+gives the goroutine's id, that place, what it does in the runtime's words,
+such as `chan receive`, its profiler labels, as in `{job: resize}`, and the
+thread it is on. A goroutine of only the runtime's code is named by the
+function it began in. A core dump's goroutines are listed as a live
+program's are. A Go library that a C program hosts carries a runtime of
+its own, whose goroutines are listed once it loads; a thread of the host's
+that calls into Go runs a goroutine for the call. A Go program built
+without debug information (`-ldflags=-w`, or `-s -w`) still has its frames
+named and unwound by Go's own function table, and its function and line
+breakpoints and steps work by it, but its goroutines cannot be read, which
+`goroutines` and `$task` say. Selecting a goroutine,
+parked or running, points `backtrace`, `frame`, `print`, `registers`, and
+the other inspecting commands at it, and `$task` in an expression is its id.
+`goroutine` *id* *command* runs one of those commands in the goroutine and
+then selects again what was selected.
 
 Signals follow gdb's defaults. `SIGALRM`, `SIGURG`, `SIGCHLD`, `SIGWINCH`,
 `SIGPROF`, `SIGVTALRM`, `SIGIO`, and `SIGPWR` are delivered without stopping;
 `SIGINT` stops and is discarded; every other signal stops and is delivered on
-resume.
+resume. Go preempts goroutines with `SIGURG`; one that arrives while a thread
+steps, steps over a breakpoint, or runs without the others waits until the
+thread continues with them, since its handler could wait for the stopped
+threads.
+
+A language runtime that handles signals itself changes their defaults:
+`SIGSEGV`, `SIGBUS`, and `SIGFPE` are delivered silently to a Go program,
+whose runtime turns a fault into a panic. A `handle` command still applies
+over that. What the runtime then reports stops instead:
+
+- a panic nothing recovered, as it ends the program;
+- a fatal error, such as `all goroutines are asleep - deadlock!`, or a
+  fault the runtime cannot turn into a panic, as one in C is.
+
+The stop prints the message the runtime prints, chained panics and all, and
+selects the frame that panicked or faulted, below the runtime's own. A
+breakpoint instruction of the program's own, such as Go's
+`runtime.Breakpoint()`, stops too, and the program goes on past it.
 
 ## Core dumps
 
@@ -515,7 +634,13 @@ finds renamed or relocated copies, used only when they match.
 Source files are read from the paths in the debug information, and read
 lazily. For a program built elsewhere, `--source-map FROM TO` reads files
 recorded under `FROM` from `TO`, matching whole path components. A missing
-source names every path tried. Breakpoints still use recorded paths, or their
+source names every path tried. A path recorded without the directory the
+program was built in, as a Go `-trimpath` build records
+`github.com/you/app/main.go` and `net/http/server.go`, is looked for in the
+current directory, and a missing one says so; a rule from
+`github.com/you/app` maps it, with or without the leading `./` it is
+shown with. uscope does not guess where Go's own sources or the module
+cache are. Breakpoints still use recorded paths, or their
 trailing components, as in `break main.c:10`.
 
 ## Output

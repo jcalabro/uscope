@@ -257,7 +257,7 @@ impl Describer {
         }
         let context = StopContext {
             stop: uscope::StopId::new(stop),
-            thread: uscope::ThreadId::new(thread),
+            execution: uscope::ThreadId::new(thread).into(),
             frame: StackFrameId::INNERMOST,
         };
         let place = match self.handle.at(context).backtrace().await {
@@ -455,6 +455,8 @@ const fn reason_kind(reason: &StopReason) -> &'static str {
         StopReason::StepIncomplete { .. } => "stepIncomplete",
         StopReason::Pause => "pause",
         StopReason::Exception(_) => "exception",
+        StopReason::LanguageException(_) => "languageException",
+        StopReason::ProgramBreakpoint { .. } => "programBreakpoint",
         StopReason::Exec { .. } => "exec",
         StopReason::ThreadExited { .. } => "threadExited",
         StopReason::Unclassifiable { .. } => "unclassifiable",

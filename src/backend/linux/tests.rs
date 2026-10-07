@@ -6,13 +6,14 @@ use crate::protocol::{
 };
 use crate::unwind::{FrameContext, MemoryReader, RegisterFile};
 use crate::{
-    AddressRange, CodeInstanceKind, ExceptionDisposition, ImageAddress, InlineFrameLookup,
-    LaunchOptions, MemoryReadCompletion, MemoryReadUnavailableReason, Path, PresentedFrame,
-    VariableQuery, WatchpointHit, WatchpointOptions, WatchpointSpec,
+    AddressRange, CodeInstanceKind, ExceptionDisposition, ExecutionContext, ImageAddress,
+    InlineFrameLookup, LaunchOptions, MemoryReadCompletion, MemoryReadUnavailableReason, Path,
+    PresentedFrame, VariableQuery, WatchpointHit, WatchpointOptions, WatchpointSpec,
 };
 use std::cell::RefCell;
 use tokio::sync::broadcast;
 
+use super::activation::StackView;
 use super::classify::{WatchStatus, classify_stop_evidence};
 use super::frames::{default_inline_visible_count, frame_lookup_address};
 use super::memory::{MemoryAccessError, read_logical_memory_with};
@@ -634,6 +635,9 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
                     name: name.into(),
                     linkage_name: None,
                     declaration: None,
+                    language: crate::SourceLanguage::C,
+                    role: crate::CodeRole::Ordinary,
+                    enclosing: None,
                 })
                 .collect(),
             code_instances: instances
@@ -666,6 +670,10 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
             sections: Vec::new(),
             vtables: Vec::new(),
             thread_local_storage: false,
+            constants: std::collections::BTreeMap::new(),
+            producers: Vec::new(),
+            packages: Vec::new(),
+            thread_locals: std::collections::BTreeMap::new(),
         },
     ))
 }
@@ -764,7 +772,7 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
             fault_address: None,
         })
     };
-    let classify = |signal, siginfo, expected: &ExpectedStop, breakpoint| {
+    let classify_trap = |signal, siginfo, expected: &ExpectedStop, breakpoint, program_trap| {
         classify_stop_evidence(
             signal,
             "raw-status".to_owned(),
@@ -774,8 +782,12 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
             false,
             breakpoint,
             false,
+            program_trap,
             WatchStatus::Absent,
         )
+    };
+    let classify = |signal, siginfo, expected: &ExpectedStop, breakpoint| {
+        classify_trap(signal, siginfo, expected, breakpoint, None)
     };
     let stepping = ExpectedStop::UserStep {
         kind: StepKind::Instruction,
@@ -832,6 +844,22 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
         ),
         ClassifiedStop::Breakpoint(address) if address == VirtualAddress::new(0x1234)
     ));
+    // An int3 of the program's own is reported as a trap, never delivered
+    // as a signal; an int3 with no evidence for either cannot be explained.
+    assert!(matches!(
+        classify_trap(
+            Signal::SIGTRAP,
+            metadata(libc::SI_KERNEL),
+            &none,
+            None,
+            Some(VirtualAddress::new(0x1233)),
+        ),
+        ClassifiedStop::ProgramTrap(address) if address == VirtualAddress::new(0x1233)
+    ));
+    assert!(matches!(
+        classify(Signal::SIGTRAP, metadata(libc::SI_KERNEL), &none, None),
+        ClassifiedStop::Unclassifiable(_)
+    ));
     // SIGKILL wakes a thread from a reported stop: its siginfo vanishes and
     // then describes its exit event.
     let repairing = ExpectedStop::BreakpointRepair {
@@ -847,8 +875,9 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
 
 fn step_execution(thread: Pid, kind: StepKind, start: StepStart) -> ActiveKind {
     ActiveKind::Step {
-        thread,
+        owner: StepOwner { thread, task: None },
         kind,
+        requested: kind,
         start: Box::new(start),
         progress_owed: false,
     }
@@ -1541,11 +1570,11 @@ fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness
         ..TraceThread::starting(ExpectedStop::None)
     };
     let mut inferior = Inferior {
-        public_stop: Some(PublicStop {
-            id: StopId::new(1),
-            triggering_thread: pid,
-            reason: StopReason::Pause,
-            presentations: BTreeMap::from([(
+        public_stop: Some(PublicStop::new(
+            StopId::new(1),
+            pid,
+            StopReason::Pause,
+            BTreeMap::from([(
                 pid,
                 FramePresentation {
                     instruction: VirtualAddress::new(0x10),
@@ -1553,9 +1582,7 @@ fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness
                     hidden_inline_frames: 2,
                 },
             )]),
-            selected_frames: BTreeMap::new(),
-        }),
-        selected_thread: Some(pid),
+        )),
         next_execution: 1,
         ..Inferior::new(
             InferiorOrigin::Launched,
@@ -4190,6 +4217,280 @@ fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_
     );
 }
 
+/// A runtime whose threads run the tasks a test sets, so run control's
+/// following of a task is tested without any language's runtime.
+#[derive(Debug, Default)]
+struct ScriptedRuntime {
+    running: std::sync::Mutex<BTreeMap<crate::ThreadId, u64>>,
+}
+
+impl ScriptedRuntime {
+    fn runs(&self, thread: Pid, task: u64) {
+        self.running
+            .lock()
+            .expect("the script")
+            .insert(debug_thread_id(thread), task);
+    }
+}
+
+impl crate::runtime_model::RuntimeModel for ScriptedRuntime {
+    fn tasks(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _start: u64,
+        _limit: usize,
+        _program_only: bool,
+    ) -> crate::runtime_model::Partial<crate::runtime_model::TaskPage> {
+        crate::runtime_model::Partial {
+            value: crate::runtime_model::TaskPage {
+                tasks: Vec::new(),
+                next: None,
+            },
+            gaps: Vec::new(),
+        }
+    }
+    fn thread_activity(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        thread: crate::ThreadId,
+    ) -> crate::runtime_model::ThreadActivity {
+        self.running
+            .lock()
+            .expect("the script")
+            .get(&thread)
+            .map_or(crate::runtime_model::ThreadActivity::Idle, |&number| {
+                crate::runtime_model::ThreadActivity::Task {
+                    number,
+                    stack: crate::StackSegment::Task,
+                }
+            })
+    }
+    fn task_context(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _task: crate::runtime_model::TaskRef,
+    ) -> std::result::Result<Option<crate::runtime_model::TaskContext>, Arc<str>> {
+        Ok(None)
+    }
+    fn thread_stacks(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _thread: crate::ThreadId,
+    ) -> std::result::Result<Vec<(std::ops::Range<u64>, crate::StackSegment)>, Arc<str>> {
+        Ok(Vec::new())
+    }
+    fn cross(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _thread: crate::ThreadId,
+        _frame: &RegisterFile,
+        _after_call: bool,
+    ) -> std::result::Result<crate::runtime_model::Crossing, Arc<str>> {
+        Ok(crate::runtime_model::Crossing::Stay)
+    }
+    fn signals(&self) -> crate::runtime_model::RuntimeSignals {
+        crate::runtime_model::RuntimeSignals::default()
+    }
+    fn hooks(&self) -> &[crate::runtime_model::RuntimeHook] {
+        &[]
+    }
+    fn exception(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _hook: ImageAddress,
+        _registers: &RegisterFile,
+    ) -> std::result::Result<crate::runtime_model::RuntimeException, Arc<str>> {
+        Err("the script has no exceptions".into())
+    }
+    fn dynamic_value(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _representation: &str,
+        _value: crate::runtime_model::StoredValue<'_>,
+    ) -> Option<std::result::Result<crate::runtime_model::DynamicValue, Arc<str>>> {
+        None
+    }
+    fn stack_mover(&self) -> Option<ImageAddress> {
+        None
+    }
+    fn moving_task(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _registers: &RegisterFile,
+    ) -> std::result::Result<u64, Arc<str>> {
+        Err("the script moves no stacks".into())
+    }
+    fn task_stack(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _task: crate::runtime_model::TaskRef,
+    ) -> std::result::Result<Option<std::ops::Range<u64>>, Arc<str>> {
+        Ok(None)
+    }
+    fn call_out(
+        &self,
+        _entry: ImageAddress,
+        _registers: &RegisterFile,
+    ) -> Option<std::result::Result<VirtualAddress, Arc<str>>> {
+        None
+    }
+    fn task_starter(&self) -> Option<ImageAddress> {
+        None
+    }
+    fn started_task(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _registers: &RegisterFile,
+    ) -> std::result::Result<crate::runtime_model::RuntimeTask, Arc<str>> {
+        Err("the script starts no tasks".into())
+    }
+    fn task_noun(&self) -> &'static str {
+        "task"
+    }
+}
+
+/// A stack of one frame, whose CFA is 0x1000 wherever it is.
+struct FlatUnwindInfo;
+
+impl UnwindInfo for FlatUnwindInfo {
+    fn cfa(
+        &self,
+        _address: ImageAddress,
+        _registers: &RegisterFile,
+        _memory: &mut dyn MemoryReader,
+    ) -> std::result::Result<VirtualAddress, UnwindTermination> {
+        Ok(VirtualAddress::new(0x1000))
+    }
+
+    fn unwind(
+        &self,
+        _address: ImageAddress,
+        _registers: &RegisterFile,
+        _memory: &mut dyn MemoryReader,
+    ) -> std::result::Result<crate::unwind::UnwindStep, UnwindTermination> {
+        Err(UnwindTermination::Complete)
+    }
+}
+
+/// Begins a source step over a line of `task`, which `thread` runs, with
+/// its plan's site at 0x40.
+fn begin_task_step(harness: &mut WatchHarness, thread: Pid, task: crate::TaskId) {
+    harness.start_continue();
+    let inferior = harness.inferior();
+    let active = inferior.active.as_mut().expect("execution");
+    let mut kind = step_execution(
+        thread,
+        StepKind::OverSource,
+        StepStart {
+            plan_addresses: BTreeSet::from([VirtualAddress::new(0x40)]),
+            ..StepStart::default()
+        },
+    );
+    if let ActiveKind::Step { owner, .. } = &mut kind {
+        owner.task = Some(task);
+    }
+    active.kind = kind;
+    let execution = active.id;
+    inferior
+        .plan_sites
+        .insert(execution, BTreeSet::from([VirtualAddress::new(0x40)]));
+    inferior.breakpoints.insert(
+        VirtualAddress::new(0x40),
+        BreakpointSite {
+            original_byte: 0x90,
+            installed: true,
+            owners: BTreeSet::from([BreakpointOwner::Plan(execution)]),
+        },
+    );
+}
+
+/// A step that belongs to a task follows it to whichever thread its
+/// runtime runs it on: another task's thread at the step's site is stepped
+/// over unseen, and the task's new thread takes the step on.
+#[test]
+fn a_step_follows_its_task_to_another_thread_and_passes_the_others() {
+    let mut harness = watch_harness(3);
+    harness.controller.unwind_info = Arc::new(FlatUnwindInfo);
+    let (first, moved, other) = (harness.threads[0], harness.threads[1], harness.threads[2]);
+    let runtime = Arc::new(ScriptedRuntime::default());
+    let image = Arc::clone(&harness.controller.module_image);
+    harness
+        .controller
+        .runtime_models
+        .borrow_mut()
+        .insert(image.id(), Some(Ok(Arc::clone(&runtime) as _)));
+    let task = crate::TaskId {
+        runtime: crate::RuntimeId::new(harness.inferior().loaded_module.id.get()),
+        number: 1,
+    };
+    runtime.runs(first, 1);
+    begin_task_step(&mut harness, first, task);
+    harness.published();
+    harness.trace().take_actions();
+    // The runtime moves the task to another thread, and runs another task
+    // where it was.
+    runtime.runs(first, 2);
+    runtime.runs(moved, 1);
+    runtime.runs(other, 3);
+    let owner = |harness: &mut WatchHarness| match &harness.inferior().active.as_ref()?.kind {
+        ActiveKind::Step { owner, .. } => Some(owner.thread),
+        _ => None,
+    };
+
+    harness.hit_at(other, 0x40).expect("another task's trap");
+    harness.settle_requested_stops();
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            "set_registers 5002 rip=0x40",
+            "request_stop 5000",
+            "request_stop 5001",
+            "remove_site 0x40",
+            "step 5002",
+        ],
+        "another task's thread is stepped over the site alone"
+    );
+    harness
+        .trap(other, libc::TRAP_TRACE, debug_registers::STATUS_IDLE)
+        .expect("the repair step");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            "reinstall_site 0x40",
+            "continue 5000 None",
+            "continue 5001 None",
+            "continue 5002 None",
+        ]
+    );
+    assert_eq!(owner(&mut harness), Some(first));
+
+    harness.hit_at(moved, 0x40).expect("the task's trap");
+    assert_eq!(
+        owner(&mut harness),
+        Some(moved),
+        "the step follows its task"
+    );
+    harness.settle_requested_stops();
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            "set_registers 5001 rip=0x40",
+            "request_stop 5000",
+            "request_stop 5002",
+            "remove_site 0x40",
+            "step 5001",
+        ],
+        "the task's new thread steps on from the site"
+    );
+    assert!(
+        !harness
+            .published()
+            .iter()
+            .any(|event| matches!(event, DebuggerEvent::InferiorStopped { .. })),
+        "neither hit is reported"
+    );
+}
+
 #[test]
 fn ending_a_plan_removes_only_the_sites_it_still_owns() {
     let mut harness = watch_harness(1);
@@ -5095,7 +5396,7 @@ fn lost_frame_harness() -> WatchHarness {
                 }),
                 code_instance: Some(CodeInstanceId::new(0)),
                 physical_instance: Some(CodeInstanceId::new(0)),
-                activation: Some(VirtualAddress::new(0x7000)),
+                activation: Some(StackView::thread(pid).activation(VirtualAddress::new(0x7000))),
                 plan_addresses: BTreeSet::from([site]),
                 ..StepStart::default()
             },
@@ -5248,7 +5549,7 @@ fn a_step_whose_thread_exits_while_an_edit_drops_the_other_reason_ends_in_its_ex
         stepping,
         StepKind::OverSource,
         StepStart {
-            activation: Some(VirtualAddress::new(0x7000)),
+            activation: Some(StackView::thread(stepping).activation(VirtualAddress::new(0x7000))),
             ..StepStart::default()
         },
     );
@@ -5331,7 +5632,10 @@ fn an_activation_missing_from_a_wholly_unwound_stack_has_returned() {
     registers.rsp = 0x0ff8;
     // Above every frame of this stack: another stack's activation, as a
     // raw-cloned thread computes from its creator's frame pointer.
-    let elsewhere = VirtualAddress::new(0x9000);
+    let elsewhere = harness
+        .controller
+        .stack_view(harness.threads[0])
+        .activation(VirtualAddress::new(0x9000));
     assert!(
         harness
             .controller
@@ -5552,7 +5856,7 @@ fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
             .handle_message(ControllerMessage::Request(Request::Step {
                 process_id: process,
                 stop_id: stop,
-                thread_id: debug_thread_id(pid),
+                context: ExecutionContext::Thread(debug_thread_id(pid)),
                 frame: StackFrameId::INNERMOST,
                 kind,
                 scope: ResumeScope::Process(process),
@@ -5594,7 +5898,7 @@ fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
     let (controller, pid) = (&harness.controller, harness.threads[0]);
     let sender = controller.message_sender.clone();
     let stop_id = StopId::new(7);
-    let thread_id = debug_thread_id(pid);
+    let context = ExecutionContext::Thread(debug_thread_id(pid));
     let frame = StackFrameId::INNERMOST;
     let mut replies = Vec::new();
     let mut evaluate = |text: &str, mode| {
@@ -5605,7 +5909,7 @@ fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
             mode,
             limits: crate::InspectionLimits::default(),
             stop_id,
-            thread_id,
+            context,
             frame,
             reply,
         }
@@ -5627,7 +5931,7 @@ fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
             query: VariableQuery::All,
             limits: crate::InspectionLimits::default(),
             stop_id,
-            thread_id,
+            context,
             frame,
             reply: variables_reply,
         },
@@ -5689,7 +5993,7 @@ fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
             mode: crate::EvaluationMode::Read,
             limits: crate::InspectionLimits::default(),
             stop_id,
-            thread_id,
+            context,
             frame,
             reply,
         }
@@ -5729,8 +6033,10 @@ fn nested_presentations_share_one_interval_between_looks_for_run_control() {
         registers: FrameRegisters::Thread(controller.ptrace.registers(pid).expect("registers")),
         cfa: Err(crate::VariableUnavailableReason::EvaluationLimit.into()),
         activation: 0,
+        below_stack_pointer: None,
     };
-    let frame = controller.frame_for(inferior, StopId::new(1), pid, &resolved);
+    let root = super::frames::StackRoot::of_thread(pid);
+    let frame = controller.frame_for(inferior, StopId::new(1), &root, &resolved);
     let (pause_reply, _paused) = tokio::sync::oneshot::channel();
     controller
         .message_sender

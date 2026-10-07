@@ -212,7 +212,7 @@ fn ambiguities(tokens: &[Token]) -> Vec<usize> {
                 && ident(open - 1).is_some_and(|word| {
                     matches!(
                         word,
-                        "sizeof" | "len" | "offsetof" | "container_of" | "global"
+                        "sizeof" | "len" | "cap" | "offsetof" | "container_of" | "global"
                     ) || Builtin::parse(word).is_some()
                 })
         {
@@ -646,11 +646,12 @@ impl<'tokens> Parser<'tokens> {
                     self.advance();
                     NodeKind::Bool(word == "true")
                 }
-                "null" => {
+                // `nil` is Go's spelling of `null`, and means the same.
+                "null" | "nil" => {
                     self.advance();
                     NodeKind::Null
                 }
-                "nil" | "nullptr" | "NULL" => {
+                "nullptr" | "NULL" => {
                     return Err(ExpressionError::syntax(
                         span,
                         format!("`{word}` is spelled `null`"),
@@ -660,12 +661,17 @@ impl<'tokens> Parser<'tokens> {
                 "offsetof" if view_call => return self.offset_of(),
                 "container_of" if view_call => return self.container_of(),
                 "global" if view_call => return self.global(),
-                "len" if called => {
+                "len" | "cap" if called => {
                     self.advance();
                     self.advance();
                     let operand = self.expression(ASSIGN)?;
-                    let close = self.expect(Punct::CloseParen, "to close `len(`")?;
-                    return self.push(NodeKind::Len(operand), span.to(close));
+                    let close = self.expect(Punct::CloseParen, &format!("to close `{word}(`"))?;
+                    let kind = if word == "len" {
+                        NodeKind::Len(operand)
+                    } else {
+                        NodeKind::Cap(operand)
+                    };
+                    return self.push(kind, span.to(close));
                 }
                 function if view_call && Builtin::parse(function).is_some() => {
                     let function = Builtin::parse(function).expect("a built-in function");
@@ -796,8 +802,15 @@ impl<'tokens> Parser<'tokens> {
                 }
                 Some(Punct::OpenBracket) => {
                     self.advance();
+                    // `[:end]` and `[:]` slice from the start.
+                    if self.peek_punct() == Some(Punct::Colon) {
+                        base = self.slice(base, None)?;
+                        continue;
+                    }
                     let index = self.expression(ASSIGN)?;
-                    if self.eat(Punct::DotDot) {
+                    if self.peek_punct() == Some(Punct::Colon) {
+                        base = self.slice(base, Some(index))?;
+                    } else if self.eat(Punct::DotDot) {
                         let end = self.expression(ASSIGN)?;
                         let close = self.expect(Punct::CloseBracket, "to close the range")?;
                         let span = self.span(base).to(close);
@@ -818,6 +831,19 @@ impl<'tokens> Parser<'tokens> {
                 _ => return Ok(base),
             }
         }
+    }
+
+    /// The rest of `base[start:end]`, from its `:`: the end may be left out.
+    fn slice(&mut self, base: NodeId, start: Option<NodeId>) -> Result<NodeId, ExpressionError> {
+        self.expect(Punct::Colon, "to separate a slice's bounds")?;
+        let end = if self.peek_punct() == Some(Punct::CloseBracket) {
+            None
+        } else {
+            Some(self.expression(ASSIGN)?)
+        };
+        let close = self.expect(Punct::CloseBracket, "to close the slice")?;
+        let span = self.span(base).to(close);
+        self.push(NodeKind::Slice { base, start, end }, span)
     }
 
     /// A type name, and whether it can only be a type: a bare path could

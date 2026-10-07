@@ -606,12 +606,12 @@ fn help_lists_every_command_and_details_one_by_name_or_alias() {
         ],
     );
     for expected in [
-        "  break        b       Set a breakpoint",
-        "  finish       fin, f  Run until the selected frame returns",
-        "  continue     c       Continue execution",
-        "  delete       del, d  Delete breakpoints, and watchpoints wID",
-        "  clear        cls     Clear and redraw the terminal",
-        "  help         h, ?    Show command help",
+        "  break        b           Set a breakpoint",
+        "  finish       fin, f      Run until the selected frame returns",
+        "  continue     c           Continue execution",
+        "  delete       del, d      Delete breakpoints, and watchpoints wID",
+        "  clear        cls         Clear and redraw the terminal",
+        "  help         h, ?        Show command help",
         "  Clear and redraw the terminal\n  aliases: cls",
         "delete <ids...>",
         "aliases: del, d",
@@ -2210,6 +2210,341 @@ fn batch_mode_lists_threads_and_steps_one_instruction() {
         "{stdout}"
     );
     assert!(stdout.contains("stopped after instruction step"));
+}
+
+/// Runs `commands` at the workers fixture's checkpoint, where its workers
+/// are parked.
+fn at_go_checkpoint(commands: &[&str]) -> String {
+    let mut all = vec!["break main.reached", "run"];
+    all.extend_from_slice(commands);
+    batch(&["build/test-programs/workers-go-o0"], &all)
+}
+
+#[test]
+fn goroutines_are_listed_by_the_code_the_program_wrote() {
+    const WORKERS: &str = "tests/fixtures/go/workers/main.go";
+    let worker = support::source_line(WORKERS, "for job := range jobs");
+    let reached = support::source_line(WORKERS, "func reached(");
+    let stdout = at_go_checkpoint(&["goroutines"]);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    // Main runs on the stopped thread, and is selected through it.
+    let main = lines
+        .iter()
+        .find(|line| line.starts_with("* [1] main.reached at "))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(
+        main.contains(&format!("workers/main.go:{reached} — running (thread ")),
+        "{main}"
+    );
+    // A parked worker is where it waits, not in the runtime parking it.
+    let workers = lines
+        .iter()
+        .filter(|line| line.contains("main.worker at "))
+        .collect::<Vec<_>>();
+    assert_eq!(workers.len(), 4, "{stdout}");
+    for line in workers {
+        assert!(line.starts_with("  ["), "{line}");
+        assert!(
+            line.ends_with(&format!("workers/main.go:{worker} — chan receive")),
+            "{line}"
+        );
+    }
+    assert!(!stdout.contains("in runtime.gopark"), "{stdout}");
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.contains("`goroutines -a` lists them")),
+        "{stdout}"
+    );
+
+    let all = at_go_checkpoint(&["tasks -a"]);
+    let listed = |output: &str| {
+        output
+            .lines()
+            .filter(|line| line.starts_with("  [") || line.starts_with("* ["))
+            .count()
+    };
+    assert!(listed(&all) > listed(&stdout), "{all}");
+    assert!(!all.contains("lists them"), "{all}");
+
+    let grouped = at_go_checkpoint(&["goroutines -g"]);
+    assert!(
+        grouped
+            .lines()
+            .any(|line| line.starts_with("4 goroutines in main.worker at ")
+                && line.contains(&format!("workers/main.go:{worker}: "))),
+        "{grouped}"
+    );
+}
+
+/// `step goroutine` follows the line's `go` statement into the goroutine
+/// it starts, which is then selected.
+#[test]
+fn step_goroutine_enters_the_goroutine_the_line_starts() {
+    const STEPS: &str = "tests/fixtures/go/steps/main.go";
+    let go = support::source_line(STEPS, "// STEP: go");
+    let spawned = support::source_line(STEPS, "// STEP: spawned");
+    let stdout = batch(
+        &["build/test-programs/steps-go-o0"],
+        &[
+            &format!("break main.go:{go}"),
+            "run",
+            // The line's breakpoint is in the goroutine's wrapper too.
+            "delete 1",
+            "step goroutine",
+            "goroutine",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[&format!(
+            "stopped after new task step in main.spawned at {STEPS}:{spawned} "
+        )],
+    );
+    let selected = stdout
+        .lines()
+        .find(|line| line.starts_with("* [") && line.contains("main.spawned at "))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(!selected.starts_with("* [1] "), "{selected}");
+    let failure = batch_output(
+        &["build/test-programs/steps-go-o0"],
+        &[&format!("break main.go:{go}"), "run", "step sideways"],
+    );
+    assert_failure(&failure, "usage: step [task]");
+}
+
+/// A program stripped of its debug information has goroutines nobody can
+/// read, which `goroutines` says rather than listing none.
+#[test]
+fn a_stripped_programs_goroutines_are_unavailable() {
+    let failure = batch_output(
+        &["build/test-programs/callers-go-stripped"],
+        &["break main.reached", "run", "goroutines"],
+    );
+    assert_failure(
+        &failure,
+        "goroutines could not be read: the program has no debug information describing Go's runtime",
+    );
+}
+
+/// A `-trimpath` build records its sources without the directory it was
+/// built in, which the missing source's reason says, with the way to map
+/// them; `--source-map` then finds them.
+#[test]
+fn a_trimpath_programs_sources_say_why_they_are_missing() {
+    const SERVER: &str = "tests/fixtures/go/server/main.go";
+    let recorded = "./github.com/jcalabro/uscope-go/tests/fixtures/go/server/main.go";
+    let stdout = batch(
+        &["build/test-programs/server-go-trimpath"],
+        &["break main.greet", "run"],
+    );
+    assert!(
+        stdout.contains(&format!(
+            "source unavailable: source file {recorded} does not exist; it was recorded \
+             without the directory the program was built in, as `-trimpath` builds record \
+             paths, so it was looked for in the current directory; a source map can say where \
+             it is"
+        )),
+        "{stdout}"
+    );
+    let root = env!("CARGO_MANIFEST_DIR");
+    let mapped = batch(
+        &[
+            "--source-map",
+            "github.com/jcalabro/uscope-go",
+            root,
+            "build/test-programs/server-go-trimpath",
+        ],
+        &["break main.greet", "run"],
+    );
+    let greet = support::source_line(SERVER, "func greet(");
+    assert!(mapped.contains(&format!("=> {greet} |")), "{mapped}");
+}
+
+#[test]
+fn a_goroutine_is_selected_or_inspected_by_its_id() {
+    let stdout = at_go_checkpoint(&[
+        "goroutines -t",
+        "goroutine 1 backtrace",
+        "threads",
+        "goroutine 1",
+        "goroutine",
+    ]);
+    // Each goroutine's frames follow it, the runtime's own among them.
+    assert_in_order(
+        &stdout,
+        &[
+            "main.worker at ",
+            "\n    #0 ",
+            "in runtime.gopark",
+            "unwind stopped",
+        ],
+    );
+    // A command runs in the goroutine without keeping it selected.
+    assert_in_order(
+        &stdout,
+        &[
+            "#0 ",
+            "in main.reached",
+            "in main.checkpoint",
+            "in runtime.main",
+        ],
+    );
+    let threads = stdout
+        .lines()
+        .filter(|line| line.contains(" stopped"))
+        .collect::<Vec<_>>();
+    assert!(
+        threads
+            .iter()
+            .any(|line| line.starts_with("* ") && line.ends_with(" — [1]")),
+        "{stdout}"
+    );
+    assert!(
+        threads.iter().any(|line| line.ends_with(" — idle")),
+        "{stdout}"
+    );
+    assert_in_order(&stdout, &["selected goroutine 1", "* [1] main.reached at "]);
+    let failure = batch_output(
+        &["build/test-programs/workers-go-o0"],
+        &["break main.reached", "run", "goroutine 1 next"],
+    );
+    assert_failure(&failure, "goroutine 1 runs only commands that inspect");
+}
+
+#[test]
+fn a_cores_goroutines_show_their_labels_and_the_runtimes_their_entries() {
+    let stdout = batch(
+        &[
+            "--core",
+            "build/test-programs/panic-go-o0.core",
+            "build/test-programs/panic-go-o0",
+        ],
+        &["goroutines -a"],
+    );
+    assert!(
+        stdout.lines().any(|line| line.contains("] main.worker at ")
+            && line.ends_with(r#"— chan receive {job: resize, tenant: "a b"}"#)),
+        "{stdout}"
+    );
+    // The runtime numbers its goroutines in batches, so its own ids vary.
+    assert!(
+        stdout.lines().any(|line| line.starts_with("  [")
+            && line.ends_with("] runtime.forcegchelper — force gc (idle)")),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn backtraces_say_whose_stack_each_run_of_frames_is_on() {
+    let stdout = batch(
+        &["build/test-programs/stacks-go-o0"],
+        &["break runtime.readmemstats_m", "run", "backtrace"],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "\n    on the runtime's stack:\n#0 ",
+            "in runtime.readmemstats_m",
+            "in runtime.systemstack",
+            "\n    on the task's stack:\n#3 ",
+            "in runtime.ReadMemStats",
+            "in main.stats",
+            "unwind stopped: the outermost frame has no caller",
+        ],
+    );
+}
+
+#[test]
+fn finish_shows_what_the_function_returned() {
+    for fixture in [
+        "build/test-programs/values-go-o0",
+        "build/test-programs/values-go-o2",
+    ] {
+        let stdout = batch(
+            &[fixture],
+            &["break main.returning", "run", "finish", "print"],
+        );
+        assert_in_order(
+            &stdout,
+            &[
+                "stopped after frame return",
+                "returned (int) count = 42",
+                "returned (bool) ok = true",
+                "returned (string) text = \"go\"",
+                "returned (error) failure = nil",
+                // The frame returned to lists them among its variables.
+                "returned (int) count = 42",
+            ],
+        );
+    }
+}
+
+#[test]
+fn a_watched_goroutine_local_names_its_goroutine_and_follows_its_stack() {
+    let stdout = batch(
+        &["build/test-programs/watched-go-o0"],
+        &[
+            "break main.bump",
+            "run",
+            "up",
+            "watch counter",
+            "delete 1",
+            "continue",
+            "continue",
+            "continue",
+            "continue",
+            "info watchpoints",
+            "continue",
+            "continue",
+        ],
+    );
+    // The address the watch is at, from its line.
+    let watched = |prefix: &str| {
+        let line = stdout
+            .lines()
+            .find(|line| line.starts_with(prefix) && line.contains("counter"))
+            .unwrap_or_else(|| panic!("no {prefix:?}:\n{stdout}"));
+        assert!(line.contains(" below the top of task "), "{line}");
+        let (_, after) = line.split_once("8 bytes at ").expect("a size");
+        after
+            .split_whitespace()
+            .next()
+            .expect("an address")
+            .to_owned()
+    };
+    let set = watched("watchpoint 1 set on counter: ");
+    let listed = watched("1 ");
+    // Each round's deep calls grew the stack, which the runtime moved.
+    assert_ne!(set, listed, "{stdout}");
+    assert_in_order(
+        &stdout,
+        &[
+            "new: 10",
+            "deleted watchpoint 1 counter: its frame or block is no longer active",
+            "inferior exited with status 0",
+        ],
+    );
+}
+
+#[test]
+fn backtraces_mark_the_iterators_of_a_loop_whose_body_runs() {
+    let stdout = batch(
+        &["build/test-programs/ranges-go-o0"],
+        &["break main.counted-range1", "run", "backtrace", "frame 1"],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "in main.counted-range1 at",
+            "#1 ",
+            "in main.Count.func1 (the iterator of #2's loop) at",
+            "#2 ",
+            "in main.counted at",
+            "#1 ",
+            "in main.Count.func1 (the iterator of #2's loop) at",
+        ],
+    );
 }
 
 #[test]

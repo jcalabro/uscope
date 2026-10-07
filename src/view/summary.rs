@@ -11,7 +11,7 @@ use rustc_apfloat::ieee::X87DoubleExtended;
 use crate::{
     BaseTypeEncoding, FloatValue, IntegerValue, PresentedCount, PresentedShape, ScalarValue,
     TextCompletion, TextSummary, TypeInfo, TypeKind, ValueChildren, VariableState,
-    VariableUnavailableReason, VariableValue,
+    VariableUnavailableReason, VariableValue, VirtualAddress,
 };
 
 /// The most elements a summary previews.
@@ -97,15 +97,21 @@ pub fn scalar(value: &ScalarValue, character: bool) -> String {
             with_character(value.to_string(), u8::try_from(*value).ok())
         }
         ScalarValue::Floating(value) => float(*value),
+        ScalarValue::Complex { real, imaginary } => {
+            let imaginary = float(*imaginary);
+            let sign = if imaginary.starts_with('-') { "" } else { "+" };
+            format!("({}{sign}{imaginary}i)", float(*real))
+        }
     }
 }
 
-/// A float, exactly as its format holds it.
+/// A float, exactly as its format holds it: its shortest digits that read
+/// back as it, with an exponent when it is very large or very small.
 #[must_use]
 pub fn float(value: FloatValue) -> String {
     match value {
-        FloatValue::Binary32(bits) => f32::from_bits(bits).to_string(),
-        FloatValue::Binary64(bits) => f64::from_bits(bits).to_string(),
+        FloatValue::Binary32(bits) => shortest(f32::from_bits(bits)),
+        FloatValue::Binary64(bits) => shortest(f64::from_bits(bits)),
         FloatValue::X87Extended {
             significand,
             sign_exponent,
@@ -113,6 +119,20 @@ pub fn float(value: FloatValue) -> String {
             u128::from(significand) | (u128::from(sign_exponent) << 64),
         )
         .to_string(),
+    }
+}
+
+/// A float's shortest round-trip digits, which take an exponent past 1e21
+/// or below 1e-6, as JavaScript writes numbers, rather than hundreds of
+/// zeros.
+fn shortest<F: std::fmt::Display + std::fmt::LowerExp>(value: F) -> String {
+    let scientific = format!("{value:e}");
+    let exponent = scientific
+        .rsplit_once('e')
+        .and_then(|(_, exponent)| exponent.parse::<i32>().ok());
+    match exponent {
+        Some(exponent) if !(-6..21).contains(&exponent) => scientific,
+        _ => value.to_string(),
     }
 }
 
@@ -154,11 +174,12 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
     let partless = matches!(children, ValueChildren::Available(parts) if parts.total() == 0);
     let rendered = match value {
         VariableValue::Scalar(value) => scalar(value, character),
-        VariableValue::Enumeration { value, matches } => matches
-            .first()
-            .map_or_else(|| integer(*value), |enumerator| enumerator.name.to_string()),
+        VariableValue::Enumeration { value, matches } => {
+            symbol(*value, matches).unwrap_or_else(|| integer(*value))
+        }
         VariableValue::Address(address) => format!("{:#x}", address.address.get()),
         VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
+        VariableValue::Function { code, function } => self::function(*code, function.as_deref()),
         VariableValue::Array { .. } | VariableValue::Slice { .. } => "[…]".to_owned(),
         // A record with no parts has nothing to elide; Rust's is `()`.
         VariableValue::Record if partless => {
@@ -175,6 +196,35 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
     match (text, value) {
         (Some(text), VariableValue::Address(_)) => format!("{rendered} {}", quoted(text)),
         _ => rendered,
+    }
+}
+
+/// The name an enumeration-like value has: its first exact constant's, or
+/// the flag constants it combines, joined by `|`.
+#[must_use]
+pub fn symbol(value: IntegerValue, matches: &[crate::Enumerator]) -> Option<String> {
+    if matches.iter().any(|enumerator| enumerator.value == value) {
+        return matches
+            .first()
+            .map(|enumerator| enumerator.name.to_string());
+    }
+    (!matches.is_empty()).then(|| {
+        matches
+            .iter()
+            .map(|enumerator| enumerator.name.as_ref())
+            .collect::<Vec<_>>()
+            .join("|")
+    })
+}
+
+/// A function value: the function it calls, `nil`, or the address of
+/// code no debug information names.
+#[must_use]
+pub fn function(code: Option<VirtualAddress>, function: Option<&str>) -> String {
+    match (code, function) {
+        (None, _) => "nil".to_owned(),
+        (Some(_), Some(function)) => function.to_owned(),
+        (Some(code), None) => format!("{:#x}", code.get()),
     }
 }
 

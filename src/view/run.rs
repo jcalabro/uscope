@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::eval::interp::{self, Outcome, Value};
-use crate::eval::target::{Machine, Refusal, Register, Stop};
+use crate::eval::target::{Key, Machine, Refusal, Register, Stop, TextSpan};
 use crate::eval::types::{Category, TypeSource, category};
 use crate::{
     InspectedValue, PresentedShape, TextCompletion, TextSummary, TypeInfo, TypeReference,
@@ -83,7 +83,8 @@ fn unsupported(message: &str) -> Stop {
 #[derive(Debug)]
 pub struct Presented {
     pub shape: PresentedShape,
-    /// How many elements or entries a sequence or map holds.
+    /// How many elements or entries a sequence or map holds, also when it
+    /// presents as text.
     pub count: Option<crate::PresentedCount>,
     pub text: Option<TextSummary>,
     pub summary: String,
@@ -253,6 +254,31 @@ impl<M: Machine> Machine for ViewMachine<'_, M> {
 
     fn presented_length(&mut self, at: &Self::Place) -> Result<Option<u64>, Stop> {
         self.base.presented_length(at)
+    }
+
+    fn capacity(&mut self, at: &Self::Place) -> Result<u64, Stop> {
+        self.base.capacity(at)
+    }
+
+    fn presented_capacity(&mut self, at: &Self::Place) -> Result<Option<u64>, Stop> {
+        self.base.presented_capacity(at)
+    }
+
+    fn text_span(&mut self, at: &Self::Place) -> Result<Option<TextSpan>, Stop> {
+        self.base.text_span(at)
+    }
+
+    fn entry(
+        &mut self,
+        from: &Self::Place,
+        step: &Self::Step,
+        key: &Key,
+    ) -> Result<Option<Self::Place>, Stop> {
+        self.base.entry(from, step, key)
+    }
+
+    fn task(&mut self) -> Result<u64, Stop> {
+        Err(unsupported("views read no tasks"))
     }
 
     fn register(&mut self, _register: &Register) -> Result<u128, Stop> {
@@ -725,6 +751,15 @@ pub fn present<M: Machine>(
         }
     };
     presented.named = named(bound, shape).len() as u64;
+    // Text the view writes `self` as presents the value, which keeps the
+    // children its shape gives it.
+    if !matches!(shape, BoundShape::Value(_) | BoundShape::Text { .. })
+        && let Some(text) = self_text(bound, &mut machine)?
+    {
+        presented.shape = PresentedShape::Text;
+        presented.summary = summary::quoted(&text);
+        presented.text = Some(text);
+    }
     if let Some(pieces) = &bound.summary {
         let mut text = String::new();
         for piece in pieces {
@@ -739,6 +774,43 @@ pub fn present<M: Machine>(
         presented.summary = text;
     }
     Ok(presented)
+}
+
+/// The text of `self`, when the view, or the last `extend` of it that
+/// formats `self`, writes it as UTF-8 and its bytes are text.
+fn self_text<M: Machine>(
+    bound: &BoundView<M::Step>,
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<Option<TextSummary>, Failure> {
+    let owner = bound
+        .extensions
+        .iter()
+        .rev()
+        .map(AsRef::as_ref)
+        .chain(std::iter::once(bound))
+        .find(|view| {
+            view.formats
+                .iter()
+                .any(|(name, ..)| name.as_ref() == "self")
+        });
+    let Some((owner, source)) =
+        owner.and_then(|owner| owner.self_text.as_ref().map(|source| (owner, source)))
+    else {
+        return Ok(None);
+    };
+    let text = if std::ptr::eq(owner, bound) {
+        machine.set_variables(&[]);
+        read_text(source, None, machine)
+    } else {
+        let this = machine.this.clone();
+        let mut extension = ViewMachine::new(&mut *machine.base, owner, this);
+        read_text(source, None, &mut extension)
+    };
+    match text {
+        Ok(text) => Ok(super::format::utf8_text(&text)),
+        Err(Failure::Problem(_)) => Ok(None),
+        Err(failure) => Err(failure),
+    }
 }
 
 /// A sequence's or map's count and summary, previewing its first elements.
@@ -1065,10 +1137,26 @@ fn read_text<M: Machine>(
     length: Option<&ViewProgram<M::Step>>,
     machine: &mut ViewMachine<'_, M>,
 ) -> Result<TextSummary, Failure> {
+    let (address, length) = text_location(source, length, machine)?;
+    if address == 0 && length != Some(0) {
+        return Err(Failure::Problem(ViewProblem::Unavailable(
+            VariableUnavailableReason::ValueAccess(ValueAccessUnavailableReason::NullPointer),
+        )));
+    }
+    read_bytes(machine, address, length)
+}
+
+/// Where a `text` shape's characters are: the first one's address, and
+/// how many there are when the view or its elements say.
+fn text_location<M: Machine>(
+    source: &TextSource<M::Step>,
+    length: Option<&ViewProgram<M::Step>>,
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<(u64, Option<u64>), Failure> {
     let declared = length
         .map(|program| count(program, machine, "text's length"))
         .transpose()?;
-    let (address, length) = match source {
+    Ok(match source {
         TextSource::Pointer(program) => match interp::value(program, machine)? {
             Value::Pointer(address) => (address, declared),
             _ => return Err(internal("a text's pointer is not a pointer")),
@@ -1090,21 +1178,144 @@ fn read_text<M: Machine>(
                 )));
             }
             if length == 0 {
-                return Ok(TextSummary {
-                    bytes: Arc::from([]),
-                    completion: TextCompletion::Complete,
-                });
+                return Ok((0, Some(0)));
             }
             let first = machine.step(&place, first, &[0])?;
             (machine.address(&first)?, Some(length))
         }
-    };
-    if address == 0 && length != Some(0) {
-        return Err(Failure::Problem(ViewProblem::Unavailable(
-            VariableUnavailableReason::ValueAccess(ValueAccessUnavailableReason::NullPointer),
-        )));
+    })
+}
+
+/// Where the text `this` is presented as is, for slicing it: the first
+/// character's address, and how many there are when the view says.
+pub fn text_span<M: Machine>(
+    bound: &BoundView<M::Step>,
+    machine: &mut M,
+    this: M::Place,
+) -> Result<Option<(u64, Option<u64>)>, Failure> {
+    let mut machine = ViewMachine::new(machine, bound, this);
+    match resolve(bound, &mut machine)? {
+        BoundShape::Text { source, length } => {
+            let (address, length) = text_location(source, length.as_ref(), &mut machine)?;
+            if address == 0 && length != Some(0) {
+                return Err(Failure::Problem(ViewProblem::Unavailable(
+                    VariableUnavailableReason::ValueAccess(
+                        ValueAccessUnavailableReason::NullPointer,
+                    ),
+                )));
+            }
+            Ok(Some((address, length)))
+        }
+        // A value presented as another is that one's text.
+        BoundShape::Value(program) => {
+            let Value::Place(place) = interp::value(program, &mut machine)? else {
+                return Ok(None);
+            };
+            Ok(machine
+                .text_span(&place)?
+                .map(|span| (span.address, Some(span.length))))
+        }
+        _ => Ok(None),
     }
-    read_bytes(machine, address, length)
+}
+
+/// How many elements `this` has room for, as the view's `capacity` field,
+/// or an extension's, says, for `cap(v)`; a view that presents the value as
+/// another gives that one's.
+pub fn capacity<M: Machine>(
+    bound: &BoundView<M::Step>,
+    machine: &mut M,
+    this: M::Place,
+) -> Result<Option<u64>, Failure> {
+    let mut machine = ViewMachine::new(machine, bound, this.clone());
+    let shape = resolve(bound, &mut machine)?;
+    if let Some(field) = bound.fields.iter().find(|field| &*field.name == "capacity") {
+        machine.set_variables(&[]);
+        return capacity_of(&field.program, &mut machine).map(Some);
+    }
+    for extension in &bound.extensions {
+        if let Some(field) = extension
+            .fields
+            .iter()
+            .find(|field| &*field.name == "capacity")
+        {
+            let mut extended = ViewMachine::new(&mut *machine.base, extension, this);
+            return capacity_of(&field.program, &mut extended).map(Some);
+        }
+    }
+    let place = match shape {
+        BoundShape::Value(program) => match interp::value(program, &mut machine)? {
+            Value::Place(place) => place,
+            _ => return Ok(None),
+        },
+        BoundShape::Dynamic { pointer, ty } => dynamic_place(pointer, ty, &mut machine)?,
+        _ => return Ok(None),
+    };
+    Ok(machine.presented_capacity(&place)?)
+}
+
+/// A `capacity` field's value, which must be a count.
+fn capacity_of<M: Machine>(
+    program: &ViewProgram<M::Step>,
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<u64, Failure> {
+    let Value::Int(integer) = interp::value(program, machine)? else {
+        return Err(refused("its `capacity` field is not an integer"));
+    };
+    let value = integer.value();
+    value
+        .to_u128()
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| refused(format!("its capacity is {value}")))
+}
+
+/// The place of the value the map `this` holds for `key`, for `m[key]`,
+/// or `None` when it holds no such key. Its entries are searched in order;
+/// a key that could not be read leaves the answer unavailable unless a
+/// later one matches.
+pub fn entry_place<M: Machine>(
+    bound: &BoundView<M::Step>,
+    machine: &mut M,
+    this: M::Place,
+    key: &Key,
+    checkpoints: &mut Checkpoints,
+) -> Result<Option<M::Place>, Failure> {
+    let mut machine = ViewMachine::new(machine, bound, this);
+    let shape = resolve(bound, &mut machine)?;
+    let BoundShape::Map {
+        scan,
+        key: key_program,
+        value,
+    } = shape
+    else {
+        return Err(refused(if matches!(shape, BoundShape::Sequence { .. }) {
+            "a sequence's elements are indexed by position"
+        } else {
+            "the view presents no map"
+        }));
+    };
+    let declared = declared_length(scan, &mut machine)?;
+    let Some(mut walk) = Walk::at(scan, declared, 0, &mut machine, checkpoints)? else {
+        return Ok(None);
+    };
+    let mut unreadable = None;
+    while walk.next(&mut machine, checkpoints)?.is_some() {
+        let candidate = element(key_program, &mut machine)?;
+        match key.matches(&candidate) {
+            Ok(true) => {
+                return match interp::value(value, &mut machine)? {
+                    Value::Place(place) => Ok(Some(place)),
+                    _ => Err(refused("the view computes its values, which have no place")),
+                };
+            }
+            Ok(false) => {}
+            Err(Stop::Missing(state)) => {
+                unreadable.get_or_insert(Stop::Missing(state));
+            }
+            Err(stop) => return Err(stop.into()),
+        }
+    }
+    unreadable.map_or_else(|| Ok(None), |stop| Err(stop.into()))
 }
 
 /// Reads text at `address`, `length` bytes or up to a NUL, a page at a

@@ -324,6 +324,10 @@ impl VariableRuntime for Runtime {
         Ok(VirtualAddress::new(address.get()))
     }
 
+    fn image_address(&self, address: VirtualAddress) -> Option<ImageAddress> {
+        Some(ImageAddress::new(address.get()))
+    }
+
     fn read_memory(
         &mut self,
         _address: VirtualAddress,
@@ -634,6 +638,14 @@ fn undefined_location_pieces_leave_the_rest_of_a_value_readable() {
         composite(&pieces, 3, &mut runtime),
         Err(EvaluateError::Malformed(_))
     ));
+    // A value with no defined bits at all is optimized out.
+    assert_eq!(
+        composite(&[piece(Location::Empty, 32)], 8, &mut runtime).map(drop),
+        Err(
+            VariableUnavailableReason::OptimizedOut(crate::OptimizedOutReason::EmptyLocation)
+                .into()
+        )
+    );
 }
 
 #[test]
@@ -1757,7 +1769,7 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
     runtime.memory = Some(Arc::from([0_u8; 0x20]));
     let context = crate::debug_info::VariableContext {
         stop_id: crate::StopId::new(1),
-        thread: crate::ThreadId::new(1),
+        context: crate::ThreadId::new(1).into(),
         frame: crate::StackFrameId::new(0),
         module: crate::ModuleId::new(0),
         image: ModuleImageId::new(0),
@@ -1814,6 +1826,10 @@ impl VariableRuntime for Memory {
 
     fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>> {
         Ok(VirtualAddress::new(address.get()))
+    }
+
+    fn image_address(&self, address: VirtualAddress) -> Option<ImageAddress> {
+        Some(ImageAddress::new(address.get()))
     }
 
     fn read_memory(

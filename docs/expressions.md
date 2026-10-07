@@ -33,6 +33,12 @@ knows is taken first.
 `$pc`, `$sp`, and `$fp` name the program counter, stack pointer, and frame
 pointer.
 
+`$task` is the id of the selected task, or of the task the selected thread
+runs, an exact integer: in Go, a goroutine's, so a breakpoint's condition
+`$task == 7` stops only in goroutine 7. Where the program has no tasks, or uscope cannot tell which one
+a thread runs, `$task` is refused; a thread between tasks, such as one idle
+in Go's scheduler, has none, and `$task` is unavailable there.
+
 ```uscope-example
 ns::counter               => reads as `ns::counter`
 ::counter                 => reads as `::counter`
@@ -68,6 +74,13 @@ $rbp                   => unavailable at `$rbp`
 $rbp + 1               => unavailable at `$rbp`
 $nope                  => error unknown-name at `$nope`
 twice                  => error ambiguous-name at `twice`
+$task                  => 7 : integer
+$task == 7             => true : bool
+```
+
+```uscope-example
+world: scalars
+$task                  => error unsupported at `$task`
 ```
 
 ## Literals
@@ -85,9 +98,10 @@ is a range. `'a'` is a character's code point, and `"text"` is a string,
 which compares with the program's text. Both take the escapes `\n`, `\r`,
 `\t`, `\0`, `\\`, `\'`, `\"`, `\xHH`, and `\u{H…}`.
 
-`true`, `false`, and `null` mean what they say. `nil`, `nullptr`, and `NULL`
-are refused with a hint to write `null`, so that one spelling reads the same
-in every language.
+`true`, `false`, and `null` mean what they say, and `nil` is a second
+spelling of `null`, which prints as `null`. `nullptr` and `NULL` are refused
+with a hint to write `null`: C's `NULL` is a macro, and the two spellings
+are enough for a condition to read the same in every language.
 
 ```uscope-example
 0x2a + 0b1010_1010 + 0o17 => reads as `42 + 170 + 15`
@@ -102,6 +116,7 @@ in every language.
 1e400                     => error syntax at `1e400`
 340282366920938463463374607431768211456 => error syntax at `340282366920938463463374607431768211456`
 'ab'                      => error syntax at `'a`
+nil                       => reads as `null`
 nullptr                   => error syntax at `nullptr`
 ```
 
@@ -145,9 +160,14 @@ selects through one pointer; `->` selects through a pointer as in C;
 `t.0` selects a tuple's field. A member of an anonymous struct or union, or
 of a base class, is selected by its own name, as C and C++ select it: a
 record's own members hide its bases', and a name that two paths reach in
-different objects is ambiguous. `a[start..end]` is a half-open range of an
-array or slice, and must be the whole expression. `len(x)` is a length and
-`sizeof(x)` a size. The language does not call functions.
+different objects is ambiguous. A member of a Go embedded field is promoted
+as Go promotes it: `n.W` selects the `W` of the shallowest embedded field
+that has one, through an embedded pointer too, and several at that depth
+are ambiguous, the error naming each. `a[start..end]` is a half-open range
+of an array or slice, and must be the whole expression; `a[start:end]`
+slices (see Slices), and `m[key]` indexes a map (see Maps). `len(x)` is a
+length, `cap(x)` a capacity, and `sizeof(x)` a size. The language does not
+call functions.
 
 ```uscope-example
 a+b*c                     => reads as `a + b * c`
@@ -162,8 +182,15 @@ a ? b : c ? d : e         => reads as `a ? b : c ? d : e`
 p->items[i + 1].0         => reads as `p->items[i + 1].0`
 &(&x)                     => reads as `& &x`
 a[1..4]                   => reads as `a[1..4]`
+s[1:3]                    => reads as `s[1:3]`
+s[:n]                     => reads as `s[:n]`
+s[i + 1:]                 => reads as `s[i + 1:]`
+s[:]                      => reads as `s[:]`
+s[c ? 1 : 2:3]            => reads as `s[c ? 1 : 2:3]`
+cap(s)                    => reads as `cap(s)`
 1 < 2 < 3                 => error syntax at `<`
 a[1..4] + 1               => error syntax at `a[1..4]`
+s[1:2:3]                  => error syntax at `:`
 f(x)                      => error syntax at `f(`
 a +                       => error syntax at ``
 ```
@@ -275,6 +302,7 @@ are not numbers; convert one with `flag as u8`.
 world: memory
 null_ptr != null && null_ptr->a > 3 => false : bool
 ptr != null && ptr->a > 3          => true : bool
+ptr != nil                         => true : bool
 !ptr                               => false : bool
 s.a > 3 ? 1 : 2                    => 1 : integer
 false && gone > 0                  => false : bool
@@ -332,6 +360,68 @@ s.missing              => error type at `missing`
 s->a                   => error type at `s`
 &r                     => error not-an-lvalue at `r`
 gone + 1               => unavailable at `gone`
+```
+
+## Slices
+
+`x[start:end]` is the part of an array, a slice, or text from index `start`
+up to, not including, `end`. A bound left out is the beginning or the end:
+`x[:end]`, `x[start:]`, and `x[:]`. When the expression runs, `0 <= start
+<= end <= len(x)` must hold, or it is a bounds error. Unlike Go, a slice's
+room beyond its length is not reachable this way, since what is there is
+not part of its value; Go's `x[low:high:max]` is not supported.
+
+Slicing an array or slice is the range of its elements `x[start..end]`, and
+like a range must be the whole expression. Slicing text, which is a
+language's string or what a character pointer points to, is text: a string
+that compares with `==` and `!=`, has a length, slices again, and prints.
+
+```uscope-example
+world: memory
+items[1:3]             => range 1..3
+items[:2]              => range 0..2
+items[1:]              => range 1..3
+arr[:]                 => range 0..4
+arr[2:2]               => range 2..2
+items[2:1]             => error bounds at `items[2:1]`
+items[1:4]             => error bounds at `items[1:4]`
+items[1:3] == 1        => error type at `items[1:3]`
+name[1:3]              => "el" : string
+name[:4] == "hell"     => true : bool
+name[1:] != "ello"     => false : bool
+len(name[2:])          => 3 : integer
+name[2:][1:]           => "lo" : string
+"hello"[1:3] == "el"   => true : bool
+name[3:9]              => error bounds at `name[3:9]`
+s[0:1]                 => error type at `s`
+ptr[0:1]               => error type at `ptr`
+```
+
+## Maps
+
+`m[key]` is the value a map holds for a key, when a view presents `m` as a
+map (`docs/views.md`): Go's maps, and the maps of the C++, Rust, and Zig
+standard libraries. A key is a number, truth value, pointer, or string, or
+text the program holds, and finds the entry whose key `==` would call equal
+to it, so numbers compare exactly and `m[2.0]` finds the key `2`. A key of a
+type the map's keys cannot equal, such as a string in a map of integers, is
+a type error, and a key the map does not hold is a missing-key error, never
+a zero value. The entries are searched in the view's order, as far as the
+inspection's budget allows. A map is never indexed by position.
+
+```uscope-example
+world: memory
+squares[3]             => 9 : int
+squares[3u8]           => 9 : int
+squares[2.0]           => 4 : int
+squares[4]             => error missing-key at `squares[4]`
+squares["3"]           => error type at `squares["3"]`
+ages["bob"]            => 41 : int
+ages[name]             => error missing-key at `ages[name]`
+ages[name[:3]]         => error missing-key at `ages[name[:3]]`
+ages["ann"] + squares[1] => 31 : integer
+ages[s]                => error type at `s`
+ages[arr]              => error type at `arr`
 ```
 
 ## Casts
@@ -479,6 +569,12 @@ partial == "xyz"       => false : bool
 text: a language's string, or what a character pointer points to. An array of
 characters is an array, so its length is its element count.
 
+`cap(x)` gives how many elements `x` has room for: an array's element count,
+the capacity a slice records, as Go's slices do, or what the `capacity`
+field of the view that presents `x` says, as the views of Go's channels, of
+C++'s vectors and strings, and of Rust's and Zig's lists do. Anything else,
+a Go map among them, has no capacity.
+
 ```uscope-example
 world: memory
 sizeof(s)              => 16 : integer
@@ -492,6 +588,12 @@ sizeof(1)              => error type at `sizeof(1)`
 len(name)              => 5 : integer
 len(buf)               => 8 : integer
 len(s)                 => error type at `s`
+cap(arr)               => 4 : integer
+cap(spare)             => 5 : integer
+len(spare)             => 3 : integer
+cap(items)             => error type at `items`
+cap(s)                 => error type at `s`
+cap(1)                 => error type at `1`
 ```
 
 ## Assignment

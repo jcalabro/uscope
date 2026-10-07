@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 mod image;
 
-pub use image::{ModuleImage, ModuleMetadata};
+pub use image::{ModuleImage, ModuleMetadata, PackageInfo, ThreadLocal};
 
 macro_rules! address_type {
     ($name:ident, $description:literal) => {
@@ -205,6 +205,195 @@ numeric_id!(
     "Identifies a thread within a debug session by its platform value."
 );
 
+/// Identifies one language runtime instance within a debug session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RuntimeId(u32);
+
+impl RuntimeId {
+    /// Creates an identifier from its numeric representation.
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric representation of this identifier.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for RuntimeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Identifies one task, such as a goroutine, of one language runtime.
+///
+/// The number is the runtime's own, such as a goroutine id. Some runtimes
+/// reuse numbers once a task exits, so an id names a task only within the
+/// process it was read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TaskId {
+    /// The runtime instance that schedules the task.
+    pub runtime: RuntimeId,
+    /// The runtime's number for the task.
+    pub number: u64,
+}
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.number.fmt(f)
+    }
+}
+
+/// What a language runtime's task is doing at a stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskState {
+    /// On a thread, running or in a system call.
+    Running,
+    /// Ready to run, waiting for a thread.
+    Runnable,
+    /// Waiting for an event, such as a channel or a lock.
+    Blocked,
+    /// The runtime's state for the task could not be read, for this reason.
+    Unknown(Arc<str>),
+}
+
+/// A place in a task's code: where it runs or will resume, the call that
+/// created it, or the function it began in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskLocation {
+    pub address: VirtualAddress,
+    /// The loaded module whose image holds the address.
+    pub module: Option<ModuleId>,
+    /// The function holding the address, or the call at it for a return
+    /// address.
+    pub function: Option<Arc<str>>,
+    pub source: Option<SourceLocation>,
+}
+
+/// One task of a language runtime at a stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSnapshot {
+    pub id: TaskId,
+    /// What its runtime calls a task, such as Go's "goroutine".
+    pub noun: &'static str,
+    pub state: TaskState,
+    /// The runtime's own words for what the task does or waits for, such
+    /// as Go's "chan receive".
+    pub detail: Option<Arc<str>>,
+    /// The thread running the task, or its runtime's code for it, as while
+    /// it is being parked.
+    pub thread: Option<ThreadId>,
+    /// Where a task that is not on a thread will resume.
+    pub resume: Option<TaskLocation>,
+    /// The call that created the task.
+    pub creation: Option<TaskLocation>,
+    /// The function the task began in.
+    pub entry: Option<TaskLocation>,
+    /// The task that created this one.
+    pub parent: Option<TaskId>,
+    /// Whether the runtime runs the task for its own work, such as a
+    /// garbage collector's worker, rather than the program's.
+    pub internal: bool,
+    /// The key-value labels the program gave the task, such as Go's
+    /// profiler labels.
+    pub labels: Arc<[(Arc<str>, Arc<str>)]>,
+}
+
+/// Whose stack a frame is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackSegment {
+    /// An OS thread's stack, which no runtime knows.
+    Thread,
+    /// A task's own stack.
+    Task,
+    /// A runtime's scheduler stack for a thread, on which it runs its own
+    /// code, for a task or for none.
+    System,
+    /// A runtime's signal-handling stack.
+    Signal,
+}
+
+/// What a stopped thread runs for a language runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadActivity {
+    /// A task, or the runtime's code on its behalf.
+    Task { task: TaskId, stack: StackSegment },
+    /// The runtime's scheduler with no task, or code no runtime knows, such
+    /// as a thread C created.
+    Idle,
+    /// The runtime's state for the thread could not be read, for this
+    /// reason.
+    Unknown(Arc<str>),
+}
+
+/// Where a page of tasks continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskCursor {
+    pub(crate) runtime: usize,
+    pub(crate) position: u64,
+}
+
+/// One page of the tasks of every runtime in a stopped process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskPage {
+    pub tasks: Arc<[TaskSnapshot]>,
+    /// Where the next page begins, or `None` after the last.
+    pub next: Option<TaskCursor>,
+    /// Why the page may be missing tasks or describe some wrongly, such
+    /// as a task whose memory could not be read. A page with none is
+    /// complete.
+    pub gaps: Arc<[Arc<str>]>,
+    /// What reading the page cost: the memory read of the runtimes.
+    pub usage: crate::InspectionUsage,
+}
+
+/// Where a request inspects or controls execution: an operating-system
+/// thread, or a language runtime's task, which runs on some thread or is
+/// parked with its registers saved in memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExecutionContext {
+    /// An operating-system thread.
+    Thread(ThreadId),
+    /// A language runtime's task.
+    Task(TaskId),
+}
+
+impl ExecutionContext {
+    /// The thread this context names, or `None` for a task.
+    #[must_use]
+    pub const fn as_thread(self) -> Option<ThreadId> {
+        match self {
+            Self::Thread(thread) => Some(thread),
+            Self::Task(_) => None,
+        }
+    }
+}
+
+impl From<ThreadId> for ExecutionContext {
+    fn from(thread: ThreadId) -> Self {
+        Self::Thread(thread)
+    }
+}
+
+impl From<TaskId> for ExecutionContext {
+    fn from(task: TaskId) -> Self {
+        Self::Task(task)
+    }
+}
+
+impl std::fmt::Display for ExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Thread(thread) => write!(f, "thread {thread}"),
+            Self::Task(task) => write!(f, "task {task}"),
+        }
+    }
+}
+
 /// The architecture-independent purpose of a distinguished register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -247,8 +436,8 @@ pub struct RegisterValue {
 pub struct RegisterSnapshot {
     /// The debugger revision at which these values were read.
     pub revision: u64,
-    /// The thread whose registers were read.
-    pub thread: ThreadId,
+    /// The thread or task whose registers were read.
+    pub context: ExecutionContext,
     /// The architecture and data representation of the register values.
     pub target: TargetDescription,
     /// Register values in the architecture's canonical display order.
@@ -265,6 +454,9 @@ pub enum BaseTypeEncoding {
     Unsigned,
     UnsignedCharacter,
     Floating,
+    /// A complex number: two floats, each half its size, the real part
+    /// first.
+    ComplexFloating,
 }
 
 /// A resolved scalar type independent of its debug-information encoding.
@@ -585,6 +777,10 @@ pub enum TypeKind {
     },
     /// A deliberately unspecified type such as C `void`.
     Unspecified,
+    /// A function value, such as Go's `func`: null, or a pointer to a
+    /// context whose first word is the code it calls and whose rest holds
+    /// what a closure captured.
+    Function,
     /// A valid type whose value shape is not implemented yet.
     Opaque {
         /// A stable description of the unsupported DWARF type tag.
@@ -825,6 +1021,11 @@ pub enum ScalarValue {
     Unsigned(u128),
     /// A binary floating-point value retained as exact target bits.
     Floating(FloatValue),
+    /// A complex number, its parts retained as exact target bits.
+    Complex {
+        real: FloatValue,
+        imaginary: FloatValue,
+    },
 }
 
 /// A decoded thin pointer or reference representation.
@@ -844,11 +1045,20 @@ pub enum VariableValue {
     Enumeration {
         /// The exact target value.
         value: IntegerValue,
-        /// Exact symbolic matches in producer/source order.
+        /// Exact symbolic matches in producer/source order, or, when none
+        /// equals the value, the flag constants whose bitwise OR it is.
         matches: Arc<[Enumerator]>,
     },
     /// A concrete thin pointer or reference address.
     Address(AddressValue),
+    /// A function value. A closure's captured variables are its children.
+    Function {
+        /// The code it calls, or `None` for a null (Go's nil) function.
+        code: Option<VirtualAddress>,
+        /// The function that code begins, when the debug information
+        /// describes one there.
+        function: Option<Arc<str>>,
+    },
     /// An optimized pointer with no concrete address representation.
     ImplicitPointer,
     /// An array whose elements are available through explicit child pages.
@@ -1114,7 +1324,7 @@ pub enum PieceLocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueChildrenReference {
     pub(crate) stop_id: crate::StopId,
-    pub(crate) thread: ThreadId,
+    pub(crate) context: ExecutionContext,
     pub(crate) frame: StackFrameId,
     pub(crate) module: ModuleId,
     pub(crate) image: ModuleImageId,
@@ -1301,7 +1511,7 @@ pub enum DereferenceTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DereferenceReference {
     pub(crate) stop_id: crate::StopId,
-    pub(crate) thread: ThreadId,
+    pub(crate) context: ExecutionContext,
     pub(crate) frame: StackFrameId,
     pub(crate) module: ModuleId,
     pub(crate) image: ModuleImageId,
@@ -1311,10 +1521,10 @@ pub struct DereferenceReference {
 }
 
 impl DereferenceReference {
-    /// Returns the thread whose frame context produced this capability.
+    /// Returns the thread or task whose frame produced this capability.
     #[must_use]
-    pub const fn thread(&self) -> ThreadId {
-        self.thread
+    pub const fn context(&self) -> ExecutionContext {
+        self.context
     }
 }
 
@@ -1324,7 +1534,7 @@ pub enum DereferenceState {
     /// The value is not a pointer or reference.
     NotApplicable,
     /// Dereference is valid at the capability's exact stopped state.
-    Available(DereferenceReference),
+    Available(Box<DereferenceReference>),
     /// The value is an indirection, but dereference is unavailable for a typed reason.
     Unavailable {
         /// The dereferenced expression's type (the pointee), when it resolves.
@@ -1486,6 +1696,8 @@ pub enum TlsUnavailableReason {
     ProviderUnavailable,
     /// The provider could not resolve this thread's address.
     LookupFailed(Arc<str>),
+    /// A parked task runs on no thread, so has no thread's storage.
+    NoThread,
 }
 
 /// Why a requested structural value operation cannot be completed.
@@ -1508,6 +1720,9 @@ pub enum ValueAccessUnavailableReason {
     NonIntegralBitField,
     /// The selected member belongs to a different active variant.
     InactiveVariant(Option<Arc<str>>),
+    /// Debug information does not describe what the closure a function
+    /// value calls captured, or describes it malformedly.
+    UndescribedClosure,
     /// An implicit-pointer view falls outside its referenced source object.
     ImplicitPointerOutOfBounds {
         /// Signed byte offset into the referenced object.
@@ -1557,8 +1772,18 @@ pub enum VariableUnavailableReason {
     ValueAccess(ValueAccessUnavailableReason),
     /// The expression exceeded the debugger's bounded work limits.
     EvaluationLimit,
+    /// The thread runs no task of its runtime, such as a thread idle in the
+    /// runtime's scheduler.
+    NoTask,
     /// A typed live-inspection resource was exhausted.
     InspectionLimit(InspectionExhaustion),
+    /// A pointer's target is on the reading frame's stack below the
+    /// frame's stack pointer, where only the frame's callees' memory is,
+    /// live or freed, so the pointer is stale.
+    BelowStackPointer {
+        /// The pointer's target.
+        address: VirtualAddress,
+    },
     /// A runtime-sized array or slice index is outside its current bounds.
     IndexOutOfBounds {
         /// Requested source index.
@@ -1638,6 +1863,9 @@ impl fmt::Display for VariableUnavailableReason {
             Self::TlsUnavailable(TlsUnavailableReason::LookupFailed(reason)) => {
                 write!(formatter, "TLS lookup failed: {reason}")
             }
+            Self::TlsUnavailable(TlsUnavailableReason::NoThread) => {
+                formatter.write_str("a parked task has no thread-local storage")
+            }
             Self::ValueAccess(ValueAccessUnavailableReason::UnspecifiedPointee) => {
                 formatter.write_str("the pointer has no concrete pointee type")
             }
@@ -1659,6 +1887,9 @@ impl fmt::Display for VariableUnavailableReason {
             Self::ValueAccess(ValueAccessUnavailableReason::NonIntegralBitField) => {
                 formatter.write_str("non-integral bit-fields are unsupported")
             }
+            Self::ValueAccess(ValueAccessUnavailableReason::UndescribedClosure) => {
+                formatter.write_str("debug information does not describe what the closure captured")
+            }
             Self::ValueAccess(ValueAccessUnavailableReason::InactiveVariant(name)) => {
                 if let Some(name) = name {
                     write!(formatter, "the member belongs to inactive variant '{name}'")
@@ -1677,6 +1908,11 @@ impl fmt::Display for VariableUnavailableReason {
             Self::EvaluationLimit => {
                 formatter.write_str("DWARF expression evaluation limit exceeded")
             }
+            Self::NoTask => formatter.write_str("the thread runs no task"),
+            Self::BelowStackPointer { address } => write!(
+                formatter,
+                "the pointer is stale: {address} is below the frame's stack pointer, in memory only its callees use"
+            ),
             Self::InspectionLimit(exhaustion) => write!(
                 formatter,
                 "{:?} limit {} exhausted after {} while requesting {}",
@@ -1998,10 +2234,18 @@ pub struct InspectedValue {
 pub enum VariableKind {
     /// A formal parameter of the selected function or inline instance.
     Parameter,
+    /// A result of the selected function or inline instance that the
+    /// debug information names as a variable, such as Go's named results
+    /// and its unnamed `~r0`. It holds the value returned once the
+    /// function sets it, at the latest as it returns.
+    Result,
     /// A local variable declared within the selected function.
     Local,
     /// A data object with static storage described by a module image.
     Global,
+    /// A value the function a step out finished returned, shown in the
+    /// frame it returned to at the stop that step made.
+    Returned,
 }
 
 /// The source visibility of a global data object.
@@ -2106,8 +2350,70 @@ pub struct Variable {
     pub declaration: Option<SourceLocation>,
     /// Its resolved type, when valid and supported.
     pub type_info: Option<TypeInfo>,
+    /// Why a generic value has the type of the shape its code was compiled
+    /// for, such as Go's `go.shape.int`, rather than its own type.
+    pub unresolved_shape: Option<ShapeUnresolvedReason>,
     /// Its current availability and value.
     pub state: VariableState,
+}
+
+/// Why the type argument a generic value has could not be found, so the
+/// value shows the shape its code was compiled for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ShapeUnresolvedReason {
+    /// The function has no dictionary of type arguments here.
+    NoDictionary,
+    /// The dictionary, or its entry for the type, cannot be read.
+    DictionaryUnavailable(VariableUnavailableReason),
+    /// Optimized code describes its dictionary in the slot where the
+    /// function may spill it, which holds a stale value until it does.
+    UnreliableDictionary,
+    /// The table of the runtime's type descriptors, Go's
+    /// `runtime.firstmoduledata`, is not described or cannot be read.
+    ModuleDataUnavailable(VariableUnavailableReason),
+    /// The dictionary names a type descriptor outside this module's.
+    ForeignType,
+    /// No type in the debug information has the dictionary's descriptor.
+    UndescribedType,
+    /// The type the dictionary names is laid out unlike the shape.
+    MismatchedShape,
+    /// The debug information describing the dictionary or the table is
+    /// malformed.
+    Malformed(Arc<str>),
+}
+
+impl fmt::Display for ShapeUnresolvedReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoDictionary => formatter.write_str("the function has no type dictionary here"),
+            Self::DictionaryUnavailable(reason) => {
+                write!(formatter, "the type dictionary is unavailable: {reason}")
+            }
+            Self::UnreliableDictionary => formatter.write_str(
+                "optimized code may not have stored its type dictionary where described",
+            ),
+            Self::ModuleDataUnavailable(reason) => {
+                write!(
+                    formatter,
+                    "the runtime's type table is unavailable: {reason}"
+                )
+            }
+            Self::ForeignType => {
+                formatter.write_str("the type argument is described by another module")
+            }
+            Self::UndescribedType => {
+                formatter.write_str("no debug information describes the type argument")
+            }
+            Self::MismatchedShape => {
+                formatter.write_str("the type argument is laid out unlike its shape")
+            }
+            Self::Malformed(description) => write!(
+                formatter,
+                "the type dictionary's debug information is malformed: {description}"
+            ),
+        }
+    }
 }
 
 /// One value produced by explicitly dereferencing a pointer or reference.
@@ -2130,8 +2436,8 @@ pub struct VariableSnapshot {
     pub revision: u64,
     /// The stopped snapshot that authorized the reads.
     pub stop_id: crate::StopId,
-    /// The thread whose selected logical frame was inspected.
-    pub thread: ThreadId,
+    /// The thread or task whose frame was inspected.
+    pub context: ExecutionContext,
     /// The backtrace frame that was inspected.
     pub stack_frame: StackFrameId,
     /// The logical frame whose source scope selected these variables.
@@ -2342,6 +2648,50 @@ pub struct FunctionInfo {
     pub linkage_name: Option<Arc<str>>,
     /// The function's declaration location, when known.
     pub declaration: Option<SourceLocation>,
+    /// The language of the unit that defines the function.
+    pub language: SourceLanguage,
+    /// What the function is to unwinding and stepping.
+    pub role: CodeRole,
+    /// The function whose loop this one is the body of, when a compiler
+    /// made a loop's body a function of its own, as Go does for a range
+    /// over a function. A step treats the body as its enclosing function's
+    /// own code, and the code between them as a call it makes.
+    pub enclosing: Option<FunctionId>,
+}
+
+/// What a function is to unwinding and stepping, whatever its language.
+///
+/// The debug-info provider sets it once, when an image loads; unwinding and
+/// stepping read roles, never names or languages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum CodeRole {
+    /// Code the program's author wrote, or a library they call.
+    #[default]
+    Ordinary,
+    /// Forwards to another function and never shows to a step:
+    /// trampolines, ABI wrappers, and code a compiler generates.
+    Wrapper,
+    /// The language runtime's own machinery: a step passes through it to
+    /// user code it calls, and a backtrace marks it.
+    RuntimeInternal,
+    /// The runtime's code that begins a panic, which calls the program's
+    /// deferred functions as it unwinds: a step goes through it into them.
+    Panic,
+    /// Continues on another stack; only a runtime model can say where.
+    StackSwitch,
+    /// The outermost frame of any stack: unwinding ends here, complete.
+    Outermost,
+    /// Entered by a trap, not a call: its caller's instruction is the one
+    /// that trapped, not a return address.
+    TrapEntry,
+    /// The signal-return trampoline a handler returns to: the interrupted
+    /// registers are in the kernel's signal frame above it.
+    SignalTrampoline,
+    /// The runtime's code that gives the thread to a task, which may be
+    /// another than the task that switched to the stack it runs on. That
+    /// task may have left the thread, so a stack it switched from ends at
+    /// the switch.
+    Dispatch,
 }
 
 /// Describes whether a function instance is emitted out of line or inlined.
@@ -2469,6 +2819,9 @@ pub struct SymbolInfo {
     /// it. The range is empty for an unsized symbol, which names only its own
     /// address.
     pub storage: Option<AddressRange<ImageAddress>>,
+    /// What the code the symbol names is to unwinding and stepping, for
+    /// code no debug information describes.
+    pub role: CodeRole,
 }
 
 /// Records which symbol tables a module image provided.
@@ -2480,6 +2833,10 @@ pub struct SymbolTableSources {
     pub dynamic_table: bool,
     /// The state of the image's embedded compressed symbol table.
     pub embedded_table: EmbeddedSymbolTable,
+    /// The state of a language runtime's own function table, such as Go's
+    /// `.gopclntab`, which names, places, and unwinds functions when no
+    /// debug information describes them.
+    pub runtime_function_table: EmbeddedSymbolTable,
 }
 
 impl Default for SymbolTableSources {
@@ -2488,19 +2845,21 @@ impl Default for SymbolTableSources {
             static_table: false,
             dynamic_table: false,
             embedded_table: EmbeddedSymbolTable::Absent,
+            runtime_function_table: EmbeddedSymbolTable::Absent,
         }
     }
 }
 
-/// The state of a symbol table embedded in compressed form (on ELF, the
-/// `.gnu_debugdata` `MiniDebugInfo` section).
+/// The state of a table an image embeds beside its ELF symbol tables: a
+/// symbol table in compressed form (on ELF, the `.gnu_debugdata`
+/// `MiniDebugInfo` section), or a language runtime's function table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmbeddedSymbolTable {
-    /// The image embeds no symbol table.
+    /// The image embeds no such table.
     Absent,
-    /// The embedded symbol table was read.
+    /// The embedded table was read.
     Loaded,
-    /// The embedded symbol table could not be read, so its symbols are absent.
+    /// The embedded table could not be read, so what it holds is absent.
     Unusable {
         /// Why the table could not be read.
         reason: Arc<str>,
@@ -2682,6 +3041,9 @@ pub struct StackFrame {
     pub module: Option<ModuleId>,
     /// The exact instruction or resume address for the frame.
     pub instruction: VirtualAddress,
+    /// Whose stack the frame is on. A backtrace changes segment where a
+    /// runtime switched stacks.
+    pub segment: StackSegment,
     /// The concrete code instance represented by the frame, when known.
     pub code_instance: Option<CodeInstanceId>,
     /// The containing function, when known.
@@ -2692,6 +3054,9 @@ pub struct StackFrame {
     /// its offset measured to [`Self::instruction`]. Inline frames carry no
     /// symbol because they are source-level expansions within one.
     pub symbol: Option<SymbolLocation>,
+    /// What the frame's code is to stepping and unwinding: its function's
+    /// role, or its symbol's where no function describes it.
+    pub role: CodeRole,
 }
 
 pub struct FrameMetadata {
@@ -2699,6 +3064,7 @@ pub struct FrameMetadata {
     pub function: Option<FunctionInfo>,
     pub source: Option<SourceLocation>,
     pub symbol: Option<SymbolLocation>,
+    pub role: CodeRole,
 }
 
 impl StackFrame {
@@ -2718,6 +3084,7 @@ impl StackFrame {
                 function: None,
                 source: None,
                 symbol: None,
+                role: CodeRole::Ordinary,
             },
         )
     }
@@ -2735,10 +3102,12 @@ impl StackFrame {
             kind,
             module,
             instruction,
+            segment: StackSegment::Thread,
             code_instance: metadata.code_instance,
             function: metadata.function,
             source: metadata.source,
             symbol: metadata.symbol,
+            role: metadata.role,
         }
     }
 }
@@ -2762,6 +3131,9 @@ pub enum UnwindTermination {
     MemoryReadFailed { address: VirtualAddress },
     /// The reconstructed caller did not make valid progress.
     InvalidCaller { description: Arc<str> },
+    /// A runtime switched stacks at the frame, and where the stack it
+    /// switched from continues could not be found.
+    UnresolvedStackSwitch { reason: Arc<str> },
     /// A previously visited frame state was encountered again.
     CycleDetected,
     /// The configured maximum frame count was reached.
@@ -2793,6 +3165,12 @@ impl fmt::Display for UnwindTermination {
             Self::InvalidCaller { description } => {
                 write!(formatter, "invalid unwind caller: {description}")
             }
+            Self::UnresolvedStackSwitch { reason } => {
+                write!(
+                    formatter,
+                    "the stack continues where its runtime switched stacks: {reason}"
+                )
+            }
             Self::CycleDetected => formatter.write_str("unwind metadata produced a frame cycle"),
             Self::DepthLimit => formatter.write_str("unwind depth limit reached"),
         }
@@ -2802,12 +3180,54 @@ impl fmt::Display for UnwindTermination {
 /// A backtrace and the reason its reconstruction ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Backtrace {
-    /// The thread whose stack was inspected.
-    pub thread: ThreadId,
+    /// The thread or task whose stack was inspected.
+    pub context: ExecutionContext,
     /// Frames ordered from the stopped frame outward.
     pub frames: Arc<[StackFrame]>,
     /// The completion or failure reason for the trace.
     pub termination: UnwindTermination,
+}
+
+impl Backtrace {
+    /// The innermost frame of code the program's author wrote or calls,
+    /// past a runtime's machinery and the wrappers a compiler writes, as a
+    /// runtime's own traceback shows a task: where it waits, not how.
+    #[must_use]
+    pub fn user_frame(&self) -> Option<&StackFrame> {
+        self.frames
+            .iter()
+            .find(|frame| frame.role == CodeRole::Ordinary)
+    }
+
+    /// For each frame, the level of the frame whose loop it runs as an
+    /// iterator: a frame between a loop body that is a function of its own
+    /// and the body's enclosing function. A body whose enclosing frame the
+    /// trace does not reach marks nothing.
+    #[must_use]
+    pub fn loop_iterators(&self) -> Vec<Option<u32>> {
+        let mut iterators = vec![None; self.frames.len()];
+        // The loops whose enclosing frames are still to come, innermost
+        // last: each one's function, and where its iterators begin.
+        let mut open: Vec<(Option<ModuleId>, FunctionId, usize)> = Vec::new();
+        for (index, frame) in self.frames.iter().enumerate() {
+            let Some(function) = &frame.function else {
+                continue;
+            };
+            if let Some(&(module, enclosing, start)) = open.last()
+                && module == frame.module
+                && enclosing == function.id
+            {
+                open.pop();
+                for iterator in &mut iterators[start..index] {
+                    *iterator = Some(frame.level);
+                }
+            }
+            if let Some(enclosing) = function.enclosing {
+                open.push((frame.module, enclosing, index + 1));
+            }
+        }
+        iterators
+    }
 }
 
 /// An internal image-address range associated with a source location.

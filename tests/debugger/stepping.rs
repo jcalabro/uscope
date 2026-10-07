@@ -1246,7 +1246,10 @@ async fn inline_next_is_owned_by_the_selected_thread() {
         // runs the same code, reaching the step's internal breakpoints.
         scenario.remove_all_breakpoints().await;
         let before = scenario.snapshot().await;
-        let selected = before.selected_thread.expect("selected worker thread");
+        let selected = before
+            .selected
+            .and_then(uscope::ExecutionContext::as_thread)
+            .expect("selected worker thread");
 
         assert_eq!(
             scenario.step_to_stop(StepKind::OverSource).await,
@@ -1263,7 +1266,11 @@ async fn inline_next_is_owned_by_the_selected_thread() {
             )
             .await;
 
-        assert_eq!(after.selected_thread, Some(selected), "{fixture}");
+        assert_eq!(
+            after.selected.and_then(uscope::ExecutionContext::as_thread),
+            Some(selected),
+            "{fixture}"
+        );
         assert_eq!(
             location_function(&location),
             Some("thread_caller"),
@@ -1678,7 +1685,14 @@ async fn instruction_steps_and_breakpoint_repairs_cross_system_calls() {
         .expect("rax");
     assert_eq!(
         rax.bytes.as_deref(),
-        Some(&registers.thread.get().to_le_bytes()[..])
+        Some(
+            &registers
+                .context
+                .as_thread()
+                .expect("a thread")
+                .get()
+                .to_le_bytes()[..]
+        )
     );
     assert_eq!(
         scenario.resume_to_stop().await,

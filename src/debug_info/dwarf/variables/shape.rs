@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use crate::model::ArrayDimension;
 use crate::{
-    BaseClass, BaseType, Enumerator, RecordMember, TypeId, TypeInfo, TypeKind, TypeModifier,
-    TypeReference, Variant, VariantDiscriminant,
+    BaseClass, BaseType, EnumerationOrigin, Enumerator, RecordMember, TypeId, TypeInfo, TypeKind,
+    TypeModifier, TypeReference, Variant, VariantDiscriminant,
 };
 
 use super::codec::integer_bit_width;
@@ -21,6 +21,9 @@ pub(super) enum ValueShape {
         representation: BaseType,
         enumerators: Arc<[Enumerator]>,
         byte_size: u64,
+        /// A language's enumeration, or constants Go gave a named type,
+        /// which make only the values they name symbolic.
+        origin: EnumerationOrigin,
     },
     Array {
         element: TypeId,
@@ -59,6 +62,10 @@ pub(super) enum ValueShape {
         target: Option<TypeId>,
         byte_size: u64,
         address_class: u64,
+    },
+    /// A function value: null, or a pointer to its closure context.
+    Function {
+        byte_size: u64,
     },
 }
 
@@ -216,6 +223,7 @@ fn nested_value_shape<T: TypeMetadataEntry>(
         TypeKind::Enumeration {
             representation,
             enumerators,
+            origin,
             ..
         } => {
             if representation.byte_size == 0 {
@@ -239,6 +247,7 @@ fn nested_value_shape<T: TypeMetadataEntry>(
                 byte_size: representation.byte_size,
                 representation,
                 enumerators: Arc::clone(enumerators),
+                origin: *origin,
             })
         }
         TypeKind::Array {
@@ -374,6 +383,11 @@ fn nested_value_shape<T: TypeMetadataEntry>(
         TypeKind::Modified { .. } | TypeKind::Named { .. } => {
             unreachable!("transparent_type_from strips every wrapper")
         }
+        TypeKind::Function => Ok(ValueShape::Function {
+            byte_size: info.byte_size.ok_or_else(|| {
+                ValueShapeError::Malformed("function value type has no byte size".into())
+            })?,
+        }),
         TypeKind::Unspecified => Err(ValueShapeError::Unsupported(
             "unspecified values are unsupported".into(),
         )),
@@ -389,6 +403,7 @@ impl ValueShape {
             Self::Scalar(base) => base.byte_size,
             Self::Enumeration { byte_size, .. }
             | Self::Indirection { byte_size, .. }
+            | Self::Function { byte_size }
             | Self::Array { byte_size, .. }
             | Self::Slice { byte_size, .. }
             | Self::Record { byte_size, .. }
@@ -402,6 +417,7 @@ impl ValueShape {
             Self::Scalar(base) => Some(base),
             Self::Enumeration { .. }
             | Self::Indirection { .. }
+            | Self::Function { .. }
             | Self::Array { .. }
             | Self::Slice { .. }
             | Self::Record { .. }

@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use anyhow::Result;
-use uscope::{StopId, StopReason, ThreadId, VirtualAddress};
+use uscope::{ExecutionContext, StopId, StopReason, VirtualAddress};
 
 use super::commands::Command;
 use super::config::Section;
@@ -76,12 +76,12 @@ impl Displays {
 #[derive(Clone, Debug)]
 pub struct Activation {
     stop: StopId,
-    thread: ThreadId,
+    context: ExecutionContext,
     function: String,
     frame: VirtualAddress,
 }
 
-type Key = (ThreadId, String, VirtualAddress, String);
+type Key = (ExecutionContext, String, VirtualAddress, String);
 
 /// The values the last stop showed and those this one has, as text, keyed
 /// by activation and name.
@@ -101,7 +101,7 @@ impl Changes {
             self.stop = Some(activation.stop);
         }
         let key = (
-            activation.thread,
+            activation.context,
             activation.function.clone(),
             activation.frame,
             name.to_owned(),
@@ -152,7 +152,7 @@ impl Cli {
             }
             if let Some(snapshot) = &snapshot
                 && snapshot.threads.len() > 1
-                && let Some(thread) = snapshot.selected_thread
+                && let Some(ExecutionContext::Thread(thread)) = snapshot.selected
             {
                 write!(
                     suffix,
@@ -215,8 +215,12 @@ impl Cli {
         };
         let activation = match &variables {
             Some(Ok(variables)) if stop.highlight_changes => {
-                self.activation(variables.stop_id, variables.thread, variables.frame_address)
-                    .await
+                self.activation(
+                    variables.stop_id,
+                    variables.context,
+                    variables.frame_address,
+                )
+                .await
             }
             _ => None,
         };
@@ -265,13 +269,13 @@ impl Cli {
     async fn activation(
         &self,
         stop: StopId,
-        thread: ThreadId,
+        context: ExecutionContext,
         frame: Option<VirtualAddress>,
     ) -> Option<Activation> {
         let location = self.debugger.current_location().await.ok()?;
         Some(Activation {
             stop,
-            thread,
+            context,
             function: format::code_name(
                 location.image.function.as_ref(),
                 location.image.symbol.as_ref(),

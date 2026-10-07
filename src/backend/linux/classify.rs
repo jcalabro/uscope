@@ -53,6 +53,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         let breakpoint = trap.then(|| self.normalize_breakpoint_pc(pid)).flatten();
         let removed = trap && breakpoint.is_none() && self.rewind_removed_trap(pid);
         let carried = trap && breakpoint.is_none() && !removed && self.rewind_carried_trap(pid);
+        let program_trap = (trap && breakpoint.is_none() && !removed && !carried)
+            .then(|| self.program_trap(pid))
+            .flatten();
 
         match classify_stop_evidence(
             signal,
@@ -63,6 +66,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             debugger_requested,
             breakpoint,
             removed || carried,
+            program_trap,
             watch,
         ) {
             ClassifiedStop::RemovedTrap if carried => ClassifiedStop::CarriedTrap,
@@ -150,6 +154,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         rewind().is_some()
     }
 
+    /// The address of the trap instruction a thread just executed, when it
+    /// is the program's own: the byte before the thread's instruction is
+    /// an `int3` that no breakpoint site of the debugger's put there.
+    pub(super) fn program_trap(&self, pid: Pid) -> Option<VirtualAddress> {
+        let address = self.ptrace.registers(pid).ok()?.rip.checked_sub(1)?;
+        let byte = self.ptrace.read_word(pid, address).ok()?.to_ne_bytes()[0];
+        (byte == BREAKPOINT_OPCODE).then_some(VirtualAddress::new(address))
+    }
+
     /// Rewinds a thread over a trap that code carried when it moved, as the
     /// vDSO does under mremap(2), where an installed site's trap lands; the
     /// module refresh that follows takes the trap out before the thread
@@ -192,7 +205,9 @@ pub(super) const fn visible_stop_priority(reason: &StopReason) -> u8 {
     match reason {
         StopReason::Attach | StopReason::Entry | StopReason::Pause => 0,
         StopReason::Exception(_) => 1,
-        StopReason::Breakpoint { .. }
+        StopReason::LanguageException(_)
+        | StopReason::ProgramBreakpoint { .. }
+        | StopReason::Breakpoint { .. }
         | StopReason::Watchpoint { .. }
         | StopReason::WatchpointInvalidated { .. }
         | StopReason::WatchpointArmFailed { .. }
@@ -236,6 +251,7 @@ pub(super) fn classify_stop_evidence(
     debugger_requested: bool,
     breakpoint: Option<VirtualAddress>,
     removed: bool,
+    program_trap: Option<VirtualAddress>,
     watch: WatchStatus,
 ) -> ClassifiedStop {
     if is_superseded(&siginfo) {
@@ -289,6 +305,9 @@ pub(super) fn classify_stop_evidence(
     }
     if removed {
         return ClassifiedStop::RemovedTrap;
+    }
+    if let Some(address) = program_trap {
+        return ClassifiedStop::ProgramTrap(address);
     }
 
     match siginfo {

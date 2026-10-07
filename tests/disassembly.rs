@@ -318,12 +318,16 @@ fn pair_with_objdump<'a, 'b>(
 }
 
 /// Launches a fixture that faults, installs breakpoints at code symbols so
-/// that traps are present in the compared code, and returns at the fault.
+/// that traps are present in the compared code, and returns at the fault,
+/// or at the panic a runtime turns it into.
 async fn faulted_with_breakpoints(fixture: &str) -> (Scenario, Modules) {
     let mut scenario = Scenario::launch(fixture);
     let stop = scenario.run_to_stop().await;
     assert!(
-        matches!(stop, StopReason::Exception(_)),
+        matches!(
+            stop,
+            StopReason::Exception(_) | StopReason::LanguageException(_)
+        ),
         "{fixture}: {stop:?}"
     );
     let modules = Modules::load(&scenario).await;

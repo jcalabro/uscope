@@ -367,7 +367,7 @@ mod tests {
             revision: 1,
             inferior: InferiorState::NotRunning,
             stop_id: None,
-            selected_thread: None,
+            selected: None,
             selected_frame: None,
             threads: Arc::from([ThreadSnapshot {
                 id: ThreadId::new(1000),
@@ -378,6 +378,7 @@ mod tests {
                     }),
                 },
                 name: None,
+                activity: None,
             }]),
             presentation: None,
             breakpoints: Arc::from([Breakpoint {

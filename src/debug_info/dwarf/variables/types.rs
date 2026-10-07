@@ -14,7 +14,7 @@ use crate::{
     Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
 };
 
-use super::codec::enumeration_constant;
+use super::codec::{complex_part, enumeration_constant};
 use super::die::{
     ByteSize, DW_AT_ZIG_PARENT, UnsignedConstant, array_bound, base_type_encoding,
     byte_size_attribute, constant_member_offset, copy_name, declaration_with_origins,
@@ -74,6 +74,12 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) definition_declarations: HashMap<DieKey, DieKey>,
     /// What each named type's identity is built from.
     pub(super) identity_parts: HashMap<TypeId, IdentityParts>,
+    /// The float type each complex type's parts have, by the part's name
+    /// and size.
+    pub(super) complex_parts: HashMap<(Arc<str>, u64), TypeId>,
+    /// Go's generic type parameters: each typedef of a shape that names
+    /// its type argument's entry in the function's dictionary.
+    pub(super) go_dict_indices: HashMap<TypeId, u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -263,6 +269,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             type_scopes: HashMap::new(),
             definition_declarations,
             identity_parts: HashMap::new(),
+            complex_parts: HashMap::new(),
+            go_dict_indices: HashMap::new(),
         };
         let mut paths = HashMap::<*const ScopeSegment, ScopePath>::new();
         for (key, segments) in scoped_types {
@@ -627,6 +635,19 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 explicit_size,
                 TypeKind::Unspecified,
             )),
+            // A Go func is a pointer to its closure context.
+            gimli::DW_TAG_subroutine_type
+                if self.language(unit_index) == SourceLanguage::Go
+                    && Self::go_kind(entry) == Some(GoKind::Func)
+                    && explicit_size == Some(8) =>
+            {
+                Ok(resolved(
+                    reference,
+                    explicit_name.unwrap_or_else(|| Arc::from("func")),
+                    explicit_size,
+                    TypeKind::Function,
+                ))
+            }
             // A type this backend does not model is opaque, not defective.
             tag => Ok(opaque(
                 reference,
@@ -778,9 +799,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             return Ok(resolved(reference, name, Some(0), kind));
         }
         let raw_encoding = gimli::DwAte(base_type_encoding(entry)?);
-        let Some(encoding) = integer_encoding(raw_encoding).or_else(|| {
-            (raw_encoding == gimli::DW_ATE_float).then_some(BaseTypeEncoding::Floating)
-        }) else {
+        let encoding = match raw_encoding {
+            gimli::DW_ATE_float => Some(BaseTypeEncoding::Floating),
+            gimli::DW_ATE_complex_float if byte_size % 2 == 0 => {
+                Some(BaseTypeEncoding::ComplexFloating)
+            }
+            _ => integer_encoding(raw_encoding),
+        };
+        let Some(encoding) = encoding else {
             return Ok(opaque(
                 reference,
                 name,
@@ -840,7 +866,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             };
             match &info.kind {
-                TypeKind::Base(base) if !matches!(base.encoding, BaseTypeEncoding::Floating) => {
+                TypeKind::Base(base) if !is_floating(base.encoding) => {
                     return Ok(base.clone());
                 }
                 TypeKind::Enumeration { representation, .. } => {
@@ -999,6 +1025,45 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         self.type_reference(unit_index, entry.attr_value(gimli::DW_AT_type))
     }
 
+    /// Every integer constant a unit declares at its top level, such as a
+    /// Go package's `const`s, by name. Constants of other types are left
+    /// out; values come from each constant's own type, read before typed Go
+    /// constants turn their types into enumerations.
+    pub(super) fn named_constants(&mut self) -> BTreeMap<Arc<str>, IntegerValue> {
+        let mut constants = BTreeMap::new();
+        for (unit_index, unit) in self.units.iter().enumerate() {
+            let mut entries = unit.entries();
+            while let Ok(Some(entry)) = entries.next_dfs() {
+                if entry.depth() != 1 || entry.tag() != gimli::DW_TAG_constant {
+                    continue;
+                }
+                let (Ok(Some(name)), Some(value)) = (
+                    copy_name(self.dwarf, unit, entry),
+                    entry.attr_value(gimli::DW_AT_const_value),
+                ) else {
+                    continue;
+                };
+                let Ok(Some(target)) = self.target(entry, unit_index) else {
+                    continue;
+                };
+                let Some(TypeEntry::Resolved(TypeInfo {
+                    kind: TypeKind::Base(base),
+                    ..
+                })) = self.entries.get(target.id.index())
+                else {
+                    continue;
+                };
+                if matches!(base.encoding, BaseTypeEncoding::Floating) {
+                    continue;
+                }
+                if let Ok(value) = enumeration_constant(value, base, self.byte_order) {
+                    constants.insert(name, value);
+                }
+            }
+        }
+        constants
+    }
+
     pub(super) fn populate_go_named_constants(&mut self) {
         let mut constants = BTreeMap::<TypeId, NamedConstantCollection>::new();
         for (unit_index, unit) in self.units.iter().enumerate() {
@@ -1020,7 +1085,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 let TypeKind::Base(base) = &info.kind else {
                     continue;
                 };
-                if !info.name.contains('.') || matches!(base.encoding, BaseTypeEncoding::Floating) {
+                if !info.name.contains('.') || is_floating(base.encoding) {
                     continue;
                 }
                 let representation = base.clone();
@@ -1202,6 +1267,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 );
             }
         }
+        self.add_complex_parts();
 
         propagate_wrapper_sizes(&mut self.entries);
 
@@ -1224,6 +1290,65 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
         }
         self.assign_identities();
+    }
+
+    /// The type a built pointer type points to.
+    pub(super) fn pointee(&self, pointer: TypeId) -> Option<TypeId> {
+        match self.entries.get(pointer.index()) {
+            Some(TypeEntry::Resolved(TypeInfo {
+                kind:
+                    TypeKind::Pointer {
+                        target: Some(target),
+                        address_class: 0,
+                    },
+                ..
+            })) => Some(target.id),
+            _ => None,
+        }
+    }
+
+    /// Gives each complex type's real and imaginary parts a float type:
+    /// the program's own float of that name and size, or one made for it.
+    fn add_complex_parts(&mut self) {
+        let mut parts = Vec::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            let TypeEntry::Resolved(TypeInfo {
+                kind: TypeKind::Base(base),
+                ..
+            }) = entry
+            else {
+                continue;
+            };
+            match base.encoding {
+                BaseTypeEncoding::Floating => {
+                    let id =
+                        TypeId::new(u32::try_from(index).expect("bounded type count fits u32"));
+                    self.complex_parts
+                        .entry((Arc::clone(&base.base_name), base.byte_size))
+                        .or_insert(id);
+                }
+                BaseTypeEncoding::ComplexFloating => parts.push(complex_part(base)),
+                _ => {}
+            }
+        }
+        for part in parts {
+            let key = (Arc::clone(&part.base_name), part.byte_size);
+            if self.complex_parts.contains_key(&key) || self.entries.len() >= MAX_TYPES {
+                continue;
+            }
+            let reference = TypeReference {
+                image: self.image,
+                id: self.next_id(),
+            };
+            self.entries.push(resolved(
+                reference,
+                Arc::clone(&part.name),
+                Some(part.byte_size),
+                TypeKind::Base(part),
+            ));
+            self.explicit_names.insert(reference.id);
+            self.complex_parts.insert(key, reference.id);
+        }
     }
 
     fn reject_inline_storage_cycles(&mut self) {
@@ -1424,6 +1549,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 )
             });
             let relationship = named_type_relationship(entry.tag(), self.language(unit_index));
+            if let Some(index) = entry
+                .attr_value(DW_AT_GO_DICT_INDEX)
+                .and_then(|value| value.udata_value())
+            {
+                self.go_dict_indices.insert(reference.id, index);
+            }
             return Ok(resolved(
                 reference,
                 name,
@@ -1720,6 +1851,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     BaseTypeEncoding::Signed
                         | BaseTypeEncoding::SignedCharacter
                         | BaseTypeEncoding::Floating
+                        | BaseTypeEncoding::ComplexFloating
                 ) {
                     return None;
                 }
@@ -2955,6 +3087,18 @@ fn opaque(
     )
 }
 
+/// Go's `DW_AT_go_dict_index`: which entry of a generic function's
+/// dictionary holds a type parameter's argument.
+const DW_AT_GO_DICT_INDEX: gimli::DwAt = gimli::DwAt(0x2906);
+
+/// Whether an encoding is a float or a pair of them.
+const fn is_floating(encoding: BaseTypeEncoding) -> bool {
+    matches!(
+        encoding,
+        BaseTypeEncoding::Floating | BaseTypeEncoding::ComplexFloating
+    )
+}
+
 /// The integral `BaseTypeEncoding` of a `DW_ATE_*` encoding.
 const fn integer_encoding(encoding: gimli::DwAte) -> Option<BaseTypeEncoding> {
     Some(match encoding {
@@ -3271,6 +3415,7 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
             }
         }
         TypeKind::Base(_)
+        | TypeKind::Function
         | TypeKind::Enumeration {
             underlying: None, ..
         }

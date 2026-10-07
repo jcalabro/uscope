@@ -4,7 +4,7 @@
 use std::process::Command;
 
 #[path = "../tests/support/memory_cap.rs"]
-mod memory_cap;
+pub mod memory_cap;
 
 const OVER_ALLOCATE: &str = "USCOPE_TEST_OVER_ALLOCATE";
 

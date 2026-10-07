@@ -7,8 +7,12 @@ use std::sync::Arc;
 
 use crate::{Error, Result};
 
+mod locations;
+
+pub use locations::PackageInfo;
+
 use super::{
-    AddressRange, BreakpointEntry, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind,
+    AddressRange, BreakpointEntry, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole,
     EntryProvenance, FunctionId, FunctionInfo, GlobalVariableId, GlobalVariableInfo, ImageAddress,
     ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup, LineEntry, LineNumber,
     ModuleImageId, SectionId, SectionInfo, SectionLocation, SourceFile, SourceFileId,
@@ -35,6 +39,30 @@ pub struct ModuleMetadata {
     /// Whether each thread gets its own copy of a block of the module's
     /// storage.
     pub thread_local_storage: bool,
+    /// Integer constants the debug information declares by name, such as a
+    /// Go package's `const`s.
+    pub constants: BTreeMap<Arc<str>, crate::IntegerValue>,
+    /// The distinct compilers and versions that produced the debug
+    /// information, as each unit names its producer.
+    pub producers: Vec<Arc<str>>,
+    /// The packages whose units the image has.
+    pub packages: Vec<PackageInfo>,
+    /// Where each thread's copy of each of the image's thread-local
+    /// variables is, by name, or why that is unknown.
+    pub thread_locals: BTreeMap<Arc<str>, std::result::Result<ThreadLocal, Arc<str>>>,
+}
+
+/// Where a thread's copy of a thread-local variable is, relative to the
+/// thread's thread pointer, as the image's own code finds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadLocal {
+    /// This far from it, fixed when the program was linked, as an
+    /// executable's own thread-locals are.
+    Offset(i64),
+    /// As far from it as the word at this address says, which the loader
+    /// writes as it loads the image, as a library's code reads its
+    /// thread-locals.
+    Slot(ImageAddress),
 }
 
 #[derive(Debug)]
@@ -289,6 +317,8 @@ pub struct ModuleImage {
     statements: Arc<[StatementRow]>,
     lines: Arc<[LineEntry]>,
     functions_by_name: BTreeMap<Arc<str>, Arc<[FunctionId]>>,
+    /// Functions by their names within the packages defining them.
+    function_names: locations::FunctionNames,
     symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
     globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
     instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
@@ -307,9 +337,33 @@ pub struct ModuleImage {
     type_index: crate::type_identity::TypeIndex,
     /// Rust trait objects' vtables, with the concrete type each is for.
     vtables: std::collections::BTreeMap<ImageAddress, TypeReference>,
+    constants: BTreeMap<Arc<str>, crate::IntegerValue>,
+    producers: Arc<[Arc<str>]>,
+    thread_locals: BTreeMap<Arc<str>, std::result::Result<ThreadLocal, Arc<str>>>,
+    /// The index in `types` of the first type each Go runtime type
+    /// descriptor offset names.
+    go_runtime_types: std::collections::BTreeMap<u64, usize>,
     /// The views the image carries for its own types, in its
     /// `.debug_uscope_views` section.
     views: Arc<crate::view::ViewSet>,
+}
+
+/// The first type, in identifier order, that each Go runtime type
+/// descriptor offset names: a named type and its typedef may both.
+fn go_runtime_types(types: &[TypeNode]) -> std::collections::BTreeMap<u64, usize> {
+    let mut offsets = std::collections::BTreeMap::new();
+    for (index, node) in types.iter().enumerate() {
+        if let TypeNode::Resolved(info) = node
+            && let Some(offset) = info
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.go)
+                .and_then(|go| go.runtime_type)
+        {
+            offsets.entry(offset).or_insert(index);
+        }
+    }
+    offsets
 }
 
 impl ModuleImage {
@@ -387,6 +441,7 @@ impl ModuleImage {
                     .iter()
                     .map(|function| (Arc::clone(&function.name), function.id)),
             ),
+            function_names: locations::FunctionNames::new(&metadata.functions, &metadata.packages),
             symbols_by_name: grouped_index(
                 metadata
                     .symbols
@@ -431,7 +486,7 @@ impl ModuleImage {
             sections: metadata.sections.into(),
             thread_local_storage: metadata.thread_local_storage,
             globals: metadata.globals.into(),
-            types: metadata.types,
+            types: Arc::clone(&metadata.types),
             source_files: metadata.source_files.into(),
             statements: metadata.statements.into(),
             lines: metadata.lines.into(),
@@ -444,6 +499,10 @@ impl ModuleImage {
             instruction_starts,
             type_index,
             vtables: metadata.vtables.iter().copied().collect(),
+            constants: std::mem::take(&mut metadata.constants),
+            producers: std::mem::take(&mut metadata.producers).into(),
+            thread_locals: std::mem::take(&mut metadata.thread_locals),
+            go_runtime_types: go_runtime_types(&metadata.types),
             views: crate::view::ViewSet::empty(),
         }
     }
@@ -691,6 +750,13 @@ impl ModuleImage {
         }
     }
 
+    /// Where each thread's copy of the named thread-local variable is, or
+    /// why that is unknown; `None` when the image defines none by the name.
+    #[must_use]
+    pub fn thread_local(&self, name: &str) -> Option<std::result::Result<ThreadLocal, Arc<str>>> {
+        self.thread_locals.get(name).cloned()
+    }
+
     /// Returns every global catalog entry in deterministic source order.
     #[must_use]
     pub fn globals(&self) -> &[GlobalVariableInfo] {
@@ -742,6 +808,20 @@ impl ModuleImage {
             .instances(language, path, base, &self.types.as_ref())
     }
 
+    /// The value of the integer constant the debug information declares as
+    /// `name`, such as `runtime._Grunning`.
+    #[must_use]
+    pub fn constant(&self, name: &str) -> Option<crate::IntegerValue> {
+        self.constants.get(name).copied()
+    }
+
+    /// The distinct producers of the image's debug information, such as
+    /// `Go cmd/compile go1.27.1; regabi`.
+    #[must_use]
+    pub fn producers(&self) -> &[Arc<str>] {
+        &self.producers
+    }
+
     /// The concrete type a Rust trait object's vtable at `address` is for.
     #[must_use]
     pub fn trait_object_type(&self, address: ImageAddress) -> Option<TypeReference> {
@@ -766,19 +846,11 @@ impl ModuleImage {
     /// several, such as a named type and its typedef, say so.
     #[must_use]
     pub fn go_runtime_type(&self, offset: u64) -> Option<TypeReference> {
-        self.types.iter().find_map(|node| match node {
-            TypeNode::Resolved(info)
-                if info
-                    .identity
-                    .as_ref()
-                    .and_then(|identity| identity.go)
-                    .and_then(|go| go.runtime_type)
-                    == Some(offset) =>
-            {
-                Some(info.reference)
-            }
-            _ => None,
-        })
+        let index = *self.go_runtime_types.get(&offset)?;
+        match &self.types[index] {
+            TypeNode::Resolved(info) => Some(info.reference),
+            TypeNode::Malformed { .. } => None,
+        }
     }
 
     /// The types whose identity has this base, whatever their language,
@@ -959,7 +1031,7 @@ impl ModuleImage {
     /// gdb does: the line itself when it has statements, otherwise the next
     /// line that does, provided a function whose statements begin at or
     /// before the request contains it. A line between functions never moves
-    /// into the next one.
+    /// into the next one, and a line of a Go file never moves at all.
     #[must_use]
     pub fn breakpoint_line(&self, file: SourceFileId, line: LineNumber) -> Option<LineNumber> {
         let ((_, next), addresses) = self
@@ -969,6 +1041,9 @@ impl ModuleImage {
             .filter(|((next_file, _), _)| *next_file == file)?;
         if *next == line {
             return Some(line);
+        }
+        if self.keeps_line_breakpoints(file) {
+            return None;
         }
         let encloses_request = |instance: &CodeInstanceInfo| {
             self.statements.iter().any(|row| {
@@ -1045,6 +1120,25 @@ impl ModuleImage {
         Ok(self
             .symbol(*symbol)
             .expect("name index references a symbol"))
+    }
+
+    /// What the code at an image address is to unwinding and stepping: the
+    /// role of the physical function containing it, or else of the code
+    /// symbol naming it, or else ordinary code.
+    #[must_use]
+    pub fn code_role(&self, address: ImageAddress) -> CodeRole {
+        let physical = self
+            .code_range_index
+            .containing(address)
+            .filter_map(|instance| self.code_instance(instance))
+            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+            .min_by_key(|instance| instance.id);
+        if let Some(function) = physical.and_then(|instance| self.function(instance.function)) {
+            return function.role;
+        }
+        self.symbolize(address)
+            .and_then(|location| self.symbol(location.symbol))
+            .map_or(CodeRole::Ordinary, |symbol| symbol.role)
     }
 
     /// Resolves an image address to its available function and source metadata.
@@ -1276,6 +1370,9 @@ mod tests {
                 name: (*name).into(),
                 linkage_name: None,
                 declaration: None,
+                language: crate::SourceLanguage::C,
+                role: CodeRole::Ordinary,
+                enclosing: None,
             })
             .collect()
     }
@@ -1484,6 +1581,7 @@ mod tests {
                 provenance: SymbolExtentProvenance::Declared,
             }),
             storage: None,
+            role: CodeRole::Ordinary,
         };
         let section = |id, name: &str, start, end, executable| SectionInfo {
             id: SectionId::new(id),
@@ -1796,6 +1894,7 @@ mod tests {
                         start: ImageAddress::new(start),
                         end: ImageAddress::new(end),
                     }),
+                    role: CodeRole::Ordinary,
                 },
             )
             .collect();

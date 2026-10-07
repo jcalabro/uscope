@@ -71,24 +71,59 @@ pub struct Configuration {
     pub follow_forks: bool,
     /// The settings a child session's configuration carries over.
     pub inherited: Map<String, Value>,
+    pub threads: ThreadListing,
+}
+
+/// What the client's threads are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadListing {
+    /// Whether a program with a runtime's tasks, such as Go's goroutines,
+    /// shows them as its threads, rather than its system threads.
+    pub tasks: bool,
+    /// Whether the tasks a runtime runs for its own work are listed.
+    pub runtime_tasks: bool,
+    /// The most tasks listed; an entry after them says how many more
+    /// there are.
+    pub max_tasks: usize,
+}
+
+impl Default for ThreadListing {
+    fn default() -> Self {
+        Self {
+            tasks: true,
+            runtime_tasks: false,
+            max_tasks: 1000,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Threads {
+    Tasks,
+    System,
 }
 
 /// The keys of a configuration that a child session's carries over: how
 /// the session presents and handles a program, which a fork does not
 /// change, and the adapter's `type`, by which a client such as nvim-dap
 /// finds the adapter to start for the child.
-const INHERITED: [&str; 7] = [
+const INHERITED: [&str; 10] = [
     "type",
     "followForks",
     "sourceMap",
     "viewFiles",
     "disassemblySyntax",
     "signals",
+    "threads",
+    "runtimeTasks",
+    "maxTasks",
     "cwd",
 ];
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[expect(clippy::struct_excessive_bools, reason = "each is a launch option")]
 struct Arguments {
     program: Option<PathBuf>,
     #[serde(default)]
@@ -117,6 +152,10 @@ struct Arguments {
     #[serde(default)]
     follow_forks: bool,
     held: Option<Held>,
+    threads: Option<Threads>,
+    #[serde(default)]
+    runtime_tasks: bool,
+    max_tasks: Option<u32>,
 }
 
 /// A process another session held for this one, which only that session
@@ -269,7 +308,17 @@ fn common(
         }
         signals.push((code, actions));
     }
+    let max_tasks = match parsed.max_tasks {
+        Some(0) => return Err(format!("invalid {what} at maxTasks: expected at least 1")),
+        Some(max) => usize::try_from(max).unwrap_or(usize::MAX),
+        None => ThreadListing::default().max_tasks,
+    };
     Ok(Configuration {
+        threads: ThreadListing {
+            tasks: !matches!(parsed.threads, Some(Threads::System)),
+            runtime_tasks: parsed.runtime_tasks,
+            max_tasks,
+        },
         start,
         stop_on_entry: parsed.stop_on_entry,
         view_files: parsed.view_files,
@@ -350,6 +399,7 @@ mod tests {
             "disassemblySyntax": "att",
             "signals": {"SIGUSR1": "nostop", "alrm": ["stop", "nopass"]},
             "console": "internalConsole",
+            "threads": "system", "runtimeTasks": true, "maxTasks": 5,
         }))
         .expect("valid configuration");
         let Start::Launch(launch) = &configuration.start else {
@@ -371,6 +421,14 @@ mod tests {
             [PathBuf::from("/one/f.c"), PathBuf::from("/z/f.c")]
         );
         assert_eq!(configuration.signals.len(), 2);
+        assert_eq!(
+            configuration.threads,
+            ThreadListing {
+                tasks: false,
+                runtime_tasks: true,
+                max_tasks: 5,
+            }
+        );
     }
 
     #[test]
@@ -403,6 +461,14 @@ mod tests {
             (
                 json!({"program": "p", "sourceMap": [["/a"]]}),
                 "invalid launch configuration at sourceMap[0]: invalid length 1, expected an array of length 2",
+            ),
+            (
+                json!({"program": "p", "maxTasks": 0}),
+                "invalid launch configuration at maxTasks: expected at least 1",
+            ),
+            (
+                json!({"program": "p", "threads": "fibers"}),
+                "invalid launch configuration at threads: unknown variant `fibers`, expected `tasks` or `system`",
             ),
         ] {
             assert_eq!(launch(arguments).map(|_| ()), Err(expected.to_owned()));

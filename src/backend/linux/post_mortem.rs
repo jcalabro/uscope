@@ -852,14 +852,12 @@ impl Controller<CoreTarget> {
             })
             .collect();
         self.inferior = Some(Inferior {
-            public_stop: Some(PublicStop {
-                id: allocate_stop_id(),
-                triggering_thread: selected,
-                reason: reason.clone(),
-                presentations: BTreeMap::new(),
-                selected_frames: BTreeMap::new(),
-            }),
-            selected_thread: Some(selected),
+            public_stop: Some(PublicStop::new(
+                allocate_stop_id(),
+                selected,
+                reason.clone(),
+                BTreeMap::new(),
+            )),
             ..Inferior::new(InferiorOrigin::PostMortem, tgid, main, trace_threads, None)
         });
         let presentation = self.presentation_for_thread(selected, Some(reason))?;
@@ -908,6 +906,10 @@ impl Controller<CoreTarget> {
                 | Request::Terminate { reply }
                 | Request::HoldForks { reply, .. } => reject(reply),
                 Request::WriteMemory { reply, .. } => reject(reply),
+                // A dump runs nothing, but the choice stays the session's.
+                Request::SetExceptionStops { stops, reply } => {
+                    let _ = reply.send(Ok(std::mem::replace(&mut self.exception_stops, stops)));
+                }
                 request => self.handle_inspection_request(request),
             }
         }

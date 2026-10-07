@@ -1,9 +1,14 @@
 // Prints `EXPECT\t<expression>\t<kind>\t<value>` for each expression the
-// debugger must agree with, then calls barrier().
+// debugger must agree with, then calls barrier(). A kind of `text` is the
+// text a string holds, `range` the elements of a range, and `error` the
+// kind of error the expression must be.
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <string>
+#include <vector>
 
 extern "C" void barrier(void *fixture);
 
@@ -64,6 +69,19 @@ struct Fixture : Base {
                     static_cast<unsigned long long>(bits_));                         \
     } while (0)
 
+#define EXPECT_TEXT(expression, native) \
+    std::printf("EXPECT\t%s\ttext\t%s\n", expression, std::string(native).c_str())
+#define EXPECT_ERROR(expression, kind) std::printf("EXPECT\t%s\terror\t%s\n", expression, kind)
+
+// Library containers, which views present: maps are indexed by key, and a
+// vector's capacity is its view's.
+struct Library {
+    std::map<int, int> squares;
+    std::map<std::string, int> ages;
+    std::vector<int> room;
+    std::string name;
+};
+
 int main() {
     Fixture f{{-5}, -70000, 250, {-12, 123456789012LL}, {10, 20, 30, 40}, nullptr, "hello", true, 2.75, {-9}};
     f.ptr = &f.arr[2];
@@ -75,6 +93,9 @@ int main() {
     // Its address escapes, so its stores happen before barrier() is called.
     __asm__ volatile("" : : "r"(&diamond) : "memory");
     int &ref = f.arr[1];
+    Library library{{{1, 1}, {2, 4}, {3, 9}}, {{"ann", 30}, {"bob", 41}}, {}, "hello"};
+    library.room.reserve(10);
+    library.room.push_back(1);
 
     EXPECT_INT("f.count", f.count);
     EXPECT_INT("f.byte + 10", f.byte + 10);
@@ -97,7 +118,21 @@ int main() {
     EXPECT_INT("diamond.top_value", diamond.top_value);
     EXPECT_INT("diamond.left_value + diamond.right_value", diamond.left_value + diamond.right_value);
     EXPECT_INT("diamond.own_value", diamond.own_value);
+    EXPECT_BOOL("f.ptr != nil", f.ptr != nullptr);
+    std::printf("EXPECT\tf.arr[1:3]\trange\t%d,%d\n", f.arr[1], f.arr[2]);
+    EXPECT_INT("cap(f.arr)", sizeof f.arr / sizeof f.arr[0]);
+    EXPECT_TEXT("f.text[1:3]", std::string(f.text).substr(1, 2));
+    EXPECT_INT("len(f.text[2:])", std::strlen(f.text) - 2);
+    EXPECT_INT("library.squares[3]", library.squares.at(3));
+    EXPECT_INT("library.ages[\"bob\"]", library.ages.at("bob"));
+    if (library.ages.count("zed") == 0) {
+        EXPECT_ERROR("library.ages[\"zed\"]", "missing-key");
+    }
+    EXPECT_INT("cap(library.room)", library.room.capacity());
+    EXPECT_INT("len(library.room)", library.room.size());
+    EXPECT_TEXT("library.name[1:4]", library.name.substr(1, 3));
     std::fflush(stdout);
+    __asm__ volatile("" : : "r"(&library) : "memory");
     barrier(&f);
     return ref == 0;
 }

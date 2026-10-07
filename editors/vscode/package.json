@@ -139,6 +139,23 @@
                 "default": "intel",
                 "description": "The assembly syntax of the disassembly view."
               },
+              "threads": {
+                "type": "string",
+                "enum": ["tasks", "system"],
+                "default": "tasks",
+                "description": "Show a runtime's tasks, such as Go's goroutines, as threads, or the system threads."
+              },
+              "runtimeTasks": {
+                "type": "boolean",
+                "default": false,
+                "description": "List the tasks a runtime runs for its own work, such as Go's garbage collector workers."
+              },
+              "maxTasks": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 1000,
+                "description": "The most tasks listed as threads; a last entry says how many more there are."
+              },
               "signals": {
                 "type": "object",
                 "additionalProperties": {
@@ -206,6 +223,23 @@
                 "enum": ["intel", "att"],
                 "default": "intel",
                 "description": "The assembly syntax of the disassembly view."
+              },
+              "threads": {
+                "type": "string",
+                "enum": ["tasks", "system"],
+                "default": "tasks",
+                "description": "Show a runtime's tasks, such as Go's goroutines, as threads, or the system threads."
+              },
+              "runtimeTasks": {
+                "type": "boolean",
+                "default": false,
+                "description": "List the tasks a runtime runs for its own work, such as Go's garbage collector workers."
+              },
+              "maxTasks": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 1000,
+                "description": "The most tasks listed as threads; a last entry says how many more there are."
               },
               "signals": {
                 "type": "object",

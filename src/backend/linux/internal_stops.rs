@@ -117,12 +117,45 @@ impl<P: LinuxTraceOps> Controller<P> {
             Edit::RemoveAllWatchpoints { reply } => {
                 let _ = reply.send(self.remove_all_watchpoints());
             }
+            Edit::SetExceptionStops { stops, reply } => {
+                let _ = reply.send(self.set_exception_stops(stops));
+            }
             Edit::RefreshModules => {
                 // A failed refresh leaves the previous modules; the next stop
                 // refreshes them again.
                 let _ = self.refresh_libraries();
             }
+            Edit::FollowStacks => self.follow_stacks(),
         }
+    }
+
+    /// Applies an edit of the debugger's own once every thread is stopped,
+    /// by an internal stop unless one is already under way. An edit already
+    /// queued is applied once.
+    pub(super) fn queue_internal_edit(&mut self, edit: Edit) -> Result<()> {
+        if self
+            .inferior
+            .as_ref()
+            .ok_or(Error::NotRunning)?
+            .barrier
+            .is_none()
+        {
+            self.begin_internal_stop()?;
+        }
+        let barrier = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.barrier.as_mut())
+            .expect("an internal stop has a barrier");
+        let kind = std::mem::discriminant(&edit);
+        if !barrier
+            .edits
+            .iter()
+            .any(|queued| std::mem::discriminant(queued) == kind)
+        {
+            barrier.edits.push(edit);
+        }
+        Ok(())
     }
 
     /// Starts stopping every running thread without a reason to publish,
@@ -176,16 +209,22 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Records that the stepping thread executed an instruction whose
     /// effect on the step is evaluated before the step resumes.
     pub(super) fn note_step_progress(&mut self, pid: Pid) {
-        if let Some(ActiveKind::Step {
-            thread,
-            progress_owed,
-            ..
-        }) = self
+        let owner = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match active.kind {
+                ActiveKind::Step { owner, .. } => Some(owner),
+                _ => None,
+            });
+        if !owner.is_some_and(|owner| self.runs_step(owner, pid)) {
+            return;
+        }
+        if let Some(ActiveKind::Step { progress_owed, .. }) = self
             .inferior
             .as_mut()
             .and_then(|inferior| inferior.active.as_mut())
             .map(|active| &mut active.kind)
-            && *thread == pid
         {
             *progress_owed = true;
         }
@@ -341,7 +380,10 @@ impl Edit {
             Self::RemoveAllWatchpoints { reply } => {
                 let _ = reply.send(Err(error));
             }
-            Self::RefreshModules => {}
+            Self::SetExceptionStops { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::RefreshModules | Self::FollowStacks => {}
         }
     }
 }

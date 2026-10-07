@@ -16,12 +16,17 @@
       rust = pkgs.rust-bin.nightly."2026-07-11".default.override {
         extensions = [ "clippy" "rust-src" "rustfmt" ];
       };
-      goStable = pkgs.go.overrideAttrs (_final: _previous: {
-        version = "1.26.5";
+      goStable = pkgs.go.overrideAttrs (_final: previous: {
+        version = "1.27.1";
         src = pkgs.fetchurl {
-          url = "https://go.dev/dl/go1.26.5.src.tar.gz";
-          hash = "sha256-SVvkvIcXasVnOS5bQRar2YRm0z17SdQedkzMaXay3EI=";
+          url = "https://go.dev/dl/go1.27.1.src.tar.gz";
+          hash = "sha256-TkCKuuEm2Ra2FkYnGT8sVPDjyhMS1pO4bbRfhiqyOLE=";
         };
+        # The patch that relaxes module vendoring for nixpkgs' Go builders no
+        # longer applies to 1.27, and nothing here builds with them.
+        patches = builtins.filter
+          (patch: !(pkgs.lib.hasInfix "go_no_vendor_checks" (toString patch)))
+          previous.patches;
       });
       # Builds C++ against LLVM's libc++ instead of libstdc++, so fixtures
       # cover both standard libraries' layouts.

@@ -62,7 +62,7 @@ func main() {
 	var nothing any                       // VIEW: nothing => nil
 	var point any = Point{X: 1, Y: 2}     // VIEW: point => main.Point {X: 1, Y: 2}
 	var stringer fmt.Stringer = nil       // VIEW: stringer => nil
-	var failure error = errors.New("bad") // VIEW: failure => *errors.errorString *{s: "bad"}
+	var failure error = errors.New("bad") // VIEW: failure => *errors.errorString *"bad"
 	var direct any = Handle(&Point{X: 3, Y: 4}) // VIEW: direct => main.Handle *{X: 3, Y: 4}
 	barrier(&small)
 	runtime.KeepAlive(empty)

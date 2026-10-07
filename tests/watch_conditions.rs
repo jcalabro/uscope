@@ -380,7 +380,7 @@ async fn concurrent_hits_are_each_counted_once_and_judged_in_their_thread() {
             scenario
                 .operation(
                     "select hitting thread",
-                    scenario.handle().select_thread(hit.thread),
+                    scenario.handle().select_context(hit.thread),
                 )
                 .await;
             assert!(holds(&scenario, "value == 50").await, "{hit:?}");

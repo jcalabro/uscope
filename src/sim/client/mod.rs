@@ -36,10 +36,10 @@ use super::watches::Intent;
 use crate::backend::ControllerMessage;
 use crate::protocol::Request;
 use crate::{
-    Backtrace, DebuggerEvent, DebuggerHandle, Error, ExceptionDisposition, ExecutionId,
-    FramePresentation, HeldChildren, InferiorState, LaunchOptions, MemoryReadCompletion, ModuleId,
-    ProcessId, ResumeScope, StateSnapshot, StepKind, StopId, StopReason, ThreadId, ThreadState,
-    VariableSnapshot, VirtualAddress,
+    Backtrace, DebuggerEvent, DebuggerHandle, Error, ExceptionDisposition, ExecutionContext,
+    ExecutionId, FramePresentation, HeldChildren, InferiorState, LaunchOptions,
+    MemoryReadCompletion, ModuleId, ProcessId, ResumeScope, StateSnapshot, StepKind, StopId,
+    StopReason, ThreadId, ThreadState, VariableSnapshot, VirtualAddress,
 };
 
 pub use self::adopter::Adopter;
@@ -672,11 +672,11 @@ impl Client {
             .pick(Stream::Client, &snapshot.threads)
             .id;
         self.handle
-            .select_thread(thread)
+            .select_context(thread)
             .await
             .map_err(|error| protocol(format!("selecting thread {thread} failed: {error}")))?;
         self.note(format!("selected thread {thread}"));
-        if snapshot.selected_thread != Some(thread) {
+        if snapshot.selected != Some(ExecutionContext::Thread(thread)) {
             self.mark(Mark::ThreadSelected);
         }
         Ok(())

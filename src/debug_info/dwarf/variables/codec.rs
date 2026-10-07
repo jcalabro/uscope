@@ -73,7 +73,7 @@ pub(super) fn checked_integer_value(
                 .map_err(|_| Arc::from("negative enumerator has an unsigned representation"))?;
             checked_integer_value(IntegerValue::Unsigned(value), base)
         }
-        (BaseTypeEncoding::Floating, _) => {
+        (BaseTypeEncoding::Floating | BaseTypeEncoding::ComplexFloating, _) => {
             Err("enumerator representation is floating-point".into())
         }
     }
@@ -105,7 +105,7 @@ pub(super) fn decode_integer_value(
         BaseTypeEncoding::Boolean
         | BaseTypeEncoding::Unsigned
         | BaseTypeEncoding::UnsignedCharacter => IntegerValue::Unsigned(raw),
-        BaseTypeEncoding::Floating => {
+        BaseTypeEncoding::Floating | BaseTypeEncoding::ComplexFloating => {
             return Err("integer representation is floating-point".into());
         }
     };
@@ -473,6 +473,41 @@ pub(super) fn decode_scalar(
         BaseTypeEncoding::Floating => {
             decode_float(type_info, bytes, target).map(ScalarValue::Floating)
         }
+        BaseTypeEncoding::ComplexFloating => {
+            let part = complex_part(type_info);
+            let (real, imaginary) = bytes.split_at(bytes.len() / 2);
+            Ok(ScalarValue::Complex {
+                real: decode_float(&part, real, target)?,
+                imaginary: decode_float(&part, imaginary, target)?,
+            })
+        }
+    }
+}
+
+/// The float type each part of a complex type is: Go's `complex128` is two
+/// `float64`, C's `complex double` two `double`, and Clang's `complex` two
+/// floats of its size.
+pub(super) fn complex_part(complex: &BaseType) -> BaseType {
+    let byte_size = complex.byte_size / 2;
+    let name: Arc<str> = match complex.base_name.as_ref() {
+        "complex64" => "float32".into(),
+        "complex128" => "float64".into(),
+        name => name
+            .strip_prefix("complex ")
+            .or_else(|| name.strip_prefix("_Complex "))
+            .unwrap_or(match byte_size {
+                4 => "float",
+                8 => "double",
+                _ => "long double",
+            })
+            .into(),
+    };
+    BaseType {
+        name: Arc::clone(&name),
+        base_name: name,
+        encoding: BaseTypeEncoding::Floating,
+        byte_size,
+        bit_size: None,
     }
 }
 
@@ -494,6 +529,30 @@ pub(super) fn unsigned_value(
     })
 }
 
+/// Whether a 16-byte float is x87 extended precision, padded, rather than
+/// the IEEE binary128 of `__float128` and `f128`; only the name tells them
+/// apart.
+fn is_x87_extended(type_info: &BaseType, target: TargetDescription) -> bool {
+    type_info.byte_size == 16
+        && type_info.encoding == BaseTypeEncoding::Floating
+        && target.architecture == Architecture::X86_64
+        && target.byte_order == ByteOrder::Little
+        && matches!(
+            type_info.base_name.as_ref(),
+            "long double" | "__float80" | "_Float64x" | "f80" | "c_longdouble"
+        )
+}
+
+/// How many leading bytes of a scalar's storage hold its value: all of
+/// them, but for x87 extended precision, whose last six are padding.
+pub(super) fn significant_bytes(type_info: &BaseType, target: TargetDescription) -> u64 {
+    if is_x87_extended(type_info, target) {
+        10
+    } else {
+        type_info.byte_size
+    }
+}
+
 fn decode_float(
     type_info: &BaseType,
     bytes: &[u8],
@@ -512,21 +571,10 @@ fn decode_float(
             )
             .expect("eight bytes fit u64"),
         )),
-        // x87 extended precision is padded to 16 bytes, the same size as the
-        // IEEE binary128 of `__float128` and `f128`; only the name tells them
-        // apart.
-        16 if target.architecture == Architecture::X86_64
-            && target.byte_order == ByteOrder::Little
-            && matches!(
-                type_info.base_name.as_ref(),
-                "long double" | "__float80" | "_Float64x" | "f80" | "c_longdouble"
-            ) =>
-        {
-            Ok(FloatValue::X87Extended {
-                significand: u64::from_le_bytes(bytes[..8].try_into().expect("eight-byte slice")),
-                sign_exponent: u16::from_le_bytes(bytes[8..10].try_into().expect("two-byte slice")),
-            })
-        }
+        16 if is_x87_extended(type_info, target) => Ok(FloatValue::X87Extended {
+            significand: u64::from_le_bytes(bytes[..8].try_into().expect("eight-byte slice")),
+            sign_exponent: u16::from_le_bytes(bytes[8..10].try_into().expect("two-byte slice")),
+        }),
         _ => Err(ScalarDecodeError::Unavailable(
             crate::UnsupportedVariableFeature::ScalarRepresentation.into(),
         )),

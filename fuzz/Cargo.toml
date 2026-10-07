@@ -58,6 +58,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "gopclntab"
+path = "fuzz_targets/gopclntab.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dap-transport"
 path = "fuzz_targets/dap_transport.rs"
 test = false

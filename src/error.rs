@@ -19,6 +19,13 @@ pub enum Error {
     FunctionNotFound(String),
     #[error("multiple functions named '{0}' were found")]
     DuplicateFunction(String),
+    /// A location that names several functions where it must name one,
+    /// with a location for each that names it alone.
+    #[error("'{name}' names more than one function: {}", candidates.join(", "))]
+    AmbiguousFunction {
+        name: String,
+        candidates: Vec<String>,
+    },
     #[error("no source file matching '{0}' was found")]
     SourceFileNotFound(PathBuf),
     #[error("source path '{path}' is ambiguous; matches: {matches:?}")]
@@ -28,6 +35,19 @@ pub enum Error {
     },
     #[error("source line {line} in {path} has no code at or after it in its function")]
     SourceLineUnavailable { path: PathBuf, line: u64 },
+    /// A source line with no statement, in a language whose line
+    /// breakpoints stay where they were asked for, with the nearest lines
+    /// before and after it that have one.
+    #[error(
+        "source line {line} in {path} has no statement{}",
+        nearest_statement_lines(*before, *after)
+    )]
+    SourceLineWithoutStatement {
+        path: PathBuf,
+        line: u64,
+        before: Option<u64>,
+        after: Option<u64>,
+    },
     #[error("breakpoint {0} was not found")]
     BreakpointNotFound(u64),
     #[error("invalid hit condition: {0}")]
@@ -51,8 +71,16 @@ pub enum Error {
     Expression(crate::ExpressionError),
     #[error("record type '{type_name}' has no member named '{member}'")]
     MemberNotFound { member: String, type_name: Arc<str> },
-    #[error("member '{member}' is ambiguous in record type '{type_name}'")]
-    AmbiguousMember { member: String, type_name: Arc<str> },
+    #[error(
+        "member '{member}' is ambiguous in record type '{type_name}'{}",
+        candidates_text(candidates)
+    )]
+    AmbiguousMember {
+        member: String,
+        type_name: Arc<str>,
+        /// The selections that reach each candidate, when they are known.
+        candidates: Vec<String>,
+    },
     #[error("'{base}' is not a base class of '{type_name}'")]
     BaseNotFound { base: Arc<str>, type_name: Arc<str> },
     #[error("'{type_name}' has several '{base}' base class subobjects")]
@@ -132,6 +160,15 @@ pub enum Error {
     UnknownSignal(u64),
     #[error("thread {0} is not a thread of the inferior")]
     UnknownThread(crate::ThreadId),
+    #[error("task {0} is not a task of the inferior")]
+    UnknownTask(crate::TaskId),
+    #[error("task {0} is parked, not running on a thread")]
+    TaskParked(crate::TaskId),
+    #[error("the frames of task {task} are unavailable: {reason}")]
+    TaskUnavailable {
+        task: crate::TaskId,
+        reason: Arc<str>,
+    },
     #[error("the requested stopped snapshot is no longer current")]
     StaleStop,
     #[error("an unclassifiable native stop cannot be resumed safely")]
@@ -173,7 +210,7 @@ pub enum Error {
         path: PathBuf,
         error: std::io::Error,
     },
-    #[error("source file {path} does not exist{}", missing_source_detail(.tried))]
+    #[error("source file {path} does not exist{}", missing_source_detail(.path, .tried))]
     SourceFileMissing { path: PathBuf, tried: Vec<PathBuf> },
     #[error("a source path rule needs a nonempty prefix to replace")]
     EmptySourcePathPrefix,
@@ -279,14 +316,47 @@ impl Error {
 
 /// Names the mapped locations tried for a missing source file, which follow
 /// the recorded path itself.
-fn missing_source_detail(tried: &[PathBuf]) -> String {
+fn missing_source_detail(path: &std::path::Path, tried: &[PathBuf]) -> String {
     let mapped = &tried[..tried.len().saturating_sub(1)];
-    if mapped.is_empty() {
+    let mut detail = if mapped.is_empty() {
+        String::new()
+    } else {
+        let paths = mapped
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        format!(", nor do its mapped paths {}", paths.join(", "))
+    };
+    if path.is_relative() {
+        detail.push_str(
+            "; it was recorded without the directory the program was built in, as `-trimpath` \
+             builds record paths, so it was looked for in the current directory; a source map \
+             can say where it is",
+        );
+    }
+    detail
+}
+
+fn nearest_statement_lines(before: Option<u64>, after: Option<u64>) -> String {
+    match (before, after) {
+        (Some(before), Some(after)) => {
+            format!("; the nearest lines that have one are {before} and {after}")
+        }
+        (Some(line), None) | (None, Some(line)) => {
+            format!("; the nearest line that has one is {line}")
+        }
+        (None, None) => String::new(),
+    }
+}
+
+/// The selections an ambiguous member's candidates are reached by.
+fn candidates_text(candidates: &[String]) -> String {
+    if candidates.is_empty() {
         return String::new();
     }
-    let paths = mapped
+    let candidates = candidates
         .iter()
-        .map(|path| path.display().to_string())
+        .map(|candidate| format!("`{candidate}`"))
         .collect::<Vec<_>>();
-    format!(", nor do its mapped paths {}", paths.join(", "))
+    format!("; select one of {}", candidates.join(", "))
 }

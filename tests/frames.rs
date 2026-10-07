@@ -6,10 +6,11 @@ use std::path::Path;
 
 use support::Scenario;
 use uscope::{
-    CoreDumpOptions, DebuggerEvent, DereferenceState, Error, ExceptionDisposition, ExitStatus,
-    FloatValue, IntegerValue, PresentedFrame, ResumeScope, ScalarValue, StackFrame, StackFrameId,
-    StepKind, StopReason, ThreadId, ValueChildQuery, ValueChildren, Variable, VariableState,
-    VariableUnavailableReason, VariableValue, WatchAccess, WatchScope, WatchpointInvalidation,
+    CodeRole, CoreDumpOptions, DebuggerEvent, DereferenceState, Error, ExceptionDisposition,
+    ExitStatus, FloatValue, IntegerValue, PresentedFrame, ResumeScope, ScalarValue, StackFrame,
+    StackFrameId, StepKind, StopReason, ThreadId, ValueChildQuery, ValueChildren, Variable,
+    VariableState, VariableUnavailableReason, VariableValue, WatchAccess, WatchScope,
+    WatchpointInvalidation,
 };
 
 /// The frames fixture across compilers, optimization, and PIE.
@@ -537,6 +538,7 @@ async fn compare_frame(
     scenario: &Scenario,
     frame: &StackFrame,
     oracle: &OracleFrame,
+    go: bool,
     context: &str,
     agreement: &mut Agreement,
 ) {
@@ -575,12 +577,17 @@ async fn compare_frame(
         .collect::<Vec<_>>();
     our_names.sort();
     gdb_names.sort();
+    // gdb shows a Go local before the line declaring it has run; uscope,
+    // like Delve, only past it.
+    if go {
+        gdb_names.retain(|name| our_names.contains(name));
+    }
     assert_eq!(our_names, gdb_names, "{context}: visible variables differ");
 
     let mut seen = Vec::new();
     for (name, expected) in &oracle.variables {
         // The innermost of several equal names is the one a lookup finds.
-        if seen.contains(name) {
+        if seen.contains(name) || !gdb_names.contains(name) {
             continue;
         }
         seen.push(name.clone());
@@ -696,21 +703,28 @@ async fn every_frame_of_every_dumped_thread_agrees_with_gdb() {
             scenario
                 .operation(
                     "select thread",
-                    scenario.handle().select_thread(ThreadId::new(*tid)),
+                    scenario.handle().select_context(ThreadId::new(*tid)),
                 )
                 .await;
             let ours = backtrace(&scenario).await;
             for frame in frames {
                 let context = format!("{core} thread {tid} frame {}", frame.level);
-                // gdb unwinds past code no module describes, where ours stops.
+                // gdb unwinds past code no module describes, where ours
+                // stops, and past the frame a runtime declares its stack's
+                // first, into the code that started the thread.
                 let Some(our_frame) = ours.get(frame.level) else {
+                    let outermost = ours
+                        .last()
+                        .and_then(|frame| frame.function.as_ref())
+                        .is_some_and(|function| function.role == CodeRole::Outermost);
                     assert!(
-                        !frame.scope,
+                        !frame.scope || outermost,
                         "{context}: our backtrace is shorter: {ours:#?}"
                     );
                     continue;
                 };
-                compare_frame(&scenario, our_frame, frame, &context, &mut agreement).await;
+                let go = core.contains("-go-");
+                compare_frame(&scenario, our_frame, frame, go, &context, &mut agreement).await;
             }
         }
         assert!(agreement.equal > 0, "{core}: nothing compared");
@@ -832,13 +846,16 @@ async fn explicit_contexts_inspect_any_frame_without_selecting_it() {
     let mut scenario = stop_in_leaf("gcc-o0").await;
     let snapshot = scenario.snapshot().await;
     let stop = snapshot.stop_id.expect("stopped");
-    let thread = snapshot.selected_thread.expect("selected thread");
+    let thread = snapshot
+        .selected
+        .and_then(uscope::ExecutionContext::as_thread)
+        .expect("selected thread");
     let frames = backtrace(&scenario).await;
     let recursion = level_of(&frames, "frames_recurse", 0);
     let handle = scenario.handle().clone();
     let view = handle.at(StopContext {
         stop,
-        thread,
+        execution: thread.into(),
         frame: frames[recursion].id,
     });
 
@@ -894,7 +911,7 @@ async fn explicit_contexts_inspect_any_frame_without_selecting_it() {
             .handle()
             .at(StopContext {
                 stop,
-                thread: ThreadId::new(u64::from(u32::MAX)),
+                execution: ThreadId::new(u64::from(u32::MAX)).into(),
                 frame: StackFrameId::INNERMOST,
             })
             .backtrace()
@@ -921,7 +938,10 @@ async fn each_thread_keeps_its_own_selected_frame() {
     let core = Scenario::fixture("crash-gcc-o0-segv.core");
     let mut scenario = Scenario::open_core("crash threads", &CoreDumpOptions::new(core));
     let snapshot = scenario.snapshot().await;
-    let crashing = snapshot.selected_thread.expect("selected thread");
+    let crashing = snapshot
+        .selected
+        .and_then(uscope::ExecutionContext::as_thread)
+        .expect("selected thread");
     let worker = snapshot
         .threads
         .iter()
@@ -942,7 +962,7 @@ async fn each_thread_keeps_its_own_selected_frame() {
     );
 
     scenario
-        .operation("select worker", scenario.handle().select_thread(worker))
+        .operation("select worker", scenario.handle().select_context(worker))
         .await;
     assert_eq!(
         scenario.snapshot().await.selected_frame,
@@ -957,7 +977,10 @@ async fn each_thread_keeps_its_own_selected_frame() {
     ));
 
     scenario
-        .operation("select crashing", scenario.handle().select_thread(crashing))
+        .operation(
+            "select crashing",
+            scenario.handle().select_context(crashing),
+        )
         .await;
     let snapshot = scenario.snapshot().await;
     assert_eq!(snapshot.selected_frame.map(StackFrameId::get), Some(1));
@@ -1169,7 +1192,10 @@ async fn stepping_from_a_selected_outer_frame_is_explicit() {
     let snapshot = scenario.snapshot().await;
     let (stop, thread) = (
         snapshot.stop_id.expect("stopped"),
-        snapshot.selected_thread.expect("selected thread"),
+        snapshot
+            .selected
+            .and_then(uscope::ExecutionContext::as_thread)
+            .expect("selected thread"),
     );
     for kind in [
         StepKind::Instruction,

@@ -959,6 +959,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         survivor.state = NativeThreadState::Stopped;
         survivor.expected = ExpectedStop::None;
         survivor.pending_signal = None;
+        survivor.held_signal = None;
         survivor.stopped_at_breakpoint = None;
         survivor.trapped_at = None;
         survivor.awaiting_breakpoint = None;
@@ -972,6 +973,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.plan_sites.clear();
         inferior.repairs.clear();
         inferior.loader_site = None;
+        inferior.runtime_hooks.clear();
+        inferior.stack_moves.clear();
         // exec(2) flushes every debug register; the new image's addresses
         // have no relation to the old watchpoints.
         self.discard_watchpoints();
@@ -1193,7 +1196,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let process_id = process_id(inferior.tgid);
         let owned_execution = inferior.active.as_ref().is_some_and(|active| {
             matches!(active.scope, ResumeScope::Thread(thread) if thread == thread_id)
-                || matches!(active.kind, ActiveKind::Step { thread, .. } if thread == pid)
+                || matches!(active.kind, ActiveKind::Step { owner, .. } if owner.thread == pid)
         });
         // A thread resumed alone to reach its awaited breakpoint holds its
         // siblings back; they must run once it is gone.
@@ -1595,6 +1598,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         for (&pid, thread) in &inferior.threads {
             let signal = thread
                 .pending_signal
+                .or(thread.held_signal)
                 .map(|pending| pending.signal)
                 .filter(|signal| self.signals.get(*signal).pass);
             record(self.ptrace.detach(pid, signal).map(drop));

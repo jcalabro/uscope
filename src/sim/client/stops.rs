@@ -10,10 +10,10 @@ use crate::sim::choices::Stream;
 use crate::sim::marks::Mark;
 use crate::sim::report::Failure;
 use crate::{
-    Backtrace, BreakpointLocation, BreakpointOptions, BreakpointSpec, Error, Expression, FrameKind,
-    LogMessage, PresentedFrame, ScalarValue, StackFrameId, StateSnapshot, StepKind, StopContext,
-    StopId, StopReason, ThreadState, UnwindTermination, VariableSnapshot, VariableState,
-    VariableValue, VariableValueSource, VirtualAddress,
+    Backtrace, BreakpointLocation, BreakpointOptions, BreakpointSpec, Error, ExecutionContext,
+    Expression, FrameKind, LogMessage, PresentedFrame, ScalarValue, StackFrameId, StateSnapshot,
+    StepKind, StopContext, StopId, StopReason, ThreadState, UnwindTermination, VariableSnapshot,
+    VariableState, VariableValue, VariableValueSource, VirtualAddress,
 };
 
 impl Client {
@@ -47,6 +47,7 @@ impl Client {
             StepKind::IntoSource,
             StepKind::OverSource,
             StepKind::Out,
+            StepKind::IntoNewTask,
         ];
         let kind = *self.choices.borrow_mut().pick(Stream::Client, &kinds);
         let before = self.snapshot().await?;
@@ -72,7 +73,7 @@ impl Client {
             Caller::Trusted
         };
         self.note(format!("step {kind:?}"));
-        if let Some(thread) = before.selected_thread {
+        if let Some(ExecutionContext::Thread(thread)) = before.selected {
             self.observe(Observation::StepBegins {
                 thread,
                 kind,
@@ -155,7 +156,7 @@ impl Client {
             caller
         };
         self.note(format!("advance to {spec}: {targets:#x?}"));
-        if let Some(thread) = before.selected_thread {
+        if let Some(ExecutionContext::Thread(thread)) = before.selected {
             self.observe(Observation::StepBegins {
                 thread,
                 kind: StepKind::Advance,
@@ -300,9 +301,9 @@ impl Client {
             Err(error) => return Err(protocol(format!("reading variables failed: {error}"))),
         };
         self.note(format!(
-            "variables of frame {} in thread {}: {}",
+            "variables of frame {} in {}: {}",
             variables.stack_frame,
-            variables.thread,
+            variables.context,
             variables
                 .variables
                 .iter()
@@ -335,14 +336,14 @@ impl Client {
         // Every other stopped thread's stack, without changing which is
         // selected.
         for thread in snapshot.threads.iter() {
-            if Some(thread.id) == snapshot.selected_thread
+            if snapshot.selected == Some(ExecutionContext::Thread(thread.id))
                 || !matches!(thread.state, ThreadState::Stopped { .. })
             {
                 continue;
             }
             let context = StopContext {
                 stop,
-                thread: thread.id,
+                execution: ExecutionContext::Thread(thread.id),
                 frame: StackFrameId::new(0),
             };
             match self.handle.at(context).backtrace().await {

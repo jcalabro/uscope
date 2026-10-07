@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use super::protocol::ErrorBody;
 use uscope::{
-    DereferenceReference, StackFrameId, StopContext, ThreadId, ValueChildrenReference, VariableKind,
+    DereferenceReference, ExecutionContext, StackFrameId, StopContext, ValueChildrenReference,
+    VariableKind,
 };
 
 /// The largest reference DAP clients accept: references are 32-bit signed.
@@ -44,7 +45,7 @@ pub enum Variables {
     /// What a pointer or reference refers to.
     Pointee {
         context: StopContext,
-        reference: DereferenceReference,
+        reference: Box<DereferenceReference>,
         name: Arc<str>,
         path: Option<uscope::Expression>,
     },
@@ -87,7 +88,7 @@ impl Variables {
 pub struct References {
     next: i64,
     frames: HashMap<i64, StopContext>,
-    frame_ids: HashMap<(ThreadId, StackFrameId), i64>,
+    frame_ids: HashMap<(ExecutionContext, StackFrameId), i64>,
     variables: HashMap<i64, Variables>,
     /// The expression of each named row of a variables list, by the list's
     /// reference and the row's name.
@@ -145,12 +146,13 @@ impl References {
     /// Returns the reference of a frame, the same one each time it is asked
     /// for during one stop.
     pub fn frame(&mut self, context: StopContext) -> Result<i64, Exhausted> {
-        if let Some(&id) = self.frame_ids.get(&(context.thread, context.frame)) {
+        if let Some(&id) = self.frame_ids.get(&(context.execution, context.frame)) {
             return Ok(id);
         }
         let id = self.allocate()?;
         self.frames.insert(id, context);
-        self.frame_ids.insert((context.thread, context.frame), id);
+        self.frame_ids
+            .insert((context.execution, context.frame), id);
         Ok(id)
     }
 
@@ -259,12 +261,12 @@ impl References {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uscope::StopId;
+    use uscope::{StopId, ThreadId};
 
     fn context(stop: u64, thread: u64) -> StopContext {
         StopContext {
             stop: StopId::new(stop),
-            thread: ThreadId::new(thread),
+            execution: ExecutionContext::Thread(ThreadId::new(thread)),
             frame: StackFrameId::INNERMOST,
         }
     }

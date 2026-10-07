@@ -679,6 +679,21 @@ fn formatted_and_linked(world: &mut World, int: TypeReference, tagged: TypeRefer
     item.extend(ints([65, 0]));
     world.variable("item", entry, &item);
 
+    // Bytes, as text and otherwise: a `message {uint8_t text[8]; uint8_t
+    // raw[4]}`, and `octets`, a `uint8_t[4]`.
+    let byte = world.base("uint8_t", E::Unsigned, 1);
+    let text = world.array(byte, &[8]);
+    let raw = world.array(byte, &[4]);
+    let message = world.record("message", 12, &[("text", text, 0), ("raw", raw, 8)]);
+    world.identify(message, SourceLanguage::C, &[], "message", Vec::new());
+    let mut note = b"hi there".to_vec();
+    note.extend([0xff, 0, 1, 2]);
+    world.variable("note", message, &note);
+    let octets = world.typedef("octets", raw);
+    world.identify(octets, SourceLanguage::C, &[], "octets", Vec::new());
+    world.variable("word", octets, b"ok!?");
+    world.variable("blob", octets, &[0xff, 0, 1, 2]);
+
     // A run queue whose tasks link through the `node` each embeds, in a
     // ring through the queue's own `tasks`.
     let size = world.base("unsigned long", E::Unsigned, 8);
