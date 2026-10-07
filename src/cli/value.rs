@@ -150,11 +150,32 @@ fn assignment(type_name: &str, name: &str, value: &str, renderer: Renderer) -> S
 }
 
 pub fn variables(snapshot: &VariableSnapshot, renderer: Renderer) -> String {
+    variables_marked(snapshot, renderer, &mut |_, _| false)
+}
+
+/// Renders variables as [`variables`] does, marking each available value
+/// that `changed`, given its name and its line without escapes, says
+/// changed: drawn in the changed role, or suffixed with `*` without colour.
+pub fn variables_marked(
+    snapshot: &VariableSnapshot,
+    renderer: Renderer,
+    changed: &mut dyn FnMut(&str, &str) -> bool,
+) -> String {
     let mut output = BoundedOutput::new(OUTPUT_LIMIT);
     let mut lines = snapshot
         .variables
         .iter()
-        .map(|variable| variable_summary(variable, renderer))
+        .map(|variable| {
+            let line = variable_summary(variable, renderer);
+            let available = matches!(variable.state, VariableState::Available { .. });
+            if !available || !changed(&variable.name, &super::terminal::plain(&line)) {
+                line
+            } else if renderer.is_colored() {
+                variable_summary(variable, renderer.changed())
+            } else {
+                format!("{line}*")
+            }
+        })
         .chain(snapshot.completion.exhaustion().map(exhaustion));
     if let Some(first) = lines.next() {
         output.push_str(&first);

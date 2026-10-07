@@ -184,6 +184,7 @@ impl<P: InspectionOps> Controller<P> {
             thread: debug_thread_id(pid),
             stack_frame: frame,
             frame: resolved.presented,
+            frame_address: resolved.cfa.ok(),
             target: self.module_image.target(),
             variables: variables.into(),
             completion: budget.completion(),

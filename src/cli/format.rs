@@ -633,22 +633,31 @@ pub const fn invalidation_text(reason: WatchpointInvalidation) -> &'static str {
 }
 
 /// Describes each hit with the watched value before and after the access.
+/// Renders the watchpoints a stop hit, the first hit's line ending with
+/// `first` and each other's naming its thread.
 pub fn watchpoint_hits(
     hits: &[WatchpointHit],
     watchpoints: &[Watchpoint],
     image: Option<&ModuleImage>,
+    first: &str,
     renderer: Renderer,
 ) -> String {
     hits.iter()
-        .map(|hit| {
+        .enumerate()
+        .map(|(index, hit)| {
             let watchpoint = watchpoints
                 .iter()
                 .find(|watchpoint| watchpoint.id == hit.watchpoint);
             let type_info = watchpoint.and_then(|watchpoint| watchpoint.type_info.as_ref());
             let old = value::watched_bytes(hit.previous.as_deref(), type_info, image);
             let new = value::watched_bytes(hit.current.as_deref(), type_info, image);
+            let thread = if index == 0 {
+                first.to_owned()
+            } else {
+                format!(" in thread {}", renderer.paint(Role::Metadata, hit.thread))
+            };
             format!(
-                "{} by {}{} in thread {}{}",
+                "{} by {}{}{thread}{}",
                 renderer.paint(Role::Current, "stopped"),
                 renderer.paint(Role::Metadata, format!("watchpoint {}", hit.watchpoint)),
                 watchpoint.map_or_else(
@@ -660,7 +669,6 @@ pub fn watchpoint_hits(
                         renderer.paint(Role::Name, watch_subject(watchpoint))
                     )
                 ),
-                renderer.paint(Role::Metadata, hit.thread),
                 if hit.changed() {
                     format!("\n  old: {old}\n  new: {new}")
                 } else {
@@ -697,15 +705,14 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
     match reason {
         StopReason::Attach => format!("{} after attaching", stopped(Role::Current)),
         StopReason::Entry => format!("{} at the program entry", stopped(Role::Current)),
-        StopReason::Breakpoint { address, hits } => format!(
-            "{} at {} at {}",
+        StopReason::Breakpoint { hits, .. } => format!(
+            "{} at {}",
             stopped(Role::Current),
             numbered_hits(
                 "breakpoint",
                 hits.iter().map(|hit| (hit.breakpoint.get(), hit.hit_count)),
                 renderer
-            ),
-            renderer.paint(Role::Metadata, address)
+            )
         ),
         StopReason::Watchpoint { hits } => format!(
             "{} by {}",
@@ -943,16 +950,31 @@ pub fn memory_read(read: &MemoryRead, renderer: Renderer) -> String {
     bound_output(&lines.join("\n"))
 }
 
-pub fn source_context(context: &SourceContext, renderer: Renderer) -> String {
+/// Renders source lines around a location, after the location itself when
+/// `located`, with a margin marking each line in `breakpoints`, enabled or
+/// not, when any shown line has one.
+pub fn source_context(
+    context: &SourceContext,
+    breakpoints: &BTreeMap<LineNumber, bool>,
+    located: bool,
+    renderer: Renderer,
+) -> String {
     let line_width = context
         .lines
         .last()
         .map_or(1, |line| line.number.to_string().len());
-    let mut output = format!(
-        "{}:{}",
-        renderer.paint(Role::Metadata, renderer.path(&context.path)),
-        renderer.paint(Role::Current, context.location.line)
-    );
+    let margin = context
+        .lines
+        .iter()
+        .any(|line| breakpoints.contains_key(&line.number));
+    let mut lines = Vec::with_capacity(context.lines.len() + 1);
+    if located {
+        lines.push(format!(
+            "{}:{}",
+            renderer.paint(Role::Metadata, renderer.path(&context.path)),
+            renderer.paint(Role::Current, context.location.line)
+        ));
+    }
     for line in context.lines.iter() {
         let current = line.number == context.location.line;
         let (marker, role) = if current {
@@ -963,15 +985,18 @@ pub fn source_context(context: &SourceContext, renderer: Renderer) -> String {
         } else {
             ("  ".to_owned(), Role::Metadata)
         };
-        write!(
-            output,
-            "\n{marker} {} | {}",
+        let breakpoint = match breakpoints.get(&line.number) {
+            Some(enabled) => enabled_mark(*enabled, renderer),
+            None if margin => " ".to_owned(),
+            None => String::new(),
+        };
+        lines.push(format!(
+            "{breakpoint}{marker} {} | {}",
             renderer.paint(role, format_args!("{:>line_width$}", line.number)),
             line.text
-        )
-        .expect("writing to a String cannot fail");
+        ));
     }
-    output
+    lines.join("\n")
 }
 
 pub fn core_dump(core: &CoreDumpInfo, renderer: Renderer) -> String {
@@ -1579,15 +1604,19 @@ pub fn module_name(modules: &LoadedModuleSnapshot, module: ModuleId) -> Option<S
 }
 
 /// Renders a backtrace, highlighting the selected frame's level.
+/// Renders a backtrace, or its first `limit` frames and how many more
+/// there are.
 pub fn backtrace(
     trace: &Backtrace,
     selected: u32,
+    limit: Option<usize>,
     modules: Option<&LoadedModuleSnapshot>,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
     renderer: Renderer,
 ) -> String {
-    let mut lines = Vec::with_capacity(trace.frames.len() + 1);
-    for frame in trace.frames.iter() {
+    let shown = limit.unwrap_or(usize::MAX).min(trace.frames.len());
+    let mut lines = Vec::with_capacity(shown + 1);
+    for frame in &trace.frames[..shown] {
         lines.push(stack_frame(
             frame,
             modules,
@@ -1596,11 +1625,24 @@ pub fn backtrace(
             renderer,
         ));
     }
-    lines.push(format!(
-        "{}: {}",
-        renderer.paint(Role::Metadata, "unwind stopped"),
-        trace.termination
-    ));
+    let more = trace.frames.len() - shown;
+    lines.push(if more == 0 {
+        format!(
+            "{}: {}",
+            renderer.paint(Role::Metadata, "unwind stopped"),
+            trace.termination
+        )
+    } else {
+        renderer
+            .paint(
+                Role::Muted,
+                format!(
+                    "{}; `bt` shows every one",
+                    plural(more as u64, "more frame")
+                ),
+            )
+            .to_string()
+    });
     lines.join("\n")
 }
 

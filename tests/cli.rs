@@ -739,16 +739,16 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
             "breakpoint 1 set at counted at tests/fixtures/c/hit-counts.c:11, stops at hits ==3\n",
             "breakpoint 2 set at 2 locations, stops at hits %4\n",
             // The fourth hit is the second inline site of the second call.
-            "stopped at breakpoint 2 (hit 4) at ",
+            "stopped at breakpoint 2 (hit 4) in ",
             "1   +      2  counted at tests/fixtures/c/hit-counts.c:11  hits ==3\n",
             "2   +      4  shared, 2 locations                          hits %4\n",
-            "stopped at breakpoint 1 (hit 3) at ",
+            "stopped at breakpoint 1 (hit 3) in ",
             "breakpoint 1 ignores its next 5 hits\n",
             "breakpoint 2 stops at every hit, hit 4 times so far\n",
             "1   +      3  counted at tests/fixtures/c/hit-counts.c:11  hits >=9\n",
             "2   +      4  shared, 2 locations\n",
             "deleted breakpoint 2\n",
-            "stopped at breakpoint 1 (hit 9) at ",
+            "stopped at breakpoint 1 (hit 9) in ",
             "breakpoint 1 stops at hits ==2 (no later hit can stop), hit 9 times so far\n",
             "inferior exited with status 0\n",
             "1   +     40  counted at tests/fixtures/c/hit-counts.c:11  hits ==2 (no later hit can stop)\n",
@@ -891,6 +891,113 @@ fn pp_fills_long_sequences_and_breaks_maps_by_width() {
     assert_in_order(&wide, &[ordered, "forward = len=2 [0x4, 0x5]\n"]);
 }
 
+/// A stop says where in words, then prints the sections `[stop] show`
+/// names, in order, and `context` prints them again.
+#[test]
+fn a_stop_prints_the_sections_its_settings_name_and_context_prints_them_again() {
+    let settings = "[ui]\nunicode = \"never\"\n[stop]\n\
+        show = [\"source\", \"locals\", \"displays\", \"registers\", \"disassembly\", \
+        \"backtrace\", \"threads\"]\n\
+        backtrace-frames = 1\n\
+        disassembly-instructions = 2\n";
+    let stdout = batch_with_settings(
+        settings,
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "break caller",
+            "display/x call",
+            "display missing + 1",
+            "display",
+            "run",
+            "undisplay 2",
+            "context",
+        ],
+    );
+    let stop = [
+        "stopped at breakpoint 1 (hit 1) in caller at tests/fixtures/c/hit-counts.c:20\n",
+        // The header names the line, so the source does not again.
+        "    19 | __attribute__((noinline)) void caller(uint64_t call) {\n\
+         +=> 20 |     counted(call);\n",
+        "(uint64_t) call = 1\n",
+        "1: (uint64_t) call = 0x1\n",
+        "2: missing + 1: ",
+        "\nrip ",
+        "=> 0x",
+        "#0  ",
+        " more frames; `bt` shows every one\n",
+        "* ",
+    ];
+    let mut expected = vec![
+        "breakpoint 1 set at caller at tests/fixtures/c/hit-counts.c:20\n",
+        "display 1: /x call\n",
+        "1: /x call\n2: missing + 1\n",
+    ];
+    expected.extend(stop);
+    expected.extend([
+        "removed 1 display\n",
+        "tests/fixtures/c/hit-counts.c:20\n    17 | }\n",
+        "(uint64_t) call = 1\n",
+        "1: (uint64_t) call = 0x1\n",
+        "\nrip ",
+    ]);
+    assert_in_order(&stdout, &expected);
+    assert_eq!(stdout.matches("2: missing + 1:").count(), 1, "{stdout}");
+}
+
+/// A stop in a process of several threads names the one it is in.
+#[test]
+fn a_stop_names_its_thread_when_the_process_has_several() {
+    let stdout = batch(
+        &["build/test-programs/hit-count-threads"],
+        &["break contended", "run"],
+    );
+    let header = stdout
+        .lines()
+        .find(|line| line.starts_with("stopped at breakpoint 1 (hit 1) in contended at "))
+        .unwrap_or_else(|| panic!("no stop in:\n{stdout}"));
+    // Every worker is running when the first reaches the breakpoint.
+    assert!(header.ends_with(" of 5]"), "{header}");
+    assert!(
+        header.contains("hit-count-threads.c:16 [thread "),
+        "{header}"
+    );
+}
+
+/// A value that differs from what the last stop showed of the same
+/// activation is marked; a caller's value is compared only with itself.
+#[test]
+fn a_stop_marks_the_values_that_changed_in_the_same_activation() {
+    let settings = "[stop]\nshow = [\"locals\"]\n";
+    let program = ["build/test-programs/hit-counts-gcc-o0"];
+    let stdout = batch_with_settings(
+        settings,
+        &program,
+        &["break caller", "run", "continue", "up", "context"],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "(uint64_t) call = 1\n",
+            "(uint64_t) call = 2*\n",
+            // main's own `call` was not shown before, so it is not marked
+            // although caller's read 1.
+            "#1 ",
+            "(uint64_t) call = 2\n",
+        ],
+    );
+
+    let stdout = batch_with_settings(
+        settings,
+        &program,
+        &["break hit-counts.c:27", "run", "next", "next"],
+    );
+    assert_in_order(
+        &stdout,
+        &["(uint64_t) call = 1\n", "(uint64_t) call = 2*\n"],
+    );
+    assert!(!stdout.contains("expected = 0*"), "{stdout}");
+}
+
 #[test]
 fn saved_breakpoint_commands_recreate_the_breakpoints() {
     let directory = support::ScratchDir::new("cli-save-breakpoints");
@@ -950,7 +1057,7 @@ fn rbreak_breaks_at_matching_functions_and_misspelled_names_suggest_near_ones() 
         &[
             "breakpoint 1 set at caller at tests/fixtures/c/hit-counts.c:20\n",
             "breakpoint 2 set at counted at tests/fixtures/c/hit-counts.c:11\n",
-            "stopped at breakpoint 1 (hit 1) at ",
+            "stopped at breakpoint 1 (hit 1) in ",
         ],
     );
     assert!(!stdout.contains("breakpoint 3 set"), "{stdout}");
@@ -1051,7 +1158,7 @@ fn breakpoints_take_options_inline_and_lines_from_the_selected_frame() {
         &[
             "breakpoint 1 set at ",
             ", stops at hits ==3 where call > 1\n",
-            "stopped at breakpoint 1 (hit 3) at ",
+            "stopped at breakpoint 1 (hit 3) in ",
             "breakpoint 2 set at counted at tests/fixtures/c/hit-counts.c:11\n",
             "breakpoint 3 set at counted at tests/fixtures/c/hit-counts.c:12\n",
             "breakpoint 4 set at caller at tests/fixtures/c/hit-counts.c:20\n",
@@ -1112,13 +1219,13 @@ fn breakpoints_and_watchpoints_are_disabled_enabled_and_advanced_past() {
             "disabled breakpoint 2\n",
             "1   +      0  counted at tests/fixtures/c/hit-counts.c:11  hits ==3  temporary\n",
             "2   -      0  caller at tests/fixtures/c/hit-counts.c:20\n",
-            "stopped at breakpoint 1 (hit 3) at ",
+            "stopped at breakpoint 1 (hit 3) in ",
             "deleted temporary breakpoint 1\n",
             "2   -      0  caller at tests/fixtures/c/hit-counts.c:20\n",
             "enabled breakpoint 2\n",
             // Hits while disabled are not counted.
-            "stopped at breakpoint 2 (hit 1) at ",
-            "stopped after advance\n",
+            "stopped at breakpoint 2 (hit 1) in ",
+            "stopped after advance in counted at tests/fixtures/c/hit-counts.c:11\n",
             "(uint64_t) call = 4\n",
             "disabled breakpoint 2 and watchpoint 1\n",
             "1   -      0  last_call  8 bytes at 0x",
@@ -1158,11 +1265,11 @@ fn batch_mode_sets_and_clears_breakpoint_conditions() {
         &stdout,
         &[
             "breakpoint 1 stops where call % 10 == 0 && last_call == call - 1 holds\n",
-            "stopped at breakpoint 1 (hit 10) at ",
+            "stopped at breakpoint 1 (hit 10) in ",
             "(uint64_t) call = 10\n",
             "1   +     10  counted at tests/fixtures/c/hit-counts.c:11  if call % 10 == 0 && last_call == call - 1\n",
             "breakpoint 1 stops unconditionally\n",
-            "stopped at breakpoint 1 (hit 11) at ",
+            "stopped at breakpoint 1 (hit 11) in ",
             "(uint64_t) call = 11\n",
         ],
     );
@@ -1196,7 +1303,8 @@ fn batch_mode_sets_amends_and_skips_watchpoint_conditions() {
         &[
             "watchpoint 1 set on last_call: 8 bytes at 0x",
             " using 1 hardware slot, stops where call % 10 == 0\n",
-            "stopped by watchpoint 1 (change, hit 10) on last_call in thread ",
+            "stopped by watchpoint 1 (change, hit 10) on last_call in counted at \
+             tests/fixtures/c/hit-counts.c:12",
             "\n  old: 9\n  new: 10\n",
             "watchpoint 1 ignores its next 15 hits\n",
             "1   +     10  last_call  8 bytes at 0x",
@@ -1290,7 +1398,7 @@ fn hit_condition_commands_explain_rejected_input() {
         &stdout,
         &[
             "breakpoint 1 stops at its next hit\n",
-            "stopped at breakpoint 1 (hit 1) at ",
+            "stopped at breakpoint 1 (hit 1) in ",
         ],
     );
 }
@@ -2074,8 +2182,8 @@ fn stops_and_list_show_source_from_any_working_directory() {
 
 #[test]
 fn source_maps_read_sources_recorded_under_another_directory() {
-    let commands = ["break breakpoint_target", "run"];
-    let unmapped = batch(&["build/test-programs/basic-relocated"], &commands);
+    let commands = ["break breakpoint_target", "run", "list"];
+    let unmapped = batch(&["build/test-programs/basic-relocated"], &commands[..2]);
     assert!(
         unmapped.contains(
             "source unavailable: source file /nonexistent/uscope/tests/fixtures/c/basic.c does not exist"
@@ -2130,7 +2238,9 @@ fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
         Signal::SIGINT,
     )
     .expect("pause uscope");
-    uscope.line("the pause", |line| line == "inferior paused");
+    uscope.line("the pause", |line| {
+        line.starts_with("inferior paused in main at ")
+    });
 
     // End of input shuts the session down, killing and reaping the inferior.
     uscope.send("where\n");

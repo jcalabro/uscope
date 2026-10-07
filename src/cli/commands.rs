@@ -51,6 +51,8 @@ pub enum Command {
     Continue,
     Print,
     Pp,
+    Display,
+    Undisplay,
     Whatis,
     Ptype,
     Set,
@@ -66,6 +68,7 @@ pub enum Command {
     Address,
     Where,
     List,
+    Context,
     Backtrace,
     Frame,
     Up,
@@ -294,6 +297,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Print an expression's value laid out to the width, or every local expanded; pp takes print's formats"
     ),
     command!(
+        Display,
+        "display",
+        [],
+        "display [expression...]",
+        "Print an expression at every stop, with print's formats, as in display/x; with none, list the displays"
+    ),
+    command!(
+        Undisplay,
+        "undisplay",
+        [],
+        "undisplay <ids...>",
+        "Remove displays by number, ranges such as 1-3, or all"
+    ),
+    command!(
         Whatis,
         "whatis",
         [],
@@ -411,6 +428,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         "list",
         "Show source around the selected frame's location",
         repeatable
+    ),
+    command!(
+        Context,
+        "context",
+        ["ctx"],
+        "context",
+        "Print the sections a stop prints, as [stop] show names them"
     ),
     command!(
         Backtrace,
@@ -544,10 +568,15 @@ impl Cli {
             Command::Print | Command::Pp => {
                 let layout = self.layout(spec.command, format)?;
                 if first.is_some() {
-                    self.print(rest, layout).await?
+                    self.print(rest, layout, renderer).await?
                 } else {
                     self.print_locals(layout).await?
                 }
+            }
+            Command::Display if first.is_none() && format.is_empty() => self.list_displays(),
+            Command::Display => self.add_display(format, rest).await?,
+            Command::Undisplay => {
+                self.undisplay(parse_display_ids(&arguments, spec)?.as_deref())?
             }
             Command::Whatis => self.whatis(rest).await?,
             Command::Ptype => self.ptype(rest).await?,
@@ -572,8 +601,12 @@ impl Cli {
             Command::Disassemble => self.disassemble(first, arguments.get(1).copied()).await?,
             Command::Address => self.address(arguments[0]).await?,
             Command::Where => self.location().await?,
-            Command::List => format::source_context(&self.source_context().await?, renderer),
-            Command::Backtrace => self.backtrace().await?,
+            Command::List => {
+                self.source_listing(&self.source_context().await?, true)
+                    .await
+            }
+            Command::Context => self.context().await?,
+            Command::Backtrace => self.backtrace(None).await?,
             Command::Frame | Command::Up | Command::Down => {
                 self.frame(parse_frame_target(spec, first)?).await?
             }
@@ -1197,6 +1230,7 @@ impl Cli {
         execution: impl std::future::Future<Output = uscope::Result<StopReason>>,
     ) -> Result<String> {
         let mut events = self.debugger.subscribe();
+        let started = std::time::Instant::now();
         let mut lines = Vec::new();
         let mut loaded = Vec::new();
         let renderer = self.renderers.stdout;
@@ -1223,6 +1257,7 @@ impl Cli {
                 reason = &mut execution => break reason?,
             }
         };
+        let elapsed = started.elapsed();
         while let Ok(event) = events.try_recv() {
             record(Ok(event));
         }
@@ -1237,7 +1272,7 @@ impl Cli {
                 }));
             }
         }
-        let stop = self.stop_with_source(&reason).await;
+        let stop = self.stop_report(&reason, elapsed).await;
         Ok(join_lines(&lines.join("\n"), &stop))
     }
 
@@ -1313,7 +1348,7 @@ impl Cli {
 
     /// How `command` with `format` lays a value out: the `[print]`
     /// settings, which `pp` and each format letter override.
-    fn layout(&self, command: Command, format: &str) -> Result<value::Layout> {
+    pub(super) fn layout(&self, command: Command, format: &str) -> Result<value::Layout> {
         let print = &self.settings.config.print;
         let has = |letter| format.contains(letter);
         if has('p') && has('l') {
@@ -1374,8 +1409,14 @@ impl Cli {
         Ok(lines.join("\n"))
     }
 
-    async fn print(&self, text: &str, layout: value::Layout) -> Result<String> {
-        let renderer = self.renderers.stdout;
+    /// An expression's value as `print` shows it, laid out as `layout`
+    /// says and drawn by `renderer`.
+    pub(super) async fn print(
+        &self,
+        text: &str,
+        layout: value::Layout,
+        renderer: Renderer,
+    ) -> Result<String> {
         let expression = parse_expression(text)?;
         let evaluation = self
             .debugger
@@ -1674,14 +1715,22 @@ impl Cli {
             }
             result => result?,
         };
+        self.render_disassembly(&disassembly, marked).await
+    }
 
+    /// Renders disassembly with the instruction at `marked` marked.
+    pub(super) async fn render_disassembly(
+        &self,
+        disassembly: &Disassembly,
+        marked: VirtualAddress,
+    ) -> Result<String> {
         let mut images = BTreeMap::new();
-        for module in format::disassembly_modules(&disassembly) {
+        for module in format::disassembly_modules(disassembly) {
             images.insert(module, self.debugger.loaded_module_image(module).await?);
         }
         let modules = self.debugger.loaded_modules().await?;
         Ok(format::disassembly(
-            &disassembly,
+            disassembly,
             Some(marked),
             &modules,
             &images,
@@ -1690,7 +1739,10 @@ impl Cli {
         ))
     }
 
-    async fn disassemble_query(&self, range: DisassemblyRange) -> uscope::Result<Disassembly> {
+    pub(super) async fn disassemble_query(
+        &self,
+        range: DisassemblyRange,
+    ) -> uscope::Result<Disassembly> {
         self.debugger
             .disassemble(DisassemblyQuery {
                 range,
@@ -1703,7 +1755,7 @@ impl Cli {
     /// function is found, and its instruction. They differ in an outer
     /// frame, whose instruction is a return address that can lie past the
     /// end of a function ending in a call.
-    async fn selected_code(&self) -> Result<(VirtualAddress, VirtualAddress)> {
+    pub(super) async fn selected_code(&self) -> Result<(VirtualAddress, VirtualAddress)> {
         // The innermost frame's instruction is the program counter, known
         // even where no module or single inline frame describes it.
         if self.selected_level().await? == 0 {
@@ -1809,7 +1861,7 @@ impl Cli {
         if frame.source.is_some() {
             output.push('\n');
             match self.source_context().await {
-                Ok(context) => output.push_str(&format::source_context(&context, renderer)),
+                Ok(context) => output.push_str(&self.source_listing(&context, true).await),
                 Err(error) => write!(
                     output,
                     "{}: {error}",
@@ -1822,6 +1874,13 @@ impl Cli {
     }
 
     async fn location(&self) -> Result<String> {
+        self.describe_location(true).await
+    }
+
+    /// The selected frame's function and source line, with its address
+    /// when `with_address`, or its address and module where no line is
+    /// known.
+    pub(super) async fn describe_location(&self, with_address: bool) -> Result<String> {
         let renderer = self.renderers.stdout;
         let location = match self.debugger.current_location().await {
             Ok(location) => location,
@@ -1853,12 +1912,20 @@ impl Cli {
             None => None,
         };
         if let Some(source) = source {
-            return Ok(format!(
-                "{} at {} ({})",
+            let mut text = format!(
+                "{} at {}",
                 renderer.paint(Role::Name, name),
-                renderer.paint(Role::Metadata, source),
-                renderer.paint(Role::Metadata, location.address)
-            ));
+                renderer.paint(Role::Metadata, source)
+            );
+            if with_address {
+                write!(
+                    text,
+                    " ({})",
+                    renderer.paint(Role::Metadata, location.address)
+                )
+                .expect("writing to a String cannot fail");
+            }
+            return Ok(text);
         }
         let modules = self.debugger.loaded_modules().await?;
         Ok(format!(
@@ -1875,7 +1942,7 @@ impl Cli {
 
     /// The selected frame's source, with as many lines around its line as
     /// `[source] context` asks for.
-    async fn source_context(&self) -> uscope::Result<uscope::SourceContext> {
+    pub(super) async fn source_context(&self) -> uscope::Result<uscope::SourceContext> {
         let [before, after] = self.settings.config.source.context;
         let mut context = self.debugger.source_context(before.max(after)).await?;
         let line = context.location.line.get();
@@ -1890,7 +1957,8 @@ impl Cli {
         Ok(context)
     }
 
-    async fn backtrace(&self) -> Result<String> {
+    /// The selected thread's backtrace, of at most `limit` frames.
+    pub(super) async fn backtrace(&self, limit: Option<usize>) -> Result<String> {
         let selected = self.selected_level().await?;
         let trace = self.debugger.backtrace().await?;
         let modules = if trace
@@ -1916,82 +1984,62 @@ impl Cli {
         Ok(format::backtrace(
             &trace,
             selected,
+            limit,
             modules.as_ref(),
             &images,
             self.renderers.stdout,
         ))
     }
 
-    /// Formats a stop, adding watched values and surrounding source where
-    /// they help explain it.
-    async fn stop_with_source(&self, reason: &StopReason) -> String {
+    /// Says which temporary breakpoints a stop deleted: a stop deletes the
+    /// temporary breakpoints it hit before it is published, so the hits
+    /// missing from `snapshot` were temporaries.
+    pub(super) fn deleted_temporaries(
+        &self,
+        hits: &[uscope::BreakpointHit],
+        snapshot: &uscope::StateSnapshot,
+    ) -> Option<String> {
+        let deleted = hits
+            .iter()
+            .filter(|hit| {
+                !snapshot
+                    .breakpoints
+                    .iter()
+                    .any(|breakpoint| breakpoint.id == hit.breakpoint)
+            })
+            .map(|hit| CountedId::Breakpoint(hit.breakpoint))
+            .collect::<Vec<_>>();
         let renderer = self.renderers.stdout;
-        let mut output = match reason {
-            StopReason::Watchpoint { hits } => {
-                let watchpoints = match self.debugger.snapshot().await {
-                    Ok(snapshot) => snapshot.watchpoints,
-                    Err(error) => {
-                        self.warn(&format!("watchpoint details unavailable: {error}"));
-                        std::sync::Arc::default()
+        (!deleted.is_empty()).then(|| {
+            format!(
+                "{} temporary {}",
+                renderer.paint(Role::Success, "deleted"),
+                describe_ids(&deleted, renderer)
+            )
+        })
+    }
+
+    /// Source lines around a location, after the location when `located`,
+    /// with the lines breakpoints are at marked.
+    pub(super) async fn source_listing(
+        &self,
+        context: &uscope::SourceContext,
+        located: bool,
+    ) -> String {
+        let mut marks = BTreeMap::new();
+        if let Ok(snapshot) = self.debugger.snapshot().await {
+            for breakpoint in snapshot.breakpoints.iter() {
+                for placed in self.placed(breakpoint).await {
+                    if let Some((path, line)) = placed.source
+                        && path == context.file.path
+                    {
+                        let enabled = marks.entry(line).or_insert(false);
+                        *enabled |= breakpoint.enabled;
                     }
-                };
-                format::watchpoint_hits(
-                    hits,
-                    &watchpoints,
-                    Some(self.debugger.module_image()),
-                    renderer,
-                )
-            }
-            StopReason::Breakpoint { hits, .. } => {
-                let mut output = format::stop(reason, renderer);
-                // A stop deletes the temporary breakpoints it hit before it
-                // is published, so the hits missing now were temporaries.
-                if let Ok(snapshot) = self.debugger.snapshot().await {
-                    let deleted = hits
-                        .iter()
-                        .filter(|hit| {
-                            !snapshot
-                                .breakpoints
-                                .iter()
-                                .any(|breakpoint| breakpoint.id == hit.breakpoint)
-                        })
-                        .map(|hit| CountedId::Breakpoint(hit.breakpoint))
-                        .collect::<Vec<_>>();
-                    if !deleted.is_empty() {
-                        write!(
-                            output,
-                            "\n{} temporary {}",
-                            renderer.paint(Role::Success, "deleted"),
-                            describe_ids(&deleted, renderer)
-                        )
-                        .expect("writing to a String cannot fail");
-                    }
-                }
-                output
-            }
-            _ => format::stop(reason, renderer),
-        };
-        if matches!(
-            reason,
-            StopReason::Breakpoint { .. }
-                | StopReason::Step { .. }
-                | StopReason::StepIncomplete { .. }
-                | StopReason::Watchpoint { .. }
-        ) {
-            match self.source_context().await {
-                Ok(context) => {
-                    output.push('\n');
-                    output.push_str(&format::source_context(&context, renderer));
-                }
-                Err(error) => {
-                    output = format!(
-                        "{output}\n{}: {error}",
-                        renderer.paint(Role::Warning, "source unavailable")
-                    );
                 }
             }
         }
-        output
+        format::source_context(context, &marks, located, self.renderers.stdout)
     }
 }
 
@@ -2265,6 +2313,20 @@ fn parse_ids(words: &[&str], watches: bool, spec: &CommandSpec) -> Result<Option
     Ok(Some(ids))
 }
 
+/// Parses display numbers, ranges of them, or `all` as `None`.
+fn parse_display_ids(words: &[&str], spec: &CommandSpec) -> Result<Option<Vec<u64>>> {
+    parse_ids(words, false, spec)?
+        .map(|ids| {
+            ids.into_iter()
+                .map(|id| match id {
+                    CountedId::Breakpoint(id) => Ok(id.get()),
+                    CountedId::Watchpoint(_) => Err(spec.usage_error()),
+                })
+                .collect()
+        })
+        .transpose()
+}
+
 /// `breakpoints 1, 3 and watchpoint 2`.
 fn describe_ids(ids: &[CountedId], renderer: Renderer) -> String {
     let list = |kind: &str, ids: Vec<u64>| -> Option<String> {
@@ -2432,7 +2494,12 @@ fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&st
         anyhow!("unknown command '{entered}'; {hint}")
     })?;
     let arguments = words.collect::<Vec<_>>();
-    if !format.is_empty() && !matches!(spec.command, Command::Print | Command::Pp) {
+    if !format.is_empty()
+        && !matches!(
+            spec.command,
+            Command::Print | Command::Pp | Command::Display
+        )
+    {
         bail!("unknown format '/{format}'; {} takes none", spec.name);
     }
     if let Some(letter) = format.chars().find(|letter| !"xdrpl".contains(*letter)) {

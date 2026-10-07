@@ -624,6 +624,24 @@ With `[stop] elapsed`, a stop after a resume that ran over a second says
 how long: `ran 1.42s`. It is measured in the CLI from the resume's
 acknowledgement to the stop's event.
 
+### As built
+
+The header keeps the word `stopped` that every other stop line begins
+with, as in `stopped at breakpoint 1 (hit 3) in parse_header at
+parse.c:41`, and names the thread by the id `thread` takes, `[thread 41672
+of 4]`, rather than its position. Attach and entry stops say where too.
+Signal and pause stops print the sections as well as breakpoint, step,
+and watchpoint ones, since where a crash happened is what one wants to
+see; a stop with no source line prints no source section rather than an
+error, as its header gives the address. Displays print after the
+sections when `show` leaves them out, so that a display added is seen
+without editing the settings. The canonical frame address comes from a
+new `VariableSnapshot::frame_address`, read where the frame's variables
+are, and a value is compared with what the stop before showed of it, so
+a value is unmarked after a stop that did not show it. Elapsed time runs
+from the command's request rather than its acknowledgement, which differ
+by a message's latency.
+
 ## Input
 
 - **Completion** of commands, aliases, settings, function names,
