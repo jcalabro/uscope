@@ -95,6 +95,9 @@ pub struct CodeAddress {
 pub struct RuntimeTask {
     /// The runtime's number for the task.
     pub number: u64,
+    /// Where the runtime keeps the task, by which a later request at the
+    /// same stop may find it at once; see [`TaskRef`].
+    pub locator: u64,
     pub state: TaskState,
     /// The runtime's own words for what the task waits for.
     pub detail: Option<Arc<str>>,
@@ -115,6 +118,16 @@ pub struct RuntimeTask {
     /// The key-value labels the program gave the task, in the runtime's
     /// order, such as Go's profiler labels.
     pub labels: TaskLabels,
+}
+
+/// A task the debugger asks a runtime about: its number, and the locator
+/// the runtime gave it when it listed it at the same stop, if it did,
+/// which spares a search. A locator that no longer holds the task, as
+/// after the debugger wrote memory, is never trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskRef {
+    pub number: u64,
+    pub locator: Option<u64>,
 }
 
 /// A task's labels: keys and their values.
@@ -246,17 +259,25 @@ pub enum HeldPlace {
 
 /// What a language runtime tells the debugger at a stop.
 pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
-    /// The runtime's tasks from `start`, an index into its own order, at
-    /// most `limit` of them.
-    fn tasks(&self, stop: &dyn RuntimeStop, start: u64, limit: usize) -> Partial<TaskPage>;
+    /// The runtime's tasks from `start`, an index into its own order: at
+    /// most `limit` of them, and only those that run the program's code
+    /// when `program_only`. A page's work is bounded, so it may hold fewer
+    /// and still have a next.
+    fn tasks(
+        &self,
+        stop: &dyn RuntimeStop,
+        start: u64,
+        limit: usize,
+        program_only: bool,
+    ) -> Partial<TaskPage>;
     /// What a stopped thread is doing for the runtime.
     fn thread_activity(&self, stop: &dyn RuntimeStop, thread: ThreadId) -> ThreadActivity;
-    /// Where the frames of the task numbered `number` begin, or `None` when
-    /// the runtime has no such task.
+    /// Where the frames of a task begin, or `None` when the runtime has no
+    /// such task.
     fn task_context(
         &self,
         stop: &dyn RuntimeStop,
-        number: u64,
+        task: TaskRef,
     ) -> Result<Option<TaskContext>, Arc<str>>;
     /// The stacks a stopped thread may run on for the runtime, each with
     /// whose it is: the bounds of the stack of the task it runs, and of the
@@ -309,12 +330,12 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         stop: &dyn RuntimeStop,
         registers: &RegisterFile,
     ) -> Result<u64, Arc<str>>;
-    /// The bounds of the stack of the task numbered `number`, or `None`
-    /// when the runtime has no such task.
+    /// The bounds of a task's stack, or `None` when the runtime has no such
+    /// task.
     fn task_stack(
         &self,
         stop: &dyn RuntimeStop,
-        number: u64,
+        task: TaskRef,
     ) -> Result<Option<std::ops::Range<u64>>, Arc<str>>;
     /// The program's code that the runtime function at `entry` goes on to
     /// call for the program, as Go's calls between Go and C do, given the

@@ -1375,6 +1375,10 @@ at every stop.
    - Its goroutines are listed, and a breakpoint is hit by a request.
    - Detaching leaves it serving: a second request succeeds.
 8. **Scale.** 100,000 parked goroutines.
+   *(Done: `tests/go/scale.rs` and `tests/dap/goroutines.rs`. A page reads
+   `allgs` in windows and scans a bounded number of goroutines; a stop
+   remembers where each listed goroutine's `g` is, so selecting one reads
+   only its own.)*
    - Paging returns every id exactly once, matching the dump.
    - Filters apply before paging.
    - The work per page is bounded, measured as counted memory reads from

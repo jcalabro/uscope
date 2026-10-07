@@ -1256,6 +1256,7 @@ build_go_fixture "$go_fixtures_dir/workers" "$output_dir/workers-go-o2"
 # A program that corrupts one of its parked goroutines, at the addresses its
 # DWARF gives, which a position-dependent executable runs at.
 build_go_fixture "$go_fixtures_dir/corrupt" "$output_dir/corrupt-go"
+build_go_fixture "$go_fixtures_dir/scale" "$output_dir/scale-go"
 build_go_fixture "$go_fixtures_dir/stacks" "$output_dir/stacks-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/stacks" "$output_dir/stacks-go-o2"

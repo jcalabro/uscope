@@ -15,7 +15,7 @@ use layout::{Goroutines, Labels, Layout, Missing, Threads};
 use super::{
     CodeAddress, Crossing, DynamicValue, Partial, RuntimeException, RuntimeHook, RuntimeImage,
     RuntimeModel, RuntimeSignals, RuntimeStop, RuntimeTask, StoredValue, TaskContext, TaskLabels,
-    TaskPage, ThreadActivity,
+    TaskPage, TaskRef, ThreadActivity,
 };
 use crate::unwind::RegisterFile;
 use crate::{
@@ -49,6 +49,10 @@ const OLDEST: (u64, u64) = (1, 20);
 /// The most goroutines one list reads, so a corrupted `allglen` cannot
 /// make the debugger read without end.
 const MAX_GOROUTINES: u64 = 1 << 24;
+/// How many entries of `allgs` a page of tasks scans for each task it may
+/// hold, and at least, whatever its limit.
+const SCAN_PER_TASK: u64 = 4;
+const MIN_SCAN: u64 = 256;
 /// The most profiler labels read from one goroutine.
 const MAX_LABELS: u64 = 64;
 
@@ -186,6 +190,17 @@ impl GoRuntime {
 
     /// The g pointers in `allgs`, as many as `allglen` publishes.
     fn allgs(&self, stop: &dyn RuntimeStop) -> Result<Vec<u64>, Arc<str>> {
+        self.allgs_from(stop, 0, MAX_GOROUTINES)
+    }
+
+    /// At most `count` of the g pointers in `allgs` from index `start`,
+    /// reading no more of the list than that.
+    fn allgs_from(
+        &self,
+        stop: &dyn RuntimeStop,
+        start: u64,
+        count: u64,
+    ) -> Result<Vec<u64>, Arc<str>> {
         let layout = self.goroutines()?;
         let bias = stop.load_bias();
         let at = |address: ImageAddress| VirtualAddress::new(address.get().wrapping_add(bias));
@@ -201,8 +216,15 @@ impl GoRuntime {
                 format!("runtime.allglen is {length}, beyond what runtime.allgs holds").into(),
             );
         }
-        let mut bytes = vec![0; usize::try_from(length * 8).map_err(|_| "allgs is too large")?];
-        if !stop.read(VirtualAddress::new(array), &mut bytes) {
+        let end = start.saturating_add(count).min(length);
+        let Some(read) = end.checked_sub(start).filter(|read| *read > 0) else {
+            return Ok(Vec::new());
+        };
+        let mut bytes = vec![0; usize::try_from(read * 8).map_err(|_| "allgs is too large")?];
+        if !stop.read(
+            VirtualAddress::new(array.wrapping_add(start * 8)),
+            &mut bytes,
+        ) {
             return Err(format!("runtime.allgs at {array:#x} is unreadable").into());
         }
         Ok(bytes
@@ -295,6 +317,7 @@ impl GoRuntime {
         });
         Ok(Some(RuntimeTask {
             number,
+            locator: g,
             state,
             detail,
             thread,
@@ -319,12 +342,26 @@ impl GoRuntime {
 }
 
 impl RuntimeModel for GoRuntime {
-    fn tasks(&self, stop: &dyn RuntimeStop, start: u64, limit: usize) -> Partial<TaskPage> {
+    /// A page scans at most a fixed multiple of its limit of `allgs`, so
+    /// dead goroutines and the runtime's own, which it leaves out, never
+    /// make one page read the whole list.
+    fn tasks(
+        &self,
+        stop: &dyn RuntimeStop,
+        start: u64,
+        limit: usize,
+        program_only: bool,
+    ) -> Partial<TaskPage> {
         let mut page = self.partial(TaskPage {
             tasks: Vec::new(),
             next: None,
         });
-        let allgs = match self.allgs(stop) {
+        let scanned = u64::try_from(limit)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(SCAN_PER_TASK)
+            .max(MIN_SCAN);
+        // One more than the scan shows whether any are left.
+        let allgs = match self.allgs_from(stop, start, scanned.saturating_add(1)) {
             Ok(allgs) => allgs,
             Err(reason) => {
                 page.gaps.push(reason);
@@ -339,17 +376,13 @@ impl RuntimeModel for GoRuntime {
             page.gaps
                 .push(format!("profiler labels are not read: {reason}").into());
         }
-        let mut index = start;
-        while let Some(&g) = usize::try_from(index)
-            .ok()
-            .and_then(|index| allgs.get(index))
-        {
-            if page.value.tasks.len() == limit {
+        for (index, &g) in (start..).zip(&allgs) {
+            if page.value.tasks.len() == limit || index - start == scanned {
                 page.value.next = Some(index);
                 break;
             }
-            index += 1;
             match self.goroutine(stop, names, g) {
+                Ok(Some(task)) if program_only && task.internal => {}
                 Ok(Some(mut task)) => {
                     if let Ok(layout) = labels {
                         match read_labels(stop, layout, g) {
@@ -378,10 +411,11 @@ impl RuntimeModel for GoRuntime {
     fn task_context(
         &self,
         stop: &dyn RuntimeStop,
-        number: u64,
+        task: TaskRef,
     ) -> Result<Option<TaskContext>, Arc<str>> {
         let layout = self.goroutines()?;
-        let Some((g, task)) = self.find(stop, number)? else {
+        let number = task.number;
+        let Some((g, task)) = self.find(stop, task)? else {
             return Ok(None);
         };
         // A goroutine that runs, or makes a system call, has its registers
@@ -523,9 +557,9 @@ impl RuntimeModel for GoRuntime {
     fn task_stack(
         &self,
         stop: &dyn RuntimeStop,
-        number: u64,
+        task: TaskRef,
     ) -> Result<Option<std::ops::Range<u64>>, Arc<str>> {
-        self.find(stop, number)?
+        self.find(stop, task)?
             .map(|(g, _)| self.stack(stop, g))
             .transpose()
     }
@@ -789,20 +823,39 @@ struct ThreadGs {
 
 impl GoRuntime {
     /// The goroutine numbered `number`: its g, and what it is.
+    /// The g of a goroutine and the goroutine it is: at its locator, when
+    /// the g there still has its number, or else the first g in `allgs`
+    /// that does.
     fn find(
         &self,
         stop: &dyn RuntimeStop,
-        number: u64,
+        task: TaskRef,
     ) -> Result<Option<(u64, RuntimeTask)>, Arc<str>> {
+        let layout = self.goroutines()?;
         let names = self.names(stop);
+        let number = task.number;
+        let numbered = |g: u64| word(stop, VirtualAddress::new(g.wrapping_add(layout.goid)));
+        if let Some(g) = task.locator
+            && numbered(g) == Some(number)
+            && let Ok(Some(found)) = self.goroutine(stop, names, g)
+        {
+            return Ok(Some((g, found)));
+        }
         // An unreadable goroutine may be the one sought, so it is absent
         // only once every goroutine was read.
         let mut unreadable = None;
         for g in self.allgs(stop)? {
-            match self.goroutine(stop, names, g) {
-                Ok(Some(task)) if task.number == number => return Ok(Some((g, task))),
-                Ok(_) => {}
-                Err(reason) => unreadable = unreadable.or(Some(reason)),
+            match numbered(g) {
+                Some(found) if found == number => match self.goroutine(stop, names, g) {
+                    Ok(Some(task)) => return Ok(Some((g, task))),
+                    Ok(None) => {}
+                    Err(reason) => unreadable = unreadable.or(Some(reason)),
+                },
+                Some(_) => {}
+                None => {
+                    unreadable = unreadable
+                        .or_else(|| Some(format!("the g at {g:#x} is unreadable").into()));
+                }
             }
         }
         unreadable.map_or(Ok(None), |reason| {

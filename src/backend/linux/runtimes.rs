@@ -4,18 +4,19 @@
 //! knows; the bound model then answers through the stopped process's memory
 //! and threads, read as every other inspection reads them.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use nix::unistd::Pid;
 
 use crate::protocol::StopId;
 use crate::runtime_model::{
-    self, CodeAddress, RuntimeModel, RuntimeStop, RuntimeTask, TaskContext,
+    self, CodeAddress, RuntimeModel, RuntimeStop, RuntimeTask, TaskContext, TaskRef,
 };
 use crate::{
-    Error, ExecutionContext, ImageAddress, LoadedModule, ModuleImage, Result, RuntimeId,
-    StackSegment, TaskCursor, TaskId, TaskLocation, TaskPage, TaskSnapshot, ThreadActivity,
-    ThreadId, VirtualAddress,
+    Error, ExecutionContext, ImageAddress, InspectionUsage, LoadedModule, ModuleImage, Result,
+    RuntimeId, StackSegment, TaskCursor, TaskId, TaskLocation, TaskPage, TaskSnapshot,
+    ThreadActivity, ThreadId, VirtualAddress,
 };
 
 use super::activation::TaskStack;
@@ -54,10 +55,18 @@ struct ProcessStop<'a, P> {
     reader: Pid,
     breakpoints: &'a std::collections::BTreeMap<VirtualAddress, BreakpointSite>,
     bias: u64,
+    /// Where the reads made are counted, when they are.
+    usage: Option<&'a Cell<InspectionUsage>>,
 }
 
 impl<P: InspectionOps> RuntimeStop for ProcessStop<'_, P> {
     fn read(&self, address: VirtualAddress, bytes: &mut [u8]) -> bool {
+        if let Some(usage) = self.usage {
+            let mut counted = usage.get();
+            counted.memory_reads += 1;
+            counted.memory_bytes += bytes.len() as u64;
+            usage.set(counted);
+        }
         match read_logical_memory(
             self.ptrace,
             self.reader,
@@ -151,12 +160,38 @@ impl<P: InspectionOps> Controller<P> {
         reader: Pid,
         read: impl FnOnce(&dyn RuntimeStop) -> T,
     ) -> T {
+        self.with_counted_runtime_stop(inferior, runtime, reader, None, read)
+    }
+
+    /// Runs `read` against one runtime as [`Self::with_runtime_stop`]
+    /// does, counting the memory it reads in `usage`.
+    fn with_counted_runtime_stop<T>(
+        &self,
+        inferior: &Inferior,
+        runtime: &BoundRuntime,
+        reader: Pid,
+        usage: Option<&Cell<InspectionUsage>>,
+        read: impl FnOnce(&dyn RuntimeStop) -> T,
+    ) -> T {
         read(&ProcessStop {
             ptrace: &self.ptrace,
             reader,
             breakpoints: &inferior.breakpoints,
             bias: runtime.module.load_bias,
+            usage,
         })
+    }
+
+    /// How to ask a runtime about `task`: by its number, and where the
+    /// runtime said it keeps it when it listed it at this stop.
+    fn task_ref(inferior: &Inferior, task: TaskId) -> TaskRef {
+        TaskRef {
+            number: task.number,
+            locator: inferior
+                .public_stop
+                .as_ref()
+                .and_then(|stop| stop.task_locators.borrow().get(&task).copied()),
+        }
     }
 
     /// One page of the tasks of every runtime at a stop.
@@ -165,6 +200,7 @@ impl<P: InspectionOps> Controller<P> {
         stop_id: StopId,
         from: Option<TaskCursor>,
         limit: usize,
+        program_only: bool,
     ) -> Result<TaskPage> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
@@ -186,13 +222,28 @@ impl<P: InspectionOps> Controller<P> {
         } else {
             Vec::new()
         };
+        let usage = Cell::new(InspectionUsage::default());
         while let Some(runtime) = runtimes.get(cursor.runtime) {
-            let page = self.with_runtime_stop(inferior, runtime, reader, |stop| {
-                runtime
-                    .model
-                    .tasks(stop, cursor.position, limit - tasks.len())
-            });
+            let page =
+                self.with_counted_runtime_stop(inferior, runtime, reader, Some(&usage), |stop| {
+                    runtime
+                        .model
+                        .tasks(stop, cursor.position, limit - tasks.len(), program_only)
+                });
             gaps.extend(page.gaps);
+            if let Some(stop) = inferior.public_stop.as_ref() {
+                stop.task_locators
+                    .borrow_mut()
+                    .extend(page.value.tasks.iter().map(|task| {
+                        (
+                            TaskId {
+                                runtime: runtime.id,
+                                number: task.number,
+                            },
+                            task.locator,
+                        )
+                    }));
+            }
             tasks.extend(
                 page.value
                     .tasks
@@ -217,6 +268,7 @@ impl<P: InspectionOps> Controller<P> {
             tasks: tasks.into(),
             next: (cursor.runtime < runtimes.len()).then_some(cursor),
             gaps: gaps.into(),
+            usage: usage.get(),
         })
     }
 
@@ -380,7 +432,9 @@ impl<P: InspectionOps> Controller<P> {
             .find(|runtime| runtime.id == task.runtime)
             .ok_or("the task's runtime is no longer loaded")?;
         self.with_runtime_stop(inferior, &runtime, inferior.memory_thread(), |stop| {
-            runtime.model.task_stack(stop, task.number)
+            runtime
+                .model
+                .task_stack(stop, Self::task_ref(inferior, task))
         })
     }
 }
@@ -442,7 +496,9 @@ impl<P: InspectionOps> Controller<P> {
             return Ok(None);
         };
         let found = self.with_runtime_stop(inferior, &runtime, reader, |stop| {
-            runtime.model.task_context(stop, task.number)
+            runtime
+                .model
+                .task_context(stop, Self::task_ref(inferior, task))
         });
         let origin = match found {
             Ok(Some(TaskContext::OnThread(thread))) => RootOrigin::Thread(debug_pid(thread)?),

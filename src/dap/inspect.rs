@@ -104,15 +104,13 @@ impl Session {
             return Ok(None);
         };
         let handle = self.target_handle()?;
-        let mut tasks = Vec::new();
-        let mut from = None;
-        loop {
-            let page = handle.tasks(from, TASK_PAGE).await.map_err(error)?;
-            tasks.extend(page.tasks.iter().cloned());
-            match page.next {
-                Some(next) => from = Some(next),
-                None => break,
-            }
+        // The runtime's own tasks are left out before paging when they are
+        // not shown, unless the stop is in one.
+        let mut tasks = all_tasks(&handle, !listing.runtime_tasks).await?;
+        if let ExecutionContext::Task(stopped) = stop.context
+            && !tasks.iter().any(|task| task.id == stopped)
+        {
+            tasks = all_tasks(&handle, false).await?;
         }
         if tasks.is_empty() {
             return Ok(None);
@@ -1569,4 +1567,26 @@ fn in_scope(scope: VariableKind, kind: VariableKind) -> bool {
     kind == scope
         || (scope == VariableKind::Parameter && kind == VariableKind::Result)
         || (scope == VariableKind::Local && kind == VariableKind::Returned)
+}
+
+/// Every task at the stop, or every one that runs the program's code.
+async fn all_tasks(
+    handle: &uscope::DebuggerHandle,
+    program_only: bool,
+) -> Result<Vec<uscope::TaskSnapshot>, ErrorBody> {
+    let mut tasks = Vec::new();
+    let mut from = None;
+    loop {
+        let page = if program_only {
+            handle.program_tasks(from, TASK_PAGE).await
+        } else {
+            handle.tasks(from, TASK_PAGE).await
+        }
+        .map_err(error)?;
+        tasks.extend(page.tasks.iter().cloned());
+        match page.next {
+            Some(next) => from = Some(next),
+            None => return Ok(tasks),
+        }
+    }
 }

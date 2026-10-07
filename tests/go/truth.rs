@@ -181,6 +181,7 @@ impl GoSession {
                 tasks: found,
                 next,
                 gaps: missing,
+                ..
             } = self
                 .scenario
                 .operation("tasks", self.scenario.handle().tasks(from, page))

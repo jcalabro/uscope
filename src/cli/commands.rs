@@ -795,13 +795,8 @@ impl Cli {
         ))
     }
 
-    /// Every task at the current stop, each with its backtrace or why it
-    /// has none, and the images that name their frames' sources.
-    async fn task_traces(&self) -> Result<TaskTraces> {
-        let snapshot = self.debugger.snapshot().await?;
-        let stop = snapshot
-            .stop_id
-            .ok_or_else(|| anyhow!("the program is not stopped"))?;
+    /// Every task at the current stop, and why the list may be incomplete.
+    async fn task_list(&self) -> Result<(Vec<TaskSnapshot>, Vec<Arc<str>>)> {
         let mut tasks = Vec::new();
         let mut gaps = Vec::new();
         let mut from = None;
@@ -811,9 +806,25 @@ impl Cli {
             gaps.extend(page.gaps.iter().cloned());
             match page.next {
                 Some(next) => from = Some(next),
-                None => break,
+                None => return Ok((tasks, gaps)),
             }
         }
+    }
+
+    /// Every task at the current stop, each with its backtrace or why it
+    /// has none, and the images that name their frames' sources.
+    async fn task_traces(&self) -> Result<TaskTraces> {
+        let (tasks, gaps) = self.task_list().await?;
+        self.traced(tasks, gaps).await
+    }
+
+    /// `tasks`, each with its backtrace or why it has none, and the images
+    /// that name their frames' sources.
+    async fn traced(&self, tasks: Vec<TaskSnapshot>, gaps: Vec<Arc<str>>) -> Result<TaskTraces> {
+        let snapshot = self.debugger.snapshot().await?;
+        let stop = snapshot
+            .stop_id
+            .ok_or_else(|| anyhow!("the program is not stopped"))?;
         let mut traced = Vec::with_capacity(tasks.len());
         for task in tasks {
             let trace = self
@@ -930,23 +941,25 @@ impl Cli {
     async fn task(&self, line: &str, arguments: &[&str]) -> Result<String> {
         let name = line_command(line).map_or("task", |(_, name)| name);
         let renderer = self.renderers.stdout;
-        let traces = self.task_traces().await?;
+        let (tasks, _) = self.task_list().await?;
         let Some(&argument) = arguments.first() else {
-            let (task, trace) = traces
-                .tasks
-                .iter()
-                .find(|(task, _)| traces.is_selected(task))
+            let selected = self.debugger.snapshot().await?.selected;
+            let task = tasks
+                .into_iter()
+                .find(|task| selects(selected, task))
                 .ok_or_else(|| anyhow!("no {name} is selected"))?;
+            // Only the selected task's frames are read.
+            let traces = self.traced(vec![task], Vec::new()).await?;
+            let (task, trace) = &traces.tasks[0];
             let place = format::task_place(task, trace, &traces.images, renderer);
             return Ok(format::task(task, &place, true, renderer));
         };
         let number = argument
             .parse::<u64>()
             .map_err(|_| anyhow!("invalid {name} ID: {argument}"))?;
-        let mut found = traces
-            .tasks
+        let mut found = tasks
             .iter()
-            .map(|(task, _)| task.id)
+            .map(|task| task.id)
             .filter(|id| id.number == number);
         let id = found.next().ok_or_else(|| anyhow!("no {name} {number}"))?;
         if found.next().is_some() {
@@ -1959,11 +1972,16 @@ struct TaskTraces {
 impl TaskTraces {
     /// Whether the task is selected, itself or through the thread it is on.
     fn is_selected(&self, task: &TaskSnapshot) -> bool {
-        match self.selected {
-            Some(ExecutionContext::Task(id)) => id == task.id,
-            Some(ExecutionContext::Thread(thread)) => task.thread == Some(thread),
-            None => false,
-        }
+        selects(self.selected, task)
+    }
+}
+
+/// Whether a selected context is `task`, or the thread running it.
+fn selects(selected: Option<ExecutionContext>, task: &TaskSnapshot) -> bool {
+    match selected {
+        Some(ExecutionContext::Task(id)) => id == task.id,
+        Some(ExecutionContext::Thread(thread)) => task.thread == Some(thread),
+        None => false,
     }
 }
 
