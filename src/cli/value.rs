@@ -7,7 +7,7 @@ use uscope::{
     BaseTypeEncoding, ByteOrder, DebuggerHandle, InspectionExhaustion, InspectionLimit,
     InspectionLimits, IntegerValue, ModuleImage, Presentation, PresentedCount, PresentedShape,
     ScalarValue, TypeInfo, TypeKind, ValueChildPage, ValueChildQuery, ValueChildRelationship,
-    ValueChildren, ValueChildrenReference, Variable, VariableSnapshot, VariableState,
+    ValueChildren, ValueChildrenReference, Variable, VariableKind, VariableSnapshot, VariableState,
     VariableValue,
 };
 
@@ -171,7 +171,16 @@ pub fn variables(snapshot: &VariableSnapshot, renderer: Renderer) -> String {
     output.into_string()
 }
 
-fn variable_summary(variable: &Variable, renderer: Renderer) -> String {
+/// One variable on a line; a value a finished function returned says so.
+pub fn variable_summary(variable: &Variable, renderer: Renderer) -> String {
+    let line = variable_line(variable, renderer);
+    if variable.kind == VariableKind::Returned {
+        return format!("{} {line}", renderer.paint(Role::Metadata, "returned"));
+    }
+    line
+}
+
+fn variable_line(variable: &Variable, renderer: Renderer) -> String {
     let Some(type_info) = &variable.type_info else {
         return untyped(&variable.name, &variable.state, renderer);
     };

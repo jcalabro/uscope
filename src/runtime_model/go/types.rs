@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::layout::{Missing, constant, offset, symbol};
 use super::{read_unsigned, word};
-use crate::runtime_model::{DynamicValue, RuntimeImage, RuntimeStop};
+use crate::runtime_model::{DynamicValue, HeldPlace, RuntimeImage, RuntimeStop, StoredValue};
 use crate::{ImageAddress, VirtualAddress};
 
 /// The most modules a type descriptor is looked for in.
@@ -105,35 +105,42 @@ impl Interfaces {
         })
     }
 
-    /// What the interface value at `address`, represented by the record
-    /// named `representation`, holds; `None` for a record that represents
-    /// no interface.
+    /// What the interface value stored at `value`, represented by the
+    /// record named `representation`, holds; `None` for a record that
+    /// represents no interface.
     pub fn value(
         &self,
         stop: &dyn RuntimeStop,
         representation: &str,
-        address: VirtualAddress,
+        value: StoredValue<'_>,
     ) -> Option<Result<DynamicValue, Arc<str>>> {
         let read = |at: u64, what: &str| {
             word(stop, VirtualAddress::new(at))
                 .ok_or_else(|| Arc::<str>::from(format!("{what} is unreadable")))
         };
-        let address = address.get();
-        let field = |offset: u64| address.wrapping_add(offset);
+        // A word of the interface itself.
+        let field = |offset: u64, what: &str| match value {
+            StoredValue::Memory(address) => read(address.get().wrapping_add(offset), what),
+            StoredValue::Bytes(bytes) => usize::try_from(offset)
+                .ok()
+                .and_then(|offset| bytes.get(offset..offset.checked_add(8)?))
+                .map(|word| u64::from_le_bytes(word.try_into().expect("eight bytes")))
+                .ok_or_else(|| format!("{what} is past the interface's bytes").into()),
+        };
         let (descriptor, data) = match representation {
             EMPTY => (
-                read(field(self.empty_type), "an interface's type"),
-                field(self.empty_data),
+                field(self.empty_type, "an interface's type"),
+                self.empty_data,
             ),
             METHODS => (
-                read(field(self.methods_table), "an interface's method table").and_then(|table| {
+                field(self.methods_table, "an interface's method table").and_then(|table| {
                     if table == 0 {
                         Ok(0)
                     } else {
                         read(table.wrapping_add(self.table_type), "a method table's type")
                     }
                 }),
-                field(self.methods_data),
+                self.methods_data,
             ),
             _ => return None,
         };
@@ -149,15 +156,21 @@ impl Interfaces {
                 1,
             )
             .ok_or("a type's flags are unreadable")?;
-            let held = if flags & self.direct_bit == 0 {
-                read(data, "an interface's data")?
-            } else {
-                data
+            // A type stored directly is the data word itself; any other
+            // is where the word points.
+            let place = match (flags & self.direct_bit != 0, value) {
+                (true, StoredValue::Memory(address)) => {
+                    HeldPlace::Memory(VirtualAddress::new(address.get().wrapping_add(data)))
+                }
+                (true, StoredValue::Bytes(_)) => HeldPlace::Within(data),
+                (false, _) => {
+                    HeldPlace::Memory(VirtualAddress::new(field(data, "an interface's data")?))
+                }
             };
             Ok(DynamicValue::Held {
                 descriptor: VirtualAddress::new(descriptor),
                 offset: descriptor - base,
-                address: VirtualAddress::new(held),
+                place,
             })
         })())
     }

@@ -92,25 +92,10 @@ async fn check_gallery(gallery: &Gallery<'_>) {
             .unwrap_or_else(|| panic!("{fixture} stopped before printing any truth"))
             .checkpoint
             .clone();
-        let trace = scenario
-            .operation("backtrace", scenario.handle().backtrace())
-            .await;
-        let innermost = trace.frames[0]
-            .function
-            .as_ref()
-            .map(|function| function.name.to_string())
-            .unwrap_or_default();
-        if innermost.ends_with("reached") {
-            let caller: StackFrameId = trace.frames[1].id;
-            scenario
-                .operation("select caller", scenario.handle().select_frame(caller))
-                .await;
-        }
-        let snapshot = scenario
-            .operation("variables", scenario.handle().variables())
-            .await;
+        let variables = checkpoint_variables(&mut scenario, fixture, &checkpoint).await;
+        let returned = checkpoint.starts_with("returned-");
         if gallery.go {
-            for variable in snapshot.variables.iter() {
+            for variable in &variables {
                 if variable.name.starts_with(['.', '#', '&']) {
                     failures.push(format!(
                         "{checkpoint}: lists the compiler's {}",
@@ -120,16 +105,13 @@ async fn check_gallery(gallery: &Gallery<'_>) {
             }
         }
         for truth in truths.iter().filter(|truth| truth.checkpoint == checkpoint) {
-            let required = gallery
-                .required
-                .contains(&format!("{checkpoint}:{}", truth.path).as_str());
-            if let Err(failure) = check_truth(
-                &scenario,
-                &snapshot.variables,
-                truth,
-                gallery.optimized && !required,
-            )
-            .await
+            // The calling convention says where every returned value is.
+            let required = returned
+                || gallery
+                    .required
+                    .contains(&format!("{checkpoint}:{}", truth.path).as_str());
+            if let Err(failure) =
+                check_truth(&scenario, &variables, truth, gallery.optimized && !required).await
             {
                 failures.push(format!("{checkpoint}: {}: {failure}", truth.path));
             }
@@ -140,6 +122,50 @@ async fn check_gallery(gallery: &Gallery<'_>) {
     assert!(failures.is_empty(), "{fixture}:\n{}", failures.join("\n"));
     assert_eq!(visited, gallery.checkpoints, "{fixture}");
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+/// The variables a checkpoint's truths are about: those of `reached`'s
+/// caller, or of the stopped frame elsewhere, or, for a `returned-`
+/// checkpoint, what that caller returned once it is finished.
+async fn checkpoint_variables(
+    scenario: &mut Scenario,
+    fixture: &str,
+    checkpoint: &str,
+) -> Vec<Variable> {
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let innermost = trace.frames[0]
+        .function
+        .as_ref()
+        .map(|function| function.name.to_string())
+        .unwrap_or_default();
+    if innermost.ends_with("reached") {
+        let caller: StackFrameId = trace.frames[1].id;
+        scenario
+            .operation("select caller", scenario.handle().select_frame(caller))
+            .await;
+    }
+    let returned = checkpoint.starts_with("returned-");
+    if returned {
+        let reason = scenario.step_to_stop(StepKind::Out).await;
+        assert_eq!(
+            reason,
+            StopReason::Step {
+                kind: StepKind::Out
+            },
+            "{fixture}: {checkpoint}"
+        );
+    }
+    let snapshot = scenario
+        .operation("variables", scenario.handle().variables())
+        .await;
+    snapshot
+        .variables
+        .iter()
+        .filter(|variable| !returned || variable.kind == VariableKind::Returned)
+        .cloned()
+        .collect()
 }
 
 /// Checks that a variable the compiler made for itself, named by the
@@ -439,6 +465,10 @@ async fn go_values_agree_with_their_program() {
                 "shape-point",
                 "shape-other",
                 "pieces",
+                "returned-registers",
+                "returned-stack",
+                "returned-deferred",
+                "returned-generic",
             ],
             optimized,
             required,

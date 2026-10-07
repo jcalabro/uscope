@@ -141,7 +141,25 @@ impl<P: InspectionOps> Controller<P> {
             VariableQuery::Global(global) => {
                 vec![self.inspect_loaded_global(inferior, root, &resolved, *global, &mut budget)?]
             }
-            VariableQuery::All => inspect_locals(&mut budget)?,
+            VariableQuery::All => {
+                let mut variables = inspect_locals(&mut budget)?;
+                // A step out's stop shows what the finished function
+                // returned beside the frame it returned to.
+                if let Some(returned) = inferior
+                    .public_stop
+                    .as_ref()
+                    .and_then(|stop| stop.returned.as_ref())
+                {
+                    variables.extend(self.returned_variables(
+                        returned,
+                        stop_id,
+                        root,
+                        frame,
+                        &mut budget,
+                    )?);
+                }
+                variables
+            }
             VariableQuery::Name(name) => {
                 let local = if scope.is_some() {
                     inspect_locals(&mut budget)

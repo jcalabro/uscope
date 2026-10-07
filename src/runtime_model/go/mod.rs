@@ -14,8 +14,8 @@ use layout::{Goroutines, Labels, Layout, Missing, Threads};
 
 use super::{
     CodeAddress, Crossing, DynamicValue, Partial, RuntimeException, RuntimeHook, RuntimeImage,
-    RuntimeModel, RuntimeSignals, RuntimeStop, RuntimeTask, TaskContext, TaskLabels, TaskPage,
-    ThreadActivity,
+    RuntimeModel, RuntimeSignals, RuntimeStop, RuntimeTask, StoredValue, TaskContext, TaskLabels,
+    TaskPage, ThreadActivity,
 };
 use crate::unwind::RegisterFile;
 use crate::{AddressRange, ImageAddress, StackSegment, TaskState, ThreadId, VirtualAddress};
@@ -419,10 +419,10 @@ impl RuntimeModel for GoRuntime {
         &self,
         stop: &dyn RuntimeStop,
         representation: &str,
-        address: VirtualAddress,
+        value: StoredValue<'_>,
     ) -> Option<Result<DynamicValue, Arc<str>>> {
         match &self.interfaces {
-            Ok(interfaces) => interfaces.value(stop, representation, address),
+            Ok(interfaces) => interfaces.value(stop, representation, value),
             Err(missing) => Some(Err(Arc::clone(missing))),
         }
     }

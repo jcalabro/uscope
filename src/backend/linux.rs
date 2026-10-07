@@ -83,6 +83,7 @@ mod presentation;
 #[cfg(debug_assertions)]
 mod recorded;
 mod registers;
+mod returns;
 mod run_control;
 mod runtimes;
 mod signals;
@@ -438,6 +439,9 @@ struct StepStart {
     /// The loops whose bodies, functions of their own, a step over or out
     /// treats as its own code.
     loops: Option<loops::StepLoops>,
+    /// For a step out of a function's own frame, the function, whose
+    /// returned values its stop shows.
+    returning: Option<returns::Returning>,
 }
 
 /// Whether a step kind executes machine instructions rather than source
@@ -604,6 +608,8 @@ struct PublicStop {
     selected_frames: BTreeMap<ExecutionContext, StackFrameId>,
     /// What each thread runs for a language runtime, read once asked for.
     activities: RefCell<BTreeMap<Pid, Option<crate::ThreadActivity>>>,
+    /// What the function a step out finished returned.
+    returned: Option<returns::Returned>,
 }
 
 /// Stop identifiers are unique across every session in the process: a
@@ -2027,6 +2033,7 @@ impl PublicStop {
             selected_thread: Some(triggering_thread),
             selected_frames: BTreeMap::new(),
             activities: RefCell::default(),
+            returned: None,
         }
     }
 

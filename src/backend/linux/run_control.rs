@@ -1344,8 +1344,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.barrier.as_ref())
             .and_then(|barrier| Some((barrier.triggering_thread, barrier.reason.clone()?)))
             .expect("ready barrier publishes a reason");
+        self.publish_stop(triggering_thread, reason)
+    }
+
+    /// Publishes the stop a ready barrier makes, which `triggering_thread`
+    /// made for `reason`.
+    fn publish_stop(&mut self, triggering_thread: Pid, reason: StopReason) -> Result<()> {
         let triggering_thread = self.presenting_thread(triggering_thread);
         let presentation = self.presentation_for_thread(triggering_thread, Some(&reason))?;
+        let returned = self.capture_returned(triggering_thread, &reason);
         let stop_id = self.ptrace.allocate_stop_id();
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         for thread in inferior.threads.values_mut() {
@@ -1357,12 +1364,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.terminating = inferior
             .terminating
             .filter(|terminating| !terminating.delivered);
-        inferior.public_stop = Some(PublicStop::new(
+        let mut stop = PublicStop::new(
             stop_id,
             triggering_thread,
             reason.clone(),
             BTreeMap::from([(triggering_thread, presentation)]),
-        ));
+        );
+        stop.returned = returned;
+        inferior.public_stop = Some(stop);
         let execution = inferior.active.take().map(|active| active.id);
         let process_id = process_id(inferior.tgid);
         if matches!(reason, StopReason::LanguageException(_)) {

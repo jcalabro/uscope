@@ -11,7 +11,9 @@
 // `result` that it is listed as one of the function's results, and
 // `hidden` that it is not listed but its name reaches it. Kind `symbol`
 // is the constants an integer's value names, and `number` an integer
-// that names none.
+// that names none. A checkpoint named `returned-` is about the values a
+// function returns: the tests finish the function that reached it and
+// inspect what it returned.
 package main
 
 import (
@@ -247,6 +249,65 @@ func pieces(text string, numbers []int, boxed any, pair Point, ratio complex128)
 	return len(text) + len(numbers) + pair.X + len(fmt.Sprint(boxed)) + int(real(ratio))
 }
 
+// returning returns a value in each kind of place Go's register ABI
+// gives one: integer and floating-point registers, both of a complex
+// number's, the words of a string, an interface, and a struct.
+//
+//go:noinline
+func returning(n int) (count int, ok bool, ratio float64, wave complex128, text string, failure error, pair Point) {
+	count, ok, ratio, wave, text, pair = n*2, true, 1.5, complex(0.5, -2), "go", Point{X: n, Y: -n}
+	const checkpoint = "returned-registers"
+	truth(checkpoint, "count", "int", count)
+	truth(checkpoint, "ok", "summary", ok)
+	truth(checkpoint, "ratio", "f64", bits64(ratio))
+	truth(checkpoint, "wave", "c128", bits64(real(wave))+":"+bits64(imag(wave)))
+	truth(checkpoint, "text", "string", fmt.Sprintf("%q", text))
+	truth(checkpoint, "failure", "summary", "nil")
+	truth(checkpoint, "pair.X", "int", pair.X)
+	truth(checkpoint, "pair.Y", "int", pair.Y)
+	reached(checkpoint)
+	return
+}
+
+// returningOnStack returns an array of more than one element, which the
+// ABI puts on the stack, between results in registers, and more integers
+// than it has registers for, the last of which goes on the stack too.
+//
+//go:noinline
+func returningOnStack(n int) (grid [3]int, label string, a, b, c, d, e, f, g, last int) {
+	grid, label = [3]int{n, n + 1, n + 2}, "stack"
+	a, b, c, d, e, f, g, last = 1, 2, 3, 4, 5, 6, 7, n*100
+	const checkpoint = "returned-stack"
+	truth(checkpoint, "grid.0", "int", grid[0])
+	truth(checkpoint, "grid.2", "int", grid[2])
+	truth(checkpoint, "label", "string", fmt.Sprintf("%q", label))
+	truth(checkpoint, "g", "int", g)
+	truth(checkpoint, "last", "int", last)
+	reached(checkpoint)
+	return
+}
+
+// returningDeferred's deferred call changes its result after the return
+// statement sets it.
+//
+//go:noinline
+func returningDeferred(n int) (total int) {
+	defer func() { total *= 10 }()
+	truth("returned-deferred", "total", "int", n*10)
+	reached("returned-deferred")
+	return n
+}
+
+// returningGeneric returns an unnamed result of the shape its code was
+// compiled for.
+//
+//go:noinline
+func returningGeneric[T any](value T) T {
+	truth("returned-generic", "~r0", "int", value)
+	reached("returned-generic")
+	return value
+}
+
 func main() {
 	if complexes(complex(1.5, -2), complex(0.1, 3e300)) == 0 {
 		os.Exit(1)
@@ -278,4 +339,8 @@ func main() {
 	truth("pieces", "pair.Y", "int", 8)
 	truth("pieces", "ratio", "c128", bits64(0.5)+":"+bits64(-1))
 	pieces(text, numbers, 42, Point{X: 7, Y: 8}, complex(0.5, -1))
+	returning(21)
+	returningOnStack(5)
+	returningDeferred(4)
+	returningGeneric(7)
 }

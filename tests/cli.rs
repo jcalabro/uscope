@@ -1764,6 +1764,31 @@ fn backtraces_say_whose_stack_each_run_of_frames_is_on() {
 }
 
 #[test]
+fn finish_shows_what_the_function_returned() {
+    for fixture in [
+        "build/test-programs/values-go-o0",
+        "build/test-programs/values-go-o2",
+    ] {
+        let stdout = batch(
+            &[fixture],
+            &["break main.returning", "run", "finish", "print"],
+        );
+        assert_in_order(
+            &stdout,
+            &[
+                "stopped after frame return",
+                "returned (int) count = 42",
+                "returned (bool) ok = true",
+                "returned (string) text = \"go\"",
+                "returned (error) failure = nil",
+                // The frame returned to lists them among its variables.
+                "returned (int) count = 42",
+            ],
+        );
+    }
+}
+
+#[test]
 fn backtraces_mark_the_iterators_of_a_loop_whose_body_runs() {
     let stdout = batch(
         &["build/test-programs/ranges-go-o0"],
