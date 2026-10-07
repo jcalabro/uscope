@@ -189,12 +189,18 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         stdout.flush()?;
     }
 
-    if let Some(start) = start {
-        // The page shows a failure to start, as the terminal does.
-        if let Err(failure) = session.start(start, false).await {
-            eprintln!("error: {}", failure.body().message);
-        }
-    }
+    // The page is served while the program loads, which can take a while,
+    // and a tab that comes meanwhile sees it loading.
+    let starting = start.map(|start| {
+        session.loading(&start);
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            // The page shows a failure to start, as the terminal does.
+            if let Err(failure) = session.start(start, false).await {
+                eprintln!("error: {}", failure.body().message);
+            }
+        })
+    });
 
     let router = Router::new()
         .route("/api/ws", get(socket))
@@ -206,6 +212,10 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         served = axum::serve(listener, router) => served.context("the server failed"),
         () = terminated => Ok(()),
     };
+    if let Some(starting) = starting {
+        // Whatever it started is ended below, not left half launched.
+        let _ = starting.await;
+    }
     session.shutdown().await;
     drop(keys);
     served
