@@ -97,6 +97,20 @@ pub struct Located {
     pub storage: ValueStorage,
 }
 
+/// One value a function returned, captured as the call to it returned.
+#[derive(Debug, Clone)]
+pub struct ReturnedValue {
+    /// The result's name in the function, such as Go's `~r0` for one the
+    /// source leaves unnamed.
+    pub name: Arc<str>,
+    /// Its type, unless its debug information is malformed.
+    pub ty: Option<TypeId>,
+    /// Its value as the call returned it, or why that cannot be known.
+    pub value: Accessed,
+    /// Why a generic result has its shape's type rather than its own.
+    pub unresolved_shape: Option<crate::ShapeUnresolvedReason>,
+}
+
 /// Storage reached, or the unavailable or malformed state that stopped it.
 pub type Accessed = std::result::Result<Located, VariableState>;
 
@@ -314,6 +328,21 @@ pub trait VariableInfo: Send + Sync {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<Variable>;
+
+    /// The values the function whose code holds `function` returned, read
+    /// through `runtime` the instant a call to it has returned, with the
+    /// caller's registers and stack as the return leaves them; captured, so
+    /// later execution cannot change them. `None` when the function's
+    /// convention for returning values is not one the provider knows.
+    fn returned(
+        &self,
+        function: ImageAddress,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<Option<Vec<ReturnedValue>>> {
+        let _ = (function, runtime, budget);
+        Ok(None)
+    }
 
     /// Dereferences one stop-scoped capability produced by this image.
     fn dereference(

@@ -19,7 +19,7 @@ use crate::eval::types::{Ty, TypeSource};
 use crate::inspection::InspectionBudget;
 use crate::model::{ValueStorage, ViewChildren};
 use crate::protocol::StopId;
-use crate::runtime_model::DynamicValue;
+use crate::runtime_model::{DynamicValue, HeldPlace, StoredValue};
 use crate::view::bind::BoundShape;
 use crate::view::kernel::Recordings;
 use crate::view::run::{Child, Failure};
@@ -1416,28 +1416,69 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
     /// runtime cannot say, the interface shows as the record it is.
     fn go_dynamic(&self, type_info: &TypeInfo, place: &StopPlace) -> Option<Dynamic> {
         let (_, record) = crate::eval::types::representation(self, type_info.reference).ok()?;
-        let (TypeKind::Record { .. }, ValueStorage::Memory(address)) =
-            (&record.kind, &place.located.storage)
-        else {
+        let TypeKind::Record { .. } = &record.kind else {
             return None;
+        };
+        let stored = match &place.located.storage {
+            ValueStorage::Memory(address) => StoredValue::Memory(*address),
+            ValueStorage::Bytes {
+                raw,
+                start,
+                end,
+                unavailable,
+                ..
+            } if unavailable.is_empty() => StoredValue::Bytes(raw.get(*start..*end)?),
+            _ => return None,
         };
         let Some(Ok(held)) = self
             .frame
-            .runtime_dynamic(place.module, &record.name, *address)
+            .runtime_dynamic(place.module, &record.name, stored)
         else {
             return None;
         };
         let DynamicValue::Held {
             descriptor,
             offset,
-            address,
+            place: held,
         } = held
         else {
             return Some(Dynamic::Nil);
         };
         let (module, _) = self.module_at(descriptor.get())?;
         let ty = module.image.go_runtime_type(offset)?;
-        Some(Dynamic::at(module, ty, address.get()))
+        match (held, &place.located.storage) {
+            (HeldPlace::Memory(address), _) => Some(Dynamic::at(module, ty, address.get())),
+            // A value stored directly in an interface held in bytes is
+            // those of its data word.
+            (
+                HeldPlace::Within(within),
+                ValueStorage::Bytes {
+                    source, raw, start, ..
+                },
+            ) => {
+                let size = self.type_info(ty)?.byte_size?;
+                let begin = start.checked_add(usize::try_from(within).ok()?)?;
+                let finish = begin.checked_add(usize::try_from(size).ok()?)?;
+                (finish <= raw.len()).then(|| Dynamic::Value {
+                    ty,
+                    place: StopPlace {
+                        module: module.loaded.id,
+                        located: Located {
+                            ty: ty.id,
+                            storage: ValueStorage::Bytes {
+                                source: source.clone(),
+                                raw: Arc::clone(raw),
+                                start: begin,
+                                end: finish,
+                                address: None,
+                                unavailable: Arc::new([]),
+                            },
+                        },
+                    },
+                })
+            }
+            (HeldPlace::Within(_), _) => None,
+        }
     }
 
     /// `value` with the presentation of what it dynamically is.

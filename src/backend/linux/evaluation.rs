@@ -134,14 +134,14 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
             .frame_runtime(self.inferior, self.root, self.resolved, module)
     }
 
-    /// What the value at `address` dynamically holds, when the runtime
-    /// the module `module` carries records it in the record named
+    /// What the value stored at `value` dynamically holds, when the
+    /// runtime the module `module` carries records it in the record named
     /// `representation`.
     pub(super) fn runtime_dynamic(
         &self,
         module: ModuleId,
         representation: &str,
-        address: VirtualAddress,
+        value: crate::runtime_model::StoredValue<'_>,
     ) -> Option<std::result::Result<crate::runtime_model::DynamicValue, Arc<str>>> {
         let runtime = self
             .controller
@@ -150,7 +150,7 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
             .find(|runtime| runtime.module.id == module)?;
         self.controller
             .with_runtime_stop(self.inferior, &runtime, self.root.reader(), |stop| {
-                runtime.model.dynamic_value(stop, representation, address)
+                runtime.model.dynamic_value(stop, representation, value)
             })
     }
 

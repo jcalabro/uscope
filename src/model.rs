@@ -2134,6 +2134,9 @@ pub enum VariableKind {
     Local,
     /// A data object with static storage described by a module image.
     Global,
+    /// A value the function a step out finished returned, shown in the
+    /// frame it returned to at the stop that step made.
+    Returned,
 }
 
 /// The source visibility of a global data object.

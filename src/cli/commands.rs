@@ -11,8 +11,8 @@ use uscope::{
     Backtrace, BreakpointId, BreakpointSpec, ByteOrder, DebuggerEvent, Disassembly,
     DisassemblyQuery, DisassemblyRange, ExecutionContext, HitComparison, HitCondition, LineNumber,
     MAX_WINDOW_AFTER, ModuleId, ModuleImage, RegisterRole, SignalPolicy, StackFrame, StackFrameId,
-    StepKind, StopContext, StopReason, TaskSnapshot, ThreadId, VirtualAddress, WatchAccess,
-    WatchpointId, WatchpointSpec,
+    StepKind, StopContext, StopReason, TaskSnapshot, ThreadId, VariableKind, VirtualAddress,
+    WatchAccess, WatchpointId, WatchpointSpec,
 };
 
 use super::format::{self, plural};
@@ -993,7 +993,22 @@ impl Cli {
     }
 
     async fn step(&self, kind: StepKind) -> Result<String> {
-        self.execute_until_stop(self.debugger.step(kind)).await
+        let mut output = self.execute_until_stop(self.debugger.step(kind)).await?;
+        // Finishing a function shows what it returned, as the stop's
+        // variables list it.
+        if kind == StepKind::Out
+            && let Ok(snapshot) = self.debugger.variables().await
+        {
+            for variable in snapshot
+                .variables
+                .iter()
+                .filter(|variable| variable.kind == VariableKind::Returned)
+            {
+                output.push('\n');
+                output.push_str(&value::variable_summary(variable, self.renderers.stdout));
+            }
+        }
+        Ok(output)
     }
 
     /// Waits for an execution request, prefixing its stop with a line for

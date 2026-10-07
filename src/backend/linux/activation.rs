@@ -69,6 +69,13 @@ impl Activation {
     pub(super) fn has_returned(self, position: StackPosition) -> bool {
         self.owner == position.owner && !position.depth.is_deeper_than(self.depth)
     }
+
+    /// Whether a stack pointer at `position` is where this activation's
+    /// return leaves it: popped to its canonical frame address exactly, as
+    /// no frame further out returning is.
+    pub(super) fn just_returned(self, position: StackPosition) -> bool {
+        self.owner == position.owner && self.depth == position.depth
+    }
 }
 
 /// A stack pointer's position on its stack.

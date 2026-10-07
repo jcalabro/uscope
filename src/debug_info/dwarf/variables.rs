@@ -58,6 +58,7 @@ mod identity;
 mod inspect;
 mod location;
 mod pieces;
+mod returns;
 mod shape;
 mod text;
 mod types;
@@ -169,6 +170,8 @@ struct CatalogFunction {
     /// The variables a Go closure captured, in its context, or why they
     /// cannot be known.
     captures: std::result::Result<Vec<Capture>, Arc<str>>,
+    /// How the function returns its values, when that is known.
+    returns: Option<returns::ReturnConvention>,
 }
 
 /// One variable a Go closure captured: a copy of its value, or, when its
@@ -217,6 +220,18 @@ pub(super) struct LoadedVariables {
     pub vtables: Vec<(ImageAddress, TypeReference)>,
     /// Integer constants the units declare at their top level, by name.
     pub constants: BTreeMap<Arc<str>, crate::IntegerValue>,
+}
+
+/// The producer a unit names.
+fn unit_producer(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+) -> std::result::Result<Option<Arc<str>>, DwarfError> {
+    let mut entries = unit.entries();
+    let Some(root) = entries.next_dfs()? else {
+        return Ok(None);
+    };
+    super::string_attribute(dwarf, unit, root, gimli::DW_AT_producer)
 }
 
 /// The file declaring a function or inlined call's function, if known.
@@ -355,6 +370,15 @@ pub(super) fn load_variable_info<'data>(
             continue;
         }
         let go = evaluation_units[unit_index].language == Some(gimli::DW_LANG_Go);
+        // Go names the register ABI its x86-64 code calls with among the
+        // flags of each unit's producer, as `go1.27.1; -N -l regabi`.
+        let go_registers = go
+            && target.architecture == crate::Architecture::X86_64
+            && unit_producer(dwarf, unit)?.is_some_and(|producer| {
+                producer
+                    .split_once(';')
+                    .is_some_and(|(_, flags)| flags.split_whitespace().any(|flag| flag == "regabi"))
+            });
         let fused_blocks = if go {
             fused_block_ranges(dwarf, unit, &catalog.code)?
         } else {
@@ -418,6 +442,8 @@ pub(super) fn load_variable_info<'data>(
                             None
                         },
                         captures: Ok(Vec::new()),
+                        returns: (go_registers && defined)
+                            .then_some(returns::ReturnConvention::GoRegisters),
                     });
                     Some(Scope {
                         ranges,
@@ -633,7 +659,7 @@ pub(super) fn load_variable_info<'data>(
                     };
                     let object_name = match kind {
                         VariableKind::Parameter => "parameter",
-                        VariableKind::Result => "result",
+                        VariableKind::Result | VariableKind::Returned => "result",
                         VariableKind::Local => "variable",
                         VariableKind::Global => "global",
                     };
@@ -1123,6 +1149,15 @@ impl VariableInfo for DwarfVariableInfo {
         }
         let mut frame_base = FrameBaseCache::Empty;
         self.inspect_data_object(object, address, context, runtime, &mut frame_base, budget)
+    }
+
+    fn returned(
+        &self,
+        function: ImageAddress,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<Option<Vec<crate::debug_info::ReturnedValue>>> {
+        self.returned_values(function, runtime, budget)
     }
 
     fn dereference(

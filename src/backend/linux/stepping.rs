@@ -28,6 +28,7 @@ use super::loops::{StepLoops, inline_loop_step_is_complete};
 use super::memory::PtraceMemory;
 use super::native::LinuxTraceOps;
 use super::registers::x86_64_registers;
+use super::returns::Returning;
 use crate::disassembly::{AssemblySyntax, ControlFlow, RawDecode, decoder_for};
 
 use super::memory::read_logical_memory;
@@ -116,6 +117,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         stop.selected = crate::ExecutionContext::Thread(debug_thread_id(pid));
         stop.selected_thread = Some(pid);
         stop.selected_frames.clear();
+        stop.returned = None;
         stop.reason = StopReason::Step { kind };
         stop.presentations.insert(pid, presentation);
         inferior.thread_mut(pid)?.reason = Some(StopReason::Step { kind });
@@ -1369,35 +1371,22 @@ impl<P: LinuxTraceOps> Controller<P> {
         // breakpoint would run the entire containing activation. Instruction
         // stepping lets `step_is_complete` observe either the next statement
         // in this instance or the point where the logical frame disappears.
+        let mut returning = None;
         if kind == StepKind::Out && !selected_is_inline {
-            plan_addresses.insert(self.caller_address(pid, &registers)?);
+            let return_address = self.caller_address(pid, &registers)?;
+            plan_addresses.insert(return_address);
+            returning = activation
+                .zip(location.as_ref())
+                .map(|(activation, location)| Returning {
+                    activation,
+                    return_address,
+                    function: location.address,
+                });
         } else if kind == StepKind::OverSource
             && !selected_is_inline
             && let (Some(source), Some(instance_id)) = (&source, code_instance)
-            && let Some(instance) = self.module_image.code_instance(instance_id)
         {
-            // A frame without a trustworthy caller, such as a coroutine's
-            // first frame or one a stack overflow corrupted, still steps by
-            // line. Its return, if it comes, is then followed like a return
-            // into code without source.
-            let return_address = match self.caller_address(pid, &registers) {
-                Ok(address) => Some(address),
-                Err(error) if is_caller_unavailable(&error) => None,
-                Err(error) => return Err(error),
-            };
-            for line in self.module_image.line_entries() {
-                if !line.statement || !instance.contains(line.range.start) {
-                    continue;
-                }
-                let location = self.module_image.locate(line.range.start);
-                if source_for_code_instance(&self.module_image, &location, instance_id)
-                    .is_some_and(|candidate| source_line_changed(Some(source), Some(&candidate)))
-                {
-                    plan_addresses
-                        .insert(inferior.loaded_module.virtual_address(line.range.start)?);
-                }
-            }
-            plan_addresses.extend(return_address);
+            self.plan_source_lines(pid, &registers, source, instance_id, &mut plan_addresses)?;
         }
 
         let panic_guards = if matches!(kind, StepKind::OverSource | StepKind::Out) {
@@ -1435,8 +1424,48 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .code_role(VirtualAddress::new(registers.rip))
                 .is_some_and(is_runtime_role),
             loops,
+            returning,
             ..StepStart::default()
         })
+    }
+
+    /// Plans a step over by line in a frame of `instance_id`: a breakpoint
+    /// at each statement of the instance on another line than `source`,
+    /// and at its return address.
+    fn plan_source_lines(
+        &self,
+        pid: Pid,
+        registers: &libc::user_regs_struct,
+        source: &SourceLocation,
+        instance_id: crate::CodeInstanceId,
+        plan_addresses: &mut BTreeSet<VirtualAddress>,
+    ) -> Result<()> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let Some(instance) = self.module_image.code_instance(instance_id) else {
+            return Ok(());
+        };
+        // A frame without a trustworthy caller, such as a coroutine's
+        // first frame or one a stack overflow corrupted, still steps by
+        // line. Its return, if it comes, is then followed like a return
+        // into code without source.
+        let return_address = match self.caller_address(pid, registers) {
+            Ok(address) => Some(address),
+            Err(error) if is_caller_unavailable(&error) => None,
+            Err(error) => return Err(error),
+        };
+        for line in self.module_image.line_entries() {
+            if !line.statement || !instance.contains(line.range.start) {
+                continue;
+            }
+            let location = self.module_image.locate(line.range.start);
+            if source_for_code_instance(&self.module_image, &location, instance_id)
+                .is_some_and(|candidate| source_line_changed(Some(source), Some(&candidate)))
+            {
+                plan_addresses.insert(inferior.loaded_module.virtual_address(line.range.start)?);
+            }
+        }
+        plan_addresses.extend(return_address);
+        Ok(())
     }
 
     /// Returns the return address and stack pointer of the call instruction
@@ -1507,9 +1536,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         let selected_is_inline = matches!(resolved.presented, PresentedFrame::Inline(_));
         let mut plan_addresses = BTreeSet::new();
 
+        let mut return_address = None;
         let activation = if resolved.activation == 0 {
             if !selected_is_inline {
-                plan_addresses.insert(self.caller_address(pid, registers)?);
+                return_address = Some(self.caller_address(pid, registers)?);
             }
             self.top_activation(pid, registers)?
         } else {
@@ -1532,14 +1562,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                 &StackRoot::of_thread(pid),
                 resolved.activation + 2,
             )?;
-            let return_address = stack
+            let caller = stack
                 .frames
                 .get(resolved.activation + 1)
                 .map(|caller| caller.context.instruction)
                 .ok_or_else(|| caller_unavailable(stack.termination.clone()))?;
-            plan_addresses.insert(self.executable_return_address(pid, return_address)?);
+            return_address = Some(self.executable_return_address(pid, caller)?);
             activation
         };
+        plan_addresses.extend(return_address);
 
         Ok(StepStart {
             source: selected.source.clone(),
@@ -1549,6 +1580,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             stack_pointer: Some(self.stack_position(pid, registers)),
             plan_addresses,
             panic_guards: self.panic_entries(inferior),
+            returning: return_address.map(|return_address| Returning {
+                activation,
+                return_address,
+                function: address,
+            }),
             ..StepStart::default()
         })
     }

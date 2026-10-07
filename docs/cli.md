@@ -64,7 +64,13 @@ continues when the handler returns.
 `finish` runs until the selected frame returns to its caller, so a recursive
 call that returns to the same address from a deeper activation keeps running.
 It supports frames of the main executable and inline frames of the innermost
-activation. Stepping always starts from the innermost frame.
+activation. Stepping always starts from the innermost frame. When `finish`
+stops as the function returns, it shows what the function returned, as
+`returned (int) count = 42`, read where the function's calling convention
+leaves each result, so an optimized function's results show as well; `print`
+lists them with the frame's variables until the program runs again. Go's
+register ABI is the convention uscope knows; a function of another language
+shows nothing returned.
 
 In a program whose language runtime schedules tasks, such as Go's
 goroutines, a step belongs to the task it began in. It follows the task to

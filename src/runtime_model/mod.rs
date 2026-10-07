@@ -201,6 +201,15 @@ pub struct RuntimeException {
     pub value: Option<Arc<str>>,
 }
 
+/// Where a value whose dynamic type a runtime records is stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredValue<'a> {
+    /// In the program's memory.
+    Memory(VirtualAddress),
+    /// In these bytes, captured from registers or memory.
+    Bytes(&'a [u8]),
+}
+
 /// What a value of a type whose dynamic type the runtime records holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DynamicValue {
@@ -212,9 +221,17 @@ pub enum DynamicValue {
         /// The descriptor's offset in the type table of the module holding
         /// it, which that module's debug information names its types by.
         offset: u64,
-        /// Where the value is.
-        address: VirtualAddress,
+        place: HeldPlace,
     },
+}
+
+/// Where a held value is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldPlace {
+    /// In the program's memory.
+    Memory(VirtualAddress),
+    /// In the holding value's own bytes, this far in.
+    Within(u64),
 }
 
 /// What a language runtime tells the debugger at a stop.
@@ -260,14 +277,14 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         hook: ImageAddress,
         registers: &RegisterFile,
     ) -> Result<RuntimeException, Arc<str>>;
-    /// What the value at `address` dynamically holds, when the record its
-    /// type is represented by, named `representation`, is one the runtime
-    /// records a dynamic type in; `None` for any other record.
+    /// What the value stored at `value` dynamically holds, when the record
+    /// its type is represented by, named `representation`, is one the
+    /// runtime records a dynamic type in; `None` for any other record.
     fn dynamic_value(
         &self,
         stop: &dyn RuntimeStop,
         representation: &str,
-        address: VirtualAddress,
+        value: StoredValue<'_>,
     ) -> Option<Result<DynamicValue, Arc<str>>>;
     /// What the runtime calls one of its tasks.
     fn task_noun(&self) -> &'static str;

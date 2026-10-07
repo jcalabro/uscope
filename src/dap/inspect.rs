@@ -632,14 +632,22 @@ impl Session {
                 .enumerate()
                 .filter(|(_, variable)| in_scope(kind, variable.kind)),
         ) {
-            let path = if unnamed.contains(&index) {
+            // A value a finished function returned is no variable of this
+            // frame, and no name reaches it.
+            let returned = variable.kind == VariableKind::Returned;
+            let path = if unnamed.contains(&index) || returned {
                 None
             } else {
                 uscope::Expression::name(&variable.name)
             };
+            let name = if returned {
+                format!("returned {}", variable.name)
+            } else {
+                variable.name.to_string()
+            };
             rows.push(self.present(
                 Item {
-                    name: &variable.name,
+                    name: &name,
                     path,
                     raw: false,
                     type_info: variable.type_info.as_ref(),
@@ -681,7 +689,9 @@ impl Session {
         };
         let mut by_name = std::collections::BTreeMap::<&str, Vec<usize>>::new();
         for (index, variable) in snapshot.variables.iter().enumerate() {
-            by_name.entry(&variable.name).or_default().push(index);
+            if variable.kind != VariableKind::Returned {
+                by_name.entry(&variable.name).or_default().push(index);
+            }
         }
         let mut unnamed = std::collections::BTreeSet::new();
         for (name, indices) in by_name.into_iter().filter(|(_, indices)| indices.len() > 1) {
@@ -1553,7 +1563,10 @@ fn limit_text(exhaustion: uscope::InspectionExhaustion) -> String {
 }
 
 /// Whether a scope of variables of one kind lists a variable: the
-/// arguments scope lists results too, as part of the signature.
+/// arguments scope lists results too, as part of the signature, and the
+/// locals scope what a finished function returned.
 fn in_scope(scope: VariableKind, kind: VariableKind) -> bool {
-    kind == scope || (scope == VariableKind::Parameter && kind == VariableKind::Result)
+    kind == scope
+        || (scope == VariableKind::Parameter && kind == VariableKind::Result)
+        || (scope == VariableKind::Local && kind == VariableKind::Returned)
 }
