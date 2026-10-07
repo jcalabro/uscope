@@ -825,6 +825,12 @@ build_fixture gcc "$c_fixtures_dir/variables-parameters.c" "$output_dir/variable
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/variables-parameters.c" "$output_dir/variables-parameters-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+for variant in "gcc -O0" "gcc -O2" "clang -O0" "clang -O2"; do
+    read -r compiler level <<<"$variant"
+    suffix="${level#-}"
+    build_fixture "$compiler" "$c_fixtures_dir/returns.c" \
+        "$output_dir/returns-c-${compiler}-${suffix,,}" "$level" -g3 -gdwarf-5 -fPIE -pie
+done
 build_fixture gcc "$c_fixtures_dir/pieces.c" "$output_dir/pieces-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/pieces.c" "$output_dir/pieces-gcc-o2" \
@@ -1046,6 +1052,12 @@ require_static_glibc "$output_dir/tls-modules-gcc-static" yes
 require_static_glibc "$output_dir/tls-modules-clang-static-pie" yes
 require_static_glibc "$output_dir/tls-modules-single-thread-gcc-static-pie" no
 require_static_glibc "$output_dir/tls-modules-single-thread-clang-static" no
+for variant in "g++ gcc -O0" "g++ gcc -O2" "clang++ clang -O2"; do
+    read -r compiler name level <<<"$variant"
+    suffix="${level#-}"
+    build_cpp_fixture "$compiler" "$cpp_fixtures_dir/returns.cpp" \
+        "$output_dir/returns-cpp-${name}-${suffix,,}" "$level" -g3 -gdwarf-5 -fPIE -pie
+done
 build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture g++ "$cpp_fixtures_dir/overloads.cpp" "$output_dir/overloads-cpp-gcc-o0" \
@@ -1189,6 +1201,10 @@ build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-r
     --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0
 build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-o2" \
     --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=2
+for level in 0 2; do
+    build_program rustc "$rust_fixtures_dir/returns.rs" "$output_dir/returns-rust-o${level}" \
+        --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level="$level"
+done
 # Line tables only: no variables or types, so nothing to present.
 build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-limited" \
     --edition=2024 -D warnings -C debuginfo=limited -C codegen-units=1 -C opt-level=0
@@ -1235,6 +1251,12 @@ build_go_fixture "$go_fixtures_dir/values" "$output_dir/values-go-o2" \
 require_dwarf_operation "$output_dir/variables-go-o0" 'DW_AT_language.*Go'
 require_dwarf_operation "$output_dir/variables-go-o0" main.inspectScalars
 require_dwarf_operation "$output_dir/enums-go-o0" 'DW_TAG_constant'
+build_zig_fixture "$zig_fixtures_dir/returns.zig" "$output_dir/returns-zig-o0" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/returns.zig" "$output_dir/returns-zig-o2" \
+    -O ReleaseSafe -fPIE -fomit-frame-pointer
+build_zig_self_hosted_fixture "$zig_fixtures_dir/returns.zig" "$output_dir/returns-zig-self-hosted" \
+    -O Debug
 build_zig_fixture "$zig_fixtures_dir/generics.zig" "$output_dir/generics-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/containers.zig" "$output_dir/containers-zig-o0" \
@@ -1347,6 +1369,12 @@ build_fixture gcc "$c_fixtures_dir/thread-stress.c" "$output_dir/thread-stress" 
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/step.c" "$output_dir/step" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
+for variant in "gcc -O0" "clang -O0" "gcc -O2"; do
+    read -r compiler level <<<"$variant"
+    suffix="${level#-}"
+    build_fixture "$compiler" "$c_fixtures_dir/step-targets.c" \
+        "$output_dir/step-targets-${compiler}-${suffix,,}" "$level" -g3 -gdwarf-5 -fPIE -pie
+done
 build_fixture gcc "$c_fixtures_dir/jump.c" "$output_dir/jump" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/stepping-boundaries.c" "$output_dir/stepping-boundaries-gcc-o0" \

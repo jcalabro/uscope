@@ -23,7 +23,7 @@ use super::new_task::NewTask;
 use super::{
     ActiveExecution, ActiveKind, BreakpointOwner, ClassifiedStop, Controller, ExpectedStop,
     Inferior, LinuxError, NativeThreadState, PendingSignal, PublicStop, RepairGroup, Resume,
-    SignalGuard, StepOwner, StopBarrier, backend_error, debug_thread_id, exception_info,
+    ResumeGuard, StepOwner, StopBarrier, backend_error, debug_thread_id, exception_info,
     pending_exception_info, process_id, scoped_threads, steps_instructions, validate_process,
     validate_public_stop, validate_resumable, validate_stopped_thread,
 };
@@ -52,21 +52,37 @@ impl<P: LinuxTraceOps> Controller<P> {
         stop_id: StopId,
         pid: Pid,
         frame: StackFrameId,
-        kind: StepKind,
+        (kind, call): (StepKind, Option<VirtualAddress>),
         scope: ResumeScope,
         exception: ExceptionDisposition,
         reply: Reply<ExecutionId>,
     ) {
-        let valid = if kind == StepKind::Advance {
-            Err(Error::AdvanceWithoutLocation)
-        } else {
-            self.validate_step(process_id, stop_id, pid, frame, kind, scope)
-        };
-        if let Err(error) = valid {
-            let _ = reply.send(Err(error));
-            return;
+        let valid = match (kind, call) {
+            (StepKind::Advance, _) => Err(Error::AdvanceWithoutLocation),
+            (StepKind::IntoSource, _) | (_, None) => {
+                self.validate_step(process_id, stop_id, pid, frame, kind, scope)
+            }
+            (_, Some(call)) => Err(Error::NotAStepTarget(call)),
         }
-        match self.try_virtual_step(process_id, stop_id, pid, kind) {
+        .and_then(|()| {
+            call.map(|call| self.chosen_call(stop_id, pid, call))
+                .transpose()
+        });
+        let into_call = match valid {
+            Ok(into_call) => into_call,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        // A step into a chosen call executes the line up to it, never only
+        // entering an inline frame.
+        let virtual_step = if into_call.is_some() {
+            Ok(None)
+        } else {
+            self.try_virtual_step(process_id, stop_id, pid, kind)
+        };
+        match virtual_step {
             Ok(Some((execution, stopped))) => {
                 // Acknowledge the step before publishing the stop it caused.
                 let _ = reply.send(Ok(execution));
@@ -92,6 +108,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if requested == StepKind::IntoNewTask {
                 start.new_task = Some(NewTask::Watching(self.task_starters()));
             }
+            start.into_call = into_call;
             self.begin_execution(
                 process_id,
                 stop_id,
@@ -489,7 +506,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                     {
                         *progress_owed = false;
                     }
-                    self.complete_user_step(thread, kind)?;
+                    // A thread running freely to a guard has no step to judge
+                    // until it returns there.
+                    if self.step_runs_to_guard() {
+                        self.start_user_step(thread, kind)?;
+                    } else {
+                        self.complete_user_step(thread, kind)?;
+                    }
                 } else {
                     self.start_user_step(thread, kind)?;
                 }
@@ -565,6 +588,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .expect("repair group exists")
                 .site_removed = true;
         }
+        // Stepping over the trap of a call that a step into another passes
+        // enters it, to run to its return.
+        self.guard_unchosen_call(pid)?;
 
         self.resume_native(
             pid,
@@ -794,6 +820,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.follow_step(pid);
         }
         if let Some((_, kind)) = planned {
+            // A step out may go on from its function's return address, so
+            // what the function returned is read as it arrives there.
+            self.note_returned_values(pid);
             if self.is_advance_target(address) {
                 return self.reach_advance_target(pid, address);
             }
@@ -836,9 +865,12 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         // A declined user hit, or another thread at a stepping plan's site,
         // which is not the user's to see. A source step that single-stepped
-        // onto a declined site may end there, with the hit counted once.
+        // onto a declined site may end there, with the hit counted once;
+        // one running freely to a guard, through a signal handler or a call
+        // it passes, does not.
         if let Some((_, kind)) = step
             && !steps_instructions(kind)
+            && !self.step_runs_to_guard()
             && let Some(reason) = self.user_step_stop(pid, kind)?
         {
             return self.begin_visible_stop(pid, reason);
@@ -848,6 +880,17 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             self.repair_when_alone(pid, address)
         }
+    }
+
+    /// Whether the active step's thread runs freely until it returns to a
+    /// guard.
+    fn step_runs_to_guard(&self) -> bool {
+        self.inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .is_some_and(|active| {
+                matches!(&active.kind, ActiveKind::Step { start, .. } if start.resume_guard.is_some())
+            })
     }
 
     /// Notes a hit at a site of the debugger's own: the loader's report of
@@ -1209,14 +1252,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.resume_native(pid, Resume::Step, false, ExpectedStop::UserStep { kind });
         };
         let registers = self.ptrace.registers(pid)?;
-        let guard = SignalGuard {
+        let guard = ResumeGuard {
             address: VirtualAddress::new(registers.rip),
             stack: self.stack_position(pid, &registers),
+            call: false,
         };
         let execution = self.active_execution()?;
         self.install_additional_plan_breakpoints(execution, &BTreeSet::from([guard.address]))?;
         if let Some(start) = self.active_step_mut() {
-            start.signal_guard = Some(guard);
+            start.resume_guard = Some(guard);
         }
         let thread = self
             .inferior
@@ -1243,13 +1287,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         if let Some(start) = self.active_step_mut() {
             start.escape = None;
         }
-        self.reach_signal_guard(pid, address)
+        self.reach_resume_guard(pid, address)
     }
 
     /// Recognizes the stepping thread's return from a signal handler to the
     /// instruction it interrupted, where the step resumes. Returns whether
     /// the site was the guard and has been handled.
-    fn reach_signal_guard(&mut self, pid: Pid, address: VirtualAddress) -> Result<bool> {
+    fn reach_resume_guard(&mut self, pid: Pid, address: VirtualAddress) -> Result<bool> {
         let Some((execution, kind, guard, planned)) = self
             .inferior
             .as_ref()
@@ -1258,7 +1302,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ActiveKind::Step {
                     owner, kind, start, ..
                 } if self.runs_step(*owner, pid) => start
-                    .signal_guard
+                    .resume_guard
                     .filter(|guard| guard.address == address)
                     .map(|guard| {
                         (
@@ -1283,7 +1327,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(true);
         }
         if let Some(start) = self.active_step_mut() {
-            start.signal_guard = None;
+            start.resume_guard = None;
         }
         if planned {
             // The step's own site is evaluated as if no signal had arrived.
@@ -1302,6 +1346,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             .is_some();
         if trapped {
             self.repair_when_alone(pid, address)?;
+        } else if guard.call {
+            // A passed call may return to where the line ends.
+            self.complete_user_step(pid, kind)?;
         } else {
             self.start_user_step(pid, kind)?;
         }

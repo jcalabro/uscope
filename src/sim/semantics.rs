@@ -156,6 +156,8 @@ pub struct Begun {
     pub hidden_inline_frames: u32,
     /// For an advance, the addresses it runs to.
     pub targets: BTreeSet<u64>,
+    /// For a step into one call of a line, where that call returns.
+    pub into_return: Option<u64>,
 }
 
 impl Begun {
@@ -177,6 +179,7 @@ impl Begun {
             hidden_inline_frames: presentation
                 .map_or(0, |presentation| presentation.hidden_inline_frames),
             targets: BTreeSet::new(),
+            into_return: None,
         }
     }
 }
@@ -378,7 +381,10 @@ pub fn advance(
 
 /// The instruction the program has at `address`, whatever traps the
 /// debugger planted over it.
-fn original_instruction(image: &Image, address: u64) -> Result<iced_x86::Instruction, String> {
+pub(super) fn original_instruction(
+    image: &Image,
+    address: u64,
+) -> Result<iced_x86::Instruction, String> {
     let bytes = (0..15)
         .map_while(|offset| image.original_byte(address + offset))
         .collect::<Vec<_>>();
@@ -472,6 +478,18 @@ fn source_step(
         kind => kind,
     };
 
+    // A step into one call of a line goes into no other: a frame it stops
+    // in below its own was made by that call.
+    if let Some(into_return) = begun.into_return
+        && entered
+        && after[before.len()].return_address != into_return
+    {
+        return Err(format!(
+            "a step from {start:#x} into the call returning to {into_return:#x} entered the \
+             call returning to {:#x}, and stopped at {end:#x}",
+            after[before.len()].return_address
+        ));
+    }
     // Stepping into an inline frame hidden at the stop moves nothing.
     if kind == StepKind::IntoSource && retired == 0 && end == start {
         if begun.hidden_inline_frames > 0 {

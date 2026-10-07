@@ -172,6 +172,8 @@ or `$VISUAL` or `$EDITOR` with `+line path`.
 | `continue`, `c` | Resume every thread. |
 | `step`, `s` / `next`, `n` | Step into / over calls, by source line. |
 | `step task` | Step into the task the line starts, such as a goroutine. |
+| `step` *function* \| `*`*0xaddress* | Step into one call of the line: the first that calls *function*, or the call instruction at an address. |
+| `info calls` | List the calls of the selected thread's line that `step` can go into. |
 | `stepi`, `si` / `nexti`, `ni` | Step one instruction, into / over calls. |
 | `finish`, `fin` | Run until the selected frame returns. |
 | `advance`, `adv` *location* | Run until the selected thread reaches a location, or the selected frame returns. |
@@ -196,8 +198,26 @@ stops as the function returns, it shows what the function returned, as
 `returned (int) count = 42`, read where the function's calling convention
 leaves each result, so an optimized function's results show as well; `print`
 lists them with the frame's variables until the program runs again. Go's
-register ABI is the convention uscope knows; a function of another language
-shows nothing returned.
+register ABI and the System V convention of C and C++ are the conventions
+uscope knows: a C or C++ value is shown named for its function, from the
+registers it was returned in, from `st0` for a `long double`, or from the
+memory whose address the function returned for a larger one. A small C++
+class's place depends on whether copying it is trivial, which Clang records
+and GCC does not, so with GCC such a value is shown as unknown for that
+reason. Rust and Zig leave their own conventions unspecified, so uscope
+shows their scalars, which they return as C does, and their aggregates as
+unknown; Zig's LLVM backend describes a function that returns a struct as
+returning nothing, so nothing is shown.
+
+`step` *function* steps into one call of a line that makes several, such as
+`step add` on `add(twice(x), inc(x))`. The line's other calls run to their
+returns, as `next` runs a call, and the step stops where the chosen
+function's source begins. A call whose function has no source is stepped
+through, as `step` would, and a line that ends before reaching the call
+ends the step as `step` does. `info calls` lists the line's calls from the
+stopped instruction on, in address order: each call's address and the
+function it calls, or `(indirect)` for a call through a pointer, which
+`step *`*0xaddress* names.
 
 In a program whose language runtime schedules tasks, such as Go's
 goroutines, a step belongs to the task it began in. It follows the task to

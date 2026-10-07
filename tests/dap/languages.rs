@@ -206,3 +206,40 @@ fn step_out_shows_what_the_function_returned() {
         finish_running(dap, thread);
     }
 }
+
+/// A C function's returned struct, from the registers System V returns
+/// it in, has members to expand.
+#[test]
+fn step_out_shows_what_a_c_function_returned() {
+    let program = "returns-c-gcc-o2";
+    let mut dap = Dap::start(program);
+    let (thread, _) = stop(
+        &mut dap,
+        program,
+        &Configuration {
+            functions: vec!["r_mixed".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    let sent = dap.send("stepOut", json!({"threadId": thread}));
+    dap.success(sent);
+    assert_eq!(dap.stopped(sent.mark).reason, "step");
+    let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 1}));
+    let variables = frame_variables(&mut dap, &trace["stackFrames"][0]);
+    let returned = &variables["returned r_mixed"];
+    let reference = returned["variablesReference"]
+        .as_i64()
+        .expect("a struct has members");
+    assert!(reference > 0, "{returned}");
+    let members = dap.request("variables", json!({"variablesReference": reference}));
+    let members = members["variables"].as_array().expect("members");
+    let value = |name: &str| {
+        members
+            .iter()
+            .find(|member| member["name"] == name)
+            .map(|member| member["value"].clone())
+    };
+    assert_eq!(value("d"), Some(json!("0.5")), "{members:?}");
+    assert_eq!(value("i"), Some(json!("42")), "{members:?}");
+    finish_running(dap, thread);
+}

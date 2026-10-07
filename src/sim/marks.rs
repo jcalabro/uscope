@@ -136,6 +136,8 @@ marks! {
     AdvanceJudged,
     /// A thread moved to where it stood, which published its stop again.
     JumpedInPlace,
+    /// A step went into one call its line listed, past the line's others.
+    SteppedIntoCall,
     /// The debugger armed a watchpoint.
     WatchAdded,
     /// The debug registers refused a watchpoint, discarding writes or with

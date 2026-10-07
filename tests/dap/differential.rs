@@ -2,8 +2,8 @@
 //!
 //! The same scripted session drives `uscope dap` and `gdb -i=dap` over the
 //! same program, and each stop must agree: its function and line, the
-//! arguments and locals it shows and their numeric values, and how many
-//! threads exist.
+//! arguments and locals it shows and their numeric values, what a step out
+//! returned, and how many threads exist.
 //! Known divergences are encoded where they arise rather than filtered.
 
 use std::collections::BTreeMap;
@@ -19,7 +19,8 @@ struct Stop {
     reason: String,
     function: String,
     line: i64,
-    /// Every argument and local, by name, with its comparable value.
+    /// Every argument and local, by name, with its comparable value, and
+    /// what a step out returned as `returned`.
     values: BTreeMap<String, String>,
     threads: usize,
 }
@@ -93,7 +94,10 @@ fn inspect(dap: &mut Dap, thread: i64, reason: &str) -> Stop {
     let scopes = dap.request("scopes", json!({"frameId": frame["id"]}));
     let mut values = BTreeMap::new();
     for scope in scopes["scopes"].as_array().into_iter().flatten() {
-        if !matches!(scope["name"].as_str(), Some("Arguments" | "Locals")) {
+        // gdb shows what a step out returned in a scope of its own, and
+        // uscope as a local named for the function.
+        let returned = scope["name"] == "Return";
+        if !returned && !matches!(scope["name"].as_str(), Some("Arguments" | "Locals")) {
             continue;
         }
         let variables = dap.request(
@@ -101,8 +105,14 @@ fn inspect(dap: &mut Dap, thread: i64, reason: &str) -> Stop {
             json!({"variablesReference": scope["variablesReference"]}),
         );
         for variable in variables["variables"].as_array().into_iter().flatten() {
+            let name = variable["name"].as_str().unwrap_or_default();
+            let name = if returned || name.starts_with("returned ") {
+                "returned"
+            } else {
+                name
+            };
             values.insert(
-                variable["name"].as_str().unwrap_or_default().to_owned(),
+                name.to_owned(),
                 comparable(variable["value"].as_str().unwrap_or_default()),
             );
         }

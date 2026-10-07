@@ -99,10 +99,11 @@ pub use protocol::{
     FramePresentation, GlobalVariableQuery, HeldChild, HeldProcess, HitComparison, HitCondition,
     InferiorState, InvalidatedWatchpoint, KernelSource, LanguageException, LanguageExceptionKind,
     LaunchOptions, LogPart, ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation,
-    ResumeScope, SignalPolicy, StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot,
-    ThreadState, TypeViews, ValueChildQuery, VariableQuery, ViewCandidate, ViewCheck,
-    ViewExplanation, WatchAccess, WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities,
-    WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions, WatchpointSpec,
+    ResumeScope, SignalPolicy, StateSnapshot, StepKind, StepTarget, StopId, StopReason,
+    ThreadSnapshot, ThreadState, TypeViews, ValueChildQuery, VariableQuery, ViewCandidate,
+    ViewCheck, ViewExplanation, WatchAccess, WatchScope, WatchTarget, Watchpoint,
+    WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions,
+    WatchpointSpec,
 };
 pub use runtime_model::TASK_NOUNS;
 pub use source_map::SourcePathMap;
@@ -1003,11 +1004,63 @@ impl DebuggerHandle {
             context,
             frame,
             kind,
+            call: None,
             scope,
             exception,
             reply,
         })
         .await
+    }
+
+    /// Starts a step into the one call of the stopped line at `call`, a
+    /// [`StepTarget`] of the innermost frame, which runs the line's other
+    /// calls to their returns. It stops as [`StepKind::IntoSource`] does:
+    /// in the called function, or, when the line ends first or the callee
+    /// has no source, where a step in would.
+    pub async fn start_step_into(
+        &self,
+        stop_id: StopId,
+        context: impl Into<ExecutionContext>,
+        call: VirtualAddress,
+        scope: ResumeScope,
+        exception: ExceptionDisposition,
+    ) -> Result<ExecutionId> {
+        let process_id = self.stopped_selection().await?.process;
+        let context = context.into();
+        self.request(|reply| Request::Step {
+            process_id,
+            stop_id,
+            context,
+            frame: StackFrameId::INNERMOST,
+            kind: StepKind::IntoSource,
+            call: Some(call),
+            scope,
+            exception,
+            reply,
+        })
+        .await
+    }
+
+    /// Steps the selected thread into the call at `call` on its line,
+    /// running every other thread too, and waits for the step's stop.
+    pub async fn step_into(&self, call: VirtualAddress) -> Result<StopReason> {
+        let selection = self.stopped_selection().await?;
+        let mut events = self.subscribe();
+        let execution = self
+            .start_step_into(
+                selection.stop,
+                selection.execution,
+                call,
+                ResumeScope::Process(selection.process),
+                ExceptionDisposition::Pass,
+            )
+            .await?;
+        self.wait_for_execution(&mut events, execution).await
+    }
+
+    /// The calls a step into the selected thread's line could go into.
+    pub async fn step_targets(&self) -> Result<Arc<[StepTarget]>> {
+        self.selected().await?.step_targets().await
     }
 
     /// Steps the selected thread, running every other thread too, and waits
@@ -1824,6 +1877,25 @@ impl StopView<'_> {
                 stop_id: context.stop,
                 context: context.execution,
                 frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// The calls of the line the frame's thread is stopped at that a step
+    /// into could go into, in address order. Only the innermost frame has
+    /// any.
+    pub async fn step_targets(&self) -> Result<Arc<[StepTarget]>> {
+        let context = self.context;
+        if context.frame != StackFrameId::INNERMOST {
+            return Err(Error::FrameStepUnsupported(
+                "only the innermost frame's line can be stepped into".into(),
+            ));
+        }
+        self.handle
+            .request(|reply| Request::StepTargets {
+                stop_id: context.stop,
+                context: context.execution,
                 reply,
             })
             .await

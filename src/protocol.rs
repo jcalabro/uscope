@@ -1162,6 +1162,19 @@ pub enum ExitStatus {
     Terminated(ExceptionInfo),
 }
 
+/// A call on the line a thread is stopped at, which a step into can go
+/// into while running the line's other calls to their returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepTarget {
+    /// The call instruction, which names the target to a step.
+    pub call: VirtualAddress,
+    /// The address a direct call calls; `None` for an indirect call.
+    pub target: Option<VirtualAddress>,
+    /// The called function's name, from its debug information or else
+    /// its symbol, when something names it.
+    pub callee: Option<Arc<str>>,
+}
+
 /// Describes why execution stopped or completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
@@ -1577,6 +1590,10 @@ pub enum Request {
         /// steps the innermost frame and requires it.
         frame: StackFrameId,
         kind: StepKind,
+        /// For [`StepKind::IntoSource`], the one call of the line, a
+        /// [`StepTarget`], to go into; the line's other calls run to their
+        /// returns.
+        call: Option<VirtualAddress>,
         /// The threads that run while the step does: every thread, or only
         /// the stepping one.
         scope: ResumeScope,
@@ -1677,6 +1694,13 @@ pub enum Request {
         context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<RegisterSnapshot>,
+    },
+    /// The calls a step into could go into from the innermost frame's
+    /// line.
+    StepTargets {
+        stop_id: StopId,
+        context: ExecutionContext,
+        reply: Reply<Arc<[StepTarget]>>,
     },
     Variables {
         query: VariableQuery,
@@ -1821,12 +1845,15 @@ impl Request {
                 context,
                 frame,
                 kind,
+                call,
                 scope,
                 exception,
                 ..
-            } => {
-                format!("step {kind:?} {stop_id:?} {context:?} {frame:?} {scope:?} {exception:?}")
-            }
+            } => format!(
+                "step {kind:?}{} {stop_id:?} {context:?} {frame:?} {scope:?} {exception:?}",
+                call.map(|call| format!(" into the call at {call}"))
+                    .unwrap_or_default()
+            ),
             Self::Advance {
                 stop_id,
                 context,
@@ -1888,6 +1915,7 @@ impl Request {
             Self::StoppedSelection { .. } => "stopped selection".to_owned(),
             Self::Backtrace { .. } => "backtrace".to_owned(),
             Self::Registers { .. } => "registers".to_owned(),
+            Self::StepTargets { .. } => "step targets".to_owned(),
             Self::Variables { .. } => "variables".to_owned(),
             Self::Evaluate { expression, .. } => format!("evaluate `{}`", expression.text()),
             Self::ExpressionType { expression, .. } => format!("type of `{}`", expression.text()),

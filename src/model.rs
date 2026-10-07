@@ -1596,6 +1596,10 @@ pub enum UnsupportedVariableFeature {
     /// Evaluating a DWARF expression operation uscope does not implement,
     /// such as `DW_OP_GNU_variable_value`.
     ExpressionOperation,
+    /// Finding a returned value its calling convention does not say where
+    /// to find, as for an aggregate in a language that leaves its own
+    /// unspecified.
+    ReturnPlace,
 }
 
 impl fmt::Display for UnsupportedVariableFeature {
@@ -1616,6 +1620,7 @@ impl fmt::Display for UnsupportedVariableFeature {
             Self::ExpressionOperation => "the DWARF expression operation",
             Self::RuntimeAggregateLocation => "the runtime aggregate location",
             Self::ScalarRepresentation => "the scalar representation",
+            Self::ReturnPlace => "returning this type by the function's calling convention",
         })
     }
 }

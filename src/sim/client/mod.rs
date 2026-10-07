@@ -136,6 +136,8 @@ pub enum Observation {
         presentation: Option<FramePresentation>,
         /// For an advance, the image addresses it runs to.
         targets: BTreeSet<u64>,
+        /// For a step into one call of a line, that call's instruction.
+        call: Option<u64>,
     },
     /// What the step ended with, when it ended without failing.
     StepEnded(Option<StopReason>),
@@ -599,12 +601,13 @@ impl Client {
         };
         let scope = ResumeScope::Process(process_id);
         if self.control(6) == 0 {
-            match self.control(if self.script.watching { 4 } else { 3 }) {
+            match self.control(if self.script.watching { 5 } else { 4 }) {
                 0 => {
                     self.toggle_breakpoint(breakpoints).await?;
                 }
                 1 => self.advance(breakpoints).await?,
                 2 => self.jump_in_place().await?,
+                3 => self.step_into_call().await?,
                 _ => self.toggle_watch(false).await?,
             }
             return Ok(());

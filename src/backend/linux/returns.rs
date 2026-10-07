@@ -41,10 +41,10 @@ pub(super) struct Returned {
 }
 
 impl<P: InspectionOps> Controller<P> {
-    /// What the function a step out finished returned, when the step stops
-    /// `pid` the instant its call returned: at its return address, with
-    /// its activation's stack just popped. A stop anywhere else, as where a
-    /// loop's body finished or a panic unwound, returned nothing to show.
+    /// What the function a step out finished returned, which the step read
+    /// as `pid` returned from its call, or reads now. A step that stopped
+    /// without its call returning, as where a loop's body finished or a
+    /// panic unwound, returned nothing to show.
     pub(super) fn capture_returned(&self, pid: Pid, reason: &StopReason) -> Option<Returned> {
         if *reason
             != (StopReason::Step {
@@ -57,7 +57,48 @@ impl<P: InspectionOps> Controller<P> {
         let ActiveKind::Step { start, .. } = &inferior.active.as_ref()?.kind else {
             return None;
         };
-        let returning = start.returning?;
+        start
+            .returned
+            .clone()
+            .or_else(|| self.read_returned(pid, start.returning?))
+    }
+
+    /// Reads what a step out's function returned when its call has just
+    /// returned to `pid`, which the step may then go on from, through code
+    /// no line describes, to where it stops.
+    pub(super) fn note_returned_values(&mut self, pid: Pid) {
+        let Some(returning) = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match &active.kind {
+                ActiveKind::Step {
+                    owner,
+                    kind: StepKind::Out,
+                    start,
+                    ..
+                } if self.runs_step(*owner, pid) && start.returned.is_none() => start.returning,
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let returned = self.read_returned(pid, returning);
+        if let Some(ActiveKind::Step { start, .. }) = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.active.as_mut())
+            .map(|active| &mut active.kind)
+        {
+            start.returned = returned;
+        }
+    }
+
+    /// What a function returned, when `pid` is the instant its call
+    /// returned: at its return address, with its activation's stack just
+    /// popped.
+    fn read_returned(&self, pid: Pid, returning: Returning) -> Option<Returned> {
+        let inferior = self.inferior.as_ref()?;
         let registers = self.ptrace.registers(pid).ok()?;
         if VirtualAddress::new(registers.rip) != returning.return_address
             || !returning

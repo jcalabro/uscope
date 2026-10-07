@@ -24,8 +24,9 @@ export interface TabState {
   flash: { text: string; at: number } | null;
   /** Files opened in this tab, most recent last. */
   files: string[];
-  /** The palette, open at everything, at files, or at a line. */
-  palette: "all" | "files" | "line" | null;
+  /** The palette, open at everything, at files, at a line, or at the calls
+   * of the shown thread's line to step into. */
+  palette: "all" | "files" | "line" | "calls" | null;
   /** Whether the key help is open. */
   help: boolean;
 }

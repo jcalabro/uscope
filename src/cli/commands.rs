@@ -196,7 +196,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Info,
         "info",
         [],
-        "info breakpoints|watchpoints|signals|modules|core|symbol|view [argument...]",
+        "info breakpoints|watchpoints|signals|modules|calls|core|symbol|view [argument...]",
         "Show debugger information, the loaded modules and where their debug information came from, the symbol and section containing an address, or which view presents an expression's value and why"
     ),
     command!(
@@ -375,8 +375,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Step,
         "step",
         ["s"],
-        "step [task]",
-        "Step into at source level, or with `task` into the task the line starts",
+        "step [task|function|*address]",
+        "Step into at source level; with `task` into the task the line starts, or with a function or a call's address into that call of the line",
         repeatable
     ),
     command!(
@@ -686,7 +686,7 @@ impl Cli {
             Command::Step => match first {
                 None => self.step(StepKind::IntoSource).await?,
                 Some(noun) if names_a_task(noun) => self.step(StepKind::IntoNewTask).await?,
-                Some(_) => return Err(spec.usage_error()),
+                Some(call) => self.step_into_call(call).await?,
             },
             Command::Next => self.step(StepKind::OverSource).await?,
             Command::Finish => self.step(StepKind::Out).await?,
@@ -763,6 +763,7 @@ impl Cli {
             ),
             ("signals" | "handle", None) => self.list_signals().await?,
             ("modules" | "sharedlibrary" | "shared", None) => self.list_modules().await?,
+            ("calls", None) => format::step_targets(&debugger.step_targets().await?, renderer),
             ("view", Some(_)) => {
                 let text = rest.trim_start()["view".len()..].trim();
                 self.explain_view(text).await?
@@ -1625,6 +1626,34 @@ impl Cli {
             }
         }
         Ok(output)
+    }
+
+    /// Steps into the call of the line that `call` names: by its callee's
+    /// name, the first such call, or by its address after `*`.
+    async fn step_into_call(&self, call: &str) -> Result<String> {
+        let targets = self.debugger.step_targets().await?;
+        let target = if let Some(address) = call.strip_prefix('*') {
+            let address = parse_address(address)?;
+            targets
+                .iter()
+                .find(|target| target.call == address)
+                .ok_or_else(|| {
+                    anyhow!("no call on this line is at {address}; `info calls` lists them")
+                })?
+        } else {
+            targets
+                .iter()
+                .find(|target| {
+                    target.callee.as_deref().is_some_and(|callee| {
+                        callee == call || callee.rsplit("::").next() == Some(call)
+                    })
+                })
+                .ok_or_else(|| {
+                    anyhow!("no call on this line calls {call}; `info calls` lists them")
+                })?
+        };
+        self.execute_until_stop(self.debugger.step_into(target.call))
+            .await
     }
 
     /// Waits for an execution request, prefixing its stop with a line for

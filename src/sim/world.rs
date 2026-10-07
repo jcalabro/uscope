@@ -138,6 +138,10 @@ pub enum Sabotage {
     /// SIGCONT is reported sent by no process, so a session cannot tell the
     /// one it sent to end a held child's stop from the program's own.
     MisattributeContinues,
+    /// Ptrace reads of a call instruction the thread the client steps has
+    /// come to report its first byte as a no-op, so the debugger cannot
+    /// tell the thread is about to call.
+    HideSteppedCalls,
 }
 
 impl Default for Settings {
@@ -824,7 +828,8 @@ impl<'a> World<'a> {
                     kind,
                     presentation,
                     targets,
-                } => self.begin_step(thread, kind, presentation.as_ref(), &targets),
+                    call,
+                } => self.begin_step(thread, kind, presentation.as_ref(), &targets, call),
                 Observation::StepEnded(reason) => self.judge_step(reason.as_ref())?,
                 Observation::Variables {
                     stop,
@@ -1072,6 +1077,7 @@ impl<'a> World<'a> {
         kind: crate::StepKind,
         presentation: Option<&crate::FramePresentation>,
         targets: &BTreeSet<u64>,
+        call: Option<u64>,
     ) {
         let mut kernel = self.machine.kernel.borrow_mut();
         let tid = Tid::try_from(thread.get()).expect("a simulated tid fits");
@@ -1081,6 +1087,15 @@ impl<'a> World<'a> {
         let mut begun = Begun::new(stepped, kind, presentation);
         let bias = self.variant.image.bias();
         begun.targets = targets.iter().map(|address| address + bias).collect();
+        // Where the chosen call returns: the instruction after it, which a
+        // breakpoint's trap over the call does not shorten.
+        begun.into_return = call.and_then(|call| {
+            Some(
+                crate::sim::semantics::original_instruction(&self.variant.image, call)
+                    .ok()?
+                    .next_ip(),
+            )
+        });
         kernel.tracking = Some(Tracking {
             tid,
             // An advance's location may be in a callee, which it must not

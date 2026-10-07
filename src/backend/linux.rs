@@ -93,6 +93,7 @@ mod signals;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim_edge;
 mod stack_watches;
+mod step_targets;
 mod stepping;
 mod tls;
 mod vdso;
@@ -487,8 +488,12 @@ struct StepStart {
     standing: Option<VirtualAddress>,
     epilogue_traversal: Option<EpilogueTraversal>,
     return_traversal: Option<ReturnTraversal>,
-    /// Where a signal handler returns to the instruction it interrupted.
-    signal_guard: Option<SignalGuard>,
+    /// Where a signal handler returns to the instruction it interrupted,
+    /// or a call the step passes returns.
+    resume_guard: Option<ResumeGuard>,
+    /// For a step into one call of a line, that call's instruction; the
+    /// step runs the line's other calls to their returns.
+    into_call: Option<VirtualAddress>,
     /// For a step over a call instruction, the return address and the stack
     /// pointer the call returns with.
     call_return: Option<(VirtualAddress, StackPosition)>,
@@ -513,6 +518,10 @@ struct StepStart {
     /// For a step out of a function's own frame, the function, whose
     /// returned values its stop shows.
     returning: Option<returns::Returning>,
+    /// What that function returned, read the instant its call returned,
+    /// which the step's stop shows though the step goes on past code no
+    /// line describes.
+    returned: Option<returns::Returned>,
     /// For a step into a new task, how far it has followed the task's
     /// start.
     new_task: Option<new_task::NewTask>,
@@ -524,12 +533,16 @@ const fn steps_instructions(kind: StepKind) -> bool {
     matches!(kind, StepKind::Instruction | StepKind::OverInstruction)
 }
 
-/// The instruction a delivered signal interrupted during a step, and the
-/// stack pointer its handler restores on returning there.
+/// Where a step resumes once its thread returns there with this stack
+/// pointer: the instruction a delivered signal interrupted, where its
+/// handler returns, or the return address of a call a step into another
+/// call runs to its return.
 #[derive(Debug, Clone, Copy)]
-struct SignalGuard {
+struct ResumeGuard {
     address: VirtualAddress,
     stack: StackPosition,
+    /// Whether a call returns there, so the step may end where it does.
+    call: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1499,12 +1512,20 @@ impl<P: LinuxTraceOps> Controller<P> {
                 context,
                 frame,
                 kind,
+                call,
                 scope,
                 exception,
                 reply,
             } => match self.context_thread(stop_id, context) {
                 Ok(pid) => self.step(
-                    process_id, stop_id, pid, frame, kind, scope, exception, reply,
+                    process_id,
+                    stop_id,
+                    pid,
+                    frame,
+                    (kind, call),
+                    scope,
+                    exception,
+                    reply,
                 ),
                 Err(error) => {
                     let _ = reply.send(Err(error));
@@ -1678,6 +1699,16 @@ impl<P: InspectionOps> Controller<P> {
                 let _ = reply.send(
                     self.stack_root(stop_id, context)
                         .and_then(|root| self.backtrace(stop_id, &root)),
+                );
+            }
+            Request::StepTargets {
+                stop_id,
+                context,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.context_thread(stop_id, context)
+                        .and_then(|pid| self.step_targets(stop_id, pid)),
                 );
             }
             Request::Registers {

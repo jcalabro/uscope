@@ -9,6 +9,7 @@ export type Command =
   | "toggleBreakpoint"
   | "editBreakpoint"
   | "jumpToCursor"
+  | "stepIntoCall"
   | "frameUp"
   | "frameDown"
   | "copyLink"
@@ -38,6 +39,7 @@ export const LABELS: Record<Command, string> = {
   toggleBreakpoint: "Toggle breakpoint",
   editBreakpoint: "Edit breakpoint condition",
   jumpToCursor: "Jump to cursor",
+  stepIntoCall: "Step into a call…",
   frameUp: "Frame up",
   frameDown: "Frame down",
   copyLink: "Copy link",
@@ -81,6 +83,7 @@ export const BINDINGS: readonly Binding[] = [
   { key: "F10", typing: false, command: "over" },
   { key: "F11", typing: false, command: "into" },
   { key: "F11", shift: true, typing: false, command: "out" },
+  { key: "F11", ctrl: true, typing: false, command: "stepIntoCall" },
   { key: "F9", typing: false, command: "toggleBreakpoint" },
   { key: "F9", shift: true, typing: false, command: "editBreakpoint" },
   { key: "k", ctrl: true, typing: false, command: "palette" },
@@ -95,6 +98,7 @@ export const BINDINGS: readonly Binding[] = [
     ["S", "instruction", true],
     ["b", "toggleBreakpoint"],
     ["J", "jumpToCursor", true],
+    ["i", "stepIntoCall"],
     ["u", "frameUp"],
     ["d", "frameDown"],
     ["w", "watchSelection"],
