@@ -328,7 +328,9 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
         _ => 0,
     };
     match value {
-        VariableValue::Scalar(value) => uscope::scalar_text(value, is_character(type_info)),
+        VariableValue::Scalar(value) => {
+            uscope::scalar_text(value, uscope::characters_of(type_info))
+        }
         VariableValue::Enumeration { value, matches } => {
             let raw = uscope::integer_text(*value);
             match matches.as_ref() {
@@ -900,15 +902,6 @@ fn schedule_children(
     }
 }
 
-/// Whether one-byte integers of this type are characters.
-const fn is_character(type_info: &TypeInfo) -> bool {
-    matches!(
-        &type_info.kind,
-        TypeKind::Base(base) if base.byte_size == 1
-            && matches!(base.encoding, BaseTypeEncoding::SignedCharacter | BaseTypeEncoding::UnsignedCharacter)
-    )
-}
-
 /// How watched bytes are decoded.
 enum WatchedScalar {
     Integer { signed: bool },
@@ -1171,16 +1164,28 @@ mod tests {
 
     #[test]
     fn scalars_render_characters_and_special_floats() {
-        let character = |value: i128| uscope::scalar_text(&ScalarValue::Signed(value), true);
+        use uscope::Characters;
+        let character =
+            |value: i128| uscope::scalar_text(&ScalarValue::Signed(value), Characters::Bytes);
         assert_eq!(character(65), "65 'A'");
         assert_eq!(character(39), r"39 '\''");
         assert_eq!(character(92), r"92 '\\'");
         assert_eq!(character(-1), "-1");
+        // A byte above ASCII is part of a character in some encoding.
+        assert_eq!(character(233), "233");
         assert_eq!(
-            uscope::scalar_text(&ScalarValue::Unsigned(66), true),
+            uscope::scalar_text(&ScalarValue::Unsigned(66), Characters::Bytes),
             "66 'B'"
         );
-        assert_eq!(uscope::scalar_text(&ScalarValue::Unsigned(66), false), "66");
+        assert_eq!(
+            uscope::scalar_text(&ScalarValue::Unsigned(66), Characters::None),
+            "66"
+        );
+        let unicode =
+            |value: u128| uscope::scalar_text(&ScalarValue::Unsigned(value), Characters::Unicode);
+        assert_eq!(unicode(233), "233 'é'");
+        assert_eq!(unicode(10), "10");
+        assert_eq!(unicode(0xd800), "55296");
 
         let float = uscope::float_text;
         assert_eq!(
@@ -1220,7 +1225,7 @@ mod tests {
                     real: uscope::FloatValue::Binary64(1.5_f64.to_bits()),
                     imaginary: uscope::FloatValue::Binary64((-2.0_f64).to_bits()),
                 },
-                false
+                Characters::None
             ),
             "(1.5-2i)"
         );

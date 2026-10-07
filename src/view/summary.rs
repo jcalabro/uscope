@@ -9,8 +9,8 @@ use rustc_apfloat::Float as _;
 use rustc_apfloat::ieee::X87DoubleExtended;
 
 use crate::{
-    BaseTypeEncoding, FloatValue, IntegerValue, PresentedCount, PresentedShape, ScalarValue,
-    TextCompletion, TextSummary, TypeInfo, TypeKind, ValueChildren, VariableState,
+    BaseType, BaseTypeEncoding, FloatValue, IntegerValue, PresentedCount, PresentedShape,
+    ScalarValue, TextCompletion, TextSummary, TypeInfo, TypeKind, ValueChildren, VariableState,
     VariableUnavailableReason, VariableValue, VirtualAddress,
 };
 
@@ -80,21 +80,42 @@ pub fn integer(value: IntegerValue) -> String {
     }
 }
 
-/// A scalar, with the printable ASCII character a character type's value
-/// stands for.
+/// Which characters a scalar's numbers stand for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Characters {
+    /// None: the scalar is a number.
+    None,
+    /// Bytes of an encoding the type does not say, of which only ASCII
+    /// is known: C's `char`.
+    Bytes,
+    /// Unicode code points: UTF-16 and UTF-32 units, `wchar_t`, and
+    /// Rust's `char`.
+    Unicode,
+}
+
+/// A scalar, with the printable character a character type's value stands
+/// for: an ASCII one for bytes, and any but a control character for
+/// Unicode.
 #[must_use]
-pub fn scalar(value: &ScalarValue, character: bool) -> String {
-    let with_character = |number: String, code: Option<u8>| match code {
-        Some(code) if character && code.is_ascii_graphic() => {
-            format!("{number} '{}'", char::from(code).escape_default())
-        }
-        _ => number,
+pub fn scalar(value: &ScalarValue, characters: Characters) -> String {
+    let with_character = |number: String, code: Option<u32>| {
+        let shown = code
+            .and_then(char::from_u32)
+            .filter(|character| match characters {
+                Characters::None => false,
+                Characters::Bytes => character.is_ascii_graphic(),
+                Characters::Unicode => !character.is_control(),
+            });
+        shown.map_or_else(
+            || number.clone(),
+            |character| format!("{number} '{}'", character.escape_debug()),
+        )
     };
     match value {
         ScalarValue::Boolean(value) => value.to_string(),
-        ScalarValue::Signed(value) => with_character(value.to_string(), u8::try_from(*value).ok()),
+        ScalarValue::Signed(value) => with_character(value.to_string(), u32::try_from(*value).ok()),
         ScalarValue::Unsigned(value) => {
-            with_character(value.to_string(), u8::try_from(*value).ok())
+            with_character(value.to_string(), u32::try_from(*value).ok())
         }
         ScalarValue::Floating(value) => float(*value),
         ScalarValue::Complex { real, imaginary } => {
@@ -136,14 +157,24 @@ fn shortest<F: std::fmt::Display + std::fmt::LowerExp>(value: F) -> String {
     }
 }
 
-/// Whether one-byte integers of a type are characters.
+/// Which characters a type's integers stand for: a one-byte character
+/// type's are bytes, and a wider one's Unicode code points.
 #[must_use]
-pub const fn is_character(type_info: &TypeInfo) -> bool {
-    matches!(
-        &type_info.kind,
-        TypeKind::Base(base) if base.byte_size == 1
-            && matches!(base.encoding, BaseTypeEncoding::SignedCharacter | BaseTypeEncoding::UnsignedCharacter)
-    )
+pub const fn characters(type_info: &TypeInfo) -> Characters {
+    match &type_info.kind {
+        TypeKind::Base(BaseType {
+            encoding: BaseTypeEncoding::SignedCharacter | BaseTypeEncoding::UnsignedCharacter,
+            byte_size,
+            ..
+        }) => {
+            if *byte_size == 1 {
+                Characters::Bytes
+            } else {
+                Characters::Unicode
+            }
+        }
+        _ => Characters::None,
+    }
 }
 
 /// A value on one line: its presentation's summary when a view presents
@@ -170,10 +201,10 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
     if let (Some(text), false) = (text, matches!(value, VariableValue::Address(_))) {
         return quoted(text);
     }
-    let character = type_info.is_some_and(is_character);
+    let characters = type_info.map_or(Characters::None, characters);
     let partless = matches!(children, ValueChildren::Available(parts) if parts.total() == 0);
     let rendered = match value {
-        VariableValue::Scalar(value) => scalar(value, character),
+        VariableValue::Scalar(value) => scalar(value, characters),
         VariableValue::Enumeration { value, matches } => {
             symbol(*value, matches).unwrap_or_else(|| integer(*value))
         }

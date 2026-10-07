@@ -81,13 +81,30 @@ pub enum BoundPiece<St> {
     Hole(ViewProgram<St>),
 }
 
-/// Where a `text` shape's bytes are.
+/// Where a `text` shape's characters are, and how many bytes wide each
+/// is: one, or two or four for UTF-16 and UTF-32.
 #[derive(Debug, Clone)]
 pub enum TextSource<St> {
-    /// A pointer to one-byte characters.
-    Pointer(ViewProgram<St>),
-    /// An array or slice of one-byte elements, with the step to its first.
-    Elements { program: ViewProgram<St>, first: St },
+    /// A pointer to characters.
+    Pointer {
+        program: ViewProgram<St>,
+        width: usize,
+    },
+    /// An array or slice of characters, with the step to its first.
+    Elements {
+        program: ViewProgram<St>,
+        first: St,
+        width: usize,
+    },
+}
+
+impl<St> TextSource<St> {
+    /// How many bytes wide each character is.
+    pub const fn width(&self) -> usize {
+        match self {
+            Self::Pointer { width, .. } | Self::Elements { width, .. } => *width,
+        }
+    }
 }
 
 /// A generator, bound: its programs see the variables of the clauses
@@ -1250,24 +1267,37 @@ fn bind_link<S: Scope>(
     program
 }
 
-/// Whether a type's values are one byte of text: a character or a byte.
-fn is_text_unit<S: Scope>(scope: &ViewScope<'_, S>, ty: &Ty) -> bool {
+/// How many bytes wide a type's values are as text: one for a character
+/// or a byte, and two or four for a character type that wide, whose
+/// values are UTF-16 or UTF-32 units.
+fn text_unit_width<S: Scope>(scope: &ViewScope<'_, S>, ty: &Ty) -> Option<usize> {
     match ty {
-        Ty::Int(int) => int.width() == 8,
-        Ty::C(_) => is_character(scope, ty),
-        Ty::Program(reference) => matches!(
-            representation(scope, *reference),
-            Ok((_, TypeInfo {
-                kind: TypeKind::Base(base),
-                ..
-            })) if base.byte_size == 1 && !matches!(
-                base.encoding,
-                BaseTypeEncoding::Boolean
+        Ty::Int(int) => (int.width() == 8).then_some(1),
+        Ty::C(_) => is_character(scope, ty).then_some(1),
+        Ty::Program(reference) => match representation(scope, *reference) {
+            Ok((
+                _,
+                TypeInfo {
+                    kind: TypeKind::Base(base),
+                    ..
+                },
+            )) => match (base.byte_size, base.encoding) {
+                (
+                    _,
+                    BaseTypeEncoding::Boolean
                     | BaseTypeEncoding::Floating
-                    | BaseTypeEncoding::ComplexFloating
-            )
-        ),
-        _ => false,
+                    | BaseTypeEncoding::ComplexFloating,
+                ) => None,
+                (1, _) => Some(1),
+                (
+                    width @ (2 | 4),
+                    BaseTypeEncoding::SignedCharacter | BaseTypeEncoding::UnsignedCharacter,
+                ) => usize::try_from(width).ok(),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -1279,16 +1309,15 @@ fn bind_text_source<S: Scope>(
     let refuse = || Rejection {
         line: pointer.line,
         part: pointer.text().to_owned(),
-        reason: "`text` takes a pointer to one-byte characters, or an array or slice of them"
-            .to_owned(),
+        reason: "`text` takes a pointer to characters, or an array or slice of them".to_owned(),
     };
     match category(scope, program.result()) {
-        Category::Pointer(Some(target)) if is_text_unit(scope, &target) => {
-            Ok(TextSource::Pointer(program))
+        Category::Pointer(Some(target)) => {
+            let width = text_unit_width(scope, &target).ok_or_else(refuse)?;
+            Ok(TextSource::Pointer { program, width })
         }
-        Category::Array { element, .. } | Category::Slice(element)
-            if program.is_place() && is_text_unit(scope, &Ty::Program(element)) =>
-        {
+        Category::Array { element, .. } | Category::Slice(element) if program.is_place() => {
+            let width = text_unit_width(scope, &Ty::Program(element)).ok_or_else(refuse)?;
             let Ty::Program(from) = program.result() else {
                 return Err(refuse());
             };
@@ -1305,6 +1334,7 @@ fn bind_text_source<S: Scope>(
             Ok(TextSource::Elements {
                 program,
                 first: planned.step,
+                width,
             })
         }
         _ => Err(refuse()),

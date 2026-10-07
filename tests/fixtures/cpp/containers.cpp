@@ -95,6 +95,15 @@ int main() {
     std::string long_text(300, 'y');              // VIEW: long_text => "{y*256}"... (300 bytes)
     std::string with_nul("a\0b", 3);             // VIEW: with_nul => "a\u{0}b"
     std::string_view view = "a view";             // VIEW: view => "a view"
+    // Wider characters, decoded from UTF-32 and UTF-16 units; a length is
+    // in bytes.
+    std::wstring wide = L"wide \u00e9";            // VIEW: wide => "wide é"
+    std::wstring long_wide(300, L'w');            // VIEW: long_wide => "{w*256}"... (1200 bytes)
+    std::u16string short16 = u"ab";               // VIEW: short16 => "ab"
+    std::u16string sixteen = u"\u03bb sixteen \U0001F980"; // VIEW: sixteen => "λ sixteen 🦀"
+    std::u32string thirty_two = U"\U0001F980 32";  // VIEW: thirty_two => "🦀 32"
+    std::u8string eight = u8"\u00e9ight";          // VIEW: eight => "éight"
+    std::wstring_view wide_view = L"wide view";   // VIEW: wide_view => "wide view"
     std::vector<int> ints = {1, 2, 3};            // VIEW: ints => len=3 [1, 2, 3]
     std::vector<int> no_ints;                     // VIEW: no_ints => len=0 []
     std::vector<std::string> words = {"one", "two"}; // VIEW: words => len=2 ["one", "two"]
@@ -202,6 +211,8 @@ int main() {
 #endif
 
     keep(text), keep(empty_text), keep(long_text), keep(with_nul), keep(view);
+    keep(wide), keep(long_wide), keep(short16), keep(sixteen), keep(thirty_two), keep(eight);
+    keep(wide_view);
     keep(ints), keep(no_ints), keep(words), keep(many), keep(four), keep(none);
     keep(dynamic_span), keep(fixed_span), keep(past_capacity), keep(dangling), keep(ragged);
     keep(ordered), keep(named), keep(no_entries), keep(repeated_keys), keep(distinct);

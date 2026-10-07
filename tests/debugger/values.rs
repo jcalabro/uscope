@@ -2517,6 +2517,16 @@ async fn c_strings_read_up_to_their_terminator_limit_or_unreadable_memory() {
             ("null_text", None),
             ("invalid", Some(text(b"", unreadable))),
             ("bytes", Some(text(b"A\xff", Complete))),
+            // Wide text is decoded from its units: UTF-32 for `wchar_t`
+            // and `char32_t`, UTF-16 for `char16_t`.
+            ("wide", Some(text("wide é".as_bytes(), Complete))),
+            ("sixteen", Some(text("sixteen λ 🦀".as_bytes(), Complete))),
+            (
+                "thirty_two",
+                Some(text("thirty-two 🦀".as_bytes(), Complete)),
+            ),
+            ("wide_buffer", Some(text(b"buf", Complete))),
+            ("lone", Some(text("a\u{fffd}".as_bytes(), Complete))),
         ],
     )
     .await;

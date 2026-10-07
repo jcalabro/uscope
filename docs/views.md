@@ -335,9 +335,11 @@ something => unbound: line 7: `format kind`: the format writes an array of 16-bi
 ## Shapes
 
 - `text(PTR)` and `text(PTR, LEN)` are text: the characters a pointer to
-  one-byte characters points to, up to a NUL or `LEN` of them. `PTR` may
-  also be an array or slice of one-byte elements, whose length is `LEN`'s
-  default.
+  characters points to, up to a NUL or `LEN` of them. `PTR` may also be an
+  array or slice of characters, whose length is `LEN`'s default. A
+  character is a byte, or a two- or four-byte character type's unit of
+  UTF-16 or UTF-32, as `char16_t` and `wchar_t` are; a unit that is no
+  character shows as U+FFFD, and a length the summary gives is in bytes.
 - `value(EXPR)` presents the value as another value, as a box presents what
   it holds.
 - `empty("TEXT")` is a value that holds nothing, summarized as `TEXT`.
