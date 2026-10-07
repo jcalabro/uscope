@@ -583,6 +583,16 @@ pub enum Inspected {
     Unavailable,
 }
 
+/// The variable a name reaches among those a frame shows: the innermost
+/// one of that name. What a finished function returned is listed among
+/// them, but no name reaches it.
+fn named<'a>(variables: &'a [crate::Variable], name: &str) -> Option<&'a crate::Variable> {
+    variables
+        .iter()
+        .rev()
+        .find(|variable| &*variable.name == name && variable.kind != crate::VariableKind::Returned)
+}
+
 /// Variables: where a thread stands at the start of a line that carries a
 /// marker, and the debugger presents that line in its innermost frame,
 /// the variables it shows there satisfy the marker's condition. Variables
@@ -600,12 +610,7 @@ pub fn variables(
     };
     let mut values = BTreeMap::new();
     for name in marker.condition.variables() {
-        let state = snapshot
-            .variables
-            .iter()
-            .rev()
-            .find(|variable| &*variable.name == name)
-            .map(|variable| &variable.state);
+        let state = named(&snapshot.variables, name).map(|variable| &variable.state);
         match state.and_then(integer) {
             Some(value) => {
                 values.insert(name.to_owned(), value);
@@ -654,13 +659,7 @@ pub fn evaluations(
         .iter()
         .find(|frame| frame.id == snapshot.stack_frame)
         .is_some_and(|frame| frame.level == 0);
-    let shown = |name: &str| {
-        snapshot
-            .variables
-            .iter()
-            .find(|variable| &*variable.name == name)
-            .map(|variable| &variable.state)
-    };
+    let shown = |name: &str| named(&snapshot.variables, name).map(|variable| &variable.state);
     let mut marks = Vec::new();
     for evaluated in evaluations {
         let state = match &evaluated.result {
@@ -1080,6 +1079,29 @@ mod tests {
                 .collect(),
             termination,
         }
+    }
+
+    /// A name reaches the innermost variable it names, never a value a
+    /// finished function returned, which may share it.
+    #[test]
+    fn names_reach_variables_but_not_returned_values() {
+        let variable = |kind| crate::Variable {
+            kind,
+            global: None,
+            name: Arc::from("count"),
+            declaration: None,
+            type_info: None,
+            unresolved_shape: None,
+            state: VariableState::Unavailable(crate::UnsupportedVariableFeature::Tls.into()),
+        };
+        let local = variable(crate::VariableKind::Local);
+        let returned = variable(crate::VariableKind::Returned);
+        assert_eq!(
+            named(&[local.clone(), returned.clone()], "count"),
+            Some(&local)
+        );
+        assert_eq!(named(&[returned], "count"), None);
+        assert_eq!(named(&[local], "other"), None);
     }
 
     /// A backtrace shows the thread's calls innermost first. It may stop

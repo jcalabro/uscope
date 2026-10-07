@@ -12,8 +12,8 @@ use crate::sim::report::Failure;
 use crate::{
     Backtrace, BreakpointLocation, BreakpointOptions, BreakpointSpec, Error, ExecutionContext,
     Expression, FrameKind, LogMessage, PresentedFrame, ScalarValue, StackFrameId, StateSnapshot,
-    StepKind, StopContext, StopId, StopReason, ThreadState, UnwindTermination, VariableSnapshot,
-    VariableState, VariableValue, VariableValueSource, VirtualAddress,
+    StepKind, StopContext, StopId, StopReason, ThreadState, UnwindTermination, VariableKind,
+    VariableSnapshot, VariableState, VariableValue, VariableValueSource, VirtualAddress,
 };
 
 /// Assigns `$pc` in a frame, and checks it reads back as assigned.
@@ -597,11 +597,16 @@ impl Client {
                 asked.push((Purpose::Expected, expected.clone()));
             }
         }
-        // Only names shown once, which name one variable unambiguously.
-        let unique = variables.variables.iter().filter(|variable| {
+        // Only names shown once, which name one variable unambiguously. No
+        // name reaches what a finished function returned.
+        let nameable = || {
             variables
                 .variables
                 .iter()
+                .filter(|variable| variable.kind != VariableKind::Returned)
+        };
+        let unique = nameable().filter(|variable| {
+            nameable()
                 .filter(|other| other.name == variable.name)
                 .count()
                 == 1
