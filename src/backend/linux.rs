@@ -68,6 +68,7 @@ mod debug_registers;
 mod disassembly;
 mod evaluation;
 mod frames;
+mod indirect;
 mod inspection;
 mod internal_stops;
 mod language_exceptions;
@@ -281,6 +282,9 @@ enum BreakpointOwner {
     /// The entry or a return of a language runtime's code that moves a
     /// watched task's stack.
     StackMove,
+    /// The entry of an indirect function's resolver, or the return of a
+    /// call of one, that a breakpoint on the function waits for.
+    Resolver,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -765,6 +769,7 @@ struct Inferior {
     /// The runtime functions whose entry stops for an exception.
     runtime_hooks: BTreeMap<VirtualAddress, language_exceptions::HookSite>,
     stack_moves: stack_watches::StackMoves,
+    indirect: indirect::IndirectFunctions,
     watch: WatchState,
     /// The signal the debugger sent to end the inferior, which never stops
     /// it whatever its policy.
@@ -832,6 +837,7 @@ impl Inferior {
             loader_site: None,
             runtime_hooks: BTreeMap::new(),
             stack_moves: stack_watches::StackMoves::default(),
+            indirect: indirect::IndirectFunctions::default(),
             watch: WatchState::default(),
             terminating: None,
             held: None,

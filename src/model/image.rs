@@ -13,12 +13,12 @@ pub use locations::PackageInfo;
 
 use super::{
     AddressRange, BreakpointEntry, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole,
-    EntryProvenance, FunctionId, FunctionInfo, GlobalVariableId, GlobalVariableInfo, ImageAddress,
-    ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup, LineEntry, LineNumber,
-    ModuleImageId, SectionId, SectionInfo, SectionLocation, SourceFile, SourceFileId,
-    SourceLanguage, SourceLocation, StatementRow, SymbolExtentProvenance, SymbolId, SymbolInfo,
-    SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TypeInfo, TypeNode,
-    TypeReference,
+    EntryProvenance, FunctionId, FunctionInfo, GlobalVariableId, GlobalVariableInfo, GotSlot,
+    ImageAddress, ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup,
+    LineEntry, LineNumber, ModuleImageId, SectionId, SectionInfo, SectionLocation, SourceFile,
+    SourceFileId, SourceLanguage, SourceLocation, StatementRow, SymbolExtentProvenance, SymbolId,
+    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TypeInfo,
+    TypeNode, TypeReference,
 };
 
 #[derive(Default)]
@@ -27,6 +27,8 @@ pub struct ModuleMetadata {
     pub code_instances: Vec<CodeInstanceInfo>,
     pub symbols: Vec<SymbolInfo>,
     pub symbol_sources: SymbolTableSources,
+    /// The GOT slots the loader fills with functions' addresses.
+    pub got_slots: Vec<GotSlot>,
     pub globals: Vec<GlobalVariableInfo>,
     pub types: Arc<[TypeNode]>,
     pub source_files: Vec<SourceFile>,
@@ -309,6 +311,7 @@ pub struct ModuleImage {
     code_instances: Arc<[CodeInstanceInfo]>,
     symbols: Arc<[SymbolInfo]>,
     symbol_sources: SymbolTableSources,
+    got_slots: Arc<[GotSlot]>,
     sections: Arc<[SectionInfo]>,
     thread_local_storage: bool,
     globals: Arc<[GlobalVariableInfo]>,
@@ -483,6 +486,7 @@ impl ModuleImage {
             code_instances: metadata.code_instances.into(),
             symbols: metadata.symbols.into(),
             symbol_sources: metadata.symbol_sources,
+            got_slots: metadata.got_slots.into(),
             sections: metadata.sections.into(),
             thread_local_storage: metadata.thread_local_storage,
             globals: metadata.globals.into(),
@@ -1105,6 +1109,29 @@ impl ModuleImage {
             .into_iter()
             .flat_map(|symbols| symbols.iter())
             .filter_map(|symbol| self.symbol(*symbol))
+    }
+
+    /// Every symbol that answers to a name as [`SymbolInfo::answers_to`]
+    /// reads it.
+    pub fn symbols_answering<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a SymbolInfo> {
+        self.symbols
+            .iter()
+            .filter(move |symbol| symbol.answers_to(name))
+    }
+
+    /// The GOT slots the loader fills with functions' addresses.
+    #[must_use]
+    pub fn got_slots(&self) -> &[GotSlot] {
+        &self.got_slots
+    }
+
+    /// Whether the module imports a function of the name from another, so
+    /// that a module with its code is yet to load.
+    #[must_use]
+    pub fn imports_function(&self, name: &str) -> bool {
+        self.got_slots.iter().any(
+            |slot| matches!(&slot.target, crate::GotTarget::Import(import) if &**import == name || crate::demangle::spells(import, name)),
+        )
     }
 
     /// Finds the single linker symbol with the supplied name.

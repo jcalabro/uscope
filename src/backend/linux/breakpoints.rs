@@ -115,6 +115,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         if let Some(existing) = self.breakpoints.identical(&spec, &options) {
             return Ok(existing.clone());
         }
+        if self.sites_live() {
+            self.learn_from_got(Some(&spec));
+        }
 
         let id = BreakpointId::new(self.next_breakpoint_id);
         let next_id = self
@@ -138,6 +141,9 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         self.next_breakpoint_id = next_id;
         self.breakpoints.push(breakpoint.clone());
+        if self.sites_live() {
+            self.sync_resolvers()?;
+        }
         self.publish_breakpoints_changed();
         Ok(breakpoint)
     }
@@ -196,6 +202,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 Err(Error::FunctionNotFound(_) | Error::SourceFileNotFound(_)) if pending => {
                     Arc::from([])
                 }
+                // A function the program imports is in a library yet to
+                // load.
+                Err(Error::FunctionNotFound(name)) if self.imports_function(&name) => Arc::from([]),
                 Err(error) => return Err(error),
             },
         };
@@ -221,6 +230,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     ) -> Result<Arc<[ResolvedBreakpointLocation]>> {
         let mut locations = Vec::new();
         let mut failure = None;
+        // Whether a module knows the spec but has no code for it yet, as
+        // one whose indirect function's resolver has yet to choose.
+        let mut known = false;
         let main = (crate::ModuleId::new(0), &*self.module_image, None);
         let libraries = self
             .modules
@@ -234,8 +246,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                 )
             });
         for (module, image, bias) in std::iter::once(main).chain(libraries) {
-            match resolve_in_image(image, spec) {
+            let chosen = |resolver| self.chosen_implementation(module, resolver);
+            match resolve_in_image(image, spec, &chosen) {
                 Ok(addresses) => {
+                    known = true;
                     for (address, code_instances) in addresses {
                         locations.push(ResolvedBreakpointLocation {
                             location: match bias {
@@ -268,10 +282,20 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
-        if locations.is_empty() {
+        if locations.is_empty() && !known {
             return Err(failure.expect("the program itself was searched"));
         }
         Ok(locations.into())
+    }
+
+    /// Whether the program or a loaded module imports a function of the
+    /// name.
+    fn imports_function(&self, name: &str) -> bool {
+        self.module_image.imports_function(name)
+            || self
+                .modules
+                .values()
+                .any(|module| module.image.imports_function(name))
     }
 
     /// A thread that reported a trap at a site steps over the trap there
@@ -309,6 +333,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             remove_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
         }
         self.breakpoints.remove(index);
+        if self.sites_live() {
+            self.sync_resolvers()?;
+        }
         self.publish_breakpoints_changed();
         Ok(breakpoint)
     }
@@ -336,6 +363,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         let mut breakpoint = current.clone();
         breakpoint.enabled = enabled;
         if enabled {
+            if self.sites_live() {
+                self.learn_from_got(Some(&breakpoint.spec));
+            }
             // A spec that resolves nowhere now is kept pending, as one
             // whose library unloaded is.
             breakpoint.locations = self
@@ -352,6 +382,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         }
         self.breakpoints[index] = breakpoint.clone();
+        if self.sites_live() {
+            self.sync_resolvers()?;
+        }
         self.publish_breakpoints_changed();
         Ok(breakpoint)
     }
@@ -430,6 +463,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         }
         let removed: Arc<[Breakpoint]> = self.breakpoints.take().into();
+        if self.sites_live() {
+            self.sync_resolvers()?;
+        }
         self.publish_breakpoints_changed();
         Ok(removed)
     }
@@ -501,7 +537,8 @@ impl<P: LinuxTraceOps> Controller<P> {
                 BreakpointOwner::Plan(_)
                 | BreakpointOwner::Loader
                 | BreakpointOwner::Runtime
-                | BreakpointOwner::StackMove => None,
+                | BreakpointOwner::StackMove
+                | BreakpointOwner::Resolver => None,
             })
             .collect::<BTreeSet<_>>();
         let mut candidates = Vec::new();
@@ -863,6 +900,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         inferior.runtime_hooks.remove(&address);
                     }
                     BreakpointOwner::StackMove => inferior.stack_moves.forget(address),
+                    BreakpointOwner::Resolver => inferior.indirect.forget(address),
                 }
             }
         }
@@ -913,6 +951,7 @@ fn memory_byte(ptrace: &impl LinuxTraceOps, pid: Pid, address: u64) -> Result<Op
 fn resolve_in_image(
     image: &crate::ModuleImage,
     spec: &BreakpointSpec,
+    chosen: &dyn Fn(crate::ImageAddress) -> Option<crate::ImageAddress>,
 ) -> Result<Vec<(crate::ImageAddress, Arc<[crate::CodeInstanceId]>)>> {
     match spec {
         BreakpointSpec::Address(_) => Ok(Vec::new()),
@@ -923,7 +962,7 @@ fn resolve_in_image(
             // module defines, has no code here.
             match image.functions_located(name, None) {
                 Ok(functions) => function_locations(image, functions),
-                Err(Error::FunctionNotFound(_)) => symbol_locations(image, name),
+                Err(Error::FunctionNotFound(_)) => symbol_locations(image, name, chosen),
                 Err(error) => Err(error),
             }
         }
@@ -990,22 +1029,32 @@ fn resolve_in_image(
 
 /// The entries of the code symbols with a name, for an image whose debug
 /// information does not describe the function, such as a system library's.
-/// An indirect function's symbol names its resolver, not the function.
+/// An indirect function's symbol names its resolver, not the function: it
+/// enters the implementation its resolver `chosen`, and nowhere until the
+/// resolver has chosen one.
 fn symbol_locations(
     image: &crate::ModuleImage,
     name: &str,
+    chosen: &dyn Fn(crate::ImageAddress) -> Option<crate::ImageAddress>,
 ) -> Result<Vec<(crate::ImageAddress, Arc<[crate::CodeInstanceId]>)>> {
-    let entries = image
-        .symbols()
-        .iter()
-        .filter(|symbol| {
-            (&*symbol.name == name || symbol.unversioned_name() == name)
-                && symbol.kind == crate::SymbolKind::Function
-                && symbol.extent.is_some()
-        })
-        .map(|symbol| symbol.address)
-        .collect::<BTreeSet<_>>();
-    if entries.is_empty() {
+    let mut entries = BTreeSet::new();
+    let mut indirect = false;
+    for symbol in image.symbols_answering(name) {
+        if symbol.extent.is_none() {
+            continue;
+        }
+        match symbol.kind {
+            crate::SymbolKind::Function => {
+                entries.insert(symbol.address);
+            }
+            crate::SymbolKind::IndirectFunction => {
+                indirect = true;
+                entries.extend(chosen(symbol.address));
+            }
+            crate::SymbolKind::Data | crate::SymbolKind::Unknown => {}
+        }
+    }
+    if entries.is_empty() && !indirect {
         return Err(Error::FunctionNotFound(name.to_owned()));
     }
     Ok(entries

@@ -302,6 +302,7 @@ fn load_debug_info(
                 code_instances: function_metadata.code_instances,
                 symbols: symbols.symbols,
                 symbol_sources: symbols.sources,
+                got_slots: symbols.got_slots,
                 globals: variables.globals,
                 types: variables.types,
                 vtables: variables.vtables,

@@ -662,6 +662,7 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
                 .collect(),
             symbols: Vec::new(),
             symbol_sources: crate::model::SymbolTableSources::default(),
+            got_slots: Vec::new(),
             globals: Vec::new(),
             types: Arc::default(),
             source_files: Vec::new(),

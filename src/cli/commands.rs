@@ -1133,7 +1133,12 @@ impl Cli {
             .and_then(|instance| image.code_instance(instance))
             .and_then(|instance| image.function(instance.function))
             .or(located.function.as_ref())
-            .map(|function| std::sync::Arc::clone(&function.name));
+            .map(|function| std::sync::Arc::clone(&function.name))
+            // Code no debug information describes is named by its symbol.
+            .or_else(|| {
+                let symbol = image.symbolize(address)?;
+                Some(format::code_name(None, Some(&symbol)).into())
+            });
         placed.source = located.source.as_ref().and_then(|source| {
             image
                 .source_file(source.file)

@@ -304,7 +304,17 @@ file that no loaded module has is answered with the nearest names, as in
 
 Addresses are always `0x`-prefixed, so `break add` names a function. Functions
 without debug information, such as libc's, break at their symbol, and
-breakpoints in a shared library wait until it loads.
+breakpoints in a shared library wait until it loads; one on a function the
+program imports waits without being asked, while a name nothing defines or
+imports is refused. C++ and Rust symbols are found by their demangled names,
+with or without the scopes and parameters that qualify them: `break scale`,
+`break shapes::scale`, and `break shapes::scale(double)` all find
+`_ZN6shapes5scaleEd`. An indirect function, such as glibc's `strlen`, stops in
+the implementation its resolver chose for the machine, as `__strlen_avx2`,
+learned from the slot the loader filled with it or by catching the resolver
+as it returns; until the resolver runs, its breakpoint waits. A location
+without debug information is described by its symbol, and `address` and
+`disassemble` look a symbol up in every loaded module.
 
 A function is first looked up by its whole name, and every function with
 that name and code gets a location, inlined copies included. Go functions
