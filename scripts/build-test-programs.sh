@@ -350,6 +350,17 @@ build_rust_fixture() {
         -C link-arg=-lc "$@"
 }
 
+# Reads the Go toolchain's version and target once.
+read_go_version() {
+    if [[ -z "$go_version" ]]; then
+        go_version=$(go version)
+        go_target=$(go env GOOS GOARCH)
+        go_target=${go_target//$'\n'//}
+    fi
+}
+
+# Builds a Go package without cgo. GO_CGO=1 enables cgo, which an external
+# link needs; GO_CC and GO_CFLAGS then choose its C compiler and flags.
 build_go_fixture() {
     local package_dir="$1"
     local output="$2"
@@ -363,14 +374,25 @@ build_go_fixture() {
         exit 1
     fi
     local -a command=(
-        env CGO_ENABLED=0 go build -buildvcs=false "$@" -o "$output" "${sources[@]}"
+        env "CGO_ENABLED=${GO_CGO:-0}" ${GO_CC:+"CC=$GO_CC"} ${GO_CFLAGS:+"CGO_CFLAGS=$GO_CFLAGS"}
+        go build -buildvcs=false "$@" -o "$output" "${sources[@]}"
     )
-    if [[ -z "$go_version" ]]; then
-        go_version=$(go version)
-        go_target=$(go env GOOS GOARCH)
-        go_target=${go_target//$'\n'//}
-    fi
+    read_go_version
     run_cached_build "$package_dir" "$output" \
+        "compiler=${go_version}"$'\n'"target=${go_target}"$'\n'"backend=gc" \
+        "${command[@]}"
+}
+
+# Builds a command from the pinned Go toolchain's own sources.
+build_go_command() {
+    local package="$1"
+    local output="$2"
+    shift 2
+    local -a command=(
+        env CGO_ENABLED=0 go build -buildvcs=false "$@" -o "$output" "$package"
+    )
+    read_go_version
+    run_cached_build "$(go env GOROOT)/src/$package" "$output" \
         "compiler=${go_version}"$'\n'"target=${go_target}"$'\n'"backend=gc" \
         "${command[@]}"
 }
@@ -555,7 +577,8 @@ require_dwarf_operation() {
 # Records a post-mortem core of a fixture with gdb's gcore. The fixture must
 # stop with the expected signal first, so a fixture that stops crashing fails
 # the build instead of silently producing a different core. FILTER becomes the
-# inferior's coredump_filter, which gcore honors like the kernel.
+# inferior's coredump_filter, which gcore honors like the kernel. gdb's log,
+# with everything the fixture printed, is kept as CORE.log.
 core_signature() {
     local signal="$1"
     local filter="$2"
@@ -638,6 +661,7 @@ generate_core() {
         exit 1
     fi
     mv "$temporary" "$core"
+    printf '%s\n' "$log" >"${core}.log"
     rebuilt_outputs["$core"]=true
     printf '%s\n' "$signature" >"${stamp}.tmp"
     mv "${stamp}.tmp" "$stamp"
@@ -666,8 +690,8 @@ suite_is_current() {
     local signature="$1"
     [[ -f "$suite_stamp" && -f "$suite_outputs" ]] || return 1
     [[ "$(<"$suite_stamp")" == "$signature" ]] || return 1
-    [[ -z "$(find "$fixtures_dir" sdk views/kernels "${BASH_SOURCE[0]}" "$frame_oracle_script" \
-        -newer "$suite_stamp" -print -quit)" ]] \
+    [[ -z "$(find "$fixtures_dir" sdk views/kernels scripts/gosym-oracle "${BASH_SOURCE[0]}" \
+        "$frame_oracle_script" -newer "$suite_stamp" -print -quit)" ]] \
         || return 1
     local output
     while IFS= read -r output; do
@@ -752,6 +776,15 @@ build_fixture gcc "$c_fixtures_dir/variables-parameters.c" "$output_dir/variable
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/variables-parameters.c" "$output_dir/variables-parameters-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/pieces.c" "$output_dir/pieces-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/pieces.c" "$output_dir/pieces-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+require_dwarf_operation "$output_dir/pieces-gcc-o2" 'DW_OP_implicit_value.*DW_OP_piece'
+require_dwarf_operation "$output_dir/pieces-gcc-o2" 'DW_OP_piece: 8; DW_OP_piece: 8'
+build_fixture clang "$c_fixtures_dir/pieces.c" "$output_dir/pieces-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+require_dwarf_operation "$output_dir/pieces-clang-o2" 'DW_OP_reg14 (r14); DW_OP_piece'
 build_fixture gcc "$c_fixtures_dir/variables-static.c" "$output_dir/variables-static-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/variables-static.c" "$output_dir/variables-static-clang-o2" \
@@ -1098,6 +1131,18 @@ build_go_fixture "$go_fixtures_dir/containers" "$output_dir/containers-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/containers" "$output_dir/containers-go-o2" \
     -buildmode=pie
+build_go_fixture "$go_fixtures_dir/names" "$output_dir/names-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/names" "$output_dir/names-go-o2" \
+    -buildmode=pie
+build_go_fixture "$go_fixtures_dir/stdlib" "$output_dir/stdlib-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/stdlib" "$output_dir/stdlib-go-o2" \
+    -buildmode=pie
+build_go_fixture "$go_fixtures_dir/values" "$output_dir/values-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/values" "$output_dir/values-go-o2" \
+    -buildmode=pie
 require_dwarf_operation "$output_dir/variables-go-o0" 'DW_AT_language.*Go'
 require_dwarf_operation "$output_dir/variables-go-o0" main.inspectScalars
 require_dwarf_operation "$output_dir/enums-go-o0" 'DW_TAG_constant'
@@ -1370,12 +1415,81 @@ build_rust_fixture "$rust_fixtures_dir/crash.rs" "$output_dir/crash-rust-nodebug
     -C opt-level=0 -C debuginfo=0 -C strip=debuginfo
 build_go_fixture "$go_fixtures_dir/preempt" "$output_dir/preempt-go" \
     -buildmode=pie
+# Tasks are read through the TLS sequence and load bias, which differ
+# between a PIE and `go build`'s default executable.
+build_go_fixture "$go_fixtures_dir/workers" "$output_dir/workers-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/workers" "$output_dir/workers-go-o2"
+# A program that corrupts one of its parked goroutines, at the addresses its
+# DWARF gives, which a position-dependent executable runs at.
+build_go_fixture "$go_fixtures_dir/corrupt" "$output_dir/corrupt-go"
+build_go_fixture "$go_fixtures_dir/scale" "$output_dir/scale-go"
+# A large real program, many packages of the standard library's.
+build_go_command cmd/gofmt "$output_dir/gofmt-go-o0" -buildmode=pie "-gcflags=all=-N -l"
+build_go_command cmd/gofmt "$output_dir/gofmt-go-o2"
+build_go_fixture "$go_fixtures_dir/stacks" "$output_dir/stacks-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/stacks" "$output_dir/stacks-go-o2"
+build_go_fixture "$go_fixtures_dir/spin" "$output_dir/spin-go-o0" \
+    "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/spin" "$output_dir/spin-go-o2"
+build_go_fixture "$go_fixtures_dir/siblings" "$output_dir/siblings-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/siblings" "$output_dir/siblings-go-o2"
+build_go_fixture "$go_fixtures_dir/watched" "$output_dir/watched-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/watched" "$output_dir/watched-go-o2"
+# Go calls C, which calls back into Go, with each C compiler.
+GO_CGO=1 GO_CC=gcc GO_CFLAGS="-g -O0" build_go_fixture "$go_fixtures_dir/cgo" \
+    "$output_dir/cgo-go-gcc" -buildmode=pie "-gcflags=all=-N -l"
+GO_CGO=1 GO_CC=clang GO_CFLAGS="-g -O2" build_go_fixture "$go_fixtures_dir/cgo" \
+    "$output_dir/cgo-go-clang"
+# An HTTP server and its client, and the same built without the paths of
+# its sources.
+build_go_fixture "$go_fixtures_dir/server" "$output_dir/server-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/server" "$output_dir/server-go-trimpath" -trimpath
+# A server to attach to.
+build_go_fixture "$go_fixtures_dir/served" "$output_dir/served-go" -buildmode=pie
+# A C program that hosts a Go library and calls into its runtime.
+GO_CGO=1 GO_CC=gcc GO_CFLAGS="-g -O0" build_go_fixture "$go_fixtures_dir/hosted" \
+    "$output_dir/libgo-hosted.so" -buildmode=c-shared "-gcflags=all=-N -l"
+build_fixture gcc "$c_fixtures_dir/go-host/main.c" "$output_dir/go-host" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie "-L$output_dir" -lgo-hosted '-Wl,-rpath,$ORIGIN'
+build_go_fixture "$go_fixtures_dir/torture" "$output_dir/torture-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/torture" "$output_dir/torture-go-o2"
+build_go_fixture "$go_fixtures_dir/growing" "$output_dir/growing-go" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/steps" "$output_dir/steps-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/steps" "$output_dir/steps-go-o2"
+build_go_fixture "$go_fixtures_dir/defers" "$output_dir/defers-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/defers" "$output_dir/defers-go-o2"
+build_go_fixture "$go_fixtures_dir/failing" "$output_dir/failing-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/failing" "$output_dir/failing-go-o2"
+build_go_fixture "$go_fixtures_dir/ranges" "$output_dir/ranges-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/ranges" "$output_dir/ranges-go-o2"
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/panic" "$output_dir/panic-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/panic" "$output_dir/panic-go-o2"
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-nodwarf" \
     -buildmode=pie "-gcflags=all=-N -l" -ldflags=-w
 build_zig_fixture "$zig_fixtures_dir/crash.zig" "$output_dir/crash-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
+# A call chain the program records itself, built as `go build` does by
+# default, stripped of DWARF and symbols, and stripped after an external link,
+# which puts Go's code after the C runtime's.
+build_go_fixture "$go_fixtures_dir/callers" "$output_dir/callers-go"
+build_go_fixture "$go_fixtures_dir/callers" "$output_dir/callers-go-stripped" \
+    -buildmode=pie "-ldflags=-s -w"
+GO_CGO=1 build_go_fixture "$go_fixtures_dir/callers" "$output_dir/callers-go-external-stripped" \
+    "-ldflags=-linkmode=external -s -w"
 build_fixture gcc "$c_fixtures_dir/vdso.c" "$output_dir/vdso-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/vdso.c" "$output_dir/vdso-gcc-o2" \
@@ -1472,6 +1586,13 @@ generate_foreign_core
 # arenas would make a full core enormous, and frame 0 needs only registers.
 generate_core "$output_dir/crash-rust-nodebug.core" 11 "$default_core_filter" \
     "$output_dir/crash-rust-nodebug" "$output_dir/crash-rust-nodebug"
+# A Go program that panics with GOTRACEBACK=crash prints every goroutine,
+# which the core's log keeps, and aborts.
+for variant in o0 o2; do
+    program="$output_dir/panic-go-${variant}"
+    generate_core "${program}.core" 6 "$default_core_filter" "$program" \
+        env GOTRACEBACK=crash "$program"
+done
 generate_core "$output_dir/crash-go-nodwarf.core" 11 "$headers_only_core_filter" \
     "$output_dir/crash-go-nodwarf" "$output_dir/crash-go-nodwarf"
 
@@ -1615,6 +1736,25 @@ for variant in "${symbols_variants[@]}"; do
         "$program $output_dir/libelf-symbols-${library}.so" "$program"
     generate_backtrace_oracle "$program" "${program}.core"
 done
+
+# Go's own reading of the function tables of images the Go linker linked,
+# which a test compares uscope's reader with.
+readonly gosym_oracle="$output_dir/gosym-oracle"
+build_go_fixture scripts/gosym-oracle "$gosym_oracle"
+generate_gosym_oracle() {
+    local program="$1"
+    local oracle="${program}.gosym"
+    rebuilt_outputs["$oracle"]=false
+    if [[ -s "$oracle" && "$oracle" -nt "$program" && "$oracle" -nt "$gosym_oracle" ]]; then
+        printf '[cached] %s\n' "$oracle"
+        return
+    fi
+    printf '[oracle] %s\n' "$oracle"
+    "$gosym_oracle" "$program" >"${oracle}.tmp"
+    mv "${oracle}.tmp" "$oracle"
+}
+generate_gosym_oracle "$output_dir/callers-go"
+generate_gosym_oracle "$output_dir/callers-go-stripped"
 
 # GNU objdump's decoding of every executable section, which differential tests
 # compare against uscope's disassembly. -z keeps the zero-filled runs objdump

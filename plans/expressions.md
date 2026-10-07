@@ -30,8 +30,13 @@ otherwise an unknown-name error. No reading is refused merely for being
 ambiguous, and such text prints as written, since parentheses one reading does
 not need may matter to another.
 
-**One spelling of null.** `nil`, `nullptr`, and `NULL` are refused with a hint,
-so a condition reads the same in every language.
+**Two spellings of null.** `null` and Go's `nil` mean the same and print as
+`null`; `nullptr` and `NULL` are refused with a hint to write `null`. A Go
+programmer writes `nil` without thinking, and refusing it only taught a
+rule; a variable named `nil`, which Go allows and nobody writes, is still
+reached in backticks. A condition still reads the same in every language,
+since both spellings mean one thing everywhere. C's `NULL` is a macro the
+debugger does not expand, and a third spelling would add nothing.
 
 **Unsupported operands are a category, not a special case.** A type the
 debugger cannot compute with (a pointer into another address space, a
@@ -49,8 +54,25 @@ the host.
 Function calls, overloaded operators, and per-language data shapes are out of
 scope. Per-language support stays at the common types (scalars, records,
 arrays, pointers, and the strings and slices the providers already read); C++
-static members, Go interface conversion, Rust enum payloads, and container
-views each wait for a need.
+static members, Go interface conversion and type assertions, `T(x)`
+conversions, and Rust enum payloads each wait for a need.
+
+**Containers are reached through their views.** `m[key]` searches the
+entries a map's view presents for the key `==` would call equal, and
+`cap(x)` reads a view's `capacity` field, so neither knows a library's
+layout. A map is never hashed, since its hash function is the program's:
+a lookup reads every entry before the one it finds, and the inspection's
+budget bounds it. A missing key is an error, never a zero value. Whether a
+pointer only stands for a container, as Go's maps and channels do, is the
+scope's answer, so the evaluator names no language.
+
+**A slice of an array is a range, and a slice of text is text.** The
+language builds no aggregates, so `a[i:j]` of an array or slice is the
+range `a[i..j]`, with its bounds checked and optional; a slice of text is
+a string, because comparing part of one is what conditions need.
+
+**`$task` is a capability of the machine**, as a register is: the debugger
+says which task a thread runs, and the evaluator knows no runtime.
 
 ## Architecture
 

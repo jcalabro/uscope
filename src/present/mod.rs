@@ -20,7 +20,7 @@ use uscope::{
     InspectionExhaustion, InspectionLimits, IntegerValue, ModuleId, ModuleImage, PresentedShape,
     ScalarValue, SourceLocation, StopContext, SymbolKind, TypeInfo, ValueChild, ValueChildQuery,
     ValueChildRelationship, ValueChildren, ValueChildrenReference, VariableKind, VariableSnapshot,
-    VariableState, VariableValue, VariableValueSource,
+    VariableState, VariableValue, VariableValueSource, VirtualAddress,
 };
 
 use crate::cli::value::summary;
@@ -106,7 +106,7 @@ pub enum Expand {
         indexed: Option<bool>,
     },
     /// What a pointer points to.
-    Pointee(DereferenceReference),
+    Pointee(Box<DereferenceReference>),
 }
 
 /// How many of a row's children are elements and how many are named.
@@ -242,14 +242,11 @@ impl Presenter<'_> {
                 } else {
                     None
                 };
-                let code = match value {
-                    VariableValue::Address(address)
-                        if self.code.function_entry(address.address.get()).is_some() =>
-                    {
-                        Some(address.address.get())
-                    }
-                    _ => None,
-                };
+                // A pointer to a function, or a function value, leads to
+                // the function's code.
+                let code = called(value)
+                    .map(VirtualAddress::get)
+                    .filter(|address| self.code.function_entry(*address).is_some());
                 // A pointer's natural memory is what it points to.
                 let memory = match (value, source) {
                     (VariableValue::Address(address), _) => Some(address.address.get()),
@@ -314,16 +311,24 @@ impl Presenter<'_> {
                 .variables
                 .iter()
                 .enumerate()
-                .filter(|(_, variable)| variable.kind == kind),
+                .filter(|(_, variable)| in_scope(kind, variable.kind)),
         ) {
-            let path = if unnamed.contains(&index) {
+            // A value a finished function returned is no variable of this
+            // frame, and no name reaches it.
+            let returned = variable.kind == VariableKind::Returned;
+            let path = if unnamed.contains(&index) || returned {
                 None
             } else {
                 Expression::name(&variable.name)
             };
+            let name = if returned {
+                format!("returned {}", variable.name)
+            } else {
+                variable.name.to_string()
+            };
             rows.push(self.listed(
                 Item {
-                    name: &variable.name,
+                    name: &name,
                     path,
                     raw: false,
                     type_info: variable.type_info.as_ref(),
@@ -362,7 +367,9 @@ impl Presenter<'_> {
         };
         let mut by_name = BTreeMap::<&str, Vec<usize>>::new();
         for (index, variable) in snapshot.variables.iter().enumerate() {
-            by_name.entry(&variable.name).or_default().push(index);
+            if variable.kind != VariableKind::Returned {
+                by_name.entry(&variable.name).or_default().push(index);
+            }
         }
         let mut unnamed = BTreeSet::new();
         for (name, indices) in by_name.into_iter().filter(|(_, indices)| indices.len() > 1) {
@@ -445,7 +452,7 @@ impl Presenter<'_> {
     pub async fn pointee(
         &self,
         context: StopContext,
-        reference: DereferenceReference,
+        reference: Box<DereferenceReference>,
         name: &str,
         path: Option<Expression>,
         window: Window,
@@ -679,6 +686,26 @@ const fn counts(
 /// Whether assigning can change a value: numbers, enumerations, and
 /// pointers in memory, or whole variables in the innermost frame's
 /// registers, when a path names them.
+/// Whether a scope of variables of one kind lists a variable: the
+/// arguments scope lists results too, as part of the signature, and the
+/// locals scope what a finished function returned.
+pub fn in_scope(scope: VariableKind, kind: VariableKind) -> bool {
+    kind == scope
+        || (scope == VariableKind::Parameter && kind == VariableKind::Result)
+        || (scope == VariableKind::Local && kind == VariableKind::Returned)
+}
+
+/// The address a pointer or function value would call, if it is one.
+const fn called(value: &VariableValue) -> Option<VirtualAddress> {
+    match value {
+        VariableValue::Address(address) => Some(address.address),
+        VariableValue::Function {
+            code: Some(code), ..
+        } => Some(*code),
+        _ => None,
+    }
+}
+
 fn editable(
     source: &VariableValueSource,
     value: &VariableValue,

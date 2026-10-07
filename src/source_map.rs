@@ -39,10 +39,19 @@ impl SourcePathMap {
     /// of each matching rule, then the recorded path itself.
     #[must_use]
     pub fn candidates(&self, recorded: &Path) -> Vec<PathBuf> {
+        // A path recorded relative to `.`, as `-trimpath` builds record
+        // theirs, matches a rule with or without the leading `./`.
+        let bare = recorded.strip_prefix(".").unwrap_or(recorded);
         let mut candidates = self
             .rules
             .iter()
-            .filter_map(|(from, to)| Some(to.join(recorded.strip_prefix(from).ok()?)))
+            .filter_map(|(from, to)| {
+                let rest = recorded
+                    .strip_prefix(from)
+                    .or_else(|_| bare.strip_prefix(from))
+                    .ok()?;
+                Some(to.join(rest))
+            })
             .filter(|candidate| candidate != recorded)
             .collect::<Vec<_>>();
         candidates.push(recorded.to_owned());

@@ -105,7 +105,8 @@ async fn selected_thread(scenario: &mut Scenario) -> ThreadId {
     scenario
         .snapshot()
         .await
-        .selected_thread
+        .selected
+        .and_then(uscope::ExecutionContext::as_thread)
         .expect("a stopped inferior has a selected thread")
 }
 
@@ -1649,7 +1650,7 @@ async fn watchpoints_work_across_the_rust_and_zig_matrix() {
 }
 
 #[tokio::test]
-async fn go_watchpoints_follow_goroutines_onto_new_threads_and_refuse_stack_objects() {
+async fn go_watchpoints_follow_goroutines_onto_new_threads() {
     let mut scenario = Scenario::launch("watch-go-o0");
     scenario.add_breakpoint("main.watchReady").await;
     let mut reason = scenario.run_to_stop().await;
@@ -1661,7 +1662,21 @@ async fn go_watchpoints_follow_goroutines_onto_new_threads_and_refuse_stack_obje
         "{reason:?}"
     );
     let watchpoint = watch(&scenario, "main.watchedCounter", WatchAccess::Write).await;
-    scenario.add_breakpoint("main.stackLocal").await;
+    // A Go local exists only past the line declaring it.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go/watch/main.go"),
+    )
+    .expect("read the fixture's source");
+    let declared = source
+        .lines()
+        .position(|line| line.contains("local := int64(5)"))
+        .expect("the fixture declares local");
+    scenario
+        .add_source_breakpoint(
+            "main.go",
+            u64::try_from(declared + 2).expect("lines fit u64"),
+        )
+        .await;
 
     let mut hit_count = 0;
     let mut writers = BTreeSet::new();
@@ -1683,14 +1698,6 @@ async fn go_watchpoints_follow_goroutines_onto_new_threads_and_refuse_stack_obje
     assert_eq!(hit_count, 21);
     assert!(writers.len() >= 2, "goroutines ran on several threads");
 
-    let refused = scenario
-        .handle()
-        .watch(&expression("local"), WatchAccess::Write)
-        .await;
-    assert!(
-        matches!(refused, Err(Error::WatchTargetUnsupported(_))),
-        "Go may move goroutine stacks: {refused:?}"
-    );
     scenario
         .operation("remove all", scenario.handle().remove_all_watchpoints())
         .await;
@@ -2020,7 +2027,8 @@ async fn attached_processes_arm_threads_they_create_later() {
         .snapshot()
         .await
         .expect("snapshot")
-        .selected_thread
+        .selected
+        .and_then(uscope::ExecutionContext::as_thread)
         .expect("selected thread");
     let watchpoint = handle
         .watch(&expression("attach_watched"), WatchAccess::Write)

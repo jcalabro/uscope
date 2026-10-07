@@ -27,7 +27,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_process(inferior, requested_process)?;
         validate_public_stop(inferior, Some(stop_id))?;
-        let pid = inferior.selected_thread.ok_or(Error::NotStopped)?;
+        let pid = inferior
+            .public_stop
+            .as_ref()
+            .ok_or(Error::NotStopped)?
+            .reader();
         self.write_memory_as(pid, address, bytes)
     }
 
@@ -39,8 +43,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         bytes: &[u8],
     ) -> Result<u64> {
         let length = bytes.len() as u64;
-        // Scans resumed after a write could follow links it changed.
+        // Scans resumed after a write could follow links it changed, and
+        // a task may no longer be where its runtime kept it.
         self.views.forget_scans();
+        if let Some(stop) = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.public_stop.as_ref())
+        {
+            stop.task_locators.borrow_mut().clear();
+        }
         if length > MAX_PUBLIC_MEMORY_WRITE {
             return Err(Error::MemoryWriteTooLarge {
                 requested: length,

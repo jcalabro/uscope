@@ -495,6 +495,8 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                     "{fixture}: {out_of_bounds:?}"
                 );
             } else {
+                // Optimized code keeps its pointer and length in registers,
+                // which a location in pieces assembles.
                 assert!(
                     matches!(
                         slice.state,
@@ -505,6 +507,7 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                     ),
                     "{fixture}: {slice:?}"
                 );
+                assert_slice_values(&scenario, &slice, None, &[20, 22], fixture).await;
             }
         }
         if source == "variables.zig" {
@@ -933,13 +936,10 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
         )
         .await;
         let expected = match expression {
-            "huge_array[1048576..1048578]" => matches!(
+            // A range is checked against the array's bounds as it runs.
+            "huge_array[7..3]" | "huge_array[1048576..1048578]" => matches!(
                 &result,
-                Err(Error::ValueIndexOutOfBounds {
-                    index: 1_048_577,
-                    count: 1_048_577,
-                    ..
-                })
+                Err(Error::Expression(error)) if error.kind == uscope::ExpressionErrorKind::Bounds
             ),
             "global_record[0..1]" => matches!(
                 &result,
@@ -1793,7 +1793,6 @@ async fn go_named_integer_constants_reconstruct_symbolic_values() {
                 uscope::IntegerValue::Signed(0),
                 &["main.StateZero", "main.StateAlias"][..],
             ),
-            ("unknown", uscope::IntegerValue::Signed(5), &[][..]),
         ] {
             let inspected = dereference_named(&scenario, name, 1).await;
             let uscope::VariableValue::Enumeration { value, matches } =
@@ -1811,6 +1810,13 @@ async fn go_named_integer_constants_reconstruct_symbolic_values() {
                 "{fixture} {name}: {inspected:?}"
             );
         }
+        // A value no constant names is a number, not a nameless symbol.
+        let unknown = dereference_named(&scenario, "unknown", 1).await;
+        assert_eq!(
+            available_value(&unknown.state),
+            &uscope::VariableValue::Scalar(ScalarValue::Signed(5)),
+            "{fixture}"
+        );
 
         resume_go_to_exit(&mut scenario, fixture).await;
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));

@@ -17,11 +17,13 @@ use super::breakpoints::{
     install_plan_breakpoint, remove_breakpoint_owner_from, runtime_breakpoint_address,
 };
 use super::classify::{format_raw_stop, visible_stop_priority};
+use super::loops::LoopReach;
 use super::native::{LinuxTraceOps, is_vanished_tracee};
+use super::new_task::NewTask;
 use super::{
     ActiveExecution, ActiveKind, BreakpointOwner, ClassifiedStop, Controller, ExpectedStop,
     Inferior, LinuxError, NativeThreadState, PendingSignal, PublicStop, RepairGroup, Resume,
-    SignalGuard, StopBarrier, backend_error, debug_thread_id, exception_info,
+    SignalGuard, StepOwner, StopBarrier, backend_error, debug_thread_id, exception_info,
     pending_exception_info, process_id, scoped_threads, steps_instructions, validate_process,
     validate_public_stop, validate_resumable, validate_stopped_thread,
 };
@@ -77,14 +79,27 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             Ok(None) => {}
         }
-        let result = self.step_start(pid, kind, frame).and_then(|start| {
+        let task = self.step_task(pid);
+        // A step into a new task steps over its line until a task starts.
+        let (requested, kind) = (
+            kind,
+            match kind {
+                StepKind::IntoNewTask => StepKind::OverSource,
+                kind => kind,
+            },
+        );
+        let result = self.step_start(pid, kind, frame).and_then(|mut start| {
+            if requested == StepKind::IntoNewTask {
+                start.new_task = Some(NewTask::Watching(self.task_starters()));
+            }
             self.begin_execution(
                 process_id,
                 stop_id,
                 scope,
                 ActiveKind::Step {
-                    thread: pid,
+                    owner: StepOwner { thread: pid, task },
                     kind,
+                    requested,
                     start: Box::new(start),
                     progress_owed: false,
                 },
@@ -150,13 +165,19 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|targets| {
                 let mut start = self.step_start(pid, StepKind::Out, frame)?;
                 start.targets = targets;
+                // Reaching a location stops as an advance; the frame
+                // returning first, as the step out it runs as.
                 self.begin_execution(
                     process_id,
                     stop_id,
                     scope,
                     ActiveKind::Step {
-                        thread: pid,
+                        owner: StepOwner {
+                            thread: pid,
+                            task: self.step_task(pid),
+                        },
                         kind: StepKind::Out,
+                        requested: StepKind::Out,
                         start: Box::new(start),
                         progress_owed: false,
                     },
@@ -194,9 +215,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         // A thread standing at its advance's location goes on until it
         // comes round.
         let standing = match &kind {
-            ActiveKind::Step { thread, start, .. } if !start.targets.is_empty() => {
-                let at = VirtualAddress::new(self.ptrace.registers(*thread)?.rip);
-                start.targets.contains(&at).then_some((*thread, at))
+            ActiveKind::Step { owner, start, .. } if !start.targets.is_empty() => {
+                let at = VirtualAddress::new(self.ptrace.registers(owner.thread)?.rip);
+                start.targets.contains(&at).then_some((owner.thread, at))
             }
             _ => None,
         };
@@ -205,38 +226,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let resume_threads = scoped_threads(inferior, scope)?;
         inferior.next_execution = inferior.next_execution.wrapping_add(1);
         let execution_id = ExecutionId::new(inferior.next_execution);
-        let owner = BreakpointOwner::Plan(execution_id);
-        let mut installed = Vec::new();
-        let mut failure = None;
-        if let ActiveKind::Step { start, .. } = &kind {
-            for &address in start.plan_addresses.iter().chain(&start.targets) {
-                if let Err(error) =
-                    install_plan_breakpoint(&self.ptrace, inferior, address, execution_id)
-                {
-                    failure = Some(error);
-                    break;
-                }
-                installed.push(address);
-            }
-        }
-        if let Some(error) = failure {
-            if self.lost_to_sigkill(&error) {
-                return Err(error);
-            }
-            let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-            for address in installed.into_iter().rev() {
-                if let Err(recovery) =
-                    remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)
-                {
-                    let _ = self.ptrace.kill(inferior.tgid, Signal::SIGKILL);
-                    return Err(backend_error(LinuxError::ResumeRecovery {
-                        cause: error.to_string(),
-                        recovery: recovery.to_string(),
-                    }));
-                }
-            }
-            return Err(error);
-        }
+        self.install_plan(&kind, execution_id)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         // One that trapped there steps over the trap as any other does; one
         // that has yet to execute the trap arrives there first.
@@ -284,6 +274,54 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         self.bump_revision();
         Ok(execution_id)
+    }
+
+    /// Plants a step's plan breakpoints for `execution`, removing those it
+    /// planted when one cannot be.
+    fn install_plan(&mut self, kind: &ActiveKind, execution: ExecutionId) -> Result<()> {
+        let ActiveKind::Step { start, .. } = kind else {
+            return Ok(());
+        };
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let starters = match &start.new_task {
+            Some(NewTask::Watching(starters)) => starters.keys().copied().collect(),
+            _ => Vec::new(),
+        };
+        let mut installed = Vec::new();
+        let mut failure = None;
+        for &address in start
+            .plan_addresses
+            .union(&start.panic_guards)
+            .chain(&start.targets)
+            .chain(&starters)
+        {
+            if let Err(error) = install_plan_breakpoint(&self.ptrace, inferior, address, execution)
+            {
+                failure = Some(error);
+                break;
+            }
+            installed.push(address);
+        }
+        let Some(error) = failure else {
+            return Ok(());
+        };
+        if self.lost_to_sigkill(&error) {
+            return Err(error);
+        }
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let owner = BreakpointOwner::Plan(execution);
+        for address in installed.into_iter().rev() {
+            if let Err(recovery) =
+                remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)
+            {
+                let _ = self.ptrace.kill(inferior.tgid, Signal::SIGKILL);
+                return Err(backend_error(LinuxError::ResumeRecovery {
+                    cause: error.to_string(),
+                    recovery: recovery.to_string(),
+                }));
+            }
+        }
+        Err(error)
     }
 
     pub(super) fn restore_unconsumed_signals(&mut self, suppressed: &[(Pid, PendingSignal)]) {
@@ -423,7 +461,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         match kind {
             ActiveKind::Step {
-                thread,
+                owner: StepOwner { thread, .. },
                 kind,
                 progress_owed,
                 ..
@@ -583,12 +621,22 @@ impl<P: LinuxTraceOps> Controller<P> {
         expected: ExpectedStop,
     ) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let holds = inferior.holds_signals(&expected);
         let thread = inferior.thread_mut(pid)?;
         // A pending signal is delivered only if its policy passes it.
-        let signal = deliver_signal
+        let mut signal = deliver_signal
             .then(|| thread.pending_signal.map(|pending| pending.signal))
             .flatten()
             .filter(|signal| self.signals.get(*signal).pass);
+        // A held signal arrives with the thread's next continue that holds
+        // none, unless another signal arrives then.
+        if matches!(resume, Resume::Continue) && signal.is_none() && !holds {
+            signal = thread
+                .held_signal
+                .take()
+                .map(|held| held.signal)
+                .filter(|signal| self.signals.get(*signal).pass);
+        }
         let result = match resume {
             Resume::Continue => self.ptrace.continue_execution(pid, signal),
             Resume::Step => self.ptrace.step(pid, signal),
@@ -654,6 +702,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.restart_after_internal(pid)
             }
             ClassifiedStop::Breakpoint(address) => self.handle_breakpoint_stop(pid, address),
+            // The program goes on after its own trap, which it raised for
+            // the debugger; the SIGTRAP is not delivered.
+            ClassifiedStop::ProgramTrap(address) => {
+                self.begin_visible_stop(pid, StopReason::ProgramBreakpoint { address })
+            }
             ClassifiedStop::Watch(owners) => self.handle_watch_stop(pid, owners),
             ClassifiedStop::Trace { watch } => self.handle_trace_stop(pid, watch),
             ClassifiedStop::SignalDelivery(pending) => self.handle_signal_stop(pid, pending),
@@ -704,6 +757,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if self.is_loader_site(address) {
             self.queue_module_refresh()?;
         }
+        self.note_stack_move(pid, address)?;
         let stopping = self.record_breakpoint_hits(pid, address);
         if !stopping.is_empty() {
             return self.begin_visible_stop(
@@ -714,6 +768,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 },
             );
         }
+        if let Some(reason) = self.runtime_exception(pid, address) {
+            return self.begin_visible_stop(pid, reason);
+        }
 
         // No user breakpoint stops at this hit: none owns the site, or each
         // declined it by its hit condition.
@@ -722,7 +779,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             .active
             .as_ref()
             .and_then(|active| match &active.kind {
-                ActiveKind::Step { thread, kind, .. } if *thread == pid => Some((active.id, *kind)),
+                ActiveKind::Step { owner, kind, .. } if self.runs_step(*owner, pid) => {
+                    Some((active.id, *kind))
+                }
                 _ => None,
             });
         let planned = step.filter(|(execution, _)| {
@@ -731,35 +790,38 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .get(&address)
                 .is_some_and(|site| site.owners.contains(&BreakpointOwner::Plan(*execution)))
         });
+        if step.is_some() {
+            self.follow_step(pid);
+        }
         if let Some((_, kind)) = planned {
             if self.is_advance_target(address) {
                 return self.reach_advance_target(pid, address);
             }
-            if self.reach_signal_guard(pid, address)? {
+            if self.reach_waypoint(pid, address)? {
                 return Ok(());
             }
+            match self.reach_loop(pid, address, kind)? {
+                LoopReach::Elsewhere => {}
+                LoopReach::Complete => {
+                    return self.begin_visible_stop(pid, StopReason::Step { kind });
+                }
+                LoopReach::Pass => return self.repair_when_alone(pid, address),
+                LoopReach::Restarted => {
+                    return self.go_on_without_plan(pid, address, Some(kind));
+                }
+            }
+            if self.begin_following(pid, kind)? || self.wait_for_loop(pid, kind)? {
+                // The step goes on by single steps, or by its new plan.
+                return self.go_on_without_plan(pid, address, Some(kind));
+            }
+            let mode = self.step_mode(kind);
             if !steps_instructions(kind) {
                 self.begin_epilogue_traversal(pid)?;
             }
-            self.note_returned_activation(pid, kind)?;
-            if self.source_step_returned_to_undescribed_code(pid, kind)? {
+            self.note_returned_activation(pid, mode)?;
+            if self.source_step_returned_to_undescribed_code(pid, mode)? {
                 self.let_step_run_on()?;
-                // A user breakpoint that declined this hit still owns the
-                // site, which the thread then steps over.
-                let lifted = self
-                    .inferior
-                    .as_ref()
-                    .ok_or(Error::NotRunning)?
-                    .thread(pid)?
-                    .stopped_at_breakpoint
-                    .is_none();
-                return if !lifted {
-                    self.repair_when_alone(pid, address)
-                } else if self.barrier_active() {
-                    self.finish_barrier_if_ready()
-                } else {
-                    self.continue_thread(pid)
-                };
+                return self.go_on_without_plan(pid, address, None);
             }
             if let Some(reason) = self.user_step_stop(pid, kind)? {
                 // The plan's sites, this one among them, are removed when
@@ -803,6 +865,34 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.finish_barrier_if_ready()
         } else {
             self.repair_when_alone(pid, address)
+        }
+    }
+
+    /// Goes on from a site at which a step removed its own plan: a user
+    /// breakpoint that declined this hit still owns the site, which the
+    /// thread then steps over; otherwise the thread goes on by single
+    /// steps of `stepping`, or runs.
+    pub(super) fn go_on_without_plan(
+        &mut self,
+        pid: Pid,
+        address: VirtualAddress,
+        stepping: Option<StepKind>,
+    ) -> Result<()> {
+        let lifted = self
+            .inferior
+            .as_ref()
+            .ok_or(Error::NotRunning)?
+            .thread(pid)?
+            .stopped_at_breakpoint
+            .is_none();
+        if !lifted {
+            self.repair_when_alone(pid, address)
+        } else if self.barrier_active() {
+            self.finish_barrier_if_ready()
+        } else if let Some(kind) = stepping {
+            self.start_user_step(pid, kind)
+        } else {
+            self.continue_thread(pid)
         }
     }
 
@@ -979,8 +1069,19 @@ impl<P: LinuxTraceOps> Controller<P> {
                 exception: pending_exception_info(pending),
             });
         }
-        let delivered = policy.pass.then_some(pending);
         let expected = inferior.thread(pid)?.expected.clone();
+        let mut delivered = policy.pass.then_some(pending);
+        if let Some(pending) = delivered
+            .filter(|pending| inferior.holds_signals(&expected) && self.defers(pending.signal))
+        {
+            record!("hold {} in {pid}", pending.signal);
+            self.inferior
+                .as_mut()
+                .ok_or(Error::NotRunning)?
+                .thread_mut(pid)?
+                .held_signal = Some(pending);
+            delivered = None;
+        }
         match expected {
             ExpectedStop::BreakpointRepair { address } => {
                 self.signal_during_repair(pid, address, delivered)
@@ -1100,7 +1201,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let registers = self.ptrace.registers(pid)?;
         let guard = SignalGuard {
             address: VirtualAddress::new(registers.rip),
-            stack: registers.rsp,
+            stack: self.stack_position(pid, &registers),
         };
         let execution = self.active_execution()?;
         self.install_additional_plan_breakpoints(execution, &BTreeSet::from([guard.address]))?;
@@ -1121,6 +1222,20 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    /// Handles a site of a step's plan that its task reached on the way to
+    /// where the step may end: the start of a task the step goes into, or
+    /// the return from a signal handler. Returns whether it did.
+    fn reach_waypoint(&mut self, pid: Pid, address: VirtualAddress) -> Result<bool> {
+        if self.reach_new_task(pid, address)? {
+            return Ok(true);
+        }
+        // The step's task is back on its plan, from wherever it escaped to.
+        if let Some(start) = self.active_step_mut() {
+            start.escape = None;
+        }
+        self.reach_signal_guard(pid, address)
+    }
+
     /// Recognizes the stepping thread's return from a signal handler to the
     /// instruction it interrupted, where the step resumes. Returns whether
     /// the site was the guard and has been handled.
@@ -1131,11 +1246,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.active.as_ref())
             .and_then(|active| match &active.kind {
                 ActiveKind::Step {
-                    thread,
-                    kind,
-                    start,
-                    ..
-                } if *thread == pid => start
+                    owner, kind, start, ..
+                } if self.runs_step(*owner, pid) => start
                     .signal_guard
                     .filter(|guard| guard.address == address)
                     .map(|guard| {
@@ -1151,7 +1263,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Ok(false);
         };
-        if self.ptrace.registers(pid)?.rsp != guard.stack {
+        if self.stack_position(pid, &self.ptrace.registers(pid)?) != guard.stack {
             // The handler itself ran the interrupted code. A site only the
             // guard owns is passed; a planned one is evaluated as usual.
             if planned {
@@ -1220,6 +1332,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// thread, unless a barrier is already doing so. Among coincident stops,
     /// the highest-priority reason is published.
     pub(super) fn begin_visible_stop(&mut self, pid: Pid, reason: StopReason) -> Result<()> {
+        let reason = self.requested_step_reason(reason);
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let thread = inferior.thread_mut(pid)?;
         thread.state = NativeThreadState::Stopped;
@@ -1394,8 +1507,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.barrier.as_ref())
             .and_then(|barrier| Some((barrier.triggering_thread, barrier.reason.clone()?)))
             .expect("ready barrier publishes a reason");
+        self.publish_stop(triggering_thread, reason)
+    }
+
+    /// Publishes the stop a ready barrier makes, which `triggering_thread`
+    /// made for `reason`.
+    fn publish_stop(&mut self, triggering_thread: Pid, reason: StopReason) -> Result<()> {
         let triggering_thread = self.presenting_thread(triggering_thread);
         let presentation = self.presentation_for_thread(triggering_thread, Some(&reason))?;
+        let returned = self.capture_returned(triggering_thread, &reason);
         // Last, so that a process ending while the stop forms keeps the
         // temporary breakpoints of a stop never published.
         let temporaries_removed = self.remove_stopped_temporaries()?;
@@ -1410,16 +1530,19 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.terminating = inferior
             .terminating
             .filter(|terminating| !terminating.delivered);
-        inferior.public_stop = Some(PublicStop {
-            id: stop_id,
+        let mut stop = PublicStop::new(
+            stop_id,
             triggering_thread,
-            reason: reason.clone(),
-            presentations: BTreeMap::from([(triggering_thread, presentation)]),
-            selected_frames: BTreeMap::new(),
-        });
-        inferior.selected_thread = Some(triggering_thread);
+            reason.clone(),
+            BTreeMap::from([(triggering_thread, presentation)]),
+        );
+        stop.returned = returned;
+        inferior.public_stop = Some(stop);
         let execution = inferior.active.take().map(|active| active.id);
         let process_id = process_id(inferior.tgid);
+        if matches!(reason, StopReason::LanguageException(_)) {
+            self.select_blamed_frame(triggering_thread);
+        }
         self.bump_revision();
         if self.attach_reply.is_some() {
             let _ = self.events.send(DebuggerEvent::InferiorAttached {

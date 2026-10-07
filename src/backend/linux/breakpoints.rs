@@ -12,7 +12,7 @@ use crate::protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointSpec, ConditionOwner, DebuggerEvent,
     ExecutionId, HitCondition, ResolvedBreakpointLocation, StopReason,
 };
-use crate::{BreakpointLocation, Error, Result, VirtualAddress};
+use crate::{BreakpointLocation, Error, LineNumber, Result, VirtualAddress};
 
 use super::memory::MemoryAccessError;
 use super::native::{LinuxTraceOps, is_vanished_tracee};
@@ -111,6 +111,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         spec: BreakpointSpec,
         options: crate::BreakpointOptions,
     ) -> Result<Breakpoint> {
+        let spec = self.in_stopped_scope(spec);
         if let Some(existing) = self.breakpoints.identical(&spec, &options) {
             return Ok(existing.clone());
         }
@@ -139,6 +140,43 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.breakpoints.push(breakpoint.clone());
         self.publish_breakpoints_changed();
         Ok(breakpoint)
+    }
+
+    /// Reads a function location at a stop as the source of the selected
+    /// frame's package reads it: qualified by that package, when the
+    /// package has a function of the name and nothing else in its image has
+    /// the whole name or a qualified one it spells. The breakpoint keeps
+    /// the qualified name, so it resolves the same way whatever stops later.
+    fn in_stopped_scope(&self, spec: BreakpointSpec) -> BreakpointSpec {
+        match spec {
+            BreakpointSpec::Function(name) => {
+                BreakpointSpec::Function(self.location_in_stopped_package(&name).unwrap_or(name))
+            }
+            BreakpointSpec::FileFunction { path, function } => BreakpointSpec::FileFunction {
+                function: self
+                    .location_in_stopped_package(&function)
+                    .unwrap_or(function),
+                path,
+            },
+            spec @ (BreakpointSpec::Source { .. } | BreakpointSpec::Address(_)) => spec,
+        }
+    }
+
+    fn location_in_stopped_package(&self, location: &str) -> Option<String> {
+        let inferior = self.inferior.as_ref()?;
+        let stop = inferior.public_stop.as_ref()?;
+        let root = self.stack_root(stop.id, stop.selected).ok()?;
+        let frame = self
+            .resolve_frame(inferior, &root, super::selected_frame(stop))
+            .ok()?
+            .frame?;
+        let (function, module) = (frame.function?, frame.module?);
+        let modules = self.unwind_modules(inferior);
+        let image = modules
+            .iter()
+            .find(|candidate| candidate.loaded.id == module)?
+            .image;
+        image.location_in_package(location, image.function_package(function.id)?)
     }
 
     pub(super) fn resolve_breakpoint(
@@ -460,7 +498,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             .iter()
             .filter_map(|owner| match owner {
                 BreakpointOwner::User(id) => Some(*id),
-                BreakpointOwner::Plan(_) | BreakpointOwner::Loader => None,
+                BreakpointOwner::Plan(_)
+                | BreakpointOwner::Loader
+                | BreakpointOwner::Runtime
+                | BreakpointOwner::StackMove => None,
             })
             .collect::<BTreeSet<_>>();
         let mut candidates = Vec::new();
@@ -818,6 +859,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                         }
                     }
                     BreakpointOwner::Loader => inferior.loader_site = None,
+                    BreakpointOwner::Runtime => {
+                        inferior.runtime_hooks.remove(&address);
+                    }
+                    BreakpointOwner::StackMove => inferior.stack_moves.forget(address),
                 }
             }
         }
@@ -876,32 +921,15 @@ fn resolve_in_image(
             // code: overloads and same-named static functions alike.
             // A function the image only declares, such as one another
             // module defines, has no code here.
-            let defined = image
-                .functions_named(name)
-                .filter(|function| image.instances_for_function(function.id).next().is_some())
-                .collect::<Vec<_>>();
-            if defined.is_empty() {
-                return symbol_locations(image, name);
+            match image.functions_located(name, None) {
+                Ok(functions) => function_locations(image, functions),
+                Err(Error::FunctionNotFound(_)) => symbol_locations(image, name),
+                Err(error) => Err(error),
             }
-            function_locations(image, defined)
         }
         BreakpointSpec::FileFunction { path, function } => {
             let source = image.source_file_matching(path)?;
-            let functions = image
-                .functions()
-                .iter()
-                .filter(|candidate| candidate.name.as_ref() == function)
-                .filter(|candidate| {
-                    candidate
-                        .declaration
-                        .as_ref()
-                        .is_some_and(|location| location.file == source.id)
-                })
-                .collect::<Vec<_>>();
-            if functions.is_empty() {
-                return Err(Error::FunctionNotFound(function.clone()));
-            }
-            function_locations(image, functions)
+            function_locations(image, image.functions_located(function, Some(source.id))?)
         }
         BreakpointSpec::Source { path, line } => {
             let source = image.source_file_matching(path)?;
@@ -909,9 +937,20 @@ fn resolve_in_image(
                 path: path.clone(),
                 line: line.get(),
             };
-            let line = image
-                .breakpoint_line(source.id, *line)
-                .ok_or_else(unavailable)?;
+            let Some(line) = image.breakpoint_line(source.id, *line) else {
+                if image.statement_addresses(source.id, *line).next().is_none()
+                    && image.keeps_line_breakpoints(source.id)
+                {
+                    let (before, after) = image.nearest_statement_lines(source.id, *line);
+                    return Err(Error::SourceLineWithoutStatement {
+                        path: path.clone(),
+                        line: line.get(),
+                        before: before.map(LineNumber::get),
+                        after: after.map(LineNumber::get),
+                    });
+                }
+                return Err(unavailable());
+            };
             let mut addresses = image
                 .statement_addresses(source.id, line)
                 .collect::<Vec<_>>();

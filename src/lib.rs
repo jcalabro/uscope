@@ -21,6 +21,7 @@ pub mod flight_recorder;
 mod inspection;
 pub(crate) mod model;
 mod protocol;
+mod runtime_model;
 #[cfg(any(test, feature = "sim"))]
 #[doc(hidden)]
 pub mod sim;
@@ -61,25 +62,27 @@ pub use model::{
     Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArgumentOrigin,
     ArrayDimension, Backtrace, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding,
     BreakpointEntry, BreakpointLocation, ByteOrder, CallFrameUnavailableReason, CodeInstanceId,
-    CodeInstanceInfo, CodeInstanceKind, ColumnNumber, DereferenceReference, DereferenceState,
-    DereferenceUnavailableReason, DereferencedValue, EmbeddedSymbolTable, EntryProvenance,
-    EntryValueUnavailableReason, EnumerationOrigin, Enumerator, ExecutionLocation, FloatValue,
-    FrameKind, FunctionId, FunctionInfo, GlobalVariableCandidate, GlobalVariableId,
-    GlobalVariableInfo, GlobalVariablePage, GlobalVariableReference, GlobalVariableType,
-    GlobalVariableVisibility, GoKind, GoTypeAttributes, ImageAddress, ImageAddressDescription,
-    ImageLocation, InlineChain, InlineFrameLookup, InspectedValue, InspectionCompletion,
-    InspectionExhaustion, InspectionLimit, InspectionLimits, InspectionUsage, IntegerValue,
-    LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
-    LoadedModuleSnapshot, MapKey, MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason,
-    ModuleAddress, ModuleId, ModuleImage, ModuleImageId, NamedTypeRelationship, OptimizedOutReason,
-    PointerWidth, Presentation, PresentedCount, PresentedShape, RecordKind, RecordMember,
-    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, ScalarValue, SectionId, SectionInfo, SectionLocation,
-    SourceContext, SourceFile, SourceFileId, SourceLanguage, SourceLine, SourceLocation,
-    StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolBinding, SymbolExtent,
+    CodeInstanceInfo, CodeInstanceKind, CodeRole, ColumnNumber, DereferenceReference,
+    DereferenceState, DereferenceUnavailableReason, DereferencedValue, EmbeddedSymbolTable,
+    EntryProvenance, EntryValueUnavailableReason, EnumerationOrigin, Enumerator, ExecutionContext,
+    ExecutionLocation, FloatValue, FrameKind, FunctionId, FunctionInfo, GlobalVariableCandidate,
+    GlobalVariableId, GlobalVariableInfo, GlobalVariablePage, GlobalVariableReference,
+    GlobalVariableType, GlobalVariableVisibility, GoKind, GoTypeAttributes, ImageAddress,
+    ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup, InspectedValue,
+    InspectionCompletion, InspectionExhaustion, InspectionLimit, InspectionLimits, InspectionUsage,
+    IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule,
+    LoadedModuleRecord, LoadedModuleSnapshot, MapKey, MemoryRead, MemoryReadCompletion,
+    MemoryReadUnavailableReason, ModuleAddress, ModuleId, ModuleImage, ModuleImageId,
+    NamedTypeRelationship, OptimizedOutReason, PointerWidth, Presentation, PresentedCount,
+    PresentedShape, RecordKind, RecordMember, RecordMemberLayout, ReferenceKind,
+    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, RuntimeId,
+    ScalarValue, SectionId, SectionInfo, SectionLocation, ShapeUnresolvedReason, SourceContext,
+    SourceFile, SourceFileId, SourceLanguage, SourceLine, SourceLocation, StackFrame, StackFrameId,
+    StackSegment, StatementFlags, StatementRow, SymbolBinding, SymbolExtent,
     SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources,
-    TargetDescription, TextCompletion, TextSummary, ThreadId, TlsUnavailableReason, TypeArgument,
-    TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
+    TargetDescription, TaskCursor, TaskId, TaskLocation, TaskPage, TaskSnapshot, TaskState,
+    TextCompletion, TextSummary, ThreadActivity, ThreadId, ThreadLocal, TlsUnavailableReason,
+    TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
     UnsupportedVariableFeature, UnwindTermination, ValueAccessUnavailableReason, ValueBitRange,
     ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren, ValueChildrenReference,
     Variable, VariableInvalidReason, VariableKind, VariableMalformedKind, VariableMalformedReason,
@@ -90,19 +93,20 @@ pub use model::{
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, ConditionOwner,
     CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, DebuggerEvent,
-    ExceptionDisposition, ExceptionInfo, ExecutionId, ExitStatus, FramePresentation,
-    GlobalVariableQuery, HeldChild, HeldProcess, HitComparison, HitCondition, InferiorState,
-    InvalidatedWatchpoint, KernelSource, LaunchOptions, LogPart, ModuleIdentity, PresentedFrame,
-    ProcessId, ResolvedBreakpointLocation, ResumeScope, SignalPolicy, StateSnapshot, StepKind,
-    StopId, StopReason, ThreadSnapshot, ThreadState, TypeViews, ValueChildQuery, VariableQuery,
-    ViewCandidate, ViewCheck, ViewExplanation, WatchAccess, WatchScope, WatchTarget, Watchpoint,
-    WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions,
-    WatchpointSpec,
+    ExceptionDisposition, ExceptionInfo, ExceptionStops, ExecutionId, ExitStatus,
+    FramePresentation, GlobalVariableQuery, HeldChild, HeldProcess, HitComparison, HitCondition,
+    InferiorState, InvalidatedWatchpoint, KernelSource, LanguageException, LanguageExceptionKind,
+    LaunchOptions, LogPart, ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation,
+    ResumeScope, SignalPolicy, StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot,
+    ThreadState, TypeViews, ValueChildQuery, VariableQuery, ViewCandidate, ViewCheck,
+    ViewExplanation, WatchAccess, WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities,
+    WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions, WatchpointSpec,
 };
+pub use runtime_model::TASK_NOUNS;
 pub use source_map::SourcePathMap;
 pub use view::summary::{
-    float as float_text, integer as integer_text, quoted as quoted_text, scalar as scalar_text,
-    value as value_summary,
+    float as float_text, function as function_text, integer as integer_text, quoted as quoted_text,
+    scalar as scalar_text, symbol as symbol_text, value as value_summary,
 };
 pub use view::syntax::Error as ViewFileError;
 
@@ -237,6 +241,14 @@ pub fn fuzz_debug_register_plan(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_elf_symbols(data: &[u8]) {
     debug_info::fuzz_elf_symbols(data);
+}
+
+/// Exercises Go function-table decoding on hostile bytes for the fuzz
+/// harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_gopclntab(data: &[u8]) {
+    debug_info::fuzz_gopclntab(data);
 }
 
 /// Exercises disassembly boundary and decoding invariants for the fuzz
@@ -779,6 +791,14 @@ impl DebuggerHandle {
         Ok(held)
     }
 
+    /// Changes which exceptions a language runtime reports stop the
+    /// inferior, and returns the previous choice. The change applies at
+    /// once and lasts for the whole session.
+    pub async fn set_exception_stops(&self, stops: ExceptionStops) -> Result<ExceptionStops> {
+        self.request(|reply| Request::SetExceptionStops { stops, reply })
+            .await
+    }
+
     /// Kills the inferior and waits until it is gone, keeping the session:
     /// the program can be launched again, or another process attached.
     pub async fn kill(&self) -> Result<()> {
@@ -901,7 +921,7 @@ impl DebuggerHandle {
         self.wait_for_execution(&mut events, execution).await
     }
 
-    /// Starts stepping one thread.
+    /// Starts stepping one thread or task.
     ///
     /// [`StepKind::Out`] runs until `frame` returns to its caller; every
     /// other kind steps from the innermost frame, which `frame` must be.
@@ -914,18 +934,19 @@ impl DebuggerHandle {
     pub async fn start_step(
         &self,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: impl Into<ExecutionContext>,
         frame: StackFrameId,
         kind: StepKind,
         scope: ResumeScope,
         exception: ExceptionDisposition,
     ) -> Result<ExecutionId> {
         let process_id = self.stopped_selection().await?.process;
+        let context = context.into();
 
         self.request(|reply| Request::Step {
             process_id,
             stop_id,
-            thread_id,
+            context,
             frame,
             kind,
             scope,
@@ -951,7 +972,7 @@ impl DebuggerHandle {
         let execution = self
             .start_step(
                 selection.stop,
-                selection.thread,
+                selection.execution,
                 frame,
                 kind,
                 ResumeScope::Process(selection.process),
@@ -973,7 +994,7 @@ impl DebuggerHandle {
             .request(|reply| Request::Advance {
                 process_id: selection.process,
                 stop_id: selection.stop,
-                thread_id: selection.thread,
+                context: selection.execution,
                 frame: selection.frame,
                 spec,
                 scope: ResumeScope::Process(selection.process),
@@ -1247,6 +1268,38 @@ impl DebuggerHandle {
         self.request(|reply| Request::Snapshot { reply }).await
     }
 
+    /// One page of the tasks every language runtime in the stopped process
+    /// schedules, such as Go's goroutines, beginning at `from` or at the
+    /// first. A page holds at most `limit` tasks, and says why it may be
+    /// incomplete.
+    pub async fn tasks(&self, from: Option<TaskCursor>, limit: usize) -> Result<TaskPage> {
+        self.task_page(from, limit, false).await
+    }
+
+    /// One page of the tasks that run the program's code, as
+    /// [`Self::tasks`] gives, leaving out those a runtime runs for its own
+    /// work before paging, so a page holds only the program's.
+    pub async fn program_tasks(&self, from: Option<TaskCursor>, limit: usize) -> Result<TaskPage> {
+        self.task_page(from, limit, true).await
+    }
+
+    async fn task_page(
+        &self,
+        from: Option<TaskCursor>,
+        limit: usize,
+        program_only: bool,
+    ) -> Result<TaskPage> {
+        let selection = self.stopped_selection().await?;
+        self.request(|reply| Request::Tasks {
+            stop_id: selection.stop,
+            from,
+            limit,
+            program_only,
+            reply,
+        })
+        .await
+    }
+
     /// Reconstructs the selected thread's stack frames.
     pub async fn backtrace(&self) -> Result<Backtrace> {
         self.selected().await?.backtrace().await
@@ -1420,7 +1473,10 @@ impl DebuggerHandle {
 
     /// Explicitly dereferences a pointer or reference value produced at the
     /// current stopped snapshot.
-    pub async fn dereference(&self, reference: DereferenceReference) -> Result<DereferencedValue> {
+    pub async fn dereference(
+        &self,
+        reference: Box<DereferenceReference>,
+    ) -> Result<DereferencedValue> {
         self.dereference_with_limits(reference, InspectionLimits::default())
             .await
     }
@@ -1428,7 +1484,7 @@ impl DebuggerHandle {
     /// Dereferences a value under explicit bounded resource limits.
     pub async fn dereference_with_limits(
         &self,
-        reference: DereferenceReference,
+        reference: Box<DereferenceReference>,
         limits: InspectionLimits,
     ) -> Result<DereferencedValue> {
         self.request(|reply| Request::Dereference {
@@ -1498,20 +1554,22 @@ impl DebuggerHandle {
 
         self.request(|reply| Request::SelectFrame {
             stop_id: selection.stop,
-            thread_id: selection.thread,
+            context: selection.execution,
             frame,
             reply,
         })
         .await
     }
 
-    /// Selects the stopped thread used by implicit inspection commands.
-    pub async fn select_thread(&self, thread_id: ThreadId) -> Result<()> {
+    /// Selects the stopped thread or task used by implicit inspection
+    /// commands.
+    pub async fn select_context(&self, context: impl Into<ExecutionContext>) -> Result<()> {
         let selection = self.stopped_selection().await?;
+        let context = context.into();
 
-        self.request(|reply| Request::SelectThread {
+        self.request(|reply| Request::SelectContext {
             stop_id: selection.stop,
-            thread_id,
+            context,
             reply,
         })
         .await
@@ -1527,7 +1585,7 @@ impl DebuggerHandle {
         let selection = self.stopped_selection().await?;
         Ok(self.at(StopContext {
             stop: selection.stop,
-            thread: selection.thread,
+            execution: selection.execution,
             frame: selection.frame,
         }))
     }
@@ -1601,13 +1659,13 @@ impl DebuggerHandle {
     }
 }
 
-/// Names one frame of one thread at one stop.
+/// Names one frame of one thread or task at one stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StopContext {
     /// The stop the frame belongs to.
     pub stop: StopId,
-    /// The thread whose stack holds the frame.
-    pub thread: ThreadId,
+    /// The thread or task whose stack holds the frame.
+    pub execution: ExecutionContext,
     /// The frame, numbered as [`DebuggerHandle::backtrace`] presents it.
     pub frame: StackFrameId,
 }
@@ -1631,7 +1689,7 @@ impl StopView<'_> {
         self.handle
             .request(|reply| Request::Backtrace {
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 reply,
             })
             .await
@@ -1643,7 +1701,7 @@ impl StopView<'_> {
         self.handle
             .request(|reply| Request::Registers {
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1656,7 +1714,7 @@ impl StopView<'_> {
         self.handle
             .request(|reply| Request::StoppedLocation {
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1712,7 +1770,7 @@ impl StopView<'_> {
                 query,
                 limits,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1745,7 +1803,7 @@ impl StopView<'_> {
                 mode,
                 limits,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1760,7 +1818,7 @@ impl StopView<'_> {
             .request(|reply| Request::ExplainView {
                 expression,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1776,7 +1834,7 @@ impl StopView<'_> {
             .request(|reply| Request::RecordKernels {
                 expression,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1791,7 +1849,7 @@ impl StopView<'_> {
             .request(|reply| Request::ExpressionType {
                 expression,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1824,7 +1882,7 @@ impl StopView<'_> {
             .request(|reply| Request::ResolveWatchTarget {
                 expression,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1839,7 +1897,7 @@ impl StopView<'_> {
             .request(|reply| Request::Disassemble {
                 query,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 reply,
             })
             .await
@@ -1852,6 +1910,6 @@ impl StopView<'_> {
 pub(crate) struct StoppedSelection {
     pub(crate) process: ProcessId,
     pub(crate) stop: StopId,
-    pub(crate) thread: ThreadId,
+    pub(crate) execution: ExecutionContext,
     pub(crate) frame: StackFrameId,
 }

@@ -6,9 +6,10 @@ use crate::model::numeric_id;
 
 use crate::{
     AddressDescription, Backtrace, BreakpointLocation, CodeInstanceId, DereferenceReference,
-    DereferencedValue, ExecutionLocation, GlobalVariablePage, GlobalVariableReference, LineNumber,
-    LoadedModule, LoadedModuleSnapshot, RegisterSnapshot, Result, StackFrame, StackFrameId,
-    ThreadId, ValueChildPage, ValueChildrenReference, VariableSnapshot, VirtualAddress,
+    DereferencedValue, ExecutionContext, ExecutionLocation, GlobalVariablePage,
+    GlobalVariableReference, LineNumber, LoadedModule, LoadedModuleSnapshot, RegisterSnapshot,
+    Result, StackFrame, StackFrameId, ThreadId, ValueChildPage, ValueChildrenReference,
+    VariableSnapshot, VirtualAddress,
 };
 
 /// Selects data objects to inspect in one frame of a stopped thread.
@@ -130,13 +131,16 @@ pub struct ViewExplanation {
 /// A user-facing request for a logical breakpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BreakpointSpec {
-    /// Break at every function with this name.
+    /// Break at every concrete instance of the functions a location names;
+    /// see [`crate::ModuleImage::functions_located`].
     Function(String),
     /// Break at every statement address of a source line. A line without
     /// statements moves to the next one with statements in the function
-    /// containing it; see [`crate::ModuleImage::breakpoint_line`].
+    /// containing it, except in Go, where it is refused; see
+    /// [`crate::ModuleImage::breakpoint_line`].
     Source { path: PathBuf, line: LineNumber },
-    /// Break at every concrete instance of a function declared in one source file.
+    /// Break at every concrete instance of the functions a location names
+    /// that are declared in one source file.
     FileFunction { path: PathBuf, function: String },
     /// Break at an absolute process virtual address.
     Address(VirtualAddress),
@@ -517,6 +521,16 @@ pub enum WatchScope {
         /// The activation's canonical frame address.
         activation: VirtualAddress,
     },
+    /// A local variable or parameter of one activation on a task's stack,
+    /// which the task's runtime may move elsewhere to grow or shrink it.
+    /// The watch moves with the stack, on whichever thread runs the task.
+    Task {
+        /// The task whose stack holds the activation.
+        task: crate::TaskId,
+        /// How far below the top of the task's stack the activation's
+        /// canonical frame address is, which a move keeps.
+        activation: u64,
+    },
 }
 
 /// Debugger-internal evidence used to decide whether a frame-scoped object
@@ -687,6 +701,9 @@ pub enum WatchpointInvalidation {
     OwnerThreadExited,
     /// The module owning the object was unloaded.
     ModuleUnloaded,
+    /// The language runtime moved the stack holding the object somewhere
+    /// the debugger could not follow.
+    StackMoved,
 }
 
 /// A watchpoint that was removed because its storage's lifetime ended.
@@ -915,6 +932,11 @@ pub enum StepKind {
     /// frame returns first, which ends it as [`StepKind::Out`] does. It is
     /// requested with [`Request::Advance`], never as a plain step.
     Advance,
+    /// Advance as [`StepKind::OverSource`] does, unless the stepping task
+    /// starts another task before the line completes: then stop where the
+    /// first such task begins its function, in that task, which the step
+    /// then belongs to.
+    IntoNewTask,
 }
 
 /// Selects what happens to an exception pending on a stopped thread.
@@ -1020,6 +1042,67 @@ impl Drop for HeldChild {
     }
 }
 
+/// Which exceptions a language runtime reports stop the inferior. By
+/// default one nothing handled and a fatal error stop, and one the program
+/// may yet handle does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExceptionStops {
+    /// Every exception as it is raised, such as each Go panic, whether or
+    /// not the program then recovers from it.
+    pub raised: bool,
+    /// An exception nothing handled, such as a Go panic no deferred call
+    /// recovered, as it ends the program.
+    pub unhandled: bool,
+    /// A fatal error the runtime ends the program with, such as Go's
+    /// report that every goroutine is asleep.
+    pub fatal: bool,
+}
+
+impl Default for ExceptionStops {
+    fn default() -> Self {
+        Self {
+            raised: false,
+            unhandled: true,
+            fatal: true,
+        }
+    }
+}
+
+impl ExceptionStops {
+    /// Whether an exception of `kind` stops.
+    #[must_use]
+    pub const fn stops(self, kind: LanguageExceptionKind) -> bool {
+        match kind {
+            LanguageExceptionKind::Raised => self.raised,
+            LanguageExceptionKind::Unhandled => self.unhandled,
+            LanguageExceptionKind::Fatal => self.fatal,
+        }
+    }
+}
+
+/// What a language runtime reports about an exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LanguageExceptionKind {
+    /// An exception as it is raised, which the program may yet handle.
+    Raised,
+    /// An exception nothing handled, which ends the program.
+    Unhandled,
+    /// A fatal error, which ends the program.
+    Fatal,
+}
+
+/// An exception a language runtime reported, such as a Go panic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageException {
+    pub kind: LanguageExceptionKind,
+    /// The runtime's own message, as it prints it or would, with any
+    /// exceptions before this one that it prints too.
+    pub message: Arc<str>,
+    /// An expression for the exception's value, which a client may
+    /// evaluate at the stop, when the runtime keeps one.
+    pub value: Option<Arc<str>>,
+}
+
 /// Platform-neutral information about an exception that stopped an inferior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExceptionInfo {
@@ -1100,6 +1183,15 @@ pub enum StopReason {
     Pause,
     /// Execution stopped because of an exception.
     Exception(ExceptionInfo),
+    /// A language runtime reported an exception: one its program raised, or
+    /// a fatal error. The frame the runtime blames is selected.
+    LanguageException(LanguageException),
+    /// The program executed a breakpoint instruction of its own, such as
+    /// Go's `runtime.Breakpoint`. It resumes after the instruction.
+    ProgramBreakpoint {
+        /// The breakpoint instruction.
+        address: VirtualAddress,
+    },
     /// The process replaced its executable image.
     Exec {
         /// Whether the new image is this debugger's executable, which is
@@ -1153,6 +1245,10 @@ pub struct ThreadSnapshot {
     /// `pthread_setname_np`, as of its start or the last stop. Core dumps
     /// record no thread names.
     pub name: Option<Arc<str>>,
+    /// What a stopped thread runs for a language runtime, such as Go's
+    /// goroutine; `None` for a running thread, or a program with no runtime
+    /// a model knows.
+    pub activity: Option<crate::ThreadActivity>,
 }
 
 /// The externally observable state of the inferior.
@@ -1189,8 +1285,8 @@ pub struct StateSnapshot {
     pub inferior: InferiorState,
     /// The current stopped snapshot, when the inferior is stopped.
     pub stop_id: Option<StopId>,
-    /// The thread selected for implicit inspection commands.
-    pub selected_thread: Option<ThreadId>,
+    /// The thread or task selected for implicit inspection commands.
+    pub selected: Option<ExecutionContext>,
     /// The selected thread's frame that implicit inspection commands use:
     /// the innermost frame at each new stop, until a client selects another.
     pub selected_frame: Option<StackFrameId>,
@@ -1383,7 +1479,7 @@ pub enum Request {
     ResolveWatchTarget {
         expression: crate::Expression,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<WatchTarget>,
     },
@@ -1442,7 +1538,7 @@ pub enum Request {
     Step {
         process_id: ProcessId,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         /// The frame whose return ends [`StepKind::Out`]; every other kind
         /// steps the innermost frame and requires it.
         frame: StackFrameId,
@@ -1458,7 +1554,7 @@ pub enum Request {
     Advance {
         process_id: ProcessId,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         spec: BreakpointSpec,
         scope: ResumeScope,
@@ -1496,7 +1592,7 @@ pub enum Request {
     Disassemble {
         query: crate::DisassemblyQuery,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         reply: Reply<crate::Disassembly>,
     },
     DescribeAddress {
@@ -1506,12 +1602,21 @@ pub enum Request {
     },
     StoppedLocation {
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<ExecutionLocation>,
     },
     Snapshot {
         reply: Reply<StateSnapshot>,
+    },
+    /// One page of the tasks of every language runtime at a stop.
+    Tasks {
+        stop_id: StopId,
+        from: Option<crate::TaskCursor>,
+        limit: usize,
+        /// Whether to leave out the tasks runtimes run for their own work.
+        program_only: bool,
+        reply: Reply<crate::TaskPage>,
     },
     /// The stop, thread, and frame that implicit inspection uses, without
     /// copying the rest of a snapshot.
@@ -1520,12 +1625,12 @@ pub enum Request {
     },
     Backtrace {
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         reply: Reply<Backtrace>,
     },
     Registers {
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<RegisterSnapshot>,
     },
@@ -1533,7 +1638,7 @@ pub enum Request {
         query: VariableQuery,
         limits: crate::InspectionLimits,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<VariableSnapshot>,
     },
@@ -1542,19 +1647,19 @@ pub enum Request {
         mode: crate::EvaluationMode,
         limits: crate::InspectionLimits,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<crate::Evaluation>,
     },
     ExpressionType {
         expression: crate::Expression,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<crate::TypeInfo>,
     },
     Dereference {
-        reference: DereferenceReference,
+        reference: Box<DereferenceReference>,
         limits: crate::InspectionLimits,
         reply: Reply<DereferencedValue>,
     },
@@ -1581,7 +1686,7 @@ pub enum Request {
     ExplainView {
         expression: crate::Expression,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<ViewExplanation>,
     },
@@ -1590,7 +1695,7 @@ pub enum Request {
     RecordKernels {
         expression: crate::Expression,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<Vec<String>>,
     },
@@ -1604,14 +1709,14 @@ pub enum Request {
     CheckViews {
         reply: Reply<ViewCheck>,
     },
-    SelectThread {
+    SelectContext {
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         reply: Reply<()>,
     },
     SelectFrame {
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<StackFrame>,
     },
@@ -1635,6 +1740,10 @@ pub enum Request {
     HoldForks {
         children: tokio::sync::mpsc::UnboundedSender<HeldChild>,
         reply: Reply<()>,
+    },
+    SetExceptionStops {
+        stops: ExceptionStops,
+        reply: Reply<ExceptionStops>,
     },
     Shutdown {
         reply: Reply<()>,
@@ -1665,25 +1774,25 @@ impl Request {
             } => format!("continue {stop_id:?} {scope:?} {exception:?}"),
             Self::Step {
                 stop_id,
-                thread_id,
+                context,
                 frame,
                 kind,
                 scope,
                 exception,
                 ..
             } => {
-                format!("step {kind:?} {stop_id:?} {thread_id:?} {frame:?} {scope:?} {exception:?}")
+                format!("step {kind:?} {stop_id:?} {context:?} {frame:?} {scope:?} {exception:?}")
             }
             Self::Advance {
                 stop_id,
-                thread_id,
+                context,
                 frame,
                 spec,
                 scope,
                 exception,
                 ..
             } => format!(
-                "advance to {spec:?} {stop_id:?} {thread_id:?} {frame:?} {scope:?} {exception:?}"
+                "advance to {spec:?} {stop_id:?} {context:?} {frame:?} {scope:?} {exception:?}"
             ),
             Self::Pause { process_id, .. } => format!("pause {process_id}"),
             Self::AddBreakpoint { spec, .. } => format!("add breakpoint {spec:?}"),
@@ -1713,6 +1822,7 @@ impl Request {
                 format!("set signal policy {signal} {policy:?}")
             }
             Self::HoldForks { .. } => "hold forks".to_owned(),
+            Self::SetExceptionStops { stops, .. } => format!("set exception stops {stops:?}"),
             Self::RemoveAllBreakpoints { .. } => "remove all breakpoints".to_owned(),
             Self::ResolveWatchTarget { .. } => "resolve watch target".to_owned(),
             Self::RemoveAllWatchpoints { .. } => "remove all watchpoints".to_owned(),
@@ -1724,6 +1834,7 @@ impl Request {
             Self::DescribeAddress { .. } => "describe address".to_owned(),
             Self::StoppedLocation { .. } => "stopped location".to_owned(),
             Self::Snapshot { .. } => "snapshot".to_owned(),
+            Self::Tasks { stop_id, from, .. } => format!("tasks {stop_id:?} from {from:?}"),
             Self::StoppedSelection { .. } => "stopped selection".to_owned(),
             Self::Backtrace { .. } => "backtrace".to_owned(),
             Self::Registers { .. } => "registers".to_owned(),
@@ -1743,7 +1854,7 @@ impl Request {
             }
             Self::ExplainType { name, .. } => format!("explain the views of `{name}`"),
             Self::CheckViews { .. } => "check views".to_owned(),
-            Self::SelectThread { .. } => "select thread".to_owned(),
+            Self::SelectContext { context, .. } => format!("select {context}"),
             Self::SelectFrame { .. } => "select frame".to_owned(),
             Self::SignalPolicy { .. } => "signal policy".to_owned(),
             Self::Kill { .. } => "kill".to_owned(),

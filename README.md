@@ -38,7 +38,7 @@ are reported as such.
 | --- | --- | --- |
 | C, C++, Rust (GCC, Clang, rustc) | Parameters, locals, and globals, including values split across registers and memory, parameters recovered from their callers, and partly optimized-out values | Full |
 | Zig 0.16 (LLVM backend) | Parameters, locals, and globals | Full; inline frames when emitted |
-| Go 1.26 `gc` | Locals in `-N -l` builds; package globals in any build | Breakpoints and continue only: no source stepping, goroutines, or split-stack backtraces |
+| Go 1.27 `gc` (with cgo) | Parameters, locals, and globals, including partly optimized-out values | Full; goroutines as tasks, stacks across the runtime's switches, and panics |
 
 Thread-local storage is supported for programs on glibc or musl, dynamically
 or statically linked, except libraries that a statically linked glibc program
@@ -82,6 +82,7 @@ uscope dap                         # serve DAP on stdio
 - [docs/expressions.md](docs/expressions.md): the expression language.
 - [docs/views.md](docs/views.md) and [docs/writing-views.md](docs/writing-views.md): views.
 - [docs/dap.md](docs/dap.md): editor setup and DAP support.
+- [docs/go.md](docs/go.md): how uscope debugs Go programs.
 - [AGENTS.md](AGENTS.md): architecture and development rules.
 
 ## Development

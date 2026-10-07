@@ -129,6 +129,17 @@ fn evaluate(world_name: &str, text: &str) -> String {
                 .map_or("?", |info| info.name.as_ref())
                 .to_owned();
             match (&value.state, cause) {
+                // Text shows as text, and a pointer to it as its address.
+                (
+                    VariableState::Available {
+                        value,
+                        text: Some(text),
+                        ..
+                    },
+                    _,
+                ) if !matches!(value, VariableValue::Address(_)) => {
+                    format!("{} : {name}", crate::quoted_text(text))
+                }
                 (VariableState::Available { value, .. }, _) => {
                     format!("{} : {name}", render(value))
                 }
@@ -330,6 +341,10 @@ fn world_expression() -> impl proptest::strategy::Strategy<Value = String> {
         Just("gone"),
         Just("$rip"),
         Just("$rbp"),
+        Just("$task"),
+        Just("squares"),
+        Just("ages"),
+        Just("spare"),
         Just("RED"),
         Just("BLUE"),
         Just("1"),
@@ -383,6 +398,9 @@ fn world_expression() -> impl proptest::strategy::Strategy<Value = String> {
             (inner.clone(), inner.clone(), inner.clone())
                 .prop_map(|(c, t, e)| format!("({c}) ? ({t}) : ({e})")),
             inner.clone().prop_map(|operand| format!("len({operand})")),
+            inner.clone().prop_map(|operand| format!("cap({operand})")),
+            (inner.clone(), inner.clone(), inner.clone())
+                .prop_map(|(base, start, end)| format!("({base})[{start}:{end}]")),
             inner.prop_map(|operand| format!("sizeof({operand})")),
         ]
     })
@@ -414,10 +432,15 @@ proptest::proptest! {
 
 /// The evaluator is pure: it reaches a program only through the traits the
 /// debugger implements for it, so none of its code may reach for process
-/// control, debug information, I/O, clocks, or threads. Tests are exempt.
+/// control, debug information, I/O, clocks, or threads. It is one language
+/// for every source language, so it tests for none: what a language's
+/// types mean reaches it as capabilities of those traits. Tests are exempt.
 #[test]
 fn the_evaluator_stays_pure() {
-    const FORBIDDEN: [&str; 11] = [
+    const FORBIDDEN: [&str; 14] = [
+        "SourceLanguage::",
+        "GoKind",
+        "GoTypeAttributes",
         "crate::backend",
         "crate::debug_info",
         "crate::sim",

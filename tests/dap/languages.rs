@@ -177,3 +177,32 @@ fn records_and_enums_expand_and_their_members_evaluate_to_what_they_show() {
         finish_running(dap, thread);
     }
 }
+
+#[test]
+fn step_out_shows_what_the_function_returned() {
+    for program in ["values-go-o0", "values-go-o2"] {
+        let mut dap = Dap::start(program);
+        let (thread, _) = stop(
+            &mut dap,
+            program,
+            &Configuration {
+                functions: vec!["main.returning".to_owned()],
+                ..Configuration::default()
+            },
+        );
+        let sent = dap.send("stepOut", json!({"threadId": thread}));
+        dap.success(sent);
+        let stopped = dap.stopped(sent.mark);
+        assert_eq!(stopped.reason, "step", "{program}");
+        let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 1}));
+        let variables = frame_variables(&mut dap, &trace["stackFrames"][0]);
+        // Returned values are listed with the frame's own, and no name
+        // reaches them.
+        let count = &variables["returned count"];
+        assert_eq!(count["value"], "42", "{program}: {variables:?}");
+        assert!(count.get("evaluateName").is_none(), "{program}: {count}");
+        assert_eq!(variables["returned text"]["value"], "\"go\"", "{program}");
+        assert_eq!(variables["returned failure"]["value"], "nil", "{program}");
+        finish_running(dap, thread);
+    }
+}

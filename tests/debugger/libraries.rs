@@ -90,6 +90,31 @@ async fn breakpoints_in_a_library_the_program_links_resolve_before_it_runs() {
 }
 
 #[tokio::test]
+async fn stepping_out_of_a_library_frame_unwinds_through_the_library() {
+    let mut scenario = Scenario::launch("module-frames-gcc-o0");
+    pending_function(&scenario, "dso_apply").await;
+    let reason = scenario.run_to_stop().await;
+    assert!(
+        matches!(reason, StopReason::Breakpoint { .. }),
+        "{reason:?}"
+    );
+
+    // Only the library's call-frame information finds the caller.
+    assert_eq!(
+        scenario.step_to_stop(StepKind::Out).await,
+        StopReason::Step {
+            kind: StepKind::Out
+        }
+    );
+    let location = scenario
+        .operation("caller", scenario.handle().current_location())
+        .await;
+    assert_eq!(location_function(&location), Some("main"));
+    assert_eq!(location_line(&location), Some(33));
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
 async fn breakpoints_follow_a_library_through_dlopen_and_dlclose() {
     let mut scenario = Scenario::launch("globals-shared");
     let touch = pending_function(&scenario, "dso_touch").await;

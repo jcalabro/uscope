@@ -5,6 +5,9 @@ compile_error!("uscope currently supports debug information only on Linux");
 mod dwarf;
 #[cfg(target_os = "linux")]
 mod elf;
+#[cfg(target_os = "linux")]
+mod gopclntab;
+mod roles;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod x86_64;
 
@@ -18,6 +21,11 @@ pub fn fuzz_elf_symbols(data: &[u8]) {
     elf::fuzz(data);
 }
 
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_gopclntab(data: &[u8]) {
+    gopclntab::fuzz(data);
+}
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -27,14 +35,14 @@ use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     CodeInstanceId, DereferenceReference, DereferencedValue, GlobalVariableId, ImageAddress,
     InspectedValue, ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StackFrameId,
-    StopId, ThreadId, TypeId, UnwindTermination, ValueChildPage, ValueChildrenReference, Variable,
+    StopId, TypeId, UnwindTermination, ValueChildPage, ValueChildrenReference, Variable,
     VariableQuery, VariableState, VariableUnavailableReason, VirtualAddress,
 };
 
 #[derive(Debug, Clone, Copy)]
 pub struct VariableContext {
     pub stop_id: StopId,
-    pub thread: ThreadId,
+    pub context: crate::ExecutionContext,
     /// The backtrace frame whose registers and call-frame address evaluate
     /// the values, which every capability they produce keeps.
     pub frame: StackFrameId,
@@ -87,6 +95,20 @@ pub struct ObjectKey(usize);
 pub struct Located {
     pub ty: TypeId,
     pub storage: ValueStorage,
+}
+
+/// One value a function returned, captured as the call to it returned.
+#[derive(Debug, Clone)]
+pub struct ReturnedValue {
+    /// The result's name in the function, such as Go's `~r0` for one the
+    /// source leaves unnamed.
+    pub name: Arc<str>,
+    /// Its type, unless its debug information is malformed.
+    pub ty: Option<TypeId>,
+    /// Its value as the call returned it, or why that cannot be known.
+    pub value: Accessed,
+    /// Why a generic result has its shape's type rather than its own.
+    pub unresolved_shape: Option<crate::ShapeUnresolvedReason>,
 }
 
 /// Storage reached, or the unavailable or malformed state that stopped it.
@@ -152,6 +174,16 @@ impl PlannedStep {
             .iter()
             .try_for_each(|step| dwarf::array_byte_offset(step, indices).map(drop))
     }
+}
+
+/// Where a string's bytes are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextLocation {
+    /// The first byte's address.
+    pub address: VirtualAddress,
+    /// How many bytes there are, when the string records it rather than
+    /// ending at a NUL.
+    pub length: Option<u64>,
 }
 
 pub struct DebugInfo {
@@ -230,6 +262,9 @@ pub trait VariableRuntime {
         offset: u64,
     ) -> std::result::Result<VirtualAddress, VariableUnavailableReason>;
     fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>>;
+    /// Where `address` is in this module's image, or `None` when the
+    /// module does not map it, such as code another module holds.
+    fn image_address(&self, address: VirtualAddress) -> Option<ImageAddress>;
     fn read_memory(
         &mut self,
         address: VirtualAddress,
@@ -308,6 +343,20 @@ pub trait VariableInfo: Send + Sync {
         budget: &mut InspectionBudget,
     ) -> Result<std::result::Result<crate::VariableValue, VariableState>>;
 
+    /// Where the bytes of the text stored at `at` are, when it is a string:
+    /// the first byte's address, and how many there are when the string
+    /// records it rather than ending at a NUL.
+    fn text_span(
+        &self,
+        at: &Located,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<std::result::Result<Option<TextLocation>, VariableState>> {
+        let _ = (at, context, runtime, budget);
+        Ok(Ok(None))
+    }
+
     /// Decodes the value stored at `at`, with its children and dereference
     /// capabilities.
     fn materialize(
@@ -332,6 +381,21 @@ pub trait VariableInfo: Send + Sync {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<Variable>;
+
+    /// The values the function whose code holds `function` returned, read
+    /// through `runtime` the instant a call to it has returned, with the
+    /// caller's registers and stack as the return leaves them; captured, so
+    /// later execution cannot change them. `None` when the function's
+    /// convention for returning values is not one the provider knows.
+    fn returned(
+        &self,
+        function: ImageAddress,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<Option<Vec<ReturnedValue>>> {
+        let _ = (function, runtime, budget);
+        Ok(None)
+    }
 
     /// Dereferences one stop-scoped capability produced by this image.
     fn dereference(

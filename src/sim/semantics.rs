@@ -20,8 +20,8 @@ use super::loader::Image;
 use super::markers::{Marker, Verdict};
 use super::marks::Mark;
 use crate::{
-    Backtrace, FrameKind, PresentedFrame, ScalarValue, StepKind, StopReason, UnwindTermination,
-    VariableSnapshot, VariableState, VariableValue, VariableValueSource,
+    Backtrace, ExecutionContext, FrameKind, PresentedFrame, ScalarValue, StepKind, StopReason,
+    UnwindTermination, VariableSnapshot, VariableState, VariableValue, VariableValueSource,
 };
 
 /// What a backtrace showed of its thread's stack.
@@ -57,7 +57,11 @@ fn stopped(kernel: &Kernel, thread: crate::ThreadId) -> Option<&Thread> {
 /// that is what the stack holds, but nothing past it, and not as a whole
 /// stack.
 pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwound>, String> {
-    let Some(thread) = stopped(kernel, backtrace.thread) else {
+    let Some(thread) = backtrace
+        .context
+        .as_thread()
+        .and_then(|thread| stopped(kernel, thread))
+    else {
         return Ok(None);
     };
     let process = kernel
@@ -294,7 +298,7 @@ pub fn step(
                 before.last().map_or(0, |call| call.return_address)
             ))
         }
-        StepKind::IntoSource | StepKind::OverSource => {
+        StepKind::IntoSource | StepKind::OverSource | StepKind::IntoNewTask => {
             source_step(begun, thread, retired, positions, variant).map(Some)
         }
         StepKind::Advance => Err("an advance is judged by `advance`".to_owned()),
@@ -460,10 +464,12 @@ fn source_step(
     let entered = after.len() > before.len() && after[..before.len()] == before[..];
     // Begun in code no line describes, stepping over has no line to step
     // over, and steps as stepping in does.
-    let kind = if lines.row(start).is_none() {
-        StepKind::IntoSource
-    } else {
-        begun.kind
+    // A process without a language runtime starts no task, so stepping
+    // into one steps over the line.
+    let kind = match begun.kind {
+        _ if lines.row(start).is_none() => StepKind::IntoSource,
+        StepKind::IntoNewTask => StepKind::OverSource,
+        kind => kind,
     };
 
     // Stepping into an inline frame hidden at the stop moves nothing.
@@ -812,7 +818,13 @@ fn stored(
             ..
         },
         Some(thread),
-    ) = (state, stopped(kernel, snapshot.thread))
+    ) = (
+        state,
+        snapshot
+            .context
+            .as_thread()
+            .and_then(|thread| stopped(kernel, thread)),
+    )
     else {
         return Ok(None);
     };
@@ -866,7 +878,10 @@ pub fn entry_values(
         .iter()
         .find(|frame| frame.id == snapshot.stack_frame)
         .is_some_and(|frame| frame.level == 0 && frame.kind == FrameKind::Physical);
-    let Some(thread) = stopped(kernel, snapshot.thread).filter(|_| innermost) else {
+    let ExecutionContext::Thread(thread) = snapshot.context else {
+        return Ok(Vec::new());
+    };
+    let Some(thread) = stopped(kernel, thread).filter(|_| innermost) else {
         return Ok(Vec::new());
     };
     let bias = variant.image.bias();
@@ -945,7 +960,7 @@ fn marker_at<'m>(
     source: &str,
     markers: &'m [Marker],
 ) -> Option<&'m Marker> {
-    let thread = stopped(kernel, snapshot.thread)?;
+    let thread = stopped(kernel, snapshot.context.as_thread()?)?;
     let facts = &variant.facts;
     let line = thread
         .registers
@@ -1050,7 +1065,7 @@ mod tests {
 
     fn backtrace_of(tid: Tid, frames: &[u64], termination: UnwindTermination) -> Backtrace {
         Backtrace {
-            thread: ThreadId::new(u64::try_from(tid).expect("a positive tid")),
+            context: ThreadId::new(u64::try_from(tid).expect("a positive tid")).into(),
             frames: frames
                 .iter()
                 .enumerate()

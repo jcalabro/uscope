@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use super::error::{ErrorKind, ExpressionError};
-use super::ir::{Comparison, Constant, Conversion, Length, Node, Op, Program};
+use super::ir::{Capacity, Comparison, Constant, Conversion, Length, Node, Op, Program};
 use super::number::{BitOperator, Bits, Exact, FloatFormat, FloatOperator, IntType, Integer};
 use super::syntax::ast::{
     BinaryOp, Builtin, Field, NodeId, NodeKind, Path, Separator, SizeOf, Suffix, Tree, TypeBase,
@@ -123,7 +123,9 @@ fn bind_as<S: Scope>(
         Finish::Truth => binder.truth(root)?,
         Finish::Value => binder.value(root)?,
     };
-    if matches!(root.ty, Ty::Text) {
+    // A string the expression writes is only compared; one it computes
+    // from the program's text is a value of its own.
+    if matches!(root.op, Op::Constant(Constant::Text(_))) {
         return Err(ExpressionError::new(
             ErrorKind::Type,
             root.span,
@@ -226,6 +228,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         let span = self.tree().span(id);
         match self.tree().kind(id).clone() {
             NodeKind::Name(path) => self.name(&path, span),
+            NodeKind::Register(name) if name == "task" => self.node(Op::Task, Ty::Exact, span),
             NodeKind::Register(name) => {
                 let register = self.scope.register(&name).ok_or_else(|| {
                     Self::error(
@@ -310,21 +313,20 @@ impl<'a, S: Scope> Binder<'a, S> {
                         format!("`{}` is not an array or slice", self.quote(base.span)),
                     ));
                 }
-                let start = self.bind(start)?;
-                let start = self.integer_value(start)?;
-                let end = self.bind(end)?;
-                let end = self.integer_value(end)?;
+                let start = self.bound_index(start)?;
+                let end = self.bound_index(end)?;
                 let ty = base.ty.clone();
                 self.node(
                     Op::Range {
                         base: Box::new(base),
-                        start: Box::new(start),
-                        end: Box::new(end),
+                        start: Some(Box::new(start)),
+                        end: Some(Box::new(end)),
                     },
                     ty,
                     span,
                 )
             }
+            NodeKind::Slice { base, start, end } => self.slice(id, base, start, end, span),
             NodeKind::SizeOf(SizeOf::Type(ty)) => {
                 let ty = self.resolve_type(&ty)?;
                 self.size_constant(&ty, span)
@@ -371,6 +373,10 @@ impl<'a, S: Scope> Binder<'a, S> {
             NodeKind::Len(operand) => {
                 let operand = self.bind(operand)?;
                 self.length(operand, span)
+            }
+            NodeKind::Cap(operand) => {
+                let operand = self.bind(operand)?;
+                self.capacity(operand, span)
             }
             NodeKind::Call {
                 function: Builtin::Inner,
@@ -1421,7 +1427,19 @@ impl<'a, S: Scope> Binder<'a, S> {
             } else {
                 (right, left)
             };
-            if ordering || !other.is_place() || matches!(other.ty, Ty::Text) {
+            if !ordering && matches!(other.ty, Ty::Text) {
+                return self.node(
+                    Op::Compare {
+                        op,
+                        how: Comparison::Texts,
+                        left: Box::new(other),
+                        right: Box::new(text),
+                    },
+                    Ty::Bool,
+                    span,
+                );
+            }
+            if ordering || !other.is_place() {
                 return Err(Self::error(
                     span,
                     ErrorKind::Type,
@@ -1799,35 +1817,10 @@ impl<'a, S: Scope> Binder<'a, S> {
 
     // ---- Members, indices, lengths ----
 
-    /// Whether a pointer is only how its language represents a value of
-    /// its own kind, as Go represents a channel or a map, which nothing
-    /// indexes as a pointer.
+    /// Whether a pointer only stands for a container a view presents,
+    /// which nothing indexes as a pointer.
     fn represents(&self, ty: &Ty) -> bool {
-        let &Ty::Program(mut reference) = ty else {
-            return false;
-        };
-        for _ in 0..MAX_INNER_STEPS {
-            let Some(info) = self.scope.type_info(reference) else {
-                return false;
-            };
-            if info
-                .identity
-                .as_ref()
-                .and_then(|identity| identity.go)
-                .is_some_and(|go| matches!(go.kind, crate::GoKind::Chan | crate::GoKind::Map))
-            {
-                return true;
-            }
-            match info.kind {
-                TypeKind::Named {
-                    target: Some(target),
-                    ..
-                }
-                | TypeKind::Modified { target, .. } => reference = target,
-                _ => return false,
-            }
-        }
-        false
+        matches!(ty, Ty::Program(reference) if self.scope.stands_for_container(*reference))
     }
 
     fn member(
@@ -1949,6 +1942,12 @@ impl<'a, S: Scope> Binder<'a, S> {
                         unreachable!("indexed places are program types")
                     };
                     let native = matches!(category, Category::Array { .. } | Category::Slice(_));
+                    // A value a view presents as a map is indexed by key.
+                    if !native && let Ok(planned) = self.scope.plan(from, StepKind::Entry) {
+                        node = self.entry(node, planned, *first, *span)?;
+                        pending = &pending[1..];
+                        continue;
+                    }
                     let available = pending.len();
                     let planned = self
                         .scope
@@ -2033,7 +2032,211 @@ impl<'a, S: Scope> Binder<'a, S> {
                     span,
                 )
             }
+            Category::Text => self.node(
+                Op::Length {
+                    operand: Box::new(operand),
+                    how: Length::Bytes,
+                },
+                Ty::Exact,
+                span,
+            ),
             category => Err(self.type_error(&operand, &category, "has no length")),
+        }
+    }
+
+    /// `cap(x)`: how many elements `x` has room for. An array has room for
+    /// its elements, a slice for what its descriptor records, and anything
+    /// else for what the `capacity` field of its view says.
+    fn capacity(&mut self, operand: Bound<S>, span: Span) -> BindResult<S> {
+        let operand = self.settle(operand)?;
+        let category = self.category(&operand.ty);
+        match category {
+            Category::Array { dimensions, .. } => {
+                let count = dimensions.first().map_or(0, |dimension| dimension.count);
+                self.node(
+                    Op::Constant(Constant::Integer(Integer::Exact(Exact::from(u128::from(
+                        count,
+                    ))))),
+                    Ty::Exact,
+                    span,
+                )
+            }
+            Category::Slice(_) if operand.is_place() => {
+                if !self.records_capacity(&operand.ty) {
+                    return Err(self.type_error(&operand, &category, "records no capacity"));
+                }
+                self.node(
+                    Op::Capacity {
+                        operand: Box::new(operand),
+                        how: Capacity::Slice,
+                    },
+                    Ty::Exact,
+                    span,
+                )
+            }
+            // A record, or a pointer that stands for a container, may have
+            // a view that gives it a capacity.
+            Category::Record if operand.is_place() => self.node(
+                Op::Capacity {
+                    operand: Box::new(operand),
+                    how: Capacity::Presented,
+                },
+                Ty::Exact,
+                span,
+            ),
+            Category::Pointer(_) if operand.is_place() && self.represents(&operand.ty) => self
+                .node(
+                    Op::Capacity {
+                        operand: Box::new(operand),
+                        how: Capacity::Presented,
+                    },
+                    Ty::Exact,
+                    span,
+                ),
+            category => Err(self.type_error(&operand, &category, "has no capacity")),
+        }
+    }
+
+    /// Whether a slice type's descriptor records a capacity.
+    fn records_capacity(&self, ty: &Ty) -> bool {
+        let Ty::Program(reference) = ty else {
+            return false;
+        };
+        representation(self.scope, *reference).is_ok_and(|(_, info)| {
+            matches!(
+                info.kind,
+                TypeKind::Slice {
+                    has_capacity: true,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Whether a slice type's elements are its language's text, as Rust's
+    /// `str` and Zig's `[]const u8` are.
+    fn is_text_slice(&self, ty: &Ty) -> bool {
+        let Ty::Program(reference) = ty else {
+            return false;
+        };
+        representation(self.scope, *reference)
+            .is_ok_and(|(_, info)| matches!(info.kind, TypeKind::Slice { text: true, .. }))
+    }
+
+    /// Whether a type is an array, or a slice of anything but text.
+    fn has_elements(&self, ty: &Ty) -> bool {
+        match self.category(ty) {
+            Category::Array { .. } => true,
+            Category::Slice(_) => !self.is_text_slice(ty),
+            _ => false,
+        }
+    }
+
+    /// An index or bound, as an integer.
+    fn bound_index(&mut self, id: NodeId) -> BindResult<S> {
+        let node = self.bind(id)?;
+        self.integer_value(node)
+    }
+
+    /// `base[start:end]`: a range of an array's or slice's elements, which
+    /// is only ever the whole expression, or the bytes of text between the
+    /// bounds, as a string.
+    fn slice(
+        &mut self,
+        id: NodeId,
+        base: NodeId,
+        start: Option<NodeId>,
+        end: Option<NodeId>,
+        span: Span,
+    ) -> BindResult<S> {
+        let base = self.bind(base)?;
+        let base = self.settle(base)?;
+        let start = start.map(|start| self.bound_index(start)).transpose()?;
+        let end = end.map(|end| self.bound_index(end)).transpose()?;
+        let (start, end) = (start.map(Box::new), end.map(Box::new));
+        if base.is_place() && self.has_elements(&base.ty) {
+            if id != self.tree().root() {
+                return Err(Self::error(
+                    span,
+                    ErrorKind::Type,
+                    "a slice of an array or slice is a range of its elements, which must be \
+                     the whole expression",
+                ));
+            }
+            let ty = base.ty.clone();
+            return self.node(
+                Op::Range {
+                    base: Box::new(base),
+                    start,
+                    end,
+                },
+                ty,
+                span,
+            );
+        }
+        let category = self.category(&base.ty);
+        let text = match &category {
+            Category::Text | Category::Record | Category::Slice(_) => true,
+            Category::Pointer(Some(pointee)) => {
+                is_character(self.scope, pointee) && !self.represents(&base.ty)
+            }
+            _ => false,
+        };
+        if !text || !(base.is_place() || matches!(category, Category::Text)) {
+            return Err(self.type_error(&base, &category, "is not an array, slice, or text"));
+        }
+        self.node(
+            Op::TextSlice {
+                base: Box::new(base),
+                start,
+                end,
+            },
+            Ty::Text,
+            span,
+        )
+    }
+
+    /// `m[key]`: the value a map holds for a key.
+    fn entry(
+        &mut self,
+        map: Bound<S>,
+        planned: super::target::Planned<S::Step>,
+        key: NodeId,
+        span: Span,
+    ) -> BindResult<S> {
+        let ty = Self::reached(planned.result, span, || {
+            "the map's values have a type the debugger cannot compute with".to_owned()
+        })?;
+        let key = self.bind(key)?;
+        let key = self.key(key)?;
+        self.node(
+            Op::Entry {
+                base: Box::new(map),
+                step: planned.step,
+                key: Box::new(key),
+            },
+            ty,
+            span,
+        )
+    }
+
+    /// A map's key: a number, truth value, pointer, or string, or text the
+    /// program holds.
+    fn key(&mut self, node: Bound<S>) -> BindResult<S> {
+        let node = self.value(node)?;
+        match self.category(&node.ty) {
+            Category::Integer { .. }
+            | Category::Float(_)
+            | Category::Bool
+            | Category::Pointer(_)
+            | Category::Null
+            | Category::Text => Ok(node),
+            Category::Record | Category::Slice(_) if node.is_place() => Ok(node),
+            category => Err(self.type_error(
+                &node,
+                &category,
+                "is no key: a key is a number, truth value, pointer, or string",
+            )),
         }
     }
 }

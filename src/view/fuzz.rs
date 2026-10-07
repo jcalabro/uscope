@@ -295,6 +295,7 @@ fn containers(input: &mut Input<'_>) -> (World, Vec<(String, TypeReference)>) {
     linked_containers(&mut world, &mut variables);
     sums_and_tuples(&mut world, &mut variables);
     btree_map(&mut world, &mut variables);
+    go_library(&mut world, &mut variables);
 
     let heap = (0..HEAP_SIZE).map(|_| input.byte()).collect::<Vec<_>>();
     world.map(HEAP, &heap);
@@ -523,7 +524,13 @@ fn linked_containers(world: &mut World, variables: &mut Vec<(String, TypeReferen
         "map[int]int",
         vec![TypeArgument::Type(size), TypeArgument::Type(size)],
     );
-    world.go_kind(go_map, crate::GoKind::Map);
+    world.edit_identity(go_map, |identity| {
+        identity.go = Some(crate::GoTypeAttributes {
+            kind: crate::GoKind::Map,
+            runtime_type: None,
+        });
+    });
+    world.container(go_map);
     variables.push(("Go map".to_owned(), go_map));
 
     // Zig HashMapUnmanaged(u32, u32, …): metadata, with its header before it.
@@ -661,7 +668,13 @@ fn sums_and_tuples(world: &mut World, variables: &mut Vec<(String, TypeReference
         "chan int",
         vec![TypeArgument::Type(size)],
     );
-    world.go_kind(channel, crate::GoKind::Chan);
+    world.edit_identity(channel, |identity| {
+        identity.go = Some(crate::GoTypeAttributes {
+            kind: crate::GoKind::Chan,
+            runtime_type: None,
+        });
+    });
+    world.container(channel);
     variables.push(("Go channel".to_owned(), channel));
 }
 
@@ -732,6 +745,69 @@ fn btree_map(world: &mut World, variables: &mut Vec<(String, TypeReference)>) {
         [arguments, vec![TypeArgument::Unknown("Global".into())]].concat(),
     );
     variables.push(("Rust BTreeMap".to_owned(), map));
+}
+
+/// Go's byte slices, times, mutexes, and buffers, whose views decode words,
+/// read text, and look up globals.
+fn go_library(world: &mut World, variables: &mut Vec<(String, TypeReference)>) {
+    let go = |world: &mut World, ty, path: &[&str], base: &str| {
+        world.identify(ty, SourceLanguage::Go, path, base, Vec::new());
+    };
+    let uint8 = world.base("uint8", E::Unsigned, 1);
+    let int32 = world.base("int32", E::Signed, 4);
+    let uint32 = world.base("uint32", E::Unsigned, 4);
+    let int64 = world.base("int64", E::Signed, 8);
+    let uint64 = world.base("uint64", E::Unsigned, 8);
+    let bytes = world.slice(uint8);
+    go(world, bytes, &[], "[]uint8");
+    variables.push(("Go []byte".to_owned(), bytes));
+
+    let duration = world.typedef("time.Duration", int64);
+    go(world, duration, &["time"], "Duration");
+    variables.push(("Go time.Duration".to_owned(), duration));
+    let location = world.record("time.Location", 16, &[("name", bytes, 0)]);
+    go(world, location, &["time"], "Location");
+    variables.push(("time.utcLoc".to_owned(), location));
+    variables.push(("time.localLoc".to_owned(), location));
+    let location_pointer = world.pointer(Some(location));
+    let time = world.record(
+        "time.Time",
+        24,
+        &[
+            ("wall", uint64, 0),
+            ("ext", int64, 8),
+            ("loc", location_pointer, 16),
+        ],
+    );
+    go(world, time, &["time"], "Time");
+    variables.push(("Go time.Time".to_owned(), time));
+
+    let state = world.record(
+        "internal/sync.Mutex",
+        8,
+        &[("state", int32, 0), ("sema", uint32, 4)],
+    );
+    let mutex = world.record("sync.Mutex", 8, &[("mu", state, 0)]);
+    go(world, mutex, &["sync"], "Mutex");
+    variables.push(("Go sync.Mutex".to_owned(), mutex));
+    let count = world.record("sync/atomic.Int32", 4, &[("v", int32, 0)]);
+    let rw = world.record(
+        "sync.RWMutex",
+        24,
+        &[
+            ("w", mutex, 0),
+            ("writerSem", uint32, 8),
+            ("readerSem", uint32, 12),
+            ("readerCount", count, 16),
+            ("readerWait", count, 20),
+        ],
+    );
+    go(world, rw, &["sync"], "RWMutex");
+    variables.push(("Go sync.RWMutex".to_owned(), rw));
+
+    let buffer = world.record("bytes.Buffer", 24, &[("buf", bytes, 0), ("off", int64, 16)]);
+    go(world, buffer, &["bytes"], "Buffer");
+    variables.push(("Go bytes.Buffer".to_owned(), buffer));
 }
 
 fn world_size(world: &World, ty: TypeReference) -> u64 {

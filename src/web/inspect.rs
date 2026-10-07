@@ -16,7 +16,7 @@ use super::session::Failure;
 pub const fn innermost(stop: u64, thread: u64) -> StopContext {
     StopContext {
         stop: uscope::StopId::new(stop),
-        thread: uscope::ThreadId::new(thread),
+        execution: uscope::ExecutionContext::Thread(uscope::ThreadId::new(thread)),
         frame: StackFrameId::INNERMOST,
     }
 }

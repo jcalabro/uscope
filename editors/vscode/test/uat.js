@@ -721,6 +721,62 @@ async function crashAtASignal() {
     await explained;
 }
 
+/**
+ * A Go program as VS Code shows it: its goroutines are its threads, named
+ * where the program has them; a step stays in its goroutine; a panic the
+ * program does not recover stops with the runtime's message; and a stack
+ * that crosses from the runtime's own stack to a goroutine's has a label
+ * heading each run of frames.
+ */
+async function goroutinesStepsPanicsAndStacks() {
+    const breakpoint = new vscode.FunctionBreakpoint('main.explode');
+    vscode.debug.addBreakpoints([breakpoint]);
+    const { session, threadId } = await launchToStop({ name: 'vscode-go', program: fixture('panic-go-o0') }, 'function breakpoint');
+    // Main's goroutine stopped, and its id is the thread's.
+    assert.strictEqual(threadId, 1);
+    const { threads } = await session.customRequest('threads');
+    const workers = threads.filter((thread) => / main\.worker — chan receive/.test(thread.name));
+    assert.strictEqual(workers.length, 5, JSON.stringify(threads));
+    assert.ok(workers.some((thread) => /\{job: resize, tenant: "a b"\}/.test(thread.name)), JSON.stringify(workers));
+
+    const stepped = event('stopped', (body) => body.reason === 'step');
+    await vscode.commands.executeCommand('workbench.action.debug.stepOver');
+    assert.strictEqual((await stepped).message.body.threadId, threadId);
+    await focus();
+    assert.strictEqual((await topFrame(session, threadId)).name, 'main.explode');
+
+    // Stepping over the panic stops where the runtime reports it. VS Code
+    // shows it at the frame that panicked, below the runtime's, where its
+    // editor asks what the exception is once someone has used an editor.
+    const panicked = event('stopped', (body) => body.reason === 'exception');
+    await vscode.commands.executeCommand('workbench.action.debug.stepOver');
+    assert.strictEqual((await panicked).message.body.threadId, threadId);
+    const shown = await focus();
+    const { stackFrames } = await session.customRequest('stackTrace', { threadId });
+    const raised = stackFrames.find((frame) => frame.id === shown.frameId);
+    assert.strictEqual(raised?.name, 'main.explode', JSON.stringify(stackFrames));
+    const exception = await session.customRequest('exceptionInfo', { threadId });
+    assert.match(exception.description, /the workers are waiting/);
+    await finish(2);
+
+    const switched = new vscode.FunctionBreakpoint('runtime.readmemstats_m');
+    vscode.debug.addBreakpoints([switched]);
+    const stacks = await launchToStop({ name: 'vscode-go-stacks', program: fixture('stacks-go-o0') }, 'function breakpoint');
+    const trace = await stacks.session.customRequest('stackTrace', { threadId: stacks.threadId });
+    const labels = trace.stackFrames
+        .filter((frame) => frame.presentationHint === 'label')
+        .map((frame) => frame.name);
+    assert.deepStrictEqual(labels.slice(0, 2), ["on the runtime's stack", "on the task's stack"], JSON.stringify(trace));
+    // The program goes on to signal itself, and past that it only ends, so
+    // stopping it there ends it however its end races the request's.
+    await remove(switched);
+    const signalled = event('stopped', (body) => body.reason === 'exception' && body.text === 'SIGUSR1');
+    await vscode.commands.executeCommand('workbench.action.debug.continue');
+    assert.strictEqual((await signalled).message.body.threadId, stacks.threadId);
+    await focus();
+    await stop(stacks.session);
+}
+
 /** Pausing stops every thread, which VS Code lists by name. */
 async function pauseAndThreads() {
     const breakpoint = new vscode.FunctionBreakpoint('worker_breakpoint');
@@ -1024,7 +1080,7 @@ exports.run = async function run() {
             createALaunchJson, findTheAdapterFromTheSetting, logTheProtocolToAFile, launchStepInspectAndRestart,
             stepIntoByInstructionAndRunToCursor, conditionsHitCountsLogpointsAndRefusals,
             consoleWatchHoverHexadecimalAndInlineValues, completionsAndLocations, dataBreakpointsAndTheirModes,
-            dataBreakpointConditions, crashAtASignal,
+            dataBreakpointConditions, crashAtASignal, goroutinesStepsPanicsAndStacks,
             pauseAndThreads, librariesAndTheirSources, runInTheIntegratedTerminal, attachToAProcess,
             pickAProcess, followAForkedChild, openACoreDump, refuseBadConfigurationsAndOfferPrograms,
         ]) {

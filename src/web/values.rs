@@ -41,7 +41,7 @@ enum Node {
     },
     Pointee {
         context: StopContext,
-        reference: DereferenceReference,
+        reference: Box<DereferenceReference>,
         name: String,
         path: Option<Expression>,
     },

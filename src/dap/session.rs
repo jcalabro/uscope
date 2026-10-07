@@ -15,9 +15,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uscope::{
     Backtrace, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle, Error,
-    ExceptionDisposition, ExitStatus, HeldProcess, InferiorState, LaunchOptions, LineNumber,
-    ModuleId, ModuleImage, ProcessId, ResumeScope, SignalPolicy, StackFrameId, StepKind,
-    StopContext, StopId, StopReason, ThreadId, VariableSnapshot, VirtualAddress,
+    ExceptionDisposition, ExecutionContext, ExitStatus, HeldProcess, InferiorState, LaunchOptions,
+    LineNumber, ModuleId, ModuleImage, ProcessId, ResumeScope, SignalPolicy, StackFrameId,
+    StepKind, StopContext, StopId, StopReason, ThreadId, VariableSnapshot, VirtualAddress,
 };
 
 use super::breakpoints::{Breakpoints, Change, Entry, Group, Key, Placement, Slot, State, Want};
@@ -30,6 +30,7 @@ use super::protocol::{
 };
 use super::signals::Selection;
 use super::sources::source_json;
+use super::threads::ThreadHandles;
 use crate::cli::{Cli, LaunchSettings, Renderers};
 
 /// How long the session waits for a program's output to drain after it
@@ -155,12 +156,9 @@ impl Client {
             .await
     }
 
-    async fn thread(&self, reason: &str, thread: ThreadId) -> Result<(), Closed> {
-        self.event(
-            "thread",
-            json!({"reason": reason, "threadId": thread.get()}),
-        )
-        .await
+    async fn thread(&self, reason: &str, id: i64) -> Result<(), Closed> {
+        self.event("thread", json!({"reason": reason, "threadId": id}))
+            .await
     }
 
     pub(super) async fn console(&self, text: impl Into<String>) -> Result<(), Closed> {
@@ -240,6 +238,7 @@ struct Target {
     /// The policy each signal had before the session changed it.
     default_policies: HashMap<u64, SignalPolicy>,
     applied_policies: HashMap<u64, SignalPolicy>,
+    applied_exceptions: uscope::ExceptionStops,
     console: Cli,
     syntax: uscope::AssemblySyntax,
     images: HashMap<ModuleId, Arc<ModuleImage>>,
@@ -249,6 +248,7 @@ struct Target {
     pumps: Vec<JoinHandle<()>>,
     /// The settings child sessions carry over.
     inherited: serde_json::Map<String, Value>,
+    threads: config::ThreadListing,
 }
 
 /// The stop the client was last told about.
@@ -256,7 +256,13 @@ struct Target {
 pub(super) struct Stop {
     pub id: StopId,
     pub thread: ThreadId,
+    /// What the client knows as the thread that stopped: the task the
+    /// thread runs, when the client's threads are tasks, or the thread.
+    pub context: ExecutionContext,
     pub reason: StopReason,
+    /// The frame of the stopped context the debugger selected, as at an
+    /// exception the frame that raised it; the innermost otherwise.
+    pub selected: StackFrameId,
 }
 
 impl Stop {
@@ -264,7 +270,7 @@ impl Stop {
     pub const fn innermost(&self) -> StopContext {
         StopContext {
             stop: self.id,
-            thread: self.thread,
+            execution: ExecutionContext::Thread(self.thread),
             frame: StackFrameId::INNERMOST,
         }
     }
@@ -288,9 +294,14 @@ pub struct Session {
     exceptions: Selection,
     pub(super) references: References,
     pub(super) stop: Option<Stop>,
-    backtraces: HashMap<ThreadId, Arc<Backtrace>>,
-    variables: HashMap<(ThreadId, StackFrameId), Arc<VariableSnapshot>>,
-    threads: BTreeSet<ThreadId>,
+    backtraces: HashMap<ExecutionContext, Arc<Backtrace>>,
+    variables: HashMap<(ExecutionContext, StackFrameId), Arc<VariableSnapshot>>,
+    /// The client's ids for threads and tasks.
+    pub(super) thread_ids: ThreadHandles,
+    /// The threads the client was told about, with their client ids.
+    threads: BTreeMap<ThreadId, i64>,
+    /// The tasks the client was told about, with their client ids.
+    pub(super) tasks: BTreeMap<uscope::TaskId, i64>,
     /// The modules the client was told are loaded.
     pub(super) modules: BTreeMap<ModuleId, uscope::LoadedModuleRecord>,
     /// The execution the client last started, whose resume it already knows.
@@ -330,7 +341,9 @@ impl Session {
             stop: None,
             backtraces: HashMap::new(),
             variables: HashMap::new(),
-            threads: BTreeSet::new(),
+            thread_ids: ThreadHandles::default(),
+            threads: BTreeMap::new(),
+            tasks: BTreeMap::new(),
             modules: BTreeMap::new(),
             resumed: None,
             restarting: false,
@@ -674,6 +687,7 @@ impl Session {
             working_directory,
             follow_forks,
             inherited,
+            threads,
         } = configuration;
         let launched = matches!(start, Start::Launch(_));
         let core = matches!(start, Start::Core(_));
@@ -709,6 +723,7 @@ impl Session {
             signals,
             applied_policies: default_policies.clone(),
             default_policies,
+            applied_exceptions: uscope::ExceptionStops::default(),
             console,
             syntax,
             images: HashMap::new(),
@@ -716,6 +731,7 @@ impl Session {
             process: None,
             pumps: Vec::new(),
             inherited,
+            threads,
         });
         if follow_forks && !core {
             self.hold_forks().await?;
@@ -964,6 +980,7 @@ impl Session {
             }
             *launch = new;
             target.stop_on_entry = configuration.stop_on_entry;
+            target.threads = configuration.threads;
         }
         let handle = target.handle.clone();
         self.restarting = true;
@@ -1208,7 +1225,11 @@ impl Session {
         arguments: &ThreadArguments,
     ) -> Result<ResumeScope, ErrorBody> {
         if single {
-            return Ok(ResumeScope::Thread(thread_id(arguments.thread_id)?));
+            let context = self.thread_ids.context(arguments.thread_id)?;
+            return context
+                .as_thread()
+                .map(ResumeScope::Thread)
+                .ok_or_else(|| ErrorBody::new(format!("{context} cannot run alone")));
         }
         self.target
             .as_ref()
@@ -1225,7 +1246,7 @@ impl Session {
     ) -> Result<Value, ErrorBody> {
         let arguments = parse::<ThreadArguments>(arguments, "step arguments")?;
         let stop = self.current_stop()?;
-        let thread = thread_id(arguments.thread_id)?;
+        let context = self.thread_ids.context(arguments.thread_id)?;
         let single = arguments.single_thread.unwrap_or(false);
         let scope = self.resume_scope(single, &arguments)?;
         let kind = if arguments.granularity.as_deref() == Some("instruction") {
@@ -1237,7 +1258,7 @@ impl Session {
         let execution = handle
             .start_step(
                 stop.id,
-                thread,
+                context,
                 StackFrameId::INNERMOST,
                 kind,
                 scope,
@@ -1310,8 +1331,8 @@ impl Session {
                 self.announce_thread(thread_id).await?;
             }
             DebuggerEvent::ThreadExited { thread_id, .. } => {
-                if self.threads.remove(&thread_id) {
-                    self.client.thread("exited", thread_id).await?;
+                if let Some(id) = self.threads.remove(&thread_id) {
+                    self.client.thread("exited", id).await?;
                 }
             }
             DebuggerEvent::ModuleLoaded { module, .. } => self.announce_module(&module).await?,
@@ -1364,10 +1385,13 @@ impl Session {
             return Ok(());
         };
         self.leave_stop();
+        let Some(id) = self.client_id(stop.context) else {
+            return Ok(());
+        };
         self.client
             .event(
                 "continued",
-                json!({"threadId": stop.thread.get(), "allThreadsContinued": true}),
+                json!({"threadId": id, "allThreadsContinued": true}),
             )
             .await
     }
@@ -1413,12 +1437,24 @@ impl Session {
         reason: StopReason,
     ) -> Result<(), Closed> {
         self.leave_stop();
-        self.announce_thread(thread).await?;
+        let snapshot = match self.target_handle() {
+            Ok(handle) => handle.snapshot().await.ok(),
+            Err(_) => None,
+        };
+        let context = self.stopped_context(snapshot.as_ref(), thread);
+        let selected = snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.selected == Some(ExecutionContext::Thread(thread)))
+            .and_then(|snapshot| snapshot.selected_frame)
+            .unwrap_or(StackFrameId::INNERMOST);
+        self.announce(context).await?;
         let mut body = json!({
-            "threadId": thread.get(),
             "allThreadsStopped": true,
             "preserveFocusHint": false,
         });
+        if let Some(id) = self.client_id(context) {
+            body["threadId"] = id.into();
+        }
         let (kind, description, text) = match &reason {
             StopReason::Breakpoint { hits, .. } => {
                 let (ids, kind) = self.breakpoints.hit(hits);
@@ -1466,7 +1502,9 @@ impl Session {
         self.stop = Some(Stop {
             id: stop,
             thread,
+            context,
             reason,
+            selected,
         });
         self.client.event("stopped", body).await
     }
@@ -1503,8 +1541,9 @@ impl Session {
         }
         // The program's threads end with it, also for a client that keeps
         // the session for a restart.
-        for thread in std::mem::take(&mut self.threads) {
-            self.client.thread("exited", thread).await?;
+        let tasks = std::mem::take(&mut self.tasks).into_values();
+        for id in std::mem::take(&mut self.threads).into_values().chain(tasks) {
+            self.client.thread("exited", id).await?;
         }
         if self.restarting {
             return Ok(());
@@ -1512,11 +1551,96 @@ impl Session {
         self.client.event("terminated", json!({})).await
     }
 
-    async fn announce_thread(&mut self, thread: ThreadId) -> Result<(), Closed> {
-        if self.threads.insert(thread) {
-            self.client.thread("started", thread).await?;
+    /// Tells the client which tasks it was told about have ended.
+    pub(super) async fn forget_tasks(
+        &mut self,
+        live: &[uscope::TaskSnapshot],
+    ) -> Result<(), Closed> {
+        let live = live.iter().map(|task| task.id).collect::<BTreeSet<_>>();
+        let gone = self
+            .tasks
+            .keys()
+            .filter(|task| !live.contains(task))
+            .copied()
+            .collect::<Vec<_>>();
+        for task in gone {
+            if let Some(id) = self.tasks.remove(&task) {
+                self.client.thread("exited", id).await?;
+            }
         }
         Ok(())
+    }
+
+    /// What the client's threads are, once a program is loaded.
+    pub(super) fn thread_listing(&self) -> Option<config::ThreadListing> {
+        self.target.as_ref().map(|target| target.threads)
+    }
+
+    /// What the client knows as a stopped thread: the task it runs, when
+    /// the client's threads are tasks and it runs one, or the thread.
+    fn stopped_context(
+        &self,
+        snapshot: Option<&uscope::StateSnapshot>,
+        thread: ThreadId,
+    ) -> ExecutionContext {
+        let lists_tasks = self
+            .target
+            .as_ref()
+            .is_some_and(|target| target.threads.tasks);
+        snapshot
+            .filter(|_| lists_tasks)
+            .and_then(|snapshot| {
+                snapshot
+                    .threads
+                    .iter()
+                    .find(|listed| listed.id == thread)
+                    .and_then(|listed| match listed.activity {
+                        Some(uscope::ThreadActivity::Task { task, .. }) => {
+                            Some(ExecutionContext::Task(task))
+                        }
+                        _ => None,
+                    })
+            })
+            .unwrap_or(ExecutionContext::Thread(thread))
+    }
+
+    /// The client's id for a thread or task it was told about.
+    fn client_id(&self, context: ExecutionContext) -> Option<i64> {
+        match context {
+            ExecutionContext::Thread(thread) => self.threads.get(&thread).copied(),
+            ExecutionContext::Task(task) => self.tasks.get(&task).copied(),
+        }
+    }
+
+    /// Tells the client of a thread or task it does not know yet.
+    async fn announce(&mut self, context: ExecutionContext) -> Result<(), Closed> {
+        let task = match context {
+            ExecutionContext::Thread(thread) => return self.announce_thread(thread).await,
+            ExecutionContext::Task(task) => task,
+        };
+        if self.tasks.contains_key(&task) {
+            return Ok(());
+        }
+        match self.thread_ids.id(context) {
+            Ok(id) => {
+                self.tasks.insert(task, id);
+                self.client.thread("started", id).await
+            }
+            Err(error) => self.client.important(error.short).await,
+        }
+    }
+
+    async fn announce_thread(&mut self, thread: ThreadId) -> Result<(), Closed> {
+        if self.threads.contains_key(&thread) {
+            return Ok(());
+        }
+        match self.thread_ids.id(ExecutionContext::Thread(thread)) {
+            Ok(id) => {
+                self.threads.insert(thread, id);
+                self.client.thread("started", id).await
+            }
+            Err(error) => self.client.important(error.short).await,
+        }
     }
 
     /// Announces the snapshot's threads not yet announced, and the exit of
@@ -1527,9 +1651,16 @@ impl Session {
             .iter()
             .map(|thread| thread.id)
             .collect::<BTreeSet<_>>();
-        for gone in &self.threads - &live {
-            self.threads.remove(&gone);
-            self.client.thread("exited", gone).await?;
+        let gone = self
+            .threads
+            .keys()
+            .filter(|thread| !live.contains(thread))
+            .copied()
+            .collect::<Vec<_>>();
+        for thread in gone {
+            if let Some(id) = self.threads.remove(&thread) {
+                self.client.thread("exited", id).await?;
+            }
         }
         for thread in live {
             self.announce_thread(thread).await?;
@@ -1986,12 +2117,22 @@ impl Session {
         Ok(json!({"breakpoints": breakpoints}))
     }
 
-    /// Makes the debugger stop on the signals the exception filters select,
-    /// with the configuration's per-signal handling applied over them.
+    /// Makes the debugger stop on the signals and exceptions the exception
+    /// filters select, with the configuration's per-signal handling
+    /// applied over them.
     async fn apply_signal_policies(&mut self) -> Result<(), ErrorBody> {
         let Some(target) = self.target.as_mut() else {
             return Ok(());
         };
+        let exceptions = self.exceptions.exceptions();
+        if target.applied_exceptions != exceptions {
+            target
+                .handle
+                .set_exception_stops(exceptions)
+                .await
+                .map_err(error)?;
+            target.applied_exceptions = exceptions;
+        }
         for code in uscope::signal_codes() {
             let mut policy = target.default_policies[&code];
             policy.stop = self.exceptions.stops(code);
@@ -2084,9 +2225,9 @@ impl Session {
     pub(super) async fn backtrace(
         &mut self,
         stop: &Stop,
-        thread: ThreadId,
+        context: ExecutionContext,
     ) -> Result<Arc<Backtrace>, ErrorBody> {
-        if let Some(trace) = self.backtraces.get(&thread) {
+        if let Some(trace) = self.backtraces.get(&context) {
             return Ok(Arc::clone(trace));
         }
         let handle = self.target_handle()?;
@@ -2094,14 +2235,14 @@ impl Session {
             handle
                 .at(StopContext {
                     stop: stop.id,
-                    thread,
+                    execution: context,
                     frame: StackFrameId::INNERMOST,
                 })
                 .backtrace()
                 .await
                 .map_err(error)?,
         );
-        self.backtraces.insert(thread, Arc::clone(&trace));
+        self.backtraces.insert(context, Arc::clone(&trace));
         Ok(trace)
     }
 
@@ -2143,13 +2284,13 @@ impl Session {
         &mut self,
         context: StopContext,
     ) -> Result<Arc<VariableSnapshot>, ErrorBody> {
-        if let Some(snapshot) = self.variables.get(&(context.thread, context.frame)) {
+        if let Some(snapshot) = self.variables.get(&(context.execution, context.frame)) {
             return Ok(Arc::clone(snapshot));
         }
         let handle = self.target_handle()?;
         let snapshot = Arc::new(handle.at(context).variables().await.map_err(error)?);
         self.variables
-            .insert((context.thread, context.frame), Arc::clone(&snapshot));
+            .insert((context.execution, context.frame), Arc::clone(&snapshot));
         Ok(snapshot)
     }
 
@@ -2315,15 +2456,6 @@ pub(super) fn error(error: Error) -> ErrorBody {
     }
 }
 
-/// A client's thread id as the debugger's.
-pub(super) fn thread_id(id: i64) -> Result<ThreadId, ErrorBody> {
-    u64::try_from(id)
-        .ok()
-        .filter(|id| *id != 0)
-        .map(ThreadId::new)
-        .ok_or_else(|| ErrorBody::new(format!("there is no thread {id}")))
-}
-
 /// The exit code a client is told: the program's own, or, as a shell
 /// reports it, 128 plus the signal that killed it.
 fn exit_code(status: &ExitStatus) -> i64 {
@@ -2335,6 +2467,11 @@ fn exit_code(status: &ExitStatus) -> i64 {
 
 /// The `stopped` event's reason, description, and text for a stop that
 /// needs nothing from the session to describe.
+/// The DAP reason for a stop.
+pub(super) fn stop_kind(reason: &StopReason) -> &'static str {
+    describe_stop(reason).0
+}
+
 fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<String>) {
     match reason {
         StopReason::Step { .. } => ("step", None, None),
@@ -2347,6 +2484,18 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
         ),
         StopReason::Pause => ("pause", None, None),
         StopReason::Entry | StopReason::Attach => ("entry", None, None),
+        StopReason::LanguageException(exception) => (
+            "exception",
+            Some(exception.message.to_string()),
+            Some(language_exception_text(exception.kind).to_owned()),
+        ),
+        StopReason::ProgramBreakpoint { address } => (
+            "exception",
+            Some(format!(
+                "the program executed a breakpoint instruction at {address}"
+            )),
+            Some("program breakpoint".to_owned()),
+        ),
         StopReason::Exception(info)
         | StopReason::CoreDump {
             exception: Some(info),
@@ -2394,6 +2543,15 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
         | StopReason::Watchpoint { .. }
         | StopReason::WatchpointInvalidated { .. }
         | StopReason::Exited(_) => unreachable!("the session describes these stops"),
+    }
+}
+
+/// What a client shows for each kind of exception a runtime reports.
+pub(super) const fn language_exception_text(kind: uscope::LanguageExceptionKind) -> &'static str {
+    match kind {
+        uscope::LanguageExceptionKind::Raised => "exception raised",
+        uscope::LanguageExceptionKind::Unhandled => "unhandled exception",
+        uscope::LanguageExceptionKind::Fatal => "fatal error",
     }
 }
 

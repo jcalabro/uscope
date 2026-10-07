@@ -35,7 +35,7 @@ use bind::{BoundView, Rejection};
 use syntax::View;
 
 /// The view files built into uscope, in the order they are tried.
-const BUILT_IN: [(&str, &str); 5] = [
+const BUILT_IN: [(&str, &str); 9] = [
     (
         "libstdc++.views",
         include_str!("../../views/libstdc++.views"),
@@ -46,6 +46,13 @@ const BUILT_IN: [(&str, &str); 5] = [
     (
         "go-runtime.views",
         include_str!("../../views/go-runtime.views"),
+    ),
+    ("go-time.views", include_str!("../../views/go-time.views")),
+    ("go-sync.views", include_str!("../../views/go-sync.views")),
+    ("go-text.views", include_str!("../../views/go-text.views")),
+    (
+        "go-errors.views",
+        include_str!("../../views/go-errors.views"),
     ),
 ];
 
@@ -224,6 +231,36 @@ pub fn name_of(view: &View) -> Arc<ViewName> {
         header: Arc::clone(&view.header),
         extend: view.extend,
     })
+}
+
+/// Whether `ty`, through its typedefs and qualifiers, is a pointer that
+/// only stands for a container its language gives a kind of its own, which
+/// a pattern names by that kind: a Go map or channel. Expressions index,
+/// measure, and size such a value through its view, never as a pointer.
+#[must_use]
+pub fn stands_for_container(types: &dyn TypeSource, mut ty: TypeReference) -> bool {
+    for _ in 0..64 {
+        let Some(info) = types.type_info(ty) else {
+            return false;
+        };
+        if info
+            .identity
+            .as_deref()
+            .and_then(pattern::go_kind_word)
+            .is_some_and(|kind| matches!(kind, "map" | "chan"))
+        {
+            return true;
+        }
+        match info.kind {
+            crate::TypeKind::Named {
+                target: Some(target),
+                ..
+            }
+            | crate::TypeKind::Modified { target, .. } => ty = target,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Chooses the view for values of `ty`: the first, in the set's order,

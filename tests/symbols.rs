@@ -1170,23 +1170,40 @@ async fn rust_frames_without_debug_info_are_named_by_demangled_symbols() {
 }
 
 #[tokio::test]
-async fn go_frames_without_dwarf_are_named_but_not_unwound() {
+async fn go_frames_without_dwarf_are_named_from_the_function_table() {
     let scenario = open_core("crash-go-nodwarf");
     let modules = Modules::load(&scenario).await;
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
         .await;
     assert_frame_symbols_are_consistent(&trace, &modules, "go");
-    // Without DWARF, Go code has no call-frame information to unwind with,
-    // and the debugger says so rather than guessing a caller.
+    // Go's function table names the function and its line. The core holds
+    // no stack, so the caller the table locates cannot be read, and the
+    // debugger says so rather than guessing one.
     assert!(
-        matches!(trace.termination, UnwindTermination::NoUnwindInfo { .. }),
+        matches!(
+            trace.termination,
+            UnwindTermination::MemoryReadFailed { .. }
+        ),
         "{trace:#?}"
     );
     let [frame] = &trace.frames[..] else {
         panic!("{trace:#?}");
     };
-    assert!(frame.function.is_none());
+    assert_eq!(
+        frame
+            .function
+            .as_ref()
+            .map(|function| function.name.as_ref()),
+        Some("main.crashNow")
+    );
+    assert_eq!(
+        frame.source.as_ref().map(|source| source.line.get()),
+        Some(support::source_line(
+            "tests/fixtures/go/crash/main.go",
+            "*crashTarget ="
+        ))
+    );
     assert_eq!(
         frame.symbol.as_ref().map(|symbol| symbol.name.as_ref()),
         Some("main.crashNow")

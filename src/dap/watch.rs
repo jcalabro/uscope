@@ -522,7 +522,9 @@ fn scope_text(scope: &WatchScope) -> String {
     match scope {
         WatchScope::Location | WatchScope::Static { .. } => String::new(),
         WatchScope::ThreadLocal { thread } => format!(", thread {thread}'s instance"),
-        WatchScope::Frame { .. } => ", until its function returns".to_owned(),
+        WatchScope::Frame { .. } | WatchScope::Task { .. } => {
+            ", until its function returns".to_owned()
+        }
     }
 }
 

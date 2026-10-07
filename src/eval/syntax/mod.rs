@@ -212,7 +212,7 @@ impl Expression {
     pub fn range_base(&self) -> Option<Self> {
         let tree = self.tree()?;
         match tree.kind(tree.root()) {
-            ast::NodeKind::Range { base, .. } => {
+            ast::NodeKind::Range { base, .. } | ast::NodeKind::Slice { base, .. } => {
                 Self::parse(tree.span(*base).text(self.text())).ok()
             }
             _ => None,

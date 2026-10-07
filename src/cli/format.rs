@@ -7,17 +7,19 @@ use std::sync::Arc;
 
 use uscope::{
     AddressDescription, Backtrace, BlockCompletion, BoundaryConflict, BoundaryEvidence, Breakpoint,
-    BreakpointLocation, ByteOrder, Condition, ConditionOwner, ContextShortfall, CoreDumpInfo,
-    CoreModuleState, DecodedInstruction, DisassembledInstruction, Disassembly, DisassemblyBlock,
-    DisassemblyView, ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, HitCondition,
-    IndirectTarget, InstructionContent, InstructionReferenceKind, InstructionTokenKind,
-    InvalidatedWatchpoint, LineNumber, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
-    ModuleId, ModuleIdentity, ModuleImage, RegisterSnapshot, SourceContext, SourceLine, StackFrame,
+    BreakpointLocation, ByteOrder, CodeRole, Condition, ConditionOwner, ContextShortfall,
+    CoreDumpInfo, CoreModuleState, DecodedInstruction, DisassembledInstruction, Disassembly,
+    DisassemblyBlock, DisassemblyView, ExitStatus, FunctionInfo, FunctionOrigin,
+    GlobalVariablePage, HitCondition, IndirectTarget, InstructionContent, InstructionReferenceKind,
+    InstructionTokenKind, InvalidatedWatchpoint, LanguageException, LanguageExceptionKind,
+    LineNumber, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity,
+    ModuleImage, RegisterSnapshot, SourceContext, SourceLine, StackFrame, StackSegment,
     StateSnapshot, StepKind, StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary,
-    ThreadState, VirtualAddress, WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
+    TaskSnapshot, ThreadActivity, ThreadState, VirtualAddress, WatchScope, Watchpoint,
+    WatchpointHit, WatchpointInvalidation,
 };
 
-use super::commands::{COMMANDS, CommandSpec};
+use super::commands::{COMMANDS, CommandSpec, aliases};
 use super::terminal::{Renderer, Role};
 use super::value::{self, bound_output};
 
@@ -54,12 +56,12 @@ pub fn help(aliases: &BTreeMap<String, String>, renderer: Renderer) -> String {
     let name_width = COMMANDS.iter().map(|command| command.name.len()).max();
     let alias_width = COMMANDS
         .iter()
-        .map(|command| command.aliases.join(", ").len())
+        .map(|command| alias_list(command).len())
         .max();
     let (name_width, alias_width) = (name_width.unwrap_or(0), alias_width.unwrap_or(0));
     let mut output = "commands:".to_owned();
     for command in COMMANDS {
-        let aliases = command.aliases.join(", ");
+        let aliases = alias_list(command);
         let rendered_aliases = if aliases.is_empty() {
             String::new()
         } else {
@@ -91,14 +93,20 @@ pub fn help(aliases: &BTreeMap<String, String>, renderer: Renderer) -> String {
     output
 }
 
+/// A command's other names, joined.
+fn alias_list(command: &CommandSpec) -> String {
+    aliases(command).collect::<Vec<_>>().join(", ")
+}
+
 pub fn command_help(command: &CommandSpec, renderer: Renderer) -> String {
     let mut output = format!("  {}", command.summary);
-    if !command.aliases.is_empty() {
+    let aliases = alias_list(command);
+    if !aliases.is_empty() {
         write!(
             output,
             "\n  {}: {}",
             renderer.paint(Role::Muted, "aliases"),
-            renderer.paint(Role::Alias, command.aliases.join(", "))
+            renderer.paint(Role::Alias, aliases)
         )
         .expect("writing to a String cannot fail");
     }
@@ -528,6 +536,10 @@ fn watch_scope_suffix(scope: &WatchScope) -> String {
         WatchScope::Frame { thread, activation } => {
             format!(" (frame {activation} of thread {thread})")
         }
+        // The watch follows the task's stack wherever its runtime moves it.
+        WatchScope::Task { task, activation } => {
+            format!(" (frame {activation:#x} below the top of task {task}'s stack)")
+        }
     }
 }
 
@@ -629,6 +641,9 @@ pub const fn invalidation_text(reason: WatchpointInvalidation) -> &'static str {
         WatchpointInvalidation::ScopeExited => "its frame or block is no longer active",
         WatchpointInvalidation::OwnerThreadExited => "the thread owning it exited",
         WatchpointInvalidation::ModuleUnloaded => "the module owning it was unloaded",
+        WatchpointInvalidation::StackMoved => {
+            "its runtime moved its stack where the debugger could not follow"
+        }
     }
 }
 
@@ -699,6 +714,21 @@ fn numbered_hits(
     format!("{noun}{plural} {hits}")
 }
 
+/// A runtime's exception, followed by its message as the runtime prints
+/// it, which may take several lines.
+fn language_exception(raised: &LanguageException, renderer: Renderer) -> String {
+    format!(
+        "{} {}:\n{}",
+        renderer.paint(Role::Error, "stopped"),
+        match raised.kind {
+            LanguageExceptionKind::Raised => "as an exception was raised",
+            LanguageExceptionKind::Unhandled => "by an unhandled exception",
+            LanguageExceptionKind::Fatal => "by a fatal runtime error",
+        },
+        renderer.paint(Role::Error, &raised.message)
+    )
+}
+
 /// Summarizes a stop on one line, without watched values or source.
 pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
     let stopped = |role| renderer.paint(role, "stopped");
@@ -747,6 +777,12 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             "{} by {}",
             stopped(Role::Error),
             exception(&info.description, info.code, renderer)
+        ),
+        StopReason::LanguageException(raised) => language_exception(raised, renderer),
+        StopReason::ProgramBreakpoint { address } => format!(
+            "{} by the program's breakpoint instruction at {}",
+            stopped(Role::Current),
+            renderer.paint(Role::Metadata, address)
         ),
         StopReason::Exec { followed } => format!(
             "inferior {} its executable image",
@@ -800,6 +836,7 @@ const fn step_name(kind: StepKind) -> &'static str {
         StepKind::OverSource => "source next",
         StepKind::Out => "frame return",
         StepKind::Advance => "advance",
+        StepKind::IntoNewTask => "new task step",
     }
 }
 
@@ -820,7 +857,7 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
         .threads
         .iter()
         .map(|thread| {
-            let marker = if snapshot.selected_thread == Some(thread.id) {
+            let marker = if snapshot.selected == Some(uscope::ExecutionContext::Thread(thread.id)) {
                 renderer.paint(Role::Current, "*").to_string()
             } else {
                 " ".to_owned()
@@ -842,13 +879,140 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
                     )
                 })
                 .unwrap_or_default();
+            let activity = match &thread.activity {
+                Some(ThreadActivity::Task { task, stack }) => {
+                    let place = match stack {
+                        StackSegment::System => " on its runtime's stack",
+                        StackSegment::Signal => " on its signal stack",
+                        _ => "",
+                    };
+                    format!(
+                        " — {}{place}",
+                        renderer.paint(Role::Metadata, format_args!("[{}]", task.number))
+                    )
+                }
+                Some(ThreadActivity::Idle) => " — idle".to_owned(),
+                _ => String::new(),
+            };
             format!(
-                "{marker} {}{name} {state}",
+                "{marker} {}{name} {state}{activity}",
                 renderer.paint(Role::Metadata, thread.id)
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// One task: its id, where the code the program wrote has it, what it does
+/// in its runtime's words, and the thread it is on.
+pub fn task(task: &TaskSnapshot, place: &str, selected: bool, renderer: Renderer) -> String {
+    let marker = if selected {
+        renderer.paint(Role::Current, "*").to_string()
+    } else {
+        " ".to_owned()
+    };
+    let detail = task
+        .detail
+        .as_deref()
+        .map(|detail| format!(" — {detail}"))
+        .unwrap_or_default();
+    let thread = task
+        .thread
+        .map(|thread| format!(" (thread {})", renderer.paint(Role::Metadata, thread)))
+        .unwrap_or_default();
+    let labels = task_labels(task)
+        .map(|labels| format!(" {}", renderer.paint(Role::Name, labels)))
+        .unwrap_or_default();
+    format!(
+        "{marker} {} {place}{detail}{labels}{thread}",
+        renderer.paint(Role::Metadata, format_args!("[{}]", task.id.number))
+    )
+}
+
+/// A task's labels as Go's tracebacks show them, `{job: resize, user: "a
+/// b"}`, quoting a key or value only where it needs it; `None` without
+/// labels.
+pub fn task_labels(task: &TaskSnapshot) -> Option<String> {
+    let quoted = |text: &str| {
+        if !text.is_empty()
+            && text
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+        {
+            text.to_owned()
+        } else {
+            format!("{text:?}")
+        }
+    };
+    (!task.labels.is_empty()).then(|| {
+        let pairs = task
+            .labels
+            .iter()
+            .map(|(key, value)| format!("{}: {}", quoted(key), quoted(value)))
+            .collect::<Vec<_>>();
+        format!("{{{}}}", pairs.join(", "))
+    })
+}
+
+/// The function a task's place names: the innermost the program wrote, or
+/// for a task of only the runtime's code, the one it began in.
+pub fn task_function(task: &TaskSnapshot, trace: &Backtrace) -> Option<String> {
+    trace.user_frame().map_or_else(
+        || {
+            task.entry
+                .as_ref()
+                .and_then(|entry| entry.function.as_deref())
+                .map(str::to_owned)
+        },
+        |frame| Some(code_name(frame.function.as_ref(), frame.symbol.as_ref())),
+    )
+}
+
+/// Where a task is: the code the program wrote that it runs, or the
+/// function a task of only the runtime's code began in, or why its frames
+/// are unknown.
+pub fn task_place(
+    task: &TaskSnapshot,
+    trace: &uscope::Result<Backtrace>,
+    images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    renderer: Renderer,
+) -> String {
+    match trace {
+        Ok(trace) => trace.user_frame().map_or_else(
+            || {
+                task_function(task, trace).map_or_else(
+                    || renderer.paint(Role::Metadata, "<runtime code>").to_string(),
+                    |entry| renderer.paint(Role::Name, entry).to_string(),
+                )
+            },
+            |frame| {
+                let name = renderer.paint(
+                    Role::Name,
+                    code_name(frame.function.as_ref(), frame.symbol.as_ref()),
+                );
+                frame_source(frame, images, renderer).map_or_else(
+                    || name.to_string(),
+                    |source| format!("{name} at {}", renderer.paint(Role::Metadata, source)),
+                )
+            },
+        ),
+        Err(error) => renderer
+            .paint(Role::Metadata, format_args!("<{error}>"))
+            .to_string(),
+    }
+}
+
+/// Tasks that are in one place.
+pub fn task_group(noun: &str, place: &str, numbers: &[u64], renderer: Renderer) -> String {
+    let listed = numbers
+        .iter()
+        .map(|number| renderer.paint(Role::Metadata, number).to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} in {place}: {listed}",
+        plural(numbers.len() as u64, noun)
+    )
 }
 
 pub fn registers(registers: &RegisterSnapshot, renderer: Renderer) -> String {
@@ -1618,9 +1782,29 @@ pub fn backtrace(
 ) -> String {
     let shown = limit.unwrap_or(usize::MAX).min(trace.frames.len());
     let mut lines = Vec::with_capacity(shown + 1);
-    for frame in &trace.frames[..shown] {
+    // Where a stack continues on another, each run of frames says whose
+    // stack it is on.
+    let switches = trace
+        .frames
+        .windows(2)
+        .any(|pair| pair[0].segment != pair[1].segment);
+    let mut segment = None;
+    let iterators = trace.loop_iterators();
+    for (frame, iterates) in trace.frames[..shown].iter().zip(iterators) {
+        if switches && segment != Some(frame.segment) {
+            segment = Some(frame.segment);
+            lines.push(
+                renderer
+                    .paint(
+                        Role::Metadata,
+                        format_args!("    on {}:", stack_owner(frame.segment)),
+                    )
+                    .to_string(),
+            );
+        }
         lines.push(stack_frame(
             frame,
+            iterates,
             modules,
             images,
             frame.level == selected,
@@ -1648,22 +1832,27 @@ pub fn backtrace(
     lines.join("\n")
 }
 
-/// Renders one backtrace frame: its level, instruction, code, and source
-/// location or module.
+/// Whose stack a run of frames is on.
+pub const fn stack_owner(segment: StackSegment) -> &'static str {
+    match segment {
+        StackSegment::Thread => "the thread's stack",
+        StackSegment::Task => "the task's stack",
+        StackSegment::System => "the runtime's stack",
+        StackSegment::Signal => "the signal stack",
+    }
+}
+
+/// Renders one backtrace frame: its level, instruction, code, the level of
+/// the frame whose loop it iterates, and source location or module.
 pub fn stack_frame(
     frame: &StackFrame,
+    iterates: Option<u32>,
     modules: Option<&LoadedModuleSnapshot>,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
     selected: bool,
     renderer: Renderer,
 ) -> String {
-    let source = frame.source.as_ref().and_then(|source| {
-        images
-            .get(&frame.module?)?
-            .source_file(source.file)
-            .map(|file| renderer.location(&file.path, source.line))
-    });
-    let place = source.map_or_else(
+    let place = frame_source(frame, images, renderer).map_or_else(
         || {
             frame
                 .module
@@ -1674,8 +1863,17 @@ pub fn stack_frame(
         },
         |source| format!(" at {}", renderer.paint(Role::Metadata, source)),
     );
+    let iterator = iterates.map_or_else(String::new, |level| {
+        format!(
+            " {}",
+            renderer.paint(
+                Role::Metadata,
+                format_args!("(the iterator of #{level}'s loop)")
+            )
+        )
+    });
     format!(
-        "{} {} in {}{place}",
+        "{} {} in {}{iterator}{place}",
         renderer.paint(
             if selected {
                 Role::Current
@@ -1686,10 +1884,32 @@ pub fn stack_frame(
         ),
         renderer.paint(Role::Metadata, format_args!("{:#018x}", frame.instruction)),
         renderer.paint(
-            Role::Name,
+            // A runtime's machinery and compiler wrappers recede.
+            if frame
+                .function
+                .as_ref()
+                .is_none_or(|function| function.role == CodeRole::Ordinary)
+            {
+                Role::Name
+            } else {
+                Role::Metadata
+            },
             code_name(frame.function.as_ref(), frame.symbol.as_ref())
         ),
     )
+}
+
+/// A frame's source file and line, from its module's image.
+fn frame_source(
+    frame: &StackFrame,
+    images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    renderer: Renderer,
+) -> Option<String> {
+    let source = frame.source.as_ref()?;
+    images
+        .get(&frame.module?)?
+        .source_file(source.file)
+        .map(|file| renderer.location(&file.path, source.line))
 }
 
 pub fn globals(page: &GlobalVariablePage, renderer: Renderer) -> String {
@@ -1991,8 +2211,8 @@ mod tests {
                 .split_whitespace()
                 .map(|word| word.trim_end_matches(','))
                 .collect::<Vec<_>>();
-            for alias in command.aliases {
-                assert!(words.contains(alias), "{alias} in {row}");
+            for alias in aliases(command) {
+                assert!(words.contains(&alias), "{alias} in {row}");
             }
             let detail = command_help(command, renderer);
             assert!(detail.contains(command.summary));

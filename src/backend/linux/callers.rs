@@ -6,8 +6,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use nix::unistd::Pid;
-
 use crate::debug_info::{
     CallSiteId, CallTarget, EntryParameter, VariableRegister, VariableRuntime, VariableRuntimeError,
 };
@@ -17,11 +15,11 @@ use crate::{
     VariableUnavailableReason, VirtualAddress,
 };
 
-use super::frames::{FrameRegisters, PhysicalFrame, PhysicalStack, unwind_module_for};
+use super::frames::{FrameRegisters, PhysicalFrame, PhysicalStack, StackRoot, unwind_module_for};
 use super::inspection::LinuxVariableRuntime;
 use super::native::InspectionOps;
 use super::{Controller, Inferior, RuntimeModule};
-use crate::unwind::{DEFAULT_MAX_FRAMES, FrameContext, RegisterFile};
+use crate::unwind::DEFAULT_MAX_FRAMES;
 
 /// How many callers one entry value may consult, through call sites whose
 /// values are themselves entry values.
@@ -38,12 +36,12 @@ pub(super) struct FrameAt {
     pub(super) depth: usize,
 }
 
-/// A stopped thread's activations, unwound once for every entry value one
-/// inspection recovers.
+/// The activations of a stopped thread or a parked task, unwound once for
+/// every entry value one inspection recovers.
 pub(super) struct Callers<'a, P: InspectionOps> {
     controller: &'a Controller<P>,
     inferior: &'a Inferior,
-    pid: Pid,
+    root: StackRoot,
     /// The activations unwound so far, and how many were asked for: fewer
     /// means the stack ended.
     stack: RefCell<Option<(PhysicalStack, usize)>>,
@@ -54,20 +52,21 @@ const fn unavailable(reason: EntryValueUnavailableReason) -> VariableRuntimeErro
 }
 
 impl<'a, P: InspectionOps> Callers<'a, P> {
-    pub(super) fn new(controller: &'a Controller<P>, inferior: &'a Inferior, pid: Pid) -> Rc<Self> {
+    pub(super) fn new(
+        controller: &'a Controller<P>,
+        inferior: &'a Inferior,
+        root: StackRoot,
+    ) -> Rc<Self> {
         Rc::new(Self {
             controller,
             inferior,
-            pid,
+            root,
             stack: RefCell::new(None),
         })
     }
 
     /// The physical activation at `index`, unwinding further if needed.
-    fn activation(
-        &self,
-        index: usize,
-    ) -> Result<Option<(FrameContext, RegisterFile)>, VariableRuntimeError> {
+    fn activation(&self, index: usize) -> Result<Option<PhysicalFrame>, VariableRuntimeError> {
         let mut stack = self.stack.borrow_mut();
         let complete = stack.as_ref().is_some_and(|(stack, requested)| {
             index < stack.frames.len() || stack.frames.len() < *requested
@@ -76,14 +75,14 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             let requested = index.saturating_add(4).min(DEFAULT_MAX_FRAMES);
             let unwound = self
                 .controller
-                .physical_stack(self.inferior, self.pid, requested)
+                .physical_stack(self.inferior, &self.root, requested)
                 .map_err(|error| VariableRuntimeError::Fatal(error.to_string().into()))?;
             *stack = Some((unwound, requested));
         }
         Ok(stack
             .as_ref()
             .and_then(|(stack, _)| stack.frames.get(index))
-            .map(|frame: &PhysicalFrame| (frame.context.clone(), frame.registers.clone())))
+            .cloned())
     }
 
     /// The value `parameter` held on entry to the function of the frame at
@@ -127,14 +126,14 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
         let frame_module = self.module(module)?;
 
         let caller_index = frame.activation + 1;
-        let Some((context, registers)) = self.activation(caller_index)? else {
+        let Some(caller_frame) = self.activation(caller_index)? else {
             return Err(unavailable(EntryValueUnavailableReason::NoCaller));
         };
         // An interrupted frame did not call the frame above it.
-        if context.signal_frame {
+        if caller_frame.context.signal_frame {
             return Err(unavailable(EntryValueUnavailableReason::NoCaller));
         }
-        let return_address = context.instruction;
+        let return_address = caller_frame.context.instruction;
         let modules = self.controller.unwind_modules(self.inferior);
         let lookup = return_address
             .get()
@@ -154,14 +153,20 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             code: Some((caller.loaded.id, caller_code)),
             depth: frame.depth + 1,
         };
-        let cfa = self
-            .controller
-            .frame_cfa(self.pid, &modules, caller_at.code, &registers);
-        let caller_registers = FrameRegisters::Caller(registers);
+        let reader = self.root.reader();
+        let cfa =
+            self.controller
+                .frame_cfa(reader, &modules, caller_at.code, &caller_frame.registers);
+        let below_stack_pointer =
+            self.controller
+                .below_stack_pointer(self.inferior, &self.root, &caller_frame);
+        let caller_registers = FrameRegisters::Caller(caller_frame.registers);
         let mut caller_runtime = LinuxVariableRuntime {
             ptrace: &self.controller.ptrace,
-            pid: self.pid,
+            pid: reader,
+            thread: self.root.thread(),
             loaded_module: caller.loaded,
+            image_range: caller.image.address_range(),
             breakpoints: &self.inferior.breakpoints,
             registers: &caller_registers,
             floating: None,
@@ -169,25 +174,14 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             tls: caller.tls,
             frame: caller_at,
             callers: Some(Rc::clone(self)),
+            below_stack_pointer,
         };
 
         let site = caller
             .variables
             .call_site(caller_return, &mut caller_runtime, budget)?
             .ok_or_else(|| unavailable(EntryValueUnavailableReason::NoCallSite))?;
-        let target = match site.target {
-            CallTarget::Code(address) => caller
-                .loaded
-                .virtual_address(address)
-                .map_err(|error| VariableRuntimeError::Malformed(error.to_string().into()))?,
-            CallTarget::Computed(address) => address,
-            CallTarget::Symbol(name) => self
-                .symbol(&name)
-                .ok_or_else(|| unavailable(EntryValueUnavailableReason::UnknownTarget))?,
-            CallTarget::Unknown => {
-                return Err(unavailable(EntryValueUnavailableReason::UnknownTarget));
-            }
-        };
+        let target = self.call_target(caller, site.target)?;
         let from = frame_module
             .loaded
             .image_address(target)
@@ -218,6 +212,25 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
                 }
                 error => error,
             })
+    }
+
+    /// Where a call site in `caller` calls.
+    fn call_target(
+        &self,
+        caller: &RuntimeModule,
+        target: CallTarget,
+    ) -> Result<VirtualAddress, VariableRuntimeError> {
+        match target {
+            CallTarget::Code(address) => caller
+                .loaded
+                .virtual_address(address)
+                .map_err(|error| VariableRuntimeError::Malformed(error.to_string().into())),
+            CallTarget::Computed(address) => Ok(address),
+            CallTarget::Symbol(name) => self
+                .symbol(&name)
+                .ok_or_else(|| unavailable(EntryValueUnavailableReason::UnknownTarget)),
+            CallTarget::Unknown => Err(unavailable(EntryValueUnavailableReason::UnknownTarget)),
+        }
     }
 
     fn module(&self, id: ModuleId) -> Result<&'a RuntimeModule, VariableRuntimeError> {
@@ -368,6 +381,15 @@ impl<P: InspectionOps> VariableRuntime for TailCallFrame<'_, '_, '_, '_, P> {
             .loaded
             .virtual_address(address)
             .map_err(|error| error.to_string().into())
+    }
+
+    fn image_address(&self, address: VirtualAddress) -> Option<ImageAddress> {
+        let callee = self.chain.callee;
+        callee
+            .loaded
+            .image_address(address)
+            .ok()
+            .filter(|address| callee.image.address_range().contains(*address))
     }
 
     fn read_memory(

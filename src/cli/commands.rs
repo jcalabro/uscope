@@ -5,11 +5,14 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use std::sync::Arc;
+
 use uscope::{
-    BreakpointId, BreakpointSpec, ByteOrder, DebuggerEvent, Disassembly, DisassemblyQuery,
-    DisassemblyRange, HitComparison, HitCondition, LineNumber, MAX_WINDOW_AFTER, RegisterRole,
-    SignalPolicy, StackFrameId, StepKind, StopReason, ThreadId, VirtualAddress, WatchAccess,
-    WatchpointId, WatchpointSpec,
+    Backtrace, BreakpointId, BreakpointSpec, ByteOrder, DebuggerEvent, Disassembly,
+    DisassemblyQuery, DisassemblyRange, ExecutionContext, HitComparison, HitCondition, LineNumber,
+    MAX_WINDOW_AFTER, ModuleId, ModuleImage, RegisterRole, SignalPolicy, StackFrame, StackFrameId,
+    StepKind, StopContext, StopReason, TaskSnapshot, ThreadId, VariableKind, VirtualAddress,
+    WatchAccess, WatchpointId, WatchpointSpec,
 };
 
 use super::config::{PrintStyle, Radix};
@@ -23,6 +26,8 @@ const DEFAULT_HEX_DUMP_BYTES: u64 = 64;
 /// not install thousands of traps.
 const MAX_RBREAK: usize = 200;
 pub const MAX_HEX_DUMP_BYTES: u64 = 8 * 1024;
+/// How many tasks one request lists.
+const TASK_PAGE: usize = 1024;
 /// Instructions shown before and from a stop that no function contains.
 const DISASSEMBLY_CONTEXT_BEFORE: u32 = 8;
 const DISASSEMBLY_CONTEXT_AFTER: u32 = 16;
@@ -78,6 +83,8 @@ pub enum Command {
     Threads,
     Thread,
     Save,
+    Tasks,
+    Task,
     Clear,
     Help,
     Quit,
@@ -366,8 +373,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Step,
         "step",
         ["s"],
-        "step",
-        "Step into at source level",
+        "step [task]",
+        "Step into at source level, or with `task` into the task the line starts",
         repeatable
     ),
     command!(
@@ -449,7 +456,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         "backtrace",
         ["bt"],
         "backtrace",
-        "Show the selected thread's stack"
+        "Show the selected thread's or task's stack"
     ),
     command!(
         Frame,
@@ -491,6 +498,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Write the commands that recreate the breakpoints, for -c"
     ),
     command!(
+        Tasks,
+        "tasks",
+        [],
+        "tasks [-a] [-g] [-t]",
+        "List tasks: -a with the runtime's own, -g grouped, -t with stacks"
+    ),
+    command!(
+        Task,
+        "task",
+        [],
+        "task [id] [command...]",
+        "Show the selected task, select one, or run a command in one"
+    ),
+    command!(
         Clear,
         "clear",
         ["cls"],
@@ -510,7 +531,28 @@ pub const COMMANDS: &[CommandSpec] = &[
 pub fn command_named(name: &str) -> Option<&'static CommandSpec> {
     COMMANDS
         .iter()
-        .find(|command| command.name == name || command.aliases.contains(&name))
+        .find(|command| aliases(command).any(|alias| alias == name) || command.name == name)
+}
+
+/// A command's other names, with each runtime's own name for its tasks for
+/// the commands about tasks: `goroutines` for `tasks` in Go.
+pub fn aliases(command: &CommandSpec) -> impl Iterator<Item = &'static str> {
+    let nouns = uscope::TASK_NOUNS.iter();
+    let runtime = match command.command {
+        Command::Tasks => nouns.map(|(_, plural)| *plural).collect(),
+        Command::Task => nouns.map(|(singular, _)| *singular).collect(),
+        _ => Vec::new(),
+    };
+    command.aliases.iter().copied().chain(runtime)
+}
+
+/// Whether `word` names a task: `task`, or a runtime's own name for one,
+/// such as Go's `goroutine`.
+fn names_a_task(word: &str) -> bool {
+    word == "task"
+        || uscope::TASK_NOUNS
+            .iter()
+            .any(|(singular, _)| *singular == word)
 }
 
 /// The command `entered` names, exactly or as the unique prefix of a
@@ -632,14 +674,14 @@ impl Cli {
             Command::Set => self.set(rest, spec).await?,
             Command::Stepi => self.step(StepKind::Instruction).await?,
             Command::Nexti => self.step(StepKind::OverInstruction).await?,
-            Command::Step => self.step(StepKind::IntoSource).await?,
+            Command::Step => match first {
+                None => self.step(StepKind::IntoSource).await?,
+                Some(noun) if names_a_task(noun) => self.step(StepKind::IntoNewTask).await?,
+                Some(_) => return Err(spec.usage_error()),
+            },
             Command::Next => self.step(StepKind::OverSource).await?,
             Command::Finish => self.step(StepKind::Out).await?,
-            Command::Advance => {
-                let location =
-                    parse_breakpoint_location(arguments[0])?.ok_or_else(|| spec.usage_error())?;
-                self.execute_until_stop(debugger.advance(location)).await?
-            }
+            Command::Advance => self.advance(arguments[0], spec).await?,
             Command::Examine => {
                 let address = parse_address(arguments[0])?;
                 let byte_count = parse_memory_byte_count(arguments.get(1).copied(), spec)?;
@@ -661,6 +703,8 @@ impl Cli {
             Command::Registers => format::registers(&debugger.registers().await?, renderer),
             Command::Threads => format::threads(&debugger.snapshot().await?, renderer),
             Command::Thread => self.select_thread(arguments[0]).await?,
+            Command::Tasks => self.tasks(line, &arguments, spec).await?,
+            Command::Task => self.task(line, &arguments).await?,
             Command::Clear => return Ok(Control::ClearScreen),
             Command::Help => match first {
                 Some(name) => format::command_help(
@@ -672,6 +716,14 @@ impl Cli {
             Command::Quit => return Ok(Control::Quit),
         };
         Ok(Control::Continue(output))
+    }
+
+    /// Runs until the selected thread reaches `location` or its frame
+    /// returns.
+    async fn advance(&self, location: &str, spec: &CommandSpec) -> Result<String> {
+        let location = parse_breakpoint_location(location)?.ok_or_else(|| spec.usage_error())?;
+        self.execute_until_stop(self.debugger.advance(location))
+            .await
     }
 
     /// Runs `info` with its `arguments`, `rest` being them as written.
@@ -1261,7 +1313,7 @@ impl Cli {
         let id = argument
             .parse()
             .map_err(|_| anyhow!("invalid thread ID: {argument}"))?;
-        self.debugger.select_thread(ThreadId::new(id)).await?;
+        self.debugger.select_context(ThreadId::new(id)).await?;
         let renderer = self.renderers.stdout;
         Ok(format!(
             "{} thread {}",
@@ -1270,8 +1322,249 @@ impl Cli {
         ))
     }
 
+    /// Every task at the current stop, and why the list may be incomplete.
+    async fn task_list(&self) -> Result<(Vec<TaskSnapshot>, Vec<Arc<str>>)> {
+        let mut tasks = Vec::new();
+        let mut gaps = Vec::new();
+        let mut from = None;
+        loop {
+            let page = self.debugger.tasks(from, TASK_PAGE).await?;
+            tasks.extend(page.tasks.iter().cloned());
+            gaps.extend(page.gaps.iter().cloned());
+            match page.next {
+                Some(next) => from = Some(next),
+                None => return Ok((tasks, gaps)),
+            }
+        }
+    }
+
+    /// Every task at the current stop, each with its backtrace or why it
+    /// has none, and the images that name their frames' sources.
+    async fn task_traces(&self) -> Result<TaskTraces> {
+        let (tasks, gaps) = self.task_list().await?;
+        self.traced(tasks, gaps).await
+    }
+
+    /// `tasks`, each with its backtrace or why it has none, and the images
+    /// that name their frames' sources.
+    async fn traced(&self, tasks: Vec<TaskSnapshot>, gaps: Vec<Arc<str>>) -> Result<TaskTraces> {
+        let snapshot = self.debugger.snapshot().await?;
+        let stop = snapshot
+            .stop_id
+            .ok_or_else(|| anyhow!("the program is not stopped"))?;
+        let mut traced = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let trace = self
+                .debugger
+                .at(StopContext {
+                    stop,
+                    execution: ExecutionContext::Task(task.id),
+                    frame: StackFrameId::INNERMOST,
+                })
+                .backtrace()
+                .await;
+            traced.push((task, trace));
+        }
+        let images = self
+            .source_images(
+                traced
+                    .iter()
+                    .filter_map(|(_, trace)| trace.as_ref().ok())
+                    .flat_map(|trace| trace.frames.iter()),
+            )
+            .await?;
+        Ok(TaskTraces {
+            selected: snapshot.selected,
+            tasks: traced,
+            gaps,
+            images,
+        })
+    }
+
+    /// Lists tasks: the program's, or with `-a` the runtime's own too; with
+    /// `-g` grouped by where they are; with `-t` each with its stack.
+    async fn tasks(&self, line: &str, arguments: &[&str], spec: &CommandSpec) -> Result<String> {
+        let (mut all, mut grouped, mut stacks) = (false, false, false);
+        for argument in arguments {
+            match *argument {
+                "-a" => all = true,
+                "-g" => grouped = true,
+                "-t" => stacks = true,
+                _ => return Err(spec.usage_error()),
+            }
+        }
+        let name = line_command(line).map_or(spec.name, |(_, name)| name);
+        let traces = self.task_traces().await?;
+        let noun = traces.tasks.first().map_or("task", |(task, _)| task.noun);
+        let renderer = self.renderers.stdout;
+        let shown = traces
+            .tasks
+            .iter()
+            .filter(|(task, _)| all || !task.internal)
+            .collect::<Vec<_>>();
+        if traces.tasks.is_empty() {
+            match traces.gaps.as_slice() {
+                [] => bail!("the program has no {name}"),
+                gaps => bail!("{name} could not be read: {}", gaps.join("; ")),
+            }
+        }
+        let mut lines = Vec::new();
+        if grouped {
+            let mut groups: Vec<(String, Vec<u64>)> = Vec::new();
+            for (task, trace) in &shown {
+                let place = format::task_place(task, trace, &traces.images, renderer);
+                match groups.iter_mut().find(|(known, _)| *known == place) {
+                    Some((_, numbers)) => numbers.push(task.id.number),
+                    None => groups.push((place, vec![task.id.number])),
+                }
+            }
+            lines.extend(
+                groups
+                    .iter()
+                    .map(|(place, numbers)| format::task_group(noun, place, numbers, renderer)),
+            );
+        } else {
+            for (task, trace) in &shown {
+                let place = format::task_place(task, trace, &traces.images, renderer);
+                lines.push(format::task(
+                    task,
+                    &place,
+                    traces.is_selected(task),
+                    renderer,
+                ));
+                if stacks {
+                    let stack = match trace {
+                        Ok(trace) => {
+                            format::backtrace(trace, u32::MAX, None, None, &traces.images, renderer)
+                        }
+                        Err(error) => error.to_string(),
+                    };
+                    lines.extend(stack.lines().map(|line| format!("    {line}")));
+                }
+            }
+        }
+        for gap in &traces.gaps {
+            lines.push(format!("some {name} could not be read: {gap}"));
+        }
+        let hidden = traces.tasks.len() - shown.len();
+        if hidden > 0 {
+            lines.push(
+                renderer
+                    .paint(
+                        Role::Metadata,
+                        format_args!(
+                            "the runtime runs {} for itself; `{name} -a` lists them",
+                            plural(hidden as u64, &format!("more {noun}"))
+                        ),
+                    )
+                    .to_string(),
+            );
+        }
+        Ok(lines.join("\n"))
+    }
+
+    /// Shows the selected task, selects one, or runs an inspection command
+    /// with one selected and then selects again what was.
+    async fn task(&self, line: &str, arguments: &[&str]) -> Result<String> {
+        let name = line_command(line).map_or("task", |(_, name)| name);
+        let renderer = self.renderers.stdout;
+        let (tasks, _) = self.task_list().await?;
+        let Some(&argument) = arguments.first() else {
+            let selected = self.debugger.snapshot().await?.selected;
+            let task = tasks
+                .into_iter()
+                .find(|task| selects(selected, task))
+                .ok_or_else(|| anyhow!("no {name} is selected"))?;
+            // Only the selected task's frames are read.
+            let traces = self.traced(vec![task], Vec::new()).await?;
+            let (task, trace) = &traces.tasks[0];
+            let place = format::task_place(task, trace, &traces.images, renderer);
+            return Ok(format::task(task, &place, true, renderer));
+        };
+        let number = argument
+            .parse::<u64>()
+            .map_err(|_| anyhow!("invalid {name} ID: {argument}"))?;
+        let mut found = tasks
+            .iter()
+            .map(|task| task.id)
+            .filter(|id| id.number == number);
+        let id = found.next().ok_or_else(|| anyhow!("no {name} {number}"))?;
+        if found.next().is_some() {
+            bail!("several runtimes have a {name} {number}");
+        }
+        let command = line
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .and_then(|(_, rest)| rest.trim_start().split_once(char::is_whitespace))
+            .map(|(_, command)| command.trim());
+        let Some(command) = command else {
+            self.debugger.select_context(id).await?;
+            return Ok(format!(
+                "{} {name} {}",
+                renderer.paint(Role::Success, "selected"),
+                renderer.paint(Role::Metadata, number)
+            ));
+        };
+        let (spec, _) =
+            line_command(command).ok_or_else(|| anyhow!("unknown command in `{command}`"))?;
+        if !inspects(spec.command) {
+            bail!(
+                "{name} {number} runs only commands that inspect, not `{}`",
+                spec.name
+            );
+        }
+        let snapshot = self.debugger.snapshot().await?;
+        self.debugger.select_context(id).await?;
+        let output = Box::pin(self.execute(command)).await;
+        if let Some(previous) = snapshot.selected {
+            self.debugger.select_context(previous).await?;
+            if let Some(frame) = snapshot
+                .selected_frame
+                .filter(|frame| *frame != StackFrameId::INNERMOST)
+            {
+                self.debugger.select_frame(frame).await?;
+            }
+        }
+        match output? {
+            Control::Continue(output) => Ok(output),
+            _ => bail!("{name} {number} runs only commands that inspect"),
+        }
+    }
+
+    /// The images of the modules whose code the frames run, which name
+    /// their source files.
+    async fn source_images(
+        &self,
+        frames: impl Iterator<Item = &StackFrame>,
+    ) -> Result<BTreeMap<ModuleId, Arc<ModuleImage>>> {
+        let modules = frames
+            .filter(|frame| frame.source.is_some())
+            .filter_map(|frame| frame.module)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut images = BTreeMap::new();
+        for module in modules {
+            images.insert(module, self.debugger.loaded_module_image(module).await?);
+        }
+        Ok(images)
+    }
+
     async fn step(&self, kind: StepKind) -> Result<String> {
-        self.execute_until_stop(self.debugger.step(kind)).await
+        let mut output = self.execute_until_stop(self.debugger.step(kind)).await?;
+        // Finishing a function shows what it returned, as the stop's
+        // variables list it.
+        if kind == StepKind::Out
+            && let Ok(snapshot) = self.debugger.variables().await
+        {
+            for variable in snapshot
+                .variables
+                .iter()
+                .filter(|variable| variable.kind == VariableKind::Returned)
+            {
+                output.push('\n');
+                output.push_str(&value::variable_summary(variable, self.renderers.stdout));
+            }
+        }
+        Ok(output)
     }
 
     /// Waits for an execution request, prefixing its stop with a line for
@@ -1896,12 +2189,13 @@ impl Cli {
             FrameTarget::Inward(_) if selected == 0 => bail!("the innermost frame is selected"),
             FrameTarget::Inward(count) => selected.saturating_sub(count),
         };
-        let frame = trace
+        let index = trace
             .frames
             .iter()
-            .find(|frame| u64::from(frame.level) == level)
+            .position(|frame| u64::from(frame.level) == level)
             .ok_or_else(|| anyhow!("the backtrace has no frame {level}"))?;
-        let frame = self.debugger.select_frame(frame.id).await?;
+        let iterates = trace.loop_iterators()[index];
+        let frame = self.debugger.select_frame(trace.frames[index].id).await?;
 
         let renderer = self.renderers.stdout;
         let modules = self.debugger.loaded_modules().await?;
@@ -1909,7 +2203,8 @@ impl Cli {
         if let (Some(module), Some(_)) = (frame.module, &frame.source) {
             images.insert(module, self.debugger.loaded_module_image(module).await?);
         }
-        let mut output = format::stack_frame(&frame, Some(&modules), &images, true, renderer);
+        let mut output =
+            format::stack_frame(&frame, iterates, Some(&modules), &images, true, renderer);
         if frame.source.is_some() {
             output.push('\n');
             match self.source_context().await {
@@ -2023,16 +2318,7 @@ impl Cli {
             None
         };
         // Source files are identified within their owning module's image.
-        let mut images = BTreeMap::new();
-        let modules_with_source = trace
-            .frames
-            .iter()
-            .filter(|frame| frame.source.is_some())
-            .filter_map(|frame| frame.module)
-            .collect::<std::collections::BTreeSet<_>>();
-        for module in modules_with_source {
-            images.insert(module, self.debugger.loaded_module_image(module).await?);
-        }
+        let images = self.source_images(trace.frames.iter()).await?;
         Ok(format::backtrace(
             &trace,
             selected,
@@ -2650,6 +2936,49 @@ fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&st
     Ok((spec, format, rest, arguments))
 }
 
+/// Every task at a stop, with what names their places.
+struct TaskTraces {
+    selected: Option<ExecutionContext>,
+    tasks: Vec<(TaskSnapshot, uscope::Result<Backtrace>)>,
+    /// Why some tasks could not be read.
+    gaps: Vec<Arc<str>>,
+    images: BTreeMap<ModuleId, Arc<ModuleImage>>,
+}
+
+impl TaskTraces {
+    /// Whether the task is selected, itself or through the thread it is on.
+    fn is_selected(&self, task: &TaskSnapshot) -> bool {
+        selects(self.selected, task)
+    }
+}
+
+/// Whether a selected context is `task`, or the thread running it.
+fn selects(selected: Option<ExecutionContext>, task: &TaskSnapshot) -> bool {
+    match selected {
+        Some(ExecutionContext::Task(id)) => id == task.id,
+        Some(ExecutionContext::Thread(thread)) => task.thread == Some(thread),
+        None => false,
+    }
+}
+
+/// Whether a command only inspects the stop, so that it may run with
+/// another task selected for it.
+const fn inspects(command: Command) -> bool {
+    matches!(
+        command,
+        Command::Print
+            | Command::Whatis
+            | Command::Ptype
+            | Command::Examine
+            | Command::Disassemble
+            | Command::Where
+            | Command::List
+            | Command::Backtrace
+            | Command::Frame
+            | Command::Registers
+    )
+}
+
 /// An evaluation's failure, pointing into the expression when it is the
 /// expression's.
 fn expression_error(text: &str, error: uscope::Error) -> anyhow::Error {
@@ -2674,8 +3003,8 @@ mod tests {
     fn command_registry_has_unique_names_and_derives_arity_from_usage() {
         let mut names = std::collections::BTreeSet::new();
         for command in COMMANDS {
-            for name in std::iter::once(&command.name).chain(command.aliases) {
-                assert!(names.insert(*name), "duplicate command name {name}");
+            for name in std::iter::once(command.name).chain(aliases(command)) {
+                assert!(names.insert(name), "duplicate command name {name}");
                 assert_eq!(
                     command_named(name).map(|found| found.name),
                     Some(command.name)

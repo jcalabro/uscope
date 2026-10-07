@@ -499,13 +499,13 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
         scenario
             .operation(
                 "select Zig thread",
-                scenario.handle().select_thread(thread.id),
+                scenario.handle().select_context(thread.id),
             )
             .await;
         let trace = scenario
             .operation("unwind Zig thread", scenario.handle().backtrace())
             .await;
-        assert_eq!(trace.thread, thread.id);
+        assert_eq!(trace.context, thread.id.into());
         assert!(!trace.frames.is_empty());
         let Some(frame) = trace.frames.iter().find(|frame| {
             frame
@@ -522,7 +522,7 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
                     .handle()
                     .at(uscope::StopContext {
                         stop,
-                        thread: thread.id,
+                        execution: thread.id.into(),
                         frame: frame.id,
                     })
                     .variables(),
@@ -840,7 +840,7 @@ async fn variable_inspection_uses_the_selected_threads_stack() {
         scenario
             .operation(
                 "select stopped thread",
-                scenario.handle().select_thread(thread.id),
+                scenario.handle().select_context(thread.id),
             )
             .await;
         match scenario.handle().variable("thread_value").await {
@@ -1077,17 +1077,18 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
             }
             assert_register_source(&snapshot.variables[12], "xmm0", fixture);
             assert_register_source(&snapshot.variables[13], "xmm1", fixture);
-            // Clang describes the x87 value's 80 bits but not its padding.
-            assert_eq!(
-                snapshot.variables[14].state,
-                VariableState::Unavailable(VariableUnavailableReason::OptimizedOut(
-                    uscope::OptimizedOutReason::UndefinedPieces {
-                        ranges: Arc::from([uscope::ValueBitRange {
-                            offset: 80,
-                            size: 48
-                        }]),
-                    }
-                )),
+            // Its one piece holds, in memory, the 80 bits x87 precision
+            // uses, not the padding after them.
+            assert_variable_value(&snapshot.variables[14], expected[14].clone());
+            assert!(
+                matches!(
+                    &snapshot.variables[14].state,
+                    VariableState::Available {
+                        source: uscope::VariableValueSource::Memory(_),
+                        raw: Some(raw),
+                        ..
+                    } if raw.len() == 10
+                ),
                 "{fixture}: {:?}",
                 snapshot.variables[14]
             );

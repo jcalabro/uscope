@@ -121,7 +121,7 @@ fn malformed_literals_point_at_themselves_and_suggest_fixes() {
     );
     assert!(error("17UL").hint.unwrap().contains("17 as unsigned long"));
     assert!(error("naïve").hint.unwrap().contains("backticks"));
-    assert_eq!(error("nil").hint.as_deref(), Some("write `null`"));
+    assert_eq!(error("nullptr").hint.as_deref(), Some("write `null`"));
 }
 
 /// Precedence levels from loosest to tightest, as the reference lists them,
@@ -565,7 +565,18 @@ fn expression_text() -> impl Strategy<Value = String> {
             inner
                 .clone()
                 .prop_map(|operand| format!("sizeof({operand})")),
-            inner.prop_map(|operand| format!("len({operand})")),
+            inner.clone().prop_map(|operand| format!("len({operand})")),
+            inner.clone().prop_map(|operand| format!("cap({operand})")),
+            (
+                inner.clone(),
+                proptest::option::of(inner.clone()),
+                proptest::option::of(inner)
+            )
+                .prop_map(|(base, start, end)| format!(
+                    "({base})[{}:{}]",
+                    start.unwrap_or_default(),
+                    end.unwrap_or_default()
+                )),
         ]
     })
 }

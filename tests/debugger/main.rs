@@ -9,11 +9,13 @@ mod expressions;
 #[cfg(debug_assertions)]
 mod flight_recorder;
 mod forks;
+mod gallery;
 mod globals;
 mod identities;
 mod libraries;
 mod locations;
 mod metadata;
+mod names;
 mod signals;
 mod stepping;
 mod unwind;

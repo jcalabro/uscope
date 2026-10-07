@@ -638,7 +638,7 @@ impl Session {
         handle
             .start_step(
                 context.stop,
-                context.thread,
+                context.execution,
                 context.frame,
                 kind,
                 ResumeScope::Process(process_id),
@@ -999,7 +999,7 @@ impl Session {
         let console = console.lock().await;
         if let Some(at) = at {
             let context = inspect::context(&handle, at.stop, at.thread, at.frame).await?;
-            handle.select_thread(context.thread).await?;
+            handle.select_context(context.execution).await?;
             handle.select_frame(context.frame).await?;
         }
         let output = console

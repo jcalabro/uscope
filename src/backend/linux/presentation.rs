@@ -19,6 +19,7 @@ use crate::eval::types::{Ty, TypeSource};
 use crate::inspection::InspectionBudget;
 use crate::model::{ValueStorage, ViewChildren};
 use crate::protocol::StopId;
+use crate::runtime_model::{DynamicValue, HeldPlace, StoredValue};
 use crate::view::bind::BoundShape;
 use crate::view::kernel::Recordings;
 use crate::view::run::{Child, Failure};
@@ -33,6 +34,7 @@ use crate::{
 use super::evaluation::{
     StopMachine, StopObject, StopPlace, StopStep, ViewBound, lookup_type_in, plan_in,
 };
+use super::frames::StackRoot;
 use super::native::InspectionOps;
 use super::{Controller, RuntimeModule};
 
@@ -222,6 +224,10 @@ impl<P: InspectionOps> Scope for ModuleScope<'_, P> {
         self.module.image.types_with_base(base)
     }
 
+    fn stands_for_container(&self, ty: TypeReference) -> bool {
+        crate::view::stands_for_container(self, ty)
+    }
+
     fn global_step(
         &self,
         name: &str,
@@ -263,6 +269,26 @@ fn element_type(shape: &BoundShape<StopStep>) -> Option<TypeReference> {
         BoundShape::If {
             then, otherwise, ..
         } => match (element_type(then), element_type(otherwise)) {
+            (Some(left), Some(right)) if left == right => Some(left),
+            (Some(found), None) if !otherwise.has_elements() => Some(found),
+            (None, Some(found)) if !then.has_elements() => Some(found),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The program type of a map's values, when every branch that presents
+/// one agrees and its values are places.
+fn entry_type(shape: &BoundShape<StopStep>) -> Option<TypeReference> {
+    match shape {
+        BoundShape::Map { value, .. } => match value.result() {
+            Ty::Program(reference) if value.is_place() => Some(*reference),
+            _ => None,
+        },
+        BoundShape::If {
+            then, otherwise, ..
+        } => match (entry_type(then), entry_type(otherwise)) {
             (Some(left), Some(right)) if left == right => Some(left),
             (Some(found), None) if !otherwise.has_elements() => Some(found),
             (None, Some(found)) if !then.has_elements() => Some(found),
@@ -422,11 +448,11 @@ impl<P: InspectionOps> Controller<P> {
     pub(super) fn explain_view(
         &self,
         stop_id: StopId,
-        pid: nix::unistd::Pid,
+        root: &StackRoot,
         frame: crate::StackFrameId,
         expression: &crate::Expression,
     ) -> Result<crate::ViewExplanation> {
-        let value = self.view_subject(stop_id, pid, frame, expression, "explain")?;
+        let value = self.view_subject(stop_id, root, frame, expression, "explain")?;
         let candidates = value.type_info.as_ref().map_or_else(Vec::new, |info| {
             candidates(&self.view_choice(info.reference))
         });
@@ -447,14 +473,14 @@ impl<P: InspectionOps> Controller<P> {
     pub(super) fn record_kernels(
         &self,
         stop_id: StopId,
-        pid: nix::unistd::Pid,
+        root: &StackRoot,
         frame: crate::StackFrameId,
         expression: &crate::Expression,
     ) -> Result<Vec<String>> {
         let recordings = Recordings::default();
         *self.views.recording.borrow_mut() = Some(recordings.clone());
         let presented = (|| -> Result<()> {
-            let value = self.view_subject(stop_id, pid, frame, expression, "record")?;
+            let value = self.view_subject(stop_id, root, frame, expression, "record")?;
             if let VariableState::Available {
                 presentation: Some(presentation),
                 ..
@@ -481,14 +507,14 @@ impl<P: InspectionOps> Controller<P> {
     fn view_subject(
         &self,
         stop_id: StopId,
-        pid: nix::unistd::Pid,
+        root: &StackRoot,
         frame: crate::StackFrameId,
         expression: &crate::Expression,
         verb: &str,
     ) -> Result<InspectedValue> {
         match self.evaluate(
             stop_id,
-            pid,
+            root,
             frame,
             expression,
             crate::EvaluationMode::Read,
@@ -516,6 +542,21 @@ impl<P: InspectionOps> Controller<P> {
         })
     }
 
+    /// The step from a value of `from` to the value its view presents as a
+    /// map holds for a key, for `m[key]`.
+    pub(super) fn view_entry(&self, from: TypeReference) -> Option<Planned<StopStep>> {
+        if !self.views.enabled {
+            return None;
+        }
+        let bound = self.view_choice(from).bound.clone()?;
+        let value = entry_type(&bound.shape)?;
+        Some(Planned {
+            step: StopStep::Entry(bound),
+            result: Some(value),
+            consumed: 1,
+        })
+    }
+
     /// The children a view presents: its elements, its fields, and the
     /// value as stored.
     pub(super) fn view_children(
@@ -527,9 +568,9 @@ impl<P: InspectionOps> Controller<P> {
         budget: &mut InspectionBudget,
     ) -> Result<ValueChildPage> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        let pid = super::debug_pid(reference.thread)?;
-        let frame = self.resolve_frame(inferior, pid, reference.frame)?;
-        let scope = self.frame_for(inferior, reference.stop_id, pid, &frame);
+        let root = self.stack_root(reference.stop_id, reference.context)?;
+        let frame = self.resolve_frame(inferior, &root, reference.frame)?;
+        let scope = self.frame_for(inferior, reference.stop_id, &root, &frame);
         let bound = view
             .bound
             .clone()
@@ -721,34 +762,6 @@ fn polymorphic(types: &dyn TypeSource, ty: TypeReference, depth: usize) -> bool 
         }))
 }
 
-/// The offset and type of member `name` in the record a pointer of type
-/// `pointer` points to.
-fn pointee_member(
-    types: &dyn TypeSource,
-    pointer: TypeReference,
-    name: &str,
-) -> Option<(u64, TypeReference)> {
-    let (_, info) = crate::eval::types::representation(types, pointer).ok()?;
-    let TypeKind::Pointer {
-        target: Some(target),
-        ..
-    } = info.kind
-    else {
-        return None;
-    };
-    let (_, record) = crate::eval::types::representation(types, target).ok()?;
-    let TypeKind::Record { members, .. } = &record.kind else {
-        return None;
-    };
-    let member = members
-        .iter()
-        .find(|member| member.name.as_deref() == Some(name))?;
-    match member.layout {
-        crate::RecordMemberLayout::ByteOffset(offset) => Some((offset, member.type_ref)),
-        _ => None,
-    }
-}
-
 /// The one type a name means in an image, as its several units' copies of
 /// one type are one.
 fn one_type(image: &crate::ModuleImage, name: &str) -> Option<TypeReference> {
@@ -904,10 +917,13 @@ fn member_name(child: &ValueChild) -> Option<&str> {
     }
 }
 
+/// Children one value lends another, and how many.
+type Lent = (Arc<ValueChildrenReference>, u64);
+
 /// The children a value lends the value it stands for, and how many: a
 /// presented value's elements and fields, but not its `[raw]`, which is
 /// its own; or the members of one no view presents.
-fn lent(state: &VariableState) -> Option<(Arc<ValueChildrenReference>, u64)> {
+fn lent(state: &VariableState) -> Option<Lent> {
     match state {
         VariableState::Available {
             presentation: Some(presentation),
@@ -1098,17 +1114,17 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if bound.is_none()
             && let VariableState::Available {
                 value: crate::VariableValue::Address(_),
-                dereference:
-                    crate::DereferenceState::Available(crate::DereferenceReference {
-                        module,
-                        image,
-                        target_type,
-                        target: crate::model::DereferenceTarget::Address(address),
-                        ..
-                    }),
+                dereference: crate::DereferenceState::Available(reference),
                 text: None,
                 ..
             } = &value.state
+            && let crate::DereferenceReference {
+                module,
+                image,
+                target_type,
+                target: crate::model::DereferenceTarget::Address(address),
+                ..
+            } = &**reference
         {
             // A pointer or reference to text shows the text, as a pointer
             // to characters does, or why its view could not read it. A
@@ -1154,7 +1170,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         };
         // An aggregate's children say where it is; another value, such as
         // a Go map's pointer, is where its state was read from.
-        let Some(raw) = self.place_of(type_info, &value.state) else {
+        let Some(raw) = self.presented_place(type_info, &value.state) else {
             return Ok(value);
         };
         let this = StopPlace::of(&raw);
@@ -1264,7 +1280,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         match language {
             Some(crate::SourceLanguage::Cpp) => self.cpp_dynamic(type_info, &place),
             Some(crate::SourceLanguage::Rust) => self.rust_dynamic(type_info, &place),
-            Some(crate::SourceLanguage::Go) => self.go_dynamic(type_info, &place),
+            Some(crate::SourceLanguage::Go) => Ok(self.go_dynamic(type_info, &place)),
             _ => Ok(None),
         }
     }
@@ -1394,93 +1410,70 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         Ok(Some(Dynamic::at(module, ty, data)))
     }
 
-    /// A Go interface holds the value of the type its runtime type
-    /// describes: its `_type`, or its `tab`'s `Type`, whose offset from
-    /// `runtime.types` a type's `DW_AT_go_runtime_type` gives. The value is
-    /// the data word itself when its type is stored directly, which Go 1.26
-    /// says in `TFlag` and earlier Go in `Kind_`, and otherwise what the
-    /// word points to. A nil interface holds nothing.
-    fn go_dynamic(
-        &mut self,
-        type_info: &TypeInfo,
-        place: &StopPlace,
-    ) -> std::result::Result<Option<Dynamic>, Stop> {
-        // Go marks a type's kind on a typedef, which a same-named typedef
-        // may stand over.
-        let is_interface = typedef_chain(self, type_info.reference).iter().any(|info| {
-            info.identity
-                .as_ref()
-                .and_then(|identity| identity.go)
-                .is_some_and(|go| go.kind == crate::GoKind::Interface)
-        });
-        let Ok((_, record)) = crate::eval::types::representation(self, type_info.reference) else {
-            return Ok(None);
+    /// A Go interface holds what the runtime the module carries says it
+    /// does: the value of the type its runtime type descriptor describes,
+    /// which a type's `DW_AT_go_runtime_type` names, or nothing. Where the
+    /// runtime cannot say, the interface shows as the record it is.
+    fn go_dynamic(&self, type_info: &TypeInfo, place: &StopPlace) -> Option<Dynamic> {
+        let (_, record) = crate::eval::types::representation(self, type_info.reference).ok()?;
+        let TypeKind::Record { .. } = &record.kind else {
+            return None;
         };
-        let (true, TypeKind::Record { members, .. }, ValueStorage::Memory(address)) =
-            (is_interface, &record.kind, &place.located.storage)
+        let stored = match &place.located.storage {
+            ValueStorage::Memory(address) => StoredValue::Memory(*address),
+            ValueStorage::Bytes {
+                raw, start, end, ..
+            } => StoredValue::Bytes(raw.get(*start..*end)?),
+            _ => return None,
+        };
+        let Some(Ok(held)) = self
+            .frame
+            .runtime_dynamic(place.module, &record.name, stored)
         else {
-            return Ok(None);
+            return None;
         };
-        let address = address.get();
-        let offset = |name: &str| {
-            members
-                .iter()
-                .find(|member| member.name.as_deref() == Some(name))
-                .and_then(|member| match member.layout {
-                    crate::RecordMemberLayout::ByteOffset(offset) => {
-                        Some((offset, member.type_ref))
-                    }
-                    _ => None,
-                })
+        let DynamicValue::Held {
+            descriptor,
+            offset,
+            place: held,
+        } = held
+        else {
+            return Some(Dynamic::Nil);
         };
-        let Some((data_offset, _)) = offset("data") else {
-            return Ok(None);
-        };
-        // The runtime type, and the pointer type its DWARF describes it by.
-        let (descriptor, descriptor_type) = if let Some((type_offset, ty)) = offset("_type") {
-            (self.word(address + type_offset)?, ty)
-        } else if let Some((tab_offset, tab_type)) = offset("tab") {
-            let Some((type_field, ty)) = pointee_member(self, tab_type, "Type") else {
-                return Ok(None);
-            };
-            let tab = self.word(address + tab_offset)?;
+        let (module, _) = self.module_at(descriptor.get())?;
+        let ty = module.image.go_runtime_type(offset)?;
+        match (held, &place.located.storage) {
+            (HeldPlace::Memory(address), _) => Some(Dynamic::at(module, ty, address.get())),
+            // A value stored directly in an interface held in bytes is
+            // those of its data word.
             (
-                if tab == 0 {
-                    0
-                } else {
-                    self.word(tab + type_field)?
+                HeldPlace::Within(within),
+                ValueStorage::Bytes {
+                    source, raw, start, ..
                 },
-                ty,
-            )
-        } else {
-            return Ok(None);
-        };
-        if descriptor == 0 {
-            return Ok(Some(Dynamic::Nil));
+            ) => {
+                let size = self.type_info(ty)?.byte_size?;
+                let begin = start.checked_add(usize::try_from(within).ok()?)?;
+                let finish = begin.checked_add(usize::try_from(size).ok()?)?;
+                (finish <= raw.len()).then(|| Dynamic::Value {
+                    ty,
+                    place: StopPlace {
+                        module: module.loaded.id,
+                        located: Located {
+                            ty: ty.id,
+                            storage: ValueStorage::Bytes {
+                                source: source.clone(),
+                                raw: Arc::clone(raw),
+                                start: begin,
+                                end: finish,
+                                address: None,
+                            },
+                        },
+                    },
+                })
+            }
+            (HeldPlace::Within(_), _) => None,
         }
-        let Some((module, image)) = self.module_at(descriptor) else {
-            return Ok(None);
-        };
-        let Ok(types) = module.image.symbol_named("runtime.types") else {
-            return Ok(None);
-        };
-        let Some(runtime_offset) = image.get().checked_sub(types.address.get()) else {
-            return Ok(None);
-        };
-        let Some(ty) = module.image.go_runtime_type(runtime_offset) else {
-            return Ok(None);
-        };
-        let (Some((tflag, _)), Some((kind, _))) = (
-            pointee_member(self, descriptor_type, "TFlag"),
-            pointee_member(self, descriptor_type, "Kind_"),
-        ) else {
-            return Ok(None);
-        };
-        let direct = self.read(descriptor + tflag, 1)?[0] & 0x20 != 0
-            || self.read(descriptor + kind, 1)?[0] & 0x20 != 0;
-        let data = address + data_offset;
-        let storage = if direct { data } else { self.word(data)? };
-        Ok(Some(Dynamic::at(module, ty, storage)))
     }
 
     /// `value` with the presentation of what it dynamically is.
@@ -1514,21 +1507,22 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 } else {
                     None
                 };
-                let shown = match pointee {
-                    Some(pointee) => pointee,
-                    None => match self.record_summary(&presented.state, 0)? {
-                        Some(fields) => fields,
-                        None => crate::view::summary::value(
-                            presented.type_info.as_ref(),
-                            &presented.state,
-                        ),
-                    },
+                let (shown, lent) = match pointee {
+                    Some((pointee, lent_by_pointee)) => {
+                        (pointee, lent_by_pointee.or_else(|| lent(&presented.state)))
+                    }
+                    None => (
+                        match self.record_summary(&presented.state, 0)? {
+                            Some(fields) => fields,
+                            None => crate::view::summary::value(
+                                presented.type_info.as_ref(),
+                                &presented.state,
+                            ),
+                        },
+                        lent(&presented.state),
+                    ),
                 };
-                (
-                    PresentedShape::Dynamic,
-                    format!("{name} {shown}"),
-                    lent(&presented.state),
-                )
+                (PresentedShape::Dynamic, format!("{name} {shown}"), lent)
             }
         };
         Ok(present_as(
@@ -1574,27 +1568,32 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
     }
 
     /// A pointer to a record as Go's debuggers show one an interface holds,
-    /// `*{name: value, …}`, or `nil`; `None` for any other value.
+    /// `*{name: value, …}`, or `nil`; `None` for any other value. A pointer
+    /// to a value a view presents is `*` and the view's summary, and lends
+    /// the view's children.
     fn pointee_summary(
         &mut self,
         state: &VariableState,
-    ) -> std::result::Result<Option<String>, Stop> {
+    ) -> std::result::Result<Option<(String, Option<Lent>)>, Stop> {
         let VariableState::Available {
             value: crate::VariableValue::Address(address),
-            dereference:
-                crate::DereferenceState::Available(crate::DereferenceReference {
-                    module,
-                    target_type,
-                    target: crate::model::DereferenceTarget::Address(target),
-                    ..
-                }),
+            dereference: crate::DereferenceState::Available(reference),
             ..
         } = state
         else {
             return Ok(None);
         };
+        let crate::DereferenceReference {
+            module,
+            target_type,
+            target: crate::model::DereferenceTarget::Address(target),
+            ..
+        } = &**reference
+        else {
+            return Ok(None);
+        };
         if address.address.get() == 0 {
-            return Ok(Some("nil".to_owned()));
+            return Ok(Some(("nil".to_owned(), None)));
         }
         let place = Located {
             ty: *target_type,
@@ -1602,9 +1601,21 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         };
         let module = self.module(*module)?;
         let pointee = self.materialize(module, &place)?;
+        let presented = self.nested(self.depth + 1).presented(pointee.clone())?;
+        if let VariableState::Available {
+            presentation: Some(presentation),
+            ..
+        } = &presented.state
+            && presentation.shape != PresentedShape::Raw
+        {
+            return Ok(Some((
+                format!("*{}", presentation.summary),
+                lent(&presented.state),
+            )));
+        }
         Ok(self
             .record_summary(&pointee.state, 0)?
-            .map(|fields| format!("*{fields}")))
+            .map(|fields| (format!("*{fields}"), None)))
     }
 
     /// The `name: value` parts of a record's members, its bases' first.
@@ -1690,24 +1701,47 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         result
     }
 
+    /// Where the value a view presents is: a slice's descriptor, though its
+    /// children are its elements, or anything else's place.
+    fn presented_place(
+        &self,
+        type_info: &TypeInfo,
+        state: &VariableState,
+    ) -> Option<Arc<ValueChildrenReference>> {
+        match state {
+            VariableState::Available {
+                value: crate::VariableValue::Slice { .. },
+                ..
+            } => self.storage_of(type_info, state),
+            state => self.place_of(type_info, state),
+        }
+    }
+
     /// Where a value of `type_info` is, as a capability over its storage.
     fn place_of(
         &self,
         type_info: &TypeInfo,
         state: &VariableState,
     ) -> Option<Arc<ValueChildrenReference>> {
-        let VariableState::Available {
-            source,
-            raw,
-            children,
-            ..
-        } = state
-        else {
+        let VariableState::Available { children, .. } = state else {
             return None;
         };
         if let ValueChildren::Available(reference) = children {
             return Some(Arc::clone(reference));
         }
+        self.storage_of(type_info, state)
+    }
+
+    /// Where a value of `type_info` was read from, as a capability over that
+    /// storage, whatever its children say.
+    fn storage_of(
+        &self,
+        type_info: &TypeInfo,
+        state: &VariableState,
+    ) -> Option<Arc<ValueChildrenReference>> {
+        let VariableState::Available { source, raw, .. } = state else {
+            return None;
+        };
         let storage = match (source, raw) {
             (crate::VariableValueSource::Memory(address), _) => ValueStorage::Memory(*address),
             (source, Some(raw)) => ValueStorage::Bytes {
@@ -1723,7 +1757,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let context = self.context(module);
         Some(Arc::new(ValueChildrenReference {
             stop_id: context.stop_id,
-            thread: context.thread,
+            context: context.context,
             frame: context.frame,
             module: context.module,
             image: context.image,
@@ -1788,6 +1822,70 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 )
             })
             .map_err(|failure| view_stop(failure, bound, ErrorKind::Unsupported))
+    }
+
+    /// The place of the value the map at `from` holds for `key`, as a view
+    /// presents the map, for `m[key]`.
+    pub(super) fn view_entry_place(
+        &mut self,
+        bound: &Arc<ViewBound>,
+        from: &StopPlace,
+        key: &crate::eval::target::Key,
+    ) -> std::result::Result<Option<StopPlace>, Stop> {
+        let controller = self.frame.controller;
+        let stop = self.frame.stop_id;
+        let scan = scan_key(bound, self.module(from.module)?.loaded.image, from);
+        let mut machine = self.nested(self.depth);
+        controller
+            .views
+            .scan(stop, scan, |checkpoints| {
+                crate::view::run::entry_place(bound, &mut machine, from.clone(), key, checkpoints)
+            })
+            .map_err(|failure| view_stop(failure, bound, ErrorKind::Type))
+    }
+
+    /// The view that presents the value at `at`, when views are on.
+    fn view_of(&self, at: &StopPlace) -> std::result::Result<Option<Arc<ViewBound>>, Stop> {
+        let controller = self.frame.controller;
+        if !controller.views.enabled {
+            return Ok(None);
+        }
+        let ty = TypeReference {
+            image: self.module(at.module)?.loaded.image,
+            id: at.located.ty,
+        };
+        Ok(controller.view_choice(ty).bound.clone())
+    }
+
+    /// How many elements the value at `at` has room for, as the
+    /// `capacity` field of its view says, for `cap(v)`.
+    pub(super) fn view_capacity(
+        &mut self,
+        at: &StopPlace,
+    ) -> std::result::Result<Option<u64>, Stop> {
+        let Some(bound) = self.view_of(at)? else {
+            return Ok(None);
+        };
+        let mut machine = self.nested(self.depth);
+        crate::view::run::capacity(&bound, &mut machine, at.clone())
+            .map_err(|failure| view_stop(failure, &bound, ErrorKind::Type))
+    }
+
+    /// Where the text a view presents the value at `at` as is, for slicing
+    /// it: `None` when no view presents it as text.
+    pub(super) fn view_text_span(
+        &mut self,
+        at: &StopPlace,
+    ) -> std::result::Result<Option<(u64, Option<u64>)>, Stop> {
+        let Some(bound) = self.view_of(at)? else {
+            return Ok(None);
+        };
+        if !bound.shape.has_text() {
+            return Ok(None);
+        }
+        let mut machine = self.nested(self.depth);
+        crate::view::run::text_span(&bound, &mut machine, at.clone())
+            .map_err(|failure| view_stop(failure, &bound, ErrorKind::Type))
     }
 
     /// How many elements the value at `at` holds, or the length of its
