@@ -4,9 +4,11 @@
 //! requests, and renders replies. Debugger semantics live in the library.
 
 pub mod commands;
+mod complete;
 pub mod config;
 pub mod format;
 pub mod help;
+mod highlight;
 mod repl;
 mod saved;
 pub mod session;
@@ -223,13 +225,28 @@ pub struct Cli {
     views: std::sync::Mutex<ViewSources>,
     /// The breakpoints an interactive session keeps for the next one.
     kept: std::sync::OnceLock<std::sync::Mutex<saved::Kept>>,
-    /// The terminal's width as the line editor last measured it, or 0.
+    /// The terminal's width and height as the line editor last measured
+    /// them, or 0.
     columns: std::sync::atomic::AtomicUsize,
+    rows: std::sync::atomic::AtomicUsize,
     /// The expressions every stop prints.
     displays: std::sync::Mutex<stops::Displays>,
     /// The values the last stops showed, which a stop marks changes from.
     changes: std::sync::Mutex<stops::Changes>,
+    /// What completion knows of the loaded code and the selected frame.
+    completion_code: std::sync::Mutex<Option<complete::Code>>,
+    completion_names: std::sync::Mutex<Option<complete::Names>>,
+    /// Source files lexed for highlighting, by path, with when each was
+    /// modified.
+    highlights: std::sync::Mutex<Highlights>,
 }
+
+/// A source file's lines, each with its highlighted spans.
+type Lexed = Vec<(String, Vec<highlight::Span>)>;
+
+/// Lexed source files by path, with when each was modified.
+type Highlights =
+    std::collections::BTreeMap<PathBuf, (Option<std::time::SystemTime>, std::sync::Arc<Lexed>)>;
 
 /// The view files a session loads: those it was given or loaded, most
 /// recent first, then the project's and the user's.
@@ -258,15 +275,68 @@ impl Cli {
             }),
             kept: std::sync::OnceLock::new(),
             columns: std::sync::atomic::AtomicUsize::new(0),
+            rows: std::sync::atomic::AtomicUsize::new(0),
             displays: std::sync::Mutex::default(),
             changes: std::sync::Mutex::default(),
+            highlights: std::sync::Mutex::default(),
+            completion_code: std::sync::Mutex::default(),
+            completion_names: std::sync::Mutex::default(),
         }
     }
 
-    /// Records the terminal's width, as the line editor measured it.
-    pub fn set_columns(&self, columns: usize) {
+    /// The process the session launched, while it is alive.
+    pub async fn live_process(&self) -> Option<uscope::ProcessId> {
+        match self.debugger.snapshot().await.ok()?.inferior {
+            uscope::InferiorState::Running { process_id, .. }
+            | uscope::InferiorState::Stopped { process_id, .. } => Some(process_id),
+            uscope::InferiorState::NotRunning => None,
+        }
+    }
+
+    /// Records the terminal's size, as the line editor measured it.
+    pub fn set_dimensions(&self, columns: usize, rows: usize) {
         self.columns
             .store(columns, std::sync::atomic::Ordering::Relaxed);
+        self.rows.store(rows, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Prints a command's output, through the pager when it is taller
+    /// than the terminal of an interactive session.
+    async fn show(&self, output: &str) -> Result<()> {
+        let rows = self.rows.load(std::sync::atomic::Ordering::Relaxed);
+        let columns = self.columns().max(1);
+        let pager = match self.settings.config.ui.pager.as_str() {
+            "never" => None,
+            "auto" => Some(
+                std::env::var("PAGER")
+                    .ok()
+                    .filter(|pager| !pager.trim().is_empty())
+                    .unwrap_or_else(|| "less -FRX".to_owned()),
+            ),
+            command => Some(command.to_owned()),
+        };
+        let tall = rows != 0
+            && output
+                .split('\n')
+                .map(|line| {
+                    terminal::plain(line)
+                        .chars()
+                        .count()
+                        .div_ceil(columns)
+                        .max(1)
+                })
+                .sum::<usize>()
+                >= rows;
+        let Some(pager) = pager.filter(|_| tall) else {
+            return Ok(emit(output)?);
+        };
+        let text = format!("{output}\n");
+        let shown = tokio::task::spawn_blocking(move || page(&pager, &text)).await?;
+        if matches!(shown, Ok(true)) {
+            return Ok(());
+        }
+        self.warn("the pager could not run; set [ui] pager, or PAGER");
+        Ok(emit(output)?)
     }
 
     /// The width a value is laid out to: the terminal's, or 80 when output
@@ -416,7 +486,12 @@ impl Cli {
 
         if !args.batch {
             if io::stdin().is_terminal() && io::stdout().is_terminal() {
-                return repl::run(self).await;
+                // Quitting kills a launched program, but detaches an
+                // attached one and leaves a core as it was.
+                let confirm = self.settings.config.ui.confirm_quit
+                    && args.attached().is_none()
+                    && self.debugger.core_dump().is_none();
+                return repl::run(self, confirm).await;
             }
             return self.run_stdin(OnError::Report).await;
         }
@@ -533,7 +608,7 @@ impl Cli {
         match self.execute(line).await? {
             Control::Continue(output) => {
                 if !output.is_empty() {
-                    emit(&output)?;
+                    self.show(&output).await?;
                 }
                 Ok(true)
             }
@@ -780,6 +855,20 @@ impl Cli {
 
 /// Writes one line to stdout. Unlike `println!`, a closed pipe is an error
 /// rather than a panic.
+/// Shows `text` through `pager`, a shell command, returning false when the
+/// shell found no such command.
+fn page(pager: &str, text: &str) -> io::Result<bool> {
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", pager])
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(mut input) = child.stdin.take() {
+        // A pager that quits early closes its input, which is no error.
+        let _ = input.write_all(text.as_bytes());
+    }
+    Ok(child.wait()?.code() != Some(127))
+}
+
 fn emit(text: &str) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{text}")?;

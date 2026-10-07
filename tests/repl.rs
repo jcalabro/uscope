@@ -27,6 +27,8 @@ fn command(executable: &Path, state: &Path) -> Command {
         .env("XDG_STATE_HOME", state)
         .env("USCOPE_CONFIG", "")
         .env("TERM", "xterm-256color")
+        // Output taller than the terminal goes through the pager.
+        .env("PAGER", "cat")
         .env_remove("NO_COLOR")
         .env_remove("CLICOLOR")
         .env_remove("CLICOLOR_FORCE");
@@ -187,8 +189,7 @@ fn interactive_empty_lines_repeat_the_last_session_command() {
             .expect("prompt after repeated source step");
     }
 
-    session.send_line("quit").expect("quit repl");
-    session.expect(Eof).expect("repl exited");
+    quit_killing(session);
 }
 
 #[test]
@@ -268,6 +269,16 @@ fn run(session: &mut OsSession, line: &str, expected: &str) {
 
 fn quit(mut session: OsSession) {
     session.send_line("quit").expect("quit");
+    session.expect(Eof).expect("the session ended");
+}
+
+/// Quits a session whose program is alive, which asks first.
+fn quit_killing(mut session: OsSession) {
+    session.send_line("quit").expect("quit");
+    session
+        .expect("kill it and quit? (y or n) ")
+        .expect("the question");
+    session.send_line("y").expect("answer yes");
     session.expect(Eof).expect("the session ended");
 }
 
@@ -384,5 +395,74 @@ fn interactive_pp_lays_values_out_to_the_terminal_width() {
         "pp record->inner",
         "(inner_record) record->inner = {signed_value = -7, unsigned_value = 9}\r\n",
     );
+    quit_killing(session);
+}
+
+#[test]
+fn interactive_quit_asks_before_killing_a_launched_program() {
+    let state = support::ScratchDir::new("repl-confirm-quit");
+    let mut session = repl(&fixture("basic"), state.path());
+    run(&mut session, "break main", "breakpoint 1 set");
+    run(&mut session, "run", "stopped at breakpoint 1");
+    session.send_line("quit").expect("type quit");
+    session
+        .expect("kill it and quit? (y or n) ")
+        .expect("the question");
+    session.send_line("n").expect("answer no");
+    session.expect("(uscope) ").expect("the session goes on");
+    run(&mut session, "where", "main at ");
+    session.send_line("q").expect("type quit's alias");
+    session
+        .expect("kill it and quit? (y or n) ")
+        .expect("the question again");
+    session.send_line("y").expect("answer yes");
+    session.expect(Eof).expect("the session ended");
+}
+
+#[test]
+fn interactive_output_taller_than_the_terminal_goes_through_the_pager() {
+    let state = support::ScratchDir::new("repl-pager");
+    let settings = state.path().join("config.toml");
+    std::fs::write(&settings, "[ui]\npager = \"sed 's/^/paged: /'\"\n")
+        .expect("write the settings");
+    let mut command = command(&fixture("basic"), state.path());
+    command
+        .env("USCOPE_CONFIG", &settings)
+        .args(["--color", "never"]);
+    let mut session = spawn(command);
+    session.expect("(uscope) ").expect("initial prompt");
+    session
+        .get_process_mut()
+        .set_window_size(80, 10)
+        .expect("shorten the terminal");
+    run(&mut session, "help", "paged:   quit");
+    // Output that fits is printed as it is.
+    run(&mut session, "breakpoints", "\r\nno breakpoints\r\n");
     quit(session);
+}
+
+#[test]
+fn interactive_tab_completes_commands_locations_and_members() {
+    let state = support::ScratchDir::new("repl-complete");
+    let mut session = repl(&fixture("records-c-gcc-o0"), state.path());
+    // A command, then a function, each the only candidate.
+    session.send("tbrea").expect("type a prefix");
+    session.send("\t").expect("complete the command");
+    session.send("inspect_rec").expect("type a function prefix");
+    session.send("\t").expect("complete the function");
+    session.send_line("").expect("run the completed line");
+    session
+        .expect("temporary breakpoint 1 set at inspect_records")
+        .expect("the completed breakpoint");
+    session.expect("(uscope) ").expect("prompt");
+    run(&mut session, "run", "stopped at breakpoint 1");
+    // A member of what a pointer points to, which the debugger reads.
+    session.send("p record->in").expect("type a member prefix");
+    session.send("\t").expect("complete the member");
+    session.send_line("").expect("run the completed line");
+    session
+        .expect("(inner_record) record->inner = {signed_value = -7, unsigned_value = 9}")
+        .expect("the completed member");
+    session.expect("(uscope) ").expect("prompt");
+    quit_killing(session);
 }

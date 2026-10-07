@@ -143,8 +143,23 @@ applies at once. The user's `[projects] trust` chooses how:
 
 An empty line repeats the last `continue`, stepping, `up`, `down`, `x`, or
 `list` command. Lines starting with `#` are ignored. `help [command]` describes
-each command, and lists the aliases the settings define. A mistyped command
-is answered with the nearest ones.
+each command, and lists the aliases the settings define. A prefix that begins
+one command's name runs it, as `disp` does `display`; one that begins several
+is answered with them, and an alias the settings define wins over a prefix. A
+mistyped command is answered with the nearest ones.
+
+Tab completes the word at the cursor: a command, a location after `break`,
+`tbreak`, `advance`, or `disassemble` (a function, or a file followed by its
+line or function), breakpoint and watchpoint ids, `info` and `handle` words,
+and in expressions the selected frame's variables, globals, and, after `.` or
+`->`, the members of the value before it, which the debugger reads.
+
+At a terminal, output taller than the screen goes through `[ui] pager`: by
+default `$PAGER`, or `less -FRX`; `never` turns it off. `quit` asks before
+killing a launched program that is still alive, unless `[ui] confirm-quit` is
+false; end-of-input and scripts never ask. `edit` opens the selected frame's
+line in `[ui] editor`, a command in which `{path}` and `{line}` are replaced,
+or `$VISUAL` or `$EDITOR` with `+line path`.
 
 ### Running
 
@@ -505,8 +520,12 @@ trailing components, as in `break main.c:10`.
 
 ## Output
 
-Interactive output is colored when stdout is a terminal, leaving source text
-plain. History is kept in `$XDG_STATE_HOME/uscope/history`, up to `[history]
+Interactive output is colored when stdout is a terminal. `[source] highlight`
+colours the keywords, strings, comments, and numbers of C, C++, Rust, Go, and
+Zig sources, chosen by the file's extension; a file is read from its start, so
+a comment that opened above the lines shown is still coloured. Tabs in source
+lines expand to `[source] tab-width` columns. `[ui] hyperlinks` makes each
+`file:line` a link to the file in terminals that show OSC 8 links. History is kept in `$XDG_STATE_HOME/uscope/history`, up to `[history]
 size` lines. Development builds
 record a flight recording of every request and ptrace call under
 `target/flight-recorder`; `USCOPE_FLIGHT_RECORDING=PATH` chooses the file,

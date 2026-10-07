@@ -488,19 +488,20 @@ fn color_follows_the_choice_and_the_environment_on_both_streams() {
     for plain in ["commands", "Set a breakpoint", "Use `help <command>`"] {
         assert!(!stdout.contains(&format!("\x1b[2m{plain}")), "{stdout:?}");
     }
-    // Source metadata is styled, but never the source text.
+    // Source metadata is styled, and the source's keywords, but not its
+    // names.
     let current = stdout
         .lines()
-        .find(|line| line.contains("uint64_t breakpoint_target(void)"))
+        .find(|line| line.contains("uint64_t breakpoint_target("))
         .expect("current source line");
-    let (_, source) = current.split_once("| ").expect("source separator");
+    let (margin, source) = current.split_once("| ").expect("source separator");
     assert!(
-        current.contains("\x1b["),
+        margin.contains("\x1b["),
         "metadata was not styled: {current:?}"
     );
     assert!(
-        !source.contains("\x1b["),
-        "source text was styled: {current:?}"
+        source.contains("uint64_t breakpoint_target(\x1b[") && source.contains("void\x1b[0m)"),
+        "the keyword was not highlighted: {current:?}"
     );
     // A failed command ends the batch, naming the command.
     assert!(
@@ -996,6 +997,66 @@ fn a_stop_marks_the_values_that_changed_in_the_same_activation() {
         &["(uint64_t) call = 1\n", "(uint64_t) call = 2*\n"],
     );
     assert!(!stdout.contains("expected = 0*"), "{stdout}");
+}
+
+/// A prefix that names one command runs it, an alias wins over a prefix,
+/// and a prefix of several names them.
+#[test]
+fn unique_prefixes_run_their_command_and_aliases_win() {
+    let directory = support::ScratchDir::new("cli-prefixes");
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "[aliases]\nfini = \"info breakpoints\"\n").expect("write the settings");
+    let mut child = uscope_command()
+        .env("USCOPE_CONFIG", &path)
+        .arg(BASIC)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start uscope");
+    let mut stdin = child.stdin.take().expect("uscope's stdin");
+    for command in ["break main", "fini", "watchp", "dis", "undisp all"] {
+        writeln!(stdin, "{command}").expect("write a command");
+    }
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for uscope");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = assert_success(output);
+    assert_in_order(
+        &stdout,
+        &[
+            "breakpoint 1 set",
+            "Id  On",
+            "no watchpoints",
+            "removed 0 displays",
+        ],
+    );
+    assert!(
+        stderr.contains("ambiguous command 'dis': disable, disassemble, display"),
+        "{stderr}"
+    );
+}
+
+/// `edit` opens the editor the settings name at the selected line.
+#[test]
+fn edit_opens_the_editor_at_the_selected_line() {
+    let stdout = batch_with_settings(
+        "[ui]\neditor = \"echo editing {path} at {line}\"\n",
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &["break counted", "run", "edit", "up", "edit"],
+    );
+    let source = format!(
+        "{}/tests/fixtures/c/hit-counts.c",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            &format!("editing {source} at 11\n"),
+            &format!("editing {source} at 20\n"),
+        ],
+    );
 }
 
 #[test]

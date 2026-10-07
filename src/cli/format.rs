@@ -12,7 +12,7 @@ use uscope::{
     DisassemblyView, ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, HitCondition,
     IndirectTarget, InstructionContent, InstructionReferenceKind, InstructionTokenKind,
     InvalidatedWatchpoint, LineNumber, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
-    ModuleId, ModuleIdentity, ModuleImage, RegisterSnapshot, SourceContext, StackFrame,
+    ModuleId, ModuleIdentity, ModuleImage, RegisterSnapshot, SourceContext, SourceLine, StackFrame,
     StateSnapshot, StepKind, StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary,
     ThreadState, VirtualAddress, WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
@@ -952,11 +952,13 @@ pub fn memory_read(read: &MemoryRead, renderer: Renderer) -> String {
 
 /// Renders source lines around a location, after the location itself when
 /// `located`, with a margin marking each line in `breakpoints`, enabled or
-/// not, when any shown line has one.
+/// not, when any shown line has one, and each line's text as `text` draws
+/// it.
 pub fn source_context(
     context: &SourceContext,
     breakpoints: &BTreeMap<LineNumber, bool>,
     located: bool,
+    text: &dyn Fn(&SourceLine) -> String,
     renderer: Renderer,
 ) -> String {
     let line_width = context
@@ -993,7 +995,7 @@ pub fn source_context(
         lines.push(format!(
             "{breakpoint}{marker} {} | {}",
             renderer.paint(role, format_args!("{:>line_width$}", line.number)),
-            line.text
+            text(line)
         ));
     }
     lines.join("\n")

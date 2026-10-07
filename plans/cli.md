@@ -659,6 +659,21 @@ by a message's latency.
 - **`confirm-quit`**: `quit` while a launched program is alive asks first;
   end-of-input and batch sessions never ask.
 
+### As built
+
+Highlighting chooses the language by the file's extension only, since
+the public model names no compile unit's language for a file; `.h` is C.
+Tabs expand to `[source] tab-width`, which nothing had applied. Completion
+offers command names and the settings' aliases but not the commands' own
+short aliases, which abbreviate what they would complete to, and appends
+a space to a word completed alone. Expressions are scanned with the debug
+console's scanner, `dap::complete`, so both complete alike; a range's
+`..` no longer reads as a member access in either. Member completion is
+the line editor's one request: it sends the expression to the REPL,
+which is waiting on the editor, and waits up to two seconds for the
+names. `edit`, `display`, and `undisplay` are refused in the debug
+console, whose client shows files and watches values itself.
+
 ## Phases
 
 Each phase ends with its tests passing and `just sim 60` where the core

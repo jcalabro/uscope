@@ -68,6 +68,7 @@ pub enum Command {
     Address,
     Where,
     List,
+    Edit,
     Context,
     Backtrace,
     Frame,
@@ -430,6 +431,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         repeatable
     ),
     command!(
+        Edit,
+        "edit",
+        [],
+        "edit",
+        "Open [ui] editor, or VISUAL or EDITOR, at the selected frame's line"
+    ),
+    command!(
         Context,
         "context",
         ["ctx"],
@@ -503,6 +511,45 @@ pub fn command_named(name: &str) -> Option<&'static CommandSpec> {
     COMMANDS
         .iter()
         .find(|command| command.name == name || command.aliases.contains(&name))
+}
+
+/// The command `entered` names, exactly or as the unique prefix of a
+/// command's name or alias, or why it names none.
+pub fn resolve_command(entered: &str) -> Result<&'static CommandSpec> {
+    if let Some(spec) = command_named(entered) {
+        return Ok(spec);
+    }
+    let names = || {
+        COMMANDS
+            .iter()
+            .flat_map(|spec| std::iter::once(spec.name).chain(spec.aliases.iter().copied()))
+    };
+    let mut matching = COMMANDS
+        .iter()
+        .filter(|spec| {
+            !entered.is_empty()
+                && std::iter::once(spec.name)
+                    .chain(spec.aliases.iter().copied())
+                    .any(|name| name.starts_with(entered))
+        })
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [spec] => Ok(spec),
+        [] => {
+            let hint = super::suggest::did_you_mean(entered, names())
+                .unwrap_or_else(|| "type `help` for a list".to_owned());
+            bail!("unknown command '{entered}'; {hint}")
+        }
+        _ => {
+            matching.sort_by_key(|spec| spec.name);
+            let names = matching
+                .iter()
+                .map(|spec| spec.name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("ambiguous command '{entered}': {names}")
+        }
+    }
 }
 
 /// The command a line starts with, and the name it is written with, which
@@ -606,6 +653,7 @@ impl Cli {
                     .await
             }
             Command::Context => self.context().await?,
+            Command::Edit => self.edit().await?,
             Command::Backtrace => self.backtrace(None).await?,
             Command::Frame | Command::Up | Command::Down => {
                 self.frame(parse_frame_target(spec, first)?).await?
@@ -671,6 +719,10 @@ impl Cli {
                 | Command::Advance
                 | Command::Clear
                 | Command::Quit
+                // The client shows files and watches values itself.
+                | Command::Edit
+                | Command::Display
+                | Command::Undisplay
         ) {
             bail!(
                 "`{}` is not available in the debug console; use the debugger's controls",
@@ -871,7 +923,7 @@ impl Cli {
     }
 
     /// The images of the loaded modules, or the program's before it runs.
-    async fn loaded_images(&self) -> Vec<std::sync::Arc<uscope::ModuleImage>> {
+    pub(super) async fn loaded_images(&self) -> Vec<std::sync::Arc<uscope::ModuleImage>> {
         let Ok(loaded) = self.debugger.loaded_modules().await else {
             return vec![std::sync::Arc::clone(self.debugger.module_image())];
         };
@@ -1991,6 +2043,43 @@ impl Cli {
         ))
     }
 
+    /// Opens the editor at the selected frame's source line and waits for
+    /// it to exit.
+    async fn edit(&self) -> Result<String> {
+        let context = self.source_context().await?;
+        let path = std::path::absolute(&*context.path)?;
+        let quoted = shell_quoted(&path.to_string_lossy());
+        let line = context.location.line.to_string();
+        let template = &self.settings.config.ui.editor;
+        #[expect(
+            clippy::literal_string_with_formatting_args,
+            reason = "the editor template's placeholders"
+        )]
+        let command = if template.trim().is_empty() {
+            let editor = ["VISUAL", "EDITOR"]
+                .into_iter()
+                .find_map(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .filter(|editor| !editor.trim().is_empty())
+                })
+                .ok_or_else(|| anyhow!("no editor is set; set [ui] editor, VISUAL, or EDITOR"))?;
+            format!("{editor} +{line} {quoted}")
+        } else {
+            template.replace("{path}", &quoted).replace("{line}", &line)
+        };
+        let status = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("sh")
+                .args(["-c", &command])
+                .status()
+        })
+        .await??;
+        if !status.success() {
+            bail!("the editor exited with {status}");
+        }
+        Ok(String::new())
+    }
+
     /// Says which temporary breakpoints a stop deleted: a stop deletes the
     /// temporary breakpoints it hit before it is published, so the hits
     /// missing from `snapshot` were temporaries.
@@ -2039,7 +2128,55 @@ impl Cli {
                 }
             }
         }
-        format::source_context(context, &marks, located, self.renderers.stdout)
+        let renderer = self.renderers.stdout;
+        let source = &self.settings.config.source;
+        let lexed = (renderer.is_colored() && source.highlight)
+            .then(|| self.lexed(&context.path))
+            .flatten();
+        let tab_width = usize::from(source.tab_width);
+        let text = |line: &uscope::SourceLine| {
+            let spans = lexed
+                .as_ref()
+                .and_then(|lexed| {
+                    lexed.get(usize::try_from(line.number.get()).ok()?.checked_sub(1)?)
+                })
+                // A file that changed since the debugger read it is not
+                // highlighted.
+                .filter(|(text, _)| **text == *line.text)
+                .map_or(&[][..], |(_, spans)| &spans[..]);
+            super::highlight::render(&line.text, spans, tab_width, renderer)
+        };
+        format::source_context(context, &marks, located, &text, renderer)
+    }
+
+    /// The highlighted lines of the source file at `path`, lexed once while
+    /// it is unchanged, or `None` for a language the lexer does not know.
+    fn lexed(&self, path: &std::path::Path) -> Option<std::sync::Arc<super::Lexed>> {
+        let language = super::highlight::Language::of(path)?;
+        let modified = std::fs::metadata(path).ok()?.modified().ok();
+        let cached = self
+            .highlights
+            .lock()
+            .expect("the highlight cache is whole")
+            .get(path)
+            .filter(|(when, _)| *when == modified)
+            .map(|(_, lexed)| lexed.clone());
+        if cached.is_some() {
+            return cached;
+        }
+        let text = std::fs::read_to_string(path).ok()?;
+        let spans = super::highlight::lex(&text, language);
+        let lexed = std::sync::Arc::new(
+            text.split('\n')
+                .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
+                .zip(spans)
+                .collect::<Vec<_>>(),
+        );
+        self.highlights
+            .lock()
+            .expect("the highlight cache is whole")
+            .insert(path.to_owned(), (modified, lexed.clone()));
+        Some(lexed)
     }
 }
 
@@ -2313,6 +2450,11 @@ fn parse_ids(words: &[&str], watches: bool, spec: &CommandSpec) -> Result<Option
     Ok(Some(ids))
 }
 
+/// `text` quoted for a POSIX shell.
+fn shell_quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
 /// Parses display numbers, ranges of them, or `all` as `None`.
 fn parse_display_ids(words: &[&str], spec: &CommandSpec) -> Result<Option<Vec<u64>>> {
     parse_ids(words, false, spec)?
@@ -2485,14 +2627,7 @@ fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&st
     let written = words.next().unwrap_or_default();
     let (entered, format) = written.split_once('/').unwrap_or((written, ""));
     let rest = line.trim_start()[written.len()..].trim();
-    let spec = command_named(entered).ok_or_else(|| {
-        let names = COMMANDS
-            .iter()
-            .flat_map(|spec| std::iter::once(spec.name).chain(spec.aliases.iter().copied()));
-        let hint = super::suggest::did_you_mean(entered, names)
-            .unwrap_or_else(|| "type `help` for a list".to_owned());
-        anyhow!("unknown command '{entered}'; {hint}")
-    })?;
+    let spec = resolve_command(entered)?;
     let arguments = words.collect::<Vec<_>>();
     if !format.is_empty()
         && !matches!(
