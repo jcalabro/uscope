@@ -1,4 +1,4 @@
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { type FormEvent, type ReactNode, useEffect, useId, useMemo, useState } from "react";
 import { targetName } from "../model";
 import type { PathEntry, Process } from "../protocol";
@@ -42,6 +42,8 @@ export function Picker() {
       if (failure instanceof RequestError && failure.kind === "busy") {
         setBusy(pending);
       } else {
+        // A replacement that failed has still ended what it replaced.
+        setBusy(null);
         setError(failure instanceof Error ? failure.message : String(failure));
       }
     } finally {
@@ -76,14 +78,19 @@ export function Picker() {
               </button>
             ))}
           </div>
+          {current && (
+            <Link to="/" className="button small">
+              Back to {current}
+            </Link>
+          )}
         </div>
         <div className="card-body">
-          {busy && (
+          {busy && current && (
             <div className="banner" role="alert">
               <span>
-                <b>End the {current ?? "current"} session?</b> {busy.describe} stops debugging{" "}
-                {current ?? "it"}: a launched program is killed, an attached one keeps running.
-                Links to it will say the session ended.
+                <b>End the {current} session?</b> {busy.describe} stops debugging {current}: a
+                launched program is killed, an attached one keeps running. Links to it will say the
+                session ended.
               </span>
               <div className="actions">
                 <button
@@ -141,12 +148,11 @@ function LaunchForm({ working, submit }: FormProps) {
     if (!valid || !words.ok || !environment.ok) {
       return;
     }
-    setRecent(rememberLaunch(form));
     const program = form.program.trim();
     submit({
       describe: `Launching ${program}`,
-      send: (replace) =>
-        connection.request("launch", {
+      send: async (replace) => {
+        await connection.request("launch", {
           program,
           arguments: words.words,
           cwd: form.cwd.trim() || null,
@@ -154,7 +160,10 @@ function LaunchForm({ working, submit }: FormProps) {
           stopAtEntry,
           run,
           replace,
-        }),
+        });
+        // Only what loaded is worth recalling.
+        setRecent(rememberLaunch(form));
+      },
     });
   };
 

@@ -1,12 +1,9 @@
 import { Link, Navigate, Outlet, useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { login } from "../connection";
-import { cache } from "../data";
 import { isPagePath } from "../focus";
-import { latestStop } from "../follow";
 import { targetName } from "../model";
 import { useConnection, useModel } from "../store";
-import { recall } from "../tree";
 
 /** `/`: wherever the session is. */
 export function Home() {
@@ -104,44 +101,16 @@ export function SessionPage() {
     }
   }, [current, session, navigate]);
 
-  // Answers belong to one session; the files and modules a program has
-  // change as its libraries load, so each stop asks again. What a stop holds
-  // changes when someone writes a value or memory, and value handles belong
-  // to one connection. Signal policies change without a stop.
-  const latest = state ? latestStop(state) : undefined;
-  const writes = state?.writes;
-  const settings = state?.settings;
-  const connection = useModel((model) => model.hello?.connection);
-  const cached = useRef({ current, latest, writes, settings, connection });
-  const before = cached.current;
-  if (before.current !== current) {
-    cache.clear();
-    recall.clear();
-  } else {
-    if (before.latest !== latest) {
-      cache.forget("sources ");
-      cache.forget("modules ");
-    }
-    if (before.writes !== writes || before.connection !== connection) {
-      for (const method of ["scopes ", "children ", "evaluate ", "readMemory ", "registers "]) {
-        cache.forget(method);
-      }
-    }
-    if (before.writes !== writes) {
-      // Code is memory too.
-      cache.forget("disassemble ");
-    }
-    if (before.settings !== settings) {
-      cache.forget("signals ");
-    }
-  }
-  cached.current = { current, latest, writes, settings, connection };
-
   if (!state) {
     return <div className="page muted">Connecting to uscope…</div>;
   }
   if (current === session) {
-    return <Outlet />;
+    // Nothing a pane holds outlives its session.
+    return (
+      <Fragment key={session}>
+        <Outlet />
+      </Fragment>
+    );
   }
   if (state.busy) {
     return <div className="page muted">{state.busy}…</div>;
