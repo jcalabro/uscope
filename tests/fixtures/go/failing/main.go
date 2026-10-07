@@ -83,12 +83,12 @@ func main() {
 	case "custom-float":
 		raise(celsius(-40))
 	case "goroutine":
-		done := make(chan struct{})
+		// Main waits for good: the panic ends the program, after the
+		// goroutine's deferred calls, which must not let main return first.
 		go func() {
-			defer close(done)
 			raise("from a goroutine")
 		}()
-		<-done
+		select {}
 	case "nested":
 		defer func() {
 			raise("second")
