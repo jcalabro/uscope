@@ -356,7 +356,11 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
                 .byte_size
                 .and_then(|size| usize::try_from(size.checked_mul(2)?).ok())
                 .unwrap_or(16);
-            format!("0x{:0width$x}", value.address.get())
+            let address = format!("0x{:0width$x}", value.address.get());
+            match &value.function {
+                Some(function) => format!("{address} <{function}>"),
+                None => address,
+            }
         }
         VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
         VariableValue::Function { code, function } => {

@@ -277,6 +277,12 @@ pub trait VariableRuntime {
         parameter: EntryParameter,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<u64, VariableRuntimeError>;
+    /// The name of the function whose first instruction `address` is, in
+    /// whichever loaded module holds it.
+    fn function_at(&self, address: VirtualAddress) -> Option<Arc<str>> {
+        let _ = address;
+        None
+    }
 }
 
 pub trait VariableInfo: Send + Sync {

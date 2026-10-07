@@ -705,6 +705,7 @@ impl World {
             }
             TypeKind::Pointer { .. } | TypeKind::Reference { .. } => {
                 VariableValue::Address(AddressValue {
+                    function: None,
                     address: VirtualAddress::new(u64::try_from(raw).expect("eight bytes")),
                 })
             }
@@ -1389,6 +1390,7 @@ impl Machine for World {
                 source: VariableValueSource::Computed,
                 raw: Some(address.to_le_bytes().to_vec().into()),
                 value: VariableValue::Address(AddressValue {
+                    function: None,
                     address: VirtualAddress::new(address),
                 }),
                 dereference: DereferenceState::NotApplicable,

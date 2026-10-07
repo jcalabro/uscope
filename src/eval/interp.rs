@@ -1076,6 +1076,7 @@ impl<M: Machine> Interpreter<'_, M> {
             Value::Float(value) => VariableValue::Scalar(ScalarValue::Floating(value.to_value())),
             Value::Bool(value) => VariableValue::Scalar(ScalarValue::Boolean(*value)),
             Value::Pointer(address) => VariableValue::Address(crate::AddressValue {
+                function: None,
                 address: VirtualAddress::new(*address),
             }),
             Value::Place(_) | Value::Raw(_) | Value::Text(_) => {

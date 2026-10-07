@@ -781,6 +781,19 @@ pub enum TypeKind {
     /// context whose first word is the code it calls and whose rest holds
     /// what a closure captured.
     Function,
+    /// The type of a function's code, as C's `int (int)`, which values have
+    /// only through pointers to it.
+    Signature {
+        /// What the function returns, or `None` for nothing.
+        returns: Option<TypeReference>,
+        /// The parameters' types, in order.
+        parameters: Arc<[TypeReference]>,
+        /// Whether more arguments may follow the parameters, as C's `...`.
+        variadic: bool,
+        /// Whether the parameters were declared, which C distinguishes:
+        /// `int (void)` takes none, while `int ()` says nothing.
+        prototyped: bool,
+    },
     /// A valid type whose value shape is not implemented yet.
     Opaque {
         /// A stable description of the unsupported DWARF type tag.
@@ -1029,10 +1042,13 @@ pub enum ScalarValue {
 }
 
 /// A decoded thin pointer or reference representation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressValue {
     /// The target virtual address represented by the value.
     pub address: VirtualAddress,
+    /// The function a pointer to code enters, by name, when the address is
+    /// a function's first instruction in a loaded module.
+    pub function: Option<Arc<str>>,
 }
 
 /// A decoded variable, child, or dereferenced value.

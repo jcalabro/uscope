@@ -584,6 +584,10 @@ pub(super) struct LinuxVariableRuntime<'a, P: InspectionOps> {
 }
 
 impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
+    fn function_at(&self, address: VirtualAddress) -> Option<Arc<str>> {
+        self.callers.as_ref()?.function_at(address)
+    }
+
     fn register(
         &mut self,
         register: u16,
