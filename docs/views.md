@@ -710,35 +710,58 @@ the kernel's name, a 32-bit length and its source, and its module.
 The built-in views cover:
 
 - C++, in libstdc++ and libc++: `std::string` and its other characters,
-  in libstdc++'s C++11 and copy-on-write ABIs and in libc++ short and long;
-  `std::string_view`, `std::vector` (not `std::vector<bool>`),
-  `std::array`, `std::span`, `std::deque`, `std::list`, `std::forward_list`,
-  `std::map`, `std::multimap`, `std::set`, `std::multiset`, and the
-  `unordered_` maps and sets; `std::unique_ptr` (not of an array),
-  `std::shared_ptr` and `std::weak_ptr` with their counts, `std::optional`,
-  `std::variant`, and tuples of up to six elements. libc++ describes a
-  `shared_ptr`'s counts only when built with `-fstandalone-debug`; without
-  them a `shared_ptr` shows no counts, and a `weak_ptr`, which cannot say
-  whether its object still exists, shows as stored.
+  `wstring`, `u8string`, `u16string`, and `u32string`, in libstdc++'s C++11
+  and copy-on-write ABIs and in libc++ short and long; `std::string_view`,
+  `std::vector`, `std::vector<bool>`, `std::bitset`, `std::array`,
+  `std::span`, `std::initializer_list`, `std::deque`, `std::list`,
+  `std::forward_list`, `std::stack`, `std::queue`, `std::priority_queue`,
+  `std::map`, `std::multimap`, `std::set`, `std::multiset`, the
+  `unordered_` maps and sets, and `std::flat_map` and `std::flat_set`;
+  `std::pair` and tuples of up to six elements; `std::unique_ptr` (not of
+  an array), `std::shared_ptr` and `std::weak_ptr` with their counts,
+  `std::reference_wrapper`, `std::optional`, `std::variant`, and
+  `std::expected`; `std::chrono` durations as durations, a
+  `system_clock` time point as the UTC time it is, and another clock's as
+  its duration; `std::atomic`, `std::mutex`, and `std::recursive_mutex`;
+  `std::filesystem::path` as its text; `std::thread::id` as its thread or
+  `no thread`; and `std::function` and `std::any` as empty or as the
+  function that calls or manages what they hold, whose name says what it
+  is. libc++ describes a `shared_ptr`'s counts and a `recursive_mutex` only
+  when built with `-fstandalone-debug`; without them a `shared_ptr` shows
+  no counts, a `weak_ptr`, which cannot say whether its object still
+  exists, shows as stored, and so does a `recursive_mutex`.
+- C, in glibc: `pthread_mutex_t` as locked or unlocked, with its owner and
+  count.
 - Rust: `String`, `PathBuf`, `OsString`, `CString`, `Vec`, `VecDeque`,
-  `HashMap`, `HashSet`, `BTreeMap`, `BTreeSet`, `Box`, `Rc`, `Arc`, both
-  `Weak`s, `Cell`, `RefCell`, and `Mutex`. `&str`, `Box<str>`, and slices
-  are text and elements without a view.
+  `LinkedList`, `BinaryHeap`, `HashMap`, `HashSet`, `BTreeMap`, `BTreeSet`,
+  `Box`, `Pin`, `Rc` and `Arc` with their counts, `Rc<str>` and `Arc<str>`
+  as their text, both `Weak`s, `Cell`, `RefCell`, `OnceCell`, `OnceLock`,
+  `Mutex`, `RwLock`, the atomics, `NonZero`, `NonNull`, `Duration` and
+  `Instant` as durations, and `SystemTime` as the UTC time it is. `&str`,
+  `Box<str>`, `&Path`, `&OsStr`, and `&CStr` are text, and slices
+  elements, without a view. `Rc<[T]>` and `Arc<[T]>` show as stored.
 - Go: maps and channels, including nil ones, which show as `nil`;
   `time.Duration` as `Duration.String` writes it; `time.Time` as its wall
   clock reading in UTC, its location, and its monotonic reading when it has
   one, and the local location before the program loads it as `Local (not
-  yet loaded)`; `sync.Mutex` and `sync.RWMutex` as their locks and waiters;
-  `sync/atomic`'s values as the values they hold; `strings.Builder` as its
-  text, and `bytes.Buffer` as the text it has yet to read; `[]byte` as text
-  when it is text; `syscall.Errno` as the system's text for it; and the
-  errors of `errors.New`, `fmt.Errorf`, and `errors.Join` as their text, or
-  the errors they join, with the errors they wrap as `wrapped`. An error
-  whose `Error` method computes its text, as `*fs.PathError`'s does, shows
-  the parts it computes the text from, since uscope calls no function in
-  the program.
-- Zig: `std.ArrayList` and the managed list, `std.HashMap`, its unmanaged
-  map, and `std.ArrayHashMapUnmanaged`.
+  yet loaded)`; `sync.Mutex` and `sync.RWMutex` as their locks and waiters,
+  `sync.WaitGroup` as its counter and waiters, and `sync.Once` as done or
+  not; `sync/atomic`'s values as the values they hold; `strings.Builder` as
+  its text, and `bytes.Buffer` as the text it has yet to read; `[]byte` and
+  `json.RawMessage` as text when they are text; `container/list`'s lists;
+  `math/big` integers of up to two words as numbers, and longer ones as
+  their words; `syscall.Errno` as the system's text for it; and the errors
+  of `errors.New`, `fmt.Errorf`, and `errors.Join` as their text, or the
+  errors they join, with the errors they wrap as `wrapped`. An error whose
+  `Error` method computes its text, as `*fs.PathError`'s does, shows the
+  parts it computes the text from, since uscope calls no function in the
+  program.
+- Zig: `std.ArrayList` and the managed list, a list or slice of bytes as
+  text when it is text, `std.Deque`, `std.PriorityQueue`, `std.HashMap`,
+  its unmanaged map, a map of `void` as the set of its keys, `std.BufSet`,
+  `std.ArrayHashMapUnmanaged`, the static and dynamic bit sets as the
+  positions they set, `std.atomic.Value`, and `std.Io.Writer.Allocating` as
+  the text it has written.
 
 Some values need no view, because their debug information says what they
 are:
@@ -748,6 +771,13 @@ are:
   Zig optional's or error union's payload itself, `null`, or `error.Bad`.
 - A Rust tuple shows as Rust writes it, `(1, "two", 3.5)`, and a tuple
   struct with its name, `Meters(7)` or `Wrapping(5)`.
+- A character of any width shows as its number and the character,
+  `65 'A'`, and a pointer to or array of `wchar_t`, `char16_t`, or
+  `char32_t` as its text, decoded from UTF-16 or UTF-32.
+- A C or C++ enumeration whose enumerators are distinct bits shows a value
+  as the enumerators it sets, `FLAG_READ|FLAG_WRITE (3)`.
+- An array of several dimensions shows as nested rows, `[[1, 2, 3], [4,
+  5, 6]]`.
 - A Go pointer shows as what it points to, as Go's debuggers show one,
   `*{X: 5, Y: 6}` or `nil`, and expands to its target's members.
 - A C++ object of a class with virtual functions shows as the object it

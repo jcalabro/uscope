@@ -71,6 +71,12 @@ Views missing for common types:
 - `math/big.Int` beyond two words, which needs decimal conversion of an
   arbitrary-precision number: shown as stored.
 - IP addresses as dotted text needs a new format; deferred.
+- C++ `unique_ptr<T[]>`, which stores no length.
+- Rust `Rc<[T]>` and `Arc<[T]>`: their elements follow the counts in an
+  unsized array that debug information gives no length or element type
+  for, and indexing one would mean supporting flexible array members.
+- A libc++ `recursive_mutex` without `-fstandalone-debug`, which clang
+  emits only as a declaration.
 
 ## Phases
 
@@ -82,3 +88,33 @@ Views missing for common types:
 Each phase adds markers to the language's `containers` fixture (or a
 gallery/scenario test for layer-1 behaviour) before the change, watched to
 fail first.
+
+## Outcome
+
+Done on 2026-10-07, in the commits from "Show wide characters and decode
+wide text" to "Present C++ thread ids and std::any". Every gap above is
+closed except those listed as out of scope, each with `VIEW:` markers
+checked across its language's build matrix, and with every built-in view
+required both to parse and to bind.
+
+Changes to the debugger and view language that the views needed:
+
+- `format self` checks the value a `value` shape presents, and a value a
+  view presents as another in memory is indexed as that one is
+  (`stack[0]`).
+- A view's pattern names an argument rustc describes as no type of its
+  own by its spelling: `Rc<str, _>`.
+- `&Path`, `&OsStr`, and `&CStr` are text slices; a `CStr`'s NUL is not
+  part of its text.
+- Zig's own backend's packed structs: their size is their backing
+  integer's, and a member placed by bit alone spans its type's bits.
+
+Findings worth keeping:
+
+- A view whose source fails to parse is dropped silently, so the binding
+  check never sees it; `every_built_in_view_parses` guards against that.
+- Each memory read in a scan costs budget: a bitset that reads its word
+  for every bit stops after about 64 bits, so views read each word once in
+  an outer clause.
+- `or` alternatives are allowed only in `let`.
+- Go 1.27's `json.RawMessage` is an alias of `jsontext.Value`.
