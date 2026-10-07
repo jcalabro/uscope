@@ -429,6 +429,11 @@ struct StepStart {
     /// program, as a step in does, since its task began a panic or its
     /// frame returned into code that calls deferred functions.
     following: bool,
+    /// The return address of code the step leaves, where a plan breakpoint
+    /// waits while the stepping thread runs freely, until the step's thread
+    /// or task reaches one of its plan's breakpoints. Meanwhile the thread
+    /// may run anything, such as another of its runtime's tasks.
+    escape: Option<VirtualAddress>,
 }
 
 /// Whether a step kind executes machine instructions rather than source

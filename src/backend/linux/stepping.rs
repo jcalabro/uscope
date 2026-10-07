@@ -141,7 +141,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 matches!(
                     &active.kind,
                     ActiveKind::Step { start, .. }
-                        if !start.plan_addresses.is_empty() || start.signal_guard.is_some()
+                        if !start.plan_addresses.is_empty()
+                            || start.signal_guard.is_some()
+                            || start.escape.is_some()
                 )
             });
         if uses_plan_breakpoints {
@@ -214,6 +216,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         let execution = self.active_execution()?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         install_plan_breakpoint(&self.ptrace, inferior, candidate, execution)?;
+        if let Some(start) = self.active_step_mut() {
+            start.escape = Some(candidate);
+        }
         self.continue_thread(pid)?;
         Ok(true)
     }

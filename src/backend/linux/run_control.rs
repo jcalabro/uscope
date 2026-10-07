@@ -676,6 +676,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.follow_step(pid);
         }
         if let Some((_, kind)) = planned {
+            if let Some(start) = self.active_step_mut() {
+                start.escape = None;
+            }
             if self.reach_signal_guard(pid, address)? {
                 return Ok(());
             }
