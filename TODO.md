@@ -32,6 +32,5 @@
 
 ## Later
 
-- A web UI.
 - Sampling and instrumented profilers.
 - Prometheus and OpenTelemetry collectors.

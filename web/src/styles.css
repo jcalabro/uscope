@@ -668,6 +668,8 @@ kbd {
 
 .field {
   display: grid;
+  /* Beside a taller field, the label, input, and note stay together. */
+  align-content: start;
   gap: 5px;
 }
 
@@ -736,6 +738,8 @@ textarea.input {
   border: 1px solid var(--line-strong);
   border-radius: 5px;
   background: var(--surface);
+  /* A link that looks like a button keeps the button's ink. */
+  color: var(--ink);
   font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
