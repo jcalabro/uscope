@@ -57,6 +57,12 @@ behave as the types they stand for, and a C++ reference stands for what it
 refers to. In a caller's frame, registers hold what unwinding recovered, and
 one it could not recover is unavailable.
 
+A word that C reserves for a type, such as `long`, `int`, `class`, or
+`const`, is a name wherever a type cannot be, since a Go, Rust, or Zig
+program may name a variable or member with it: `long * 2` multiplies the
+variable `long`. Inside a cast's parentheses, after `as`, and in `sizeof`, the
+word is the type.
+
 ```uscope-example
 world: memory
 s.a                    => 5 : int
@@ -76,6 +82,11 @@ $nope                  => error unknown-name at `$nope`
 twice                  => error ambiguous-name at `twice`
 $task                  => 7 : integer
 $task == 7             => true : bool
+long                   => 3 : int
+long * 2               => 6 : integer
+words.int + words.class => 10 : integer
+(long)-1               => -1 : long int
+sizeof(long)           => 8 : integer
 ```
 
 ```uscope-example

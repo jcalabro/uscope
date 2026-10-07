@@ -1519,6 +1519,12 @@ pub fn memory() -> World {
     world.variable("twice", int, &2_i32.to_le_bytes());
     let light = world.enumeration("Light", uint, &[("RED", 10), ("AMBER", 11)]);
     world.variable("light", light, &11_u32.to_le_bytes());
+    // Names C reserves, which Go, Rust, and Zig programs may use.
+    world.variable("long", int, &3_i32.to_le_bytes());
+    let words = world.record("Words", 8, &[("int", int, 0), ("class", int, 4)]);
+    let mut words_bytes = 4_i32.to_le_bytes().to_vec();
+    words_bytes.extend(6_i32.to_le_bytes());
+    world.variable("words", words, &words_bytes);
     // C++ classes: a Tile is a Named and a Shape, and a Twice holds two
     // Shapes, its own and its Tile's.
     let shape = world.record("Shape", 4, &[("id", int, 0)]);
