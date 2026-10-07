@@ -12,7 +12,7 @@ mod handles;
 mod inspect;
 pub mod launcher;
 mod memory;
-mod output;
+pub mod output;
 mod protocol;
 mod session;
 mod signals;
@@ -95,7 +95,7 @@ pub async fn run(args: &DapArgs) -> Result<()> {
 
 /// Completes when the adapter is asked to stop: an editor closing the
 /// session may send SIGTERM, SIGINT, or SIGHUP instead of disconnecting.
-async fn termination() {
+pub async fn termination() {
     let signals = [
         SignalKind::terminate(),
         SignalKind::interrupt(),

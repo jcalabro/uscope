@@ -56,6 +56,7 @@ serde_path_to_error = "0.1"
 thiserror = "2.0"
 wasmi = { version = "2.0", default-features = false, features = ["std", "validate"] }
 tokio = { version = "1.52", features = ["fs", "io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cpp_demangle = "0.5"
@@ -68,8 +69,11 @@ rustc-demangle = "0.1"
 
 [dev-dependencies]
 expectrl = "0.9"
+futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 jsonschema = { version = "0.58", default-features = false }
 proptest = { version = "1.11", default-features = false, features = ["std"] }
+tokio-tungstenite = "0.29"
+ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 object = { version = "0.39", features = ["read", "write"] }

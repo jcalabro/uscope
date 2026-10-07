@@ -2,6 +2,7 @@
 
 mod cli;
 mod dap;
+mod web;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -199,6 +200,8 @@ enum Tool {
     Dap(dap::DapArgs),
     /// Check and explain how views present program types.
     Views(ViewsArgs),
+    /// Serve a debugger to web browsers.
+    Web(web::WebArgs),
 }
 
 fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsString), String> {
@@ -270,6 +273,17 @@ async fn async_main() -> ExitCode {
             };
             // Reading stdin blocks a runtime thread that would keep the
             // runtime from shutting down after the client left.
+            std::process::exit(code);
+        }
+        Some(Tool::Web(web_args)) => {
+            let code = match web::run(web_args).await {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    1
+                }
+            };
+            // Tabs still connected would keep the runtime from shutting down.
             std::process::exit(code);
         }
         Some(Tool::Views(views)) => {

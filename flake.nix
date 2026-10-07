@@ -48,6 +48,11 @@
         # against: on the default search path they would shadow the shared C
         # library for every program.
         GLIBC_STATIC_LIBRARIES = "${pkgs.glibc.static}/lib";
+        # The web UI's end-to-end tests drive the browsers nixpkgs builds,
+        # which must match the pinned @playwright/test exactly.
+        PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+        PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
+        PLAYWRIGHT_DRIVER_VERSION = pkgs.playwright-driver.version;
         RUSTFLAGS = "-C link-arg=-fuse-ld=mold -C link-arg=-Wl,--dynamic-linker=${pkgs.glibc}/lib/ld-linux-x86-64.so.2";
         packages = with pkgs; [
           rust
@@ -66,6 +71,9 @@
           zig
           pkg-config
           util-linux
+          nodejs_24
+          pnpm
+          biome
         ];
       };
     };
