@@ -124,7 +124,9 @@ pub fn check_backtrace(trace: &Backtrace, main: ModuleId) -> Result<(), String> 
     // A runtime's stack may also end where it switched from a task that
     // has since gone elsewhere, as an idle thread's does at `mcall`, and a
     // thread the kernel just started, before its runtime gives it a stack,
-    // has only the frame it began in.
+    // has only the frame it began in. Code outside the runtime's image,
+    // such as the C library's that starts a thread, ends a stack where its
+    // call-frame information says it does.
     if trace.termination == UnwindTermination::Complete {
         let last = trace.frames.len().checked_sub(1).ok_or("no frames")?;
         let switched_from = role(last) == Some(CodeRole::StackSwitch)
@@ -133,7 +135,10 @@ pub fn check_backtrace(trace: &Backtrace, main: ModuleId) -> Result<(), String> 
                 StackSegment::System | StackSegment::Signal
             );
         let starting = last == 0 && trace.frames[0].segment == StackSegment::Thread;
-        if role(last) != Some(CodeRole::Outermost) && !switched_from && !starting {
+        let foreign = trace.frames[last]
+            .module
+            .is_some_and(|module| module != main);
+        if role(last) != Some(CodeRole::Outermost) && !switched_from && !starting && !foreign {
             return Err(format!(
                 "it ends complete at a frame that begins no stack: {trace:#?}"
             ));
