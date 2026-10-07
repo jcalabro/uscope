@@ -80,6 +80,10 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     /// Go's generic type parameters: each typedef of a shape that names
     /// its type argument's entry in the function's dictionary.
     pub(super) go_dict_indices: HashMap<TypeId, u64>,
+    /// Whether each C++ class whose producer says how calls pass it is
+    /// passed by value, in registers where it fits, rather than by
+    /// reference to a copy.
+    pub(super) passed_by_value: HashMap<TypeId, bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -270,6 +274,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             definition_declarations,
             identity_parts: HashMap::new(),
             complex_parts: HashMap::new(),
+            passed_by_value: HashMap::new(),
             go_dict_indices: HashMap::new(),
         };
         let mut paths = HashMap::<*const ScopeSegment, ScopePath>::new();
@@ -361,7 +366,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         })
     }
 
-    fn is_zig(&self, unit_index: usize) -> bool {
+    pub(super) fn is_zig(&self, unit_index: usize) -> bool {
         self.zig_units.get(unit_index).copied().unwrap_or(false)
     }
 
@@ -2482,6 +2487,24 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         Ok((discriminant, variants))
     }
 
+    /// Records whether calls pass a C++ class by value, when its producer
+    /// says.
+    fn note_calling_convention(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        id: TypeId,
+    ) {
+        match entry.attr_value(gimli::DW_AT_calling_convention) {
+            Some(gimli::AttributeValue::CallingConvention(gimli::DW_CC_pass_by_value)) => {
+                self.passed_by_value.insert(id, true);
+            }
+            Some(gimli::AttributeValue::CallingConvention(gimli::DW_CC_pass_by_reference)) => {
+                self.passed_by_value.insert(id, false);
+            }
+            _ => {}
+        }
+    }
+
     fn build_record_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -2499,6 +2522,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if !incomplete && explicit_size.is_none() {
             return Err("complete record type has no byte size".into());
         }
+        self.note_calling_convention(entry, reference.id);
         if self.has_direct_variant_part(entry, unit_index)? {
             let storage = if kind == RecordKind::Class {
                 VariantStorageKind::Class

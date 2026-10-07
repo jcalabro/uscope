@@ -18,6 +18,7 @@ mod locations;
 mod metadata;
 mod names;
 mod signals;
+mod step_targets;
 mod stepping;
 mod unwind;
 mod values;

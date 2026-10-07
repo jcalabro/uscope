@@ -193,6 +193,7 @@ pub(super) const fn x86_64_general_register_slot(
 /// The 512-byte x86-64 FXSAVE image saved by ptrace and by `NT_FPREGSET`.
 pub(super) type Fxsave = Arc<[u8; core_dump::FXSAVE_SIZE]>;
 
+const FXSAVE_X87_OFFSET: usize = 32;
 const FXSAVE_XMM_OFFSET: usize = 160;
 
 pub(super) fn native_fxsave(registers: &libc::user_fpregs_struct) -> Fxsave {
@@ -223,6 +224,23 @@ pub(super) fn x86_64_xmm_variable_register(registers: &Fxsave, dwarf: u16) -> Va
             role: None,
         },
         bytes: bytes.into(),
+    }
+}
+
+/// One of the x87 registers st0 through st7, DWARF's 33 through 40, which
+/// FXSAVE stores from the stack's top, each in the low ten bytes of
+/// sixteen.
+pub(super) fn x86_64_x87_variable_register(registers: &Fxsave, dwarf: u16) -> VariableRegister {
+    let index = usize::from(dwarf - 33);
+    let start = FXSAVE_X87_OFFSET + index * 16;
+    VariableRegister {
+        descriptor: RegisterDescriptor {
+            id: RegisterId::new(43 + u32::try_from(index).expect("x87 index fits u32")),
+            name: format!("st{index}").into(),
+            bits: 80,
+            role: None,
+        },
+        bytes: registers[start..start + 10].to_vec().into(),
     }
 }
 

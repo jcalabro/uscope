@@ -415,6 +415,15 @@ impl Scenario {
         self.wait_for_request(task, "advance").await
     }
 
+    /// Steps the selected thread into the call at `call` on its line,
+    /// running its line's other calls to their returns.
+    pub async fn step_into_to_stop(&mut self, call: uscope::VirtualAddress) -> StopReason {
+        let task = self.spawn_request(&format!("step into {call}"), move |handle| async move {
+            handle.step_into(call).await
+        });
+        self.wait_for_request(task, "step into").await
+    }
+
     /// Moves the selected thread, without running it, to resume at a
     /// location, and waits for the stop that publishes.
     pub async fn jump_to_stop(&mut self, spec: BreakpointSpec) -> StopReason {

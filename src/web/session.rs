@@ -340,6 +340,7 @@ impl Session {
                 | Request::Disassemble(_)
                 | Request::ReadMemory(_)
                 | Request::Registers(_)
+                | Request::StepTargets(_)
                 | Request::Signals
                 | Request::Modules
                 | Request::Functions(_)
@@ -453,6 +454,22 @@ impl Session {
             Request::ReadMemory(read) => Ok(to_value(
                 &lowlevel::read_memory(&self.current_handle().await?, &read).await?,
             )),
+            Request::StepTargets(at) => {
+                let handle = self.current_handle().await?;
+                let context = inspect::context(&handle, at.stop, at.thread, 0).await?;
+                let targets = handle.at(context).step_targets().await?;
+                let hex = |address: uscope::VirtualAddress| format!("{:#x}", address.get());
+                Ok(to_value(&protocol::StepTargets {
+                    calls: targets
+                        .iter()
+                        .map(|target| protocol::StepCall {
+                            call: hex(target.call),
+                            callee: target.callee.as_deref().map(str::to_owned),
+                            target: target.target.map(hex),
+                        })
+                        .collect(),
+                }))
+            }
             Request::Registers(at) => Ok(to_value(&protocol::Registers {
                 registers: lowlevel::registers(&self.current_handle().await?, at).await?,
             })),
@@ -666,6 +683,22 @@ impl Session {
             0
         };
         let context = inspect::context(&handle, step.stop, step.thread, frame).await?;
+        let scope = ResumeScope::Process(process_id);
+        if let Some(call) = step.call.as_deref().filter(|_| step.kind == StepKind::Into) {
+            let call = lowlevel::address(call)?;
+            let action = format!("stepped into the call at {call}");
+            self.caused(connection, &action);
+            handle
+                .start_step_into(
+                    context.stop,
+                    context.execution,
+                    call,
+                    scope,
+                    ExceptionDisposition::Pass,
+                )
+                .await?;
+            return Ok(action);
+        }
         self.caused(connection, action);
         handle
             .start_step(
@@ -673,7 +706,7 @@ impl Session {
                 context.execution,
                 context.frame,
                 kind,
-                ResumeScope::Process(process_id),
+                scope,
                 ExceptionDisposition::Pass,
             )
             .await?;

@@ -69,6 +69,9 @@ pub enum Request {
     Restart,
     /// Steps one thread of a stop.
     Step(Step),
+    /// The calls of a thread's line at a stop that a step into can go
+    /// into.
+    StepTargets(ThreadAt),
     /// Moves one thread of a stop, without running it, to resume at a
     /// location in its function.
     Jump(Jump),
@@ -210,6 +213,12 @@ pub struct Step {
     #[cfg_attr(test, ts(optional = nullable))]
     pub frame: u32,
     pub kind: StepKind,
+    /// For a step into, the one call of the line to go into, in
+    /// hexadecimal, as `stepTargets` lists it; the line's other calls run
+    /// to their returns.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub call: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1087,6 +1096,27 @@ pub struct Memory {
     pub unreadable: Option<String>,
 }
 
+/// The calls a step into can go into, in address order.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct StepTargets {
+    pub calls: Vec<StepCall>,
+}
+
+/// One call of a line.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct StepCall {
+    /// The call instruction's address, in hexadecimal, which names it to a
+    /// step.
+    pub call: String,
+    /// The function it calls, when something names it.
+    pub callee: Option<String>,
+    /// The address a direct call calls, in hexadecimal; none for an
+    /// indirect call.
+    pub target: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Registers {
@@ -1238,6 +1268,8 @@ mod tests {
         Token::decl,
         BranchTarget::decl,
         Memory::decl,
+        StepTargets::decl,
+        StepCall::decl,
         Registers::decl,
         Register::decl,
         Signals::decl,

@@ -202,12 +202,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                     &active.kind,
                     ActiveKind::Step { start, .. }
                         if !start.plan_addresses.is_empty()
-                            || start.signal_guard.is_some()
+                            || start.resume_guard.is_some()
                             || start.escape.is_some()
                 )
             });
         if uses_plan_breakpoints {
             return self.continue_thread(pid);
+        }
+        if self.pass_unchosen_call(pid)? {
+            return Ok(());
         }
         let mode = self.step_mode(kind);
         if matches!(mode, StepKind::IntoSource | StepKind::OverSource)
@@ -548,6 +551,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     fn advance_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
+        self.note_returned_values(pid);
         self.retire_return_guard()?;
         self.retire_epilogue_return_guard()?;
         let mode = self.step_mode(kind);
@@ -1559,7 +1563,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// Returns the return address and stack pointer of the call instruction
     /// a thread is about to execute, or `None` for any other instruction.
-    fn call_return(
+    pub(super) fn call_return(
         &self,
         inferior: &Inferior,
         pid: Pid,

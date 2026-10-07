@@ -26,7 +26,7 @@ use super::memory::read_logical_memory;
 use super::native::InspectionOps;
 use super::registers::{
     Fxsave, x86_64_caller_variable_register, x86_64_general_variable_register,
-    x86_64_register_snapshot, x86_64_xmm_variable_register,
+    x86_64_register_snapshot, x86_64_x87_variable_register, x86_64_xmm_variable_register,
 };
 use super::tls::TlsModule;
 use super::{
@@ -601,7 +601,7 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
         if let Some(value) = x86_64_general_variable_register(native, register) {
             return Ok(value);
         }
-        if (17..=32).contains(&register) {
+        if (17..=40).contains(&register) {
             let floating = self.floating.get_or_insert_with(|| {
                 self.ptrace
                     .floating_registers(self.pid)
@@ -612,11 +612,17 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
                 .map_err(|error| {
                     VariableRuntimeError::Unavailable(
                         VariableUnavailableReason::RegisterUnavailable(
-                            format!("xmm{} ({error})", register - 17).into(),
+                            format!("floating-point register {register} ({error})").into(),
                         ),
                     )
                 })
-                .map(|floating| x86_64_xmm_variable_register(floating, register));
+                .map(|floating| {
+                    if register <= 32 {
+                        x86_64_xmm_variable_register(floating, register)
+                    } else {
+                        x86_64_x87_variable_register(floating, register)
+                    }
+                });
         }
         Err(VariableRuntimeError::Unavailable(
             crate::UnsupportedVariableFeature::RegisterClass.into(),

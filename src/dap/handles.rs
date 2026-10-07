@@ -97,6 +97,8 @@ pub struct References {
     locations: HashMap<i64, Location>,
     /// The source line each goto target names.
     targets: HashMap<i64, uscope::BreakpointSpec>,
+    /// The call each step-in target names.
+    calls: HashMap<i64, uscope::VirtualAddress>,
 }
 
 /// A place in the program's source a location reference names.
@@ -132,6 +134,7 @@ impl Default for References {
             paths: HashMap::new(),
             locations: HashMap::new(),
             targets: HashMap::new(),
+            calls: HashMap::new(),
         }
     }
 }
@@ -194,6 +197,18 @@ impl References {
     /// The location a goto target names.
     pub fn target_of(&self, id: i64) -> Option<&uscope::BreakpointSpec> {
         self.targets.get(&id)
+    }
+
+    /// Returns a new reference to a call a step in may go into.
+    pub fn step_target(&mut self, call: uscope::VirtualAddress) -> Result<i64, Exhausted> {
+        let id = self.allocate()?;
+        self.calls.insert(id, call);
+        Ok(id)
+    }
+
+    /// The call a step-in target names.
+    pub fn call_of(&self, id: i64) -> Option<uscope::VirtualAddress> {
+        self.calls.get(&id).copied()
     }
 
     pub fn frame_context(&self, id: i64) -> Option<StopContext> {
@@ -275,6 +290,7 @@ impl References {
         self.paths.clear();
         self.locations.clear();
         self.targets.clear();
+        self.calls.clear();
     }
 }
 

@@ -107,6 +107,7 @@ impl Client {
                 kind,
                 presentation: before.presentation.clone(),
                 targets: BTreeSet::new(),
+                call: None,
             });
         }
         let result = self.handle.step(kind).await;
@@ -159,6 +160,68 @@ impl Client {
         Ok(())
     }
 
+    /// Steps into one of the calls of the selected thread's line, which
+    /// runs the line's other calls to their returns.
+    pub(super) async fn step_into_call(&self) -> Result<(), Failure> {
+        let before = self.snapshot().await?;
+        let (Some(stop), Some(ExecutionContext::Thread(thread))) =
+            (before.stop_id, before.selected)
+        else {
+            return Ok(());
+        };
+        let view = self.handle.at(StopContext {
+            stop,
+            execution: thread.into(),
+            frame: StackFrameId::INNERMOST,
+        });
+        let targets = match view.step_targets().await {
+            Ok(targets) => targets,
+            // Which line a thread is on depends on the inline frame.
+            Err(Error::AmbiguousInlineFrame) if presented_ambiguously(&before) => {
+                self.note("step targets from an ambiguous inline frame refused");
+                return Ok(());
+            }
+            Err(error) => return Err(protocol(format!("step targets failed: {error}"))),
+        };
+        if targets.is_empty() {
+            self.note("no call on the line to step into");
+            return Ok(());
+        }
+        let target = self
+            .choices
+            .borrow_mut()
+            .pick(Stream::Control, &targets)
+            .clone();
+        self.note(format!(
+            "step into the call at {} of {:?}",
+            target.call, target.callee
+        ));
+        self.observe(Observation::StepBegins {
+            thread,
+            kind: StepKind::IntoSource,
+            presentation: before.presentation.clone(),
+            targets: BTreeSet::new(),
+            call: Some(target.call.get()),
+        });
+        let result = self.handle.step_into(target.call).await;
+        self.observe(Observation::StepEnded(result.as_ref().ok().cloned()));
+        match result {
+            Ok(reason) => {
+                self.note(format!("stepped into the call: {reason:?}"));
+                self.mark(Mark::SteppedIntoCall);
+            }
+            Err(Error::EventStreamLagged(_)) => self.mark(Mark::ClientLagged),
+            Err(error) if self.refused_unarmed(&error).await? => {}
+            Err(error) => {
+                return Err(protocol(format!(
+                    "step into the call at {} failed: {error}",
+                    target.call
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Runs to a location, or until the selected frame returns first, which
     /// is refused as a step out of it is. The client learns where the
     /// location is from a disabled breakpoint, which plants nothing.
@@ -190,6 +253,7 @@ impl Client {
                 kind: StepKind::Advance,
                 presentation: before.presentation.clone(),
                 targets,
+                call: None,
             });
         }
         let result = self.handle.advance(spec.clone()).await;

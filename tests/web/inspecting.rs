@@ -265,3 +265,53 @@ async fn functions_are_found_by_any_part_of_their_name() {
     let none = tab.ok("functions", json!({"query": "  "})).await;
     assert!(names(&none).is_empty());
 }
+
+/// After a step out, the locals of the frame returned to include what the
+/// function returned, which expands but which no path names.
+#[tokio::test]
+async fn a_step_out_lists_what_the_function_returned() {
+    let web = Web::start("returned", &[&fixture("returns-c-gcc-o2")]);
+    let mut tab = web.control("tab").await;
+    tab.state("the program loaded", |state| state["session"].is_string())
+        .await;
+    tab.ok("addBreakpoint", json!({"location": "r_mixed"}))
+        .await;
+    tab.ok("continue", json!({})).await;
+    let stopped = tab.inferior("stopped").await;
+    let (stop, thread) = (
+        stopped["inferior"]["stop"].clone(),
+        stopped["inferior"]["thread"].clone(),
+    );
+    tab.ok(
+        "step",
+        json!({"stop": stop, "thread": thread, "kind": "out"}),
+    )
+    .await;
+    let out = tab
+        .state("the step out", |state| {
+            state["inferior"]["state"] == "stopped" && state["inferior"]["stop"] != stop
+        })
+        .await;
+    let frame = json!({"stop": out["inferior"]["stop"], "thread": thread, "frame": 0});
+    let scopes = tab.ok("scopes", frame).await;
+    let locals = scopes["scopes"]
+        .as_array()
+        .expect("scopes")
+        .iter()
+        .find(|scope| scope["key"] == "locals")
+        .expect("locals")
+        .clone();
+    let returned = row(&locals["rows"], "returned r_mixed");
+    assert!(returned["path"].is_null(), "{returned}");
+    let members = returned["children"]["handle"]
+        .as_u64()
+        .expect("the struct expands");
+    let fields = tab
+        .ok(
+            "children",
+            json!({"handle": members, "start": 0, "count": 10}),
+        )
+        .await;
+    assert_eq!(row(&fields["rows"], "i")["text"], "42", "{fields}");
+    assert_eq!(row(&fields["rows"], "d")["text"], "0.5", "{fields}");
+}

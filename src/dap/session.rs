@@ -488,6 +488,7 @@ impl Session {
                     .await?
             }
             "stepOut" => self.step(arguments, StepKind::Out, StepKind::Out).await?,
+            "stepInTargets" => self.step_in_targets(arguments).await?,
             "pause" => self.pause().await?,
             "setBreakpoints" => self.set_breakpoints(arguments).await?,
             "setFunctionBreakpoints" => self.set_function_breakpoints(arguments).await?,
@@ -1259,17 +1260,35 @@ impl Session {
             source
         };
         let handle = self.target_handle()?;
-        let execution = handle
-            .start_step(
-                stop.id,
-                context,
-                StackFrameId::INNERMOST,
-                kind,
-                scope,
-                ExceptionDisposition::Pass,
-            )
-            .await
-            .map_err(error)?;
+        // A step in may go into one target of `stepInTargets`.
+        let call = match arguments.target_id {
+            Some(target) if kind == StepKind::IntoSource => {
+                Some(self.references.call_of(target).ok_or_else(|| {
+                    ErrorBody::new("the step-in target belongs to an earlier stop")
+                })?)
+            }
+            _ => None,
+        };
+        let execution = match call {
+            Some(call) => {
+                handle
+                    .start_step_into(stop.id, context, call, scope, ExceptionDisposition::Pass)
+                    .await
+            }
+            None => {
+                handle
+                    .start_step(
+                        stop.id,
+                        context,
+                        StackFrameId::INNERMOST,
+                        kind,
+                        scope,
+                        ExceptionDisposition::Pass,
+                    )
+                    .await
+            }
+        }
+        .map_err(error)?;
         self.resumed = Some(execution);
         self.leave_stop();
         self.cancel_inspections();
@@ -1281,6 +1300,33 @@ impl Session {
             )
             .await?;
         Ok(json!({}))
+    }
+
+    /// The calls of a frame's line that a step in can go into, which only
+    /// the innermost frame has.
+    async fn step_in_targets(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
+        let arguments = parse::<protocol::ScopesArguments>(arguments, "stepInTargets arguments")?;
+        self.current_stop()?;
+        let context = self
+            .references
+            .frame_context(arguments.frame_id)
+            .ok_or_else(|| ErrorBody::new("the frame belongs to an earlier stop"))?;
+        if context.frame != StackFrameId::INNERMOST {
+            return Ok(json!({"targets": []}));
+        }
+        let handle = self.target_handle()?;
+        let listed = handle.at(context).step_targets().await.map_err(error)?;
+        let mut targets = Vec::with_capacity(listed.len());
+        for target in listed.iter() {
+            let id = self.references.step_target(target.call)?;
+            let label = match (&target.callee, target.target) {
+                (Some(callee), _) => callee.to_string(),
+                (None, Some(address)) => format!("call to {address}"),
+                (None, None) => format!("indirect call at {}", target.call),
+            };
+            targets.push(json!({"id": id, "label": label}));
+        }
+        Ok(json!({"targets": targets}))
     }
 
     /// Moves a thread to a target `gotoTargets` named, without running it;
@@ -2413,6 +2459,7 @@ fn capabilities() -> Value {
         "supportsLoadedSourcesRequest": true,
         "supportsBreakpointLocationsRequest": true,
         "supportsGotoTargetsRequest": true,
+        "supportsStepInTargetsRequest": true,
         "supportsValueFormattingOptions": true,
         "supportsCompletionsRequest": true,
         "completionTriggerCharacters": [" ", ".", ">", "$"],

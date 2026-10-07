@@ -439,6 +439,8 @@ pub struct ThreadArguments {
     pub thread_id: i64,
     pub single_thread: Option<bool>,
     pub granularity: Option<String>,
+    /// For `stepIn`, the `stepInTargets` target to go into.
+    pub target_id: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

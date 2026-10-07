@@ -1354,6 +1354,34 @@ pub fn code_name(function: Option<&FunctionInfo>, symbol: Option<&SymbolLocation
     name
 }
 
+/// Renders the calls of a line that a step can go into, by address, with
+/// what each calls.
+pub fn step_targets(targets: &[uscope::StepTarget], renderer: Renderer) -> String {
+    if targets.is_empty() {
+        return "no calls on this line".to_owned();
+    }
+    let mut text = "calls on this line:".to_owned();
+    for target in targets {
+        let callee = target.callee.as_deref().map_or_else(
+            || {
+                if target.target.is_some() {
+                    "(unnamed)".to_owned()
+                } else {
+                    "(indirect)".to_owned()
+                }
+            },
+            |callee| renderer.paint(Role::Name, callee).to_string(),
+        );
+        write!(
+            text,
+            "\n  {}  {callee}",
+            renderer.paint(Role::Metadata, format!("{:#018x}", target.call.get()))
+        )
+        .expect("writing to a String cannot fail");
+    }
+    text
+}
+
 /// Renders what contains an address: its symbol and offset, its section, and
 /// its module. A data symbol names only bytes within its declared size.
 pub fn address_description(description: &AddressDescription, renderer: Renderer) -> String {

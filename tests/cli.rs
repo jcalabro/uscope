@@ -569,7 +569,8 @@ fn command_errors_show_the_usage_or_the_reason() {
             "cls",
         ],
     );
-    let info = "usage: info breakpoints|watchpoints|signals|modules|core|symbol|view [argument...]";
+    let info =
+        "usage: info breakpoints|watchpoints|signals|modules|calls|core|symbol|view [argument...]";
     let clear = "cannot clear screen: stdout is not an ANSI terminal";
     assert_in_order(
         &stderr,
@@ -2573,7 +2574,7 @@ fn step_goroutine_enters_the_goroutine_the_line_starts() {
         &["build/test-programs/steps-go-o0"],
         &[&format!("break main.go:{go}"), "run", "step sideways"],
     );
-    assert_failure(&failure, "usage: step [task]");
+    assert_failure(&failure, "no call on this line calls sideways");
 }
 
 /// A program stripped of its debug information has goroutines nobody can
@@ -2752,6 +2753,49 @@ fn finish_shows_what_the_function_returned() {
             ],
         );
     }
+}
+
+/// C and C++ return by the System V convention: in registers, in st0, or
+/// in memory whose address is returned. A small C++ class GCC does not say
+/// how calls pass is unknown, for that reason.
+#[test]
+fn finish_shows_what_a_c_or_cpp_function_returned() {
+    let stdout = batch(
+        &["build/test-programs/returns-c-gcc-o2"],
+        &[
+            "break r_double",
+            "break r_long_double",
+            "break r_big",
+            "run",
+            "finish",
+            "continue",
+            "finish",
+            "continue",
+            "finish",
+            "print",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "returned (double) r_double = -0.375",
+            "returned (long double) r_long_double = 2.5",
+            "returned (big) r_big = {<3 fields>}",
+            "(int) n = 1",
+            "returned (big) r_big = {<3 fields>}",
+        ],
+    );
+    let stdout = batch(
+        &["build/test-programs/returns-cpp-gcc-o2"],
+        &["break r_plain", "run", "finish"],
+    );
+    assert!(
+        stdout.contains(
+            "returned (Plain) r_plain = <unavailable: unsupported variable feature: \
+             returning this type by the function's calling convention>"
+        ),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -4145,5 +4189,48 @@ fn jump_moves_the_thread_to_resume_elsewhere_in_its_function() {
     assert_in_order(
         &errors,
         &["error: stdin:5: elsewhere has no code in the function the thread is stopped in"],
+    );
+}
+
+#[test]
+fn step_goes_into_one_call_of_the_line() {
+    let line = |marker: &str| support::source_line("tests/fixtures/c/step-targets.c", marker);
+    let (output, errors) = piped(
+        &["build/test-programs/step-targets-gcc-o0"],
+        &[
+            &format!("break step-targets.c:{}", line("targets: calls")),
+            "run",
+            "info calls",
+            "step add",
+            "print a",
+            "finish",
+            "next",
+            "info calls",
+            "step strlen",
+            "step nothing",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "stopped at breakpoint 1 (hit 1) in main",
+            // GCC computes the arguments last to first.
+            "calls on this line:",
+            "  inc",
+            "  twice",
+            "  add",
+            "stopped after source step in add at tests/fixtures/c/step-targets.c:15",
+            "(int) a = 2",
+            "returned (int) add = 4",
+            "calls on this line:",
+            "  (indirect)",
+            "  strlen",
+            // Stepping into code without source goes on to the next line.
+            "stopped after source step in main at tests/fixtures/c/step-targets.c:29",
+        ],
+    );
+    assert_in_order(
+        &errors,
+        &["error: stdin:10: no call on this line calls nothing; `info calls` lists them"],
     );
 }

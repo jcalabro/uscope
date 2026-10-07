@@ -433,3 +433,46 @@ async fn a_thread_jumps_to_a_line_and_registers_change_through_their_rows() {
         "{exited}"
     );
 }
+
+/// A step into one call of a line goes into that call, running the
+/// line's others to their returns.
+#[tokio::test]
+async fn a_step_goes_into_the_call_the_tab_chose() {
+    let web = Web::start("step targets", &[&fixture("step-targets-gcc-o0")]);
+    let mut tab = web.control("tab").await;
+    tab.state("the program loaded", |state| state["session"].is_string())
+        .await;
+    let line = crate::support::source_line("tests/fixtures/c/step-targets.c", "targets: calls");
+    tab.ok(
+        "addBreakpoint",
+        json!({"location": format!("step-targets.c:{line}")}),
+    )
+    .await;
+    tab.ok("continue", json!({})).await;
+    let stopped = tab.inferior("stopped").await;
+    let (stop, thread) = (
+        stopped["inferior"]["stop"].clone(),
+        stopped["inferior"]["thread"].clone(),
+    );
+    let targets = tab
+        .ok("stepTargets", json!({"stop": stop, "thread": thread}))
+        .await;
+    let calls = targets["calls"].as_array().expect("calls").clone();
+    let callees = calls
+        .iter()
+        .map(|call| call["callee"].as_str().expect("a callee"))
+        .collect::<Vec<_>>();
+    assert_eq!(callees, ["inc", "twice", "add"], "{targets}");
+    tab.ok(
+        "step",
+        json!({"stop": stop, "thread": thread, "kind": "into", "call": calls[2]["call"]}),
+    )
+    .await;
+    let into = tab
+        .state("the step into add", |state| {
+            state["inferior"]["state"] == "stopped" && state["inferior"]["stop"] != stop
+        })
+        .await;
+    assert_eq!(into["inferior"]["place"]["function"], "add", "{into}");
+    assert_eq!(into["inferior"]["reason"]["kind"], "step", "{into}");
+}

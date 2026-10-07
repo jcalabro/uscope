@@ -5866,6 +5866,7 @@ fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
                 context: ExecutionContext::Thread(debug_thread_id(pid)),
                 frame: StackFrameId::INNERMOST,
                 kind,
+                call: None,
                 scope: ResumeScope::Process(process),
                 exception: ExceptionDisposition::Pass,
                 reply,

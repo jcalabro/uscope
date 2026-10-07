@@ -209,6 +209,8 @@ pub enum Error {
          cannot keep to it; assign $pc to move the thread anywhere"
     )]
     JumpWithoutFunction,
+    #[error("no call of the stopped line is at {0}, so a step cannot go into it")]
+    NotAStepTarget(crate::VirtualAddress),
     #[error("a step of thread {stepping} cannot resume thread {resumed} alone")]
     StepScopeMismatch {
         stepping: crate::ThreadId,
