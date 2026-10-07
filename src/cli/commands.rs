@@ -2069,12 +2069,15 @@ impl Cli {
             template.replace("{path}", &quoted).replace("{line}", &line)
         };
         let status = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("sh")
+            let mut editor = std::process::Command::new("sh")
                 .args(["-c", &command])
-                .status()
+                .spawn()?;
+            super::wait_for_child(&mut editor)
         })
         .await??;
-        if !status.success() {
+        if let Some(status) = status
+            && !status.success()
+        {
             bail!("the editor exited with {status}");
         }
         Ok(String::new())
