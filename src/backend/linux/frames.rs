@@ -6,7 +6,7 @@ use std::sync::Arc;
 use nix::libc;
 use nix::unistd::Pid;
 
-use crate::debug_info::{UnwindInfo, VariableRuntimeError};
+use crate::debug_info::{TailJump, UnwindInfo, VariableRuntimeError};
 use crate::model::FrameMetadata;
 use crate::protocol::{FramePresentation, PresentedFrame, StepKind, StopId, StopReason};
 use crate::runtime_model::Crossing;
@@ -24,6 +24,7 @@ use crate::{
 
 use super::activation::{StackPosition, StackView};
 use super::breakpoints::runtime_breakpoint_address;
+use super::callers::Callers;
 use super::loops::is_loop_body;
 use super::memory::PtraceMemory;
 use super::native::InspectionOps;
@@ -154,7 +155,8 @@ impl<P: InspectionOps> Controller<P> {
             BreakpointOwner::Plan(_)
             | BreakpointOwner::Loader
             | BreakpointOwner::Runtime
-            | BreakpointOwner::StackMove => None,
+            | BreakpointOwner::StackMove
+            | BreakpointOwner::Resolver => None,
         }) {
             // A breakpoint removed while sites could not be edited, as SIGKILL
             // tears the process down, leaves its owner on the trap.
@@ -227,8 +229,37 @@ impl<P: InspectionOps> Controller<P> {
         let presentation = self.root_presentation(root)?;
         let stack = self.physical_stack(inferior, root, DEFAULT_MAX_FRAMES)?;
         let modules = self.unwind_modules(inferior);
+        Ok(self
+            .expand_backtrace(
+                inferior,
+                root,
+                &stack,
+                DEFAULT_MAX_FRAMES,
+                &modules,
+                presentation.as_ref(),
+            )?
+            .trace)
+    }
 
-        expand_inline_backtrace(&stack, root.context, &modules, presentation.as_ref())
+    /// A stack's logical frames, with the frames of the functions that left
+    /// by tail calls that its calls' sites and debug information find.
+    fn expand_backtrace(
+        &self,
+        inferior: &Inferior,
+        root: &StackRoot,
+        stack: &PhysicalStack,
+        unwound: usize,
+        modules: &[UnwindModule<'_>],
+        presentation: Option<&FramePresentation>,
+    ) -> Result<Expanded> {
+        let callers = Callers::with_stack(self, inferior, root.clone(), stack.clone(), unwound);
+        expand_inline_backtrace(
+            stack,
+            root.context,
+            modules,
+            presentation,
+            &mut |activation, code| callers.tail_jumps(activation, code),
+        )
     }
 
     /// The inferior, once `stop_id` is its current stop and `root` begins in
@@ -421,37 +452,58 @@ impl<P: InspectionOps> Controller<P> {
             });
         }
 
-        let trace = expand_inline_backtrace(&stack, root.context, &modules, presentation)?;
-        let Some(selected) = trace.frames.get(level).cloned() else {
+        let expanded =
+            self.expand_backtrace(inferior, root, &stack, max_frames, &modules, presentation)?;
+        let Some(selected) = expanded.trace.frames.get(level).cloned() else {
             return Err(Error::FrameNotFound {
                 frame,
-                frames: u32::try_from(trace.frames.len()).expect("frame count fits u32"),
+                frames: u32::try_from(expanded.trace.frames.len()).expect("frame count fits u32"),
             });
         };
-        // Inline frames precede the physical frame of their activation.
-        let activation = trace.frames[..level]
-            .iter()
-            .filter(|frame| frame.kind != FrameKind::Inline)
-            .count();
+        let FrameOrigin { activation, jump } = expanded.origins[level];
         let physical = &stack.frames[activation];
-        let code = stack
-            .lookup_address(activation)
-            .and_then(|lookup| unwind_module_for(&modules, lookup))
-            .map(|(module, address)| (module.loaded.id, address));
+        let code = jump.or_else(|| {
+            stack
+                .lookup_address(activation)
+                .and_then(|lookup| unwind_module_for(&modules, lookup))
+                .map(|(module, address)| (module.loaded.id, address))
+        });
         let presented = match selected.kind {
             FrameKind::Inline => PresentedFrame::Inline(
                 selected
                     .code_instance
                     .expect("inline frames name their code instance"),
             ),
-            FrameKind::Physical | FrameKind::Signal => PresentedFrame::Physical,
+            FrameKind::Physical | FrameKind::Signal | FrameKind::TailCall => {
+                PresentedFrame::Physical
+            }
         };
         // Only code a function describes has a source scope.
         let scope = match (selected.kind, selected.code_instance) {
             (_, None) => FrameScope::Unavailable,
             (FrameKind::Inline, Some(instance)) => FrameScope::Inline(instance),
-            (FrameKind::Physical | FrameKind::Signal, Some(_)) => FrameScope::Function,
+            (FrameKind::Physical | FrameKind::Signal | FrameKind::TailCall, Some(_)) => {
+                FrameScope::Function
+            }
         };
+        // The jump discarded the frame's registers and its stack's place:
+        // only entry values recover what was passed to it.
+        if jump.is_some() {
+            return Ok(ResolvedFrame {
+                id: frame,
+                presented,
+                frame: Some(selected),
+                code,
+                scope,
+                registers: FrameRegisters::Discarded,
+                cfa: Err(VariableUnavailableReason::CallFrameUnavailable(
+                    CallFrameUnavailableReason::TailCall,
+                )
+                .into()),
+                activation,
+                below_stack_pointer: None,
+            });
+        }
 
         Ok(ResolvedFrame {
             id: frame,
@@ -896,40 +948,98 @@ pub(super) fn source_line_changed(
     })
 }
 
+/// Where a logical frame of a backtrace comes from.
+#[derive(Debug, Clone, Copy)]
+struct FrameOrigin {
+    /// The physical activation whose state the frame has, or, for a frame
+    /// whose function left by a tail call, the one whose state replaced it.
+    activation: usize,
+    /// For a frame whose function left by a tail call, the module and an
+    /// address within its jump.
+    jump: Option<(ModuleId, ImageAddress)>,
+}
+
+/// A stack's logical frames, and where each comes from.
+struct Expanded {
+    trace: Backtrace,
+    origins: Vec<FrameOrigin>,
+}
+
 /// A stack's logical frames: each activation's inline frames, innermost
-/// first, then the activation itself.
+/// first, then the activation itself, then the functions that left by the
+/// tail calls `tail_jumps` finds between it and its caller, the last first.
 fn expand_inline_backtrace(
     stack: &PhysicalStack,
     subject: ExecutionContext,
     modules: &[UnwindModule<'_>],
     presentation: Option<&FramePresentation>,
-) -> Result<Backtrace> {
+    tail_jumps: &mut dyn FnMut(usize, (ModuleId, ImageAddress)) -> Vec<TailJump>,
+) -> Result<Expanded> {
     let mut frames = Vec::new();
+    let mut origins = Vec::new();
 
     for (activation, physical) in stack.frames.iter().enumerate() {
         let first = frames.len();
-        expand_activation(stack, activation, modules, presentation, &mut frames)?;
+        let code = expand_activation(stack, activation, modules, presentation, &mut frames)?;
+        origins.resize(
+            frames.len(),
+            FrameOrigin {
+                activation,
+                jump: None,
+            },
+        );
+        // A signal interrupted its frame rather than calling it.
+        if let Some((module, address)) = code
+            && !physical.context.signal_frame
+        {
+            for jump in tail_jumps(activation, (module.loaded.id, address)) {
+                let Ok(instruction) = module.loaded.virtual_address(jump.instruction) else {
+                    break;
+                };
+                let lookup = module.loaded.virtual_address(jump.lookup)?;
+                push_code_frames(
+                    &mut frames,
+                    FrameKind::TailCall,
+                    module,
+                    jump.lookup,
+                    instruction,
+                    lookup,
+                    None,
+                )?;
+                origins.resize(
+                    frames.len(),
+                    FrameOrigin {
+                        activation,
+                        jump: Some((module.loaded.id, jump.lookup)),
+                    },
+                );
+            }
+        }
         for frame in &mut frames[first..] {
             frame.segment = physical.segment;
         }
     }
 
-    Ok(Backtrace {
-        context: subject,
-        frames: frames.into(),
-        termination: stack.termination.clone(),
+    Ok(Expanded {
+        trace: Backtrace {
+            context: subject,
+            frames: frames.into(),
+            termination: stack.termination.clone(),
+        },
+        origins,
     })
 }
 
 /// One activation's logical frames: its inline frames, innermost first,
-/// then the activation itself.
-fn expand_activation(
+/// then the activation itself. Returns the module describing its code, and
+/// the code's address in that image.
+fn expand_activation<'a>(
     stack: &PhysicalStack,
     activation: usize,
-    modules: &[UnwindModule<'_>],
+    modules: &[UnwindModule<'a>],
     presentation: Option<&FramePresentation>,
     frames: &mut Vec<StackFrame>,
-) -> Result<()> {
+) -> Result<Option<(UnwindModule<'a>, ImageAddress)>> {
     let context = &stack.frames[activation].context;
     let kind = if context.signal_frame {
         FrameKind::Signal
@@ -941,21 +1051,44 @@ fn expand_activation(
     let (Some(lookup), Some((frame_module, image_address))) = (lookup, located) else {
         let level = u32::try_from(frames.len()).expect("frame count fits in u32");
         frames.push(StackFrame::new(level, kind, None, context.instruction));
-        return Ok(());
+        return Ok(None);
     };
+    // The stop presentation describes the main image only; innermost
+    // frames in other modules show their complete inline chain.
+    let presentation =
+        presentation.filter(|_| activation == 0 && frame_module.loaded.id == modules[0].loaded.id);
+    push_code_frames(
+        frames,
+        kind,
+        frame_module,
+        image_address,
+        context.instruction,
+        lookup,
+        presentation,
+    )?;
+    Ok(Some((frame_module, image_address)))
+}
+
+/// The logical frames of code at `image_address` in `frame_module`, the
+/// frame's instruction or the byte before its return address: the inline
+/// frames `presentation` shows, or else all of them, innermost first, then
+/// a frame of `kind` for the function.
+fn push_code_frames(
+    frames: &mut Vec<StackFrame>,
+    kind: FrameKind,
+    frame_module: UnwindModule<'_>,
+    image_address: ImageAddress,
+    instruction: VirtualAddress,
+    lookup: VirtualAddress,
+    presentation: Option<&FramePresentation>,
+) -> Result<()> {
     let module_image = frame_module.image;
     let location = module_image.locate(image_address);
     let module = Some(frame_module.loaded.id);
     let physical_source = if let InlineFrameLookup::Unique(chain) = &location.inline_frames {
-        // The stop presentation describes the main image only; innermost
-        // frames in other modules show their complete inline chain.
         let visible = match presentation {
-            Some(presentation)
-                if activation == 0 && frame_module.loaded.id == modules[0].loaded.id =>
-            {
-                presentation_visible_count(&location, presentation)?
-            }
-            _ => chain.instances.len(),
+            Some(presentation) => presentation_visible_count(&location, presentation)?,
+            None => chain.instances.len(),
         };
         let mut source = visible_source(module_image, &location, &chain.instances, visible);
 
@@ -973,7 +1106,7 @@ fn expand_activation(
                 level,
                 FrameKind::Inline,
                 module,
-                context.instruction,
+                instruction,
                 FrameMetadata {
                     code_instance: Some(instance.id),
                     function,
@@ -1001,7 +1134,7 @@ fn expand_activation(
         level,
         kind,
         module,
-        context.instruction,
+        instruction,
         FrameMetadata {
             code_instance: physical_instance.map(|instance| instance.id),
             function,
@@ -1009,7 +1142,7 @@ fn expand_activation(
             // A caller is looked up just before its return address, but
             // its offset describes the frame's own instruction.
             symbol: location.symbol.map(|mut symbol| {
-                symbol.offset += context.instruction.get() - lookup.get();
+                symbol.offset += instruction.get() - lookup.get();
                 symbol
             }),
             role: module_image.code_role(image_address),
@@ -1037,6 +1170,7 @@ pub(super) struct PhysicalFrame {
 }
 
 /// A stack's physical activations, innermost first.
+#[derive(Clone)]
 pub(super) struct PhysicalStack {
     /// The live registers of a thread's stack; `None` for registers a task
     /// saved, which hold only some of them.
@@ -1125,6 +1259,9 @@ pub(super) enum FrameRegisters {
     /// The registers the unwinder reconstructed for a caller's activation.
     /// Registers a callee could overwrite without saving are absent.
     Caller(RegisterFile),
+    /// None: the frame's function left by a tail call, which discarded
+    /// them.
+    Discarded,
 }
 
 /// The source scope whose variables a frame shows.
@@ -1276,11 +1413,12 @@ impl RoleCallerProvider<'_, '_> {
 
 /// Where Linux's x86-64 `ucontext` keeps the interrupted registers: its
 /// `uc_mcontext`, after `uc_flags`, `uc_link`, and `uc_stack`.
-const UCONTEXT_MCONTEXT: u64 = 40;
+pub(super) const UCONTEXT_MCONTEXT: u64 = 40;
 
 /// The DWARF numbers of the general registers in the order the kernel's
 /// `sigcontext` saves them, from r8 to rip.
-const SIGCONTEXT_REGISTERS: [u16; 17] = [8, 9, 10, 11, 12, 13, 14, 15, 5, 4, 6, 3, 1, 0, 2, 7, 16];
+pub(super) const SIGCONTEXT_REGISTERS: [u16; 17] =
+    [8, 9, 10, 11, 12, 13, 14, 15, 5, 4, 6, 3, 1, 0, 2, 7, 16];
 
 /// Asks the runtime whose module holds a frame's code where the frame,
 /// with these registers, goes on past the stack switch it makes; `None`

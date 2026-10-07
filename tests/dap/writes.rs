@@ -149,3 +149,125 @@ fn write_memory_writes_bytes_and_reports_the_change() {
     );
     dap.finish();
 }
+
+/// Stops the jump program at `checked`'s first line, with no breakpoints
+/// left, and returns the stopped thread.
+fn stopped_in_checked(dap: &mut Dap) -> i64 {
+    let path = source("c/jump.c");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("jump"),
+        json!({}),
+        &Configuration {
+            sources: vec![(path.clone(), vec![line_of(&path, "jump: start")])],
+            ..Configuration::default()
+        },
+    );
+    let stop = dap.stopped(started.mark);
+    dap.request(
+        "setBreakpoints",
+        json!({"source": {"path": path}, "breakpoints": []}),
+    );
+    stop.thread
+}
+
+fn top_line(dap: &mut Dap, thread: i64) -> Value {
+    dap.request("stackTrace", json!({"threadId": thread}))["stackFrames"][0]["line"].clone()
+}
+
+/// Jump to Cursor: `gotoTargets` names a line's code, and `goto` moves the
+/// thread there without running it, then stops it there as `goto`.
+#[test]
+fn goto_moves_a_thread_to_a_line_of_its_function() {
+    let mut dap = Dap::start("goto");
+    let thread = stopped_in_checked(&mut dap);
+    let path = source("c/jump.c");
+    let target = line_of(&path, "jump: target");
+    let targets = dap.request(
+        "gotoTargets",
+        json!({"source": {"path": path}, "line": target}),
+    );
+    let targets = targets["targets"].as_array().expect("targets").clone();
+    assert_eq!(targets.len(), 1, "{targets:?}");
+    assert_eq!(targets[0]["line"], json!(target));
+    let mark = dap.mark();
+    dap.request(
+        "goto",
+        json!({"threadId": thread, "targetId": targets[0]["id"]}),
+    );
+    let stop = dap.stopped(mark);
+    assert_eq!(stop.reason, "goto");
+    assert_eq!(top_line(&mut dap, thread), json!(target));
+    // A target belongs to the stop that named it.
+    let stale = dap.request_error(
+        "goto",
+        json!({"threadId": thread, "targetId": targets[0]["id"]}),
+    );
+    assert_eq!(stale, "the goto target belongs to an earlier stop");
+    // A line of another function is a target, but not for this thread.
+    let call = line_of(&path, "jump: call");
+    let elsewhere = dap.request(
+        "gotoTargets",
+        json!({"source": {"path": path}, "line": call}),
+    );
+    let refused = dap.request_error(
+        "goto",
+        json!({"threadId": thread, "targetId": elsewhere["targets"][0]["id"]}),
+    );
+    assert!(
+        refused.contains("has no code in the function the thread is stopped in"),
+        "{refused}"
+    );
+    // `status = value` and `status += 10` never ran.
+    let resumed = dap.send("continue", json!({"threadId": thread}));
+    dap.success(resumed);
+    assert_eq!(
+        dap.event(resumed.mark, "exited", |_| true),
+        json!({"exitCode": 100})
+    );
+    dap.finish();
+}
+
+/// The innermost frame's registers can be set, and setting the program
+/// counter moves the thread as `goto` does; a caller's cannot.
+#[test]
+fn registers_of_the_innermost_frame_can_be_set() {
+    let mut dap = Dap::start("set registers");
+    let thread = stopped_in_checked(&mut dap);
+    let frames = dap.request("stackTrace", json!({"threadId": thread}))["stackFrames"]
+        .as_array()
+        .expect("frames")
+        .clone();
+    let caller = scope(&mut dap, &frames[1], "Registers");
+    let caller_rbx = row(&mut dap, &caller, "rbx");
+    assert_eq!(
+        caller_rbx["presentationHint"]["attributes"],
+        json!(["readOnly"])
+    );
+    let registers = scope(&mut dap, &frames[0], "Registers");
+    let rax = row(&mut dap, &registers, "rax");
+    assert_eq!(rax["presentationHint"]["attributes"], json!([]));
+    assert_eq!(rax["evaluateName"], "$rax");
+    let set = dap.request(
+        "setVariable",
+        json!({"variablesReference": registers, "name": "rax", "value": "0x2a"}),
+    );
+    assert_eq!(set["value"], "0x000000000000002a");
+    // Setting the program counter publishes the stop again, even where
+    // the thread already is.
+    let rip = row(&mut dap, &registers, "rip");
+    let mark = dap.mark();
+    dap.request(
+        "setVariable",
+        json!({"variablesReference": registers, "name": "rip", "value": rip["value"]}),
+    );
+    assert_eq!(dap.stopped(mark).reason, "goto");
+    // The thread runs on from where it was; checked computes its own rax.
+    let resumed = dap.send("continue", json!({"threadId": thread}));
+    dap.success(resumed);
+    assert_eq!(
+        dap.event(resumed.mark, "exited", |_| true),
+        json!({"exitCode": 111})
+    );
+    dap.finish();
+}

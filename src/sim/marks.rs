@@ -82,6 +82,9 @@ marks! {
     /// A backtrace ended at a caller read from a return address the program
     /// overwrote.
     CorruptCaller,
+    /// A backtrace showed functions that left by tail calls, at jumps
+    /// their activation took.
+    TailCallFrames,
     /// The stepping oracle judged where a step ended.
     StepJudged,
     /// A source step in unoptimized code passed the exact rules.
@@ -134,6 +137,10 @@ marks! {
     AdvanceReturned,
     /// The stepping oracle judged where an advance ended.
     AdvanceJudged,
+    /// A thread moved to where it stood, which published its stop again.
+    JumpedInPlace,
+    /// A step went into one call its line listed, past the line's others.
+    SteppedIntoCall,
     /// The debugger armed a watchpoint.
     WatchAdded,
     /// The debug registers refused a watchpoint, discarding writes or with

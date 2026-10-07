@@ -11,14 +11,15 @@ import { hidden } from "./Values";
 import { LinkedExpansion, ValueRow } from "./ValueTree";
 import { useFocus } from "./Workspace";
 
-function row(register: Register): Row {
+/** A register's row: the innermost frame's are the thread's, and change. */
+function row(register: Register, innermost: boolean): Row {
   return {
     name: register.name,
     text: register.value ?? "not saved",
     type: register.role,
-    path: null,
+    path: `$${register.name}`,
     children: null,
-    editable: false,
+    editable: innermost && register.value !== null,
     memory: null,
     memoryBytes: null,
     truncated: false,
@@ -44,7 +45,7 @@ export function Registers() {
         {registers.data.registers.map((register) => (
           <ValueRow
             key={register.name}
-            row={row(register)}
+            row={row(register, (focus.at?.frame ?? 0) === 0)}
             // Each frame's registers are compared with that frame's.
             parent={`registers@${focus.at?.frame ?? 0}`}
             depth={0}

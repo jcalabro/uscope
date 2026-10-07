@@ -35,6 +35,8 @@ pub struct ExecutableSource {
     /// For an attach target, the start time that keeps a recycled process ID
     /// from being mistaken for the process whose executable was read.
     pub process_start_time: Option<u64>,
+    /// Where the session finds separate debug files.
+    pub debug_files: crate::debug_info::DebugFileSearch,
 }
 
 pub fn executable_source(path: &Path) -> Result<ExecutableSource> {
@@ -88,6 +90,7 @@ fn read_executable_source(
             inode: metadata.ino(),
         },
         process_start_time,
+        debug_files: crate::debug_info::DebugFileSearch::default(),
     })
 }
 

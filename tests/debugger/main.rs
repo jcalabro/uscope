@@ -3,6 +3,7 @@ mod support;
 
 mod attach;
 mod concurrency;
+mod debug_files;
 mod exec;
 mod execution;
 mod expressions;
@@ -17,7 +18,9 @@ mod locations;
 mod metadata;
 mod names;
 mod signals;
+mod step_targets;
 mod stepping;
+mod tail_frames;
 mod unwind;
 mod values;
 mod variables;

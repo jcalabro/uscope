@@ -187,6 +187,10 @@ impl<P: InspectionOps> TypeSource for ModuleScope<'_, P> {
         self.controller.module_image.target().byte_order
     }
 
+    fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
+        self.controller.module_image.target().c_base_type(ty)
+    }
+
     fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
         left.image == self.module.loaded.image && self.module.image.same_type(left, right)
     }

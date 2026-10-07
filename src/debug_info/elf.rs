@@ -4,21 +4,24 @@
 //! (`.gnu_debugdata`) tables are merged into one catalog. Only defined code
 //! symbols in executable sections receive an extent, so only they can name
 //! machine code; only sized data symbols in allocated sections name storage.
+//! Each PLT stub is named `name@plt` after the function it jumps to, as
+//! binutils names them. Where one name has several definitions, symbol
+//! versions tell them apart, as `memcpy@GLIBC_2.2.5` does an old `memcpy`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Arc;
 
-use object::read::elf::{Dyn as _, ElfFile, FileHeader, ProgramHeader as _};
+use object::read::elf::{Dyn as _, ElfFile, FileHeader, ProgramHeader as _, SectionHeader as _};
 use object::{
     Object, ObjectSection, ObjectSegment, ObjectSymbol, ObjectSymbolTable, SectionFlags,
     SegmentFlags, SymbolFlags, SymbolSection, elf,
 };
 
 use crate::{
-    AddressRange, EmbeddedSymbolTable, ImageAddress, SectionId, SectionInfo, SymbolBinding,
-    SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolTableSources,
-    ThreadLocal,
+    AddressRange, EmbeddedSymbolTable, GotSlot, GotTarget, ImageAddress, SectionId, SectionInfo,
+    SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind,
+    SymbolTableSources, ThreadLocal,
 };
 
 /// Bounds the decompressed size of an embedded symbol table so a malformed or
@@ -27,6 +30,7 @@ const EMBEDDED_TABLE_LIMIT: usize = 64 << 20;
 
 pub struct SymbolTable {
     pub symbols: Vec<SymbolInfo>,
+    pub got_slots: Vec<GotSlot>,
     pub sources: SymbolTableSources,
 }
 
@@ -47,6 +51,12 @@ struct RawSymbol {
     code_section: Option<(u64, u64)>,
     /// The image's allocated section that defines a data symbol.
     storage_section: Option<(u64, u64)>,
+    /// Whether a table defines the symbol without a version.
+    unversioned: bool,
+    /// The versions the dynamic table defines the symbol in, each with
+    /// whether it is the name's default version, which the static linker
+    /// binds new references to.
+    versions: Vec<(Box<[u8]>, bool)>,
 }
 
 /// Loads every symbol table of an ELF image. `unwind_functions` are the code
@@ -54,6 +64,7 @@ struct RawSymbol {
 /// the inferred extents of unsized symbols.
 pub fn load_symbols(
     object: &object::File<'_>,
+    debug_object: Option<&object::File<'_>>,
     unwind_functions: &[AddressRange<ImageAddress>],
 ) -> SymbolTable {
     let sections = ImageSections {
@@ -63,17 +74,35 @@ pub fn load_symbols(
     let mut raw = BTreeMap::new();
 
     collect(object, object.symbols(), &sections, false, &mut raw);
+    // A separate debug file keeps the static table its module was stripped
+    // of, with the module's section headers, which match by identity as an
+    // embedded object's do.
+    if let Some(debug_object) = debug_object {
+        collect(
+            debug_object,
+            debug_object.symbols(),
+            &sections,
+            false,
+            &mut raw,
+        );
+    }
     let embedded_table = object
         .section_by_name(".gnu_debugdata")
         .map_or(EmbeddedSymbolTable::Absent, |section| {
             collect_embedded(object, &section, &sections, &mut raw)
         });
     collect(object, object.dynamic_symbols(), &sections, true, &mut raw);
+    collect_versions(object, &mut raw);
+    let mut raw = distinguish_versions(raw);
+    let got_slots = got_slots(object);
+    collect_plt(object, &got_slots, &mut raw);
 
     SymbolTable {
         symbols: normalize(raw, unwind_functions),
+        got_slots,
         sources: SymbolTableSources {
-            static_table: object.symbol_table().is_some(),
+            static_table: object.symbol_table().is_some()
+                || debug_object.is_some_and(|debug_object| debug_object.symbol_table().is_some()),
             dynamic_table: object.dynamic_symbol_table().is_some(),
             embedded_table,
             runtime_function_table: EmbeddedSymbolTable::Absent,
@@ -483,9 +512,251 @@ fn collect<'data, S>(
                 size: symbol.size(),
                 code_section,
                 storage_section,
+                unversioned: false,
+                versions: Vec::new(),
             });
         entry.exported |= exported;
+        // The dynamic table's versions are read separately.
+        entry.unversioned |= !exported;
     }
+}
+
+/// Records the versions the dynamic table's version section gives each
+/// defined dynamic symbol.
+fn collect_versions(object: &object::File<'_>, raw: &mut BTreeMap<(Box<[u8]>, u64), RawSymbol>) {
+    let versions = match object {
+        object::File::Elf64(elf) => elf
+            .elf_section_table()
+            .versions(elf.endian(), elf.data())
+            .ok()
+            .flatten()
+            .map(|versions| (elf.endian(), versions)),
+        _ => None,
+    };
+    for symbol in object.dynamic_symbols() {
+        let Ok(name) = symbol.name_bytes() else {
+            continue;
+        };
+        let Some(entry) = raw.get_mut(&(Box::from(name), symbol.address())) else {
+            continue;
+        };
+        let version = versions.as_ref().and_then(|(endian, versions)| {
+            let index = versions.version_index(*endian, symbol.index());
+            if index.is_local() || index.is_global() {
+                return None;
+            }
+            let version = versions.version(index).ok().flatten()?;
+            Some((Box::from(version.name()), !index.is_hidden()))
+        });
+        match version {
+            Some(version) => entry.versions.push(version),
+            None => entry.unversioned = true,
+        }
+    }
+}
+
+/// Spells the versions of the definitions of a name that several
+/// addresses share, as binutils does: older versions as `name@VERSION`,
+/// then the default version as `name@@VERSION` where the plain name would
+/// still name several addresses. The plain name stays where a table
+/// defines it without a version, or as the default version.
+fn distinguish_versions(
+    raw: BTreeMap<(Box<[u8]>, u64), RawSymbol>,
+) -> BTreeMap<(Box<[u8]>, u64), RawSymbol> {
+    fn respell(
+        raw: BTreeMap<(Box<[u8]>, u64), RawSymbol>,
+        default: bool,
+    ) -> BTreeMap<(Box<[u8]>, u64), RawSymbol> {
+        let mut addresses = BTreeMap::<&[u8], usize>::new();
+        for (name, _) in raw.keys() {
+            *addresses.entry(name).or_default() += 1;
+        }
+        let shared = addresses
+            .into_iter()
+            .filter(|(_, count)| *count > 1)
+            .map(|(name, _)| Box::<[u8]>::from(name))
+            .collect::<BTreeSet<_>>();
+        let mut spelled = BTreeMap::new();
+        let mut add = |key: (Box<[u8]>, u64), symbol: RawSymbol| match spelled.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(symbol);
+            }
+            // A static table may already hold the versioned spelling.
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let existing: &mut RawSymbol = entry.get_mut();
+                existing.exported |= symbol.exported;
+                existing.unversioned |= symbol.unversioned;
+                existing.versions.extend(symbol.versions);
+            }
+        };
+        for ((name, address), mut symbol) in raw {
+            if !shared.contains(&name) {
+                add((name, address), symbol);
+                continue;
+            }
+            let separator: &[u8] = if default { b"@@" } else { b"@" };
+            let (respelled, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut symbol.versions)
+                .into_iter()
+                .partition(|(_, is_default)| *is_default == default);
+            for (version, _) in respelled {
+                let spelling = [&name[..], separator, &version].concat().into_boxed_slice();
+                add(
+                    (spelling, address),
+                    RawSymbol {
+                        exported: true,
+                        unversioned: true,
+                        versions: Vec::new(),
+                        ..symbol
+                    },
+                );
+            }
+            symbol.versions = kept;
+            if symbol.unversioned || !symbol.versions.is_empty() {
+                add((name, address), symbol);
+            }
+        }
+        spelled
+    }
+    respell(respell(raw, false), true)
+}
+
+/// Names each PLT stub after the function whose GOT slot its indirect jump
+/// reads: the symbol a `JUMP_SLOT` or `GLOB_DAT` relocation fills the slot
+/// with, or for an `IRELATIVE` one, the indirect function whose resolver
+/// fills it. A stub is one section entry long, and local to the image.
+/// The GOT slots the loader fills with functions' addresses: those that
+/// relocations name a function for, and those an indirect function of the
+/// module's own fills.
+fn got_slots(object: &object::File<'_>) -> Vec<GotSlot> {
+    if object.architecture() != object::Architecture::X86_64 {
+        return Vec::new();
+    }
+    let mut slots = Vec::new();
+    for (slot, relocation) in object.dynamic_relocations().into_iter().flatten() {
+        let object::RelocationFlags::Elf { r_type } = relocation.flags() else {
+            continue;
+        };
+        let target = match (r_type, relocation.target()) {
+            (
+                elf::R_X86_64_JUMP_SLOT | elf::R_X86_64_GLOB_DAT,
+                object::RelocationTarget::Symbol(index),
+            ) => object
+                .dynamic_symbol_table()
+                .and_then(|table| table.symbol_by_index(index).ok())
+                // A data import's slot holds no function.
+                .filter(|symbol| symbol.kind() != object::SymbolKind::Data)
+                .and_then(|symbol| symbol.name().ok())
+                .filter(|name| !name.is_empty())
+                .map(|name| GotTarget::Import(Arc::from(name))),
+            (elf::R_X86_64_IRELATIVE, _) => u64::try_from(relocation.addend())
+                .ok()
+                .map(|resolver| GotTarget::Indirect(ImageAddress::new(resolver))),
+            _ => None,
+        };
+        if let Some(target) = target {
+            slots.push(GotSlot {
+                address: ImageAddress::new(slot),
+                target,
+            });
+        }
+    }
+    slots
+}
+
+fn collect_plt(
+    object: &object::File<'_>,
+    slots: &[GotSlot],
+    raw: &mut BTreeMap<(Box<[u8]>, u64), RawSymbol>,
+) {
+    let object::File::Elf64(elf) = object else {
+        return;
+    };
+    let endian = elf.endian();
+
+    // An indirect function is named by its exported symbol first, then by
+    // the first of its names.
+    let mut resolvers = BTreeMap::<u64, (bool, &[u8])>::new();
+    for ((name, address), symbol) in raw.iter() {
+        if symbol.kind != SymbolKind::IndirectFunction {
+            continue;
+        }
+        let candidate = (!symbol.exported, &name[..]);
+        resolvers
+            .entry(*address)
+            .and_modify(|best| *best = (*best).min(candidate))
+            .or_insert(candidate);
+    }
+    let targets = slots
+        .iter()
+        .filter_map(|slot| {
+            let name: Box<[u8]> = match &slot.target {
+                GotTarget::Import(name) => Box::from(name.as_bytes()),
+                GotTarget::Indirect(resolver) => Box::from(resolvers.get(&resolver.get())?.1),
+            };
+            Some((slot.address.get(), name))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if targets.is_empty() {
+        return;
+    }
+
+    for section in elf.sections() {
+        let Ok(section_name @ (b".plt" | b".plt.sec" | b".plt.got")) = section.name_bytes() else {
+            continue;
+        };
+        let Ok(code) = section.data() else {
+            continue;
+        };
+        let start = section.address();
+        let declared = section.elf_section_header().sh_entsize(endian);
+        let entry_size = match declared {
+            8 | 16 => declared,
+            _ if section_name == b".plt.got" => 8,
+            _ => 16,
+        };
+        let Ok(entry_bytes) = usize::try_from(entry_size) else {
+            continue;
+        };
+        let end = start.saturating_add(code.len() as u64);
+        for (index, entry) in code.chunks_exact(entry_bytes).enumerate() {
+            let address = start + index as u64 * entry_size;
+            let Some(name) = got_slot(entry, address).and_then(|slot| targets.get(&slot)) else {
+                continue;
+            };
+            let mut stub = name.to_vec();
+            stub.extend_from_slice(b"@plt");
+            raw.entry((stub.into(), address)).or_insert(RawSymbol {
+                kind: SymbolKind::Function,
+                binding: SymbolBinding::Local,
+                exported: false,
+                size: entry_size,
+                code_section: Some((start, end)),
+                storage_section: None,
+                unversioned: true,
+                versions: Vec::new(),
+            });
+        }
+    }
+}
+
+/// The GOT slot a PLT stub's `jmp *slot(%rip)` reads, past any `endbr64`
+/// or other instructions before it.
+fn got_slot(code: &[u8], address: u64) -> Option<u64> {
+    use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind};
+    let mut decoder = Decoder::with_ip(64, code, address, DecoderOptions::NONE);
+    while decoder.can_decode() {
+        let instruction = decoder.decode();
+        if instruction.is_invalid() {
+            return None;
+        }
+        if instruction.mnemonic() == Mnemonic::Jmp
+            && instruction.op0_kind() == OpKind::Memory
+            && instruction.is_ip_rel_memory_operand()
+        {
+            return Some(instruction.ip_rel_memory_address());
+        }
+    }
+    None
 }
 
 fn normalize(
@@ -617,7 +888,7 @@ pub(super) fn fuzz(data: &[u8]) {
     let Ok(object) = object::File::parse(bytes.as_slice()) else {
         return;
     };
-    let table = load_symbols(&object, &unwind);
+    let table = load_symbols(&object, None, &unwind);
     let sections = image_sections(&object, is_code);
     let storage_sections = image_sections(&object, holds_storage);
     for (index, symbol) in table.symbols.iter().enumerate() {
@@ -673,6 +944,7 @@ pub(super) fn fuzz(data: &[u8]) {
             code_instances: Vec::new(),
             symbols: table.symbols,
             symbol_sources: table.sources,
+            got_slots: table.got_slots,
             globals: Vec::new(),
             types: Arc::default(),
             source_files: Vec::new(),
@@ -963,7 +1235,7 @@ mod tests {
                 end: ImageAddress::new(end),
             })
             .collect::<Vec<_>>();
-        load_symbols(&object, &unwind)
+        load_symbols(&object, None, &unwind)
     }
 
     type Summary<'a> = (&'a str, SymbolKind, SymbolBinding, Option<(u64, u64)>);
@@ -1136,7 +1408,7 @@ mod tests {
         let bytes = object.write().expect("write test object");
         let object = object::File::parse(bytes.as_slice()).expect("parse test object");
 
-        let storage = load_symbols(&object, &[])
+        let storage = load_symbols(&object, None, &[])
             .symbols
             .into_iter()
             .map(|symbol| {

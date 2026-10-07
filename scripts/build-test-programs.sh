@@ -289,6 +289,45 @@ derive_stripped_library() {
         bash -c "$script" _ "$input" "$output" "$embedded"
 }
 
+# Splits the debug information off a program or library as distributions
+# ship it, stripping every symbol table but the dynamic one from OUTPUT. With
+# LAYOUT `debuglink`, OUTPUT names its debug file by `.gnu_debuglink`, which
+# sits beside it under `.debug`; with `build-id`, the debug file is filed
+# under ROOT/.build-id by the build-id OUTPUT keeps.
+derive_split_debug() {
+    local input="$1"
+    local output="$2"
+    local layout="$3"
+    local root="${4:-}"
+    local script
+    # shellcheck disable=SC2016
+    script='
+        set -euo pipefail
+        input="$1"; output="$2"; layout="$3"; root="$4"
+        objcopy --only-keep-debug "$input" "$output.debug.tmp"
+        strip --strip-all -o "$output.tmp" "$input"
+        case "$layout" in
+            debuglink)
+                directory="$(dirname "$output")/.debug"
+                mkdir -p "$directory"
+                debug="$directory/$(basename "$output").debug"
+                mv "$output.debug.tmp" "$debug"
+                objcopy "--add-gnu-debuglink=$debug" "$output.tmp"
+                ;;
+            build-id)
+                id=$(readelf -n "$input" | awk "/Build ID:/ { print \$3 }")
+                [[ -n "$id" ]] || { echo "$input has no build-id" >&2; exit 1; }
+                mkdir -p "$root/.build-id/${id:0:2}"
+                mv "$output.debug.tmp" "$root/.build-id/${id:0:2}/${id:2}.debug"
+                ;;
+        esac
+        mv "$output.tmp" "$output"
+    '
+    run_cached_build "$input" "$output" \
+        "derivation=split-debug-v1"$'\n'"layout=${layout}"$'\n'"root=${root}" \
+        bash -c "$script" _ "$input" "$output" "$layout" "$root"
+}
+
 # Fails the build when the symbol fixture library no longer has the symbol
 # tables and layout the symbolization tests depend on. TABLES names which
 # tables must exist: full, dynamic, or embedded.
@@ -764,6 +803,16 @@ build_fixture gcc "$c_fixtures_dir/enums.c" "$output_dir/enums-c-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/enums.c" "$output_dir/enums-c-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+for variant in "gcc -O0" "gcc -O2" "clang -O2"; do
+    read -r compiler level <<<"$variant"
+    suffix="${level#-}"
+    build_fixture "$compiler" "$c_fixtures_dir/realigned.c" \
+        "$output_dir/realigned-${compiler}-${suffix,,}" "$level" -g3 -gdwarf-5 -fPIE -pie
+done
+for compiler in gcc clang; do
+    build_fixture "$compiler" "$c_fixtures_dir/function-types.c" \
+        "$output_dir/function-types-${compiler}-o0" -O0 -g3 -gdwarf-5 -fPIE -pie
+done
 build_fixture gcc "$c_fixtures_dir/types.c" "$output_dir/types-c-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/types.c" "$output_dir/types-c-clang-o0" \
@@ -776,6 +825,12 @@ build_fixture gcc "$c_fixtures_dir/variables-parameters.c" "$output_dir/variable
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/variables-parameters.c" "$output_dir/variables-parameters-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+for variant in "gcc -O0" "gcc -O2" "clang -O0" "clang -O2"; do
+    read -r compiler level <<<"$variant"
+    suffix="${level#-}"
+    build_fixture "$compiler" "$c_fixtures_dir/returns.c" \
+        "$output_dir/returns-c-${compiler}-${suffix,,}" "$level" -g3 -gdwarf-5 -fPIE -pie
+done
 build_fixture gcc "$c_fixtures_dir/pieces.c" "$output_dir/pieces-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/pieces.c" "$output_dir/pieces-gcc-o2" \
@@ -869,6 +924,44 @@ build_fixture clang "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-f
 build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-frames-gcc-nopie" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie \
     "-L$output_dir" -lmodule-frames '-Wl,-rpath,$ORIGIN'
+# Programs and a library whose debug information is a separate file, found
+# by `.gnu_debuglink` beside them, by build-id under a debug directory, or
+# from a debuginfod server.
+mkdir -p "$output_dir/split"
+build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/split/basic-debuglink.full" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie
+derive_split_debug "$output_dir/split/basic-debuglink.full" "$output_dir/split/basic-debuglink" \
+    debuglink
+build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/split/basic-build-id.full" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie -Wl,--build-id
+derive_split_debug "$output_dir/split/basic-build-id.full" "$output_dir/split/basic-build-id" \
+    build-id "$output_dir/split/debug-root"
+# The same debug file under another debug directory, naming a dwz
+# supplementary file as distributions' debug files do, which uscope refuses
+# with its reason rather than misread.
+altlinked_script='
+    set -euo pipefail
+    root="$1"; output="$2"
+    rm -rf "$output"
+    cp -r "$root" "$output"
+    debug=$(find "$output/.build-id" -name "*.debug")
+    printf "/usr/lib/debug/.dwz/uscope-fixture\0\x01\x02\x03\x04" >"$output/altlink"
+    objcopy --add-section ".gnu_debugaltlink=$output/altlink" "$debug"
+    rm "$output/altlink"
+    # The build cache counts only an executable output as built.
+    touch "$output/ready"
+    chmod +x "$output/ready"
+'
+run_cached_build "$output_dir/split/basic-build-id" "$output_dir/split/altlink-root/ready" \
+    "derivation=altlinked-v1" \
+    bash -c "$altlinked_script" _ "$output_dir/split/debug-root" "$output_dir/split/altlink-root"
+build_shared_fixture gcc "$c_fixtures_dir/module-frames/library.c" \
+    "$output_dir/split/libmodule-frames.so.full" -O0 -g3 -gdwarf-5 -Wl,--build-id \
+    -Wl,-soname,libmodule-frames.so
+derive_split_debug "$output_dir/split/libmodule-frames.so.full" \
+    "$output_dir/split/libmodule-frames.so" debuglink
+build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/split/module-frames" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie "-L$output_dir/split" -lmodule-frames '-Wl,-rpath,$ORIGIN'
 build_symbols_library gcc "$output_dir/libelf-symbols-gcc.so"
 build_symbols_library clang "$output_dir/libelf-symbols-clang.so"
 # Stripped libraries keep the soname they were linked with, so each derived
@@ -959,10 +1052,18 @@ require_static_glibc "$output_dir/tls-modules-gcc-static" yes
 require_static_glibc "$output_dir/tls-modules-clang-static-pie" yes
 require_static_glibc "$output_dir/tls-modules-single-thread-gcc-static-pie" no
 require_static_glibc "$output_dir/tls-modules-single-thread-clang-static" no
+for variant in "g++ gcc -O0" "g++ gcc -O2" "clang++ clang -O2"; do
+    read -r compiler name level <<<"$variant"
+    suffix="${level#-}"
+    build_cpp_fixture "$compiler" "$cpp_fixtures_dir/returns.cpp" \
+        "$output_dir/returns-cpp-${name}-${suffix,,}" "$level" -g3 -gdwarf-5 -fPIE -pie
+done
 build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture g++ "$cpp_fixtures_dir/overloads.cpp" "$output_dir/overloads-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fPIE -pie
+build_cpp_fixture g++ "$cpp_fixtures_dir/overloads.cpp" "$output_dir/overloads-cpp-gcc-nodebug" \
+    -O0 -fPIE -pie
 build_cpp_fixture clang++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-clang-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-gcc-o2" \
@@ -1100,6 +1201,10 @@ build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-r
     --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0
 build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-o2" \
     --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=2
+for level in 0 2; do
+    build_program rustc "$rust_fixtures_dir/returns.rs" "$output_dir/returns-rust-o${level}" \
+        --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level="$level"
+done
 # Line tables only: no variables or types, so nothing to present.
 build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-limited" \
     --edition=2024 -D warnings -C debuginfo=limited -C codegen-units=1 -C opt-level=0
@@ -1146,6 +1251,12 @@ build_go_fixture "$go_fixtures_dir/values" "$output_dir/values-go-o2" \
 require_dwarf_operation "$output_dir/variables-go-o0" 'DW_AT_language.*Go'
 require_dwarf_operation "$output_dir/variables-go-o0" main.inspectScalars
 require_dwarf_operation "$output_dir/enums-go-o0" 'DW_TAG_constant'
+build_zig_fixture "$zig_fixtures_dir/returns.zig" "$output_dir/returns-zig-o0" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/returns.zig" "$output_dir/returns-zig-o2" \
+    -O ReleaseSafe -fPIE -fomit-frame-pointer
+build_zig_self_hosted_fixture "$zig_fixtures_dir/returns.zig" "$output_dir/returns-zig-self-hosted" \
+    -O Debug
 build_zig_fixture "$zig_fixtures_dir/generics.zig" "$output_dir/generics-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/containers.zig" "$output_dir/containers-zig-o0" \
@@ -1243,6 +1354,15 @@ build_fixture gcc "$c_fixtures_dir/thread-exec.c" "$output_dir/thread-exec" \
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/reexec.c" "$output_dir/reexec" \
     -O0 -g3 -fPIE -pie
+# Without debug information: breakpoints resolve by symbol, an indirect
+# function's once its resolver has chosen, whether the loader binds at
+# startup, binds lazily, or a static program relocates itself.
+build_fixture gcc "$c_fixtures_dir/measure.c" "$output_dir/measure-gcc-nodebug" \
+    -O0 -fPIE -pie
+build_fixture clang "$c_fixtures_dir/measure.c" "$output_dir/measure-clang-nopie-lazy" \
+    -O1 -fno-pie -no-pie -Wl,-z,lazy
+build_fixture gcc "$c_fixtures_dir/measure.c" "$output_dir/measure-gcc-static" \
+    -O0 -static -L"$GLIBC_STATIC_LIBRARIES"
 build_fixture gcc "$c_fixtures_dir/thread-steps.c" "$output_dir/thread-steps-gcc-o0" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie -pthread
 build_fixture clang "$c_fixtures_dir/thread-steps.c" "$output_dir/thread-steps-clang-o2" \
@@ -1252,6 +1372,14 @@ build_fixture gcc "$c_fixtures_dir/hot-calls.c" "$output_dir/hot-calls" \
 build_fixture gcc "$c_fixtures_dir/thread-stress.c" "$output_dir/thread-stress" \
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/step.c" "$output_dir/step" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
+for variant in "gcc -O0" "clang -O0" "gcc -O2"; do
+    read -r compiler level <<<"$variant"
+    suffix="${level#-}"
+    build_fixture "$compiler" "$c_fixtures_dir/step-targets.c" \
+        "$output_dir/step-targets-${compiler}-${suffix,,}" "$level" -g3 -gdwarf-5 -fPIE -pie
+done
+build_fixture gcc "$c_fixtures_dir/jump.c" "$output_dir/jump" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/stepping-boundaries.c" "$output_dir/stepping-boundaries-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
@@ -1271,6 +1399,14 @@ build_fixture clang "$c_fixtures_dir/tail-calls.c" "$output_dir/tail-calls-clang
 require_tail_jump "$output_dir/tail-calls-clang-o2" outer_tail add_one
 require_tail_jump "$output_dir/tail-calls-clang-o2" outer_chain chain_helper
 require_tail_jump "$output_dir/tail-calls-clang-o2" descend_tail mutual_tail
+for variant in gcc-o2:gcc:-gdwarf-5 gcc-o2-dwarf4:gcc:-gdwarf-4 clang-o2:clang:-gdwarf-5; do
+    IFS=: read -r name compiler dwarf <<<"$variant"
+    build_fixture "$compiler" "$c_fixtures_dir/tail-frames.c" "$output_dir/tail-frames-$name" \
+        -O2 -g3 "$dwarf" -fomit-frame-pointer -fPIE -pie
+    require_tail_jump "$output_dir/tail-frames-$name" top middle
+    require_tail_jump "$output_dir/tail-frames-$name" middle leaf
+    require_tail_jump "$output_dir/tail-frames-$name" either leaf
+done
 build_fixture gcc "$c_fixtures_dir/step-over-libc.c" "$output_dir/step-over-libc" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/orphan-frames.c" "$output_dir/orphan-frames" \
@@ -1619,7 +1755,8 @@ readonly symbol_oracle_dir="$output_dir/symbol-oracles"
 mkdir -p "$symbol_oracle_dir"
 
 # Records readelf's section and symbol tables and call-frame entries for one
-# ELF file. An embedded MiniDebugInfo object has no frame contents to dump.
+# ELF file, and the symbols objdump synthesizes for its PLT stubs. An
+# embedded MiniDebugInfo object has no frame contents to dump.
 generate_symbol_oracle() {
     local elf="$1"
     local oracle="$symbol_oracle_dir/${2:-${elf##*/}}.readelf"
@@ -1627,7 +1764,7 @@ generate_symbol_oracle() {
     # Nix store files all date from 1970, so the modification time alone never
     # notices a toolchain update. The resolved path names the store entry.
     local header
-    header="uscope-symbol-oracle-v3 $(readlink -f "$elf")"
+    header="uscope-symbol-oracle-v4 $(readlink -f "$elf")"
     # Registered so that deleting an oracle invalidates the cached suite.
     rebuilt_outputs["$oracle"]=false
     if [[ -s "$oracle" && "$oracle" -nt "$elf" && "$(head -n 1 "$oracle")" == "$header" ]]; then
@@ -1641,6 +1778,7 @@ generate_symbol_oracle() {
         readelf -sW "$elf"
         if [[ "$frames" == yes ]]; then
             readelf -wf "$elf"
+            objdump -d -j .plt -j .plt.sec -j .plt.got "$elf" 2>/dev/null | grep '@plt>:$' || true
         fi
     } >"${oracle}.tmp"
     mv "${oracle}.tmp" "$oracle"
@@ -1739,6 +1877,36 @@ for variant in "${symbols_variants[@]}"; do
     generate_core "${program}.core" 4 "$default_core_filter" \
         "$program $output_dir/libelf-symbols-${library}.so" "$program"
     generate_backtrace_oracle "$program" "${program}.core"
+done
+
+# gdb's type and target function of each function pointer, one per line as
+# `name<TAB>type<TAB>function`, read from the executable's own data.
+generate_function_type_oracle() {
+    local program="$1"
+    local oracle="${program}.gdb-function-types"
+    rebuilt_outputs["$oracle"]=false
+    if [[ -s "$oracle" && "$oracle" -nt "$program" ]]; then
+        printf '[cached] %s\n' "$oracle"
+        return
+    fi
+    printf '[oracle] %s\n' "$oracle"
+    local -a names=(unary unary_pointer operation 'operations[0]' no_arguments with_variadic
+        chooser unprototyped handlers.on_event handlers.on_done namer constant_function
+        null_function)
+    local name
+    for name in "${names[@]}"; do
+        gdb -nx -batch -q -iex 'set auto-load off' -iex 'set debuginfod enabled off' \
+            -ex "whatis $name" -ex "print $name" "$program" 2>&1 \
+            | awk -v name="$name" '
+                /^type = / { type = substr($0, 8) }
+                /^\$1 = / { target = ""; if (match($0, /<[^>]*>$/)) {
+                    target = substr($0, RSTART + 1, RLENGTH - 2) } }
+                END { printf "%s\t%s\t%s\n", name, type, target }'
+    done >"${oracle}.tmp"
+    mv "${oracle}.tmp" "$oracle"
+}
+for compiler in gcc clang; do
+    generate_function_type_oracle "$output_dir/function-types-${compiler}-o0"
 done
 
 # Go's own reading of the function tables of images the Go linker linked,

@@ -37,7 +37,7 @@ interface Group {
   rank: number;
 }
 
-type Mode = "all" | "files" | "line";
+type Mode = "all" | "files" | "line" | "calls";
 
 export function Palette() {
   const mode = useTab((current) => current.palette);
@@ -78,9 +78,11 @@ function Open({ mode }: { mode: Mode }) {
           placeholder={
             mode === "line"
               ? "a line, or file:line"
-              : mode === "files"
-                ? "a file"
-                : "a command, function, file, thread, breakpoint, or stop"
+              : mode === "calls"
+                ? "a call of the line to step into"
+                : mode === "files"
+                  ? "a file"
+                  : "a command, function, file, thread, breakpoint, or stop"
           }
           value={query}
           // biome-ignore lint/a11y/noAutofocus: the palette opens to be typed in
@@ -180,6 +182,10 @@ function useGroups(mode: Mode, query: string): Group[] {
     "functions",
     mode === "all" && query ? { query, limit: EACH } : null,
   ).data;
+  const calls = useRequest(
+    "stepTargets",
+    mode === "calls" && at ? { stop: at.stop, thread: at.thread } : null,
+  ).data;
 
   const showSource = (path: string, line: number) =>
     look(
@@ -212,6 +218,23 @@ function useGroups(mode: Mode, query: string): Group[] {
     ];
   }
 
+  if (mode === "calls") {
+    if (!at) {
+      return [];
+    }
+    const items: Item[] = (calls?.calls ?? []).map((call) => ({
+      id: `call:${call.call}`,
+      label: call.callee ?? (call.target ? `call to ${call.target}` : "indirect call"),
+      detail: call.call,
+      run: () =>
+        void connection
+          .request("step", { stop: at.stop, thread: at.thread, kind: "into", call: call.call })
+          .catch((failure: Error) => flash(failure.message)),
+    }));
+    const group = ranked("Calls", items, query, 50);
+    return group ? [group] : [];
+  }
+
   const files: Item[] = (sources?.files ?? []).map((path) => ({
     id: `file:${path}`,
     label: paths.link(path),
@@ -223,7 +246,7 @@ function useGroups(mode: Mode, query: string): Group[] {
   }
 
   const commands: Item[] = (Object.keys(LABELS) as Command[])
-    .filter((command) => !["palette", "files", "line"].includes(command))
+    .filter((command) => !["palette", "files", "line", "stepIntoCall"].includes(command))
     .map((command) => ({
       id: `command:${command}`,
       label: LABELS[command],

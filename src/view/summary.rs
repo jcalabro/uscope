@@ -177,7 +177,13 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
         VariableValue::Enumeration { value, matches } => {
             symbol(*value, matches).unwrap_or_else(|| integer(*value))
         }
-        VariableValue::Address(address) => format!("{:#x}", address.address.get()),
+        VariableValue::Address(address) => {
+            let text = format!("{:#x}", address.address.get());
+            address
+                .function
+                .as_ref()
+                .map_or_else(|| text.clone(), |function| format!("{text} <{function}>"))
+        }
         VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
         VariableValue::Function { code, function } => self::function(*code, function.as_deref()),
         VariableValue::Array { .. } | VariableValue::Slice { .. } => "[…]".to_owned(),

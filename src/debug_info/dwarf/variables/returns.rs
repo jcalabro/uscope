@@ -1,16 +1,25 @@
 //! The values a function returned, read where its caller sees them the
-//! instant the call returns. Go's register ABI (`abi-internal.md`) is the
-//! one convention known: optimized code keeps no result in a place its
-//! debug information describes by then, but the convention says where
-//! each one is.
+//! instant the call returns. Optimized code keeps no result in a place its
+//! debug information describes by then, but the calling convention says
+//! where each one is. Two conventions are known on x86-64.
 //!
-//! Go assigns results to registers apart from the arguments, starting
-//! again from the first: an integer, pointer, or boolean takes the next
-//! integer register, a float the next floating-point one, a complex number
-//! two, and a string, slice, interface, struct, or one-element array its
-//! parts in order. A value with no register left for every part, or an
-//! array of more elements, is on the stack instead, after the arguments
-//! the stack holds, at the caller's stack pointer.
+//! Go's register ABI (`abi-internal.md`) assigns results to registers
+//! apart from the arguments, starting again from the first: an integer,
+//! pointer, or boolean takes the next integer register, a float the next
+//! floating-point one, a complex number two, and a string, slice,
+//! interface, struct, or one-element array its parts in order. A value with
+//! no register left for every part, or an array of more elements, is on
+//! the stack instead, after the arguments the stack holds, at the caller's
+//! stack pointer.
+//!
+//! The System V ABI, which C and C++ follow, returns one value. A value of
+//! at most two eightbytes is classified an eightbyte at a time: one holding
+//! any integer takes the next of rax and rdx, and one of only floats the
+//! next of xmm0 and xmm1. A `long double` is in st0. A larger value, and a
+//! C++ class its producer says calls pass by reference, is in memory the
+//! caller provides, whose address the function returns in rax. Rust and Zig
+//! leave their own conventions unspecified, so only their scalars, which
+//! LLVM and Zig return as C does, are known.
 
 use std::sync::Arc;
 
@@ -18,8 +27,8 @@ use crate::debug_info::{Located, ReturnedValue, VariableRuntime};
 use crate::inspection::InspectionBudget;
 use crate::model::ValueStorage;
 use crate::{
-    BaseTypeEncoding, ImageAddress, RecordMemberLayout, Result, TypeId, TypeKind, TypeNode,
-    VariableKind, VariableMalformedKind, VariableValueSource, VirtualAddress,
+    BaseTypeEncoding, ImageAddress, RecordMemberLayout, Result, SourceLanguage, TypeId, TypeKind,
+    TypeNode, VariableKind, VariableMalformedKind, VariableValueSource, VirtualAddress,
 };
 
 use super::evaluate::EvaluateError;
@@ -40,11 +49,31 @@ const STACK_POINTER: u16 = 7;
 /// results.
 const WORD: u64 = 8;
 
+/// System V's integer result registers, rax and rdx.
+const SYSTEM_V_INTEGER: [u16; 2] = [0, 1];
+/// System V's floating-point result registers, xmm0 and xmm1.
+const SYSTEM_V_FLOATING: [u16; 2] = [17, 18];
+/// The x87 register stack's top, which returns a `long double`.
+const ST0: u16 = 33;
+/// The size of an eightbyte, the unit System V classifies.
+const EIGHTBYTE: u64 = 8;
+
 /// How a function returns its values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReturnConvention {
     /// Go's register ABI on x86-64, which the producer names `regabi`.
     GoRegisters,
+    /// The System V x86-64 convention.
+    SystemV(Box<SystemV>),
+}
+
+/// The one value a function returns by the System V convention.
+pub(super) struct SystemV {
+    /// The function's name, which the value is shown by.
+    pub(super) name: Arc<str>,
+    pub(super) ty: TypeResolution,
+    /// The function's language, which says whether the convention is
+    /// known for aggregates and how C++ passes a class.
+    pub(super) language: SourceLanguage,
 }
 
 /// Where one part of a value is.
@@ -54,6 +83,8 @@ enum Source {
     Register(u16),
     /// The stack, this far past the caller's stack pointer.
     Stack(u64),
+    /// Memory at the address a register holds.
+    Indirect(u16),
 }
 
 /// One part of a value: where it is in the value, its size, and where it
@@ -71,6 +102,8 @@ enum Unassigned {
     Stack,
     /// Its type is one the convention does not describe.
     Unsupported,
+    /// Its language does not say where it is returned.
+    Unspecified,
     /// Its type's debug information is malformed.
     Malformed(Arc<str>),
 }
@@ -93,9 +126,13 @@ impl DwarfVariableInfo {
         let Some(catalog) = self.function_at(function) else {
             return Ok(None);
         };
-        let Some(ReturnConvention::GoRegisters) = catalog.returns else {
-            return Ok(None);
-        };
+        match &catalog.returns {
+            Some(ReturnConvention::GoRegisters) => {}
+            Some(ReturnConvention::SystemV(returned)) => {
+                return self.system_v_returned(returned, runtime, budget);
+            }
+            None => return Ok(None),
+        }
         let own = |kind: VariableKind| {
             catalog
                 .objects
@@ -185,7 +222,7 @@ impl DwarfVariableInfo {
         let size = to_usize(self.size(ty).map_err(placed)?);
         let mut raw = vec![0; size];
         let mut stack_pointer = None;
-        let mut on_stack = None;
+        let mut in_memory = None;
         for part in parts {
             let length = to_usize(part.size);
             let bytes = match part.source {
@@ -198,7 +235,13 @@ impl DwarfVariableInfo {
                         }
                     };
                     let address = VirtualAddress::new(base.wrapping_add(offset));
-                    on_stack = Some(address);
+                    in_memory = Some(address);
+                    budget.consume_memory(length)?;
+                    runtime.read_memory(address, length)?
+                }
+                Source::Indirect(register) => {
+                    let address = VirtualAddress::new(word(&runtime.register(register)?.bytes));
+                    in_memory = Some(address);
                     budget.consume_memory(length)?;
                     runtime.read_memory(address, length)?
                 }
@@ -212,7 +255,7 @@ impl DwarfVariableInfo {
             };
             target.copy_from_slice(source);
         }
-        let source = match (parts, on_stack) {
+        let source = match (parts, in_memory) {
             ([_], Some(address)) => VariableValueSource::Memory(address),
             _ => VariableValueSource::Composite,
         };
@@ -230,6 +273,14 @@ impl DwarfVariableInfo {
 
     /// What `ty` is, through names and modifiers.
     fn underlying(&self, ty: TypeId) -> std::result::Result<&crate::TypeInfo, Unassigned> {
+        self.underlying_type(ty).map(|(_, info)| info)
+    }
+
+    /// What `ty` is, through names and modifiers, and its identifier.
+    fn underlying_type(
+        &self,
+        ty: TypeId,
+    ) -> std::result::Result<(TypeId, &crate::TypeInfo), Unassigned> {
         let mut id = ty;
         for _ in 0..64 {
             let Some(TypeNode::Resolved(info)) = self.types.get(id.index()) else {
@@ -241,7 +292,7 @@ impl DwarfVariableInfo {
                     ..
                 }
                 | TypeKind::Modified { target, .. } => id = target.id,
-                _ => return Ok(info),
+                _ => return Ok((id, info)),
             }
         }
         Err(Unassigned::Malformed("a type names itself".into()))
@@ -274,6 +325,286 @@ impl DwarfVariableInfo {
             _ => return Err(Unassigned::Unsupported),
         }
         .max(1))
+    }
+}
+
+/// The class System V gives a scalar, and so the eightbyte holding it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Integer,
+    Floating,
+    /// A `long double`, which only the x87 registers hold.
+    X87,
+}
+
+/// One scalar in a value: where it is, its size, and its class.
+#[derive(Debug, Clone, Copy)]
+struct Leaf {
+    offset: u64,
+    size: u64,
+    class: Class,
+}
+
+impl DwarfVariableInfo {
+    /// The one value a function returned by the System V convention.
+    fn system_v_returned(
+        &self,
+        returned: &SystemV,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<Option<Vec<ReturnedValue>>> {
+        let ty = match &returned.ty {
+            TypeResolution::Resolved(ty) => *ty,
+            TypeResolution::Malformed(description) => {
+                let state = evaluate_error_state(
+                    EvaluateError::Malformed(Arc::clone(description)),
+                    VariableMalformedKind::InvalidTypeGraph,
+                )?;
+                return Ok(Some(vec![ReturnedValue {
+                    name: Arc::clone(&returned.name),
+                    ty: None,
+                    value: Err(state),
+                    unresolved_shape: None,
+                }]));
+            }
+        };
+        // A value of no size, as Rust's `()`, is nothing to show.
+        if self.size(ty).is_ok_and(|size| size == 0) {
+            return Ok(None);
+        }
+        let captured = self
+            .system_v_parts(ty, returned.language)
+            .map_err(placed)
+            .and_then(|parts| self.capture(ty, &parts, runtime, budget));
+        let value = match captured {
+            Ok(located) => Ok(located),
+            Err(error) => Err(evaluate_error_state(
+                error,
+                VariableMalformedKind::InvalidTypeGraph,
+            )?),
+        };
+        Ok(Some(vec![ReturnedValue {
+            name: Arc::clone(&returned.name),
+            ty: Some(ty),
+            value,
+            unresolved_shape: None,
+        }]))
+    }
+
+    /// Where System V returns a value of type `ty`.
+    fn system_v_parts(
+        &self,
+        ty: TypeId,
+        language: SourceLanguage,
+    ) -> std::result::Result<Vec<Part>, Unassigned> {
+        let size = self.size(ty)?;
+        let (id, info) = self.underlying_type(ty)?;
+        let memory = vec![Part {
+            offset: 0,
+            size,
+            source: Source::Indirect(SYSTEM_V_INTEGER[0]),
+        }];
+        let aggregate = match &info.kind {
+            TypeKind::Base(_)
+            | TypeKind::Enumeration { .. }
+            | TypeKind::Pointer { .. }
+            | TypeKind::Reference { .. }
+            | TypeKind::Function => false,
+            TypeKind::Record { .. } | TypeKind::Union { .. } => match language {
+                SourceLanguage::C => true,
+                SourceLanguage::Cpp => match self.passed_by_value.get(&id) {
+                    Some(true) => true,
+                    Some(false) => return Ok(memory),
+                    // A class too large for registers is in memory however
+                    // calls pass it; a smaller one's place depends on
+                    // whether copying it is trivial, which the producer
+                    // did not say.
+                    None if size > 2 * EIGHTBYTE => return Ok(memory),
+                    None => return Err(Unassigned::Unspecified),
+                },
+                _ => return Err(Unassigned::Unspecified),
+            },
+            // C returns no array but a vector, which the vector registers
+            // hold.
+            _ => return Err(Unassigned::Unsupported),
+        };
+        if size > 2 * EIGHTBYTE {
+            return if aggregate {
+                Ok(memory)
+            } else {
+                Err(Unassigned::Unsupported)
+            };
+        }
+        let mut leaves = Vec::new();
+        self.leaves(ty, 0, &mut leaves)?;
+        if let [
+            Leaf {
+                class: Class::X87,
+                offset: 0,
+                ..
+            },
+        ] = leaves[..]
+        {
+            // The x87 register's ten bytes; the rest is padding.
+            return Ok(vec![Part {
+                offset: 0,
+                size: 10,
+                source: Source::Register(ST0),
+            }]);
+        }
+        // An unaligned field puts a value in memory, though producers
+        // disagree on packed records.
+        if leaves.iter().any(|leaf| leaf.offset % leaf.size != 0) {
+            return Err(Unassigned::Unsupported);
+        }
+        let (mut integers, mut floats) = (SYSTEM_V_INTEGER.iter(), SYSTEM_V_FLOATING.iter());
+        let mut parts = Vec::new();
+        let mut start = 0;
+        while start < size {
+            let end = (start + EIGHTBYTE).min(size);
+            let class = leaves
+                .iter()
+                .filter(|leaf| leaf.offset < end && leaf.offset + leaf.size > start)
+                .fold(None, |merged, leaf| {
+                    Some(match (merged, leaf.class) {
+                        (Some(Class::X87), _) | (_, Class::X87) => Class::X87,
+                        (Some(Class::Integer), _) | (_, Class::Integer) => Class::Integer,
+                        _ => Class::Floating,
+                    })
+                });
+            let register = match class {
+                Some(Class::Integer) => integers.next(),
+                Some(Class::Floating) => floats.next(),
+                Some(Class::X87) | None => None,
+            }
+            .ok_or(Unassigned::Unsupported)?;
+            parts.push(Part {
+                offset: start,
+                size: end - start,
+                source: Source::Register(*register),
+            });
+            start = end;
+        }
+        Ok(parts)
+    }
+
+    /// Adds the scalars of a value of type `ty` at `offset` to `leaves`.
+    fn leaves(
+        &self,
+        ty: TypeId,
+        offset: u64,
+        leaves: &mut Vec<Leaf>,
+    ) -> std::result::Result<(), Unassigned> {
+        let mut leaf = |offset, size, class| {
+            leaves.push(Leaf {
+                offset,
+                size,
+                class,
+            });
+        };
+        match &self.underlying(ty)?.kind {
+            TypeKind::Base(base) => {
+                let size = base.byte_size;
+                match base.encoding {
+                    BaseTypeEncoding::Floating if size <= EIGHTBYTE => {
+                        leaf(offset, size, Class::Floating);
+                    }
+                    BaseTypeEncoding::Floating if base.base_name.contains("long double") => {
+                        leaf(offset, size, Class::X87);
+                    }
+                    BaseTypeEncoding::ComplexFloating if size <= 2 * EIGHTBYTE => {
+                        leaf(offset, size / 2, Class::Floating);
+                        leaf(offset + size / 2, size / 2, Class::Floating);
+                    }
+                    BaseTypeEncoding::Floating | BaseTypeEncoding::ComplexFloating => {
+                        return Err(Unassigned::Unsupported);
+                    }
+                    _ if size == 0 => {}
+                    _ if size <= EIGHTBYTE => leaf(offset, size, Class::Integer),
+                    _ if size == 2 * EIGHTBYTE => {
+                        leaf(offset, EIGHTBYTE, Class::Integer);
+                        leaf(offset + EIGHTBYTE, EIGHTBYTE, Class::Integer);
+                    }
+                    _ => return Err(Unassigned::Unsupported),
+                }
+            }
+            TypeKind::Enumeration { representation, .. } => {
+                leaf(offset, representation.byte_size, Class::Integer);
+            }
+            TypeKind::Pointer { .. } | TypeKind::Reference { .. } | TypeKind::Function => {
+                leaf(offset, WORD, Class::Integer);
+            }
+            TypeKind::Array {
+                element,
+                dimensions,
+            } => {
+                let count = dimensions
+                    .iter()
+                    .try_fold(1_u64, |count, dimension| count.checked_mul(dimension.count))
+                    .filter(|&count| count <= 2 * EIGHTBYTE)
+                    .ok_or(Unassigned::Unsupported)?;
+                let stride = self.size(element.id)?;
+                for index in 0..count {
+                    self.leaves(element.id, offset + index * stride, leaves)?;
+                }
+            }
+            TypeKind::Record {
+                members,
+                bases,
+                incomplete: false,
+                ..
+            } => {
+                for base in bases.iter() {
+                    let RecordMemberLayout::ByteOffset(at) = base.layout else {
+                        return Err(Unassigned::Unsupported);
+                    };
+                    self.leaves(base.type_ref.id, offset + at, leaves)?;
+                }
+                for member in members.iter() {
+                    self.member_leaves(member, offset, leaves)?;
+                }
+            }
+            TypeKind::Union {
+                members,
+                incomplete: false,
+            } => {
+                for member in members.iter() {
+                    self.member_leaves(member, offset, leaves)?;
+                }
+            }
+            _ => return Err(Unassigned::Unsupported),
+        }
+        Ok(())
+    }
+
+    /// Adds the scalars of a record's member to `leaves`: a bit field's
+    /// bytes are integers.
+    fn member_leaves(
+        &self,
+        member: &crate::RecordMember,
+        offset: u64,
+        leaves: &mut Vec<Leaf>,
+    ) -> std::result::Result<(), Unassigned> {
+        match member.layout {
+            RecordMemberLayout::ByteOffset(at) => {
+                self.leaves(member.type_ref.id, offset + at, leaves)
+            }
+            RecordMemberLayout::BitRange {
+                bit_offset,
+                bit_size,
+            } => {
+                if bit_size > 0 {
+                    let bytes = bit_offset / 8..=(bit_offset + bit_size - 1) / 8;
+                    leaves.extend(bytes.map(|byte| Leaf {
+                        offset: offset + byte,
+                        size: 1,
+                        class: Class::Integer,
+                    }));
+                }
+                Ok(())
+            }
+            RecordMemberLayout::Runtime => Err(Unassigned::Unsupported),
+        }
     }
 }
 
@@ -408,6 +739,7 @@ impl Assignment {
 fn placed(unassigned: Unassigned) -> EvaluateError {
     match unassigned {
         Unassigned::Unsupported => crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+        Unassigned::Unspecified => crate::UnsupportedVariableFeature::ReturnPlace.into(),
         Unassigned::Malformed(description) => EvaluateError::Malformed(description),
         Unassigned::Stack => "a type has no stack layout".into(),
     }

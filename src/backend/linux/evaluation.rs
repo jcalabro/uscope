@@ -23,7 +23,7 @@ use crate::eval::target::{
 use crate::eval::types::{TypeSource, type_info};
 use crate::inspection::InspectionBudget;
 use crate::model::{DereferenceTarget, ValueStorage};
-use crate::protocol::StopId;
+use crate::protocol::{DebuggerEvent, StopId};
 use crate::{
     AddressValue, ByteOrder, CodeInstanceId, DereferenceReference, DereferenceState,
     DereferenceUnavailableReason, Error, ImageAddress, InspectedValue, ModuleId, RecordKind,
@@ -169,6 +169,7 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
     fn registers(&self) -> Option<&RegisterSnapshot> {
         self.registers
             .get_or_init(|| {
+                let discarded = crate::unwind::RegisterFile::new([]);
                 let (native, caller) = match &self.resolved.registers {
                     FrameRegisters::Caller(registers) => {
                         let native = self
@@ -176,6 +177,14 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
                             .thread()
                             .map(|pid| self.controller.ptrace.registers(pid));
                         (native.transpose().ok()?, Some(registers))
+                    }
+                    // A tail call discarded every register of the frame.
+                    FrameRegisters::Discarded => {
+                        let native = self
+                            .root
+                            .thread()
+                            .map(|pid| self.controller.ptrace.registers(pid));
+                        (native.transpose().ok()?, Some(&discarded))
                     }
                     FrameRegisters::Thread(native) => (Some(*native), None),
                 };
@@ -313,6 +322,10 @@ impl<P: InspectionOps> TypeSource for Frame<'_, P> {
 
     fn byte_order(&self) -> ByteOrder {
         self.controller.module_image.target().byte_order
+    }
+
+    fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
+        self.controller.module_image.target().c_base_type(ty)
     }
 }
 
@@ -693,6 +706,10 @@ impl<P: InspectionOps> TypeSource for StopMachine<'_, '_, P> {
     fn byte_order(&self) -> ByteOrder {
         self.frame.byte_order()
     }
+
+    fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
+        self.frame.c_base_type(ty)
+    }
 }
 
 impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
@@ -993,9 +1010,14 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         })?;
         let value = &snapshot.registers[usize::from(register.number)];
         let Some(bytes) = &value.bytes else {
-            return Err(Stop::missing(VariableState::Unavailable(
-                VariableUnavailableReason::RegisterNotSaved(Arc::clone(&value.register.name)),
-            )));
+            let reason = if matches!(self.frame.resolved.registers, FrameRegisters::Discarded) {
+                VariableUnavailableReason::CallFrameUnavailable(
+                    crate::CallFrameUnavailableReason::TailCall,
+                )
+            } else {
+                VariableUnavailableReason::RegisterNotSaved(Arc::clone(&value.register.name))
+            };
+            return Err(Stop::missing(VariableState::Unavailable(reason)));
         };
         let mut wide = [0_u8; 16];
         let length = bytes.len().min(16);
@@ -1076,6 +1098,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 raw: Some(raw.into()),
                 value: VariableValue::Address(AddressValue {
                     address: VirtualAddress::new(address),
+                    function: None,
                 }),
                 dereference,
                 children: ValueChildren::NotApplicable,
@@ -1105,6 +1128,12 @@ enum Evaluated {
         whole: bool,
         span: Span,
     },
+    /// Store `bytes` in a register, then read it again.
+    WriteRegister {
+        register: Register,
+        bytes: Vec<u8>,
+        span: Span,
+    },
 }
 
 /// An interpreter failure as the debugger's error.
@@ -1117,7 +1146,9 @@ fn failure(failure: Failure) -> Error {
 
 impl<P: LinuxTraceOps> Controller<P> {
     /// Evaluates an expression that may assign, in one frame of a validated
-    /// stop, and makes its assignment.
+    /// stop, and makes its assignment. Assigning the program counter moves
+    /// the thread, whose stop is then published again: the event is
+    /// returned, to follow the evaluation's reply.
     pub(super) fn evaluate_assigning(
         &mut self,
         stop_id: StopId,
@@ -1125,16 +1156,25 @@ impl<P: LinuxTraceOps> Controller<P> {
         frame: StackFrameId,
         expression: &Expression,
         limits: crate::InspectionLimits,
-    ) -> Result<Evaluation> {
+    ) -> Result<(Evaluation, Option<DebuggerEvent>)> {
         let (target, bytes, whole, span) =
             match self.run_expression(stop_id, root, frame, expression, Mode::Assign, limits)? {
-                Evaluated::Done(evaluation) => return Ok(*evaluation),
+                Evaluated::Done(evaluation) => return Ok((*evaluation, None)),
                 Evaluated::Write {
                     target,
                     bytes,
                     whole,
                     span,
                 } => (target, bytes, whole, span),
+                Evaluated::WriteRegister {
+                    register,
+                    bytes,
+                    span,
+                } => {
+                    return self.assign_register(
+                        stop_id, root, frame, expression, limits, &register, &bytes, span,
+                    );
+                }
             };
         let refused = |reason: String| {
             Error::Expression(crate::ExpressionError::new(
@@ -1143,6 +1183,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reason,
             ))
         };
+        let thread_registers = self.shares_thread_registers(root, frame)?;
         match &target.located.storage {
             ValueStorage::Memory(address)
             | ValueStorage::Bytes {
@@ -1158,19 +1199,19 @@ impl<P: LinuxTraceOps> Controller<P> {
                 source: VariableValueSource::Register(register),
                 ..
             } => {
-                // A register belongs to the innermost frame; a caller's copy
-                // lives in memory its callees saved, and part of a register
-                // cannot be told from the whole.
-                if frame != StackFrameId::INNERMOST {
-                    return Err(refused(
-                        "it is held in a register of a caller's frame".into(),
-                    ));
-                }
+                // A register belongs to the innermost activation; a caller's
+                // copy lives in memory its callees saved, and part of a
+                // register cannot be told from the whole.
                 let Some(pid) = root.thread() else {
                     return Err(refused(
                         "it is held in a register the task's runtime saved".into(),
                     ));
                 };
+                if !thread_registers {
+                    return Err(refused(
+                        "it is held in a register of a caller's frame".into(),
+                    ));
+                }
                 if !whole {
                     return Err(refused("it is part of a value held in a register".into()));
                 }
@@ -1187,10 +1228,83 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ));
             }
         }
-        // The value is the target read again, so what the target's own type
-        // makes of the stored bytes shows. It is read in the assignment's own
-        // mode, which run control waiting cannot interrupt: the write is made,
-        // and serving the request again would make it twice.
+        self.read_assigned(stop_id, root, frame, expression, limits)
+            .map(|evaluation| (evaluation, None))
+    }
+
+    /// Stores an assignment's bytes in a register of a frame that shares
+    /// the thread's own, and moves the thread when the register is its
+    /// program counter.
+    #[expect(clippy::too_many_arguments, reason = "one assignment's parts")]
+    fn assign_register(
+        &mut self,
+        stop_id: StopId,
+        root: &StackRoot,
+        frame: StackFrameId,
+        expression: &Expression,
+        limits: crate::InspectionLimits,
+        register: &Register,
+        bytes: &[u8],
+        span: Span,
+    ) -> Result<(Evaluation, Option<DebuggerEvent>)> {
+        let refused = |reason: String| {
+            Error::Expression(crate::ExpressionError::new(
+                ErrorKind::Assignment,
+                span,
+                reason,
+            ))
+        };
+        let Some(pid) = root.thread() else {
+            return Err(refused(
+                "a parked task's registers are what its runtime saved; only a thread's can be \
+                 changed"
+                    .into(),
+            ));
+        };
+        if !self.shares_thread_registers(root, frame)? {
+            return Err(refused(
+                "a caller's registers are what unwinding recovered; only the innermost frame's \
+                 belong to the thread"
+                    .into(),
+            ));
+        }
+        let snapshot = self.registers(stop_id, root, frame)?;
+        let descriptor = snapshot
+            .registers
+            .get(usize::from(register.number))
+            .map(|value| value.register.clone())
+            .ok_or_else(|| refused("the register is unknown".into()))?;
+        self.write_register(pid, descriptor.id, bytes)
+            .map_err(|_| refused(format!("register {} cannot be changed", descriptor.name)))?;
+        let evaluation = self.read_assigned(stop_id, root, frame, expression, limits)?;
+        if descriptor.role != Some(crate::RegisterRole::ProgramCounter) {
+            return Ok((evaluation, None));
+        }
+        let (_, moved) = self.publish_moved_thread(pid)?;
+        Ok((evaluation, Some(moved)))
+    }
+
+    /// Whether a frame's registers are the thread's own, as the innermost
+    /// activation's frames, inlined ones too, share them.
+    fn shares_thread_registers(&self, root: &StackRoot, frame: StackFrameId) -> Result<bool> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let resolved = self.resolve_frame(inferior, root, frame)?;
+        Ok(matches!(resolved.registers, FrameRegisters::Thread(_)))
+    }
+
+    /// An assignment's value: its target read again, so what the target's
+    /// own type makes of the stored bytes shows. It is read in the
+    /// assignment's own mode, which run control waiting cannot interrupt:
+    /// the write is made, and serving the request again would make it
+    /// twice.
+    fn read_assigned(
+        &self,
+        stop_id: StopId,
+        root: &StackRoot,
+        frame: StackFrameId,
+        expression: &Expression,
+        limits: crate::InspectionLimits,
+    ) -> Result<Evaluation> {
         let target = Expression::parse(
             expression
                 .assignment_target()
@@ -1214,11 +1328,13 @@ impl<P: InspectionOps> Controller<P> {
     ) -> Result<Evaluation> {
         match self.run_expression(stop_id, root, frame, expression, mode, limits)? {
             Evaluated::Done(evaluation) => Ok(*evaluation),
-            Evaluated::Write { span, .. } => Err(Error::Expression(crate::ExpressionError::new(
-                ErrorKind::Mode,
-                span,
-                "this process's state cannot be changed",
-            ))),
+            Evaluated::Write { span, .. } | Evaluated::WriteRegister { span, .. } => {
+                Err(Error::Expression(crate::ExpressionError::new(
+                    ErrorKind::Mode,
+                    span,
+                    "this process's state cannot be changed",
+                )))
+            }
         }
     }
 
@@ -1258,6 +1374,15 @@ impl<P: InspectionOps> Controller<P> {
                 target,
                 bytes,
                 whole,
+                span,
+            },
+            Outcome::AssignRegister {
+                register,
+                bytes,
+                span,
+            } => Evaluated::WriteRegister {
+                register,
+                bytes,
                 span,
             },
         })

@@ -31,6 +31,8 @@ is described in [dap.md](dap.md), and `uscope views` in [views.md](views.md).
 | `--allow-module-mismatch` | Use a core dump's module files that cannot be proven to match it. |
 | `--source-map FROM TO` | Read sources recorded under `FROM` from `TO`. Repeatable; the first matching rule wins. |
 | `--views FILE` | Load views from `FILE` ahead of the others. Repeatable; later files come first. |
+| `--debug-directory DIR` | Search `DIR` for the separate debug files of stripped modules, ahead of `[debug-info] directories`, `NIX_DEBUG_INFO_DIRS`, and `/usr/lib/debug`. Repeatable. |
+| `--debuginfod` | Download debug files no directory holds from the servers `DEBUGINFOD_URLS` lists, as `[debug-info] debuginfod = true` does. |
 | `-c, --command FILE` | Run the commands in `FILE`. Repeatable. |
 | `-e, --eval COMMAND` | Run one command, after any `-c` files. Repeatable. |
 | `--batch` | Exit after the commands instead of starting the REPL; with no `-c` or `-e`, read commands from stdin. A failing command ends the session with an error naming its source. |
@@ -85,6 +87,7 @@ config check` checks every file, for a project's CI.
 | `[print]` | `style` (`compact` or `pretty`), `radix`, `width`, `indent`, `max-depth`, `max-elements` |
 | `[disassembly]` | `syntax`, `show-bytes` |
 | `[breakpoints]` | `save` |
+| `[debug-info]` | `directories`, searched for separate debug files after `--debug-directory`'s and relative to the project root, and `debuginfod` |
 | `[history]` | `size` |
 | `[signals]` | `SIGUSR1 = "nostop noprint pass"`, as `handle` takes them |
 | `[[source-map]]` | `from` and `to`, as `--source-map` takes them, after the command line's rules; `to` is relative to the project root |
@@ -149,7 +152,7 @@ is answered with them, and an alias the settings define wins over a prefix. A
 mistyped command is answered with the nearest ones.
 
 Tab completes the word at the cursor: a command, a location after `break`,
-`tbreak`, `advance`, or `disassemble` (a function, or a file followed by its
+`tbreak`, `advance`, `jump`, or `disassemble` (a function, or a file followed by its
 line or function), breakpoint and watchpoint ids, `info` and `handle` words,
 and in expressions the selected frame's variables, globals, and, after `.` or
 `->`, the members of the value before it, which the debugger reads.
@@ -169,9 +172,12 @@ or `$VISUAL` or `$EDITOR` with `+line path`.
 | `continue`, `c` | Resume every thread. |
 | `step`, `s` / `next`, `n` | Step into / over calls, by source line. |
 | `step task` | Step into the task the line starts, such as a goroutine. |
+| `step` *function* \| `*`*0xaddress* | Step into one call of the line: the first that calls *function*, or the call instruction at an address. |
+| `info calls` | List the calls of the selected thread's line that `step` can go into. |
 | `stepi`, `si` / `nexti`, `ni` | Step one instruction, into / over calls. |
 | `finish`, `fin` | Run until the selected frame returns. |
 | `advance`, `adv` *location* | Run until the selected thread reaches a location, or the selected frame returns. |
+| `jump`, `j` *location* | Move the selected thread, without running it, to resume at a location in its function. |
 | `quit`, `q` | Exit, killing a launched program and detaching from an attached one. |
 
 Ctrl-C pauses a running program. The terminal's `SIGINT` also reaches the
@@ -192,8 +198,26 @@ stops as the function returns, it shows what the function returned, as
 `returned (int) count = 42`, read where the function's calling convention
 leaves each result, so an optimized function's results show as well; `print`
 lists them with the frame's variables until the program runs again. Go's
-register ABI is the convention uscope knows; a function of another language
-shows nothing returned.
+register ABI and the System V convention of C and C++ are the conventions
+uscope knows: a C or C++ value is shown named for its function, from the
+registers it was returned in, from `st0` for a `long double`, or from the
+memory whose address the function returned for a larger one. A small C++
+class's place depends on whether copying it is trivial, which Clang records
+and GCC does not, so with GCC such a value is shown as unknown for that
+reason. Rust and Zig leave their own conventions unspecified, so uscope
+shows their scalars, which they return as C does, and their aggregates as
+unknown; Zig's LLVM backend describes a function that returns a struct as
+returning nothing, so nothing is shown.
+
+`step` *function* steps into one call of a line that makes several, such as
+`step add` on `add(twice(x), inc(x))`. The line's other calls run to their
+returns, as `next` runs a call, and the step stops where the chosen
+function's source begins. A call whose function has no source is stepped
+through, as `step` would, and a line that ends before reaching the call
+ends the step as `step` does. `info calls` lists the line's calls from the
+stopped instruction on, in address order: each call's address and the
+function it calls, or `(indirect)` for a call through a pointer, which
+`step *`*0xaddress* names.
 
 In a program whose language runtime schedules tasks, such as Go's
 goroutines, a step belongs to the task it began in. It follows the task to
@@ -226,6 +250,19 @@ names, as a breakpoint there would stop it, or until the selected frame
 returns, whichever comes first, so `advance 42` leaves a loop without
 leaving the function. Other threads run meanwhile and pass the location
 without stopping. A breakpoint reached on the way stops it as usual.
+
+`jump` moves the selected thread to resume at a line of the selected
+frame's file, such as `jump 42`, `jump +2`, or `jump -3`, or at a
+`file:line` or `0xaddress`, without running anything. The location must be
+in the code of the function the thread is stopped in, at one place: leaving
+the function would leave its frame for another's, so a location elsewhere,
+or a line inlined into the function several times, is refused. Nothing
+else changes, so the function's variables keep their values. The stop is
+shown again at its new place, and a breakpoint there stops the thread as it
+resumes, before it runs anything, as gdb's does. Assigning `$pc`, as `set var $pc =
+0x401136`, moves the thread anywhere, which is rarely safe. A thread
+stopped in a system call that the kernel would restart, as one paused in
+`read` is, no longer restarts it once moved.
 
 A forked child is not followed: it runs on its own, without the breakpoints
 it inherited. A program that calls `exec` is followed, with its breakpoints.
@@ -304,7 +341,17 @@ file that no loaded module has is answered with the nearest names, as in
 
 Addresses are always `0x`-prefixed, so `break add` names a function. Functions
 without debug information, such as libc's, break at their symbol, and
-breakpoints in a shared library wait until it loads.
+breakpoints in a shared library wait until it loads; one on a function the
+program imports waits without being asked, while a name nothing defines or
+imports is refused. C++ and Rust symbols are found by their demangled names,
+with or without the scopes and parameters that qualify them: `break scale`,
+`break shapes::scale`, and `break shapes::scale(double)` all find
+`_ZN6shapes5scaleEd`. An indirect function, such as glibc's `strlen`, stops in
+the implementation its resolver chose for the machine, as `__strlen_avx2`,
+learned from the slot the loader filled with it or by catching the resolver
+as it returns; until the resolver runs, its breakpoint waits. A location
+without debug information is described by its symbol, and `address` and
+`disassemble` look a symbol up in every loaded module.
 
 A function is first looked up by its whole name, and every function with
 that name and code gets a location, inlined copies included. Go functions
@@ -461,10 +508,26 @@ callee's, and one that was unavailable is never marked.
 Backtraces unwind through every loaded module using its own call-frame
 information. Frames without debug information are named `symbol+offset` from
 the module's ELF symbol tables, including MiniDebugInfo; code no symbol covers
-is `<unknown>` rather than borrowing a neighbor's name. Rust and C++ symbols
+is `<unknown>` rather than borrowing a neighbor's name. A PLT stub is named
+after the function it jumps to, as `puts@plt`, and can be broken at by that
+name; one whose slot an indirect function's resolver fills is named after
+the indirect function. Where a library defines one name several times, as
+glibc does an old and a new `memcpy`, versions tell them apart: the old is
+`memcpy@GLIBC_2.2.5`, and the default keeps its plain name. A breakpoint on
+the plain name takes every version, and one on a versioned name that one. Rust and C++ symbols
 are demangled. The vDSO, the code the kernel maps into every process for
 calls such as `clock_gettime`, is the module `[vdso]`; no file backs it, so
 it is read from the process's memory.
+
+A function that left by a tail call, jumping to another instead of calling
+it, has no frame of its own, but a backtrace shows it between the function it
+jumped to and the caller, marked `[tail call]`, where the debug information
+allows only one chain of tail calls from the call the caller made: the same
+chains that recover entry values. The frame is at the jump. The jump
+discarded its registers and its place on the stack, so they are
+unavailable, as `print $pc` there says; what was passed to it is recovered
+as an entry value where the call site that passed it says how. Where more
+than one chain is possible, no such frame is shown rather than one guessed.
 
 A Go thread runs the runtime's code on a stack of its own, and signal
 handlers on another, and a backtrace follows the runtime from them onto the
@@ -495,13 +558,17 @@ Past Go code, only the stack pointer is recovered.
 | --- | --- |
 | `print`, `p` [*expression*] | Print a value, or every parameter and local of the selected frame. |
 | `pp` [*expression*] | Print a value laid out to the width, or every parameter and local of the selected frame, expanded. |
-| `set` [`var`] *assignment* | Assign, as in `set var x = y + 1`. |
+| `set` [`var`] *assignment* | Assign, as in `set var x = y + 1`, or a register of the innermost frame, as in `set var $rax = 0`. |
 | `whatis` *expression* | Show an expression's type. |
 | `ptype` *expression or type* | Show a type's definition. |
 | `globals` [*filter*] | List globals and their types without reading them. |
 | `info view` *expression* | Explain which view presents a value. |
 | `set views on`\|`off` | Present values through views, or as stored. |
 | `views` [`load` *file*\|`clear`\|`check`\|`explain` *type*\|`record` *file* *expression*] | Manage view files; see [views.md](views.md). |
+
+Types are named as C declares them, so a pointer to a function shows its
+signature, as `int (*)(const char *, ...)`, and its value names the function
+it enters, in whichever module holds it: `0x401136 <parse_header>`.
 
 `pp` lays a value out for reading: a group of members or elements that fits
 in the rest of the line stays on it, and one that does not puts each member on
@@ -540,6 +607,7 @@ points at is unavailable rather than shown from whatever is there now.
 | `disassemble`, `disas` [*function*\|*0xaddress*] [*count*] | Disassemble a whole function, or *count* instructions from an address. |
 | `address` *symbol* | Show a symbol's runtime address. |
 | `info symbol` *0xaddress* | Name the module, section, and symbol containing an address. |
+| `info modules`, `info sharedlibrary` | List the loaded modules, where each is, what describes its code, and the separate file its debug information came from. |
 
 `disassemble` shows every range of a function, including split `.cold` parts,
 with breakpoint traps hidden. Each line shows the address, its symbol offset,
@@ -628,6 +696,23 @@ and is reported missing if the dump did not save it.
 For a dump from another machine or a container, `--sysroot DIR` resolves
 every recorded path inside `DIR` as if it were `/`, and `--module-path DIR`
 finds renamed or relocated copies, used only when they match.
+
+## Separate debug information
+
+A module stripped of its debug information, as distributions ship their
+programs and libraries, takes it from a separate debug file, found as gdb
+finds them: by the module's build-id under a debug directory's `.build-id`,
+then by the file name and checksum its `.gnu_debuglink` records, beside the
+module, in its `.debug` directory, or under a debug directory at the
+module's own path. The debug directories are those `--debug-directory` and
+`[debug-info] directories` name, then those `NIX_DEBUG_INFO_DIRS` lists,
+then `/usr/lib/debug`. With `--debuginfod`, a file no directory holds is
+downloaded from the debuginfod servers `DEBUGINFOD_URLS` lists and kept in
+debuginfod's cache, which other debuggers share; no server is asked
+otherwise. Every candidate must prove it describes the module, by build-id
+or checksum. A debug file that uses a dwz supplementary file
+(`.gnu_debugaltlink`), as most distributions' do, cannot be read yet: the
+module is described by its own file, and `info modules` says why.
 
 ## Sources
 

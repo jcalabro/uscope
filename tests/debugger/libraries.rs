@@ -53,18 +53,25 @@ pub async fn breakpoint(scenario: &mut Scenario, id: uscope::BreakpointId) -> Br
 #[tokio::test]
 async fn breakpoints_in_a_library_the_program_links_resolve_before_it_runs() {
     let mut scenario = Scenario::launch("module-frames-gcc-o0");
-    // Without the pending option, a function nothing defines is refused;
-    // the program only declares it.
+    // Without the pending option, a function nothing defines or imports is
+    // refused, but one the program imports waits for its library.
     let refused = scenario
         .attempt(
             "add missing breakpoint",
             scenario
                 .handle()
-                .add_breakpoint(BreakpointSpec::Function("dso_apply".to_owned())),
+                .add_breakpoint(BreakpointSpec::Function("dso_absent".to_owned())),
         )
         .await;
     assert!(matches!(refused, Err(uscope::Error::FunctionNotFound(_))));
-    let pending = pending_function(&scenario, "dso_apply").await;
+    let pending = scenario
+        .operation(
+            "add imported breakpoint",
+            scenario
+                .handle()
+                .add_breakpoint(BreakpointSpec::Function("dso_apply".to_owned())),
+        )
+        .await;
     assert!(
         pending.locations.is_empty(),
         "nothing defines it before launch"
@@ -203,9 +210,6 @@ async fn source_breakpoints_resolve_in_library_source_once_it_loads() {
 async fn functions_without_debug_information_break_at_their_symbol() {
     let mut scenario = Scenario::launch("reexec");
     let puts = pending_function(&scenario, "puts").await;
-    // An indirect function's symbol names its resolver, which runs once at
-    // binding, not the function: it stays pending rather than mislead.
-    let strstr = pending_function(&scenario, "strstr").await;
     let reason = scenario
         .run_with_to_stop(LaunchOptions {
             arguments: vec!["one".into()],
@@ -219,12 +223,6 @@ async fn functions_without_debug_information_break_at_their_symbol() {
     assert_eq!(
         library_locations(&breakpoint(&mut scenario, puts.id).await),
         1
-    );
-    assert!(
-        breakpoint(&mut scenario, strstr.id)
-            .await
-            .locations
-            .is_empty()
     );
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
@@ -242,6 +240,110 @@ async fn functions_without_debug_information_break_at_their_symbol() {
             .map(|function| &*function.name),
         Some("reexecuted")
     );
+    scenario.shutdown().await;
+}
+
+/// Runs to the first stop at `breakpoint`, past the hits of others.
+async fn run_to_breakpoint(scenario: &mut Scenario, breakpoint: uscope::BreakpointId) {
+    for stop in 0..64 {
+        let reason = if stop == 0 {
+            scenario.run_to_stop().await
+        } else {
+            scenario.resume_to_stop().await
+        };
+        let StopReason::Breakpoint { hits, .. } = &reason else {
+            panic!("stopped for {reason:?}");
+        };
+        if hits.iter().any(|hit| hit.breakpoint == breakpoint) {
+            return;
+        }
+    }
+    panic!("breakpoint {breakpoint} was not reached in 64 stops");
+}
+
+/// Continues to a stop in the C library's `strlen` from the fixture's
+/// `measure`, which clang calls by a tail call that leaves `main` its
+/// caller.
+async fn stop_in_strlen(scenario: &mut Scenario, strlen: uscope::BreakpointId) {
+    let reason = scenario.resume_to_stop().await;
+    let StopReason::Breakpoint { hits, .. } = &reason else {
+        panic!("stopped for {reason:?}");
+    };
+    assert_eq!(hits[0].breakpoint, strlen);
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let names = trace
+        .frames
+        .iter()
+        .take(2)
+        .map(|frame| {
+            frame
+                .symbol
+                .as_ref()
+                .map(|symbol| (&*symbol.name, symbol.offset))
+        })
+        .collect::<Vec<_>>();
+    // The implementation, not the resolver, which is `strlen` itself.
+    let Some((implementation, 0)) = names[0] else {
+        panic!("stopped in {names:?}");
+    };
+    assert!(implementation.starts_with("__strlen_"), "{names:?}");
+    assert!(
+        matches!(names[1], Some(("measure" | "main", _))),
+        "{names:?}"
+    );
+}
+
+/// An indirect function's symbol names its resolver, which the loader calls
+/// to choose an implementation for the machine. A breakpoint on the
+/// function stops in the implementation chosen, as gdb's does: read from a
+/// GOT slot the loader filled, or else caught as the resolver returns,
+/// before a static program's start relocates it.
+async fn indirect_function_pending_before_the_run(fixture: &str) {
+    let mut scenario = Scenario::launch(fixture);
+    let measure = pending_function(&scenario, "measure").await;
+    let strlen = pending_function(&scenario, "strlen").await;
+    // The loader and the C library measure strings of their own first.
+    run_to_breakpoint(&mut scenario, measure.id).await;
+    let resolved = breakpoint(&mut scenario, strlen.id).await;
+    assert!(!resolved.locations.is_empty(), "{resolved:?}");
+    stop_in_strlen(&mut scenario, strlen.id).await;
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn indirect_functions_break_where_the_loader_chose_at_startup() {
+    indirect_function_pending_before_the_run("measure-gcc-nodebug").await;
+}
+
+#[tokio::test]
+async fn indirect_functions_break_where_the_loader_chose_for_a_lazy_program() {
+    indirect_function_pending_before_the_run("measure-clang-nopie-lazy").await;
+}
+
+#[tokio::test]
+async fn indirect_functions_break_where_a_static_program_chose() {
+    indirect_function_pending_before_the_run("measure-gcc-static").await;
+}
+
+/// Added once the program runs, a breakpoint on an indirect function finds
+/// the implementation its resolver chose long before.
+#[tokio::test]
+async fn indirect_functions_added_later_break_where_their_resolver_chose() {
+    let mut scenario = Scenario::launch("measure-gcc-static");
+    let measure = pending_function(&scenario, "measure").await;
+    run_to_breakpoint(&mut scenario, measure.id).await;
+    let strlen = scenario
+        .operation(
+            "add breakpoint",
+            scenario
+                .handle()
+                .add_breakpoint(BreakpointSpec::Function("strlen".to_owned())),
+        )
+        .await;
+    assert_eq!(strlen.locations.len(), 1, "{strlen:?}");
+    stop_in_strlen(&mut scenario, strlen.id).await;
     scenario.shutdown().await;
 }
 

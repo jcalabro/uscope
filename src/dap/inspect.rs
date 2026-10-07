@@ -349,8 +349,10 @@ impl Session {
         } else {
             crate::cli::format::code_name(frame.function.as_ref(), frame.symbol.as_ref())
         };
-        if frame.kind == uscope::FrameKind::Inline {
-            name.push_str(" [inlined]");
+        match frame.kind {
+            uscope::FrameKind::Inline => name.push_str(" [inlined]"),
+            uscope::FrameKind::TailCall => name.push_str(" [tail call]"),
+            uscope::FrameKind::Physical | uscope::FrameKind::Signal => {}
         }
         let mut body = json!({
             "id": id,
@@ -597,7 +599,13 @@ impl Session {
                 let registers = handle.at(context).registers().await.map_err(error)?;
                 return Ok(window
                     .slice(registers.registers.iter())
-                    .map(|value| values::register(value, registers.target.byte_order))
+                    .map(|value| {
+                        values::register(
+                            value,
+                            registers.target.byte_order,
+                            context.frame == uscope::StackFrameId::INNERMOST,
+                        )
+                    })
                     .collect());
             }
             Variables::Statics {
@@ -977,8 +985,26 @@ impl Session {
                 ))
             })?;
         let options = self.value_options(arguments.format.as_ref());
-        self.assign(context, &arguments.name, path, &arguments.value, options)
-            .await
+        let register = matches!(
+            self.references.variables_of(arguments.variables_reference),
+            Some(Variables::Registers { .. })
+        );
+        let mut set = self
+            .assign(context, &arguments.name, path, &arguments.value, options)
+            .await?;
+        // A register's row shows its bytes, as the registers list does.
+        if register
+            && let Some(value) = set["value"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+        {
+            let bits = set["type"]
+                .as_str()
+                .and_then(|kind| kind.strip_prefix('u')?.parse::<usize>().ok())
+                .unwrap_or(64);
+            set["value"] = format!("{value:#0width$x}", width = bits / 4 + 2).into();
+        }
+        Ok(set)
     }
 
     pub(super) async fn set_expression(&mut self, arguments: Value) -> Result<Value, ErrorBody> {

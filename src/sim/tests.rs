@@ -126,6 +126,20 @@ fn late_single_steps_fail_the_stepping_oracle() {
     assert_eq!(first_failure_with(Sabotage::LateSingleSteps), "stepping");
 }
 
+/// A kernel that hides a call the stepping thread stands at makes a step
+/// into another call of the line enter that one, which the stepping oracle
+/// catches, if code integrity has not caught the lie first.
+#[test]
+fn hidden_calls_fail_the_stepping_oracle() {
+    some_failure_saying(
+        Sabotage::HideSteppedCalls,
+        "stepping",
+        "into the call returning to",
+        // Reading the code the thread stands at shows the lie too.
+        &["stepping", "code integrity"],
+    );
+}
+
 /// Runs fixed seeds with `sabotage` until one fails `check`, requiring
 /// every failure on the way to be one of `allowed`.
 fn some_failure_with(sabotage: Sabotage, check: &str, allowed: &[&str]) {

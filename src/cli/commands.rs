@@ -68,6 +68,7 @@ pub enum Command {
     Next,
     Finish,
     Advance,
+    Jump,
     Examine,
     Disassemble,
     Address,
@@ -152,10 +153,11 @@ macro_rules! command {
 }
 
 /// The subcommands `info` accepts, by their primary names.
-pub const INFO_SUBCOMMANDS: [&str; 6] = [
+pub const INFO_SUBCOMMANDS: [&str; 7] = [
     "breakpoints",
     "watchpoints",
     "signals",
+    "modules",
     "core",
     "symbol",
     "view",
@@ -194,8 +196,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Info,
         "info",
         [],
-        "info breakpoints|watchpoints|signals|core|symbol|view [argument...]",
-        "Show debugger information, the symbol and section containing an address, or which view presents an expression's value and why"
+        "info breakpoints|watchpoints|signals|modules|calls|core|symbol|view [argument...]",
+        "Show debugger information, the loaded modules and where their debug information came from, the symbol and section containing an address, or which view presents an expression's value and why"
     ),
     command!(
         Handle,
@@ -373,8 +375,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Step,
         "step",
         ["s"],
-        "step [task]",
-        "Step into at source level, or with `task` into the task the line starts",
+        "step [task|function|*address]",
+        "Step into at source level; with `task` into the task the line starts, or with a function or a call's address into that call of the line",
         repeatable
     ),
     command!(
@@ -399,6 +401,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         ["adv"],
         "advance <function|0xaddress|file:line|file:function>",
         "Run until the selected thread reaches a location, or the selected frame returns first"
+    ),
+    command!(
+        Jump,
+        "jump",
+        ["j"],
+        "jump <line|+offset|-offset|0xaddress|file:line>",
+        "Move the selected thread, without running it, to resume at a location in its function"
     ),
     command!(
         Examine,
@@ -677,11 +686,12 @@ impl Cli {
             Command::Step => match first {
                 None => self.step(StepKind::IntoSource).await?,
                 Some(noun) if names_a_task(noun) => self.step(StepKind::IntoNewTask).await?,
-                Some(_) => return Err(spec.usage_error()),
+                Some(call) => self.step_into_call(call).await?,
             },
             Command::Next => self.step(StepKind::OverSource).await?,
             Command::Finish => self.step(StepKind::Out).await?,
             Command::Advance => self.advance(arguments[0], spec).await?,
+            Command::Jump => self.jump(arguments[0], spec).await?,
             Command::Examine => {
                 let address = parse_address(arguments[0])?;
                 let byte_count = parse_memory_byte_count(arguments.get(1).copied(), spec)?;
@@ -726,6 +736,16 @@ impl Cli {
             .await
     }
 
+    /// Moves the selected thread to resume at a line of the selected
+    /// frame's file, or at another location in its function.
+    async fn jump(&self, written: &str, spec: &CommandSpec) -> Result<String> {
+        let location = match frame_line(written)? {
+            Some(line) => self.frame_source(line).await?,
+            None => parse_breakpoint_location(written)?.ok_or_else(|| spec.usage_error())?,
+        };
+        self.execute_until_stop(self.debugger.jump(location)).await
+    }
+
     /// Runs `info` with its `arguments`, `rest` being them as written.
     async fn info(&self, arguments: &[&str], rest: &str, spec: &CommandSpec) -> Result<String> {
         let renderer = self.renderers.stdout;
@@ -742,12 +762,48 @@ impl Cli {
                 renderer,
             ),
             ("signals" | "handle", None) => self.list_signals().await?,
+            ("modules" | "sharedlibrary" | "shared", None) => self.list_modules().await?,
+            ("calls", None) => format::step_targets(&debugger.step_targets().await?, renderer),
             ("view", Some(_)) => {
                 let text = rest.trim_start()["view".len()..].trim();
                 self.explain_view(text).await?
             }
             _ => return Err(spec.usage_error()),
         })
+    }
+
+    /// The loaded modules: where each is, what describes its code, and the
+    /// separate file its debug information came from.
+    async fn list_modules(&self) -> Result<String> {
+        let loaded = match self.debugger.loaded_modules().await {
+            Ok(loaded) => loaded,
+            // Before the program runs, only its own image is known.
+            Err(uscope::Error::NotRunning) => {
+                let image = std::sync::Arc::clone(self.debugger.module_image());
+                return Ok(format::modules(
+                    &[format::ModuleRow {
+                        path: std::sync::Arc::new(image.path().to_path_buf()),
+                        load_bias: None,
+                        image: Some(image),
+                    }],
+                    self.renderers.stdout,
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut modules = Vec::with_capacity(loaded.modules.len());
+        for record in loaded.modules.iter() {
+            modules.push(format::ModuleRow {
+                path: std::sync::Arc::clone(&record.path),
+                load_bias: Some(record.module.load_bias),
+                image: self
+                    .debugger
+                    .loaded_module_image(record.module.id)
+                    .await
+                    .ok(),
+            });
+        }
+        Ok(format::modules(&modules, self.renderers.stdout))
     }
 
     /// Runs one command for a client that controls execution itself, such
@@ -1133,7 +1189,12 @@ impl Cli {
             .and_then(|instance| image.code_instance(instance))
             .and_then(|instance| image.function(instance.function))
             .or(located.function.as_ref())
-            .map(|function| std::sync::Arc::clone(&function.name));
+            .map(|function| std::sync::Arc::clone(&function.name))
+            // Code no debug information describes is named by its symbol.
+            .or_else(|| {
+                let symbol = image.symbolize(address)?;
+                Some(format::code_name(None, Some(&symbol)).into())
+            });
         placed.source = located.source.as_ref().and_then(|source| {
             image
                 .source_file(source.file)
@@ -1565,6 +1626,34 @@ impl Cli {
             }
         }
         Ok(output)
+    }
+
+    /// Steps into the call of the line that `call` names: by its callee's
+    /// name, the first such call, or by its address after `*`.
+    async fn step_into_call(&self, call: &str) -> Result<String> {
+        let targets = self.debugger.step_targets().await?;
+        let target = if let Some(address) = call.strip_prefix('*') {
+            let address = parse_address(address)?;
+            targets
+                .iter()
+                .find(|target| target.call == address)
+                .ok_or_else(|| {
+                    anyhow!("no call on this line is at {address}; `info calls` lists them")
+                })?
+        } else {
+            targets
+                .iter()
+                .find(|target| {
+                    target.callee.as_deref().is_some_and(|callee| {
+                        callee == call || callee.rsplit("::").next() == Some(call)
+                    })
+                })
+                .ok_or_else(|| {
+                    anyhow!("no call on this line calls {call}; `info calls` lists them")
+                })?
+        };
+        self.execute_until_stop(self.debugger.step_into(target.call))
+            .await
     }
 
     /// Waits for an execution request, prefixing its stop with a line for

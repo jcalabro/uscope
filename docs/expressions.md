@@ -57,6 +57,12 @@ behave as the types they stand for, and a C++ reference stands for what it
 refers to. In a caller's frame, registers hold what unwinding recovered, and
 one it could not recover is unavailable.
 
+A word that C reserves for a type, such as `long`, `int`, `class`, or
+`const`, is a name wherever a type cannot be, since a Go, Rust, or Zig
+program may name a variable or member with it: `long * 2` multiplies the
+variable `long`. Inside a cast's parentheses, after `as`, and in `sizeof`, the
+word is the type.
+
 ```uscope-example
 world: memory
 s.a                    => 5 : int
@@ -76,6 +82,11 @@ $nope                  => error unknown-name at `$nope`
 twice                  => error ambiguous-name at `twice`
 $task                  => 7 : integer
 $task == 7             => true : bool
+long                   => 3 : int
+long * 2               => 6 : integer
+words.int + words.class => 10 : integer
+(long)-1               => -1 : long int
+sizeof(long)           => 8 : integer
 ```
 
 ```uscope-example
@@ -429,7 +440,9 @@ ages[arr]              => error type at `arr`
 `(T)x` and `x as T` convert a value. `T` may be a built-in type (`iN` and
 `uN` for N from 1 to 128, `isize`, `usize`, `f32`, `f64`, `bool`), a type the
 program defines, a C base type written with its words in any order, or a
-`struct`, `union`, `enum`, or `class` tag. `const`, `volatile`, and `mut` are
+`struct`, `union`, `enum`, or `class` tag. A C base type the program's debug
+information does not describe, such as `unsigned char` in a Go program, is
+the one the target's C compiler would lay out. `const`, `volatile`, and `mut` are
 accepted and ignored. A pointer type is `T*` inside a cast's parentheses,
 where `(*p)` dereferences, and `*T` after `as`, where a trailing `*` would
 multiply.
@@ -519,6 +532,15 @@ world: memory
 (Shape)tile == 7       => error type at `(Shape)tile == 7`
 ((Shape)twice_shaped).id => error ambiguous-name at `((Shape)twice_shaped)`
 (Tile)s                => error type at `(Tile)s`
+(short)70000           => 4464 : short
+(unsigned short)-1     => 65535 : unsigned short
+(signed char)200       => -56 : signed char
+(long long unsigned)-1 => 18446744073709551615 : unsigned long long
+(double)1              => 1.0 : double
+(float)0.1 == 0.1 as f32 => true : bool
+*(unsigned char*)&s.a  => 5 : unsigned char
+sizeof(long double)    => 16 : integer
+(unsigned long)-1      => 18446744073709551615 : unsigned long
 ```
 
 ## Enumerations
@@ -633,6 +655,26 @@ assign: ptr = 0        => 0x0 : S*
 assign: ptr = 1.5      => error type at `1.5`
 assign: s = s          => error type at `s`
 assign: r = 3          => 3 : int
+```
+
+A register is assigned the same way. It holds an unsigned number of its own
+width, which the value must fit, or a pointer. Only the innermost frame's
+registers belong to the thread; a caller's are what unwinding recovered, and
+are refused. Assigning `$pc` moves where the thread resumes: the stop is
+published again at its new place, under a new stop.
+
+```uscope-example
+world: memory
+assign: $rsp = 0x7ffe0010    => 2147352592 : u64
+assign: $sp -= 16            => 2147352560 : u64
+assign: $pc = 0x401010       => 4198416 : u64
+assign: $rsp = (u64)-1       => 18446744073709551615 : u64
+assign: $rsp = -1            => error assignment at `-1`
+assign: $rsp = 1.5           => error assignment at `1.5`
+assign: $rsp = s             => error type at `s`
+assign: $rsp + 1 = 2         => error not-an-lvalue at `$rsp + 1`
+assign: $rbp += 1            => unavailable at `$rbp`
+$rsp = 1                     => error mode at `$rsp = 1`
 ```
 
 ## Limits

@@ -766,6 +766,34 @@ pub struct LaunchOptions {
     pub stop_at_entry: bool,
 }
 
+/// Where a session finds the debug information that modules' files leave
+/// out, as distributions ship it in separate debug files.
+///
+/// A module whose file has no DWARF takes it from the file its build-id
+/// names under a debug directory's `.build-id`, or else from the file its
+/// `.gnu_debuglink` names, beside it, in its `.debug` directory, or under a
+/// debug directory at its own path, or last from a debuginfod server. Each
+/// must prove it describes the module, by build-id or by the checksum the
+/// link records.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DebugFileOptions {
+    /// Debug directories searched before the system's: those
+    /// `NIX_DEBUG_INFO_DIRS` lists, then `/usr/lib/debug`.
+    pub directories: Vec<PathBuf>,
+    /// Whether to download the debug files no directory holds from
+    /// debuginfod servers. As with gdb, sessions ask no server unless told
+    /// to, since a download sends a module's build-id over the network and
+    /// may take long.
+    pub debuginfod: bool,
+    /// The debuginfod servers to ask, in order, or `None` for those
+    /// `DEBUGINFOD_URLS` lists.
+    pub debuginfod_urls: Option<Vec<String>>,
+    /// Where downloaded debug files are kept, or `None` for debuginfod's own
+    /// cache, which other debuggers share: `DEBUGINFOD_CACHE_PATH`, or else
+    /// `debuginfod_client` in the user's cache directory.
+    pub debuginfod_cache: Option<PathBuf>,
+}
+
 /// Selects a post-mortem core dump and how its module files are found and
 /// trusted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -796,6 +824,8 @@ pub struct CoreDumpOptions {
     /// save. A file that cannot be placed at its recorded image is still
     /// refused, since relocating it would be a guess.
     pub allow_module_mismatch: bool,
+    /// Where the modules' separate debug files are found.
+    pub debug_files: DebugFileOptions,
 }
 
 impl CoreDumpOptions {
@@ -808,6 +838,7 @@ impl CoreDumpOptions {
             sysroot: None,
             module_paths: Vec::new(),
             allow_module_mismatch: false,
+            debug_files: DebugFileOptions::default(),
         }
     }
 }
@@ -1131,6 +1162,19 @@ pub enum ExitStatus {
     Terminated(ExceptionInfo),
 }
 
+/// A call on the line a thread is stopped at, which a step into can go
+/// into while running the line's other calls to their returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepTarget {
+    /// The call instruction, which names the target to a step.
+    pub call: VirtualAddress,
+    /// The address a direct call calls; `None` for an indirect call.
+    pub target: Option<VirtualAddress>,
+    /// The called function's name, from its debug information or else
+    /// its symbol, when something names it.
+    pub callee: Option<Arc<str>>,
+}
+
 /// Describes why execution stopped or completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
@@ -1181,6 +1225,9 @@ pub enum StopReason {
     },
     /// Execution stopped at the user's request.
     Pause,
+    /// A thread was moved to resume elsewhere, by a jump or by assigning
+    /// its program counter, without running.
+    Jump,
     /// Execution stopped because of an exception.
     Exception(ExceptionInfo),
     /// A language runtime reported an exception: one its program raised, or
@@ -1543,6 +1590,10 @@ pub enum Request {
         /// steps the innermost frame and requires it.
         frame: StackFrameId,
         kind: StepKind,
+        /// For [`StepKind::IntoSource`], the one call of the line, a
+        /// [`StepTarget`], to go into; the line's other calls run to their
+        /// returns.
+        call: Option<VirtualAddress>,
         /// The threads that run while the step does: every thread, or only
         /// the stepping one.
         scope: ResumeScope,
@@ -1559,6 +1610,16 @@ pub enum Request {
         spec: BreakpointSpec,
         scope: ResumeScope,
         exception: ExceptionDisposition,
+        reply: Reply<ExecutionId>,
+    },
+    /// Moves `context`'s thread, without running it, to resume at the one
+    /// location `spec` resolves to in the function it is stopped in, and
+    /// publishes the stop again there.
+    Jump {
+        process_id: ProcessId,
+        stop_id: StopId,
+        context: ExecutionContext,
+        spec: BreakpointSpec,
         reply: Reply<ExecutionId>,
     },
     Pause {
@@ -1633,6 +1694,13 @@ pub enum Request {
         context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<RegisterSnapshot>,
+    },
+    /// The calls a step into could go into from the innermost frame's
+    /// line.
+    StepTargets {
+        stop_id: StopId,
+        context: ExecutionContext,
+        reply: Reply<Arc<[StepTarget]>>,
     },
     Variables {
         query: VariableQuery,
@@ -1777,12 +1845,15 @@ impl Request {
                 context,
                 frame,
                 kind,
+                call,
                 scope,
                 exception,
                 ..
-            } => {
-                format!("step {kind:?} {stop_id:?} {context:?} {frame:?} {scope:?} {exception:?}")
-            }
+            } => format!(
+                "step {kind:?}{} {stop_id:?} {context:?} {frame:?} {scope:?} {exception:?}",
+                call.map(|call| format!(" into the call at {call}"))
+                    .unwrap_or_default()
+            ),
             Self::Advance {
                 stop_id,
                 context,
@@ -1794,6 +1865,12 @@ impl Request {
             } => format!(
                 "advance to {spec:?} {stop_id:?} {context:?} {frame:?} {scope:?} {exception:?}"
             ),
+            Self::Jump {
+                stop_id,
+                context,
+                spec,
+                ..
+            } => format!("jump to {spec:?} {stop_id:?} {context:?}"),
             Self::Pause { process_id, .. } => format!("pause {process_id}"),
             Self::AddBreakpoint { spec, .. } => format!("add breakpoint {spec:?}"),
             Self::SetBreakpointEnabled { id, enabled, .. } => {
@@ -1838,6 +1915,7 @@ impl Request {
             Self::StoppedSelection { .. } => "stopped selection".to_owned(),
             Self::Backtrace { .. } => "backtrace".to_owned(),
             Self::Registers { .. } => "registers".to_owned(),
+            Self::StepTargets { .. } => "step targets".to_owned(),
             Self::Variables { .. } => "variables".to_owned(),
             Self::Evaluate { expression, .. } => format!("evaluate `{}`", expression.text()),
             Self::ExpressionType { expression, .. } => format!("type of `{}`", expression.text()),

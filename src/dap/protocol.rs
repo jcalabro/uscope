@@ -308,6 +308,20 @@ pub struct BreakpointLocationsArguments {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+pub struct GotoTargetsArguments {
+    pub source: Source,
+    pub line: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GotoArguments {
+    pub thread_id: i64,
+    pub target_id: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct DataBreakpointInfoArguments {
     pub variables_reference: Option<i64>,
     pub name: String,
@@ -425,6 +439,8 @@ pub struct ThreadArguments {
     pub thread_id: i64,
     pub single_thread: Option<bool>,
     pub granularity: Option<String>,
+    /// For `stepIn`, the `stepInTargets` target to go into.
+    pub target_id: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

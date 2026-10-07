@@ -52,6 +52,10 @@ struct Gallery<'a> {
     required: &'a [&'a str],
     /// Whether every listed variable must have a name its program wrote.
     go: bool,
+    /// `checkpoint:path` values a function returned that this build's
+    /// calling convention does not say where to find, which must be shown
+    /// as unknown for that reason.
+    unknown: &'a [&'a str],
 }
 
 /// Runs a gallery through every checkpoint and checks every truth it
@@ -105,6 +109,15 @@ async fn check_gallery(gallery: &Gallery<'_>) {
             }
         }
         for truth in truths.iter().filter(|truth| truth.checkpoint == checkpoint) {
+            if gallery
+                .unknown
+                .contains(&format!("{checkpoint}:{}", truth.path).as_str())
+            {
+                if let Err(failure) = check_unknown(&variables, truth) {
+                    failures.push(format!("{checkpoint}: {}: {failure}", truth.path));
+                }
+                continue;
+            }
             // The calling convention says where every returned value is.
             let required = returned
                 || gallery
@@ -225,6 +238,28 @@ async fn checkpoint_variables(
         .filter(|variable| !returned || variable.kind == VariableKind::Returned)
         .cloned()
         .collect()
+}
+
+/// Checks that the returned value a truth is about is listed, as unknown
+/// because its calling convention does not say where it is.
+fn check_unknown(variables: &[Variable], truth: &Truth) -> Result<(), String> {
+    let name = truth
+        .path
+        .split('.')
+        .next()
+        .expect("a path names a variable");
+    let variable = variables
+        .iter()
+        .find(|variable| variable.name.as_ref() == name)
+        .ok_or("is not listed")?;
+    match &variable.state {
+        VariableState::Unavailable(uscope::VariableUnavailableReason::Unsupported(
+            uscope::UnsupportedVariableFeature::ReturnPlace,
+        )) => Ok(()),
+        state => Err(format!(
+            "is not unknown for its calling convention: {state:?}"
+        )),
+    }
 }
 
 /// Checks that a variable the compiler made for itself, named by the
@@ -477,6 +512,7 @@ async fn c_pieces_agree_with_their_program() {
             optimized,
             required,
             go: false,
+            unknown: &[],
         })
         .await;
     }
@@ -532,6 +568,147 @@ async fn go_values_agree_with_their_program() {
             optimized,
             required,
             go: true,
+            unknown: &[],
+        })
+        .await;
+    }
+}
+
+/// Every checkpoint of a returns gallery, in order.
+const C_RETURNS: &[&str] = &[
+    "returned-int",
+    "returned-char",
+    "returned-bool",
+    "returned-int128",
+    "returned-enum",
+    "returned-float",
+    "returned-double",
+    "returned-long-double",
+    "returned-complex-float",
+    "returned-complex-double",
+    "returned-ints",
+    "returned-pair",
+    "returned-mixed",
+    "returned-flipped",
+    "returned-floats",
+    "returned-doubles",
+    "returned-vector",
+    "returned-big",
+    "returned-text",
+    "returned-bits",
+    "returned-union",
+    "returned-void",
+];
+
+#[tokio::test]
+async fn c_returned_values_agree_with_their_program() {
+    for (fixture, optimized) in [
+        ("returns-c-gcc-o0", false),
+        ("returns-c-gcc-o2", true),
+        ("returns-c-clang-o0", false),
+        ("returns-c-clang-o2", true),
+    ] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["reached"],
+            checkpoints: C_RETURNS,
+            optimized,
+            required: &[],
+            go: false,
+            unknown: &[],
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn cpp_returned_values_agree_with_their_program() {
+    // GCC does not record whether calls pass a class by value, which
+    // decides where a small one is returned.
+    let gcc = &[
+        "returned-plain:r_plain.a",
+        "returned-plain:r_plain.b",
+        "returned-derived:r_derived.own",
+        "returned-owner:r_owner.value",
+    ][..];
+    for (fixture, optimized, unknown) in [
+        ("returns-cpp-gcc-o0", false, gcc),
+        ("returns-cpp-gcc-o2", true, gcc),
+        ("returns-cpp-clang-o2", true, &[][..]),
+    ] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["reached"],
+            checkpoints: &[
+                "returned-int",
+                "returned-plain",
+                "returned-derived",
+                "returned-owner",
+                "returned-large",
+            ],
+            optimized,
+            required: &[],
+            go: false,
+            unknown,
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn rust_returned_values_agree_with_their_program() {
+    for (fixture, optimized) in [("returns-rust-o0", false), ("returns-rust-o2", true)] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["reached"],
+            checkpoints: &[
+                "returned-int",
+                "returned-bool",
+                "returned-u128",
+                "returned-f64",
+                "returned-f32",
+                "returned-level",
+                "returned-pair",
+                "returned-unit",
+            ],
+            optimized,
+            required: &[],
+            go: false,
+            // Rust's own convention is unspecified for aggregates.
+            unknown: &["returned-pair:r_pair.first"],
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn zig_returned_values_agree_with_their_program() {
+    for (fixture, optimized, unknown) in [
+        ("returns-zig-o0", false, &[][..]),
+        ("returns-zig-o2", true, &[][..]),
+        // Zig's own convention is unspecified for aggregates.
+        (
+            "returns-zig-self-hosted",
+            false,
+            &["returned-pair:r_pair"][..],
+        ),
+    ] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["reached"],
+            checkpoints: &[
+                "returned-int",
+                "returned-bool",
+                "returned-u64",
+                "returned-f64",
+                "returned-f32",
+                "returned-level",
+                "returned-pair",
+            ],
+            optimized,
+            required: &[],
+            go: false,
+            unknown,
         })
         .await;
     }

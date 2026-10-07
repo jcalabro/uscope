@@ -265,10 +265,11 @@ fn caller_frames_registers_and_hexadecimal_values() {
         .to_owned();
     let number = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("hex");
     assert_eq!(number(&rip), number(&pointer));
-    // A register's row names it as an expression, and cannot be changed.
+    // A register's row names it as an expression; the innermost frame's
+    // can be changed, as the thread's own.
     let row = named(&registers, "rip");
     assert_eq!(row["evaluateName"], "$rip");
-    assert_eq!(row["presentationHint"]["attributes"], json!(["readOnly"]));
+    assert_eq!(row["presentationHint"]["attributes"], json!([]));
     let watched = dap.request(
         "evaluate",
         json!({"expression": "$rip", "frameId": frames[0]["id"], "context": "watch", "format": {"hex": true}}),
@@ -666,6 +667,13 @@ fn function_pointers_link_to_the_function_they_point_to() {
     let scopes = scopes(&mut dap, &frame);
     let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
     let function = named(&locals, "function_pointer");
+    assert_eq!(function["type"], json!("int (*)(int)"), "{function}");
+    assert!(
+        function["value"]
+            .as_str()
+            .is_some_and(|value| value.ends_with(" <pointer_identity>")),
+        "{function}"
+    );
     let reference = function["valueLocationReference"].clone();
     assert!(reference.as_i64().is_some_and(|id| id > 0), "{function}");
     let location = dap.request("locations", json!({"locationReference": reference}));

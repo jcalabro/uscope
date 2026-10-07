@@ -336,3 +336,35 @@ async fn signals_and_modules_are_part_of_the_session() {
         "{modules:?}"
     );
 }
+
+/// A module stripped of its debug information names the separate file it
+/// came from, found in the server's debug directories.
+#[tokio::test]
+async fn modules_name_their_separate_debug_files() {
+    let root = fixture("split/debug-root");
+    let web = Web::start(
+        "debug files",
+        &["--debug-directory", &root, &fixture("split/basic-build-id")],
+    );
+    let mut tab = web.control("tab").await;
+    tab.state("the program loaded", |state| state["session"].is_string())
+        .await;
+    tab.ok("addBreakpoint", json!({"location": "breakpoint_target"}))
+        .await;
+    tab.ok("continue", json!({})).await;
+    tab.inferior("stopped").await;
+    let modules = tab.ok("modules", json!(null)).await;
+    let program = &modules["modules"][0];
+    assert_eq!(program["name"], "basic-build-id", "{modules}");
+    assert_eq!(program["symbols"], "debug");
+    assert!(
+        program["debugFile"]
+            .as_str()
+            .is_some_and(|path| path.starts_with(&root)
+                && std::path::Path::new(path)
+                    .extension()
+                    .is_some_and(|extension| extension == "debug")),
+        "{program}"
+    );
+    assert_eq!(program["debugFileProblem"], Value::Null);
+}

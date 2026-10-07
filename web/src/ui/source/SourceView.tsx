@@ -147,6 +147,11 @@ class Values extends WidgetType {
     }
     return span;
   }
+  // A click on a line's values puts the cursor on that line, as one beside
+  // them does.
+  override ignoreEvent(): boolean {
+    return false;
+  }
 }
 
 function hoverDom(expression: string, value: Hovered): HTMLElement {

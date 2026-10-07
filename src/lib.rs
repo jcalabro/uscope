@@ -33,6 +33,7 @@ mod unwind;
 mod view;
 pub mod view_files;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -61,28 +62,29 @@ pub use eval::syntax::{Expression, Span};
 pub use model::{
     Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArgumentOrigin,
     ArrayDimension, Backtrace, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding,
-    BreakpointEntry, BreakpointLocation, ByteOrder, CallFrameUnavailableReason, CodeInstanceId,
-    CodeInstanceInfo, CodeInstanceKind, CodeRole, ColumnNumber, DereferenceReference,
-    DereferenceState, DereferenceUnavailableReason, DereferencedValue, EmbeddedSymbolTable,
-    EntryProvenance, EntryValueUnavailableReason, EnumerationOrigin, Enumerator, ExecutionContext,
-    ExecutionLocation, FloatValue, FrameKind, FunctionId, FunctionInfo, GlobalVariableCandidate,
-    GlobalVariableId, GlobalVariableInfo, GlobalVariablePage, GlobalVariableReference,
-    GlobalVariableType, GlobalVariableVisibility, GoKind, GoTypeAttributes, ImageAddress,
-    ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup, InspectedValue,
-    InspectionCompletion, InspectionExhaustion, InspectionLimit, InspectionLimits, InspectionUsage,
-    IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule,
-    LoadedModuleRecord, LoadedModuleSnapshot, MapKey, MemoryRead, MemoryReadCompletion,
-    MemoryReadUnavailableReason, ModuleAddress, ModuleId, ModuleImage, ModuleImageId,
-    NamedTypeRelationship, OptimizedOutReason, PointerWidth, Presentation, PresentedCount,
-    PresentedShape, RecordKind, RecordMember, RecordMemberLayout, ReferenceKind,
-    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, RuntimeId,
-    ScalarValue, SectionId, SectionInfo, SectionLocation, ShapeUnresolvedReason, SourceContext,
-    SourceFile, SourceFileId, SourceLanguage, SourceLine, SourceLocation, StackFrame, StackFrameId,
-    StackSegment, StatementFlags, StatementRow, SymbolBinding, SymbolExtent,
-    SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources,
-    TargetDescription, TaskCursor, TaskId, TaskLocation, TaskPage, TaskSnapshot, TaskState,
-    TextCompletion, TextSummary, ThreadActivity, ThreadId, ThreadLocal, TlsUnavailableReason,
-    TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
+    BreakpointEntry, BreakpointLocation, ByteOrder, CBaseType, CallFrameUnavailableReason,
+    CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole, ColumnNumber, DebugFile,
+    DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue,
+    EmbeddedSymbolTable, EntryProvenance, EntryValueUnavailableReason, EnumerationOrigin,
+    Enumerator, ExecutionContext, ExecutionLocation, FloatValue, FrameKind, FunctionId,
+    FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
+    GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
+    GoKind, GoTypeAttributes, GotSlot, GotTarget, ImageAddress, ImageAddressDescription,
+    ImageLocation, InlineChain, InlineFrameLookup, InspectedValue, InspectionCompletion,
+    InspectionExhaustion, InspectionLimit, InspectionLimits, InspectionUsage, IntegerValue,
+    LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
+    LoadedModuleSnapshot, MapKey, MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason,
+    ModuleAddress, ModuleId, ModuleImage, ModuleImageId, NamedTypeRelationship, OptimizedOutReason,
+    PointerWidth, Presentation, PresentedCount, PresentedShape, RecordKind, RecordMember,
+    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
+    RegisterSnapshot, RegisterValue, RuntimeId, ScalarValue, SectionId, SectionInfo,
+    SectionLocation, ShapeUnresolvedReason, SourceContext, SourceFile, SourceFileId,
+    SourceLanguage, SourceLine, SourceLocation, StackFrame, StackFrameId, StackSegment,
+    StatementFlags, StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId,
+    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TaskCursor,
+    TaskId, TaskLocation, TaskPage, TaskSnapshot, TaskState, TextCompletion, TextSummary,
+    ThreadActivity, ThreadId, ThreadLocal, TlsUnavailableReason, TypeArgument, TypeId,
+    TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
     UnsupportedVariableFeature, UnwindTermination, ValueAccessUnavailableReason, ValueBitRange,
     ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren, ValueChildrenReference,
     Variable, VariableInvalidReason, VariableKind, VariableMalformedKind, VariableMalformedReason,
@@ -92,15 +94,16 @@ pub use model::{
 };
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, ConditionOwner,
-    CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, DebuggerEvent,
+    CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, DebugFileOptions, DebuggerEvent,
     ExceptionDisposition, ExceptionInfo, ExceptionStops, ExecutionId, ExitStatus,
     FramePresentation, GlobalVariableQuery, HeldChild, HeldProcess, HitComparison, HitCondition,
     InferiorState, InvalidatedWatchpoint, KernelSource, LanguageException, LanguageExceptionKind,
     LaunchOptions, LogPart, ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation,
-    ResumeScope, SignalPolicy, StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot,
-    ThreadState, TypeViews, ValueChildQuery, VariableQuery, ViewCandidate, ViewCheck,
-    ViewExplanation, WatchAccess, WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities,
-    WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions, WatchpointSpec,
+    ResumeScope, SignalPolicy, StateSnapshot, StepKind, StepTarget, StopId, StopReason,
+    ThreadSnapshot, ThreadState, TypeViews, ValueChildQuery, VariableQuery, ViewCandidate,
+    ViewCheck, ViewExplanation, WatchAccess, WatchScope, WatchTarget, Watchpoint,
+    WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions,
+    WatchpointSpec,
 };
 pub use runtime_model::TASK_NOUNS;
 pub use source_map::SourcePathMap;
@@ -325,14 +328,20 @@ pub struct DebuggerHandle {
 impl Debugger {
     /// Creates a debugger for a native executable and starts its backend controller.
     pub fn new(executable: impl AsRef<Path>) -> Result<Self> {
-        let executable = backend::executable_source(executable.as_ref())?;
+        Self::new_with(executable, &DebugFileOptions::default())
+    }
+
+    /// Creates a debugger for a native executable whose modules' separate
+    /// debug files are found as `debug_files` says.
+    pub fn new_with(executable: impl AsRef<Path>, debug_files: &DebugFileOptions) -> Result<Self> {
+        let mut executable = backend::executable_source(executable.as_ref())?;
+        executable.debug_files = debug_info::DebugFileSearch::new(debug_files);
         Self::from_executable_source(executable)
     }
 
     /// Attaches to an existing local process and returns once it is coherently stopped.
     pub async fn attach(process: ProcessId) -> Result<Self> {
-        let executable = backend::process_executable_source(process)?;
-        Self::attach_from_source(process, executable, false).await
+        Self::attach_with(process, None, &DebugFileOptions::default()).await
     }
 
     /// Attaches using an explicitly supplied executable when automatic discovery is unavailable.
@@ -340,7 +349,27 @@ impl Debugger {
         process: ProcessId,
         executable: impl AsRef<Path>,
     ) -> Result<Self> {
-        let executable = backend::executable_source(executable.as_ref())?;
+        Self::attach_with(
+            process,
+            Some(executable.as_ref()),
+            &DebugFileOptions::default(),
+        )
+        .await
+    }
+
+    /// Attaches to an existing local process, reading its executable from
+    /// `executable` when given, and finding its modules' separate debug
+    /// files as `debug_files` says.
+    pub async fn attach_with(
+        process: ProcessId,
+        executable: Option<&Path>,
+        debug_files: &DebugFileOptions,
+    ) -> Result<Self> {
+        let mut executable = match executable {
+            Some(executable) => backend::executable_source(executable)?,
+            None => backend::process_executable_source(process)?,
+        };
+        executable.debug_files = debug_info::DebugFileSearch::new(debug_files);
         Self::attach_from_source(process, executable, false).await
     }
 
@@ -349,11 +378,7 @@ impl Debugger {
     /// coherently stopped. The process must still be the one held: one that
     /// ended, and whose identifier was given to another, is refused.
     pub async fn attach_held(held: HeldProcess) -> Result<Self> {
-        let executable = backend::process_executable_source(held.process_id)?;
-        if executable.process_start_time != Some(held.start_time) {
-            return Err(Error::HeldProcessGone(held.process_id.get()));
-        }
-        Self::attach_from_source(held.process_id, executable, true).await
+        Self::attach_held_with(held, None, &DebugFileOptions::default()).await
     }
 
     /// Attaches to a held process as [`Self::attach_held`] does, using an
@@ -362,9 +387,35 @@ impl Debugger {
         held: HeldProcess,
         executable: impl AsRef<Path>,
     ) -> Result<Self> {
-        let mut executable = backend::executable_source(executable.as_ref())?;
-        // The attach checks this once it has seized the process.
-        executable.process_start_time = Some(held.start_time);
+        Self::attach_held_with(
+            held,
+            Some(executable.as_ref()),
+            &DebugFileOptions::default(),
+        )
+        .await
+    }
+
+    /// Attaches to a held process as [`Self::attach_held`] does, reading
+    /// its executable from `executable` when given, and finding its
+    /// modules' separate debug files as `debug_files` says.
+    pub async fn attach_held_with(
+        held: HeldProcess,
+        executable: Option<&Path>,
+        debug_files: &DebugFileOptions,
+    ) -> Result<Self> {
+        let mut executable = if let Some(executable) = executable {
+            let mut executable = backend::executable_source(executable)?;
+            // The attach checks this once it has seized the process.
+            executable.process_start_time = Some(held.start_time);
+            executable
+        } else {
+            let executable = backend::process_executable_source(held.process_id)?;
+            if executable.process_start_time != Some(held.start_time) {
+                return Err(Error::HeldProcessGone(held.process_id.get()));
+            }
+            executable
+        };
+        executable.debug_files = debug_info::DebugFileSearch::new(debug_files);
         Self::attach_from_source(held.process_id, executable, true).await
     }
 
@@ -405,7 +456,11 @@ impl Debugger {
     }
 
     fn from_executable_source(executable: backend::ExecutableSource) -> Result<Self> {
-        let debug_info = debug_info::load_bytes(&executable.display_path, &executable.data)?;
+        let debug_info = debug_info::load_program(
+            &executable.display_path,
+            &executable.data,
+            &executable.debug_files,
+        )?;
         Self::start(|channels| {
             let image = Arc::clone(&debug_info.image);
             let controller = backend::spawn_controller(executable, debug_info, channels)?;
@@ -949,11 +1004,63 @@ impl DebuggerHandle {
             context,
             frame,
             kind,
+            call: None,
             scope,
             exception,
             reply,
         })
         .await
+    }
+
+    /// Starts a step into the one call of the stopped line at `call`, a
+    /// [`StepTarget`] of the innermost frame, which runs the line's other
+    /// calls to their returns. It stops as [`StepKind::IntoSource`] does:
+    /// in the called function, or, when the line ends first or the callee
+    /// has no source, where a step in would.
+    pub async fn start_step_into(
+        &self,
+        stop_id: StopId,
+        context: impl Into<ExecutionContext>,
+        call: VirtualAddress,
+        scope: ResumeScope,
+        exception: ExceptionDisposition,
+    ) -> Result<ExecutionId> {
+        let process_id = self.stopped_selection().await?.process;
+        let context = context.into();
+        self.request(|reply| Request::Step {
+            process_id,
+            stop_id,
+            context,
+            frame: StackFrameId::INNERMOST,
+            kind: StepKind::IntoSource,
+            call: Some(call),
+            scope,
+            exception,
+            reply,
+        })
+        .await
+    }
+
+    /// Steps the selected thread into the call at `call` on its line,
+    /// running every other thread too, and waits for the step's stop.
+    pub async fn step_into(&self, call: VirtualAddress) -> Result<StopReason> {
+        let selection = self.stopped_selection().await?;
+        let mut events = self.subscribe();
+        let execution = self
+            .start_step_into(
+                selection.stop,
+                selection.execution,
+                call,
+                ResumeScope::Process(selection.process),
+                ExceptionDisposition::Pass,
+            )
+            .await?;
+        self.wait_for_execution(&mut events, execution).await
+    }
+
+    /// The calls a step into the selected thread's line could go into.
+    pub async fn step_targets(&self) -> Result<Arc<[StepTarget]>> {
+        self.selected().await?.step_targets().await
     }
 
     /// Steps the selected thread, running every other thread too, and waits
@@ -1003,6 +1110,42 @@ impl DebuggerHandle {
             })
             .await?;
 
+        self.wait_for_execution(&mut events, execution).await
+    }
+
+    /// Moves one stopped thread, without running it, to resume at the one
+    /// location `spec` resolves to in the function it is stopped in, and
+    /// publishes the stop again there with [`StopReason::Jump`] under a new
+    /// stop. A breakpoint at the new location stops the thread as it
+    /// resumes, before it runs anything. A location with no code in the function, or with code in
+    /// several places of it, is refused; to move a thread anywhere, assign
+    /// `$pc`.
+    pub async fn start_jump(
+        &self,
+        stop_id: StopId,
+        context: impl Into<ExecutionContext>,
+        spec: BreakpointSpec,
+    ) -> Result<ExecutionId> {
+        let process_id = self.stopped_selection().await?.process;
+        let context = context.into();
+        self.request(|reply| Request::Jump {
+            process_id,
+            stop_id,
+            context,
+            spec,
+            reply,
+        })
+        .await
+    }
+
+    /// Moves the selected thread to resume at `spec`, as
+    /// [`Self::start_jump`] does, and waits for the stop it publishes.
+    pub async fn jump(&self, spec: BreakpointSpec) -> Result<StopReason> {
+        let selection = self.stopped_selection().await?;
+        let mut events = self.subscribe();
+        let execution = self
+            .start_jump(selection.stop, selection.execution, spec)
+            .await?;
         self.wait_for_execution(&mut events, execution).await
     }
 
@@ -1124,11 +1267,42 @@ impl DebuggerHandle {
     }
 
     /// Resolves a linker symbol to its address in the running process.
+    ///
+    /// The symbol may be any loaded module's, named as
+    /// [`SymbolInfo::answers_to`] reads names. Where several modules define
+    /// the name, the first in load order that exports it wins, as the
+    /// dynamic loader binds it; otherwise the name must be one address's.
     pub async fn runtime_address(&self, name: &str) -> Result<VirtualAddress> {
-        let image_address = self.module_image.symbol_named(name)?.address;
         let loaded = self.loaded_module().await?;
-
-        loaded.virtual_address(image_address)
+        let mut modules = vec![(loaded, Arc::clone(&self.module_image))];
+        for record in self.loaded_modules().await?.modules.iter() {
+            if record.module.id != loaded.id
+                && let Ok(image) = self.loaded_module_image(record.module.id).await
+            {
+                modules.push((record.module, image));
+            }
+        }
+        let mut found = BTreeSet::new();
+        for (module, image) in &modules {
+            let symbols = image.symbols_answering(name).collect::<Vec<_>>();
+            // A versioned name's default version is the one the loader binds.
+            if let Some(exported) = symbols
+                .iter()
+                .filter(|symbol| symbol.exported)
+                .min_by_key(|symbol| (&*symbol.name != name, !symbol.name.contains("@@")))
+            {
+                return module.virtual_address(exported.address);
+            }
+            for symbol in symbols {
+                found.insert(module.virtual_address(symbol.address)?);
+            }
+        }
+        let mut found = found.into_iter();
+        match (found.next(), found.next()) {
+            (Some(address), None) => Ok(address),
+            (None, _) => Err(Error::SymbolNotFound(name.to_owned())),
+            (Some(_), Some(_)) => Err(Error::DuplicateSymbol(name.to_owned())),
+        }
     }
 
     /// Describes a process address by the loaded module, section, and symbol
@@ -1703,6 +1877,25 @@ impl StopView<'_> {
                 stop_id: context.stop,
                 context: context.execution,
                 frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// The calls of the line the frame's thread is stopped at that a step
+    /// into could go into, in address order. Only the innermost frame has
+    /// any.
+    pub async fn step_targets(&self) -> Result<Arc<[StepTarget]>> {
+        let context = self.context;
+        if context.frame != StackFrameId::INNERMOST {
+            return Err(Error::FrameStepUnsupported(
+                "only the innermost frame's line can be stepped into".into(),
+            ));
+        }
+        self.handle
+            .request(|reply| Request::StepTargets {
+                stop_id: context.stop,
+                context: context.execution,
                 reply,
             })
             .await

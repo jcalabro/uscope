@@ -97,6 +97,16 @@ pub struct WebArgs {
     #[arg(long = "allow-origin", value_name = "ORIGIN", hide = true)]
     allow_origins: Vec<String>,
 
+    /// Search DIR for the separate debug files of modules stripped of their
+    /// debug information, before the system's directories. May be repeated.
+    #[arg(long = "debug-directory", value_name = "DIR")]
+    debug_directories: Vec<PathBuf>,
+
+    /// Download debug files no directory holds from the debuginfod servers
+    /// `DEBUGINFOD_URLS` lists.
+    #[arg(long)]
+    debuginfod: bool,
+
     /// Arguments passed to the launched program.
     #[arg(last = true, value_name = "ARGS", conflicts_with_all = ["attach", "core"])]
     arguments: Vec<OsString>,
@@ -154,7 +164,12 @@ pub async fn run(args: &WebArgs) -> Result<()> {
     let origins = Origins::new(address, args.allow_origins.clone());
     let cwd = std::env::current_dir().context("the working directory")?;
     let tokens = Tokens::mint().context("failed to mint access tokens")?;
-    let session = Session::new(cwd, origins.primary().to_owned(), tokens);
+    let debug_files = uscope::DebugFileOptions {
+        directories: args.debug_directories.clone(),
+        debuginfod: args.debuginfod,
+        ..uscope::DebugFileOptions::default()
+    };
+    let session = Session::new(cwd, origins.primary().to_owned(), tokens, debug_files);
     let app = Arc::new(App {
         session: Arc::clone(&session),
         origins,

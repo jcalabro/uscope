@@ -25,8 +25,8 @@ use super::config::{self, Configuration, Start};
 use super::handles::References;
 use super::output;
 use super::protocol::{
-    self, ErrorBody, Outgoing, SetBreakpointsArguments, SetExceptionBreakpointsArguments,
-    SetFunctionBreakpointsArguments, ThreadArguments,
+    self, ErrorBody, GotoArguments, Outgoing, SetBreakpointsArguments,
+    SetExceptionBreakpointsArguments, SetFunctionBreakpointsArguments, ThreadArguments,
 };
 use super::signals::Selection;
 use super::sources::source_json;
@@ -488,6 +488,7 @@ impl Session {
                     .await?
             }
             "stepOut" => self.step(arguments, StepKind::Out, StepKind::Out).await?,
+            "stepInTargets" => self.step_in_targets(arguments).await?,
             "pause" => self.pause().await?,
             "setBreakpoints" => self.set_breakpoints(arguments).await?,
             "setFunctionBreakpoints" => self.set_function_breakpoints(arguments).await?,
@@ -501,6 +502,8 @@ impl Session {
             "modules" => self.modules(arguments).await?,
             "loadedSources" => self.loaded_sources().await?,
             "breakpointLocations" => self.breakpoint_locations(arguments)?,
+            "gotoTargets" => self.goto_targets(arguments)?,
+            "goto" => self.goto(arguments).await?,
             "completions" => self.completions(arguments).await?,
             "setDataBreakpoints" => self.set_data_breakpoints(arguments).await?,
             "disassemble" => self.disassemble(arguments).await?,
@@ -557,10 +560,11 @@ impl Session {
         };
         let program = launch.program.clone();
         let title = format!("Loading {}", launch.program.display());
+        let debug_files = configuration.debug_files.clone();
         let debugger = self
             .with_progress(
                 title,
-                tokio::task::spawn_blocking(move || Debugger::new(&program)),
+                tokio::task::spawn_blocking(move || Debugger::new_with(&program, &debug_files)),
             )
             .await
             .map_err(|error| ErrorBody::shown(error.to_string()))?
@@ -591,16 +595,16 @@ impl Session {
                     process_id: process,
                     start_time,
                 });
+                let debug_files = &configuration.debug_files;
                 let attached = async {
-                    match (executable, held) {
-                        (Some(executable), Some(held)) => {
-                            Debugger::attach_held_with_executable(held, executable).await
+                    match held {
+                        Some(held) => {
+                            Debugger::attach_held_with(held, executable.as_deref(), debug_files)
+                                .await
                         }
-                        (None, Some(held)) => Debugger::attach_held(held).await,
-                        (Some(executable), None) => {
-                            Debugger::attach_with_executable(process, executable).await
+                        None => {
+                            Debugger::attach_with(process, executable.as_deref(), debug_files).await
                         }
-                        (None, None) => Debugger::attach(process).await,
                     }
                 };
                 let attached = self
@@ -688,6 +692,7 @@ impl Session {
             follow_forks,
             inherited,
             threads,
+            debug_files: _,
         } = configuration;
         let launched = matches!(start, Start::Launch(_));
         let core = matches!(start, Start::Core(_));
@@ -1255,17 +1260,35 @@ impl Session {
             source
         };
         let handle = self.target_handle()?;
-        let execution = handle
-            .start_step(
-                stop.id,
-                context,
-                StackFrameId::INNERMOST,
-                kind,
-                scope,
-                ExceptionDisposition::Pass,
-            )
-            .await
-            .map_err(error)?;
+        // A step in may go into one target of `stepInTargets`.
+        let call = match arguments.target_id {
+            Some(target) if kind == StepKind::IntoSource => {
+                Some(self.references.call_of(target).ok_or_else(|| {
+                    ErrorBody::new("the step-in target belongs to an earlier stop")
+                })?)
+            }
+            _ => None,
+        };
+        let execution = match call {
+            Some(call) => {
+                handle
+                    .start_step_into(stop.id, context, call, scope, ExceptionDisposition::Pass)
+                    .await
+            }
+            None => {
+                handle
+                    .start_step(
+                        stop.id,
+                        context,
+                        StackFrameId::INNERMOST,
+                        kind,
+                        scope,
+                        ExceptionDisposition::Pass,
+                    )
+                    .await
+            }
+        }
+        .map_err(error)?;
         self.resumed = Some(execution);
         self.leave_stop();
         self.cancel_inspections();
@@ -1276,6 +1299,52 @@ impl Session {
                 json!({"threadId": arguments.thread_id, "allThreadsContinued": !single}),
             )
             .await?;
+        Ok(json!({}))
+    }
+
+    /// The calls of a frame's line that a step in can go into, which only
+    /// the innermost frame has.
+    async fn step_in_targets(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
+        let arguments = parse::<protocol::ScopesArguments>(arguments, "stepInTargets arguments")?;
+        self.current_stop()?;
+        let context = self
+            .references
+            .frame_context(arguments.frame_id)
+            .ok_or_else(|| ErrorBody::new("the frame belongs to an earlier stop"))?;
+        if context.frame != StackFrameId::INNERMOST {
+            return Ok(json!({"targets": []}));
+        }
+        let handle = self.target_handle()?;
+        let listed = handle.at(context).step_targets().await.map_err(error)?;
+        let mut targets = Vec::with_capacity(listed.len());
+        for target in listed.iter() {
+            let id = self.references.step_target(target.call)?;
+            let label = match (&target.callee, target.target) {
+                (Some(callee), _) => callee.to_string(),
+                (None, Some(address)) => format!("call to {address}"),
+                (None, None) => format!("indirect call at {}", target.call),
+            };
+            targets.push(json!({"id": id, "label": label}));
+        }
+        Ok(json!({"targets": targets}))
+    }
+
+    /// Moves a thread to a target `gotoTargets` named, without running it;
+    /// the stop it publishes again follows as a `goto` stop.
+    async fn goto(&self, arguments: Value) -> Result<Value, ErrorBody> {
+        let arguments = parse::<GotoArguments>(arguments, "goto arguments")?;
+        let stop = self.current_stop()?;
+        let context = self.thread_ids.context(arguments.thread_id)?;
+        let target = self
+            .references
+            .target_of(arguments.target_id)
+            .cloned()
+            .ok_or_else(|| ErrorBody::new("the goto target belongs to an earlier stop"))?;
+        let handle = self.target_handle()?;
+        handle
+            .start_jump(stop.id, context, target)
+            .await
+            .map_err(error)?;
         Ok(json!({}))
     }
 
@@ -2389,6 +2458,8 @@ fn capabilities() -> Value {
         "supportsModulesRequest": true,
         "supportsLoadedSourcesRequest": true,
         "supportsBreakpointLocationsRequest": true,
+        "supportsGotoTargetsRequest": true,
+        "supportsStepInTargetsRequest": true,
         "supportsValueFormattingOptions": true,
         "supportsCompletionsRequest": true,
         "completionTriggerCharacters": [" ", ".", ">", "$"],
@@ -2483,6 +2554,7 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
             Some("step incomplete".to_owned()),
         ),
         StopReason::Pause => ("pause", None, None),
+        StopReason::Jump => ("goto", None, None),
         StopReason::Entry | StopReason::Attach => ("entry", None, None),
         StopReason::LanguageException(exception) => (
             "exception",

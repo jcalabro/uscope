@@ -89,6 +89,7 @@ export function Modules() {
             <th>End</th>
             <th>Symbols</th>
             <th>Path</th>
+            <th>Debug file</th>
           </tr>
         </thead>
         <tbody>
@@ -100,6 +101,16 @@ export function Modules() {
               <td className={module.symbols === "none" ? "dim" : ""}>{module.symbols}</td>
               <td className="dim" title={module.path}>
                 {module.path}
+              </td>
+              <td
+                className={module.debugFileProblem ? "error" : "dim"}
+                title={
+                  module.debugFileProblem
+                    ? `cannot use ${module.debugFile}: ${module.debugFileProblem}`
+                    : (module.debugFile ?? undefined)
+                }
+              >
+                {module.debugFile ?? "—"}
               </td>
             </tr>
           ))}

@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use uscope::{LineNumber, LoadedModuleRecord, ModuleId, ModuleImage};
+use uscope::{BreakpointSpec, LineNumber, LoadedModuleRecord, ModuleId, ModuleImage};
 
-use super::protocol::{BreakpointLocationsArguments, ErrorBody, ModulesArguments};
+use super::protocol::{
+    BreakpointLocationsArguments, ErrorBody, GotoTargetsArguments, ModulesArguments,
+};
 use super::session::{Closed, Session, error, parse};
 
 impl Session {
@@ -214,6 +216,52 @@ impl Session {
             .collect::<Vec<_>>();
         Ok(json!({"breakpoints": lines}))
     }
+
+    /// The places a thread may be moved to on a line: the line itself, or
+    /// the next with code, as a breakpoint there would slide.
+    pub(super) fn goto_targets(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
+        let arguments = parse::<GotoTargetsArguments>(arguments, "gotoTargets arguments")?;
+        self.current_stop()?;
+        let handle = self.target_handle()?;
+        let path = arguments
+            .source
+            .path
+            .ok_or_else(|| ErrorBody::new("the source has no path"))?;
+        let recorded = self.recorded_path(Path::new(&path));
+        let Some(line) = self
+            .line_from_client(arguments.line)
+            .and_then(LineNumber::new)
+        else {
+            return Ok(json!({"targets": []}));
+        };
+        let mut images = vec![Arc::clone(handle.module_image())];
+        images.extend(
+            self.code()
+                .modules()
+                .iter()
+                .map(|(_, image)| Arc::clone(image)),
+        );
+        let lines = images
+            .iter()
+            .filter_map(|image| {
+                let file = image.source_file_matching(&recorded).ok()?;
+                image.breakpoint_line(file.id, line)
+            })
+            .collect::<BTreeSet<_>>();
+        let mut targets = Vec::new();
+        for line in lines {
+            let id = self.references.goto_target(BreakpointSpec::Source {
+                path: recorded.clone(),
+                line,
+            })?;
+            targets.push(json!({
+                "id": id,
+                "label": format!("line {line}"),
+                "line": self.line_to_client(line.get()),
+            }));
+        }
+        Ok(json!({"targets": targets}))
+    }
 }
 
 pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImage>) -> Value {
@@ -227,15 +275,25 @@ pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImag
     });
     if let Some(image) = image {
         let debug_information = !image.functions().is_empty();
-        module["symbolStatus"] = if debug_information {
+        let status = if debug_information {
             "debug information loaded"
         } else if !image.symbols().is_empty() {
             "symbols only, no debug information"
         } else {
             "no symbols"
+        };
+        module["symbolStatus"] = match image.separate_debug_file() {
+            Some(uscope::DebugFile::Unusable { path, reason }) => format!(
+                "{status}; cannot use the debug file {}: {reason}",
+                path.display()
+            ),
+            _ => status.to_owned(),
         }
         .into();
-        if debug_information {
+        // A separate debug file, when the module's own was stripped.
+        if let Some(debug_file) = image.debug_file() {
+            module["symbolFilePath"] = debug_file.display().to_string().into();
+        } else if debug_information {
             module["symbolFilePath"] = image.path().display().to_string().into();
         }
         let range = image.address_range();

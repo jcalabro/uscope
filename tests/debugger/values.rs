@@ -117,7 +117,7 @@ async fn structural_inspection_dereferences_each_intermediate_pointer_only_when_
                 Some(uscope::TypeKind::Pointer { .. })
             ) && matches!(
                 available_value(&terminal_pointer.state),
-                uscope::VariableValue::Address(uscope::AddressValue { address })
+                uscope::VariableValue::Address(uscope::AddressValue { address, .. })
                     if address.get() != 0
             ),
             "{fixture}: terminal pointer was implicitly dereferenced: {terminal_pointer:?}"
@@ -306,7 +306,7 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 }
             ) && matches!(
                 available_value(&null.state),
-                uscope::VariableValue::Address(uscope::AddressValue { address })
+                uscope::VariableValue::Address(uscope::AddressValue { address, .. })
                     if address.get() == 0
             ),
             "{fixture}: {null:?}"

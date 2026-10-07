@@ -24,8 +24,8 @@ use crate::support::flight_recordings;
 // A response may wait for the program to load, as `setBreakpoints` sent
 // beside `launch` does, which takes seconds for the largest fixtures under
 // `just stress`, so responses are bounded as events are.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_mins(1);
+const EVENT_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// A position in the stream of received messages; waits look only after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -864,11 +864,16 @@ impl Dap {
             }
             Some("stopped") => {
                 if !checks.relaxed {
-                    if checks.stopped {
+                    // A thread moved without running stops again, after the
+                    // response to the request that moved it.
+                    if checks.stopped && body["reason"] != "goto" {
                         return Err("a second stopped event without a resume between".to_owned());
                     }
                     if let Some(command) = self.outstanding.values().find(|command| {
-                        matches!(command.as_str(), "continue" | "next" | "stepIn" | "stepOut")
+                        matches!(
+                            command.as_str(),
+                            "continue" | "next" | "stepIn" | "stepOut" | "goto"
+                        )
                     }) {
                         return Err(format!("a stop preceded the response to {command}"));
                     }

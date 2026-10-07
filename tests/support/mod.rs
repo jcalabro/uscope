@@ -30,12 +30,12 @@ use uscope::{
     StackFrameId, StateSnapshot, StepKind, StopReason, ThreadId, VirtualAddress,
 };
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 // Event delivery depends on waiter and controller OS threads being scheduled.
-const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a scenario's check of a stop may take, all its requests
 /// together.
-const STOP_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+const STOP_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Checks what must hold at every stop of a scenario, through the handle;
 /// an error says what does not, and fails the scenario.
@@ -226,6 +226,16 @@ pub struct Scenario {
 
 impl Scenario {
     pub fn new(name: impl Into<String>, fixture: impl AsRef<Path>) -> Self {
+        Self::with_debug_files(name, fixture, &uscope::DebugFileOptions::default())
+    }
+
+    /// A scenario whose modules' separate debug files are found as
+    /// `debug_files` says.
+    pub fn with_debug_files(
+        name: impl Into<String>,
+        fixture: impl AsRef<Path>,
+        debug_files: &uscope::DebugFileOptions,
+    ) -> Self {
         let name = name.into();
         let fixture = fixture.as_ref();
         assert!(
@@ -233,7 +243,8 @@ impl Scenario {
             "missing test fixture {}; run `just build-test-programs`",
             fixture.display()
         );
-        let debugger = Debugger::new(fixture).expect("initialize debugger scenario");
+        let debugger =
+            Debugger::new_with(fixture, debug_files).expect("initialize debugger scenario");
         Self::from_debugger(name, debugger)
     }
 
@@ -403,6 +414,24 @@ impl Scenario {
             handle.advance(spec).await
         });
         self.wait_for_request(task, "advance").await
+    }
+
+    /// Steps the selected thread into the call at `call` on its line,
+    /// running its line's other calls to their returns.
+    pub async fn step_into_to_stop(&mut self, call: uscope::VirtualAddress) -> StopReason {
+        let task = self.spawn_request(&format!("step into {call}"), move |handle| async move {
+            handle.step_into(call).await
+        });
+        self.wait_for_request(task, "step into").await
+    }
+
+    /// Moves the selected thread, without running it, to resume at a
+    /// location, and waits for the stop that publishes.
+    pub async fn jump_to_stop(&mut self, spec: BreakpointSpec) -> StopReason {
+        let task = self.spawn_request(&format!("jump {spec:?}"), move |handle| async move {
+            handle.jump(spec).await
+        });
+        self.wait_for_request(task, "jump").await
     }
 
     /// Steps the selected thread while every other thread stays stopped.

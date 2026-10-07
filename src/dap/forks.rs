@@ -15,11 +15,11 @@ use super::session::Client;
 /// How long the client may take to answer `startDebugging`. VS Code answers
 /// once the child session has attached, which includes loading the
 /// program's debug information.
-const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
+const ANSWER_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// How long a session the client started, as nvim-dap answers as soon as
 /// it starts one, may take to attach.
-const ADOPTION_TIMEOUT: Duration = Duration::from_secs(60);
+const ADOPTION_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// How often a child a session may still attach to is checked.
 const ADOPTION_POLL: Duration = Duration::from_millis(50);

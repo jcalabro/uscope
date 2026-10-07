@@ -109,9 +109,15 @@ fn evaluate(world_name: &str, text: &str) -> String {
         Err(error) => return failure(&error),
     };
     let outcome = match run(&program, &mut world) {
-        Ok(Outcome::Assign { target, bytes, .. }) => {
+        Ok(outcome @ (Outcome::Assign { .. } | Outcome::AssignRegister { .. })) => {
             // The value is the target read again.
-            world.write(&target, &bytes);
+            match outcome {
+                Outcome::Assign { target, bytes, .. } => world.write(&target, &bytes),
+                Outcome::AssignRegister {
+                    register, bytes, ..
+                } => world.write_register(&register, &bytes),
+                _ => unreachable!("matched above"),
+            }
             let target = text.split_once('=').map_or(text, |(target, _)| {
                 target.trim_end_matches(['+', '-', '*', '/', '%', '&', '|', '^', '<', '>'])
             });
@@ -148,7 +154,9 @@ fn evaluate(world_name: &str, text: &str) -> String {
             }
         }
         Ok(Outcome::Range { start, end, .. }) => format!("range {start}..{end}"),
-        Ok(Outcome::Assign { .. }) => "an assignment the world did not make".to_owned(),
+        Ok(Outcome::Assign { .. } | Outcome::AssignRegister { .. }) => {
+            "an assignment the world did not make".to_owned()
+        }
         Err(Failure::Expression(error)) => failure(&error),
         Err(Failure::Debugger(error)) => format!("debugger failure {error}"),
     }
@@ -219,7 +227,7 @@ fn outcome(world: &mut super::fake::World, text: &str) -> String {
             (state, cause) => format!("{state:?} at {cause:?}"),
         },
         Ok(Outcome::Range { start, end, .. }) => format!("range {start}..{end}"),
-        Ok(Outcome::Assign { .. }) => "an assignment".to_owned(),
+        Ok(Outcome::Assign { .. } | Outcome::AssignRegister { .. }) => "an assignment".to_owned(),
         Err(Failure::Expression(error)) => format!("error {error}"),
         Err(Failure::Debugger(error)) => format!("failure {error}"),
     }

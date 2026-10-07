@@ -9,7 +9,7 @@ use gimli::{Location, Value};
 
 use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, die_reference};
 use crate::debug_info::{
-    CallSite, CallSiteId, CallTarget, EntryParameter, TailCallChain, VariableRuntime,
+    CallSite, CallSiteId, CallTarget, EntryParameter, TailCallChain, TailJump, VariableRuntime,
     VariableRuntimeError,
 };
 use crate::{
@@ -51,6 +51,8 @@ struct CatalogCallSite {
     target: SiteTarget,
     /// For a tail call, the function it enters in this module, if known.
     enters: Option<usize>,
+    /// For a tail call, where it jumped from, if known.
+    jump: Option<TailJump>,
     parameters: Vec<SiteParameter>,
     malformed: Option<Arc<str>>,
 }
@@ -164,15 +166,22 @@ impl CallSiteBuilder {
             return_address: None,
             target: SiteTarget::Unknown,
             enters: None,
+            jump: None,
             parameters: Vec::new(),
             malformed: None,
         };
         match site_attributes(dwarf, units, unit_index, unit, entry) {
-            Ok((return_address, tail, target)) => {
+            Ok(SiteAttributes {
+                return_address,
+                call,
+                tail,
+                target,
+            }) => {
                 site.target = target;
                 // A tail call returns nowhere, whatever address follows it.
                 site.return_address = return_address.filter(|_| !tail);
                 if tail {
+                    site.jump = tail_jump(call, return_address);
                     self.functions[function].tail_calls.push(self.sites.len());
                 }
             }
@@ -255,21 +264,50 @@ impl CallSiteBuilder {
     }
 }
 
-/// A call site's return address, whether it is a tail call, and its target.
+/// What a call site entry says of its call.
+struct SiteAttributes {
+    /// The instruction after the call.
+    return_address: Option<ImageAddress>,
+    /// The call instruction itself.
+    call: Option<ImageAddress>,
+    tail: bool,
+    target: SiteTarget,
+}
+
+/// Where a tail call jumped from: its instruction, or else within the
+/// instruction before the address after it.
+fn tail_jump(call: Option<ImageAddress>, after: Option<ImageAddress>) -> Option<TailJump> {
+    if let Some(call) = call {
+        return Some(TailJump {
+            instruction: call,
+            lookup: call,
+        });
+    }
+    let after = after?;
+    Some(TailJump {
+        instruction: after,
+        lookup: ImageAddress::new(after.get().checked_sub(1)?),
+    })
+}
+
 fn site_attributes<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
     units: &[gimli::Unit<Reader<'data>>],
     unit_index: usize,
     unit: &gimli::Unit<Reader<'data>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
-) -> Result<(Option<ImageAddress>, bool, SiteTarget), DwarfError> {
-    let return_address = match entry
-        .attr_value(gimli::DW_AT_call_return_pc)
-        .or_else(|| entry.attr_value(gimli::DW_AT_low_pc))
-    {
-        Some(value) => dwarf.attr_address(unit, value)?.map(ImageAddress::new),
-        None => None,
+) -> Result<SiteAttributes, DwarfError> {
+    let address = |attributes: &[gimli::DwAt]| -> Result<Option<ImageAddress>, DwarfError> {
+        match attributes
+            .iter()
+            .find_map(|attribute| entry.attr_value(*attribute))
+        {
+            Some(value) => Ok(dwarf.attr_address(unit, value)?.map(ImageAddress::new)),
+            None => Ok(None),
+        }
     };
+    let return_address = address(&[gimli::DW_AT_call_return_pc, gimli::DW_AT_low_pc])?;
+    let call = address(&[gimli::DW_AT_call_pc])?;
     let tail = [gimli::DW_AT_call_tail_call, gimli::DW_AT_GNU_tail_call]
         .into_iter()
         .any(|attribute| {
@@ -309,7 +347,12 @@ fn site_attributes<'data>(
     } else {
         SiteTarget::Unknown
     };
-    Ok((return_address, tail, target))
+    Ok(SiteAttributes {
+        return_address,
+        call,
+        tail,
+        target,
+    })
 }
 
 fn site_parameter(
@@ -604,6 +647,7 @@ impl DwarfVariableInfo {
                 .chain(entered)
                 .map(|function| catalog.functions[function].name.clone())
                 .collect(),
+            jumps: links.iter().map(|site| catalog.sites[*site].jump).collect(),
             links: links.into_iter().map(CallSiteId).collect(),
         })
     }
@@ -760,6 +804,7 @@ mod tests {
                     return_address: None,
                     target: SiteTarget::Unknown,
                     enters,
+                    jump: None,
                     parameters: Vec::new(),
                     malformed: None,
                 }
@@ -792,6 +837,7 @@ mod tests {
             return_address: None,
             target: SiteTarget::Unknown,
             enters: None,
+            jump: None,
             parameters,
             malformed: None,
         };

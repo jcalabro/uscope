@@ -6,8 +6,8 @@ use std::sync::Arc;
 use super::number::{FloatFormat, IntType};
 use super::syntax::ast::CWord;
 use crate::{
-    ArrayDimension, BaseType, BaseTypeEncoding, Enumerator, ModuleImageId, NamedTypeRelationship,
-    TypeId, TypeInfo, TypeKind, TypeReference,
+    ArrayDimension, BaseType, BaseTypeEncoding, CBaseType, Enumerator, ModuleImageId,
+    NamedTypeRelationship, TypeId, TypeInfo, TypeKind, TypeReference,
 };
 
 /// A type an expression's value has.
@@ -21,6 +21,9 @@ pub enum Ty {
     Int(IntType),
     /// A built-in float type.
     Float(FloatFormat),
+    /// A C base type the program does not describe, as the target lays it
+    /// out.
+    C(CBaseType),
     Bool,
     /// A pointer the expression derived, by `&` or a cast.
     Pointer(Arc<Self>),
@@ -71,6 +74,10 @@ pub trait TypeSource {
 
     /// The target's byte order.
     fn byte_order(&self) -> crate::ByteOrder;
+
+    /// The target's layout of a C base type, or `None` when uscope does not
+    /// know the target's C data model.
+    fn c_base_type(&self, ty: CBaseType) -> Option<BaseType>;
 
     /// Whether two types have one identity, as one type defined in several
     /// units does.
@@ -123,6 +130,10 @@ pub fn category(types: &dyn TypeSource, ty: &Ty) -> Category {
             enumerators: None,
         },
         Ty::Float(format) => Category::Float(*format),
+        Ty::C(c) => types.c_base_type(*c).map_or_else(
+            || Category::Opaque(format!("the target's `{}` is unknown", c.name()).into()),
+            |base| base_category(&base),
+        ),
         Ty::Bool => Category::Bool,
         Ty::Pointer(pointee) => Category::Pointer(match pointee.as_ref() {
             Ty::Void => None,
@@ -227,6 +238,14 @@ fn base_category(base: &BaseType) -> Category {
 
 /// Whether values of a type are characters, whose pointers point at text.
 pub fn is_character(types: &dyn TypeSource, ty: &Ty) -> bool {
+    if let Ty::C(c) = ty {
+        return types.c_base_type(*c).is_some_and(|base| {
+            matches!(
+                base.encoding,
+                BaseTypeEncoding::SignedCharacter | BaseTypeEncoding::UnsignedCharacter
+            )
+        });
+    }
     let Ty::Program(reference) = ty else {
         return false;
     };
@@ -255,6 +274,7 @@ pub fn size_of(types: &dyn TypeSource, ty: &Ty) -> Option<u64> {
         Ty::Float(FloatFormat::Binary32) => Some(4),
         Ty::Float(FloatFormat::Binary64) => Some(8),
         Ty::Float(FloatFormat::X87Extended) => Some(16),
+        Ty::C(c) => types.c_base_type(*c).map(|base| base.byte_size),
         Ty::Bool => Some(1),
         Ty::Pointer(_) => Some(u64::from(types.pointer_size())),
         Ty::Exact | Ty::Void | Ty::Null | Ty::Text => None,
@@ -272,12 +292,34 @@ pub fn type_name(types: &dyn TypeSource, ty: &Ty) -> String {
         Ty::Float(FloatFormat::Binary32) => "f32".to_owned(),
         Ty::Float(FloatFormat::Binary64) => "f64".to_owned(),
         Ty::Float(FloatFormat::X87Extended) => "f80".to_owned(),
+        Ty::C(c) => c.name().to_owned(),
         Ty::Bool => "bool".to_owned(),
-        Ty::Pointer(pointee) => format!("{}*", type_name(types, pointee)),
+        Ty::Pointer(pointee) => pointer_name(&type_name(types, pointee)),
         Ty::Void => "void".to_owned(),
         Ty::Null => "null".to_owned(),
         Ty::Text => "string".to_owned(),
     }
+}
+
+/// The name of a pointer to a type named `pointee`. A pointer to a
+/// pointer to a function or an array adds its `*` inside the declarator's
+/// parentheses, as `int (**)(int)` points to `int (*)(int)`, and a pointer
+/// to an array parenthesizes its `*`, as in `int (*)[2]`.
+fn pointer_name(pointee: &str) -> String {
+    let hole = pointee.match_indices("(*").find(|(index, _)| {
+        pointee[index + 1..]
+            .trim_start_matches('*')
+            .starts_with([')', ' '])
+    });
+    if let Some((index, _)) = hole {
+        return format!("{}*{}", &pointee[..=index], &pointee[index + 1..]);
+    }
+    if pointee.ends_with(']')
+        && let Some(index) = pointee.find('[')
+    {
+        return format!("{} (*){}", pointee[..index].trim_end(), &pointee[index..]);
+    }
+    format!("{pointee}*")
 }
 
 fn int_name(int: IntType) -> String {
@@ -300,6 +342,7 @@ fn language_type_id(ty: &Ty) -> u32 {
         Ty::Float(FloatFormat::Binary64) => 6,
         Ty::Float(FloatFormat::X87Extended) => 7,
         Ty::Int(int) => 16 + u32::from(int.width()) * 2 + u32::from(int.is_signed()),
+        Ty::C(c) => 512 + *c as u32,
         Ty::Pointer(pointee) => (1_u32 << 20).wrapping_add(language_type_id(pointee)),
     }
 }
@@ -333,6 +376,9 @@ pub fn type_info(types: &dyn TypeSource, ty: &Ty) -> TypeInfo {
         })
     };
     let kind = match ty {
+        Ty::C(c) => types
+            .c_base_type(*c)
+            .map_or(TypeKind::Unspecified, TypeKind::Base),
         Ty::Int(int) => base(
             if int.is_signed() {
                 BaseTypeEncoding::Signed

@@ -489,6 +489,12 @@ impl DwarfVariableInfo {
         transparent_type_from(&self.types, id)
     }
 
+    /// Whether a type is a function's, whose values are code.
+    fn is_code(&self, id: TypeId) -> bool {
+        self.transparent_type(id)
+            .is_ok_and(|(_, info)| matches!(info.kind, TypeKind::Signature { .. }))
+    }
+
     fn validate_static_member_layout(&self, record: TypeId, member: &RecordMember) -> Result<()> {
         let record_size = self.type_info(record).ok().and_then(|info| info.byte_size);
         let member_size = self
@@ -2139,10 +2145,14 @@ impl DwarfVariableInfo {
                                     reason: DereferenceUnavailableReason::UnspecifiedPointee,
                                 }
                             };
+                            // A pointer to code names the function it enters.
+                            let function = target
+                                .filter(|target| self.is_code(*target) && address.get() != 0)
+                                .and_then(|_| runtime.function_at(address));
                             leaf(
                                 source,
                                 raw,
-                                VariableValue::Address(AddressValue { address }),
+                                VariableValue::Address(AddressValue { address, function }),
                                 dereference,
                             )
                         }
