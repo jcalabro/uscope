@@ -185,6 +185,10 @@ impl<M: Machine> TypeSource for ViewMachine<'_, M> {
     fn byte_order(&self) -> crate::ByteOrder {
         self.base.byte_order()
     }
+
+    fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
+        self.base.c_base_type(ty)
+    }
 }
 
 impl<M: Machine> Machine for ViewMachine<'_, M> {

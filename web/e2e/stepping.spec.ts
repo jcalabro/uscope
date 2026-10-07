@@ -107,6 +107,39 @@ test("a breakpoint stops the program where the page shows, and steps replace the
   await expect(page.locator(".cm-pc-line")).toContainText("handle_request(&server, &req)");
 });
 
+test("Shift+J moves the thread to the cursor's line without running it", async ({
+  page,
+  uscope,
+}) => {
+  await join(page, uscope.link);
+  await breakInHandleRequest(page);
+  await stepOver(page);
+  await stepOver(page);
+  await expect(page.locator(".cm-pc-line")).toContainText("int status = 0;");
+  // Back to the lookup, to run it again.
+  const before = page.url();
+  await line(page, "table_find(&s->table, req->key)").click();
+  await page.keyboard.press("Shift+J");
+  await expect(page).not.toHaveURL(before);
+  await expect(page.locator(".cm-pc-line")).toContainText("table_find(&s->table, req->key)");
+  await expect(page.getByTestId("stops")).toContainText("jump · kvstore.c:91");
+});
+
+test("i lists the calls of the line, and steps into the one chosen", async ({ page, uscope }) => {
+  await join(page, uscope.link);
+  await breakInHandleRequest(page);
+  await stepOver(page);
+  await expect(page.locator(".cm-pc-line")).toContainText("table_find(&s->table, req->key)");
+  const before = page.url();
+  await page.keyboard.press("i");
+  const calls = page.getByRole("group", { name: "Calls" });
+  await expect(calls.getByRole("option")).toHaveText([/^table_find/]);
+  await page.keyboard.press("Enter");
+  await expect(page).not.toHaveURL(before);
+  await expect(page.getByRole("region", { name: "Call stack" })).toContainText("table_find");
+  await expect(page.getByTestId("stops")).toContainText("step · kvstore.c:66");
+});
+
 test("the gutter sets and clears breakpoints, and conditions narrow them", async ({
   page,
   uscope,
@@ -129,6 +162,8 @@ test("the gutter sets and clears breakpoints, and conditions narrow them", async
   // Only every third request is a get, so at least two hits did not stop.
   await expect(breakpoints).toContainText(/(^|\D)([3-9]|\d\d+) hits/);
 
+  // The stop may have scrolled the source; measure the line where it is now.
+  await scrollTo(page, 90);
   await clickGutter(page, 90);
   await expect(breakpoints.locator("[data-breakpoint]")).toHaveCount(0);
 });

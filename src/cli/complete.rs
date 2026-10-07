@@ -280,9 +280,7 @@ pub fn complete(
             .collect::<Vec<_>>()
     };
     let candidates = match spec.command {
-        Command::Break | Command::Tbreak | Command::Advance | Command::Disassemble
-            if argument == 0 =>
-        {
+        command if argument == 0 && takes_location(command) => {
             return location(word, start, context);
         }
         Command::Break | Command::Tbreak => {
@@ -351,6 +349,14 @@ pub fn complete(
         _ => Vec::new(),
     };
     (start, matching(word, candidates))
+}
+
+/// Whether a command's first argument is a location.
+const fn takes_location(command: Command) -> bool {
+    matches!(
+        command,
+        Command::Break | Command::Tbreak | Command::Advance | Command::Jump | Command::Disassemble
+    )
 }
 
 fn words_of(words: &[&str]) -> Vec<String> {

@@ -88,8 +88,17 @@ export const test = base.extend<{ program: string[]; uscope: Uscope; quiet: unde
       const errors: string[] = [];
       const watch = (page: Page) => {
         page.on("console", (message) => {
-          // A failed request is recorded once, by its response, below.
-          if (message.type() === "error" && !/failed to load resource/i.test(message.text())) {
+          // A failed request is recorded once, by its response, below. Firefox
+          // also reports a font download it aborted as the page went away
+          // (NS_BINDING_ABORTED), which no blocked or missing font causes.
+          const aborted = /downloadable font: download failed.*status=2152398850/.test(
+            message.text(),
+          );
+          if (
+            message.type() === "error" &&
+            !aborted &&
+            !/failed to load resource/i.test(message.text())
+          ) {
             errors.push(`${page.url()}: ${message.text().slice(0, 300)}`);
           }
         });

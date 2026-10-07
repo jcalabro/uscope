@@ -135,6 +135,33 @@ pub(super) fn x86_64_caller_variable_register(
     Err(VariableUnavailableReason::Unsupported(UnsupportedVariableFeature::RegisterClass).into())
 }
 
+/// The id of the program counter's descriptor.
+pub(super) const PROGRAM_COUNTER: u32 = 16;
+
+pub(super) const fn is_program_counter(register: RegisterId) -> bool {
+    register.get() == PROGRAM_COUNTER
+}
+
+/// The field of any register a snapshot presents, by its descriptor's id:
+/// a general register, or one of [`SPECIAL_REGISTERS`] after them.
+pub(super) const fn x86_64_register_slot(
+    registers: &mut libc::user_regs_struct,
+    register: RegisterId,
+) -> Option<&mut u64> {
+    Some(match register.get() {
+        18 => &mut registers.cs,
+        19 => &mut registers.ss,
+        20 => &mut registers.ds,
+        21 => &mut registers.es,
+        22 => &mut registers.fs,
+        23 => &mut registers.gs,
+        24 => &mut registers.fs_base,
+        25 => &mut registers.gs_base,
+        26 => &mut registers.orig_rax,
+        _ => return x86_64_general_register_slot(registers, register),
+    })
+}
+
 /// The field of a general register, by its descriptor's id.
 pub(super) const fn x86_64_general_register_slot(
     registers: &mut libc::user_regs_struct,
@@ -166,6 +193,7 @@ pub(super) const fn x86_64_general_register_slot(
 /// The 512-byte x86-64 FXSAVE image saved by ptrace and by `NT_FPREGSET`.
 pub(super) type Fxsave = Arc<[u8; core_dump::FXSAVE_SIZE]>;
 
+const FXSAVE_X87_OFFSET: usize = 32;
 const FXSAVE_XMM_OFFSET: usize = 160;
 
 pub(super) fn native_fxsave(registers: &libc::user_fpregs_struct) -> Fxsave {
@@ -196,6 +224,23 @@ pub(super) fn x86_64_xmm_variable_register(registers: &Fxsave, dwarf: u16) -> Va
             role: None,
         },
         bytes: bytes.into(),
+    }
+}
+
+/// One of the x87 registers st0 through st7, DWARF's 33 through 40, which
+/// FXSAVE stores from the stack's top, each in the low ten bytes of
+/// sixteen.
+pub(super) fn x86_64_x87_variable_register(registers: &Fxsave, dwarf: u16) -> VariableRegister {
+    let index = usize::from(dwarf - 33);
+    let start = FXSAVE_X87_OFFSET + index * 16;
+    VariableRegister {
+        descriptor: RegisterDescriptor {
+            id: RegisterId::new(43 + u32::try_from(index).expect("x87 index fits u32")),
+            name: format!("st{index}").into(),
+            bits: 80,
+            role: None,
+        },
+        bytes: registers[start..start + 10].to_vec().into(),
     }
 }
 

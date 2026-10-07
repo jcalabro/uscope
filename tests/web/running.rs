@@ -294,3 +294,185 @@ async fn a_viewer_reads_stacks_and_sources_but_cannot_step_or_break() {
         assert_eq!(kind, "invalid", "{url}");
     }
 }
+
+/// Breakpoints in code without debug information are placed and shown by
+/// their symbols: an indirect function's at the implementation its
+/// resolver chose.
+#[tokio::test]
+async fn breakpoints_without_debug_information_show_the_symbols_they_stop_in() {
+    let web = Web::start("symbols", &[&fixture("measure-gcc-nodebug")]);
+    let mut tab = web.control("tab").await;
+    tab.state("the program loaded", |state| state["session"].is_string())
+        .await;
+    let measure = tab
+        .ok("addBreakpoint", json!({"location": "measure"}))
+        .await["id"]
+        .clone();
+    let set = tab
+        .state("the breakpoint", |state| {
+            state["breakpoints"][0]["id"] == measure
+        })
+        .await;
+    assert_eq!(set["breakpoints"][0]["places"][0]["function"], "measure");
+    tab.ok("continue", json!({})).await;
+    let stopped = tab.inferior("stopped").await;
+    assert_eq!(stopped["inferior"]["place"]["function"], "measure");
+
+    let strlen = tab.ok("addBreakpoint", json!({"location": "strlen"})).await["id"].clone();
+    let set = tab
+        .state("the breakpoint", |state| {
+            state["breakpoints"][1]["id"] == strlen
+        })
+        .await;
+    let places = set["breakpoints"][1]["places"]
+        .as_array()
+        .expect("places")
+        .iter()
+        .filter_map(|place| place["function"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        places.iter().any(|name| name.starts_with("__strlen_")),
+        "{places:?}"
+    );
+    let stop = stopped["inferior"]["stop"].clone();
+    tab.ok("continue", json!({"stop": stop})).await;
+    let stopped = tab
+        .state("the stop in strlen", |state| {
+            state["inferior"]["state"] == "stopped" && state["inferior"]["stop"] != stop
+        })
+        .await;
+    let function = stopped["inferior"]["place"]["function"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(function.starts_with("__strlen_"), "{stopped}");
+}
+
+/// A tab moves a thread, without running it, to a line of its function, and
+/// every tab follows it to a new stop there; the innermost frame's
+/// registers change through their rows.
+#[tokio::test]
+async fn a_thread_jumps_to_a_line_and_registers_change_through_their_rows() {
+    let web = Web::start("jump", &[&fixture("jump")]);
+    let mut tab = web.control("tab").await;
+    tab.state("the program loaded", |state| state["session"].is_string())
+        .await;
+    let files = tab.ok("sources", json!(null)).await;
+    let path = source_named(&files, "jump.c");
+    let line = |marker: &str| {
+        crate::support::source_line("tests/fixtures/c/jump.c", &format!("jump: {marker}"))
+    };
+    tab.ok(
+        "addBreakpoint",
+        json!({"location": format!("{path}:{}", line("start"))}),
+    )
+    .await;
+    tab.ok("continue", json!({})).await;
+    let stopped = tab.inferior("stopped").await;
+    let (stop, thread) = (
+        stopped["inferior"]["stop"].clone(),
+        stopped["inferior"]["thread"].clone(),
+    );
+
+    let (kind, message) = tab
+        .request(
+            "jump",
+            json!({"stop": stop, "thread": thread, "location": "elsewhere"}),
+        )
+        .await
+        .expect_err("a jump out of the function");
+    assert!(
+        message.contains("has no code in the function"),
+        "{kind}: {message}"
+    );
+    tab.ok(
+        "jump",
+        json!({"stop": stop, "thread": thread, "location": format!("{path}:{}", line("target"))}),
+    )
+    .await;
+    let moved = tab
+        .state("the jump", |state| {
+            state["inferior"]["state"] == "stopped" && state["inferior"]["stop"] != stop
+        })
+        .await;
+    assert_eq!(moved["inferior"]["reason"]["kind"], "jump", "{moved}");
+    assert_eq!(
+        moved["inferior"]["place"]["line"],
+        line("target"),
+        "{moved}"
+    );
+    let (kind, _) = tab
+        .request(
+            "jump",
+            json!({"stop": stop, "thread": thread, "location": format!("{path}:{}", line("start"))}),
+        )
+        .await
+        .expect_err("a jump from an earlier stop");
+    assert_eq!(kind, "staleStop");
+
+    let at = json!({"stop": moved["inferior"]["stop"], "thread": thread, "frame": 0});
+    let mut set = at.clone();
+    set["path"] = "$rbx".into();
+    set["value"] = "0x2a".into();
+    tab.ok("setValue", set).await;
+    let registers = tab.ok("registers", at).await;
+    let rbx = registers["registers"]
+        .as_array()
+        .expect("registers")
+        .iter()
+        .find(|register| register["name"] == "rbx")
+        .expect("rbx")
+        .clone();
+    assert_eq!(rbx["value"], "0x000000000000002a", "{rbx}");
+
+    // Only `status += 100` ran.
+    tab.ok("continue", json!({"stop": moved["inferior"]["stop"]}))
+        .await;
+    let exited = tab.inferior("exited").await;
+    assert!(
+        exited["inferior"].to_string().contains("with status 100"),
+        "{exited}"
+    );
+}
+
+/// A step into one call of a line goes into that call, running the
+/// line's others to their returns.
+#[tokio::test]
+async fn a_step_goes_into_the_call_the_tab_chose() {
+    let web = Web::start("step targets", &[&fixture("step-targets-gcc-o0")]);
+    let mut tab = web.control("tab").await;
+    tab.state("the program loaded", |state| state["session"].is_string())
+        .await;
+    let line = crate::support::source_line("tests/fixtures/c/step-targets.c", "targets: calls");
+    tab.ok(
+        "addBreakpoint",
+        json!({"location": format!("step-targets.c:{line}")}),
+    )
+    .await;
+    tab.ok("continue", json!({})).await;
+    let stopped = tab.inferior("stopped").await;
+    let (stop, thread) = (
+        stopped["inferior"]["stop"].clone(),
+        stopped["inferior"]["thread"].clone(),
+    );
+    let targets = tab
+        .ok("stepTargets", json!({"stop": stop, "thread": thread}))
+        .await;
+    let calls = targets["calls"].as_array().expect("calls").clone();
+    let callees = calls
+        .iter()
+        .map(|call| call["callee"].as_str().expect("a callee"))
+        .collect::<Vec<_>>();
+    assert_eq!(callees, ["inc", "twice", "add"], "{targets}");
+    tab.ok(
+        "step",
+        json!({"stop": stop, "thread": thread, "kind": "into", "call": calls[2]["call"]}),
+    )
+    .await;
+    let into = tab
+        .state("the step into add", |state| {
+            state["inferior"]["state"] == "stopped" && state["inferior"]["stop"] != stop
+        })
+        .await;
+    assert_eq!(into["inferior"]["place"]["function"], "add", "{into}");
+    assert_eq!(into["inferior"]["reason"]["kind"], "step", "{into}");
+}

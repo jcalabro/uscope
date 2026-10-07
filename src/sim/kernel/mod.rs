@@ -692,6 +692,7 @@ impl Kernel {
         Shadow {
             base,
             calls: Vec::new(),
+            jumps: Vec::new(),
             lost: false,
         }
     }
@@ -1118,6 +1119,37 @@ impl Kernel {
         }
     }
 
+    /// The word at `address`, with the first byte of the call instruction
+    /// the thread the client steps has come to hidden as a no-op, under
+    /// [`Sabotage::HideSteppedCalls`].
+    #[cfg(test)]
+    fn hide_stepped_call(&self, tgid: Tid, address: u64, word: u64) -> u64 {
+        // Once the thread has moved: a call it stands at as the step begins
+        // may be the one the step is to go into.
+        let Some(thread) = self
+            .tracking
+            .as_ref()
+            .filter(|tracking| !tracking.positions.is_empty())
+            .and_then(|tracking| self.threads.get(&tracking.tid))
+            .filter(|thread| thread.tgid == tgid)
+        else {
+            return word;
+        };
+        let rip = thread.registers.rip;
+        let Some(offset) = rip.checked_sub(address).filter(|offset| *offset < 8) else {
+            return word;
+        };
+        let calls = self.processes.get(&tgid).is_some_and(|process| {
+            crate::sim::cpu::decode(rip, &process.space)
+                .is_ok_and(|instruction| instruction.mnemonic() == iced_x86::Mnemonic::Call)
+        });
+        if !calls {
+            return word;
+        }
+        let shift = offset * 8;
+        (word & !(0xff << shift)) | (0x90 << shift)
+    }
+
     /// A word ptrace reads, as a sabotaged kernel reports it.
     #[cfg(test)]
     pub(super) fn sabotage_read(&self, tgid: Tid, address: u64, word: u64) -> u64 {
@@ -1145,6 +1177,7 @@ impl Kernel {
         };
         match self.sabotage {
             Some(Sabotage::SkipLinkedNodes) if address.checked_add(8) == Some(word) => word + 16,
+            Some(Sabotage::HideSteppedCalls) => self.hide_stepped_call(tgid, address, word),
             Some(Sabotage::SkewReturnAddresses) if return_slot(true) => word + 1,
             Some(Sabotage::SkewSmallStackWords) if small_on_stack() => word + 1,
             Some(Sabotage::FlickeringStackWords) if small_on_stack() => {

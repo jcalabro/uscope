@@ -15,7 +15,7 @@ use crate::eval::syntax::ast::{BinaryOp, NodeKind};
 use crate::eval::target::{
     Lookup, Planned, Refusal, Register, Scope, StepKind, TypeLookup, TypeQuery,
 };
-use crate::eval::types::{Category, Ty, TypeSource, category, representation};
+use crate::eval::types::{Category, Ty, TypeSource, category, is_character, representation};
 use crate::{BaseTypeEncoding, TypeArgument, TypeInfo, TypeKind, TypeReference};
 
 use super::pattern::{Captured, Captures};
@@ -370,6 +370,10 @@ impl<S: Scope> TypeSource for ViewScope<'_, S> {
 
     fn byte_order(&self) -> crate::ByteOrder {
         self.base.byte_order()
+    }
+
+    fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
+        self.base.c_base_type(ty)
     }
 
     fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
@@ -1250,6 +1254,7 @@ fn bind_link<S: Scope>(
 fn is_text_unit<S: Scope>(scope: &ViewScope<'_, S>, ty: &Ty) -> bool {
     match ty {
         Ty::Int(int) => int.width() == 8,
+        Ty::C(_) => is_character(scope, ty),
         Ty::Program(reference) => matches!(
             representation(scope, *reference),
             Ok((_, TypeInfo {

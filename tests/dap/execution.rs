@@ -351,3 +351,48 @@ fn single_thread_requests_run_only_the_thread_they_name() {
     );
     dap.finish();
 }
+
+/// Step Into Target: `stepInTargets` names the calls of the innermost
+/// frame's line, and `stepIn` with one of them goes into that call,
+/// running the line's others to their returns.
+#[test]
+fn step_in_goes_into_the_target_the_client_chose() {
+    let mut dap = Dap::start("step in targets");
+    let stop = stopped_at(
+        &mut dap,
+        "step-targets-gcc-o0",
+        "c/step-targets.c",
+        "targets: calls",
+    );
+    let thread = stop.thread;
+    let frames = dap.request("stackTrace", json!({"threadId": thread}))["stackFrames"]
+        .as_array()
+        .expect("frames")
+        .clone();
+    let listed = dap.request("stepInTargets", json!({"frameId": frames[0]["id"]}));
+    let targets = listed["targets"].as_array().expect("targets").clone();
+    let labels = targets
+        .iter()
+        .map(|target| target["label"].as_str().expect("a label"))
+        .collect::<Vec<_>>();
+    assert_eq!(labels, ["inc", "twice", "add"], "{targets:?}");
+    // A caller's line has nothing to step into.
+    if let Some(caller) = frames.get(1) {
+        let none = dap.request("stepInTargets", json!({"frameId": caller["id"]}));
+        assert_eq!(none["targets"], json!([]));
+    }
+    let add = targets[2]["id"].clone();
+    let sent = dap.send("stepIn", json!({"threadId": thread, "targetId": add}));
+    dap.success(sent);
+    assert_eq!(dap.stopped(sent.mark).reason, "step");
+    let (function, line, _) = top(&mut dap, thread);
+    assert_eq!(function, "add");
+    assert_eq!(
+        line,
+        json!(line_of(&source("c/step-targets.c"), "targets: add"))
+    );
+    // A target belongs to the stop that listed it.
+    let stale = dap.request_error("stepIn", json!({"threadId": thread, "targetId": add}));
+    assert_eq!(stale, "the step-in target belongs to an earlier stop");
+    dap.finish();
+}

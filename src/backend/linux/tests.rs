@@ -662,6 +662,7 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
                 .collect(),
             symbols: Vec::new(),
             symbol_sources: crate::model::SymbolTableSources::default(),
+            got_slots: Vec::new(),
             globals: Vec::new(),
             types: Arc::default(),
             source_files: Vec::new(),
@@ -1143,7 +1144,12 @@ impl LinuxTraceOps for FakeTrace {
     fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
         None
     }
-    fn load_module(&self, _path: &Path, _id: crate::ModuleImageId) -> Result<DebugInfo> {
+    fn load_module(
+        &self,
+        _path: &Path,
+        _id: crate::ModuleImageId,
+        _search: &crate::debug_info::DebugFileSearch,
+    ) -> Result<DebugInfo> {
         panic!("unexpected module load")
     }
     fn thread_group_id(&self, _pid: Pid) -> Result<Pid> {
@@ -1550,6 +1556,7 @@ fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness
             data: sectionless_elf(),
             identity: FileIdentity { inode: 0 },
             process_start_time: None,
+            debug_files: crate::debug_info::DebugFileSearch::default(),
         },
         DebugInfo {
             image: Arc::clone(image),
@@ -5859,6 +5866,7 @@ fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
                 context: ExecutionContext::Thread(debug_thread_id(pid)),
                 frame: StackFrameId::INNERMOST,
                 kind,
+                call: None,
                 scope: ResumeScope::Process(process),
                 exception: ExceptionDisposition::Pass,
                 reply,
@@ -6061,4 +6069,71 @@ fn nested_presentations_share_one_interval_between_looks_for_run_control() {
     });
     assert!(interrupted, "the work never looked for run control");
     assert_eq!(charges, INTERRUPT_INTERVAL);
+}
+
+/// glibc describes its signal trampoline, `__restore_rt`, with call-frame
+/// expressions that find every register in the `ucontext` the kernel
+/// saved. Evaluating them must agree with the kernel's `sigcontext`
+/// layout, which unwinding through a trampoline reads directly.
+#[test]
+fn glibc_signal_trampoline_expressions_find_the_kernels_saved_registers() {
+    use super::frames::{SIGCONTEXT_REGISTERS, UCONTEXT_MCONTEXT};
+
+    struct Saved(BTreeMap<u64, u64>);
+    impl MemoryReader for Saved {
+        fn read_u64(&mut self, address: VirtualAddress) -> Option<u64> {
+            self.0.get(&address.get()).copied()
+        }
+    }
+
+    let maps = std::fs::read_to_string("/proc/self/maps").expect("read our own maps");
+    let libc = maps
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(5))
+        .find(|path| path.ends_with("/libc.so.6"))
+        .expect("the tests link glibc");
+    let debug = crate::debug_info::load_module(
+        std::path::Path::new(libc),
+        crate::ModuleImageId::new(1),
+        &crate::debug_info::DebugFileSearch::default(),
+    )
+    .expect("load libc");
+    let trampoline = debug
+        .image
+        .symbols_named("__restore_rt")
+        .next()
+        .expect("glibc's signal trampoline")
+        .address;
+
+    // A handler's frame returned into the trampoline, whose stack holds the
+    // ucontext; each saved register gets a value of its own.
+    let stack = 0x7fff_0000_u64;
+    let expected: Vec<(u16, u64)> = SIGCONTEXT_REGISTERS
+        .iter()
+        .enumerate()
+        .map(|(slot, &register)| (register, 0x1000 + slot as u64 * 0x11))
+        .collect();
+    let mut memory = Saved(
+        expected
+            .iter()
+            .enumerate()
+            .map(|(slot, &(_, value))| (stack + UCONTEXT_MCONTEXT + 8 * slot as u64, value))
+            .collect(),
+    );
+    let registers = RegisterFile::new([(7, stack), (16, trampoline.get())]);
+    let step = debug
+        .unwind
+        .unwind(trampoline, &registers, &mut memory)
+        .expect("glibc's CFI unwinds its trampoline");
+    assert!(
+        step.signal_frame,
+        "the trampoline's CIE marks a signal frame"
+    );
+    for (register, value) in expected {
+        assert_eq!(
+            step.registers.get(register),
+            Some(value),
+            "DWARF register {register}"
+        );
+    }
 }

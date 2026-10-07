@@ -530,6 +530,18 @@ impl World {
         self.registers.insert(name, Some(value));
     }
 
+    /// Stores an assignment's bytes in the register a scope named.
+    pub fn write_register(&mut self, register: &Register, bytes: &[u8]) {
+        let value = self
+            .registers
+            .values_mut()
+            .nth(usize::from(register.number))
+            .expect("a register the scope named");
+        let mut wide = [0_u8; 16];
+        wide[..bytes.len()].copy_from_slice(bytes);
+        *value = Some(u128::from_le_bytes(wide));
+    }
+
     /// A register unwinding could not recover.
     pub fn lost_register(&mut self, name: &'static str) {
         self.registers.insert(name, None);
@@ -705,6 +717,7 @@ impl World {
             }
             TypeKind::Pointer { .. } | TypeKind::Reference { .. } => {
                 VariableValue::Address(AddressValue {
+                    function: None,
                     address: VirtualAddress::new(u64::try_from(raw).expect("eight bytes")),
                 })
             }
@@ -820,6 +833,15 @@ impl TypeSource for World {
 
     fn byte_order(&self) -> ByteOrder {
         ByteOrder::Little
+    }
+
+    fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
+        crate::TargetDescription {
+            architecture: crate::Architecture::X86_64,
+            byte_order: ByteOrder::Little,
+            pointer_width: crate::PointerWidth::Bits64,
+        }
+        .c_base_type(ty)
     }
 
     /// Types with identities are one type when their identities are, as
@@ -1380,6 +1402,7 @@ impl Machine for World {
                 source: VariableValueSource::Computed,
                 raw: Some(address.to_le_bytes().to_vec().into()),
                 value: VariableValue::Address(AddressValue {
+                    function: None,
                     address: VirtualAddress::new(address),
                 }),
                 dereference: DereferenceState::NotApplicable,
@@ -1519,6 +1542,12 @@ pub fn memory() -> World {
     world.variable("twice", int, &2_i32.to_le_bytes());
     let light = world.enumeration("Light", uint, &[("RED", 10), ("AMBER", 11)]);
     world.variable("light", light, &11_u32.to_le_bytes());
+    // Names C reserves, which Go, Rust, and Zig programs may use.
+    world.variable("long", int, &3_i32.to_le_bytes());
+    let words = world.record("Words", 8, &[("int", int, 0), ("class", int, 4)]);
+    let mut words_bytes = 4_i32.to_le_bytes().to_vec();
+    words_bytes.extend(6_i32.to_le_bytes());
+    world.variable("words", words, &words_bytes);
     // C++ classes: a Tile is a Named and a Shape, and a Twice holds two
     // Shapes, its own and its Tile's.
     let shape = world.record("Shape", 4, &[("id", int, 0)]);

@@ -27,9 +27,93 @@ pub fn demangle(name: &str) -> Option<String> {
         .ok()
 }
 
+/// Whether a mangled linker name demangles to a name a person writes. As
+/// with gdb, the name may leave out the scopes that qualify it, and a C++
+/// function's parameters: `scale`, `shapes::scale`, and
+/// `shapes::scale(double)` all spell `_ZN6shapes5scaleEd`.
+pub fn spells(mangled: &str, name: &str) -> bool {
+    let (written, written_parameters) = split_parameters(name);
+    // Only a mangled name holding the name's last part can demangle to it,
+    // which spares demangling every symbol of a module.
+    let last = last_part(name);
+    if last.is_empty() || !mangled.contains(last) {
+        return false;
+    }
+    let Some(demangled) = demangle(mangled) else {
+        return false;
+    };
+    let (qualified, parameters) = split_parameters(&demangled);
+    // A clone, such as `[clone .constprop.0]`, is other code.
+    if parameters.contains("[clone") {
+        return false;
+    }
+    let named = qualified == written
+        || qualified
+            .strip_suffix(written)
+            .is_some_and(|scopes| scopes.ends_with("::"));
+    named
+        && (written_parameters.is_empty()
+            || parameters == written_parameters
+            || parameters
+                .strip_prefix(written_parameters)
+                .is_some_and(|qualifiers| qualifiers.starts_with(' ')))
+}
+
+/// The part of a written or demangled name after its last scope, without
+/// its parameters, which a name `spells` must share with its symbol's.
+pub fn last_part(name: &str) -> &str {
+    let (written, _) = split_parameters(name);
+    written.rsplit("::").next().unwrap_or(written)
+}
+
+/// A function's name and its parameter list, which begins at the first
+/// parenthesis outside template arguments.
+fn split_parameters(name: &str) -> (&str, &str) {
+    let mut depth = 0_usize;
+    for (index, character) in name.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            '(' if depth == 0 => return name.split_at(index),
+            _ => {}
+        }
+    }
+    (name, "")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::demangle;
+    use super::{demangle, spells};
+
+    #[test]
+    fn written_names_spell_mangled_ones_with_or_without_scopes_and_parameters() {
+        for (mangled, name, expected) in [
+            ("_ZN6shapes5scaleEd", "shapes::scale", true),
+            ("_ZN6shapes5scaleEd", "shapes::scale(double)", true),
+            ("_ZN6shapes5scaleEd", "scale", true),
+            ("_ZN6shapes5scaleEd", "shapes::scale(int)", false),
+            ("_ZN6shapes5scaleEd", "apes::scale", false),
+            ("_ZN6shapes5scaleEd", "shapes::scal", false),
+            ("_ZNK6shapes6Widget4pickEv", "shapes::Widget::pick", true),
+            ("_ZNK6shapes6Widget4pickEv", "Widget::pick()", true),
+            ("_ZN5boxedIiE3getEv", "boxed<int>::get", true),
+            ("_Z3bazi.constprop.0", "baz", false),
+            (
+                "_ZN4core3fmt5write17h0123456789abcdefE",
+                "core::fmt::write",
+                true,
+            ),
+            (
+                "_RNvCsdHzz05DFzbQ_5crash9crash_now",
+                "crash::crash_now",
+                true,
+            ),
+            ("_RNvCsdHzz05DFzbQ_5crash9crash_now", "crash::crash", false),
+            ("main", "main", false),
+        ] {
+            assert_eq!(spells(mangled, name), expected, "{mangled} as {name}");
+        }
+    }
 
     #[test]
     fn rust_and_cpp_names_demangle_and_other_names_do_not() {

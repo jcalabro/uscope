@@ -36,6 +36,7 @@ export function Stack() {
               <span className={frame.source ? "fn" : "fn subtle"}>
                 {frame.name}
                 {frame.kind === "inline" && <span className="dim"> inlined</span>}
+                {frame.kind === "tailCall" && <span className="dim"> tail call</span>}
               </span>
               <span className="end">{where(frame)}</span>
             </button>

@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
-use uscope::{AssemblySyntax, CoreDumpOptions, ProcessId, SignalPolicy, SourcePathMap};
+use uscope::{
+    AssemblySyntax, CoreDumpOptions, DebugFileOptions, ProcessId, SignalPolicy, SourcePathMap,
+};
 
 /// How the session obtains its target.
 #[derive(Debug)]
@@ -72,6 +74,8 @@ pub struct Configuration {
     /// The settings a child session's configuration carries over.
     pub inherited: Map<String, Value>,
     pub threads: ThreadListing,
+    /// Where modules' separate debug files are found.
+    pub debug_files: DebugFileOptions,
 }
 
 /// What the client's threads are.
@@ -108,8 +112,10 @@ enum Threads {
 /// the session presents and handles a program, which a fork does not
 /// change, and the adapter's `type`, by which a client such as nvim-dap
 /// finds the adapter to start for the child.
-const INHERITED: [&str; 10] = [
+const INHERITED: [&str; 12] = [
     "type",
+    "debugDirectories",
+    "debuginfod",
     "followForks",
     "sourceMap",
     "viewFiles",
@@ -149,6 +155,10 @@ struct Arguments {
     allow_module_mismatch: bool,
     #[serde(default)]
     view_files: Vec<PathBuf>,
+    #[serde(default)]
+    debug_directories: Vec<PathBuf>,
+    #[serde(default)]
+    debuginfod: bool,
     #[serde(default)]
     follow_forks: bool,
     held: Option<Held>,
@@ -261,9 +271,19 @@ pub fn attach(arguments: Value) -> Result<Configuration, String> {
             sysroot: parsed.sysroot.clone(),
             module_paths: parsed.module_paths.clone(),
             allow_module_mismatch: parsed.allow_module_mismatch,
+            debug_files: debug_files(&parsed),
         }),
     };
     common(parsed, start, inherited, "attach configuration")
+}
+
+/// Where a configuration's separate debug files are found.
+fn debug_files(parsed: &Arguments) -> DebugFileOptions {
+    DebugFileOptions {
+        directories: parsed.debug_directories.clone(),
+        debuginfod: parsed.debuginfod,
+        ..DebugFileOptions::default()
+    }
 }
 
 /// The settings of `arguments` a child session carries over. An attach
@@ -283,6 +303,7 @@ fn common(
     inherited: Map<String, Value>,
     what: &str,
 ) -> Result<Configuration, String> {
+    let debug_files = debug_files(&parsed);
     let mut source_paths = SourcePathMap::new();
     for [from, to] in parsed.source_map {
         source_paths
@@ -314,6 +335,7 @@ fn common(
         None => ThreadListing::default().max_tasks,
     };
     Ok(Configuration {
+        debug_files,
         threads: ThreadListing {
             tasks: !matches!(parsed.threads, Some(Threads::System)),
             runtime_tasks: parsed.runtime_tasks,

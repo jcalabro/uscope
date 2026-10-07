@@ -595,3 +595,51 @@ fn a_function_breakpoint_stops_in_every_overload_and_method_of_the_name() {
     assert_eq!(stops, expected);
     dap.finish();
 }
+
+/// Function breakpoints find code without debug information by its
+/// symbols: an indirect function stops in the implementation its resolver
+/// chose, which the stack names.
+#[test]
+fn function_breakpoints_find_code_without_debug_information_by_its_symbols() {
+    let mut dap = Dap::start("symbol breakpoints");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("measure-gcc-nodebug"),
+        json!({"stopOnEntry": true}),
+        &Configuration::default(),
+    );
+    let entry = dap.stopped(started.mark);
+    dap.request(
+        "setFunctionBreakpoints",
+        json!({"breakpoints": [{"name": "measure"}]}),
+    );
+    let resumed = dap.send("continue", json!({"threadId": entry.thread}));
+    dap.success(resumed);
+    let stop = dap.stopped(resumed.mark);
+    let set = dap.request(
+        "setFunctionBreakpoints",
+        json!({"breakpoints": [{"name": "measure"}, {"name": "strlen"}]}),
+    );
+    let [_, strlen] = &breakpoints(&set)[..] else {
+        panic!("two breakpoints: {set}");
+    };
+    assert_eq!(strlen["verified"], true, "{strlen}");
+    assert!(strlen["instructionReference"].is_string(), "{strlen}");
+    let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+    dap.success(resumed);
+    let stop = dap.stopped(resumed.mark);
+    assert_eq!(stop.body["hitBreakpointIds"], json!([strlen["id"]]));
+    let trace = dap.request("stackTrace", json!({"threadId": stop.thread}));
+    let names = trace["stackFrames"]
+        .as_array()
+        .expect("frames")
+        .iter()
+        .take(2)
+        .map(|frame| frame["name"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        names[0].starts_with("__strlen_") && names[1].starts_with("measure+"),
+        "{names:?}"
+    );
+    dap.finish();
+}

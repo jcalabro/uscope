@@ -781,6 +781,19 @@ pub enum TypeKind {
     /// context whose first word is the code it calls and whose rest holds
     /// what a closure captured.
     Function,
+    /// The type of a function's code, as C's `int (int)`, which values have
+    /// only through pointers to it.
+    Signature {
+        /// What the function returns, or `None` for nothing.
+        returns: Option<TypeReference>,
+        /// The parameters' types, in order.
+        parameters: Arc<[TypeReference]>,
+        /// Whether more arguments may follow the parameters, as C's `...`.
+        variadic: bool,
+        /// Whether the parameters were declared, which C distinguishes:
+        /// `int (void)` takes none, while `int ()` says nothing.
+        prototyped: bool,
+    },
     /// A valid type whose value shape is not implemented yet.
     Opaque {
         /// A stable description of the unsupported DWARF type tag.
@@ -1029,10 +1042,13 @@ pub enum ScalarValue {
 }
 
 /// A decoded thin pointer or reference representation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressValue {
     /// The target virtual address represented by the value.
     pub address: VirtualAddress,
+    /// The function a pointer to code enters, by name, when the address is
+    /// a function's first instruction in a loaded module.
+    pub function: Option<Arc<str>>,
 }
 
 /// A decoded variable, child, or dereferenced value.
@@ -1580,6 +1596,10 @@ pub enum UnsupportedVariableFeature {
     /// Evaluating a DWARF expression operation uscope does not implement,
     /// such as `DW_OP_GNU_variable_value`.
     ExpressionOperation,
+    /// Finding a returned value its calling convention does not say where
+    /// to find, as for an aggregate in a language that leaves its own
+    /// unspecified.
+    ReturnPlace,
 }
 
 impl fmt::Display for UnsupportedVariableFeature {
@@ -1600,6 +1620,7 @@ impl fmt::Display for UnsupportedVariableFeature {
             Self::ExpressionOperation => "the DWARF expression operation",
             Self::RuntimeAggregateLocation => "the runtime aggregate location",
             Self::ScalarRepresentation => "the scalar representation",
+            Self::ReturnPlace => "returning this type by the function's calling convention",
         })
     }
 }
@@ -1636,6 +1657,9 @@ pub enum CallFrameUnavailableReason {
     NoInstructionContext,
     /// Unwinding terminated without producing a CFA.
     UnwindTerminated(Arc<str>),
+    /// The frame's function left by a tail call, which gave its place on
+    /// the stack to the function it jumped to.
+    TailCall,
 }
 
 /// Why the value a parameter held on entry cannot be recovered from the
@@ -1850,6 +1874,9 @@ impl fmt::Display for VariableUnavailableReason {
             }
             Self::CallFrameUnavailable(CallFrameUnavailableReason::UnwindTerminated(reason)) => {
                 write!(formatter, "the call-frame address is unavailable: {reason}")
+            }
+            Self::CallFrameUnavailable(CallFrameUnavailableReason::TailCall) => {
+                formatter.write_str("a tail call discarded the frame")
             }
             Self::EntryValue(reason) => {
                 write!(formatter, "the entry value is unavailable: {reason}")
@@ -2498,6 +2525,107 @@ pub struct TargetDescription {
     pub pointer_width: PointerWidth,
 }
 
+impl TargetDescription {
+    /// The target's C base type, as its C compiler lays it out, or `None`
+    /// for a target whose C data model uscope does not know.
+    #[must_use]
+    pub fn c_base_type(&self, ty: CBaseType) -> Option<BaseType> {
+        use BaseTypeEncoding as E;
+        if self.architecture != Architecture::X86_64 || self.pointer_width != PointerWidth::Bits64 {
+            return None;
+        }
+        // The System V x86-64 data model: LP64, signed `char`, and an x87
+        // `long double` padded to sixteen bytes.
+        let (encoding, byte_size) = match ty {
+            CBaseType::Char | CBaseType::SignedChar => (E::SignedCharacter, 1),
+            CBaseType::UnsignedChar => (E::UnsignedCharacter, 1),
+            CBaseType::Short => (E::Signed, 2),
+            CBaseType::UnsignedShort => (E::Unsigned, 2),
+            CBaseType::Int => (E::Signed, 4),
+            CBaseType::UnsignedInt => (E::Unsigned, 4),
+            CBaseType::Long | CBaseType::LongLong => (E::Signed, 8),
+            CBaseType::UnsignedLong | CBaseType::UnsignedLongLong => (E::Unsigned, 8),
+            CBaseType::Float => (E::Floating, 4),
+            CBaseType::Double => (E::Floating, 8),
+            CBaseType::LongDouble => (E::Floating, 16),
+        };
+        let name: Arc<str> = ty.name().into();
+        Some(BaseType {
+            name: Arc::clone(&name),
+            base_name: name,
+            encoding,
+            byte_size,
+            bit_size: None,
+        })
+    }
+}
+
+/// One of C's base types, by what it is rather than how it is spelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CBaseType {
+    Char,
+    SignedChar,
+    UnsignedChar,
+    Short,
+    UnsignedShort,
+    Int,
+    UnsignedInt,
+    Long,
+    UnsignedLong,
+    LongLong,
+    UnsignedLongLong,
+    Float,
+    Double,
+    LongDouble,
+}
+
+impl CBaseType {
+    /// Every C base type, in declaration order.
+    pub const ALL: [Self; 14] = [
+        Self::Char,
+        Self::SignedChar,
+        Self::UnsignedChar,
+        Self::Short,
+        Self::UnsignedShort,
+        Self::Int,
+        Self::UnsignedInt,
+        Self::Long,
+        Self::UnsignedLong,
+        Self::LongLong,
+        Self::UnsignedLongLong,
+        Self::Float,
+        Self::Double,
+        Self::LongDouble,
+    ];
+
+    /// The type's shortest spelling, such as `unsigned long`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Char => "char",
+            Self::SignedChar => "signed char",
+            Self::UnsignedChar => "unsigned char",
+            Self::Short => "short",
+            Self::UnsignedShort => "unsigned short",
+            Self::Int => "int",
+            Self::UnsignedInt => "unsigned int",
+            Self::Long => "long",
+            Self::UnsignedLong => "unsigned long",
+            Self::LongLong => "long long",
+            Self::UnsignedLongLong => "unsigned long long",
+            Self::Float => "float",
+            Self::Double => "double",
+            Self::LongDouble => "long double",
+        }
+    }
+
+    /// The type a shortest spelling names.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|ty| ty.name() == name)
+    }
+}
+
 /// Why a stopped target-memory read could not continue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -2824,6 +2952,40 @@ pub struct SymbolInfo {
     pub role: CodeRole,
 }
 
+/// The separate debug file found for a module stripped of its debug
+/// information.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DebugFile {
+    /// The file the module's debug information and symbols came from.
+    Used(Arc<PathBuf>),
+    /// A file that names the module but could not be loaded, which leaves
+    /// the module as its own file describes it.
+    Unusable {
+        path: Arc<PathBuf>,
+        reason: Arc<str>,
+    },
+}
+
+/// A slot of a module's global offset table that the loader fills with a
+/// function's address as it relocates the module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GotSlot {
+    /// Where the slot is in the module.
+    pub address: ImageAddress,
+    /// The function whose address the loader writes there.
+    pub target: GotTarget,
+}
+
+/// The function a [`GotSlot`] holds once its module is relocated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GotTarget {
+    /// A function named for the loader to look up in the loaded modules.
+    Import(Arc<str>),
+    /// The implementation chosen by this module's indirect function whose
+    /// resolver is at this address.
+    Indirect(ImageAddress),
+}
+
 /// Records which symbol tables a module image provided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolTableSources {
@@ -2887,6 +3049,27 @@ impl SymbolInfo {
     #[must_use]
     pub fn demangled_name(&self) -> Option<String> {
         crate::demangle::demangle(&self.name)
+    }
+
+    /// Whether a name a person writes names the symbol: its linker name,
+    /// that name without its version, or its demangled spelling, with or
+    /// without a C++ function's parameters, as `shapes::scale` names
+    /// `_ZN6shapes5scaleEd`, `shapes::scale(double)`.
+    #[must_use]
+    pub fn answers_to(&self, name: &str) -> bool {
+        &*self.name == name
+            || self.unversioned_name() == name
+            || crate::demangle::spells(&self.name, name)
+    }
+
+    /// The name without the version that tells it apart from other
+    /// definitions of the name, as `memcpy` for `memcpy@GLIBC_2.2.5`.
+    #[must_use]
+    pub fn unversioned_name(&self) -> &str {
+        match self.name.split_once('@') {
+            Some((name, version)) if !name.is_empty() && version != "plt" => name,
+            _ => &self.name,
+        }
     }
 }
 
@@ -3026,6 +3209,11 @@ pub enum FrameKind {
     Inline,
     /// A signal trampoline activation.
     Signal,
+    /// A function that left by a tail call, which replaced its activation
+    /// with the frame's below it. Only the debug information's one chain
+    /// of tail calls between a call and the frame it entered shows it, and
+    /// its state is gone but for what was passed to it.
+    TailCall,
 }
 
 /// A platform-independent stack frame.

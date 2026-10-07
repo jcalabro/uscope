@@ -1,7 +1,7 @@
 //! A module image's static metadata and the indexes that answer lookups
 //! in it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,12 +13,12 @@ pub use locations::PackageInfo;
 
 use super::{
     AddressRange, BreakpointEntry, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole,
-    EntryProvenance, FunctionId, FunctionInfo, GlobalVariableId, GlobalVariableInfo, ImageAddress,
-    ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup, LineEntry, LineNumber,
-    ModuleImageId, SectionId, SectionInfo, SectionLocation, SourceFile, SourceFileId,
-    SourceLanguage, SourceLocation, StatementRow, SymbolExtentProvenance, SymbolId, SymbolInfo,
-    SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TypeInfo, TypeNode,
-    TypeReference,
+    EntryProvenance, FunctionId, FunctionInfo, GlobalVariableId, GlobalVariableInfo, GotSlot,
+    ImageAddress, ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup,
+    LineEntry, LineNumber, ModuleImageId, SectionId, SectionInfo, SectionLocation, SourceFile,
+    SourceFileId, SourceLanguage, SourceLocation, StatementRow, SymbolExtentProvenance, SymbolId,
+    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TypeInfo,
+    TypeNode, TypeReference,
 };
 
 #[derive(Default)]
@@ -27,6 +27,8 @@ pub struct ModuleMetadata {
     pub code_instances: Vec<CodeInstanceInfo>,
     pub symbols: Vec<SymbolInfo>,
     pub symbol_sources: SymbolTableSources,
+    /// The GOT slots the loader fills with functions' addresses.
+    pub got_slots: Vec<GotSlot>,
     pub globals: Vec<GlobalVariableInfo>,
     pub types: Arc<[TypeNode]>,
     pub source_files: Vec<SourceFile>,
@@ -309,6 +311,7 @@ pub struct ModuleImage {
     code_instances: Arc<[CodeInstanceInfo]>,
     symbols: Arc<[SymbolInfo]>,
     symbol_sources: SymbolTableSources,
+    got_slots: Arc<[GotSlot]>,
     sections: Arc<[SectionInfo]>,
     thread_local_storage: bool,
     globals: Arc<[GlobalVariableInfo]>,
@@ -320,6 +323,9 @@ pub struct ModuleImage {
     /// Functions by their names within the packages defining them.
     function_names: locations::FunctionNames,
     symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
+    /// Symbols by the last part of each name they answer to, built on the
+    /// first search for one, since it demangles every symbol.
+    symbols_by_last_part: std::sync::OnceLock<HashMap<Box<str>, Vec<SymbolId>>>,
     globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
     instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
     statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
@@ -346,6 +352,8 @@ pub struct ModuleImage {
     /// The views the image carries for its own types, in its
     /// `.debug_uscope_views` section.
     views: Arc<crate::view::ViewSet>,
+    /// The separate debug file found for the image.
+    debug_file: Option<crate::DebugFile>,
 }
 
 /// The first type, in identifier order, that each Go runtime type
@@ -448,6 +456,7 @@ impl ModuleImage {
                     .iter()
                     .map(|symbol| (Arc::clone(&symbol.name), symbol.id)),
             ),
+            symbols_by_last_part: std::sync::OnceLock::new(),
             globals_by_selector: grouped_index(global_selectors(&metadata)),
             instances_by_function: grouped_index(
                 metadata
@@ -483,6 +492,7 @@ impl ModuleImage {
             code_instances: metadata.code_instances.into(),
             symbols: metadata.symbols.into(),
             symbol_sources: metadata.symbol_sources,
+            got_slots: metadata.got_slots.into(),
             sections: metadata.sections.into(),
             thread_local_storage: metadata.thread_local_storage,
             globals: metadata.globals.into(),
@@ -504,6 +514,7 @@ impl ModuleImage {
             thread_locals: std::mem::take(&mut metadata.thread_locals),
             go_runtime_types: go_runtime_types(&metadata.types),
             views: crate::view::ViewSet::empty(),
+            debug_file: None,
         }
     }
 
@@ -520,6 +531,29 @@ impl ModuleImage {
     pub(crate) fn with_views(mut self, views: Arc<crate::view::ViewSet>) -> Self {
         self.views = views;
         self
+    }
+
+    /// Records the separate debug file found for the image.
+    pub(crate) fn with_debug_file(mut self, debug_file: Option<crate::DebugFile>) -> Self {
+        self.debug_file = debug_file;
+        self
+    }
+
+    /// The separate debug file the image's debug information and symbols
+    /// came from, when its own file was stripped of them.
+    #[must_use]
+    pub const fn debug_file(&self) -> Option<&Arc<PathBuf>> {
+        match &self.debug_file {
+            Some(crate::DebugFile::Used(path)) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// The separate debug file found for the image, whether it was used or
+    /// could not be.
+    #[must_use]
+    pub const fn separate_debug_file(&self) -> Option<&crate::DebugFile> {
+        self.debug_file.as_ref()
     }
 
     /// The views the image carries for its own types.
@@ -1105,6 +1139,56 @@ impl ModuleImage {
             .into_iter()
             .flat_map(|symbols| symbols.iter())
             .filter_map(|symbol| self.symbol(*symbol))
+    }
+
+    /// Every symbol that answers to a name as [`SymbolInfo::answers_to`]
+    /// reads it.
+    pub fn symbols_answering<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a SymbolInfo> {
+        let index = self.symbols_by_last_part.get_or_init(|| {
+            let mut index = HashMap::<Box<str>, Vec<SymbolId>>::new();
+            for symbol in self.symbols.iter() {
+                let demangled = crate::demangle::demangle(&symbol.name);
+                let parts = [
+                    Some(&*symbol.name),
+                    Some(symbol.unversioned_name()),
+                    demangled.as_deref().map(crate::demangle::last_part),
+                ];
+                for part in parts.into_iter().flatten() {
+                    let ids = index.entry(part.into()).or_default();
+                    if ids.last() != Some(&symbol.id) {
+                        ids.push(symbol.id);
+                    }
+                }
+            }
+            index
+        });
+        let mut candidates = [name, crate::demangle::last_part(name)]
+            .into_iter()
+            .filter_map(|part| index.get(part))
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+            .into_iter()
+            .filter_map(|id| self.symbol(id))
+            .filter(move |symbol| symbol.answers_to(name))
+    }
+
+    /// The GOT slots the loader fills with functions' addresses.
+    #[must_use]
+    pub fn got_slots(&self) -> &[GotSlot] {
+        &self.got_slots
+    }
+
+    /// Whether the module imports a function of the name from another, so
+    /// that a module with its code is yet to load.
+    #[must_use]
+    pub fn imports_function(&self, name: &str) -> bool {
+        self.got_slots.iter().any(
+            |slot| matches!(&slot.target, crate::GotTarget::Import(import) if &**import == name || crate::demangle::spells(import, name)),
+        )
     }
 
     /// Finds the single linker symbol with the supplied name.

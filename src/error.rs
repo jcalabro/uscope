@@ -198,6 +198,19 @@ pub enum Error {
     FrameStepUnsupported(Arc<str>),
     #[error("an advance runs to a location, so it is requested with the location")]
     AdvanceWithoutLocation,
+    #[error(
+        "{0} has no code in the function the thread is stopped in; a jump stays in its function"
+    )]
+    JumpOutsideFunction(Arc<str>),
+    #[error("{0} has code in several places of the function; jump to one of their addresses")]
+    AmbiguousJump(Arc<str>),
+    #[error(
+        "no debug information describes the function the thread is stopped in, so a jump \
+         cannot keep to it; assign $pc to move the thread anywhere"
+    )]
+    JumpWithoutFunction,
+    #[error("no call of the stopped line is at {0}, so a step cannot go into it")]
+    NotAStepTarget(crate::VirtualAddress),
     #[error("a step of thread {stepping} cannot resume thread {resumed} alone")]
     StepScopeMismatch {
         stepping: crate::ThreadId,

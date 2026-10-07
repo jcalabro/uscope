@@ -910,8 +910,8 @@ async fn assert_named_targets(scenario: &Scenario, modules: &Modules, fixture: &
     )
     .await;
 
-    // A function is named by its symbol, the C library's entry through the
-    // linkage table by its section alone.
+    // A function is named by its symbol, and the C library's entry through
+    // the linkage table by the stub binutils names after it.
     let calls = call_targets(&main);
     assert!(
         calls.contains(&(
@@ -926,7 +926,7 @@ async fn assert_named_targets(scenario: &Scenario, modules: &Modules, fixture: &
             section
                 .as_deref()
                 .is_some_and(|name| name.starts_with(".plt"))
-                && symbol.is_none()
+                && symbol.as_deref() == Some("printf@plt")
         }),
         "{fixture}: {calls:?}"
     );

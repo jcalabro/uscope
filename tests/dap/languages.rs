@@ -206,3 +206,88 @@ fn step_out_shows_what_the_function_returned() {
         finish_running(dap, thread);
     }
 }
+
+/// A C function's returned struct, from the registers System V returns
+/// it in, has members to expand.
+#[test]
+fn step_out_shows_what_a_c_function_returned() {
+    let program = "returns-c-gcc-o2";
+    let mut dap = Dap::start(program);
+    let (thread, _) = stop(
+        &mut dap,
+        program,
+        &Configuration {
+            functions: vec!["r_mixed".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    let sent = dap.send("stepOut", json!({"threadId": thread}));
+    dap.success(sent);
+    assert_eq!(dap.stopped(sent.mark).reason, "step");
+    let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 1}));
+    let variables = frame_variables(&mut dap, &trace["stackFrames"][0]);
+    let returned = &variables["returned r_mixed"];
+    let reference = returned["variablesReference"]
+        .as_i64()
+        .expect("a struct has members");
+    assert!(reference > 0, "{returned}");
+    let members = dap.request("variables", json!({"variablesReference": reference}));
+    let members = members["variables"].as_array().expect("members");
+    let value = |name: &str| {
+        members
+            .iter()
+            .find(|member| member["name"] == name)
+            .map(|member| member["value"].clone())
+    };
+    assert_eq!(value("d"), Some(json!("0.5")), "{members:?}");
+    assert_eq!(value("i"), Some(json!("42")), "{members:?}");
+    finish_running(dap, thread);
+}
+
+/// The functions that left by tail calls stand between a frame and its
+/// caller in a stack trace, and their scopes show what was passed to them.
+#[test]
+fn stack_traces_show_the_functions_that_left_by_tail_calls() {
+    let program = "tail-frames-gcc-o2";
+    let mut dap = Dap::start(program);
+    let (thread, _) = stop(
+        &mut dap,
+        program,
+        &Configuration {
+            functions: vec!["leaf".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 4}));
+    let frames = trace["stackFrames"].as_array().expect("frames");
+    let line = |marker: &str| {
+        i64::try_from(crate::support::source_line(
+            "tests/fixtures/c/tail-frames.c",
+            marker,
+        ))
+        .expect("a line fits")
+    };
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| (frame["name"].clone(), frame["line"].clone()))
+            .skip(1)
+            .collect::<Vec<_>>(),
+        [
+            (json!("middle [tail call]"), json!(line("frames: middle"))),
+            (json!("top [tail call]"), json!(line("frames: top"))),
+            (json!("main"), json!(line("frames: call top"))),
+        ],
+        "{frames:#?}"
+    );
+    let variables = frame_variables(&mut dap, &frames[1]);
+    assert_eq!(variables["value"]["value"], "6", "{variables:?}");
+
+    // Through `either`, which may have reached `leaf` two ways.
+    let resumed = dap.send("continue", json!({"threadId": thread}));
+    dap.success(resumed);
+    dap.stopped(resumed.mark);
+    let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 2}));
+    assert_eq!(trace["stackFrames"][1]["name"], "main", "{trace:#?}");
+    finish_running(dap, thread);
+}

@@ -8,6 +8,8 @@ mod elf;
 #[cfg(target_os = "linux")]
 mod gopclntab;
 mod roles;
+#[cfg(target_os = "linux")]
+mod separate;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod x86_64;
 
@@ -236,6 +238,19 @@ pub struct TailCallChain {
     /// The linker name of each function entered: the call's target, then
     /// each link's. Another module may define one under the same name.
     pub functions: Arc<[Option<Arc<str>>]>,
+    /// Where each link jumped from, when its call site says.
+    pub jumps: Arc<[Option<TailJump>]>,
+}
+
+/// Where a tail call jumped from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TailJump {
+    /// The jump's address, or the one after it where only that is
+    /// described.
+    pub instruction: ImageAddress,
+    /// An address within the jump, whose code and source are the jumping
+    /// function's.
+    pub lookup: ImageAddress,
 }
 
 /// The function a call site calls.
@@ -277,6 +292,12 @@ pub trait VariableRuntime {
         parameter: EntryParameter,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<u64, VariableRuntimeError>;
+    /// The name of the function whose first instruction `address` is, in
+    /// whichever loaded module holds it.
+    fn function_at(&self, address: VirtualAddress) -> Option<Arc<str>> {
+        let _ = address;
+        None
+    }
 }
 
 pub trait VariableInfo: Send + Sync {
@@ -466,16 +487,31 @@ pub trait UnwindInfo: Send + Sync {
     ) -> std::result::Result<UnwindStep, UnwindTermination>;
 }
 
+#[cfg(target_os = "linux")]
+pub use separate::DebugFileSearch;
+
+/// Loads a program's debug information from its own file alone.
+#[cfg(any(test, feature = "sim"))]
 pub fn load_bytes(path: &Path, data: &[u8]) -> Result<DebugInfo> {
-    dwarf::load_bytes(path, data, crate::ModuleImageId::new(0))
+    load_program(path, data, &DebugFileSearch::default())
+}
+
+/// Loads a program's debug information, from a separate debug file that
+/// `search` finds when its own file has none.
+pub fn load_program(path: &Path, data: &[u8], search: &DebugFileSearch) -> Result<DebugInfo> {
+    dwarf::load_bytes(path, data, crate::ModuleImageId::new(0), search)
 }
 
 #[expect(
     clippy::redundant_pub_crate,
     reason = "the private debug-info edge is shared by sibling backend modules"
 )]
-pub(crate) fn load_module(path: &Path, id: crate::ModuleImageId) -> Result<DebugInfo> {
-    dwarf::load(path, id)
+pub(crate) fn load_module(
+    path: &Path,
+    id: crate::ModuleImageId,
+    search: &DebugFileSearch,
+) -> Result<DebugInfo> {
+    dwarf::load(path, id, search)
 }
 
 #[expect(
@@ -486,6 +522,7 @@ pub(crate) fn load_module_bytes(
     path: &Path,
     data: &[u8],
     id: crate::ModuleImageId,
+    search: &DebugFileSearch,
 ) -> Result<DebugInfo> {
-    dwarf::load_bytes(path, data, id)
+    dwarf::load_bytes(path, data, id, search)
 }

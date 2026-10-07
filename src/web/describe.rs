@@ -103,6 +103,12 @@ impl Images {
     }
 }
 
+/// The symbol naming code no debug information describes.
+fn symbol_name(image: &ModuleImage, address: ImageAddress) -> Option<String> {
+    let symbol = image.symbolize(address)?;
+    Some(format::code_name(None, Some(&symbol)))
+}
+
 /// A frame's name: its function or symbol, or else its address and module.
 pub fn frame_name(frame: &StackFrame, image: Option<&ModuleImage>) -> String {
     if frame.function.is_some() || frame.symbol.is_some() {
@@ -345,7 +351,10 @@ impl Describer {
             return place;
         };
         let located = image.locate(address);
-        place.function = located.function.map(|function| function.name.to_string());
+        place.function = located
+            .function
+            .map(|function| function.name.to_string())
+            .or_else(|| symbol_name(&image, address));
         if let Some(location) = image.source_location(address)
             && let Some(file) = image.source_file(location.file)
         {
@@ -378,7 +387,10 @@ impl Describer {
                 continue;
             }
             let located = image.locate(image_address);
-            place.function = located.function.map(|function| function.name.to_string());
+            place.function = located
+                .function
+                .map(|function| function.name.to_string())
+                .or_else(|| symbol_name(&image, image_address));
             if let Some(location) = located.source
                 && let Some(file) = image.source_file(location.file)
             {
@@ -454,6 +466,7 @@ const fn reason_kind(reason: &StopReason) -> &'static str {
         StopReason::Step { .. } => "step",
         StopReason::StepIncomplete { .. } => "stepIncomplete",
         StopReason::Pause => "pause",
+        StopReason::Jump => "jump",
         StopReason::Exception(_) => "exception",
         StopReason::LanguageException(_) => "languageException",
         StopReason::ProgramBreakpoint { .. } => "programBreakpoint",

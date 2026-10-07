@@ -119,7 +119,13 @@ pub fn variable(
 
 /// Presents a register, which never expands and which expressions read but
 /// cannot assign.
-pub fn register(value: &RegisterValue, byte_order: uscope::ByteOrder) -> Map<String, Value> {
+/// A register's row: one the innermost frame holds can be set, as the
+/// thread's own; a caller's is what unwinding recovered.
+pub fn register(
+    value: &RegisterValue,
+    byte_order: uscope::ByteOrder,
+    innermost: bool,
+) -> Map<String, Value> {
     let mut variable = Map::new();
     let name = value.register.name.as_ref();
     variable.insert("name".to_owned(), name.into());
@@ -129,9 +135,14 @@ pub fn register(value: &RegisterValue, byte_order: uscope::ByteOrder) -> Map<Str
     {
         variable.insert("evaluateName".to_owned(), format!("${name}").into());
     }
+    let attributes = if innermost && value.bytes.is_some() {
+        json!([])
+    } else {
+        json!(["readOnly"])
+    };
     variable.insert(
         "presentationHint".to_owned(),
-        json!({"kind": "data", "attributes": ["readOnly"]}),
+        json!({"kind": "data", "attributes": attributes}),
     );
     variable.insert(
         "value".to_owned(),

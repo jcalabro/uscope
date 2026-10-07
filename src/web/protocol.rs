@@ -69,6 +69,12 @@ pub enum Request {
     Restart,
     /// Steps one thread of a stop.
     Step(Step),
+    /// The calls of a thread's line at a stop that a step into can go
+    /// into.
+    StepTargets(ThreadAt),
+    /// Moves one thread of a stop, without running it, to resume at a
+    /// location in its function.
+    Jump(Jump),
     /// Says where this tab is looking, for everyone's presence list.
     SetFocus(SetFocus),
     /// A thread's stack at a stop.
@@ -207,6 +213,22 @@ pub struct Step {
     #[cfg_attr(test, ts(optional = nullable))]
     pub frame: u32,
     pub kind: StepKind,
+    /// For a step into, the one call of the line to go into, in
+    /// hexadecimal, as `stepTargets` lists it; the line's other calls run
+    /// to their returns.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub call: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Jump {
+    /// The stop the thread is moved at, which must still be current.
+    pub stop: u64,
+    pub thread: u64,
+    /// `FILE:LINE`, or another location a breakpoint takes.
+    pub location: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -844,6 +866,8 @@ pub enum FrameKind {
     Inline,
     /// A signal handler's trampoline.
     Signal,
+    /// A function that left by a tail call to the frame below it.
+    TailCall,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1074,6 +1098,27 @@ pub struct Memory {
     pub unreadable: Option<String>,
 }
 
+/// The calls a step into can go into, in address order.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct StepTargets {
+    pub calls: Vec<StepCall>,
+}
+
+/// One call of a line.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct StepCall {
+    /// The call instruction's address, in hexadecimal, which names it to a
+    /// step.
+    pub call: String,
+    /// The function it calls, when something names it.
+    pub callee: Option<String>,
+    /// The address a direct call calls, in hexadecimal; none for an
+    /// indirect call.
+    pub target: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Registers {
@@ -1104,6 +1149,7 @@ pub struct Modules {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Module {
     pub id: u64,
@@ -1115,6 +1161,11 @@ pub struct Module {
     /// `debug` with debug information, `symbols` with only a symbol table,
     /// or `none`.
     pub symbols: String,
+    /// The separate file its debug information came from, when its own
+    /// file was stripped of it.
+    pub debug_file: Option<String>,
+    /// Why the separate debug file found for it could not be used.
+    pub debug_file_problem: Option<String>,
 }
 
 /// The answer to `share`.
@@ -1145,6 +1196,7 @@ mod tests {
         OpenCore::decl,
         Continue::decl,
         Step::decl,
+        Jump::decl,
         StepKind::decl,
         SetFocus::decl,
         Focus::decl,
@@ -1218,6 +1270,8 @@ mod tests {
         Token::decl,
         BranchTarget::decl,
         Memory::decl,
+        StepTargets::decl,
+        StepCall::decl,
         Registers::decl,
         Register::decl,
         Signals::decl,

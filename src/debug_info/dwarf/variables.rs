@@ -28,8 +28,8 @@ use crate::inspection::InspectionBudget;
 use crate::{
     AddressRange, ByteOrder, CodeInstanceId, DereferenceReference, DereferencedValue, Error,
     GlobalVariableId, GlobalVariableInfo, ImageAddress, InspectedValue, ModuleImageId, Result,
-    SourceFile, SourceFileId, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeNode,
-    TypeReference, ValueChildPage, ValueChildrenReference, Variable, VariableKind,
+    SourceFile, SourceFileId, SourceLanguage, SourceLocation, TargetDescription, TypeId, TypeInfo,
+    TypeNode, TypeReference, ValueChildPage, ValueChildrenReference, Variable, VariableKind,
     VariableMalformedKind, VariableMalformedReason, VariableQuery, VariableState,
 };
 
@@ -211,6 +211,9 @@ pub(super) struct DwarfVariableInfo {
     go_function_entries: HashMap<ImageAddress, usize>,
     /// The float type of complex numbers' parts, by the part's name and size.
     complex_parts: HashMap<(Arc<str>, u64), TypeId>,
+    /// Whether each C++ class whose producer says how calls pass it is
+    /// passed by value.
+    passed_by_value: HashMap<TypeId, bool>,
     /// Go's type parameters: the dictionary entry each shape typedef names.
     go_dict_indices: HashMap<TypeId, u64>,
     /// The first type, in identifier order, each Go runtime type descriptor
@@ -244,6 +247,33 @@ fn unit_producer(
         return Ok(None);
     };
     super::string_attribute(dwarf, unit, root, gimli::DW_AT_producer)
+}
+
+/// What a function returns by the System V convention: one value of its
+/// type, named for it, unless it returns nothing.
+fn system_v_returns<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    units: &[gimli::Unit<Reader<'data>>],
+    unit_index: usize,
+    unit: &gimli::Unit<Reader<'data>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    language: SourceLanguage,
+    types: &mut TypeArenaBuilder<'_, 'data>,
+) -> Option<returns::ReturnConvention> {
+    let chain = origin_chain(units, unit_index, entry).unwrap_or_default();
+    let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
+    let type_value = type_value?;
+    let name = string_with_origins(dwarf, units, unit, entry, &chain, gimli::DW_AT_name)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| Arc::from("returned"));
+    Some(returns::ReturnConvention::SystemV(Box::new(
+        returns::SystemV {
+            name,
+            ty: types.variable_type(type_unit, Some(type_value)),
+            language,
+        },
+    )))
 }
 
 /// The file declaring a function or inlined call's function, if known.
@@ -393,6 +423,21 @@ pub(super) fn load_variable_info<'data>(
                     .split_once(';')
                     .is_some_and(|(_, flags)| flags.split_whitespace().any(|flag| flag == "regabi"))
             });
+        // Other languages' x86-64 code returns as the System V convention
+        // says, or, for the languages that leave theirs unspecified, as it
+        // for scalars.
+        let language = source_language(
+            evaluation_units[unit_index].language,
+            types.is_zig(unit_index),
+        );
+        let system_v = target.architecture == crate::Architecture::X86_64
+            && matches!(
+                language,
+                SourceLanguage::C
+                    | SourceLanguage::Cpp
+                    | SourceLanguage::Rust
+                    | SourceLanguage::Zig
+            );
         let fused_blocks = if go {
             fused_block_ranges(dwarf, unit, &catalog.code)?
         } else {
@@ -456,8 +501,15 @@ pub(super) fn load_variable_info<'data>(
                             None
                         },
                         captures: Ok(Vec::new()),
-                        returns: (go_registers && defined)
-                            .then_some(returns::ReturnConvention::GoRegisters),
+                        returns: if go_registers && defined {
+                            Some(returns::ReturnConvention::GoRegisters)
+                        } else if system_v && defined {
+                            system_v_returns(
+                                dwarf, units, unit_index, unit, entry, language, &mut types,
+                            )
+                        } else {
+                            None
+                        },
                     });
                     let frame_base = copy_optional_location(
                         dwarf,
@@ -900,6 +952,7 @@ pub(super) fn load_variable_info<'data>(
             dynamic_record_layouts: types.dynamic_record_layouts,
             go_function_entries,
             complex_parts: types.complex_parts,
+            passed_by_value: types.passed_by_value,
             go_dict_indices: types.go_dict_indices,
             go_runtime_types,
             objects_by_debug_offset,

@@ -569,7 +569,8 @@ fn command_errors_show_the_usage_or_the_reason() {
             "cls",
         ],
     );
-    let info = "usage: info breakpoints|watchpoints|signals|core|symbol|view [argument...]";
+    let info =
+        "usage: info breakpoints|watchpoints|signals|modules|calls|core|symbol|view [argument...]";
     let clear = "cannot clear screen: stdout is not an ANSI terminal";
     assert_in_order(
         &stderr,
@@ -776,6 +777,269 @@ fn batch_with_settings(settings: &str, arguments: &[&str], commands: &[&str]) ->
             .output()
             .expect("run uscope"),
     )
+}
+
+#[test]
+fn words_c_reserves_for_types_name_a_rust_programs_variables() {
+    let output = batch(
+        &["build/test-programs/strings-rust-o0"],
+        &["break strings_target", "run", "whatis long", "p *long"],
+    );
+    assert_in_order(
+        &output,
+        &["type = &alloc::string::String", "(String) *long = \"zzz"],
+    );
+}
+
+#[test]
+fn c_base_types_cast_in_a_program_that_describes_none() {
+    let output = batch(
+        &["build/test-programs/strings-go-o0"],
+        &[
+            "break main.stringsTarget",
+            "run",
+            "p (unsigned char)300",
+            "p ((char*)name.str)[1]",
+            "whatis (long long unsigned)1",
+            "p sizeof(long double)",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "(unsigned char) (unsigned char)300 = 44 ','",
+            "(char) ((char*)name.str)[1] = 111 'o'",
+            "type = unsigned long long",
+            "(integer) sizeof(long double) = 16",
+        ],
+    );
+}
+
+#[test]
+fn function_pointers_show_their_signature_and_the_function_they_enter() {
+    let output = batch(
+        &["build/test-programs/variables-gcc-o0"],
+        &[
+            "break variables.c:68",
+            "run",
+            "p function_pointer",
+            "ptype function_pointer",
+            "p *function_pointer",
+            "whatis &function_pointer",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "(int (*)(int)) function_pointer = 0x",
+            " <pointer_identity>\n",
+            "type = int (*)(int)\n",
+            "(int (int)) *function_pointer = <unavailable",
+            "type = int (**)(int)\n",
+        ],
+    );
+    // A pointer into another module names the function there.
+    let shared = batch(
+        &["build/test-programs/globals-shared"],
+        &["break after_load", "run", "up", "p touch", "whatis *touch"],
+    );
+    assert_in_order(
+        &shared,
+        &[
+            "(touch_fn) touch = 0x",
+            " <dso_touch>\n",
+            "type = int32_t (void)\n",
+        ],
+    );
+}
+
+/// Function pointers' types read as gdb reads them, declarators and all,
+/// and their values name the function they enter, compared over GCC's and
+/// Clang's debug information.
+#[test]
+fn function_types_read_as_gdb_reads_them() {
+    let compact = |text: &str| text.split_whitespace().collect::<String>();
+    for compiler in ["gcc", "clang"] {
+        let program = format!("build/test-programs/function-types-{compiler}-o0");
+        let oracle = std::fs::read_to_string(format!("{program}.gdb-function-types"))
+            .expect("the gdb oracle; run `just build-test-programs`");
+        let rows: Vec<Vec<&str>> = oracle
+            .lines()
+            .map(|line| line.split('\t').collect())
+            .collect();
+        let mut commands = vec!["break main".to_owned(), "run".to_owned()];
+        for row in &rows {
+            commands.push(format!("whatis {}", row[0]));
+            commands.push(format!("print {}", row[0]));
+        }
+        let commands: Vec<&str> = commands.iter().map(String::as_str).collect();
+        let output = batch(&[&program], &commands);
+        let mut types = output
+            .lines()
+            .filter_map(|line| line.strip_prefix("type = "));
+        let mut values = output
+            .lines()
+            .filter(|line| line.starts_with('(') && line.contains(" = "));
+        for row in &rows {
+            let [name, gdb_type, gdb_function] = row[..] else {
+                panic!("malformed oracle row {row:?}");
+            };
+            let ours = types.next().expect("a type per whatis");
+            assert_eq!(compact(ours), compact(gdb_type), "{compiler} whatis {name}");
+            let value = values.next().expect("a value per print");
+            let function = value
+                .strip_suffix('>')
+                .and_then(|value| value.rsplit_once(" <"))
+                .map_or("", |(_, function)| function);
+            // gdb names a pointer to data by its symbol too; uscope names
+            // only the functions pointers to code enter.
+            let expected = if name == "unary_pointer" {
+                ""
+            } else {
+                gdb_function
+            };
+            assert_eq!(function, expected, "{compiler} print {name}: {value}");
+        }
+    }
+}
+
+/// A PLT stub is named after the function it jumps to, so a breakpoint can
+/// name it and a backtrace through it reads as gdb's does.
+#[test]
+fn plt_stubs_are_named_after_their_targets() {
+    let output = batch(
+        &["build/test-programs/disassembly-gcc-o0"],
+        &["break printf@plt", "run", "bt"],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "stopped at breakpoint 1 (hit 1) in printf@plt at 0x",
+            "#0  0x",
+            " in printf@plt from disassembly-gcc-o0\n#1  0x",
+            " in main at tests/fixtures/c/disassembly/main.c:",
+        ],
+    );
+}
+
+/// glibc defines `timer_create` twice, the old one as
+/// `timer_create@GLIBC_2.2.5`, whose version names it apart. A breakpoint
+/// on the plain name takes both, and one on the versioned name the old.
+#[test]
+fn symbol_versions_tell_apart_definitions_of_one_name() {
+    let output = batch(
+        &[BASIC],
+        &[
+            "break main",
+            "run",
+            "break timer_create",
+            "break timer_create@GLIBC_2.2.5",
+        ],
+    );
+    // The default version keeps the plain name, and the old one is named
+    // by its version alone.
+    let location = |name: &str| {
+        output
+            .lines()
+            .find_map(|line| {
+                let rest = line.split(&format!("{name} at ")).nth(1)?;
+                rest.split_whitespace().next().map(str::to_owned)
+            })
+            .unwrap_or_else(|| panic!("no {name:?} in {output}"))
+    };
+    let (current, old) = (
+        location("timer_create"),
+        location("timer_create@GLIBC_2.2.5"),
+    );
+    assert_ne!(current, old, "{output}");
+    assert_in_order(
+        &output,
+        &[
+            "breakpoint 2 set at 2 locations",
+            &format!("\n  timer_create at {current} in libc.so.6"),
+            &format!("\n  timer_create@GLIBC_2.2.5 at {old} in libc.so.6"),
+            &format!("breakpoint 3 set at timer_create@GLIBC_2.2.5 at {old} in libc.so.6"),
+        ],
+    );
+    let described = batch(
+        &[BASIC],
+        &[
+            "break main",
+            "run",
+            &format!("info symbol {old}"),
+            &format!("info symbol {current}"),
+        ],
+    );
+    assert_in_order(
+        &described,
+        &[
+            "\ntimer_create@GLIBC_2.2.5 in section .text",
+            "\ntimer_create in section .text",
+        ],
+    );
+}
+
+/// Code without debug information is broken at by its symbols: a function
+/// the program imports waits for its library, an indirect function stops
+/// in the implementation chosen for the machine, and C++ names are read
+/// demangled, with or without their scopes and parameters.
+#[test]
+fn functions_without_debug_information_are_found_by_their_symbols() {
+    const MEASURE: &str = "build/test-programs/measure-gcc-nodebug";
+    let output = batch(
+        &[MEASURE],
+        &[
+            "break printf",
+            "break measure",
+            "run",
+            "break strlen",
+            "continue",
+            "address printf",
+            "disassemble printf 1",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "breakpoint 1 set, pending until a module with its code loads",
+            "breakpoint 2 set at measure at 0x",
+            "stopped at breakpoint 2 (hit 1) in measure at 0x",
+            "breakpoint 3 set at 2 locations",
+            "\n  strlen at 0x",
+            " in ld-linux-x86-64.so.2",
+            "\n  __strlen_",
+            " in libc.so.6",
+            "stopped at breakpoint 3 (hit 1) in __strlen_",
+            "printf: 0x",
+            " <printf>:",
+        ],
+    );
+    // A name nothing imports or defines is a mistake, not a wait.
+    let refused = batch_output(&[MEASURE], &["break printff"]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("no function named 'printff' was found")
+    );
+
+    let output = batch(
+        &["build/test-programs/overloads-cpp-gcc-nodebug"],
+        &[
+            "break pick",
+            "break shapes::Widget::pick()",
+            "break pick(double)",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "breakpoint 1 set at 3 locations",
+            "\n  pick(int) at 0x",
+            "\n  pick(double) at 0x",
+            "\n  shapes::Widget::pick() const at 0x",
+            "breakpoint 2 set at shapes::Widget::pick() const at 0x",
+            "breakpoint 3 set at pick(double) at 0x",
+        ],
+    );
 }
 
 #[test]
@@ -2310,7 +2574,7 @@ fn step_goroutine_enters_the_goroutine_the_line_starts() {
         &["build/test-programs/steps-go-o0"],
         &[&format!("break main.go:{go}"), "run", "step sideways"],
     );
-    assert_failure(&failure, "usage: step [task]");
+    assert_failure(&failure, "no call on this line calls sideways");
 }
 
 /// A program stripped of its debug information has goroutines nobody can
@@ -2333,11 +2597,23 @@ fn a_stripped_programs_goroutines_are_unavailable() {
 #[test]
 fn a_trimpath_programs_sources_say_why_they_are_missing() {
     const SERVER: &str = "tests/fixtures/go/server/main.go";
-    let recorded = "./github.com/jcalabro/uscope-go/tests/fixtures/go/server/main.go";
     let stdout = batch(
         &["build/test-programs/server-go-trimpath"],
         &["break main.greet", "run"],
     );
+    // The import path the build recorded depends on where the checkout
+    // that built it is, so it is read from the breakpoint's location.
+    let greet = support::source_line(SERVER, "func greet(");
+    let recorded = stdout
+        .split_whitespace()
+        .find_map(|word| word.strip_suffix(&format!(":{greet}")))
+        .filter(|path| path.ends_with(SERVER))
+        .unwrap_or_else(|| panic!("no recorded path in {stdout}"));
+    let import = recorded
+        .strip_prefix("./")
+        .and_then(|path| path.strip_suffix(SERVER))
+        .and_then(|path| path.strip_suffix('/'))
+        .unwrap_or_else(|| panic!("{recorded} is no import path"));
     assert!(
         stdout.contains(&format!(
             "source unavailable: source file {recorded} does not exist; it was recorded \
@@ -2351,13 +2627,12 @@ fn a_trimpath_programs_sources_say_why_they_are_missing() {
     let mapped = batch(
         &[
             "--source-map",
-            "github.com/jcalabro/uscope-go",
+            import,
             root,
             "build/test-programs/server-go-trimpath",
         ],
         &["break main.greet", "run"],
     );
-    let greet = support::source_line(SERVER, "func greet(");
     assert!(mapped.contains(&format!("=> {greet} |")), "{mapped}");
 }
 
@@ -2478,6 +2753,49 @@ fn finish_shows_what_the_function_returned() {
             ],
         );
     }
+}
+
+/// C and C++ return by the System V convention: in registers, in st0, or
+/// in memory whose address is returned. A small C++ class GCC does not say
+/// how calls pass is unknown, for that reason.
+#[test]
+fn finish_shows_what_a_c_or_cpp_function_returned() {
+    let stdout = batch(
+        &["build/test-programs/returns-c-gcc-o2"],
+        &[
+            "break r_double",
+            "break r_long_double",
+            "break r_big",
+            "run",
+            "finish",
+            "continue",
+            "finish",
+            "continue",
+            "finish",
+            "print",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "returned (double) r_double = -0.375",
+            "returned (long double) r_long_double = 2.5",
+            "returned (big) r_big = {<3 fields>}",
+            "(int) n = 1",
+            "returned (big) r_big = {<3 fields>}",
+        ],
+    );
+    let stdout = batch(
+        &["build/test-programs/returns-cpp-gcc-o2"],
+        &["break r_plain", "run", "finish"],
+    );
+    assert!(
+        stdout.contains(
+            "returned (Plain) r_plain = <unavailable: unsupported variable feature: \
+             returning this type by the function's calling convention>"
+        ),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -3231,7 +3549,7 @@ fn disassemble_renders_the_stopped_function_with_named_targets_and_source_lines(
         " <disasm_helper>",
         "# 0x",
         " <disasm_counter>",
-        " <.plt+0x",
+        " <printf@plt>",
         "push rbp",
     ] {
         assert!(
@@ -3368,7 +3686,7 @@ fn disassemble_names_the_targets_indirect_branches_read_at_the_stop() {
     let stub = find("jmp qword ptr [rip+", false);
     assert!(
         stub.ends_with(&format!(
-            "jmp qword ptr [rip+{:#x}]  # {:#x} <.got.plt+0x18> -> {:#x} <.plt+0x16>",
+            "jmp qword ptr [rip+{:#x}]  # {:#x} <.got.plt+0x18> -> {:#x} <printf@plt+0x6>",
             got_plt + 0x18 - (plt + 0x16),
             got_plt + 0x18,
             plt + 0x16
@@ -3775,4 +4093,183 @@ fn vdso_code_is_shown_in_the_module_the_kernel_names() {
             && innermost.ends_with(" from [vdso]"),
         "{live}"
     );
+}
+
+/// `info modules` says what describes each module, and for one stripped of
+/// its debug information which separate file it came from, or why the
+/// one found could not be used.
+#[test]
+fn info_modules_names_separate_debug_files_and_why_one_is_unusable() {
+    const PROGRAM: &str = "build/test-programs/split/basic-build-id";
+    let output = batch(
+        &[
+            "--debug-directory",
+            "build/test-programs/split/debug-root",
+            PROGRAM,
+        ],
+        &[
+            "info modules",
+            "break breakpoint_target",
+            "run",
+            "info modules",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "not loaded",
+            "debug",
+            "basic-build-id",
+            "\n  debug information from ",
+            ".debug",
+            "breakpoint 1 set at breakpoint_target at ",
+            "stopped at breakpoint 1",
+            "\n0x",
+            "debug",
+            "basic-build-id",
+            "\n  debug information from ",
+            "split/debug-root/.build-id/",
+            "symbols  ",
+            "libc.so.6",
+        ],
+    );
+    let output = batch(
+        &[
+            "--debug-directory",
+            "build/test-programs/split/altlink-root",
+            PROGRAM,
+        ],
+        &["info modules"],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "not loaded",
+            "symbols",
+            "basic-build-id",
+            "\n  cannot use the debug file ",
+            ": it shares debug information with other files through a dwz supplementary file",
+        ],
+    );
+}
+
+/// `jump` moves the stopped thread to a line of its function without
+/// running it, by number, by offset, or as `file:line`, and refuses a
+/// location outside the function; `set var` assigns registers.
+#[test]
+fn jump_moves_the_thread_to_resume_elsewhere_in_its_function() {
+    let line = |marker: &str| support::source_line("tests/fixtures/c/jump.c", marker);
+    let (output, errors) = piped(
+        &["build/test-programs/jump"],
+        &[
+            &format!("break jump.c:{}", line("jump: start")),
+            "run",
+            &format!("jump {}", line("jump: target")),
+            "print status",
+            "jump elsewhere",
+            "set var $rax = 5",
+            "print $rax",
+            "jump +1",
+            "continue",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "stopped at breakpoint 1 (hit 1) in checked",
+            "stopped where the thread was moved to resume in checked at tests/fixtures/c/jump.c:17",
+            " => 17 |     status += 100; // jump: target",
+            "(volatile int) status = 0",
+            "(u64) $rax = 5",
+            "stopped where the thread was moved to resume in checked at tests/fixtures/c/jump.c:18",
+            // Neither `status = value` nor `status += 100` ran.
+            "inferior exited with status 0",
+        ],
+    );
+    assert_in_order(
+        &errors,
+        &["error: stdin:5: elsewhere has no code in the function the thread is stopped in"],
+    );
+}
+
+#[test]
+fn step_goes_into_one_call_of_the_line() {
+    let line = |marker: &str| support::source_line("tests/fixtures/c/step-targets.c", marker);
+    let (output, errors) = piped(
+        &["build/test-programs/step-targets-gcc-o0"],
+        &[
+            &format!("break step-targets.c:{}", line("targets: calls")),
+            "run",
+            "info calls",
+            "step add",
+            "print a",
+            "finish",
+            "next",
+            "info calls",
+            "step strlen",
+            "step nothing",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "stopped at breakpoint 1 (hit 1) in main",
+            // GCC computes the arguments last to first.
+            "calls on this line:",
+            "  inc",
+            "  twice",
+            "  add",
+            "stopped after source step in add at tests/fixtures/c/step-targets.c:15",
+            "(int) a = 2",
+            "returned (int) add = 4",
+            "calls on this line:",
+            "  (indirect)",
+            "  strlen",
+            // Stepping into code without source goes on to the next line.
+            "stopped after source step in main at tests/fixtures/c/step-targets.c:29",
+        ],
+    );
+    assert_in_order(
+        &errors,
+        &["error: stdin:10: no call on this line calls nothing; `info calls` lists them"],
+    );
+}
+
+/// A backtrace shows the functions that left by tail calls between a frame
+/// and its caller, and selecting one shows what was passed to it.
+#[test]
+fn backtraces_show_the_functions_that_left_by_tail_calls() {
+    let line = |marker: &str| support::source_line("tests/fixtures/c/tail-frames.c", marker);
+    let (output, errors) = piped(
+        &["build/test-programs/tail-frames-gcc-o2"],
+        &[
+            &format!("break tail-frames.c:{}", line("frames: leaf")),
+            "run",
+            "bt",
+            "frame 1",
+            "print value",
+            "print $pc",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "stopped at breakpoint 1 (hit 1) in leaf",
+            &format!(
+                " in middle [tail call] at tests/fixtures/c/tail-frames.c:{}",
+                line("frames: middle")
+            ),
+            &format!(
+                " in top [tail call] at tests/fixtures/c/tail-frames.c:{}",
+                line("frames: top")
+            ),
+            &format!(
+                " in main at tests/fixtures/c/tail-frames.c:{}",
+                line("frames: call top")
+            ),
+            "(int) value = 6",
+            "(u64) $pc = <unavailable: a tail call discarded the frame>",
+        ],
+    );
+    assert!(errors.is_empty(), "{errors}");
 }

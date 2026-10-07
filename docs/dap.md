@@ -18,24 +18,26 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
 - **Breakpoints.**
   - Source, function, and instruction breakpoints. A source breakpoint is placed at its line's first statement; a column within the line is not used.
   - Breakpoints in shared libraries, kept pending until the library loads and following it through `dlopen` and `dlclose`. `breakpointLocations` lists the lines of loaded libraries' sources as well as the program's.
-  - Functions without debug information, such as libc's, break at their symbol.
+  - Functions without debug information, such as libc's, break at their symbol, read demangled for C++ and Rust. An indirect function, such as glibc's `strlen`, breaks in the implementation its resolver chose for the machine.
   - Conditions and logpoints in the [expression language](expressions.md): a logpoint's `{expression}` parts are evaluated at each hit. A condition that does not parse, or that assigns, leaves its breakpoint unverified with the reason; one that fails when evaluated stops the program and says why.
   - Hit counts are an operator and a count: `==5`, `>=5`, `%3`. A bare `5` is refused, since clients disagree about whether it means the fifth hit only or every hit from the fifth.
   - Data breakpoints (hardware watchpoints) on variables, expressions, and addresses. A `write` data breakpoint stops when a store changes the value, as clients present it ("Break on Value Change"); its *On Every Store* mode (`breakpointModes`) stops at every store, even of the value already held. `readWrite` stops at every load and store. A watched local ends with its frame, and the client is told. A goroutine's watched local follows its stack when the runtime moves it. Data breakpoints set before a program is loaded are refused.
   - Conditions and hit counts on data breakpoints, as on breakpoints. A condition is evaluated in the accessing thread's frame after the access, and every reported access is a hit. A data breakpoint re-sent with new conditions keeps its id and its count; one whose conditions do not parse is unverified and no longer watches.
   - Breakpoints can be edited while the program runs. Breakpoints the debug console makes, deletes, disables, or enables are reported to the client, as are the client's data breakpoints it deletes, disables, or enables. A disabled breakpoint stays listed as unverified, with a message naming the console command that enables it.
 - **Execution.** Continue, pause, step over, into, and out, by line or by instruction. The debugger is all-stop: every thread stops and resumes together, unless a request names a single thread (`singleThread`). A program that executes itself again is followed with its breakpoints.
+- **Step Into Target.** `stepInTargets` lists the calls of the innermost frame's line, from the stopped instruction on, each labeled with the function it calls, or as an indirect call; a caller's frame has none. `stepIn` with one's `targetId` goes into that call, running the line's other calls to their returns, and stops where its function's source begins, or as a plain step in does when the line ends first or the function has no source. A target belongs to the stop that listed it.
+- **Jump to Cursor.** `gotoTargets` names the line a thread can be moved to, or the next line with code, as a breakpoint would slide; `goto` moves the thread there without running it, and it stops again with reason `goto`. The line must have code in the function the thread is stopped in, at one place, or `goto` is refused with the reason; the function's variables keep their values.
 - **Fork children.** With `followForks`, each process the program forks is debugged in a session of its own, which the adapter asks the client to start with `startDebugging`. See [Following forks](#following-forks).
 - **Inspection.**
-  - Threads with names, and stack traces through libraries and inlined calls, with the frames' parameters, lines, and modules when a client asks.
+  - Threads with names, and stack traces through libraries and inlined calls, with the frames' parameters, lines, and modules when a client asks. A function that left by a tail call is shown, named with `[tail call]`, between the function it jumped to and their caller where the debug information allows only one chain of tail calls; its registers are gone, and its arguments are known where the call sites say what was passed.
   - A Go program's threads are its goroutines, each with its goroutine id as its thread id, named as `[7] main.worker — chan receive {job: resize} (thread 1234)`: the function the program wrote that it is in, past the runtime's machinery, what it waits for or that it stopped at a breakpoint, its profiler labels, and the system thread it is on. A stop names the goroutine that stopped. A parked goroutine's stack, variables, and expressions are its own, and `$task` is its id. The list puts the goroutine that stopped first, then goroutines on threads, then the program's other goroutines, leaving out the runtime's own unless `runtimeTasks` is set; it is cut at `maxTasks`, and a last entry says how many more there are. A system thread that stopped running no goroutine is listed too. `"threads": "system"` lists the system threads instead.
   - A stack that crosses from one stack to another, as Go's runtime does from its own stacks and signal handlers to a goroutine's, has a label heading each run of frames saying whose stack it is on. The runtime's own frames and compiler wrappers are subtle, as are the frames of an iterator that runs the body of a Go `range` over a function, whose names say whose loop they iterate.
-  - Arguments, locals, statics, and registers, with the text of strings. Each row's `evaluateName` reaches exactly that variable: a static that a local shadows is named from the outermost scope, such as `::count`, or with its file, such as `` ::`main.c::count` ``, and a variable an inner block hides has none. A register's row is named `$rax` and is read-only. A Go function's results, such as `~r0`, are among its arguments. After a step out of a Go function, the locals of the frame it returned to include what it returned, as `returned count`, which no expression names.
+  - Arguments, locals, statics, and registers, with the text of strings. Each row's `evaluateName` reaches exactly that variable: a static that a local shadows is named from the outermost scope, such as `::count`, or with its file, such as `` ::`main.c::count` ``, and a variable an inner block hides has none. A register's row is named `$rax`; the innermost frame's can be set, while a caller's, which unwinding recovered, are read-only. A Go function's results, such as `~r0`, are among its arguments. After a step out of a function, the locals of the frame it returned to include what it returned, as `returned count` for a Go result or `returned add` for a C function's value, which no expression names; the CLI's `finish` documents which languages' values are known.
   - Containers presented by [views](views.md): a vector's elements as indexed variables, paged by the client's `filter`, `start`, and `count`, and its fields and `[raw]`, the value as stored, as named ones.
   - Hover, watch, clipboard, and debug console evaluation in the [expression language](expressions.md).
   - Integers in hexadecimal, per request with `format` or for the session with the `uscope/setValueFormat` request (`{"hex": true}`).
   - Each variable's declaration (`declarationLocationReference`), and the function a function pointer points to (`valueLocationReference`), through the `locations` request.
-  - Changing values with `setVariable` and `setExpression`.
+  - Changing values with `setVariable` and `setExpression`, registers among them. Setting `rip` moves the thread, which then stops again with reason `goto`.
   - Memory reads and writes, and disassembly.
   - Modules with their address ranges and symbol files, the vDSO among them as `[vdso]`, and loaded sources. Once a client asks for the loaded sources, `loadedSource` events keep its list current as libraries load and unload.
 - **Signals.** Exception filters choose which signals stop the program (`fatal`, `interrupt`, `routine`, `other`), and `exceptionInfo` explains a stop. The `signals` setting overrides the policy of individual signals. A language runtime that handles faults itself, as Go's turns them into panics, gets them silently unless the `signals` setting says otherwise.
@@ -48,9 +50,7 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
 
 The adapter does not advertise these:
 
-- Jumping to a line (`gotoTargets`, VS Code's *Jump to Cursor*) and assigning registers, which need writable registers.
-- Stepping into a chosen call on a line (`stepInTargets`), restarting a frame (`restartFrame`), and stepping backwards.
-- Showing the value a function returned after stepping out of it.
+- Restarting a frame (`restartFrame`) and stepping backwards.
 - Following children made by `vfork` or `posix_spawn`, which share their parent's memory until they execute another program: they run on their own.
 - Terminating single threads, and leaving a process suspended when detaching from it.
 - Sending source contents: every source has a path, and the client reads it.
@@ -72,6 +72,8 @@ A launch configuration:
   "console": "internalConsole",  // or "integratedTerminal" or "externalTerminal"
   "sourceMap": [["/build/src", "${workspaceFolder}/src"]],  // earlier rules first; {"from": "to"} also works
   "viewFiles": ["${workspaceFolder}/app.views"],  // ahead of .uscope/views, the user's, the program's, the built-in
+  "debugDirectories": ["/srv/debug"],  // separate debug files, ahead of NIX_DEBUG_INFO_DIRS and /usr/lib/debug
+  "debuginfod": false,           // download missing debug files from DEBUGINFOD_URLS
   "disassemblySyntax": "intel",  // or "att"
   "signals": { "SIGUSR1": "nostop", "SIGPIPE": ["stop", "print"] },
   "followForks": false,          // debug forked processes in sessions of their own
@@ -92,6 +94,7 @@ Attaching to a process, or opening a core dump:
   "allowModuleMismatch": false }
 ```
 
+- A module stripped of its debug information takes it from a separate debug file: by build-id under a debug directory's `.build-id`, by `.gnu_debuglink` beside it, in its `.debug` directory, or under a debug directory, and, with `debuginfod`, from a debuginfod server. The `modules` request names the file as a module's `symbolFilePath`.
 - `pid` may be a number or a numeric string, as VS Code's `${command:pickProcess}` produces.
 - Attaching continues the process unless `stopOnEntry` is set.
 - Disconnecting detaches from an attached process and kills a launched one, unless the client asks otherwise with `terminateDebuggee`.
@@ -103,7 +106,7 @@ Attaching to a process, or opening a core dump:
 
 `"followForks": true`, in a launch or attach configuration, debugs every process the program forks in a session of its own. The child runs no instruction before its session has attached to it and set its breakpoints, so a breakpoint on the line after `fork()` stops in the child too.
 
-- **How.** The debugger removes the parent's breakpoints from the child, stops it, and releases it untraced. The adapter then asks the client to start a child session with `startDebugging`, as an attach configuration naming the child (`"name": "app (fork 1234)"`, `"pid"`), the parent's `type`, `followForks`, `sourceMap`, `viewFiles`, `disassemblySyntax`, `signals`, and `cwd`, an attach's `program`, and `"held": {"startTime": …}`, which tells the child's session to end the stop the child waits in. The child session continues the child once it is configured, unless `stopOnEntry` is set.
+- **How.** The debugger removes the parent's breakpoints from the child, stops it, and releases it untraced. The adapter then asks the client to start a child session with `startDebugging`, as an attach configuration naming the child (`"name": "app (fork 1234)"`, `"pid"`), the parent's `type`, `followForks`, `sourceMap`, `viewFiles`, `debugDirectories`, `debuginfod`, `disassemblySyntax`, `signals`, and `cwd`, an attach's `program`, and `"held": {"startTime": …}`, which tells the child's session to end the stop the child waits in. The child session continues the child once it is configured, unless `stopOnEntry` is set.
 - **Clients.** It needs a client that starts child sessions (`supportsStartDebuggingRequest`), such as VS Code and nvim-dap. With any other, the adapter says so once and the children run on their own. Each child session runs its own adapter, and ends independently of the parent's.
 - **Children no session takes run on their own.** The adapter releases a child the client refuses to debug or does not answer for within 60 seconds, and one no session has attached to 60 seconds after the client answered, and says so. A child session that fails to attach releases its child at once. A child forked while the parent's session ends is released too. A released child receives the SIGCONT that ends its stop, as after a shell's `fg`.
 - **Yama.** A child session attaches to a process that is not its adapter's descendant, which Yama refuses while `kernel.yama.ptrace_scope` is 1, Ubuntu's default, or more. Set it to 0 (`sudo sysctl kernel.yama.ptrace_scope=0`), or, at 1 or 2, give `uscope` the `cap_sys_ptrace` capability. A child session that cannot attach releases the child, which runs on its own.

@@ -23,9 +23,16 @@ pub const RESERVED: [&str; 8] = [
 /// Words that begin or qualify a type, and so are no bare name.
 pub const QUALIFIERS: [&str; 3] = ["const", "volatile", "mut"];
 
-/// Whether an unquoted word can be a segment of a path.
+/// Whether an unquoted word reads as a name wherever it stands, so that
+/// printing it needs no backticks.
 pub fn is_name_word(word: &str) -> bool {
     !RESERVED.contains(&word) && !is_type_word(word)
+}
+
+/// Whether an unquoted word names something where no type can stand: C's
+/// type words are names there, as Go, Rust, and Zig programs may use them.
+fn is_operand_word(word: &str) -> bool {
+    !RESERVED.contains(&word)
 }
 
 /// Whether a word begins or qualifies a type.
@@ -762,7 +769,7 @@ impl<'tokens> Parser<'tokens> {
         let span = self.peek_span();
         let name = match self.peek() {
             TokenKind::Quoted(name) => name.clone(),
-            TokenKind::Ident(word) if is_name_word(word) => word.clone(),
+            TokenKind::Ident(word) if is_operand_word(word) => word.clone(),
             _ => return Err(self.unexpected("a name")),
         };
         self.advance();
@@ -780,7 +787,7 @@ impl<'tokens> Parser<'tokens> {
                     self.advance();
                     let field_span = self.peek_span();
                     let field = match self.peek().clone() {
-                        TokenKind::Ident(word) if is_name_word(&word) => Field::Named(word),
+                        TokenKind::Ident(word) if is_operand_word(&word) => Field::Named(word),
                         TokenKind::Quoted(name) => Field::Named(name),
                         TokenKind::Integer {
                             value,

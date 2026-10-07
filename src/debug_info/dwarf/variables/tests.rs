@@ -1761,8 +1761,12 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
         })
         .expect("add the DWARF sections");
     let bytes = elf.write().expect("write the test object");
-    let debug_info = crate::debug_info::load_bytes(std::path::Path::new("malformed.o"), &bytes)
-        .expect("load the test object");
+    let debug_info = crate::debug_info::load_program(
+        std::path::Path::new("malformed.o"),
+        &bytes,
+        &crate::debug_info::DebugFileSearch::default(),
+    )
+    .expect("load the test object");
     assert_eq!(debug_info.image.globals().len(), 1);
 
     let mut runtime = Runtime::new([]);

@@ -211,7 +211,8 @@ pub fn breakpoint(breakpoint: &Breakpoint, placed: &[Placed], renderer: Renderer
     };
     for location in placed {
         let described = self::placed(location, renderer);
-        if location.function.is_none() && location.source.is_none() {
+        // A location without a source line already says its address.
+        if location.source.is_none() {
             write!(output, "\n  {described}")
         } else {
             write!(
@@ -773,6 +774,10 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             step_name(*kind)
         ),
         StopReason::Pause => format!("inferior {}", renderer.paint(Role::Current, "paused")),
+        StopReason::Jump => format!(
+            "{} where the thread was moved to resume",
+            stopped(Role::Current)
+        ),
         StopReason::Exception(info) => format!(
             "{} by {}",
             stopped(Role::Error),
@@ -1165,6 +1170,63 @@ pub fn source_context(
     lines.join("\n")
 }
 
+/// One module `info modules` lists.
+pub struct ModuleRow {
+    pub path: Arc<PathBuf>,
+    /// Where it is loaded, once it is.
+    pub load_bias: Option<u64>,
+    pub image: Option<Arc<uscope::ModuleImage>>,
+}
+
+/// The modules, one per line with the range each occupies and what
+/// describes its code, and below one stripped of its debug information the
+/// separate file that holds it, or why that file could not be used.
+pub fn modules(modules: &[ModuleRow], renderer: Renderer) -> String {
+    let mut lines = Vec::with_capacity(modules.len());
+    for module in modules {
+        let range = match (&module.image, module.load_bias) {
+            (Some(image), Some(bias)) => {
+                let range = image.address_range();
+                format!(
+                    "{:#x}-{:#x}",
+                    range.start.get().wrapping_add(bias),
+                    range.end.get().wrapping_add(bias)
+                )
+            }
+            (_, None) => "not loaded".to_owned(),
+            (None, Some(_)) => "?".to_owned(),
+        };
+        let described = match &module.image {
+            Some(image) if !image.functions().is_empty() => "debug",
+            Some(image) if !image.symbols().is_empty() => "symbols",
+            _ => "none",
+        };
+        lines.push(format!(
+            "{}  {described:<7}  {}",
+            renderer.paint(Role::Metadata, format!("{range:<29}")),
+            renderer.path(&module.path)
+        ));
+        match module
+            .image
+            .as_ref()
+            .and_then(|image| image.separate_debug_file())
+        {
+            Some(uscope::DebugFile::Used(path)) => lines.push(format!(
+                "  {} {}",
+                renderer.paint(Role::Muted, "debug information from"),
+                renderer.path(path)
+            )),
+            Some(uscope::DebugFile::Unusable { path, reason }) => lines.push(format!(
+                "  {} {}: {reason}",
+                renderer.paint(Role::Warning, "cannot use the debug file"),
+                renderer.path(path)
+            )),
+            None => {}
+        }
+    }
+    lines.join("\n")
+}
+
 pub fn core_dump(core: &CoreDumpInfo, renderer: Renderer) -> String {
     let mut lines = vec![
         format!(
@@ -1290,6 +1352,34 @@ pub fn code_name(function: Option<&FunctionInfo>, symbol: Option<&SymbolLocation
         name.push_str(" (unsized symbol)");
     }
     name
+}
+
+/// Renders the calls of a line that a step can go into, by address, with
+/// what each calls.
+pub fn step_targets(targets: &[uscope::StepTarget], renderer: Renderer) -> String {
+    if targets.is_empty() {
+        return "no calls on this line".to_owned();
+    }
+    let mut text = "calls on this line:".to_owned();
+    for target in targets {
+        let callee = target.callee.as_deref().map_or_else(
+            || {
+                if target.target.is_some() {
+                    "(unnamed)".to_owned()
+                } else {
+                    "(indirect)".to_owned()
+                }
+            },
+            |callee| renderer.paint(Role::Name, callee).to_string(),
+        );
+        write!(
+            text,
+            "\n  {}  {callee}",
+            renderer.paint(Role::Metadata, format!("{:#018x}", target.call.get()))
+        )
+        .expect("writing to a String cannot fail");
+    }
+    text
 }
 
 /// Renders what contains an address: its symbol and offset, its section, and
@@ -1872,8 +1962,14 @@ pub fn stack_frame(
             )
         )
     });
+    // A function that left by a tail call is no activation of its own.
+    let tail = if frame.kind == uscope::FrameKind::TailCall {
+        format!(" {}", renderer.paint(Role::Metadata, "[tail call]"))
+    } else {
+        String::new()
+    };
     format!(
-        "{} {} in {}{iterator}{place}",
+        "{} {} in {}{tail}{iterator}{place}",
         renderer.paint(
             if selected {
                 Role::Current

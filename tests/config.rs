@@ -98,6 +98,19 @@ fn assert_in_order(output: &str, expected: &[&str]) {
     }
 }
 
+/// `output` without the "(ran 1.42s)" a stop after a slow run ends with.
+fn without_elapsed(output: &str) -> String {
+    let mut kept = String::new();
+    let mut rest = output;
+    while let Some(start) = rest.find(" (ran ") {
+        kept.push_str(&rest[..start]);
+        rest = &rest[start..];
+        rest = rest.find(')').map_or("", |end| &rest[end + 1..]);
+    }
+    kept.push_str(rest);
+    kept
+}
+
 fn show_line<'a>(shown: &'a str, key: &str) -> &'a str {
     shown
         .lines()
@@ -135,7 +148,9 @@ fn settings_layer_flags_environment_local_project_user_and_defaults() {
     // The local file's context, the project's hidden bytes, and the flag's
     // syntax over the user's.
     let plain = session(&["--disassembly-syntax", "intel"], true);
-    // After the breakpoint's line and the stop's header, `list`'s.
+    // After the breakpoint's line and the stop's header, `list`'s. A stop
+    // after a run of a second or more, as under load, says how long it ran.
+    let plain = without_elapsed(&plain);
     let listing = plain
         .split("basic.c:10\n")
         .nth(3)
