@@ -25,3 +25,9 @@ view go bytes.Buffer {
         text(&buf[off], len(buf) - off)
     }
 }
+
+# Raw JSON is the text it holds. json.RawMessage is jsontext.Value.
+view go `encoding/json/jsontext`.Value {
+    show sequence(len(self)) for i in range(len(self)) => self[i]
+    format self as utf8
+}
