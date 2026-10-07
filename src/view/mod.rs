@@ -35,7 +35,7 @@ use bind::{BoundView, Rejection};
 use syntax::View;
 
 /// The view files built into uscope, in the order they are tried.
-const BUILT_IN: [(&str, &str); 9] = [
+const BUILT_IN: [(&str, &str); 10] = [
     (
         "libstdc++.views",
         include_str!("../../views/libstdc++.views"),
@@ -54,6 +54,7 @@ const BUILT_IN: [(&str, &str); 9] = [
         "go-errors.views",
         include_str!("../../views/go-errors.views"),
     ),
+    ("glibc.views", include_str!("../../views/glibc.views")),
 ];
 
 /// The kernels built into uscope: each one's name, the source it is built

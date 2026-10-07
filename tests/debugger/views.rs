@@ -310,6 +310,15 @@ async fn check_name(
     failures: &mut Vec<String>,
 ) {
     let name = match (&child.relationship, &child.state) {
+        // An element a view computes, as a bitset's positions are, has no
+        // place to index.
+        (
+            ValueChildRelationship::Element { .. },
+            VariableState::Available {
+                source: uscope::VariableValueSource::Computed,
+                ..
+            },
+        ) => return,
         (ValueChildRelationship::Element { .. }, _) => {
             format!("({})[{index}]", marker.expression)
         }
@@ -656,16 +665,17 @@ async fn cpp_containers_present_as_their_views_say_across_the_library_matrix() {
         ("containers-cpp-gcc-oldabi", false, &["overcounted"]),
         // Without -fstandalone-debug, libc++'s control blocks are
         // undescribed, so a shared_ptr shows no counts and a weak_ptr cannot
-        // say whether its object exists.
+        // say whether its object exists; recursive_mutex, defined in the
+        // library, is only declared.
         (
             "containers-cpp-libcxx-o0",
             false,
-            &["shared_too", "weak", "expired"],
+            &["shared_too", "weak", "expired", "reentered"],
         ),
         (
             "containers-cpp-libcxx-o2",
             true,
-            &["shared_too", "weak", "expired"],
+            &["shared_too", "weak", "expired", "reentered"],
         ),
         ("containers-cpp-libcxx-standalone", false, &[]),
         ("containers-cpp-gcc-debug", false, &[]),
@@ -679,6 +689,19 @@ async fn cpp_containers_present_as_their_views_say_across_the_library_matrix() {
     }
     assert_every_view_binds("libstdc++.views", &seen);
     assert_every_view_binds("libc++.views", &seen);
+}
+
+#[tokio::test]
+async fn c_library_values_present_as_their_views_say() {
+    let mut seen = BTreeSet::new();
+    for (fixture, optimized) in [
+        ("glibc-c-gcc-o0", false),
+        ("glibc-c-gcc-o2", true),
+        ("glibc-c-clang-o0", false),
+    ] {
+        seen.extend(check_containers(fixture, "c/glibc.c", "barrier", optimized).await);
+    }
+    assert_every_view_binds("glibc.views", &seen);
 }
 
 #[tokio::test]

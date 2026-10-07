@@ -917,6 +917,17 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         self.view_capacity(at)
     }
 
+    fn presented_element(
+        &mut self,
+        at: &StopPlace,
+        index: i128,
+    ) -> std::result::Result<Option<StopPlace>, Stop> {
+        let Some(bound) = self.view_of(at)? else {
+            return Ok(None);
+        };
+        self.view_element(&bound, at, index).map(Some)
+    }
+
     fn text_span(&mut self, at: &StopPlace) -> std::result::Result<Option<TextSpan>, Stop> {
         // A view that presents the value as text says where it is, and
         // otherwise the debug information does.

@@ -1120,33 +1120,34 @@ require_dwarf_operation "$output_dir/templates-cpp-gcc-dwarf4" 'DW_AT_type.*sign
 build_cpp_fixture clang++-libc++ "$cpp_fixtures_dir/templates.cpp" "$output_dir/templates-cpp-libcxx-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 require_dwarf_operation "$output_dir/templates-cpp-libcxx-o0" 'DW_AT_name.*: __1$'
-# The containers the built-in views present, across the libraries' matrix.
+# The containers the built-in views present, across the libraries' matrix,
+# in C++23 for its flat maps and std::expected.
 for optimization in o0 o2; do
     level="-O${optimization#o}"
     build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" \
-        "$output_dir/containers-cpp-gcc-$optimization" "$level" -g3 -gdwarf-5 -fPIE -pie
+        "$output_dir/containers-cpp-gcc-$optimization" "$level" -std=c++23 -g3 -gdwarf-5 -fPIE -pie
     build_cpp_fixture clang++ "$cpp_fixtures_dir/containers.cpp" \
-        "$output_dir/containers-cpp-clang-$optimization" "$level" -g3 -gdwarf-5 -fPIE -pie
+        "$output_dir/containers-cpp-clang-$optimization" "$level" -std=c++23 -g3 -gdwarf-5 -fPIE -pie
     build_cpp_fixture clang++-libc++ "$cpp_fixtures_dir/containers.cpp" \
-        "$output_dir/containers-cpp-libcxx-$optimization" "$level" -g3 -gdwarf-5 -fPIE -pie
+        "$output_dir/containers-cpp-libcxx-$optimization" "$level" -std=c++23 -g3 -gdwarf-5 -fPIE -pie
 done
 # libstdc++'s copy-on-write string, from before the C++11 ABI.
 build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-gcc-oldabi" \
-    -O0 -g3 -gdwarf-5 -fPIE -pie -D_GLIBCXX_USE_CXX11_ABI=0
+    -O0 -std=c++23 -g3 -gdwarf-5 -fPIE -pie -D_GLIBCXX_USE_CXX11_ABI=0
 # libstdc++'s debug mode, whose containers wrap the ordinary ones.
 build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-gcc-debug" \
-    -O0 -g3 -gdwarf-5 -fPIE -pie -D_GLIBCXX_DEBUG
+    -O0 -std=c++23 -g3 -gdwarf-5 -fPIE -pie -D_GLIBCXX_DEBUG
 # libstdc++ linked into the program.
 build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-gcc-static" \
-    -O0 -g3 -gdwarf-5 -fPIE -pie -static-libstdc++
+    -O0 -std=c++23 -g3 -gdwarf-5 -fPIE -pie -static-libstdc++
 # Template names without their arguments, which only the arguments'
 # entries give.
 build_cpp_fixture clang++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-clang-simple" \
-    -O0 -g3 -gdwarf-5 -gsimple-template-names -fPIE -pie
+    -O0 -std=c++23 -g3 -gdwarf-5 -gsimple-template-names -fPIE -pie
 # Only with -fstandalone-debug does clang describe the libc++ classes the
 # program never defines itself, such as a shared_ptr's control block.
 build_cpp_fixture clang++-libc++ "$cpp_fixtures_dir/containers.cpp" \
-    "$output_dir/containers-cpp-libcxx-standalone" -O0 -g3 -gdwarf-5 -fstandalone-debug -fPIE -pie
+    "$output_dir/containers-cpp-libcxx-standalone" -O0 -std=c++23 -g3 -gdwarf-5 -fstandalone-debug -fPIE -pie
 build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o0" \
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o2" \
@@ -1332,6 +1333,12 @@ build_program rustc "$rust_fixtures_dir/kvstore.rs" "$output_dir/kvstore-rust" \
 build_go_fixture "$go_fixtures_dir/kvstore" "$output_dir/kvstore-go" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_fixture gcc "$c_fixtures_dir/strings.c" "$output_dir/strings-c-gcc-o0" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/glibc.c" "$output_dir/glibc-c-gcc-o0" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/glibc.c" "$output_dir/glibc-c-gcc-o2" \
+    -O2 -g3 -fPIE -pie
+build_fixture clang "$c_fixtures_dir/glibc.c" "$output_dir/glibc-c-clang-o0" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/floats.c" "$output_dir/floats-c-gcc" \
     -O0 -g3 -fPIE -pie

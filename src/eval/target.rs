@@ -392,6 +392,18 @@ pub trait Machine: TypeSource {
         Ok(None)
     }
 
+    /// The place of element `index` of a value, as the view that presents
+    /// it says, for a view that presents a value as another; `None` when no
+    /// view presents its type.
+    fn presented_element(
+        &mut self,
+        at: &Self::Place,
+        index: i128,
+    ) -> Result<Option<Self::Place>, Stop> {
+        let _ = (at, index);
+        Ok(None)
+    }
+
     /// Where the bytes of the text a place holds are, or `None` when it
     /// holds no text.
     fn text_span(&mut self, at: &Self::Place) -> Result<Option<TextSpan>, Stop> {

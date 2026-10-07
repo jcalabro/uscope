@@ -268,6 +268,14 @@ impl<M: Machine> Machine for ViewMachine<'_, M> {
         self.base.presented_capacity(at)
     }
 
+    fn presented_element(
+        &mut self,
+        at: &Self::Place,
+        index: i128,
+    ) -> Result<Option<Self::Place>, Stop> {
+        self.base.presented_element(at, index)
+    }
+
     fn text_span(&mut self, at: &Self::Place) -> Result<Option<TextSpan>, Stop> {
         self.base.text_span(at)
     }
@@ -1098,6 +1106,15 @@ pub fn element_place<M: Machine>(
 ) -> Result<M::Place, Failure> {
     let mut machine = ViewMachine::new(machine, bound, this);
     let shape = resolve(bound, &mut machine)?;
+    // A value presented as another has that one's elements.
+    if let BoundShape::Value(program) = shape {
+        let Value::Place(place) = interp::value(program, &mut machine)? else {
+            return Err(refused("the view computes the value it presents"));
+        };
+        return machine
+            .presented_element(&place, index)?
+            .ok_or_else(|| refused("the value the view presents has no elements"));
+    }
     let BoundShape::Sequence { scan, element } = shape else {
         return Err(refused(if matches!(shape, BoundShape::Map { .. }) {
             "a map's entries are not indexed by position"
