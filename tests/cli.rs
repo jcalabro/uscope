@@ -756,6 +756,141 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
     );
 }
 
+/// Runs `commands` in batch mode with the settings file `settings`.
+fn batch_with_settings(settings: &str, arguments: &[&str], commands: &[&str]) -> String {
+    let directory = support::ScratchDir::new("cli-settings");
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, settings).expect("write the settings");
+    let mut all = vec!["--batch"];
+    for command in commands {
+        all.extend(["--eval", command]);
+    }
+    all.extend_from_slice(arguments);
+    assert_success(
+        uscope_command()
+            .env("USCOPE_CONFIG", &path)
+            .args(all)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .stdin(Stdio::null())
+            .output()
+            .expect("run uscope"),
+    )
+}
+
+#[test]
+fn pp_lays_values_out_to_the_width_and_print_formats_combine() {
+    let records = ["build/test-programs/records-c-gcc-o0"];
+    let commands = ["break inspect_records", "run", "pp *records", "up", "pp"];
+    let wide = batch(&records, &commands);
+    assert!(
+        wide.contains(
+            "(outer_record[2]) *records = [\n\
+             \x20 {inner = {signed_value = 1, unsigned_value = 2}, values = [3, 4]},\n\
+             \x20 {inner = {signed_value = 5, unsigned_value = 6}, values = [43, 44]},\n\
+             ]\n"
+        ),
+        "{wide}"
+    );
+    // With no expression, every local of the frame, expanded.
+    assert!(
+        wide.contains("(bit_fields) bits = {negative = -3, first = 5, second = 42}\n"),
+        "{wide}"
+    );
+    let narrow = batch_with_settings("[print]\nwidth = 40\n", &records, &commands);
+    assert!(
+        narrow.contains(
+            "(outer_record[2]) *records = [\n\
+             \x20 {\n\
+             \x20   inner = {\n\
+             \x20     signed_value = 1,\n\
+             \x20     unsigned_value = 2,\n\
+             \x20   },\n\
+             \x20   values = [3, 4],\n\
+             \x20 },\n"
+        ),
+        "{narrow}"
+    );
+
+    let (stdout, stderr) = piped(
+        &records,
+        &[
+            "break inspect_records",
+            "run",
+            "print/x *record",
+            "pp/x record->values",
+            "print/pl *record",
+            "print/q *record",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "(outer_record) *record = {inner = {signed_value = 0xfffffff9, unsigned_value = 0x9}, \
+             values = [0x14, 0x16]}\n",
+            "(int32_t[2]) record->values = [0x14, 0x16]\n",
+        ],
+    );
+    assert_in_order(
+        &stderr,
+        &[
+            "/p prints a value laid out and /l on one line; choose one",
+            "unknown format '/q'; print takes /x, /d, /r, /p, and /l",
+        ],
+    );
+
+    // `[print]` chooses what `print` does, and its formats override it.
+    let configured = batch_with_settings(
+        "[print]\nstyle = \"pretty\"\nradix = \"hexadecimal\"\nwidth = 40\n",
+        &records,
+        &[
+            "break inspect_records",
+            "run",
+            "print record->inner",
+            "print/l record->inner",
+            "print/d record->values",
+        ],
+    );
+    assert_in_order(
+        &configured,
+        &[
+            "(inner_record) record->inner = {\n  signed_value = 0xfffffff9,\n  unsigned_value = 0x9,\n}\n",
+            "(inner_record) record->inner = {signed_value = 0xfffffff9, unsigned_value = 0x9}\n",
+            "(int32_t[2]) record->values = [20, 22]\n",
+        ],
+    );
+}
+
+/// A long sequence of leaves fills its lines, and a map puts each entry on
+/// a line of its own.
+#[test]
+fn pp_fills_long_sequences_and_breaks_maps_by_width() {
+    let commands = ["break barrier", "run", "up", "pp many"];
+    let rust = ["build/test-programs/containers-rust-o0"];
+    let cpp = ["build/test-programs/containers-cpp-gcc-o0"];
+    let narrow = "[print]\nwidth = 30\n";
+    assert!(batch_with_settings(narrow, &rust, &commands).contains(
+        "(Vec<u32, alloc::alloc::Global>) many = len=300 [\n\
+             \x20 0, 1, 2, 3, 4, 5, 6, 7, 8,\n\
+             \x20 9, 10, 11, 12, 13, 14, 15,\n"
+    ));
+    let wide = batch(&rust, &commands);
+    assert!(
+        wide.contains(
+            "  249, 250, <truncated: MemoryReads limit 256 after 256; requested 1>,\n\
+             \x20 <49 omitted>,\n\
+             ]\n"
+        ),
+        "{wide}"
+    );
+
+    let commands = ["break barrier", "run", "up", "pp ordered", "pp/x forward"];
+    let ordered = "ordered = len=3 {\n  1: 10,\n  2: 20,\n  3: 30,\n}\n";
+    let narrow = batch_with_settings(narrow, &cpp, &commands);
+    assert_in_order(&narrow, &[ordered, "forward = len=2 [\n  0x4, 0x5,\n]\n"]);
+    let wide = batch(&cpp, &commands);
+    assert_in_order(&wide, &[ordered, "forward = len=2 [0x4, 0x5]\n"]);
+}
+
 #[test]
 fn saved_breakpoint_commands_recreate_the_breakpoints() {
     let directory = support::ScratchDir::new("cli-save-breakpoints");

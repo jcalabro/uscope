@@ -346,3 +346,31 @@ fn an_interactive_session_keeps_its_breakpoints_for_the_next_one() {
     assert!(output.status.success(), "{output:?}");
     assert!(!saved.exists());
 }
+
+#[test]
+fn interactive_pp_lays_values_out_to_the_terminal_width() {
+    let state = support::ScratchDir::new("repl-pp-width");
+    let mut session = repl(&fixture("records-c-gcc-o0"), state.path());
+    run(&mut session, "break inspect_records", "breakpoint 1 set");
+    run(&mut session, "run", "stopped at breakpoint 1");
+    session
+        .get_process_mut()
+        .set_window_size(40, 24)
+        .expect("narrow the terminal");
+    run(
+        &mut session,
+        "pp record->inner",
+        "(inner_record) record->inner = {\r\n  signed_value = -7,\r\n  unsigned_value = 9,\r\n}\r\n",
+    );
+    // The width is measured again for each line.
+    session
+        .get_process_mut()
+        .set_window_size(100, 24)
+        .expect("widen the terminal");
+    run(
+        &mut session,
+        "pp record->inner",
+        "(inner_record) record->inner = {signed_value = -7, unsigned_value = 9}\r\n",
+    );
+    quit(session);
+}

@@ -18,8 +18,6 @@ use super::terminal::{Renderer, Role};
 pub const OUTPUT_LIMIT: usize = 64 * 1024;
 pub const OUTPUT_TRUNCATION_MARKER: &str = "<truncated: OutputBytes>";
 const ANSI_RESET: &str = "\u{1b}[0m";
-/// The most children requested in one page while expanding a value.
-const MAX_EXPANDED_CHILDREN: u64 = 256;
 
 /// A string that stops growing at a byte limit, ending with a marker when
 /// truncated. Truncation never splits a UTF-8 character or an ANSI sequence.
@@ -135,7 +133,7 @@ fn state_failure(state: &VariableState) -> Option<(Role, String)> {
     }
 }
 
-fn exhaustion(exhaustion: InspectionExhaustion) -> String {
+pub fn exhaustion(exhaustion: InspectionExhaustion) -> String {
     format!(
         "<truncated: {:?} limit {} after {}; requested {}>",
         exhaustion.resource, exhaustion.limit, exhaustion.used, exhaustion.requested
@@ -371,14 +369,244 @@ const fn is_leaf(value: &VariableValue) -> bool {
     )
 }
 
+/// How `print` lays a value out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layout {
+    /// Whether groups that do not fit the width break across lines.
+    pub pretty: bool,
+    /// The columns a pretty value fits in.
+    pub width: usize,
+    /// The columns each nested line is indented by.
+    pub indent: usize,
+    /// Whether integers show in hexadecimal.
+    pub hexadecimal: bool,
+    /// Whether values show as stored, without their views.
+    pub raw: bool,
+    /// The most aggregate levels expanded.
+    pub max_depth: u64,
+    /// The most children shown per aggregate.
+    pub max_elements: u64,
+}
+
+/// A value laid out as text, and groups of items in brackets that a
+/// printer shows on one line or one item per line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Doc {
+    Text(String),
+    Group {
+        open: String,
+        items: Vec<Vec<Self>>,
+        close: String,
+    },
+}
+
+/// Builds a [`Doc`] from text, openings, separators, and closings in order,
+/// counting the bytes its compact form takes.
+#[derive(Default)]
+struct Builder {
+    root: Vec<Doc>,
+    frames: Vec<(String, Vec<Vec<Doc>>, Vec<Doc>)>,
+    bytes: usize,
+}
+
+impl Builder {
+    fn current(&mut self) -> &mut Vec<Doc> {
+        match self.frames.last_mut() {
+            Some((_, _, item)) => item,
+            None => &mut self.root,
+        }
+    }
+
+    fn text(&mut self, text: String) {
+        self.bytes += text.len();
+        self.current().push(Doc::Text(text));
+    }
+
+    fn open(&mut self, open: String) {
+        self.bytes += open.len();
+        self.frames.push((open, Vec::new(), Vec::new()));
+    }
+
+    fn separate(&mut self) {
+        self.bytes += 2;
+        if let Some((_, items, item)) = self.frames.last_mut() {
+            items.push(std::mem::take(item));
+        }
+    }
+
+    fn close(&mut self, close: String) {
+        self.bytes += close.len();
+        let Some((open, mut items, item)) = self.frames.pop() else {
+            return;
+        };
+        if !item.is_empty() {
+            items.push(item);
+        }
+        self.current().push(Doc::Group { open, items, close });
+    }
+
+    /// Whether the value is already longer than any output shows.
+    const fn full(&self) -> bool {
+        self.bytes > OUTPUT_LIMIT
+    }
+
+    fn finish(mut self) -> Vec<Doc> {
+        // A walk the budget ended leaves groups open, past what is shown.
+        while !self.frames.is_empty() {
+            self.close(String::new());
+        }
+        self.root
+    }
+}
+
+/// The columns `docs` take on one line.
+fn flat_width(docs: &[Doc]) -> usize {
+    docs.iter()
+        .map(|doc| match doc {
+            Doc::Text(text) => text.chars().count(),
+            Doc::Group { open, items, close } => {
+                open.chars().count()
+                    + items.iter().map(|item| flat_width(item)).sum::<usize>()
+                    + 2 * items.len().saturating_sub(1)
+                    + close.chars().count()
+            }
+        })
+        .sum()
+}
+
+/// Writes `docs` on one line, as `print` always did.
+fn compact(docs: &[Doc], output: &mut BoundedOutput) {
+    for doc in docs {
+        if output.is_truncated() {
+            return;
+        }
+        match doc {
+            Doc::Text(text) => output.push_str(text),
+            Doc::Group { open, items, close } => {
+                output.push_str(open);
+                for (index, item) in items.iter().enumerate() {
+                    if index != 0 {
+                        output.push_str(", ");
+                    }
+                    compact(item, output);
+                }
+                output.push_str(close);
+            }
+        }
+    }
+}
+
+/// Writes `docs` from `column` so that each group that does not fit the
+/// width, with the `trailing` columns that follow it on its line, puts each
+/// item on a line of its own, indented, and ended by a comma.
+fn pretty(
+    docs: &[Doc],
+    layout: Layout,
+    indent: usize,
+    trailing: usize,
+    column: &mut usize,
+    output: &mut BoundedOutput,
+) {
+    for (index, doc) in docs.iter().enumerate() {
+        if output.is_truncated() {
+            return;
+        }
+        let after = flat_width(&docs[index + 1..]) + trailing;
+        match doc {
+            Doc::Text(text) => {
+                output.push_str(text);
+                *column += text.chars().count();
+            }
+            Doc::Group { items, .. }
+                if items.is_empty()
+                    || *column + flat_width(std::slice::from_ref(doc)) + after <= layout.width =>
+            {
+                compact(std::slice::from_ref(doc), output);
+                *column += flat_width(std::slice::from_ref(doc));
+            }
+            Doc::Group { open, items, close } => {
+                output.push_str(open);
+                let inner = indent + layout.indent;
+                // A sequence of leaves fills each line rather than taking
+                // one line per element.
+                let fill = open.ends_with('[')
+                    && items
+                        .iter()
+                        .all(|item| item.iter().all(|doc| matches!(doc, Doc::Text(_))));
+                for (index, item) in items.iter().enumerate() {
+                    let item_width = flat_width(item) + 1;
+                    if !fill || index == 0 || *column + 1 + item_width > layout.width {
+                        output.push_str("\n");
+                        output.push_str(&" ".repeat(inner));
+                        *column = inner;
+                    } else {
+                        output.push_str(" ");
+                        *column += 1;
+                    }
+                    pretty(item, layout, inner, 1, column, output);
+                    output.push_str(",");
+                    *column += 1;
+                }
+                output.push_str("\n");
+                output.push_str(&" ".repeat(indent));
+                output.push_str(close);
+                *column = indent + close.chars().count();
+            }
+        }
+    }
+}
+
 /// Pending output of [`expanded`], consumed from the back.
 enum Work {
     State(Box<(TypeInfo, VariableState)>, u64),
     Text(String),
+    Separate,
+    Close(String),
+}
+
+/// An integer leaf in hexadecimal within its type's width, as `print/x`
+/// shows it, or `None` for any other value.
+fn hexadecimal_text(type_info: &TypeInfo, state: &VariableState) -> Option<String> {
+    let integer = match state {
+        VariableState::Available {
+            value: VariableValue::Scalar(ScalarValue::Signed(value)),
+            ..
+        } => IntegerValue::Signed(*value),
+        VariableState::Available {
+            value: VariableValue::Scalar(ScalarValue::Unsigned(value)),
+            ..
+        } => IntegerValue::Unsigned(*value),
+        VariableState::Available {
+            value: VariableValue::Enumeration { value, .. },
+            ..
+        } => *value,
+        _ => return None,
+    };
+    // An exact integer has no width: a negative one keeps its sign.
+    let width = type_info
+        .byte_size
+        .map(|size| size.saturating_mul(8).min(128));
+    match (integer, width) {
+        (IntegerValue::Signed(value), None) if value < 0 => {
+            Some(format!("-{:#x}", value.unsigned_abs()))
+        }
+        (IntegerValue::Signed(value), Some(width)) => {
+            let mask = if width >= 128 {
+                u128::MAX
+            } else {
+                (1_u128 << width) - 1
+            };
+            Some(format!("{:#x}", value.cast_unsigned() & mask))
+        }
+        (IntegerValue::Signed(value), None) => Some(format!("{value:#x}")),
+        (IntegerValue::Unsigned(value), _) => Some(format!("{value:#x}")),
+        _ => None,
+    }
 }
 
 /// Renders a value with its aggregates expanded, fetching child pages until
-/// the remaining inspection limits or the output budget run out.
+/// the remaining inspection limits or the output budget run out, and lays
+/// it out as `layout` says.
 #[expect(
     clippy::too_many_lines,
     reason = "values as stored and as presented are expanded in one bounded walk"
@@ -389,18 +617,27 @@ pub async fn expanded(
     name: &str,
     state: &VariableState,
     mut remaining: InspectionLimits,
-    raw: bool,
+    layout: Layout,
     renderer: Renderer,
 ) -> uscope::Result<String> {
-    let mut output = BoundedOutput::new(OUTPUT_LIMIT);
+    let raw = layout.raw;
+    let mut output = Builder::default();
     let mut work = vec![Work::State(Box::new((type_info.clone(), state.clone())), 0)];
     while let Some(item) = work.pop() {
-        if output.is_truncated() {
+        if output.full() {
             break;
         }
         let (boxed, depth) = match item {
             Work::Text(text) => {
-                output.push_str(&text);
+                output.text(text);
+                continue;
+            }
+            Work::Separate => {
+                output.separate();
+                continue;
+            }
+            Work::Close(close) => {
+                output.close(close);
                 continue;
             }
             Work::State(boxed, depth) => (boxed, depth),
@@ -413,7 +650,7 @@ pub async fn expanded(
             ..
         } = state
         else {
-            output.push_str(&state_summary(type_info, state));
+            output.text(state_summary(type_info, state));
             continue;
         };
         let presentation = presentation.as_deref().filter(|_| !raw);
@@ -432,26 +669,26 @@ pub async fn expanded(
                 presentation.count,
             )
             else {
-                output.push_str(&presentation.summary);
+                output.text(presentation.summary.to_string());
                 continue;
             };
             let length = match count {
                 PresentedCount::Exact(count) => format!("len={count}"),
                 PresentedCount::AtLeast(count) => format!("len>={count}"),
                 _ => {
-                    output.push_str(&presentation.summary);
+                    output.text(presentation.summary.to_string());
                     continue;
                 }
             };
             let count = count.known();
-            let page = first_children(debugger, reference, count, &mut remaining).await?;
+            let page = first_children(debugger, reference, count, layout, &mut remaining).await?;
             let (opening, closing) = if shape == PresentedShape::Map {
                 ("{", "}")
             } else {
                 ("[", "]")
             };
-            output.push_str(&format!("{length} {opening}"));
-            work.push(Work::Text(closing.to_owned()));
+            output.open(format!("{length} {opening}"));
+            work.push(Work::Close(closing.to_owned()));
             schedule_children(&mut work, count, page.as_ref(), depth + 1, raw);
             continue;
         }
@@ -460,15 +697,19 @@ pub async fn expanded(
         }
         // Strings show as their text rather than their parts.
         if stored_text(state).is_some() || is_leaf(value) {
-            output.push_str(&rendered_summary(type_info, state, true));
+            let hexadecimal = layout
+                .hexadecimal
+                .then(|| hexadecimal_text(type_info, state))
+                .flatten();
+            output.text(hexadecimal.unwrap_or_else(|| rendered_summary(type_info, state, true)));
             continue;
         }
-        if depth >= remaining.aggregate_depth {
-            output.push_str("<truncated: AggregateDepth>");
+        if depth >= remaining.aggregate_depth.min(layout.max_depth) {
+            output.text("<truncated: AggregateDepth>".to_owned());
             continue;
         }
         let ValueChildren::Available(reference) = children else {
-            output.push_str(&value_summary(type_info, value, children));
+            output.text(value_summary(type_info, value, children));
             continue;
         };
         if let Some(resource) = [
@@ -480,11 +721,18 @@ pub async fn expanded(
         .into_iter()
         .find_map(|(resource, remaining)| (remaining == 0).then_some(resource))
         {
-            output.push_str(&format!("<truncated: {resource:?}>"));
+            output.text(format!("<truncated: {resource:?}>"));
             continue;
         }
 
-        let page = first_children(debugger, reference, reference.total(), &mut remaining).await?;
+        let page = first_children(
+            debugger,
+            reference,
+            reference.total(),
+            layout,
+            &mut remaining,
+        )
+        .await?;
         let (opening, closing) = match value {
             VariableValue::Array { .. } | VariableValue::Slice { .. } => ("[", "]".to_owned()),
             VariableValue::Variant { active, .. } => (
@@ -497,16 +745,23 @@ pub async fn expanded(
             VariableValue::Union => ("{", "} <active member unknown>".to_owned()),
             _ => ("{", "}".to_owned()),
         };
-        output.push_str(opening);
-        work.push(Work::Text(closing));
+        output.open(opening.to_owned());
+        work.push(Work::Close(closing));
         schedule_children(&mut work, reference.total(), page.as_ref(), depth + 1, raw);
+    }
+    let docs = output.finish();
+    let mut text = BoundedOutput::new(OUTPUT_LIMIT);
+    if layout.pretty {
+        let prefix = format!("({}) {name} = ", type_info.name);
+        let mut column = prefix.chars().count();
+        pretty(&docs, layout, 0, 0, &mut column, &mut text);
+    } else {
+        compact(&docs, &mut text);
     }
     Ok(assignment(
         &type_info.name,
         name,
-        &renderer
-            .paint(Role::Value, output.into_string())
-            .to_string(),
+        &renderer.paint(Role::Value, text.into_string()).to_string(),
         renderer,
     ))
 }
@@ -517,9 +772,10 @@ async fn first_children(
     debugger: &DebuggerHandle,
     reference: &Arc<ValueChildrenReference>,
     count: u64,
+    layout: Layout,
     remaining: &mut InspectionLimits,
 ) -> uscope::Result<Option<ValueChildPage>> {
-    let requested = count.min(MAX_EXPANDED_CHILDREN).min(remaining.value_nodes);
+    let requested = count.min(layout.max_elements).min(remaining.value_nodes);
     if requested == 0 {
         return Ok(None);
     }
@@ -538,7 +794,7 @@ async fn first_children(
 }
 
 /// Schedules one aggregate's children, then any truncation markers, as
-/// comma-separated items.
+/// separated items.
 fn schedule_children(
     work: &mut Vec<Work>,
     total: u64,
@@ -588,7 +844,7 @@ fn schedule_children(
     while let Some(item) = items.pop() {
         work.extend(item.into_iter().rev());
         if !items.is_empty() {
-            work.push(Work::Text(", ".to_owned()));
+            work.push(Work::Separate);
         }
     }
 }
@@ -685,56 +941,6 @@ fn watched_scalar(type_info: &TypeInfo, image: Option<&ModuleImage>) -> Option<W
             .type_info(next)?;
     }
     None
-}
-
-/// Renders an integer in hexadecimal within its type's width, as `print/x`
-/// does; other values render as `print` shows them.
-pub fn hexadecimal(
-    type_info: &TypeInfo,
-    name: &str,
-    state: &VariableState,
-    renderer: Renderer,
-) -> String {
-    let integer = match state {
-        VariableState::Available {
-            value: VariableValue::Scalar(ScalarValue::Signed(value)),
-            ..
-        } => Some(IntegerValue::Signed(*value)),
-        VariableState::Available {
-            value: VariableValue::Scalar(ScalarValue::Unsigned(value)),
-            ..
-        } => Some(IntegerValue::Unsigned(*value)),
-        VariableState::Available {
-            value: VariableValue::Enumeration { value, .. },
-            ..
-        } => Some(*value),
-        _ => None,
-    };
-    // An exact integer has no width: a negative one keeps its sign.
-    let width = type_info
-        .byte_size
-        .map(|size| size.saturating_mul(8).min(128));
-    let text = integer.and_then(|integer| match (integer, width) {
-        (IntegerValue::Signed(value), None) if value < 0 => {
-            Some(format!("-{:#x}", value.unsigned_abs()))
-        }
-        (IntegerValue::Signed(value), Some(width)) => {
-            let mask = if width >= 128 {
-                u128::MAX
-            } else {
-                (1_u128 << width) - 1
-            };
-            Some(format!("{:#x}", value.cast_unsigned() & mask))
-        }
-        (IntegerValue::Signed(value), None) => Some(format!("{value:#x}")),
-        (IntegerValue::Unsigned(value), _) => Some(format!("{value:#x}")),
-        _ => None,
-    });
-    let value = text.map_or_else(
-        || state_summary(type_info, state),
-        |text| renderer.paint(Role::Value, text).to_string(),
-    );
-    assignment(&type_info.name, name, &value, renderer)
 }
 
 /// A type's name with the path its producer's name leaves out, as in

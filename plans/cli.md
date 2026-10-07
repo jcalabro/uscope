@@ -553,6 +553,14 @@ applies only to a scalar.
   output is not a terminal, so piped and batch output is the same
   everywhere; `[print] width` fixes it.
 
+As built, `/d` joins the formats to override `radix = "hexadecimal"`, and
+is refused with `/x`. A sequence whose elements are all leaves fills its
+lines rather than taking one per element, as rustfmt lays out short array
+elements, so a 300-element vector takes a screen rather than 300 lines;
+records and maps keep one member per line. The line editor measures the
+terminal after each line it reads and sends the width with it, so a resize
+applies to the next command.
+
 ## Stops
 
 ### The header

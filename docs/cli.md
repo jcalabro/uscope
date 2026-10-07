@@ -371,7 +371,8 @@ Past Go code, only the stack pointer is recovered.
 
 | Command | |
 | --- | --- |
-| `print`, `p` [*expression*] | Print a value, or every parameter and local of the selected frame. `/x` prints integers in hexadecimal and `/r` without views. |
+| `print`, `p` [*expression*] | Print a value, or every parameter and local of the selected frame. |
+| `pp` [*expression*] | Print a value laid out to the width, or every parameter and local of the selected frame, expanded. |
 | `set` [`var`] *assignment* | Assign, as in `set var x = y + 1`. |
 | `whatis` *expression* | Show an expression's type. |
 | `ptype` *expression or type* | Show a type's definition. |
@@ -379,6 +380,27 @@ Past Go code, only the stack pointer is recovered.
 | `info view` *expression* | Explain which view presents a value. |
 | `set views on`\|`off` | Present values through views, or as stored. |
 | `views` [`load` *file*\|`clear`\|`check`\|`explain` *type*\|`record` *file* *expression*] | Manage view files; see [views.md](views.md). |
+
+`pp` lays a value out for reading: a group of members or elements that fits
+in the rest of the line stays on it, and one that does not puts each member on
+a line of its own, indented and ended by a comma. A sequence of plain values
+fills its lines instead. The width is the terminal's, measured as each command
+runs, or 80 when output is not a terminal, so piped and batch output is the
+same everywhere; `[print] width` fixes it.
+
+```text
+(uscope) pp *records
+(outer_record[2]) *records = [
+  {inner = {signed_value = 1, unsigned_value = 2}, values = [3, 4]},
+  {inner = {signed_value = 5, unsigned_value = 6}, values = [43, 44]},
+]
+```
+
+`print` prints on one line unless `[print] style = "pretty"` makes it print as
+`pp` does. Both take formats, which combine, as in `p/xr` or `pp/x`: `/x`
+prints integers in hexadecimal, members and elements included, `/d` in
+decimal, overriding `[print] radix`, `/r` values as stored, without views,
+`/p` laid out as `pp` does, and `/l` on one line.
 
 Expressions are described in [expressions.md](expressions.md). Every value has
 an explicit state: available, unavailable for a stated reason (optimized out,

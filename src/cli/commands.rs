@@ -12,6 +12,7 @@ use uscope::{
     WatchpointId, WatchpointSpec,
 };
 
+use super::config::{PrintStyle, Radix};
 use super::format::{self, plural};
 use super::terminal::{Renderer, Role};
 use super::value;
@@ -49,6 +50,7 @@ pub enum Command {
     Run,
     Continue,
     Print,
+    Pp,
     Whatis,
     Ptype,
     Set,
@@ -282,7 +284,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         "print",
         ["p"],
         "print [expression...]",
-        "Print an expression's value, or every variable; print/x shows integers in hexadecimal, and print/r values as stored, without views"
+        "Print an expression's value, or every variable; print/x shows integers in hexadecimal, /d in decimal, /r values as stored, without views, /p laid out to the width, and /l on one line"
+    ),
+    command!(
+        Pp,
+        "pp",
+        [],
+        "pp [expression...]",
+        "Print an expression's value laid out to the width, or every local expanded; pp takes print's formats"
     ),
     command!(
         Whatis,
@@ -514,24 +523,7 @@ impl Cli {
                 _ => return Err(spec.usage_error()),
             },
             Command::Breakpoints => self.list_breakpoints().await?,
-            Command::Info => match (arguments[0], arguments.get(1)) {
-                ("breakpoints" | "break", None) => self.list_breakpoints().await?,
-                ("watchpoints" | "watch", None) => self.list_watchpoints().await?,
-                ("core", None) => debugger
-                    .core_dump()
-                    .map(|core| format::core_dump(core, renderer))
-                    .ok_or_else(|| anyhow!("no core dump is open"))?,
-                ("symbol", Some(address)) => format::address_description(
-                    &debugger.describe_address(parse_address(address)?).await?,
-                    renderer,
-                ),
-                ("signals" | "handle", None) => self.list_signals().await?,
-                ("view", Some(_)) => {
-                    let text = rest.trim_start()["view".len()..].trim();
-                    self.explain_view(text).await?
-                }
-                _ => return Err(spec.usage_error()),
-            },
+            Command::Info => self.info(&arguments, rest, spec).await?,
             Command::Handle => self.handle_signal(&arguments).await?,
             Command::Delete => self.delete(&arguments, false, spec).await?,
             Command::Enable => self.set_enabled(&arguments, true, spec).await?,
@@ -549,10 +541,14 @@ impl Cli {
                     .await?
             }
             Command::Continue => self.execute_until_stop(debugger.resume()).await?,
-            Command::Print => match first {
-                Some(_) => self.print(rest, format == "x", format == "r").await?,
-                None => value::variables(&debugger.variables().await?, renderer),
-            },
+            Command::Print | Command::Pp => {
+                let layout = self.layout(spec.command, format)?;
+                if first.is_some() {
+                    self.print(rest, layout).await?
+                } else {
+                    self.print_locals(layout).await?
+                }
+            }
             Command::Whatis => self.whatis(rest).await?,
             Command::Ptype => self.ptype(rest).await?,
             Command::Globals => self.globals(first).await?,
@@ -595,6 +591,30 @@ impl Cli {
             Command::Quit => return Ok(Control::Quit),
         };
         Ok(Control::Continue(output))
+    }
+
+    /// Runs `info` with its `arguments`, `rest` being them as written.
+    async fn info(&self, arguments: &[&str], rest: &str, spec: &CommandSpec) -> Result<String> {
+        let renderer = self.renderers.stdout;
+        let debugger = &self.debugger;
+        Ok(match (arguments[0], arguments.get(1)) {
+            ("breakpoints" | "break", None) => self.list_breakpoints().await?,
+            ("watchpoints" | "watch", None) => self.list_watchpoints().await?,
+            ("core", None) => debugger
+                .core_dump()
+                .map(|core| format::core_dump(core, renderer))
+                .ok_or_else(|| anyhow!("no core dump is open"))?,
+            ("symbol", Some(address)) => format::address_description(
+                &debugger.describe_address(parse_address(address)?).await?,
+                renderer,
+            ),
+            ("signals" | "handle", None) => self.list_signals().await?,
+            ("view", Some(_)) => {
+                let text = rest.trim_start()["view".len()..].trim();
+                self.explain_view(text).await?
+            }
+            _ => return Err(spec.usage_error()),
+        })
     }
 
     /// Runs one command for a client that controls execution itself, such
@@ -1291,7 +1311,70 @@ impl Cli {
         Ok(format::watchpoint_set(&watchpoint, self.renderers.stdout))
     }
 
-    async fn print(&self, text: &str, hexadecimal: bool, raw: bool) -> Result<String> {
+    /// How `command` with `format` lays a value out: the `[print]`
+    /// settings, which `pp` and each format letter override.
+    fn layout(&self, command: Command, format: &str) -> Result<value::Layout> {
+        let print = &self.settings.config.print;
+        let has = |letter| format.contains(letter);
+        if has('p') && has('l') {
+            bail!("/p prints a value laid out and /l on one line; choose one");
+        }
+        if has('x') && has('d') {
+            bail!("/x prints integers in hexadecimal and /d in decimal; choose one");
+        }
+        let width = match print.width {
+            super::config::Width::Columns(columns) => usize::from(columns),
+            super::config::Width::Terminal => self.columns(),
+        };
+        Ok(value::Layout {
+            pretty: !has('l')
+                && (has('p') || command == Command::Pp || print.style == PrintStyle::Pretty),
+            width,
+            indent: usize::from(print.indent),
+            hexadecimal: !has('d') && (has('x') || print.radix == Radix::Hexadecimal),
+            raw: has('r'),
+            max_depth: print.max_depth,
+            max_elements: print.max_elements,
+        })
+    }
+
+    /// Every local of the selected frame: summarized, or each expanded
+    /// and laid out when `layout` is pretty.
+    async fn print_locals(&self, layout: value::Layout) -> Result<String> {
+        let renderer = self.renderers.stdout;
+        let snapshot = self.debugger.variables().await?;
+        if !layout.pretty {
+            return Ok(value::variables(&snapshot, renderer));
+        }
+        let mut lines = Vec::new();
+        let mut length = 0;
+        for variable in snapshot.variables.iter() {
+            if length > value::OUTPUT_LIMIT {
+                break;
+            }
+            let line = match &variable.type_info {
+                Some(type_info) => {
+                    value::expanded(
+                        &self.debugger,
+                        type_info,
+                        &variable.name,
+                        &variable.state,
+                        uscope::InspectionLimits::default(),
+                        layout,
+                        renderer,
+                    )
+                    .await?
+                }
+                None => value::untyped(&variable.name, &variable.state, renderer),
+            };
+            length += line.len();
+            lines.push(line);
+        }
+        lines.extend(snapshot.completion.exhaustion().map(value::exhaustion));
+        Ok(lines.join("\n"))
+    }
+
+    async fn print(&self, text: &str, layout: value::Layout) -> Result<String> {
         let renderer = self.renderers.stdout;
         let expression = parse_expression(text)?;
         let evaluation = self
@@ -1305,9 +1388,6 @@ impl Cli {
             _ => bail!("the evaluation produced an unknown kind of result"),
         };
         let mut output = match &inspected.type_info {
-            Some(type_info) if hexadecimal => {
-                value::hexadecimal(type_info, text, &inspected.state, renderer)
-            }
             Some(type_info) => {
                 value::expanded(
                     &self.debugger,
@@ -1315,7 +1395,7 @@ impl Cli {
                     text,
                     &inspected.state,
                     uscope::InspectionLimits::default().remaining_after(inspected.usage),
-                    raw,
+                    layout,
                     renderer,
                 )
                 .await?
@@ -2352,8 +2432,11 @@ fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&st
         anyhow!("unknown command '{entered}'; {hint}")
     })?;
     let arguments = words.collect::<Vec<_>>();
-    if !format.is_empty() && (spec.command != Command::Print || !matches!(format, "x" | "r")) {
-        bail!("unknown format '/{format}'; print takes /x or /r");
+    if !format.is_empty() && !matches!(spec.command, Command::Print | Command::Pp) {
+        bail!("unknown format '/{format}'; {} takes none", spec.name);
+    }
+    if let Some(letter) = format.chars().find(|letter| !"xdrpl".contains(*letter)) {
+        bail!("unknown format '/{letter}'; print takes /x, /d, /r, /p, and /l");
     }
     let (minimum, maximum) = spec.arity();
     if !(minimum..=maximum).contains(&arguments.len()) {
