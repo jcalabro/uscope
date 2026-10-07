@@ -1205,7 +1205,10 @@ Two oracles are rejected:
 
 ### Invariants at every stop
 
-Each Go scenario calls one shared `check_go_stop` after every stop. Most
+Each Go scenario calls one shared `check_go_stop` after every stop
+*(done: `tests/go/invariants.rs`, run by the scenario harness itself;
+it checks threads and backtraces, and leaves values, tasks against the
+dump, and `me` to the tests whose fixtures report them)*. Most
 bugs surface here, in whichever test happens to reach them, without a test
 written for them.
 

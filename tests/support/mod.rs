@@ -14,6 +14,7 @@ mod memory_cap;
 use std::future::Future;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Child, ChildStdin, Command, ExitStatus as ProcessExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -32,6 +33,14 @@ use uscope::{
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 // Event delivery depends on waiter and controller OS threads being scheduled.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a scenario's check of a stop may take, all its requests
+/// together.
+const STOP_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Checks what must hold at every stop of a scenario, through the handle;
+/// an error says what does not, and fails the scenario.
+pub type StopCheck =
+    fn(DebuggerHandle) -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>>;
 
 /// A uniquely named temporary directory, removed with its contents on drop,
 /// even when the test panics.
@@ -211,6 +220,7 @@ pub struct Scenario {
     process_id: Option<ProcessId>,
     last_revision: u64,
     last_exit: Option<ExitStatus>,
+    stop_check: Option<StopCheck>,
 }
 
 impl Scenario {
@@ -268,7 +278,15 @@ impl Scenario {
             process_id: None,
             last_revision: 0,
             last_exit: None,
+            stop_check: None,
         }
+    }
+
+    /// Runs `check` after every stop a run-control request ends in.
+    #[must_use]
+    pub fn checking_stops(mut self, check: StopCheck) -> Self {
+        self.stop_check = Some(check);
+        self
     }
 
     pub fn fixture(name: &str) -> PathBuf {
@@ -542,6 +560,18 @@ impl Scenario {
             .unwrap_or_else(|error| self.fail(&format!("{operation} request failed: {error}")));
         self.transcript.push(format!("reply: {reply:?}"));
         self.assert_terminal_event(&event, &reply);
+        if let Some(check) = self.stop_check
+            && matches!(event, DebuggerEvent::InferiorStopped { .. })
+        {
+            let checked = timeout(STOP_CHECK_TIMEOUT, check(self.handle.clone()))
+                .await
+                .unwrap_or_else(|_| {
+                    self.fail(&format!("checking the {operation}'s stop timed out"))
+                });
+            if let Err(problem) = checked {
+                self.fail(&format!("after {operation}: {problem}"));
+            }
+        }
         reply
     }
 

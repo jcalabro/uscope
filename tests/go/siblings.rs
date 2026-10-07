@@ -30,7 +30,7 @@ const STEPS: usize = 60;
 /// A program stopped in one goroutine's loop, with no breakpoint left, and
 /// the runtime given `processors` processors.
 async fn in_the_loop(fixture: &str, processors: &str) -> Scenario {
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = crate::invariants::checked(fixture);
     let breakpoint = scenario
         .add_breakpoint_spec(uscope::BreakpointSpec::Source {
             path: "siblings/main.go".into(),
@@ -125,7 +125,7 @@ async fn a_step_stays_with_its_goroutine() {
 async fn finish_returns_to_its_caller_after_the_stack_moves() {
     let recurse = support::source_line(SOURCE, "// recurse");
     for fixture in BUILDS {
-        let mut scenario = Scenario::launch(fixture);
+        let mut scenario = crate::invariants::checked(fixture);
         // Each goroutine first reaches this depth in its first deep call,
         // whose deeper calls then grow its stack again.
         let breakpoint = scenario
@@ -194,7 +194,7 @@ async fn finish_returns_to_its_caller_after_the_stack_moves() {
 #[tokio::test]
 async fn stepping_through_the_scheduler_returns_to_the_same_goroutine() {
     for fixture in BUILDS {
-        let mut scenario = Scenario::launch(fixture);
+        let mut scenario = crate::invariants::checked(fixture);
         let breakpoint = scenario.add_breakpoint("runtime.Gosched").await;
         let reason = scenario
             .run_with_to_stop(LaunchOptions {

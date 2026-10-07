@@ -20,7 +20,7 @@ const BUILDS: [&str; 2] = ["watched-go-o0", "watched-go-o2"];
 /// with the goroutine's `counter` watched, and a breakpoint after every
 /// goroutine has returned.
 async fn watching(fixture: &str, access: WatchAccess) -> (Scenario, Watchpoint, i128, u64) {
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = crate::invariants::checked(fixture);
     let bump = scenario.add_breakpoint("main.bump").await;
     let reason = scenario
         .run_with_to_stop(LaunchOptions {

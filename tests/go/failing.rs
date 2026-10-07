@@ -86,7 +86,7 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
 
             let scratch = ScratchDir::new("failing");
             let errors = scratch.path().join("stderr");
-            let mut scenario = Scenario::launch(fixture);
+            let mut scenario = crate::invariants::checked(fixture);
             let reason = scenario
                 .run_with_to_stop(LaunchOptions {
                     arguments: vec![case.into()],
@@ -173,7 +173,7 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
 
 /// A case launched with these exceptions stopping, to its first stop.
 async fn launched(fixture: &str, case: &str, stops: ExceptionStops) -> (Scenario, StopReason) {
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = crate::invariants::checked(fixture);
     scenario
         .operation(
             "exception stops",

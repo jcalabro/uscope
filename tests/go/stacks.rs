@@ -40,7 +40,7 @@ async fn stop_in(
     function: &str,
     wanted: impl Fn(&[(StackSegment, Vec<String>)]) -> bool,
 ) -> (Scenario, Backtrace) {
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = crate::invariants::checked(fixture);
     scenario.add_breakpoint(function).await;
     let reason = scenario.run_to_stop().await;
     let trace = stop_where(&mut scenario, reason, fixture, wanted).await;
@@ -307,7 +307,7 @@ async fn a_thread_switching_to_a_goroutine_unwinds_on_its_system_stack() {
 #[tokio::test]
 async fn a_vdso_call_unwinds_onto_its_caller() {
     for fixture in BUILDS {
-        let mut scenario = Scenario::launch(fixture);
+        let mut scenario = crate::invariants::checked(fixture);
         let start = scenario.add_breakpoint("main.stats").await;
         scenario.run_to_stop().await;
         // The program holds the vDSO's clock_gettime itself.
