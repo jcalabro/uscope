@@ -195,6 +195,7 @@ it inherited. A program that calls `exec` is followed, with its breakpoints.
 | `hits` *id* *hit-condition*\|`always` | Replace the hit condition, keeping the count. |
 | `ignore` *id* *count* | Skip the next *count* hits. |
 | `disable` *ids...* / `enable` *ids...* | Stop using breakpoints and watchpoints, keeping them, and use them again. |
+| `save breakpoints` *file* | Write the commands that recreate the breakpoints, for `-c`. |
 
 `condition`, `hits`, and `ignore` change a watchpoint too, named by `w` and
 its id: `condition w2 counter > 10`, `hits w2 %100`.
@@ -223,8 +224,9 @@ break 42                  # line 42 of the selected frame's file
 break +3                  # three lines on; -3 three lines back
 ```
 
-`if` and `log` take the text up to the next option word, `if`, `hits`, or
-`log`, outside a string or brackets, so a condition that uses one of those
+`disabled` sets a breakpoint that starts disabled. `if` and `log` take the
+text up to the next option word, `if`, `hits`, `log`, or `disabled`,
+outside a string or brackets, so a condition that uses one of those
 words as a name writes it in parentheses. A log message may be quoted,
 with `\"` for a quote inside it. A hit condition written right after the
 location, as in `break counted ==3`, is the same as `hits ==3`. Lists of
@@ -272,6 +274,24 @@ whether or not it stops, as in gdb, and counts restart with each new process.
 Hits that do not stop are invisible: the thread steps over the trap while the
 others stay stopped, then everything resumes, including a `next` or `finish`
 in progress.
+
+A session at a terminal keeps its breakpoints for the next one in
+`.uscope/state/breakpoints.toml` at the project root, and restores them
+when it starts, each pending until code for it loads, so that a
+breakpoint saved in one program of a project applies to all of them.
+The first save creates `.uscope/state/` with a `.gitignore` of `*`, so
+saved state is never committed. Breakpoints are saved as their locations
+were written, with a path inside the project relative to its root, and
+with their conditions, hit conditions, log messages, and whether they are
+enabled; hit counts belong to one process and are not saved, nor are
+temporary or address breakpoints. A source breakpoint records the text of
+its line, and a session that finds it reading differently restores it
+where it was and warns that it changed. A file that does not parse is
+reported and never overwritten; the session saves nothing until it is
+fixed or deleted. Two sessions in one project each save their own
+breakpoints, and the last to change them wins. `[breakpoints] save =
+false` turns this off, and `--batch` sessions, scripts, and the debug
+console neither restore nor save.
 
 Breakpoints and watchpoints can be changed while the program runs: every
 thread stops briefly for the change and resumes without a reported stop.

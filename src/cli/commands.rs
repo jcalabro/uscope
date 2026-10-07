@@ -71,6 +71,7 @@ pub enum Command {
     Registers,
     Threads,
     Thread,
+    Save,
     Clear,
     Help,
     Quit,
@@ -152,14 +153,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         Break,
         "break",
         ["b"],
-        "break [location] [if condition...] [hits hit-condition] [log message]",
+        "break [location] [if condition...] [hits hit-condition] [log message] [disabled]",
         "Set a breakpoint at a function, file:line, file:function, or 0xaddress, or at the selected frame's line, line N of its file, or +N lines on"
     ),
     command!(
         Tbreak,
         "tbreak",
         [],
-        "tbreak [location] [if condition...] [hits hit-condition] [log message]",
+        "tbreak [location] [if condition...] [hits hit-condition] [log message] [disabled]",
         "Set a breakpoint that the stop it causes deletes"
     ),
     command!(
@@ -442,6 +443,13 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!(Threads, "threads", [], "threads", "List threads"),
     command!(Thread, "thread", [], "thread <id>", "Select a thread"),
     command!(
+        Save,
+        "save",
+        [],
+        "save breakpoints <file>",
+        "Write the commands that recreate the breakpoints, for -c"
+    ),
+    command!(
         Clear,
         "clear",
         ["cls"],
@@ -501,6 +509,10 @@ impl Cli {
                     .await?
             }
             Command::Rbreak => self.rbreak(rest).await?,
+            Command::Save => match arguments.as_slice() {
+                ["breakpoints", file] => self.save_breakpoint_commands(file).await?,
+                _ => return Err(spec.usage_error()),
+            },
             Command::Breakpoints => self.list_breakpoints().await?,
             Command::Info => match (arguments[0], arguments.get(1)) {
                 ("breakpoints" | "break", None) => self.list_breakpoints().await?,
@@ -714,19 +726,30 @@ impl Cli {
                 .as_deref()
                 .map(uscope::LogMessage::parse)
                 .transpose()?,
+            enabled: !parsed.disabled,
             temporary,
             ..uscope::BreakpointOptions::default()
         };
+        let address = matches!(location, BreakpointSpec::Address(_));
         let breakpoint = match self.debugger.add_breakpoint_with(location, options).await {
             Ok(breakpoint) => breakpoint,
             Err(error) => return Err(self.suggest(error).await),
         };
         let placed = self.placed(&breakpoint).await;
-        Ok(format::breakpoint(
-            &breakpoint,
-            &placed,
-            self.renderers.stdout,
-        ))
+        let renderer = self.renderers.stdout;
+        let mut output = format::breakpoint(&breakpoint, &placed, renderer);
+        if address && !temporary && self.keeps_breakpoints() {
+            write!(
+                output,
+                "\n{}",
+                renderer.paint(
+                    Role::Muted,
+                    "(not kept for the next session: an address does not survive a rebuild)"
+                )
+            )
+            .expect("writing to a String cannot fail");
+        }
+        Ok(output)
     }
 
     /// Breaks at every function of the loaded modules whose name, demangled,
@@ -778,6 +801,20 @@ impl Cli {
             ));
         }
         Ok(lines.join("\n"))
+    }
+
+    /// Writes the commands that recreate the breakpoints to `file`.
+    async fn save_breakpoint_commands(&self, file: &str) -> Result<String> {
+        let snapshot = self.debugger.snapshot().await?;
+        let text = super::saved::commands(&snapshot.breakpoints, &self.settings.root);
+        std::fs::write(file, text).with_context(|| format!("cannot write {file}"))?;
+        let renderer = self.renderers.stdout;
+        Ok(format!(
+            "{} {} to {}",
+            renderer.paint(Role::Success, "saved"),
+            plural(snapshot.breakpoints.len() as u64, "breakpoint"),
+            renderer.paint(Role::Metadata, file)
+        ))
     }
 
     /// The images of the loaded modules, or the program's before it runs.
@@ -2007,9 +2044,10 @@ struct BreakLine<'a> {
     condition: Option<&'a str>,
     hits: Option<&'a str>,
     log: Option<String>,
+    disabled: bool,
 }
 
-const BREAK_OPTIONS: [&str; 3] = ["if", "hits", "log"];
+const BREAK_OPTIONS: [&str; 4] = ["if", "hits", "log", "disabled"];
 
 /// Splits a `break` line into its location and its options, each of which
 /// takes the text up to the next option word outside a string or brackets.
@@ -2040,11 +2078,12 @@ fn parse_break<'a>(line: &'a str, spec: &CommandSpec) -> Result<BreakLine<'a>> {
             .get(index + 1)
             .map_or(line.len(), |&next| words[next].0);
         let text = line[offset + keyword.len()..end].trim();
-        if text.is_empty() {
+        if text.is_empty() != (keyword == "disabled") {
             return Err(spec.usage_error());
         }
         let twice = || anyhow!("`{keyword}` is given twice");
         match keyword {
+            "disabled" if !parsed.disabled => parsed.disabled = true,
             "if" if parsed.condition.is_none() => parsed.condition = Some(text),
             "hits" if parsed.hits.is_none() => parsed.hits = Some(text),
             "log" if parsed.log.is_none() => parsed.log = Some(unquoted(text)?),
@@ -2394,6 +2433,7 @@ mod tests {
                 condition: Some(r#"name == "log" && (a log b)"#),
                 hits: Some(">=2"),
                 log: Some(r#"said "{name}""#.to_owned()),
+                disabled: false,
             }
         );
         assert_eq!(

@@ -8,6 +8,7 @@ pub mod config;
 pub mod format;
 pub mod help;
 mod repl;
+mod saved;
 pub mod session;
 mod suggest;
 pub mod terminal;
@@ -219,6 +220,8 @@ pub struct Cli {
     syntax: AssemblySyntax,
     launch: LaunchSettings,
     views: std::sync::Mutex<ViewSources>,
+    /// The breakpoints an interactive session keeps for the next one.
+    kept: std::sync::OnceLock<std::sync::Mutex<saved::Kept>>,
 }
 
 /// The view files a session loads: those it was given or loaded, most
@@ -246,6 +249,7 @@ impl Cli {
                 session: Vec::new(),
                 discovered: Vec::new(),
             }),
+            kept: std::sync::OnceLock::new(),
         }
     }
 
@@ -349,6 +353,16 @@ impl Cli {
         self.announce(args)?;
         self.load_views(&self.settings.root, &args.views).await;
         self.apply_signal_settings().await?;
+        // Scripts behave the same in every checkout, so only a session at
+        // a terminal keeps its breakpoints.
+        if !args.batch
+            && io::stdin().is_terminal()
+            && io::stdout().is_terminal()
+            && self.debugger.core_dump().is_none()
+            && self.settings.config.breakpoints.save
+        {
+            self.restore_breakpoints(&args.source_paths).await;
+        }
 
         for command in &args.startup {
             if !self
@@ -478,8 +492,15 @@ impl Cli {
         }
     }
 
-    /// Executes one command line and returns whether to keep reading.
+    /// Executes one command line, keeps the breakpoints it leaves, and
+    /// returns whether to keep reading.
     async fn run_line(&self, line: &str) -> Result<bool> {
+        let result = self.run_unsaved_line(line).await;
+        self.save_breakpoints().await;
+        result
+    }
+
+    async fn run_unsaved_line(&self, line: &str) -> Result<bool> {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             return Ok(true);
@@ -502,6 +523,184 @@ impl Cli {
             }
             Control::Quit => Ok(false),
         }
+    }
+
+    /// Restores the breakpoints the project's last interactive session
+    /// kept, each pending until code for it loads, and starts keeping this
+    /// session's.
+    async fn restore_breakpoints(&self, source_paths: &uscope::SourcePathMap) {
+        let path = saved::path(&self.settings.root);
+        let shown = self.renderers.stderr.path(&path);
+        let mut kept = saved::Kept {
+            path: path.clone(),
+            source_paths: source_paths.clone(),
+            ..saved::Kept::default()
+        };
+        match saved::read(&path) {
+            Err(message) => {
+                self.warn(&format!(
+                    "cannot restore breakpoints from {shown}: {message}; none are saved until it is fixed or deleted"
+                ));
+                kept.blocked = true;
+            }
+            Ok(entries) => {
+                let mut restored = 0;
+                for entry in &entries {
+                    match self.restore_breakpoint(entry, source_paths).await {
+                        Ok(changed) => {
+                            restored += 1;
+                            if let Some(text) = &entry.line_text {
+                                kept.line_texts.insert(entry.location.clone(), text.clone());
+                            }
+                            if changed {
+                                self.warn(&format!(
+                                    "{} changed since it was saved",
+                                    entry.location
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            self.warn(&format!(
+                                "cannot restore the breakpoint at {}: {error:#}",
+                                entry.location
+                            ));
+                            kept.unrestored.push(entry.clone());
+                        }
+                    }
+                }
+                kept.written = entries;
+                if restored > 0 {
+                    let _ = emit(&format!(
+                        "{} {}",
+                        self.renderers.stdout.paint(Role::Success, "restored"),
+                        format::plural(restored, "breakpoint")
+                    ));
+                }
+            }
+        }
+        let _ = self.kept.set(std::sync::Mutex::new(kept));
+    }
+
+    /// Restores one saved breakpoint, returning whether its line reads
+    /// differently than when it was saved.
+    async fn restore_breakpoint(
+        &self,
+        entry: &saved::Saved,
+        source_paths: &uscope::SourcePathMap,
+    ) -> Result<bool> {
+        let spec = commands::parse_breakpoint_location(&entry.location)?
+            .ok_or_else(|| anyhow!("'{}' is no location", entry.location))?;
+        let options = uscope::BreakpointOptions {
+            hit_condition: entry.hits.as_deref().map(str::parse).transpose()?,
+            condition: entry
+                .condition
+                .as_deref()
+                .map(uscope::Condition::parse)
+                .transpose()?,
+            log_message: entry
+                .log
+                .as_deref()
+                .map(uscope::LogMessage::parse)
+                .transpose()?,
+            enabled: entry.enabled,
+            pending: true,
+            ..uscope::BreakpointOptions::default()
+        };
+        let breakpoint = self.debugger.add_breakpoint_with(spec, options).await?;
+        let Some(text) = &entry.line_text else {
+            return Ok(false);
+        };
+        Ok(self
+            .current_line_text(&breakpoint, source_paths)
+            .await
+            .is_some_and(|current| current.trim() != text.trim()))
+    }
+
+    /// The line a source breakpoint's first location is at, as it reads now.
+    async fn current_line_text(
+        &self,
+        breakpoint: &uscope::Breakpoint,
+        source_paths: &uscope::SourcePathMap,
+    ) -> Option<String> {
+        if !matches!(breakpoint.spec, uscope::BreakpointSpec::Source { .. }) {
+            return None;
+        }
+        let placed = self.placed(breakpoint).await;
+        let (path, line) = placed.first()?.source.clone()?;
+        saved::line_text(source_paths, &path, line.get())
+    }
+
+    /// Writes the session's breakpoints to the project's file when they
+    /// changed since it was last written.
+    async fn save_breakpoints(&self) {
+        let Some(kept) = self.kept.get() else {
+            return;
+        };
+        if kept.lock().expect("the kept state is whole").blocked {
+            return;
+        }
+        let Ok(snapshot) = self.debugger.snapshot().await else {
+            return;
+        };
+        let root = &self.settings.root;
+        let source_paths = kept
+            .lock()
+            .expect("the kept state is whole")
+            .source_paths
+            .clone();
+        let mut entries = Vec::new();
+        for breakpoint in snapshot.breakpoints.iter() {
+            let Some(location) = saved::location(&breakpoint.spec, root) else {
+                continue;
+            };
+            let known = kept
+                .lock()
+                .expect("the kept state is whole")
+                .line_texts
+                .get(&location)
+                .cloned();
+            let line_text = if known.is_some() {
+                known
+            } else {
+                let text = self.current_line_text(breakpoint, &source_paths).await;
+                if let Some(text) = &text {
+                    kept.lock()
+                        .expect("the kept state is whole")
+                        .line_texts
+                        .insert(location, text.clone());
+                }
+                text
+            };
+            entries.extend(saved::saved(breakpoint, root, line_text));
+        }
+        let (path, error) = {
+            let mut kept = kept.lock().expect("the kept state is whole");
+            entries.extend(kept.unrestored.iter().cloned());
+            if entries == kept.written {
+                return;
+            }
+            match saved::write(&kept.path, &entries) {
+                Ok(()) => {
+                    kept.written = entries;
+                    return;
+                }
+                Err(error) => {
+                    kept.blocked = true;
+                    (kept.path.clone(), error)
+                }
+            }
+        };
+        self.warn(&format!(
+            "cannot save breakpoints to {}: {error}; none are saved for the rest of the session",
+            self.renderers.stderr.path(&path)
+        ));
+    }
+
+    /// Whether this session keeps its breakpoints for the next one.
+    fn keeps_breakpoints(&self) -> bool {
+        self.kept
+            .get()
+            .is_some_and(|kept| !kept.lock().expect("the kept state is whole").blocked)
     }
 
     fn report_error(&self, error: &anyhow::Error) {
