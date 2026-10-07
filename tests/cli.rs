@@ -791,6 +791,30 @@ fn words_c_reserves_for_types_name_a_rust_programs_variables() {
 }
 
 #[test]
+fn c_base_types_cast_in_a_program_that_describes_none() {
+    let output = batch(
+        &["build/test-programs/strings-go-o0"],
+        &[
+            "break main.stringsTarget",
+            "run",
+            "p (unsigned char)300",
+            "p ((char*)name.str)[1]",
+            "whatis (long long unsigned)1",
+            "p sizeof(long double)",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "(unsigned char) (unsigned char)300 = 44 ','",
+            "(char) ((char*)name.str)[1] = 111 'o'",
+            "type = unsigned long long",
+            "(integer) sizeof(long double) = 16",
+        ],
+    );
+}
+
+#[test]
 fn pp_lays_values_out_to_the_width_and_print_formats_combine() {
     let records = ["build/test-programs/records-c-gcc-o0"];
     let commands = ["break inspect_records", "run", "pp *records", "up", "pp"];

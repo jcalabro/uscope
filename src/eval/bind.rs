@@ -15,7 +15,7 @@ use super::target::{Lookup, Refusal, Scope, StepKind, TypeLookup, TypeQuery};
 use super::types::{
     Category, Ty, builtin, c_type_key, category, is_character, representation, size_of, type_name,
 };
-use crate::{RecordMemberLayout, TypeKind, TypeReference};
+use crate::{CBaseType, RecordMemberLayout, TypeKind, TypeReference};
 
 /// Whether an expression may assign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -671,11 +671,21 @@ impl<'a, S: Scope> Binder<'a, S> {
                     candidates.join(", ")
                 ),
             )),
-            TypeLookup::NotFound => Err(Self::error(
-                span,
-                ErrorKind::UnknownName,
-                format!("no type is named `{}`", query.name),
-            )),
+            // C's base types are the target's where the program describes
+            // none, as a Go program describes no `unsigned char`.
+            TypeLookup::NotFound => match &name.base {
+                TypeBase::CWords(_)
+                    if let Some(c) = CBaseType::from_name(&query.name)
+                        && self.scope.c_base_type(c).is_some() =>
+                {
+                    Ok(Self::pointers(Ty::C(c), name.pointers))
+                }
+                _ => Err(Self::error(
+                    span,
+                    ErrorKind::UnknownName,
+                    format!("no type is named `{}`", query.name),
+                )),
+            },
         }
     }
 

@@ -822,6 +822,15 @@ impl TypeSource for World {
         ByteOrder::Little
     }
 
+    fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
+        crate::TargetDescription {
+            architecture: crate::Architecture::X86_64,
+            byte_order: ByteOrder::Little,
+            pointer_width: crate::PointerWidth::Bits64,
+        }
+        .c_base_type(ty)
+    }
+
     /// Types with identities are one type when their identities are, as
     /// copies of one type in several units are.
     fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
