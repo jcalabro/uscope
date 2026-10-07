@@ -113,7 +113,11 @@ function Lines({
   innermost: boolean;
 }) {
   const lines = useMemo(() => {
-    const lines: Line[] = disassembled.notes.map((note) => ({ kind: "note", key: note, note }));
+    const lines: Line[] = disassembled.notes.map((note, index) => ({
+      kind: "note",
+      key: `note:${index}`,
+      note,
+    }));
     for (const instruction of disassembled.instructions) {
       if (instruction.source) {
         lines.push({
