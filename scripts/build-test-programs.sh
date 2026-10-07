@@ -1625,7 +1625,8 @@ readonly symbol_oracle_dir="$output_dir/symbol-oracles"
 mkdir -p "$symbol_oracle_dir"
 
 # Records readelf's section and symbol tables and call-frame entries for one
-# ELF file. An embedded MiniDebugInfo object has no frame contents to dump.
+# ELF file, and the symbols objdump synthesizes for its PLT stubs. An
+# embedded MiniDebugInfo object has no frame contents to dump.
 generate_symbol_oracle() {
     local elf="$1"
     local oracle="$symbol_oracle_dir/${2:-${elf##*/}}.readelf"
@@ -1633,7 +1634,7 @@ generate_symbol_oracle() {
     # Nix store files all date from 1970, so the modification time alone never
     # notices a toolchain update. The resolved path names the store entry.
     local header
-    header="uscope-symbol-oracle-v3 $(readlink -f "$elf")"
+    header="uscope-symbol-oracle-v4 $(readlink -f "$elf")"
     # Registered so that deleting an oracle invalidates the cached suite.
     rebuilt_outputs["$oracle"]=false
     if [[ -s "$oracle" && "$oracle" -nt "$elf" && "$(head -n 1 "$oracle")" == "$header" ]]; then
@@ -1647,6 +1648,7 @@ generate_symbol_oracle() {
         readelf -sW "$elf"
         if [[ "$frames" == yes ]]; then
             readelf -wf "$elf"
+            objdump -d -j .plt -j .plt.sec -j .plt.got "$elf" 2>/dev/null | grep '@plt>:$' || true
         fi
     } >"${oracle}.tmp"
     mv "${oracle}.tmp" "$oracle"

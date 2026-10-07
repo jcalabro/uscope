@@ -4,12 +4,14 @@
 //! (`.gnu_debugdata`) tables are merged into one catalog. Only defined code
 //! symbols in executable sections receive an extent, so only they can name
 //! machine code; only sized data symbols in allocated sections name storage.
+//! Each PLT stub is named `name@plt` after the function it jumps to, as
+//! binutils names them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Arc;
 
-use object::read::elf::{Dyn as _, ElfFile, FileHeader, ProgramHeader as _};
+use object::read::elf::{Dyn as _, ElfFile, FileHeader, ProgramHeader as _, SectionHeader as _};
 use object::{
     Object, ObjectSection, ObjectSegment, ObjectSymbol, ObjectSymbolTable, SectionFlags,
     SegmentFlags, SymbolFlags, SymbolSection, elf,
@@ -69,6 +71,7 @@ pub fn load_symbols(
             collect_embedded(object, &section, &sections, &mut raw)
         });
     collect(object, object.dynamic_symbols(), &sections, true, &mut raw);
+    collect_plt(object, &mut raw);
 
     SymbolTable {
         symbols: normalize(raw, unwind_functions),
@@ -486,6 +489,118 @@ fn collect<'data, S>(
             });
         entry.exported |= exported;
     }
+}
+
+/// Names each PLT stub after the function whose GOT slot its indirect jump
+/// reads: the symbol a `JUMP_SLOT` or `GLOB_DAT` relocation fills the slot
+/// with, or for an `IRELATIVE` one, the indirect function whose resolver
+/// fills it. A stub is one section entry long, and local to the image.
+fn collect_plt(object: &object::File<'_>, raw: &mut BTreeMap<(Box<[u8]>, u64), RawSymbol>) {
+    let object::File::Elf64(elf) = object else {
+        return;
+    };
+    if object.architecture() != object::Architecture::X86_64 {
+        return;
+    }
+    let endian = elf.endian();
+
+    // An indirect function is named by its exported symbol first, then by
+    // the first of its names.
+    let mut resolvers = BTreeMap::<u64, (bool, &[u8])>::new();
+    for ((name, address), symbol) in raw.iter() {
+        if symbol.kind != SymbolKind::IndirectFunction {
+            continue;
+        }
+        let candidate = (!symbol.exported, &name[..]);
+        resolvers
+            .entry(*address)
+            .and_modify(|best| *best = (*best).min(candidate))
+            .or_insert(candidate);
+    }
+    let mut targets = BTreeMap::<u64, Box<[u8]>>::new();
+    for (slot, relocation) in object.dynamic_relocations().into_iter().flatten() {
+        let object::RelocationFlags::Elf { r_type } = relocation.flags() else {
+            continue;
+        };
+        let name = match (r_type, relocation.target()) {
+            (
+                elf::R_X86_64_JUMP_SLOT | elf::R_X86_64_GLOB_DAT,
+                object::RelocationTarget::Symbol(index),
+            ) => object
+                .dynamic_symbol_table()
+                .and_then(|table| table.symbol_by_index(index).ok())
+                .and_then(|symbol| symbol.name_bytes().ok())
+                .filter(|name| !name.is_empty())
+                .map(Box::from),
+            (elf::R_X86_64_IRELATIVE, _) => u64::try_from(relocation.addend())
+                .ok()
+                .and_then(|resolver| resolvers.get(&resolver))
+                .map(|(_, name)| Box::from(*name)),
+            _ => None,
+        };
+        if let Some(name) = name {
+            targets.insert(slot, name);
+        }
+    }
+    if targets.is_empty() {
+        return;
+    }
+
+    for section in elf.sections() {
+        let Ok(section_name @ (b".plt" | b".plt.sec" | b".plt.got")) = section.name_bytes() else {
+            continue;
+        };
+        let Ok(code) = section.data() else {
+            continue;
+        };
+        let start = section.address();
+        let declared = section.elf_section_header().sh_entsize(endian);
+        let entry_size = match declared {
+            8 | 16 => declared,
+            _ if section_name == b".plt.got" => 8,
+            _ => 16,
+        };
+        let Ok(entry_bytes) = usize::try_from(entry_size) else {
+            continue;
+        };
+        let end = start.saturating_add(code.len() as u64);
+        for (index, entry) in code.chunks_exact(entry_bytes).enumerate() {
+            let address = start + index as u64 * entry_size;
+            let Some(name) = got_slot(entry, address).and_then(|slot| targets.get(&slot)) else {
+                continue;
+            };
+            let mut stub = name.to_vec();
+            stub.extend_from_slice(b"@plt");
+            raw.entry((stub.into(), address)).or_insert(RawSymbol {
+                kind: SymbolKind::Function,
+                binding: SymbolBinding::Local,
+                exported: false,
+                size: entry_size,
+                code_section: Some((start, end)),
+                storage_section: None,
+            });
+        }
+    }
+}
+
+/// The GOT slot a PLT stub's `jmp *slot(%rip)` reads, past any `endbr64`
+/// or other instructions before it.
+fn got_slot(code: &[u8], address: u64) -> Option<u64> {
+    use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind};
+    let mut decoder = Decoder::with_ip(64, code, address, DecoderOptions::NONE);
+    while decoder.can_decode() {
+        let instruction = decoder.decode();
+        if instruction.is_invalid() {
+            return None;
+        }
+        if instruction.mnemonic() == Mnemonic::Jmp
+            && instruction.op0_kind() == OpKind::Memory
+            && instruction.is_ip_rel_memory_operand()
+        {
+            return Some(instruction.ip_rel_memory_address());
+        }
+    }
+    None
 }
 
 fn normalize(
