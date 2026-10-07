@@ -112,7 +112,23 @@ export function useCommands(): (command: Command) => boolean {
           });
           return true;
         }
+        case "palette":
+        case "files":
+        case "line":
+          // The palette searches a session's program.
+          if (!current.session) {
+            return false;
+          }
+          tab.setState({ palette: command === "palette" ? "all" : command });
+          return true;
+        case "help":
+          tab.setState((state) => ({ help: !state.help }));
+          return true;
         case "back": {
+          if (current.help) {
+            tab.setState({ help: false });
+            return true;
+          }
           if (current.look.view && current.session) {
             const look = inView(current.look, "source");
             void navigate({

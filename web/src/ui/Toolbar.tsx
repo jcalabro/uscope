@@ -4,7 +4,8 @@ import { type ActionName, action, continueLabel } from "../actions";
 import { describe } from "../keys";
 import { targetName } from "../model";
 import { useConnection, useModel } from "../store";
-import { useTab } from "../tab";
+import { tab, useTab } from "../tab";
+import { chooseTheme, savedTheme, THEMES, type Theme } from "../theme";
 import { People } from "./People";
 import { Share } from "./Share";
 import { Status } from "./Status";
@@ -89,6 +90,53 @@ export function Toolbar() {
           {targetName(model.state) ? "Debug something else" : "Debug something"}
         </button>
       )}
+      <ThemeButton />
+      <button
+        type="button"
+        className="tb ghost"
+        aria-label="Every key"
+        title="Every key (?)"
+        onClick={() => tab.setState((current) => ({ help: !current.help }))}
+      >
+        ?
+      </button>
     </header>
+  );
+}
+
+/** A circle, half filled for the system's theme, empty for light, full for dark. */
+function ThemeGlyph({ theme }: { theme: Theme }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+      <circle
+        cx="7"
+        cy="7"
+        r="5.5"
+        fill={theme === "dark" ? "currentColor" : "none"}
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+      {theme === "system" && <path d="M7 1.5a5.5 5.5 0 0 1 0 11z" fill="currentColor" />}
+    </svg>
+  );
+}
+
+/** Cycles the theme: the system's, light, then dark. */
+function ThemeButton() {
+  const [theme, setTheme] = useState(savedTheme);
+  const next = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length] as Theme;
+  return (
+    <button
+      type="button"
+      className="tb ghost"
+      aria-label={`Theme: ${theme}`}
+      title={`Theme: ${theme}; click for ${next}`}
+      onClick={() => {
+        chooseTheme(next);
+        setTheme(next);
+      }}
+    >
+      <ThemeGlyph theme={theme} />
+    </button>
   );
 }

@@ -2148,3 +2148,118 @@ fieldset.segmented {
 .pane.registers .value-name {
   width: 8ch;
 }
+
+/* ---------- palette and key help ---------- */
+
+.overlay {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  background: rgb(10 15 25 / 25%);
+}
+
+.palette {
+  display: flex;
+  flex-direction: column;
+  width: min(620px, calc(100vw - 32px));
+  max-height: 65vh;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.palette-query {
+  flex: none;
+  padding: 11px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: none;
+  color: var(--ink);
+  font: 14px var(--mono);
+  outline: none;
+}
+
+.palette-results {
+  flex: 1;
+  min-height: 0;
+  padding-bottom: 6px;
+  overflow: auto;
+}
+
+.palette-group {
+  padding: 8px 14px 2px;
+  color: var(--ink-3);
+  font: 600 10px / 1.6 var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.palette-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 14px;
+  font: 12.5px / 1.5 var(--mono);
+  cursor: pointer;
+}
+
+.palette-item.on {
+  background: var(--accent-soft);
+}
+
+.palette-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-label mark {
+  background: none;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.palette-hint {
+  margin-left: auto;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+.key-help {
+  width: min(560px, calc(100vw - 32px));
+  max-height: 76vh;
+  overflow: auto;
+}
+
+.key-help .card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface-2);
+  font: 11.5px var(--mono);
+}
+
+.overlay-close {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: none;
+  cursor: default;
+}
+
+.overlay > .card,
+.overlay > .palette {
+  position: relative;
+}

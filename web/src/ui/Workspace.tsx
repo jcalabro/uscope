@@ -15,6 +15,7 @@ import { Banner } from "./Banner";
 import { BottomPanel } from "./BottomPanel";
 import { Breakpoints } from "./Breakpoints";
 import { CodeArea } from "./CodeArea";
+import { Palette } from "./Palette";
 import { Registers } from "./Registers";
 import { useSplit } from "./Split";
 import { Stack } from "./Stack";
@@ -125,6 +126,7 @@ export function Workspace() {
           <Registers />
         </div>
       </main>
+      <Palette />
     </FocusContext>
   );
 }

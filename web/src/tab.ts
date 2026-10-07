@@ -24,6 +24,10 @@ export interface TabState {
   flash: { text: string; at: number } | null;
   /** Files opened in this tab, most recent last. */
   files: string[];
+  /** The palette, open at everything, at files, or at a line. */
+  palette: "all" | "files" | "line" | null;
+  /** Whether the key help is open. */
+  help: boolean;
 }
 
 export const initialTab: TabState = {
@@ -37,6 +41,8 @@ export const initialTab: TabState = {
   editing: null,
   flash: null,
   files: [],
+  palette: null,
+  help: false,
 };
 
 export const tab = createStore<TabState>(() => initialTab);
