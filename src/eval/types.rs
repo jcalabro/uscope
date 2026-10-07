@@ -294,11 +294,32 @@ pub fn type_name(types: &dyn TypeSource, ty: &Ty) -> String {
         Ty::Float(FloatFormat::X87Extended) => "f80".to_owned(),
         Ty::C(c) => c.name().to_owned(),
         Ty::Bool => "bool".to_owned(),
-        Ty::Pointer(pointee) => format!("{}*", type_name(types, pointee)),
+        Ty::Pointer(pointee) => pointer_name(&type_name(types, pointee)),
         Ty::Void => "void".to_owned(),
         Ty::Null => "null".to_owned(),
         Ty::Text => "string".to_owned(),
     }
+}
+
+/// The name of a pointer to a type named `pointee`. A pointer to a
+/// pointer to a function or an array adds its `*` inside the declarator's
+/// parentheses, as `int (**)(int)` points to `int (*)(int)`, and a pointer
+/// to an array parenthesizes its `*`, as in `int (*)[2]`.
+fn pointer_name(pointee: &str) -> String {
+    let hole = pointee.match_indices("(*").find(|(index, _)| {
+        pointee[index + 1..]
+            .trim_start_matches('*')
+            .starts_with([')', ' '])
+    });
+    if let Some((index, _)) = hole {
+        return format!("{}*{}", &pointee[..=index], &pointee[index + 1..]);
+    }
+    if pointee.ends_with(']')
+        && let Some(index) = pointee.find('[')
+    {
+        return format!("{} (*){}", pointee[..index].trim_end(), &pointee[index..]);
+    }
+    format!("{pointee}*")
 }
 
 fn int_name(int: IntType) -> String {

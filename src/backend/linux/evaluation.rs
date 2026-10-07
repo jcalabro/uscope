@@ -1084,6 +1084,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 raw: Some(raw.into()),
                 value: VariableValue::Address(AddressValue {
                     address: VirtualAddress::new(address),
+                    function: None,
                 }),
                 dereference,
                 children: ValueChildren::NotApplicable,

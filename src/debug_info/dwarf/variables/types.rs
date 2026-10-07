@@ -648,6 +648,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     TypeKind::Function,
                 ))
             }
+            gimli::DW_TAG_subroutine_type => {
+                self.build_signature_type(entry, unit_index, reference, explicit_name)
+            }
             // A type this backend does not model is opaque, not defective.
             tag => Ok(opaque(
                 reference,
@@ -1017,6 +1020,52 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         ))
     }
 
+    /// A function's type: what it returns and what its parameters are.
+    fn build_signature_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+    ) -> Built {
+        let returns = self.target(entry, unit_index)?;
+        let mut parameters = Vec::new();
+        let mut variadic = false;
+        for child in self.children(unit_index, entry.offset())? {
+            let child = child?;
+            match child.tag() {
+                gimli::DW_TAG_formal_parameter => {
+                    if parameters.len() >= MAX_RECORD_CHILDREN {
+                        return Ok(opaque(
+                            reference,
+                            explicit_name.unwrap_or_else(|| Arc::from("<function>")),
+                            None,
+                            "parameter metadata exceeds its resource limit",
+                        ));
+                    }
+                    parameters.push(
+                        self.target(&child, unit_index)?
+                            .ok_or("a function type's parameter has no type")?,
+                    );
+                }
+                gimli::DW_TAG_unspecified_parameters => variadic = true,
+                // Producers may describe more, such as template parameters,
+                // which a signature does not need.
+                _ => {}
+            }
+        }
+        let prototyped = strict_flag(entry, gimli::DW_AT_prototyped)?;
+        let kind = TypeKind::Signature {
+            returns,
+            parameters: parameters.into(),
+            variadic,
+            prototyped,
+        };
+        // Named from its parts once every type is built.
+        let name = explicit_name.unwrap_or_else(|| Arc::from("<function>"));
+        Ok(resolved(reference, name, None, kind))
+    }
+
     pub(super) fn target(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -1376,35 +1425,26 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
 
         let rendered = match &info.kind {
-            TypeKind::Pointer { target, .. } => target.as_ref().map_or_else(
-                || Arc::from("void *"),
-                |target| {
-                    let target_name = self.render_type_name(target.id, visiting);
-                    Arc::from(self.indirection_type_name(target.id, &target_name, "*"))
-                },
-            ),
-            TypeKind::Reference { kind, target, .. } => {
-                let target_name = self.render_type_name(target.id, visiting);
-                Arc::from(self.indirection_type_name(
-                    target.id,
-                    &target_name,
-                    if *kind == ReferenceKind::Lvalue {
-                        "&"
-                    } else {
-                        "&&"
-                    },
-                ))
+            TypeKind::Pointer { .. }
+            | TypeKind::Reference { .. }
+            | TypeKind::Array { .. }
+            | TypeKind::Signature { .. } => {
+                // `declare` guards against cycles itself.
+                visiting.remove(&id);
+                let declared = self.declare(id, String::new(), visiting);
+                visiting.insert(id);
+                Arc::from(declared)
             }
-            TypeKind::Array {
-                element,
-                dimensions,
-            } => {
-                let mut name = self.render_type_name(element.id, visiting).to_string();
-                for dimension in dimensions.iter() {
-                    use std::fmt::Write;
-                    let _ = write!(name, "[{}]", dimension.count);
-                }
-                Arc::from(name)
+            // A qualified pointer qualifies its declarator, as in
+            // `int (* const)(int)`.
+            TypeKind::Modified { modifier, target }
+                if modifier_keyword(*modifier).is_some()
+                    && self.modified_target_is_indirection(target.id) =>
+            {
+                visiting.remove(&id);
+                let declared = self.declare(id, String::new(), visiting);
+                visiting.insert(id);
+                Arc::from(declared)
             }
             TypeKind::Modified { modifier, target } => {
                 let target_name = self.render_type_name(target.id, visiting);
@@ -1441,25 +1481,134 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         false
     }
 
-    fn indirection_type_name(&self, target: TypeId, target_name: &str, symbol: &str) -> String {
-        let target_is_synthesized_array = !self.explicit_names.contains(&target)
-            && self.entries.get(target.index()).is_some_and(|entry| {
-                matches!(
-                    entry,
-                    TypeEntry::Resolved(TypeInfo {
-                        kind: TypeKind::Array { .. },
-                        ..
-                    })
-                )
-            });
-        if target_is_synthesized_array && let Some(suffix) = target_name.find('[') {
-            return format!(
-                "{} ({symbol}){}",
-                target_name[..suffix].trim_end(),
-                &target_name[suffix..]
-            );
+    /// Renders a type as C declares it around `inner`, the declarator
+    /// built so far: `int (*)(int)` is a pointer to `int (int)`, whose
+    /// parameter list binds tighter than its `*`.
+    fn declare(&self, id: TypeId, inner: String, visiting: &mut HashSet<TypeId>) -> String {
+        let join = |base: &str, inner: String| {
+            if inner.is_empty() {
+                base.to_owned()
+            } else if inner.starts_with('[') {
+                format!("{base}{inner}")
+            } else {
+                format!("{base} {inner}")
+            }
+        };
+        let info = match self.entries.get(id.index()) {
+            Some(TypeEntry::Resolved(
+                info @ TypeInfo {
+                    kind:
+                        TypeKind::Pointer { .. }
+                        | TypeKind::Reference { .. }
+                        | TypeKind::Array { .. }
+                        | TypeKind::Signature { .. },
+                    ..
+                },
+            )) if !self.explicit_names.contains(&id) => info,
+            Some(TypeEntry::Resolved(
+                info @ TypeInfo {
+                    kind: TypeKind::Modified { modifier, target },
+                    ..
+                },
+            )) if !self.explicit_names.contains(&id)
+                && modifier_keyword(*modifier).is_some()
+                && self.modified_target_is_indirection(target.id) =>
+            {
+                info
+            }
+            _ => return join(&self.render_type_name(id, visiting), inner),
+        };
+        if visiting.len() >= MAX_TYPE_RESOLUTION_DEPTH || !visiting.insert(id) {
+            return join(&format!("<type #{}>", id.get()), inner);
         }
-        format!("{target_name} {symbol}")
+        let declared = match &info.kind {
+            TypeKind::Pointer { target: None, .. } => join("void", format!("*{inner}")),
+            TypeKind::Pointer {
+                target: Some(target),
+                ..
+            } => self.declare_indirection(target.id, "*", &inner, visiting),
+            TypeKind::Reference { kind, target, .. } => {
+                let symbol = if *kind == ReferenceKind::Lvalue {
+                    "&"
+                } else {
+                    "&&"
+                };
+                self.declare_indirection(target.id, symbol, &inner, visiting)
+            }
+            TypeKind::Array {
+                element,
+                dimensions,
+            } => {
+                use std::fmt::Write;
+                let mut inner = inner;
+                for dimension in dimensions.iter() {
+                    let _ = write!(inner, "[{}]", dimension.count);
+                }
+                self.declare(element.id, inner, visiting)
+            }
+            TypeKind::Signature {
+                returns,
+                parameters,
+                variadic,
+                prototyped,
+            } => {
+                let mut list = parameters
+                    .iter()
+                    .map(|parameter| self.render_type_name(parameter.id, visiting).to_string())
+                    .collect::<Vec<_>>();
+                // An unprototyped C function's `()` says nothing of its
+                // parameters, though producers describe them as variadic.
+                let unprototyped = list.is_empty() && !*prototyped;
+                if *variadic && !unprototyped {
+                    list.push("...".to_owned());
+                } else if list.is_empty() && *prototyped {
+                    list.push("void".to_owned());
+                }
+                let inner = format!("{inner}({})", list.join(", "));
+                match returns {
+                    Some(returns) => self.declare(returns.id, inner, visiting),
+                    None => join("void", inner),
+                }
+            }
+            TypeKind::Modified { modifier, target } => {
+                let keyword = modifier_keyword(*modifier).expect("a qualifier's keyword");
+                let inner = if inner.starts_with(['*', '&']) {
+                    format!(" {keyword} {inner}")
+                } else {
+                    format!(" {keyword}{inner}")
+                };
+                self.declare(target.id, inner, visiting)
+            }
+            _ => unreachable!("only declarators are declared"),
+        };
+        visiting.remove(&id);
+        declared
+    }
+
+    /// Declares a pointer or reference to `target`, parenthesized where
+    /// the target's own declarator binds tighter, as an array's or a
+    /// function's does.
+    fn declare_indirection(
+        &self,
+        target: TypeId,
+        symbol: &str,
+        inner: &str,
+        visiting: &mut HashSet<TypeId>,
+    ) -> String {
+        let binds_tighter = !self.explicit_names.contains(&target)
+            && matches!(
+                self.entries.get(target.index()),
+                Some(TypeEntry::Resolved(TypeInfo {
+                    kind: TypeKind::Array { .. } | TypeKind::Signature { .. },
+                    ..
+                }))
+            );
+        let inner = if binds_tighter {
+            format!("({symbol}{inner})")
+        } else {
+            format!("{symbol}{inner}")
+        };
+        self.declare(target, inner, visiting)
     }
 
     fn build_pointer_type(
@@ -3414,6 +3563,18 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
                 }
             }
         }
+        TypeKind::Signature {
+            returns,
+            parameters,
+            ..
+        } => {
+            if let Some(returns) = returns {
+                push(*returns);
+            }
+            for parameter in parameters.iter() {
+                push(*parameter);
+            }
+        }
         TypeKind::Base(_)
         | TypeKind::Function
         | TypeKind::Enumeration {
@@ -3428,15 +3589,23 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
     }
 }
 
-fn modifier_type_name(modifier: TypeModifier, target: &str, indirection: bool) -> String {
-    let keyword = match modifier {
+/// The word a qualifier is written with, or `None` for `_Atomic`, which
+/// wraps its type instead.
+const fn modifier_keyword(modifier: TypeModifier) -> Option<&'static str> {
+    Some(match modifier {
         TypeModifier::Const => "const",
         TypeModifier::Volatile => "volatile",
         TypeModifier::Restrict => "restrict",
         TypeModifier::Immutable => "immutable",
         TypeModifier::Packed => "packed",
         TypeModifier::Shared => "shared",
-        TypeModifier::Atomic => return format!("_Atomic({target})"),
+        TypeModifier::Atomic => return None,
+    })
+}
+
+fn modifier_type_name(modifier: TypeModifier, target: &str, indirection: bool) -> String {
+    let Some(keyword) = modifier_keyword(modifier) else {
+        return format!("_Atomic({target})");
     };
     if indirection {
         format!("{target} {keyword}")

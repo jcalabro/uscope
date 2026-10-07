@@ -503,6 +503,10 @@ Past Go code, only the stack pointer is recovered.
 | `set views on`\|`off` | Present values through views, or as stored. |
 | `views` [`load` *file*\|`clear`\|`check`\|`explain` *type*\|`record` *file* *expression*] | Manage view files; see [views.md](views.md). |
 
+Types are named as C declares them, so a pointer to a function shows its
+signature, as `int (*)(const char *, ...)`, and its value names the function
+it enters, in whichever module holds it: `0x401136 <parse_header>`.
+
 `pp` lays a value out for reading: a group of members or elements that fits
 in the rest of the line stays on it, and one that does not puts each member on
 a line of its own, indented and ended by a comma. A sequence of plain values

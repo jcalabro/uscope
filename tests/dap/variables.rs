@@ -666,6 +666,13 @@ fn function_pointers_link_to_the_function_they_point_to() {
     let scopes = scopes(&mut dap, &frame);
     let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
     let function = named(&locals, "function_pointer");
+    assert_eq!(function["type"], json!("int (*)(int)"), "{function}");
+    assert!(
+        function["value"]
+            .as_str()
+            .is_some_and(|value| value.ends_with(" <pointer_identity>")),
+        "{function}"
+    );
     let reference = function["valueLocationReference"].clone();
     assert!(reference.as_i64().is_some_and(|id| id > 0), "{function}");
     let location = dap.request("locations", json!({"locationReference": reference}));

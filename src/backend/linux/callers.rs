@@ -284,6 +284,24 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
     /// The one address a linker symbol defines a function at, across every
     /// loaded module. An indirect function's callers reach whichever
     /// implementation its resolver chose, which is not its address.
+    /// The function whose first instruction `address` is, by its symbol's
+    /// name, in whichever module holds it.
+    pub(super) fn function_at(&self, address: VirtualAddress) -> Option<Arc<str>> {
+        let modules = self.controller.unwind_modules(self.inferior);
+        let (module, image_address) = unwind_module_for(&modules, address)?;
+        let symbol = module.image.symbolize(image_address)?;
+        (symbol.offset == 0
+            && matches!(
+                symbol.kind,
+                SymbolKind::Function | SymbolKind::IndirectFunction
+            ))
+        .then(|| {
+            symbol
+                .demangled_name()
+                .map_or_else(|| Arc::clone(&symbol.name), Arc::from)
+        })
+    }
+
     fn symbol(&self, name: &str) -> Option<VirtualAddress> {
         let mut found = None;
         for module in self.controller.modules.values() {

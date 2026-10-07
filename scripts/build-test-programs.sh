@@ -764,6 +764,10 @@ build_fixture gcc "$c_fixtures_dir/enums.c" "$output_dir/enums-c-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/enums.c" "$output_dir/enums-c-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+for compiler in gcc clang; do
+    build_fixture "$compiler" "$c_fixtures_dir/function-types.c" \
+        "$output_dir/function-types-${compiler}-o0" -O0 -g3 -gdwarf-5 -fPIE -pie
+done
 build_fixture gcc "$c_fixtures_dir/types.c" "$output_dir/types-c-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/types.c" "$output_dir/types-c-clang-o0" \
@@ -1735,6 +1739,36 @@ for variant in "${symbols_variants[@]}"; do
     generate_core "${program}.core" 4 "$default_core_filter" \
         "$program $output_dir/libelf-symbols-${library}.so" "$program"
     generate_backtrace_oracle "$program" "${program}.core"
+done
+
+# gdb's type and target function of each function pointer, one per line as
+# `name<TAB>type<TAB>function`, read from the executable's own data.
+generate_function_type_oracle() {
+    local program="$1"
+    local oracle="${program}.gdb-function-types"
+    rebuilt_outputs["$oracle"]=false
+    if [[ -s "$oracle" && "$oracle" -nt "$program" ]]; then
+        printf '[cached] %s\n' "$oracle"
+        return
+    fi
+    printf '[oracle] %s\n' "$oracle"
+    local -a names=(unary unary_pointer operation 'operations[0]' no_arguments with_variadic
+        chooser unprototyped handlers.on_event handlers.on_done namer constant_function
+        null_function)
+    local name
+    for name in "${names[@]}"; do
+        gdb -nx -batch -q -iex 'set auto-load off' -iex 'set debuginfod enabled off' \
+            -ex "whatis $name" -ex "print $name" "$program" 2>&1 \
+            | awk -v name="$name" '
+                /^type = / { type = substr($0, 8) }
+                /^\$1 = / { target = ""; if (match($0, /<[^>]*>$/)) {
+                    target = substr($0, RSTART + 1, RLENGTH - 2) } }
+                END { printf "%s\t%s\t%s\n", name, type, target }'
+    done >"${oracle}.tmp"
+    mv "${oracle}.tmp" "$oracle"
+}
+for compiler in gcc clang; do
+    generate_function_type_oracle "$output_dir/function-types-${compiler}-o0"
 done
 
 # Go's own reading of the function tables of images the Go linker linked,

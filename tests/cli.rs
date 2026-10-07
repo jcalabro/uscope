@@ -815,6 +815,94 @@ fn c_base_types_cast_in_a_program_that_describes_none() {
 }
 
 #[test]
+fn function_pointers_show_their_signature_and_the_function_they_enter() {
+    let output = batch(
+        &["build/test-programs/variables-gcc-o0"],
+        &[
+            "break variables.c:68",
+            "run",
+            "p function_pointer",
+            "ptype function_pointer",
+            "p *function_pointer",
+            "whatis &function_pointer",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "(int (*)(int)) function_pointer = 0x",
+            " <pointer_identity>\n",
+            "type = int (*)(int)\n",
+            "(int (int)) *function_pointer = <unavailable",
+            "type = int (**)(int)\n",
+        ],
+    );
+    // A pointer into another module names the function there.
+    let shared = batch(
+        &["build/test-programs/globals-shared"],
+        &["break after_load", "run", "up", "p touch", "whatis *touch"],
+    );
+    assert_in_order(
+        &shared,
+        &[
+            "(touch_fn) touch = 0x",
+            " <dso_touch>\n",
+            "type = int32_t (void)\n",
+        ],
+    );
+}
+
+/// Function pointers' types read as gdb reads them, declarators and all,
+/// and their values name the function they enter, compared over GCC's and
+/// Clang's debug information.
+#[test]
+fn function_types_read_as_gdb_reads_them() {
+    let compact = |text: &str| text.split_whitespace().collect::<String>();
+    for compiler in ["gcc", "clang"] {
+        let program = format!("build/test-programs/function-types-{compiler}-o0");
+        let oracle = std::fs::read_to_string(format!("{program}.gdb-function-types"))
+            .expect("the gdb oracle; run `just build-test-programs`");
+        let rows: Vec<Vec<&str>> = oracle
+            .lines()
+            .map(|line| line.split('\t').collect())
+            .collect();
+        let mut commands = vec!["break main".to_owned(), "run".to_owned()];
+        for row in &rows {
+            commands.push(format!("whatis {}", row[0]));
+            commands.push(format!("print {}", row[0]));
+        }
+        let commands: Vec<&str> = commands.iter().map(String::as_str).collect();
+        let output = batch(&[&program], &commands);
+        let mut types = output
+            .lines()
+            .filter_map(|line| line.strip_prefix("type = "));
+        let mut values = output
+            .lines()
+            .filter(|line| line.starts_with('(') && line.contains(" = "));
+        for row in &rows {
+            let [name, gdb_type, gdb_function] = row[..] else {
+                panic!("malformed oracle row {row:?}");
+            };
+            let ours = types.next().expect("a type per whatis");
+            assert_eq!(compact(ours), compact(gdb_type), "{compiler} whatis {name}");
+            let value = values.next().expect("a value per print");
+            let function = value
+                .strip_suffix('>')
+                .and_then(|value| value.rsplit_once(" <"))
+                .map_or("", |(_, function)| function);
+            // gdb names a pointer to data by its symbol too; uscope names
+            // only the functions pointers to code enter.
+            let expected = if name == "unary_pointer" {
+                ""
+            } else {
+                gdb_function
+            };
+            assert_eq!(function, expected, "{compiler} print {name}: {value}");
+        }
+    }
+}
+
+#[test]
 fn pp_lays_values_out_to_the_width_and_print_formats_combine() {
     let records = ["build/test-programs/records-c-gcc-o0"];
     let commands = ["break inspect_records", "run", "pp *records", "up", "pp"];

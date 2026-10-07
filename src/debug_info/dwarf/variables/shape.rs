@@ -391,6 +391,9 @@ fn nested_value_shape<T: TypeMetadataEntry>(
         TypeKind::Unspecified => Err(ValueShapeError::Unsupported(
             "unspecified values are unsupported".into(),
         )),
+        TypeKind::Signature { .. } => Err(ValueShapeError::Unsupported(
+            "a function's code is not a value".into(),
+        )),
         TypeKind::Opaque { description } => {
             Err(ValueShapeError::Unsupported(Arc::clone(description)))
         }
