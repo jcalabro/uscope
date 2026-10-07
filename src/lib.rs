@@ -578,6 +578,22 @@ impl DebuggerHandle {
         .await
     }
 
+    /// Replaces the message a breakpoint logs instead of stopping; `None`
+    /// makes it stop again. Like a condition, this needs no stop and applies
+    /// from the next hit.
+    pub async fn set_breakpoint_log_message(
+        &self,
+        id: BreakpointId,
+        log_message: Option<LogMessage>,
+    ) -> Result<Breakpoint> {
+        self.request(|reply| Request::SetBreakpointLogMessage {
+            id,
+            log_message,
+            reply,
+        })
+        .await
+    }
+
     /// Removes one logical breakpoint and returns its prior definition.
     pub async fn remove_breakpoint(&self, id: BreakpointId) -> Result<Breakpoint> {
         self.request(|reply| Request::RemoveBreakpoint { id, reply })
