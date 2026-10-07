@@ -3,7 +3,6 @@
 ## Debugger
 
 - Break on symbol names in modules without DWARF.
-- Show symbol versions where they distinguish otherwise identical names.
 - Separate debug information: `.gnu_debuglink`, build-id directories, and debuginfod.
 - Write registers, for assigning `$rax` and DAP's `goto` (VS Code's Jump to Cursor).
 - Step into a chosen call on a line (DAP `stepInTargets`), and show a C, C++, Rust, or Zig function's return value after `finish`, as Go's is.

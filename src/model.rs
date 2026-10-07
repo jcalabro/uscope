@@ -3005,6 +3005,16 @@ impl SymbolInfo {
     pub fn demangled_name(&self) -> Option<String> {
         crate::demangle::demangle(&self.name)
     }
+
+    /// The name without the version that tells it apart from other
+    /// definitions of the name, as `memcpy` for `memcpy@GLIBC_2.2.5`.
+    #[must_use]
+    pub fn unversioned_name(&self) -> &str {
+        match self.name.split_once('@') {
+            Some((name, version)) if !name.is_empty() && version != "plt" => name,
+            _ => &self.name,
+        }
+    }
 }
 
 impl SymbolLocation {

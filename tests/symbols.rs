@@ -670,6 +670,8 @@ struct OracleSymbol {
     /// The defining section, or `None` for undefined, absolute, and common.
     section: Option<u32>,
     dynamic: bool,
+    /// The version a dynamic symbol has, and whether it is the default.
+    version: Option<(String, bool)>,
 }
 
 impl Oracle {
@@ -680,6 +682,7 @@ impl Oracle {
             files: names.iter().map(|name| OracleFile::read(name)).collect(),
             data: Vec::new(),
         };
+        oracle.distinguish_versions();
         oracle.add_plt_symbols();
         oracle.data = oracle
             .symbols()
@@ -692,6 +695,37 @@ impl Oracle {
             })
             .collect();
         oracle
+    }
+
+    /// Spells the versions readelf reads where they tell apart definitions
+    /// of one name at several addresses: older versions as `name@VERSION`,
+    /// then the default as `name@@VERSION` where its plain name would
+    /// still name several addresses.
+    fn distinguish_versions(&mut self) {
+        for default in [false, true] {
+            let mut addresses = BTreeMap::<String, BTreeSet<u64>>::new();
+            for (_, symbol) in self.symbols() {
+                if symbol.section.is_some() {
+                    addresses
+                        .entry(symbol.name.clone())
+                        .or_default()
+                        .insert(symbol.address);
+                }
+            }
+            for file in &mut self.files {
+                for symbol in &mut file.symbols {
+                    if let Some((version, is_default)) = &symbol.version
+                        && *is_default == default
+                        && addresses
+                            .get(&symbol.name)
+                            .is_some_and(|addresses| addresses.len() > 1)
+                    {
+                        let separator = if default { "@@" } else { "@" };
+                        symbol.name = format!("{}{separator}{version}", symbol.name);
+                    }
+                }
+            }
+        }
     }
 
     /// Adds a local function symbol for each PLT stub objdump names, one
@@ -724,6 +758,7 @@ impl Oracle {
                         binding: Some(SymbolBinding::Local),
                         section: Some(section),
                         dynamic: false,
+                        version: None,
                     },
                 ));
             }
@@ -851,36 +886,7 @@ impl OracleFile {
             {
                 continue;
             }
-            let size = fields[2].strip_prefix("0x").map_or_else(
-                || fields[2].parse().expect("decimal symbol size"),
-                |hex| u64::from_str_radix(hex, 16).expect("hex symbol size"),
-            );
-            symbols.push(OracleSymbol {
-                // readelf appends versions to dynamic symbol names. A static
-                // table may itself hold versioned names, which are kept.
-                name: if dynamic {
-                    fields[7].split('@').next().expect("name").to_owned()
-                } else {
-                    fields[7].to_owned()
-                },
-                address: u64::from_str_radix(fields[1], 16).expect("symbol value"),
-                size,
-                kind: match fields[3] {
-                    "FUNC" => Some(SymbolKind::Function),
-                    "IFUNC" => Some(SymbolKind::IndirectFunction),
-                    "OBJECT" => Some(SymbolKind::Data),
-                    "NOTYPE" => Some(SymbolKind::Unknown),
-                    _ => None,
-                },
-                binding: match fields[4] {
-                    "GLOBAL" | "UNIQUE" => Some(SymbolBinding::Global),
-                    "WEAK" => Some(SymbolBinding::Weak),
-                    "LOCAL" => Some(SymbolBinding::Local),
-                    _ => None,
-                },
-                section: fields[6].parse().ok(),
-                dynamic,
-            });
+            symbols.push(symbol_row(&fields, dynamic));
         }
         Self {
             executable_sections,
@@ -891,6 +897,49 @@ impl OracleFile {
             entry_sizes,
             plt,
         }
+    }
+}
+
+/// One symbol of readelf's table, from its fields
+/// `Num: Value Size Type Bind Vis Ndx Name`.
+fn symbol_row(fields: &[&str], dynamic: bool) -> OracleSymbol {
+    let size = fields[2].strip_prefix("0x").map_or_else(
+        || fields[2].parse().expect("decimal symbol size"),
+        |hex| u64::from_str_radix(hex, 16).expect("hex symbol size"),
+    );
+    // readelf appends versions to dynamic symbol names, `@@` for the
+    // default. A static table may itself hold versioned names, which
+    // are kept.
+    let (name, version) = match fields[7].split_once('@') {
+        Some((name, version)) if dynamic => (
+            name.to_owned(),
+            Some(version.strip_prefix('@').map_or_else(
+                || (version.to_owned(), false),
+                |version| (version.to_owned(), true),
+            )),
+        ),
+        _ => (fields[7].to_owned(), None),
+    };
+    OracleSymbol {
+        name,
+        version,
+        address: u64::from_str_radix(fields[1], 16).expect("symbol value"),
+        size,
+        kind: match fields[3] {
+            "FUNC" => Some(SymbolKind::Function),
+            "IFUNC" => Some(SymbolKind::IndirectFunction),
+            "OBJECT" => Some(SymbolKind::Data),
+            "NOTYPE" => Some(SymbolKind::Unknown),
+            _ => None,
+        },
+        binding: match fields[4] {
+            "GLOBAL" | "UNIQUE" => Some(SymbolBinding::Global),
+            "WEAK" => Some(SymbolBinding::Weak),
+            "LOCAL" => Some(SymbolBinding::Local),
+            _ => None,
+        },
+        section: fields[6].parse().ok(),
+        dynamic,
     }
 }
 

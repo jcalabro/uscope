@@ -5,7 +5,8 @@
 //! symbols in executable sections receive an extent, so only they can name
 //! machine code; only sized data symbols in allocated sections name storage.
 //! Each PLT stub is named `name@plt` after the function it jumps to, as
-//! binutils names them.
+//! binutils names them. Where one name has several definitions, symbol
+//! versions tell them apart, as `memcpy@GLIBC_2.2.5` does an old `memcpy`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -49,6 +50,12 @@ struct RawSymbol {
     code_section: Option<(u64, u64)>,
     /// The image's allocated section that defines a data symbol.
     storage_section: Option<(u64, u64)>,
+    /// Whether a table defines the symbol without a version.
+    unversioned: bool,
+    /// The versions the dynamic table defines the symbol in, each with
+    /// whether it is the name's default version, which the static linker
+    /// binds new references to.
+    versions: Vec<(Box<[u8]>, bool)>,
 }
 
 /// Loads every symbol table of an ELF image. `unwind_functions` are the code
@@ -71,6 +78,8 @@ pub fn load_symbols(
             collect_embedded(object, &section, &sections, &mut raw)
         });
     collect(object, object.dynamic_symbols(), &sections, true, &mut raw);
+    collect_versions(object, &mut raw);
+    let mut raw = distinguish_versions(raw);
     collect_plt(object, &mut raw);
 
     SymbolTable {
@@ -486,9 +495,112 @@ fn collect<'data, S>(
                 size: symbol.size(),
                 code_section,
                 storage_section,
+                unversioned: false,
+                versions: Vec::new(),
             });
         entry.exported |= exported;
+        // The dynamic table's versions are read separately.
+        entry.unversioned |= !exported;
     }
+}
+
+/// Records the versions the dynamic table's version section gives each
+/// defined dynamic symbol.
+fn collect_versions(object: &object::File<'_>, raw: &mut BTreeMap<(Box<[u8]>, u64), RawSymbol>) {
+    let versions = match object {
+        object::File::Elf64(elf) => elf
+            .elf_section_table()
+            .versions(elf.endian(), elf.data())
+            .ok()
+            .flatten()
+            .map(|versions| (elf.endian(), versions)),
+        _ => None,
+    };
+    for symbol in object.dynamic_symbols() {
+        let Ok(name) = symbol.name_bytes() else {
+            continue;
+        };
+        let Some(entry) = raw.get_mut(&(Box::from(name), symbol.address())) else {
+            continue;
+        };
+        let version = versions.as_ref().and_then(|(endian, versions)| {
+            let index = versions.version_index(*endian, symbol.index());
+            if index.is_local() || index.is_global() {
+                return None;
+            }
+            let version = versions.version(index).ok().flatten()?;
+            Some((Box::from(version.name()), !index.is_hidden()))
+        });
+        match version {
+            Some(version) => entry.versions.push(version),
+            None => entry.unversioned = true,
+        }
+    }
+}
+
+/// Spells the versions of the definitions of a name that several
+/// addresses share, as binutils does: older versions as `name@VERSION`,
+/// then the default version as `name@@VERSION` where the plain name would
+/// still name several addresses. The plain name stays where a table
+/// defines it without a version, or as the default version.
+fn distinguish_versions(
+    raw: BTreeMap<(Box<[u8]>, u64), RawSymbol>,
+) -> BTreeMap<(Box<[u8]>, u64), RawSymbol> {
+    fn respell(
+        raw: BTreeMap<(Box<[u8]>, u64), RawSymbol>,
+        default: bool,
+    ) -> BTreeMap<(Box<[u8]>, u64), RawSymbol> {
+        let mut addresses = BTreeMap::<&[u8], usize>::new();
+        for (name, _) in raw.keys() {
+            *addresses.entry(name).or_default() += 1;
+        }
+        let shared = addresses
+            .into_iter()
+            .filter(|(_, count)| *count > 1)
+            .map(|(name, _)| Box::<[u8]>::from(name))
+            .collect::<BTreeSet<_>>();
+        let mut spelled = BTreeMap::new();
+        let mut add = |key: (Box<[u8]>, u64), symbol: RawSymbol| match spelled.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(symbol);
+            }
+            // A static table may already hold the versioned spelling.
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let existing: &mut RawSymbol = entry.get_mut();
+                existing.exported |= symbol.exported;
+                existing.unversioned |= symbol.unversioned;
+                existing.versions.extend(symbol.versions);
+            }
+        };
+        for ((name, address), mut symbol) in raw {
+            if !shared.contains(&name) {
+                add((name, address), symbol);
+                continue;
+            }
+            let separator: &[u8] = if default { b"@@" } else { b"@" };
+            let (respelled, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut symbol.versions)
+                .into_iter()
+                .partition(|(_, is_default)| *is_default == default);
+            for (version, _) in respelled {
+                let spelling = [&name[..], separator, &version].concat().into_boxed_slice();
+                add(
+                    (spelling, address),
+                    RawSymbol {
+                        exported: true,
+                        unversioned: true,
+                        versions: Vec::new(),
+                        ..symbol
+                    },
+                );
+            }
+            symbol.versions = kept;
+            if symbol.unversioned || !symbol.versions.is_empty() {
+                add((name, address), symbol);
+            }
+        }
+        spelled
+    }
+    respell(respell(raw, false), true)
 }
 
 /// Names each PLT stub after the function whose GOT slot its indirect jump
@@ -578,6 +690,8 @@ fn collect_plt(object: &object::File<'_>, raw: &mut BTreeMap<(Box<[u8]>, u64), R
                 size: entry_size,
                 code_section: Some((start, end)),
                 storage_section: None,
+                unversioned: true,
+                versions: Vec::new(),
             });
         }
     }

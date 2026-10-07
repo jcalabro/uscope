@@ -921,6 +921,54 @@ fn plt_stubs_are_named_after_their_targets() {
     );
 }
 
+/// glibc defines `timer_create` twice, the old one as
+/// `timer_create@GLIBC_2.2.5`, whose version names it apart. A breakpoint
+/// on the plain name takes both, and one on the versioned name the old.
+#[test]
+fn symbol_versions_tell_apart_definitions_of_one_name() {
+    let output = batch(
+        &[BASIC],
+        &[
+            "break main",
+            "run",
+            "break timer_create",
+            "break timer_create@GLIBC_2.2.5",
+        ],
+    );
+    let addresses = |heading: &str| {
+        output
+            .split(heading)
+            .nth(1)
+            .unwrap_or_else(|| panic!("no {heading:?} in {output}"))
+            .lines()
+            .skip(usize::from(heading.ends_with("locations")))
+            .map_while(|line| {
+                let rest = line.trim().strip_prefix("virtual address ")?;
+                rest.split_whitespace().next().map(str::to_owned)
+            })
+            .collect::<Vec<_>>()
+    };
+    let both = addresses("breakpoint 2 set at 2 locations");
+    let old = addresses("breakpoint 3 set at ");
+    assert_eq!(both.len(), 2, "{output}");
+    assert!(old.len() == 1 && both.contains(&old[0]), "{output}");
+    let mut commands = vec!["break main".to_owned(), "run".to_owned()];
+    commands.extend(both.iter().map(|address| format!("info symbol {address}")));
+    let commands = commands.iter().map(String::as_str).collect::<Vec<_>>();
+    let described = batch(&[BASIC], &commands);
+    for address in &both {
+        let name = if *address == old[0] {
+            "timer_create@GLIBC_2.2.5 in section .text"
+        } else {
+            "timer_create in section .text"
+        };
+        assert!(
+            described.contains(&format!("\n{name}")),
+            "{address}: {described}"
+        );
+    }
+}
+
 #[test]
 fn pp_lays_values_out_to_the_width_and_print_formats_combine() {
     let records = ["build/test-programs/records-c-gcc-o0"];

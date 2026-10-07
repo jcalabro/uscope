@@ -464,7 +464,10 @@ the module's ELF symbol tables, including MiniDebugInfo; code no symbol covers
 is `<unknown>` rather than borrowing a neighbor's name. A PLT stub is named
 after the function it jumps to, as `puts@plt`, and can be broken at by that
 name; one whose slot an indirect function's resolver fills is named after
-the indirect function. Rust and C++ symbols
+the indirect function. Where a library defines one name several times, as
+glibc does an old and a new `memcpy`, versions tell them apart: the old is
+`memcpy@GLIBC_2.2.5`, and the default keeps its plain name. A breakpoint on
+the plain name takes every version, and one on a versioned name that one. Rust and C++ symbols
 are demangled. The vDSO, the code the kernel maps into every process for
 calls such as `clock_gettime`, is the module `[vdso]`; no file backs it, so
 it is read from the process's memory.
