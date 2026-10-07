@@ -1764,6 +1764,26 @@ fn backtraces_say_whose_stack_each_run_of_frames_is_on() {
 }
 
 #[test]
+fn backtraces_mark_the_iterators_of_a_loop_whose_body_runs() {
+    let stdout = batch(
+        &["build/test-programs/ranges-go-o0"],
+        &["break main.counted-range1", "run", "backtrace", "frame 1"],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "in main.counted-range1 at",
+            "#1 ",
+            "in main.Count.func1 (the iterator of #2's loop) at",
+            "#2 ",
+            "in main.counted at",
+            "#1 ",
+            "in main.Count.func1 (the iterator of #2's loop) at",
+        ],
+    );
+}
+
+#[test]
 fn stops_and_list_show_source_from_any_working_directory() {
     let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
         .current_dir("/")

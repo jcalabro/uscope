@@ -1536,12 +1536,13 @@ impl Cli {
             FrameTarget::Inward(_) if selected == 0 => bail!("the innermost frame is selected"),
             FrameTarget::Inward(count) => selected.saturating_sub(count),
         };
-        let frame = trace
+        let index = trace
             .frames
             .iter()
-            .find(|frame| u64::from(frame.level) == level)
+            .position(|frame| u64::from(frame.level) == level)
             .ok_or_else(|| anyhow!("the backtrace has no frame {level}"))?;
-        let frame = self.debugger.select_frame(frame.id).await?;
+        let iterates = trace.loop_iterators()[index];
+        let frame = self.debugger.select_frame(trace.frames[index].id).await?;
 
         let renderer = self.renderers.stdout;
         let modules = self.debugger.loaded_modules().await?;
@@ -1549,7 +1550,8 @@ impl Cli {
         if let (Some(module), Some(_)) = (frame.module, &frame.source) {
             images.insert(module, self.debugger.loaded_module_image(module).await?);
         }
-        let mut output = format::stack_frame(&frame, Some(&modules), &images, true, renderer);
+        let mut output =
+            format::stack_frame(&frame, iterates, Some(&modules), &images, true, renderer);
         if frame.source.is_some() {
             output.push('\n');
             match self.debugger.source_context(SOURCE_CONTEXT_RADIUS).await {

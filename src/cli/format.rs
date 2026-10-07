@@ -1469,7 +1469,8 @@ pub fn backtrace(
         .windows(2)
         .any(|pair| pair[0].segment != pair[1].segment);
     let mut segment = None;
-    for frame in trace.frames.iter() {
+    let iterators = trace.loop_iterators();
+    for (frame, iterates) in trace.frames.iter().zip(iterators) {
         if switches && segment != Some(frame.segment) {
             segment = Some(frame.segment);
             lines.push(
@@ -1483,6 +1484,7 @@ pub fn backtrace(
         }
         lines.push(stack_frame(
             frame,
+            iterates,
             modules,
             images,
             frame.level == selected,
@@ -1507,10 +1509,11 @@ pub const fn stack_owner(segment: StackSegment) -> &'static str {
     }
 }
 
-/// Renders one backtrace frame: its level, instruction, code, and source
-/// location or module.
+/// Renders one backtrace frame: its level, instruction, code, the level of
+/// the frame whose loop it iterates, and source location or module.
 pub fn stack_frame(
     frame: &StackFrame,
+    iterates: Option<u32>,
     modules: Option<&LoadedModuleSnapshot>,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
     selected: bool,
@@ -1527,8 +1530,17 @@ pub fn stack_frame(
         },
         |source| format!(" at {}", renderer.paint(Role::Metadata, source)),
     );
+    let iterator = iterates.map_or_else(String::new, |level| {
+        format!(
+            " {}",
+            renderer.paint(
+                Role::Metadata,
+                format_args!("(the iterator of #{level}'s loop)")
+            )
+        )
+    });
     format!(
-        "{} {} in {}{place}",
+        "{} {} in {}{iterator}{place}",
         renderer.paint(
             if selected {
                 Role::Current

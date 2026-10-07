@@ -412,7 +412,11 @@ a step out of them.
 
 - A `-rangeN` body presents like an inline frame of its parent function.
   Its frame shows the parent's variables, without `#yield`, `#state`, or
-  `.closureptr`.
+  `.closureptr`. *(Done this way: Go describes every variable a body uses
+  as the body's own, through its closure, so the body shows those; the
+  parent's frame, one iterator up, shows the rest. Reading a parent's
+  variable the body does not use from the body's frame would need objects
+  bound to another frame, for names the source never uses there.)*
 - `next` in a body treats each call into the iterator as a call. It stops
   at the next body line or the line after the loop.
 - The iterator function's own frames stay visible in the backtrace, marked

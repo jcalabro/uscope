@@ -3066,6 +3066,36 @@ impl Backtrace {
                 .is_none_or(|function| function.role == CodeRole::Ordinary)
         })
     }
+
+    /// For each frame, the level of the frame whose loop it runs as an
+    /// iterator: a frame between a loop body that is a function of its own
+    /// and the body's enclosing function. A body whose enclosing frame the
+    /// trace does not reach marks nothing.
+    #[must_use]
+    pub fn loop_iterators(&self) -> Vec<Option<u32>> {
+        let mut iterators = vec![None; self.frames.len()];
+        // The loops whose enclosing frames are still to come, innermost
+        // last: each one's function, and where its iterators begin.
+        let mut open: Vec<(Option<ModuleId>, FunctionId, usize)> = Vec::new();
+        for (index, frame) in self.frames.iter().enumerate() {
+            let Some(function) = &frame.function else {
+                continue;
+            };
+            if let Some(&(module, enclosing, start)) = open.last()
+                && module == frame.module
+                && enclosing == function.id
+            {
+                open.pop();
+                for iterator in &mut iterators[start..index] {
+                    *iterator = Some(frame.level);
+                }
+            }
+            if let Some(enclosing) = function.enclosing {
+                open.push((frame.module, enclosing, index + 1));
+            }
+        }
+        iterators
+    }
 }
 
 /// An internal image-address range associated with a source location.
