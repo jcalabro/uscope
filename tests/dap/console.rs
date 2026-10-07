@@ -177,6 +177,7 @@ fn console_commands_print_what_the_cli_prints_at_the_same_stop() {
 
     for (command, console) in commands.iter().zip(console) {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .env("USCOPE_CONFIG", "")
             .arg(fixture("variables-gcc-o0"))
             .args([
                 "--batch",

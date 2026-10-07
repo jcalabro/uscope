@@ -19,7 +19,6 @@ use super::{Cli, Control};
 
 const DEFAULT_HEX_DUMP_BYTES: u64 = 64;
 pub const MAX_HEX_DUMP_BYTES: u64 = 8 * 1024;
-const SOURCE_CONTEXT_RADIUS: u32 = 3;
 /// Instructions shown before and from a stop that no function contains.
 const DISASSEMBLY_CONTEXT_BEFORE: u32 = 8;
 const DISASSEMBLY_CONTEXT_AFTER: u32 = 16;
@@ -427,8 +426,23 @@ pub fn line_command(line: &str) -> Option<(&'static CommandSpec, &str)> {
 }
 
 impl Cli {
+    /// A line whose first word is an alias from the settings, with the
+    /// command line the alias stands for in its place.
+    pub(super) fn expand_alias(&self, line: &str) -> Option<String> {
+        let word = line.split_whitespace().next()?;
+        let expansion = self.settings.config.aliases.get(word)?;
+        let rest = line.trim_start()[word.len()..].trim();
+        Some(if rest.is_empty() {
+            expansion.clone()
+        } else {
+            format!("{expansion} {rest}")
+        })
+    }
+
     /// Parses and executes one non-empty command line.
     pub(super) async fn execute(&self, line: &str) -> Result<Control> {
+        let expanded = self.expand_alias(line);
+        let line = expanded.as_deref().unwrap_or(line);
         let (spec, format, rest, arguments) = command_line(line)?;
         let first = arguments.first().copied();
         let renderer = self.renderers.stdout;
@@ -495,10 +509,7 @@ impl Cli {
             Command::Disassemble => self.disassemble(first, arguments.get(1).copied()).await?,
             Command::Address => self.address(arguments[0]).await?,
             Command::Where => self.location().await?,
-            Command::List => format::source_context(
-                &debugger.source_context(SOURCE_CONTEXT_RADIUS).await?,
-                renderer,
-            ),
+            Command::List => format::source_context(&self.source_context().await?, renderer),
             Command::Backtrace => self.backtrace().await?,
             Command::Frame | Command::Up | Command::Down => {
                 self.frame(parse_frame_target(spec, first)?).await?
@@ -512,7 +523,7 @@ impl Cli {
                     command_named(name).ok_or_else(|| anyhow!("unknown command '{name}'"))?,
                     renderer,
                 ),
-                None => format::help(renderer),
+                None => format::help(&self.settings.config.aliases, renderer),
             },
             Command::Quit => return Ok(Control::Quit),
         };
@@ -1185,6 +1196,7 @@ impl Cli {
             Some(marked),
             &modules,
             &images,
+            self.settings.config.disassembly.show_bytes,
             self.renderers.stdout,
         ))
     }
@@ -1307,7 +1319,7 @@ impl Cli {
         let mut output = format::stack_frame(&frame, Some(&modules), &images, true, renderer);
         if frame.source.is_some() {
             output.push('\n');
-            match self.debugger.source_context(SOURCE_CONTEXT_RADIUS).await {
+            match self.source_context().await {
                 Ok(context) => output.push_str(&format::source_context(&context, renderer)),
                 Err(error) => write!(
                     output,
@@ -1348,7 +1360,7 @@ impl Cli {
                 .loaded_module_image(location.module)
                 .await?
                 .source_file(source.file)
-                .map(|file| format!("{}:{}", file.path.display(), source.line)),
+                .map(|file| renderer.location(&file.path, source.line)),
             None => None,
         };
         if let Some(source) = source {
@@ -1370,6 +1382,23 @@ impl Cli {
                     .unwrap_or_else(|| "<unknown module>".to_owned())
             )
         ))
+    }
+
+    /// The selected frame's source, with as many lines around its line as
+    /// `[source] context` asks for.
+    async fn source_context(&self) -> uscope::Result<uscope::SourceContext> {
+        let [before, after] = self.settings.config.source.context;
+        let mut context = self.debugger.source_context(before.max(after)).await?;
+        let line = context.location.line.get();
+        let first = line.saturating_sub(u64::from(before));
+        let last = line.saturating_add(u64::from(after));
+        context.lines = context
+            .lines
+            .iter()
+            .filter(|source| (first..=last).contains(&source.number.get()))
+            .cloned()
+            .collect();
+        Ok(context)
     }
 
     async fn backtrace(&self) -> Result<String> {
@@ -1433,7 +1462,7 @@ impl Cli {
                 | StopReason::StepIncomplete { .. }
                 | StopReason::Watchpoint { .. }
         ) {
-            match self.debugger.source_context(SOURCE_CONTEXT_RADIUS).await {
+            match self.source_context().await {
                 Ok(context) => {
                     output.push('\n');
                     output.push_str(&format::source_context(&context, renderer));
@@ -1665,8 +1694,14 @@ fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&st
     let written = words.next().unwrap_or_default();
     let (entered, format) = written.split_once('/').unwrap_or((written, ""));
     let rest = line.trim_start()[written.len()..].trim();
-    let spec = command_named(entered)
-        .ok_or_else(|| anyhow!("unknown command '{entered}'; type `help` for a list"))?;
+    let spec = command_named(entered).ok_or_else(|| {
+        let names = COMMANDS
+            .iter()
+            .flat_map(|spec| std::iter::once(spec.name).chain(spec.aliases.iter().copied()));
+        let hint = super::suggest::did_you_mean(entered, names)
+            .unwrap_or_else(|| "type `help` for a list".to_owned());
+        anyhow!("unknown command '{entered}'; {hint}")
+    })?;
     let arguments = words.collect::<Vec<_>>();
     if !format.is_empty() && (spec.command != Command::Print || !matches!(format, "x" | "r")) {
         bail!("unknown format '/{format}'; print takes /x or /r");

@@ -1,8 +1,8 @@
 //! The view files a client loads for a session, besides those it is
 //! given.
 //!
-//! They are the project's, every `*.views` file in `.uscope/views` under the
-//! working directory, and the user's, in `$XDG_CONFIG_HOME/uscope/views` or
+//! They are the project's, every `*.views` file in `.uscope/views` at the
+//! project root, and the user's, in `$XDG_CONFIG_HOME/uscope/views` or
 //! `~/.config/uscope/views`, each directory's in name order. A project's
 //! views come before the user's, being about the project's own types.
 
@@ -32,13 +32,10 @@ pub struct KernelFile {
 /// The project's and then the user's view files, and why any could not be
 /// read. A directory that does not exist holds none.
 #[must_use]
-pub fn discover(working_directory: &Path) -> (Vec<ViewFile>, Vec<String>) {
+pub fn discover(project_root: &Path) -> (Vec<ViewFile>, Vec<String>) {
     let mut files = Vec::new();
     let mut errors = Vec::new();
-    let directories = [
-        Some(working_directory.join(".uscope/views")),
-        user_directory(),
-    ];
+    let directories = [Some(project_root.join(".uscope/views")), user_directory()];
     for directory in directories.into_iter().flatten() {
         let (found, failed) = read_directory(&directory);
         files.extend(found);

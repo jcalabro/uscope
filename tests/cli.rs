@@ -21,9 +21,17 @@ fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name)
 }
 
+/// A uscope command that reads no settings files, so that a developer's
+/// own can never change a test's outcome.
+fn uscope_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
+    command.env("USCOPE_CONFIG", "");
+    command
+}
+
 /// Runs uscope in the repository with no standard input.
 fn uscope(arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_uscope"))
+    uscope_command()
         .args(arguments)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::null())
@@ -50,7 +58,7 @@ fn batch(arguments: &[&str], commands: &[&str]) -> String {
 /// Runs `commands` through uscope's standard input, which reports each
 /// failed command and carries on, and returns stdout and stderr.
 fn piped(arguments: &[&str], commands: &[&str]) -> (String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let mut child = uscope_command()
         .args(arguments)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::piped())
@@ -289,8 +297,9 @@ fn help_is_task_oriented_and_progressive() {
     );
     for invocation in [
         "uscope EXECUTABLE [-- ARGS...]",
-        "uscope --attach PID [EXECUTABLE]",
+        "uscope --attach PID|NAME [EXECUTABLE]",
         "uscope --core CORE [EXECUTABLE]",
+        "uscope --launch NAME",
     ] {
         assert!(short.contains(invocation), "{short}");
     }
@@ -316,7 +325,7 @@ fn help_is_task_oriented_and_progressive() {
     }
     assert!(!long.contains("uscope dap ["), "{long}");
 
-    for subcommand in ["dap", "views"] {
+    for subcommand in ["dap", "views", "config"] {
         assert!(short.contains(subcommand), "{short}");
         let own = assert_success(uscope(&[subcommand, "--help"]));
         assert!(own.contains(&format!("uscope {subcommand}")), "{own}");
@@ -409,6 +418,33 @@ fn pid_only_attach_discovers_the_executable_and_quit_detaches() {
     assert_eq!(target.wait().code(), Some(23));
 }
 
+/// `--attach NAME` attaches to the one process of that name, and refuses
+/// to choose among several.
+#[test]
+fn attach_by_name_needs_exactly_one_process_of_that_name() {
+    let directory = support::ScratchDir::new("cli-attach-name");
+    let name = format!("named-{}", std::process::id());
+    let copy = directory.path().join(&name);
+    fs::copy(fixture("build/test-programs/attach"), &copy).expect("copy the fixture");
+    let mut target = support::ExternalProcess::spawn(&copy);
+    let stdout = batch(&["--attach", &name], &["quit"]);
+    assert!(stdout.is_empty(), "{stdout}");
+    target.release();
+    assert_eq!(target.wait().code(), Some(23));
+
+    let first = support::ExternalProcess::spawn(&copy);
+    let second = support::ExternalProcess::spawn(&copy);
+    let output = batch_output(&["--attach", &name], &["quit"]);
+    for process in [&first, &second] {
+        assert_failure(&output, &process.process_id().to_string());
+    }
+    assert_failure(&output, &format!("2 processes are named '{name}'"));
+    assert_failure(
+        &batch_output(&["--attach", "no-such-process-name"], &["quit"]),
+        "no process is named 'no-such-process-name'",
+    );
+}
+
 #[test]
 fn color_follows_the_choice_and_the_environment_on_both_streams() {
     // Redirected output is plain unless color is forced, and `never` wins
@@ -416,14 +452,14 @@ fn color_follows_the_choice_and_the_environment_on_both_streams() {
     assert_no_sgr(&batch(&[BASIC], &["help"]));
     let colored_help = assert_success(uscope(&["--color", "always", "-h"]));
     assert!(colored_help.contains("\x1b["), "{colored_help:?}");
-    let plain_help = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let plain_help = uscope_command()
         .env("CLICOLOR_FORCE", "1")
         .args(["--color", "never", "-h"])
         .output()
         .expect("run uscope help with color disabled");
     assert_no_sgr(&assert_success(plain_help));
 
-    let never = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let never = uscope_command()
         .env("CLICOLOR_FORCE", "1")
         .args(["--batch", "--color", "never", "--eval", "help"])
         .arg(fixture(BASIC))
@@ -1011,13 +1047,16 @@ fn view_files_come_from_the_session_the_project_and_the_user() {
     )
     .expect("write a broken view file");
     let load_broken = format!("views load {}", broken.display());
-    // The project is where the program runs, wherever uscope does.
-    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+    // The project is the one uscope runs in, from any of its directories,
+    // wherever the program runs.
+    let subdirectory = directory.path().join("src");
+    fs::create_dir_all(&subdirectory).expect("make a project subdirectory");
+    let output = uscope_command()
+        .current_dir(&subdirectory)
         .env("XDG_CONFIG_HOME", directory.path().join("config"))
         .arg("--batch")
         .arg("--cwd")
-        .arg(directory.path())
+        .arg("/")
         .arg("--views")
         .arg(&session)
         .args(["-e", "break barrier", "-e", "run", "-e", "up"])
@@ -1075,7 +1114,7 @@ fn views_check_and_explain_a_programs_types_without_a_process() {
         "/build/test-programs/embedded-views"
     );
     let run = |arguments: &[&std::ffi::OsStr]| {
-        Command::new(env!("CARGO_BIN_EXE_uscope"))
+        uscope_command()
             .current_dir(directory.path())
             .env("XDG_CONFIG_HOME", directory.path().join("config"))
             .arg("views")
@@ -1166,7 +1205,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
     let record = format!("views record {} family", runs.display());
     let load_junk = format!("views load {}", junk.display());
     let program = format!("{root}/build/test-programs/tutorial");
-    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let output = uscope_command()
         .current_dir(root)
         .env("XDG_CONFIG_HOME", directory.path().join("config"))
         .arg("--batch")
@@ -1202,7 +1241,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
         "{stderr}"
     );
     let replay = |arguments: &[&std::ffi::OsStr]| {
-        Command::new(env!("CARGO_BIN_EXE_uscope"))
+        uscope_command()
             .args(["views".as_ref(), "replay".as_ref(), runs.as_os_str()])
             .args(arguments)
             .stdin(Stdio::null())
@@ -1606,7 +1645,7 @@ fn batch_mode_lists_threads_and_steps_one_instruction() {
 
 #[test]
 fn stops_and_list_show_source_from_any_working_directory() {
-    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let output = uscope_command()
         .current_dir("/")
         .args([
             "--batch",
@@ -1655,8 +1694,9 @@ fn source_maps_read_sources_recorded_under_another_directory() {
         ],
         &commands,
     );
+    // The mapped file is the repository's, shown relative to it.
     assert!(
-        stdout.contains(&format!("{repository}/tests/fixtures/c/basic.c:6")),
+        stdout.contains("\ntests/fixtures/c/basic.c:6\n"),
         "{stdout}"
     );
     assert!(
@@ -1667,9 +1707,7 @@ fn source_maps_read_sources_recorded_under_another_directory() {
 
 #[test]
 fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
-    let mut uscope = Uscope::spawn(
-        Command::new(env!("CARGO_BIN_EXE_uscope")).arg(fixture("build/test-programs/spin")),
-    );
+    let mut uscope = Uscope::spawn(uscope_command().arg(fixture("build/test-programs/spin")));
     uscope.send("break main\nrun\nthreads\n");
     uscope.line("the breakpoint stop", |line| {
         line.starts_with("stopped at breakpoint 1")
@@ -2665,7 +2703,7 @@ fn a_killed_session_leaves_its_flight_recording() {
     let recording = scratch.path().join("recording.log");
     // uscope keeps reading its open standard input after the script.
     let uscope = Uscope::spawn(
-        Command::new(env!("CARGO_BIN_EXE_uscope"))
+        uscope_command()
             .env("USCOPE_FLIGHT_RECORDING", &recording)
             .args(["--eval", "break main", "--eval", "run"])
             .arg(fixture("build/test-programs/basic")),

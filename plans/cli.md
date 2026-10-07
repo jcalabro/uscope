@@ -49,9 +49,10 @@ Three files, all optional, in TOML:
    `.gitignore`, which uscope never edits.
 
 Each setting comes from the first of these that sets it: a command-line
-flag, the environment (`NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `PAGER`,
-`EDITOR`), the local file, the project's file, the user's file, and the
-built-in default. Tables merge key by key, so a project that sets `[print]
+flag, the environment (`NO_COLOR`, `CLICOLOR`, and `CLICOLOR_FORCE`), the
+local file, the project's file, the user's file, and the built-in default.
+`PAGER`, `VISUAL`, and `EDITOR` name the pager and editor only where no
+file names one, since a file's setting is the more specific choice. Tables merge key by key, so a project that sets `[print]
 style` keeps the user's `[print] max-depth`. Lists, such as `[stop] show`,
 replace rather than append, because a merged list cannot express removing
 an entry. The exceptions are startup commands, which run in order from
@@ -106,6 +107,9 @@ name = "crash"
 core = "core.server"
 program = "build/server"
 ```
+
+A configuration's `cwd` defaults to the project root, as its paths are
+relative to it. `--attach` takes a name too, matched the same way.
 
 `uscope --launch NAME` (`-l NAME`) starts one. With no executable, no
 `--attach`, and no `--core`, a project with exactly one launch
@@ -271,7 +275,13 @@ applied through the requests the flags already use.
 
 DAP reads no configuration in this plan. Its sessions take their settings
 from the client's launch arguments, as editors expect; reading
-`[signals]` and `[[source-map]]` there too is a follow-up.
+`[signals]` and `[[source-map]]` there too is a follow-up. Its console
+shows paths relative to the project root of the launch `cwd`, as the CLI
+does, so the two print the same at the same stop.
+
+`USCOPE_CONFIG` is read and removed from the environment before the
+runtime starts, as `USCOPE_FLIGHT_RECORDING` is, so a launched program's
+environment, and so its stack layout, never depends on it.
 
 ## Breakpoints
 

@@ -62,7 +62,7 @@ fn lines_or<T>(
     items.iter().map(line).collect::<Vec<_>>().join("\n")
 }
 
-pub fn help(renderer: Renderer) -> String {
+pub fn help(aliases: &BTreeMap<String, String>, renderer: Renderer) -> String {
     let name_width = COMMANDS.iter().map(|command| command.name.len()).max();
     let alias_width = COMMANDS
         .iter()
@@ -86,6 +86,18 @@ pub fn help(renderer: Renderer) -> String {
             command.summary
         )
         .expect("writing to a String cannot fail");
+    }
+    if !aliases.is_empty() {
+        let width = aliases.keys().map(String::len).max().unwrap_or(0);
+        output.push_str("\n\naliases from the settings:");
+        for (alias, expansion) in aliases {
+            write!(
+                output,
+                "\n  {}  {expansion}",
+                renderer.paint(Role::Alias, format_args!("{alias:<width$}"))
+            )
+            .expect("writing to a String cannot fail");
+        }
     }
     output.push_str("\n\nUse `help <command>` for aliases and usage.");
     output
@@ -685,7 +697,7 @@ pub fn source_context(context: &SourceContext, renderer: Renderer) -> String {
         .map_or(1, |line| line.number.to_string().len());
     let mut output = format!(
         "{}:{}",
-        renderer.paint(Role::Metadata, context.path.display()),
+        renderer.paint(Role::Metadata, renderer.path(&context.path)),
         renderer.paint(Role::Current, context.location.line)
     );
     for line in context.lines.iter() {
@@ -900,6 +912,7 @@ pub fn disassembly(
     program_counter: Option<VirtualAddress>,
     modules: &LoadedModuleSnapshot,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    show_bytes: bool,
     renderer: Renderer,
 ) -> String {
     let mut lines = Vec::new();
@@ -941,6 +954,7 @@ pub fn disassembly(
                     program_counter,
                     modules,
                     images,
+                    show_bytes,
                     renderer,
                 );
             }
@@ -967,6 +981,7 @@ pub fn disassembly(
                 program_counter,
                 modules,
                 images,
+                show_bytes,
                 renderer,
             );
         }
@@ -984,6 +999,7 @@ fn disassembly_block(
     program_counter: Option<VirtualAddress>,
     modules: &LoadedModuleSnapshot,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    show_bytes: bool,
     renderer: Renderer,
 ) {
     let place = |instruction: &DisassembledInstruction| {
@@ -1003,19 +1019,14 @@ fn disassembly_block(
         .map(|instruction| place(instruction).len())
         .max()
         .unwrap_or_default();
-    let bytes_width = block
-        .instructions
-        .iter()
-        .map(|instruction| instruction.bytes.len().min(ALIGNED_INSTRUCTION_BYTES) * 3)
-        .max()
-        .unwrap_or_default();
+    let bytes_width = bytes_column_width(block);
 
     let mut source = None;
     for instruction in block.instructions.iter() {
         let module = instruction.location.module.as_ref();
         let current_source = instruction.source.as_ref().and_then(|location| {
             let file = images.get(&module?.module)?.source_file(location.file)?;
-            Some(format!("{}:{}", file.path.display(), location.line))
+            Some(renderer.location(&file.path, location.line))
         });
         if current_source.is_some() && current_source != source {
             lines.push(
@@ -1034,7 +1045,7 @@ fn disassembly_block(
         } else {
             "  ".to_owned()
         };
-        let bytes = instruction_bytes(&instruction.bytes);
+        let bytes = instruction_bytes(&instruction.bytes, show_bytes.then_some(bytes_width));
         let text = match &instruction.content {
             InstructionContent::Decoded(decoded) => instruction_text(
                 decoded,
@@ -1049,7 +1060,7 @@ fn disassembly_block(
                 .to_string(),
         };
         lines.push(format!(
-            "{marker} {}{} {bytes:<bytes_width$} {text}",
+            "{marker} {}{}{bytes} {text}",
             renderer.paint(
                 Role::Metadata,
                 format_args!("{:#018x}", instruction.address)
@@ -1088,6 +1099,16 @@ fn disassembly_block(
     }
 }
 
+/// The width of the bytes column, which fits all but the longest encodings.
+fn bytes_column_width(block: &DisassemblyBlock) -> usize {
+    block
+        .instructions
+        .iter()
+        .map(|instruction| instruction.bytes.len().min(ALIGNED_INSTRUCTION_BYTES) * 3)
+        .max()
+        .unwrap_or_default()
+}
+
 fn conflict_note(conflict: &BoundaryConflict) -> String {
     if conflict.evidence == BoundaryEvidence::RangeEnd {
         format!(
@@ -1102,11 +1123,17 @@ fn conflict_note(conflict: &BoundaryConflict) -> String {
     }
 }
 
-fn instruction_bytes(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut text, byte| {
+/// An instruction's bytes, padded to the column's width after a space, or
+/// nothing when the column is hidden.
+fn instruction_bytes(bytes: &[u8], width: Option<usize>) -> String {
+    let Some(width) = width else {
+        return String::new();
+    };
+    let text = bytes.iter().fold(String::new(), |mut text, byte| {
         write!(text, "{byte:02x} ").expect("writing to a String cannot fail");
         text
-    })
+    });
+    format!(" {text:<width$}")
 }
 
 /// Renders an instruction's text with each encoded address named.
@@ -1337,7 +1364,7 @@ pub fn stack_frame(
         images
             .get(&frame.module?)?
             .source_file(source.file)
-            .map(|file| format!("{}:{}", file.path.display(), source.line))
+            .map(|file| renderer.location(&file.path, source.line))
     });
     let place = source.map_or_else(
         || {
@@ -1655,7 +1682,7 @@ mod tests {
     #[test]
     fn generated_help_lists_every_command_and_shows_usage_only_for_arguments() {
         let renderer = Renderer::new(false);
-        let overview = help(renderer);
+        let overview = help(&BTreeMap::new(), renderer);
         for command in COMMANDS {
             // Each command has one overview row: its name, aliases, summary.
             let row = overview

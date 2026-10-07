@@ -23,6 +23,7 @@ fn command(executable: &Path, state: &Path) -> Command {
     command
         .arg(executable)
         .env("XDG_STATE_HOME", state)
+        .env("USCOPE_CONFIG", "")
         .env("TERM", "xterm-256color")
         .env_remove("NO_COLOR")
         .env_remove("CLICOLOR")

@@ -1,22 +1,28 @@
 # Command line
 
 ```text
-uscope [OPTIONS] EXECUTABLE [-- ARGS...]     launch a program
-uscope [OPTIONS] --attach PID [EXECUTABLE]   attach to a process
-uscope [OPTIONS] --core CORE [EXECUTABLE]    open a core dump
-uscope views check|explain|replay ...        check views without a process
+uscope [OPTIONS] EXECUTABLE [-- ARGS...]          launch a program
+uscope [OPTIONS] --attach PID|NAME [EXECUTABLE]   attach to a process
+uscope [OPTIONS] --core CORE [EXECUTABLE]         open a core dump
+uscope [OPTIONS] --launch NAME [-- ARGS...]       start a launch configuration
+uscope config path|show|check|init|trust|untrust|trusted
+uscope views check|explain|replay ...             check views without a process
 uscope dap [--port PORT | --listen ADDRESS] [--log FILE]
 ```
 
 With `--attach` or `--core`, the executable is found through `/proc` or in the
-dump; pass `EXECUTABLE` only when that fails. `uscope dap` is described in
-[dap.md](dap.md), and `uscope views` in [views.md](views.md).
+dump; pass `EXECUTABLE` only when that fails. `--attach NAME` attaches to the
+one process with that name, matched exactly as `pgrep -x` matches, and fails
+naming them when there are several. `uscope` alone starts the project's launch
+configuration when it has exactly one; see [Settings](#settings). `uscope dap`
+is described in [dap.md](dap.md), and `uscope views` in [views.md](views.md).
 
 ## Flags
 
 | Flag | |
 | --- | --- |
-| `-p, --attach PID` | Attach to a running process. It is detached, still running, when uscope exits. |
+| `-p, --attach PID\|NAME` | Attach to a running process, by id or by name. It is detached, still running, when uscope exits. |
+| `-l, --launch NAME` | Start the project's launch configuration `NAME`. |
 | `--core CORE` | Open a core dump. |
 | `--cwd DIR` | Working directory of a launched program. |
 | `--env NAME=VALUE` | Set an environment variable of a launched program. Repeatable. |
@@ -28,17 +34,117 @@ dump; pass `EXECUTABLE` only when that fails. `uscope dap` is described in
 | `-c, --command FILE` | Run the commands in `FILE`. Repeatable. |
 | `-e, --eval COMMAND` | Run one command, after any `-c` files. Repeatable. |
 | `--batch` | Exit after the commands instead of starting the REPL; with no `-c` or `-e`, read commands from stdin. A failing command ends the session with an error naming its source. |
-| `--color auto\|always\|never` | Color output. `auto` honors `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, and `TERM`, and is off when output is not a terminal. |
-| `--disassembly-syntax intel\|att` | Syntax for `disassemble`. Default `intel`. |
+| `--color auto\|always\|never` | Color output, over `[ui] color`. `auto` honors `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, and `TERM`, and is off when output is not a terminal. |
+| `--disassembly-syntax intel\|att` | Syntax for `disassemble`, over `[disassembly] syntax`. Default `intel`. |
+| `--config FILE` | Read `FILE` instead of the user's settings file, as `USCOPE_CONFIG=FILE` does. |
+| `--no-config` | Read no settings files, as an empty `USCOPE_CONFIG` does. |
+| `--trust-project` | Use the project's startup commands, aliases, and launch configurations in this session without asking. |
 
 Launched programs run without address randomization, as under gdb, so
 addresses are the same on every run.
+
+## Settings
+
+Settings are TOML, in three files, each optional:
+
+1. The user's, `$XDG_CONFIG_HOME/uscope/config.toml` or
+   `~/.config/uscope/config.toml`, for every project.
+2. The project's, `.uscope/config.toml` at the project root, usually
+   committed.
+3. The project's local file, `.uscope/config.local.toml`, for one person;
+   list it in the project's `.gitignore`, which uscope never edits.
+
+The project root is the nearest directory, from the one uscope runs in
+upwards, that holds `.uscope/`, then the nearest that holds `.git`, then the
+directory itself. It is where views and saved breakpoints are found too, and
+source paths inside it are shown relative to it.
+
+A setting comes from the first of these that sets it: a flag, the
+environment (`NO_COLOR`, `CLICOLOR_FORCE`, and `CLICOLOR` outrank every
+file), the local file, the project's, the user's, and the default. Tables
+merge key by key, and lists replace. Startup commands instead run from every
+file in order, user, project, local, then the launch configuration's, then
+`-c` files and `-e` commands; launch configurations merge by name, so the
+local file can change one key of the project's.
+
+`uscope config init` writes the user's file with every setting at its
+default, commented out and described; `uscope config show` prints every
+setting in effect and the file, flag, or variable it comes from; `uscope
+config path` prints the files a session here would read. An unknown key, a
+wrong type, or a value out of range stops startup with the file, line,
+column, and nearest valid key, as in `config.toml:3:1: unknown key 'colour'
+in [ui]; did you mean 'color'?`; `--no-config` starts anyway, and `uscope
+config check` checks every file, for a project's CI.
+
+| Table | Settings |
+| --- | --- |
+| `[ui]` | `color`, `theme` (`default` or `light`), `unicode`, `hyperlinks` (OSC 8 links on `file:line`), `paths` (`relative`, `absolute`, or `name`), `pager`, `editor`, `prompt`, `confirm-quit` |
+| `[theme]` | One role's style over the theme's, such as `changed = "bold yellow"`: a color (`red`, `bright-red`, `0`-`255`, `#rrggbb`) with `bold`, `dim`, `italic`, `underline`, `reverse`, and `on COLOR` |
+| `[source]` | `context = [before, after]` lines at stops and in `list`, `highlight`, `tab-width` |
+| `[stop]` | `show`, the sections a stop prints, and their sizes |
+| `[print]` | `style` (`compact` or `pretty`), `radix`, `width`, `indent`, `max-depth`, `max-elements` |
+| `[disassembly]` | `syntax`, `show-bytes` |
+| `[breakpoints]` | `save` |
+| `[history]` | `size` |
+| `[signals]` | `SIGUSR1 = "nostop noprint pass"`, as `handle` takes them |
+| `[[source-map]]` | `from` and `to`, as `--source-map` takes them, after the command line's rules; `to` is relative to the project root |
+| `[aliases]` | `bm = "break main"`: a word that stands for a command line; it cannot hide a command |
+| `[startup]` | `commands`, run at startup |
+| `[projects]` | `trust`, only in the user's file |
+| `[[launch]]` | Launch configurations, below |
+
+### Launch configurations
+
+A project describes how its programs are debugged, as VS Code's
+`launch.json` does:
+
+```toml
+[[launch]]
+name = "server"
+program = "build/server"          # relative to the project root, as every path here is
+args = ["--port", "8080"]
+env = { RUST_LOG = "debug" }
+cwd = "."                         # the project root by default
+startup = ["break handle_request", "run"]
+
+[[launch]]
+name = "attached"
+attach = "server"                 # a process id, or a name
+
+[[launch]]
+name = "crash"
+core = "core.server"              # with sysroot, module-path, and allow-module-mismatch
+program = "build/server"
+```
+
+`uscope --launch server` starts one, and `uscope` alone starts the only one;
+with several, it lists them and exits rather than choose. Arguments after
+`--` replace a configuration's `args`, `--env` adds to and overrides its
+`env`, and `--cwd` replaces its `cwd`. `views` names view files, as
+`--views` does.
+
+### Trusting a project
+
+A project's files arrive with a clone, so its startup commands, aliases, and
+launch configurations, which act, apply only once trusted; everything else
+applies at once. The user's `[projects] trust` chooses how:
+
+- `ask`, the default: a session in a terminal shows them and asks `yes`,
+  `once`, or `no`. `yes` records them in `$XDG_STATE_HOME/uscope/trust.toml`,
+  readable, and the session asks again only when they change. A session that
+  cannot ask, such as `--batch`, fails and names `--trust-project` and
+  `uscope config trust`, which trust them for the session and until they
+  change. `uscope config untrust` forgets a project, and `uscope config
+  trusted` lists those trusted.
+- `always`: every project's files apply, as running its `Makefile` would.
+- `never`: they never apply, and the session says what it left out.
 
 ## Commands
 
 An empty line repeats the last `continue`, stepping, `up`, `down`, `x`, or
 `list` command. Lines starting with `#` are ignored. `help [command]` describes
-each command.
+each command, and lists the aliases the settings define. A mistyped command
+is answered with the nearest ones.
 
 ### Running
 
@@ -264,7 +370,8 @@ trailing components, as in `break main.c:10`.
 ## Output
 
 Interactive output is colored when stdout is a terminal, leaving source text
-plain. History is kept in `$XDG_STATE_HOME/uscope/history`. Development builds
+plain. History is kept in `$XDG_STATE_HOME/uscope/history`, up to `[history]
+size` lines. Development builds
 record a flight recording of every request and ptrace call under
 `target/flight-recorder`; `USCOPE_FLIGHT_RECORDING=PATH` chooses the file,
 and an empty value turns it off.
