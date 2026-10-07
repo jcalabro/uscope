@@ -27,6 +27,8 @@ async fn a_loaded_program_waits_for_continue_then_runs_to_its_exit_with_output()
     let session = loaded["session"].as_str().expect("a session").to_owned();
 
     tab.ok("continue", json!({})).await;
+    // The program reads its input until it ends.
+    tab.ok("input", json!({"text": "", "eof": true})).await;
     assert!(
         tab.output_until("stderr", "err 3")
             .await
@@ -48,6 +50,7 @@ async fn a_loaded_program_waits_for_continue_then_runs_to_its_exit_with_output()
     );
     // A continue starts it again.
     tab.ok("continue", json!({})).await;
+    tab.ok("input", json!({"text": "", "eof": true})).await;
     tab.output_until("stdout", "out 1").await;
     tab.inferior("exited").await;
     tab.save_traffic("run-to-exit");
@@ -125,6 +128,7 @@ async fn a_tab_that_joins_late_sees_the_recent_output_once() {
     let program = fixture("output-streams");
     let web = Web::start("late", &["--run", &program]);
     let mut early = web.control("early").await;
+    early.ok("input", json!({"text": "", "eof": true})).await;
     early.output_until("stdout", "burst done").await;
     early.inferior("exited").await;
     let mut late = web.control("late").await;

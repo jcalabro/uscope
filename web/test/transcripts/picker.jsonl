@@ -1,23 +1,24 @@
 {"message":{"connection":1,"cwd":"<root>","name":"tester","role":"control","type":"hello","version":1},"to":"page"}
-{"message":{"busy":null,"inferior":{"state":"notStarted"},"revision":0,"session":null,"target":null,"threads":[],"type":"state"},"to":"page"}
+{"message":{"breakpoints":[],"busy":null,"inferior":{"state":"notStarted"},"revision":0,"session":null,"stops":[],"target":null,"threads":[],"type":"state"},"to":"page"}
 {"message":{"id":1,"method":"completePath","params":{"text":"<root>/build/test-programs//spi"}},"to":"server"}
-{"message":{"people":[{"connection":1,"name":"tester","role":"control"}],"type":"presence"},"to":"page"}
+{"message":{"people":[{"connection":1,"focus":null,"name":"tester","role":"control"}],"type":"presence"},"to":"page"}
 {"message":{"id":1,"result":{"entries":[{"kind":"executable","text":"<root>/build/test-programs//spin"},{"kind":"file","text":"<root>/build/test-programs//spin.command"}]},"type":"result"},"to":"page"}
 {"message":{"id":2,"method":"launch","params":{"program":"<root>/build/test-programs/spin","run":true}},"to":"server"}
-{"message":{"busy":"Loading <root>/build/test-programs/spin","inferior":{"state":"notStarted"},"revision":0,"session":null,"target":null,"threads":[],"type":"state"},"to":"page"}
-{"message":{"busy":null,"inferior":{"pid":1947055,"state":"running"},"revision":1,"session":"be534384","target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[{"id":1947055,"name":null,"stopped":false}],"type":"state"},"to":"page"}
-{"message":{"busy":null,"inferior":{"pid":1947055,"state":"running"},"revision":4,"session":"be534384","target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[{"id":1947055,"name":"spin","stopped":false}],"type":"state"},"to":"page"}
+{"message":{"breakpoints":[],"busy":"Loading <root>/build/test-programs/spin","inferior":{"state":"notStarted"},"revision":0,"session":null,"stops":[],"target":null,"threads":[],"type":"state"},"to":"page"}
+{"message":{"breakpoints":[],"busy":null,"inferior":{"state":"notStarted"},"revision":0,"session":"a5f2bca3","stops":[],"target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[],"type":"state"},"to":"page"}
+{"message":{"breakpoints":[],"busy":null,"inferior":{"pid":2849423,"state":"running"},"revision":1,"session":"a5f2bca3","stops":[],"target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[{"id":2849423,"name":null,"stopped":false}],"type":"state"},"to":"page"}
+{"message":{"breakpoints":[],"busy":null,"inferior":{"pid":2849423,"state":"running"},"revision":4,"session":"a5f2bca3","stops":[],"target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[{"id":2849423,"name":"spin","stopped":false}],"type":"state"},"to":"page"}
 {"message":{"id":2,"result":null,"type":"result"},"to":"page"}
 {"message":{"id":3,"method":"launch","params":{"program":"<root>/build/test-programs/basic"}},"to":"server"}
 {"message":{"connection":1,"name":"tester","text":"launched <root>/build/test-programs/spin","type":"notice"},"to":"page"}
-{"message":{"busy":null,"inferior":{"pid":1947055,"state":"running"},"revision":5,"session":"be534384","target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[{"id":1947055,"name":"spin","stopped":false}],"type":"state"},"to":"page"}
+{"message":{"breakpoints":[],"busy":null,"inferior":{"pid":2849423,"state":"running"},"revision":5,"session":"a5f2bca3","stops":[],"target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[{"id":2849423,"name":"spin","stopped":false}],"type":"state"},"to":"page"}
 {"message":{"error":{"kind":"busy","message":"spin is being debugged; replace it to continue"},"id":3,"type":"error"},"to":"page"}
 {"message":{"id":4,"method":"launch","params":{"program":"<root>/build/test-programs/basic","replace":true}},"to":"server"}
-{"message":{"busy":"Loading <root>/build/test-programs/basic","inferior":{"state":"notStarted"},"revision":0,"session":null,"target":null,"threads":[],"type":"state"},"to":"page"}
+{"message":{"breakpoints":[],"busy":"Loading <root>/build/test-programs/basic","inferior":{"state":"notStarted"},"revision":0,"session":null,"stops":[],"target":null,"threads":[],"type":"state"},"to":"page"}
+{"message":{"breakpoints":[],"busy":null,"inferior":{"state":"notStarted"},"revision":0,"session":"7e52c848","stops":[],"target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/basic"},"threads":[],"type":"state"},"to":"page"}
 {"message":{"id":4,"result":null,"type":"result"},"to":"page"}
-{"message":{"connection":1,"name":"tester","text":"launched <root>/build/test-programs/basic","type":"notice"},"to":"page"}
-{"message":{"busy":null,"inferior":{"state":"notStarted"},"revision":0,"session":"057d0949","target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/basic"},"threads":[],"type":"state"},"to":"page"}
 {"message":{"id":5,"method":"launch","params":{"program":"/nonexistent/program","replace":true}},"to":"server"}
-{"message":{"busy":"Loading /nonexistent/program","inferior":{"state":"notStarted"},"revision":0,"session":null,"target":null,"threads":[],"type":"state"},"to":"page"}
-{"message":{"busy":null,"inferior":{"state":"notStarted"},"revision":0,"session":null,"target":null,"threads":[],"type":"state"},"to":"page"}
+{"message":{"connection":1,"name":"tester","text":"launched <root>/build/test-programs/basic","type":"notice"},"to":"page"}
+{"message":{"breakpoints":[],"busy":"Loading /nonexistent/program","inferior":{"state":"notStarted"},"revision":0,"session":null,"stops":[],"target":null,"threads":[],"type":"state"},"to":"page"}
+{"message":{"breakpoints":[],"busy":null,"inferior":{"state":"notStarted"},"revision":0,"session":null,"stops":[],"target":null,"threads":[],"type":"state"},"to":"page"}
 {"message":{"error":{"kind":"failed","message":"failed to load /nonexistent/program: No such file or directory (os error 2)"},"id":5,"type":"error"},"to":"page"}

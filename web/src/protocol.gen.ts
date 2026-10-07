@@ -8,9 +8,9 @@ export type Envelope = {
 /**
  * Chosen by the tab; the answer carries it back.
  */
-id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" });
+id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input });
 
-export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" };
+export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input };
 
 export type SetName = { name: string, };
 
@@ -64,6 +64,71 @@ export type Continue = {
  */
 stop: number | null, };
 
+export type Step = { 
+/**
+ * The stop being stepped from, which must still be current.
+ */
+stop: number, thread: number, 
+/**
+ * The frame a step out leaves; every other step starts from the
+ * innermost frame.
+ */
+frame: number, kind: StepKind, };
+
+export type StepKind = "over" | "into" | "out" | "instruction" | "overInstruction";
+
+export type SetFocus = { 
+/**
+ * Absent when the tab looks at nothing in particular.
+ */
+focus: Focus | null, };
+
+export type Focus = { 
+/**
+ * The page path and query, such as `/s/k7q2/stop/12/t/41872/f/1`.
+ */
+url: string, 
+/**
+ * Such as `frame 1, serve_conn`.
+ */
+label: string, };
+
+export type ThreadAt = { stop: number, thread: number, };
+
+export type SourcePath = { 
+/**
+ * A path as the debug information records it.
+ */
+path: string, };
+
+export type AddBreakpoint = { 
+/**
+ * A function, `FILE:LINE`, `FILE:FUNCTION`, or `0xADDRESS`.
+ */
+location: string, condition: string | null, 
+/**
+ * Which hits stop, such as `>=5` or `%10`.
+ */
+hitCondition: string | null, 
+/**
+ * A message to log instead of stopping, with expressions in braces.
+ */
+logMessage: string | null, };
+
+export type EditBreakpoint = { id: number, 
+/**
+ * Absent to remove.
+ */
+condition: string | null, hitCondition: string | null, logMessage: string | null, };
+
+export type BreakpointRef = { id: number, };
+
+export type Input = { text: string, 
+/**
+ * Close the input after the text, so the program reads its end.
+ */
+eof: boolean, };
+
 export type ServerMessage = { "type": "hello" } & Hello | { "type": "state" } & State | { "type": "result", id: number, result: unknown, } | { "type": "error", id: number, error: ErrorBody, } | { "type": "output" } & Output | { "type": "presence" } & Presence | { "type": "notice" } & Notice;
 
 export type Hello = { version: number, 
@@ -97,7 +162,11 @@ busy: string | null,
 /**
  * The debugger revision this state reflects.
  */
-revision: number, inferior: Inferior, threads: Array<Thread>, };
+revision: number, inferior: Inferior, threads: Array<Thread>, breakpoints: Array<Breakpoint>, 
+/**
+ * The latest stops of this session, oldest first.
+ */
+stops: Array<StopEntry>, };
 
 export type Target = { kind: TargetKind, 
 /**
@@ -123,7 +192,11 @@ stop: number,
 /**
  * The thread whose event caused the stop.
  */
-thread: number, reason: StopReason, } | { "state": "exited", description: string, } | { "state": "detached", pid: number, };
+thread: number, reason: StopReason, 
+/**
+ * Where that thread stopped.
+ */
+place: Place | null, } | { "state": "exited", description: string, } | { "state": "detached", pid: number, };
 
 export type StopReason = { 
 /**
@@ -135,6 +208,40 @@ kind: string,
  */
 description: string, };
 
+export type Place = { 
+/**
+ * The instruction's address, in hexadecimal.
+ */
+address: string, function: string | null, 
+/**
+ * The source file, as the debug information records it.
+ */
+path: string | null, line: number | null, };
+
+export type StopEntry = { stop: number, thread: number, reason: StopReason, place: Place | null, 
+/**
+ * Who ran the program to it, when someone did.
+ */
+by: string | null, 
+/**
+ * What they did, such as `stepped over`.
+ */
+action: string | null, };
+
+export type Breakpoint = { id: number, 
+/**
+ * What it was set at, as it was asked for.
+ */
+location: string, condition: string | null, hitCondition: string | null, logMessage: string | null, 
+/**
+ * Hits in the current process, including those that did not stop.
+ */
+hits: number, 
+/**
+ * Where it resolved; none while no loaded code has it.
+ */
+places: Array<Place>, };
+
 export type Thread = { id: number, name: string | null, stopped: boolean, };
 
 export type ErrorBody = { kind: ErrorKind, message: string, };
@@ -143,11 +250,11 @@ export type ErrorKind = "staleStop" | "notStopped" | "forbidden" | "busy" | "inv
 
 export type Output = { stream: Stream, text: string, };
 
-export type Stream = "stdout" | "stderr";
+export type Stream = "stdout" | "stderr" | "log";
 
 export type Presence = { people: Array<Person>, };
 
-export type Person = { connection: number, name: string, role: Role, };
+export type Person = { connection: number, name: string, role: Role, focus: Focus | null, };
 
 export type Notice = { 
 /**
@@ -183,3 +290,49 @@ export type Process = { pid: number,
 command: string, };
 
 export type ShareLink = { url: string, };
+
+export type Backtrace = { frames: Array<Frame>, 
+/**
+ * Why the stack ends early, when the unwinder could not finish it.
+ */
+incomplete: string | null, };
+
+export type Frame = { 
+/**
+ * Its number, counting from the innermost frame.
+ */
+index: number, 
+/**
+ * The function, symbol, or address.
+ */
+name: string, kind: FrameKind, 
+/**
+ * The instruction or return address, in hexadecimal.
+ */
+address: string, 
+/**
+ * The file name of the module the code is in.
+ */
+module: string | null, source: SourceLine | null, };
+
+export type FrameKind = "physical" | "inline" | "signal";
+
+export type SourceLine = { path: string, line: number, column: number | null, };
+
+export type SourceFiles = { 
+/**
+ * Paths as the debug information records them, sorted.
+ */
+files: Array<string>, };
+
+export type SourceText = { path: string, 
+/**
+ * The file read, which a source map may have moved.
+ */
+read: string, text: string, 
+/**
+ * The lines a breakpoint can stop at, in order.
+ */
+breakable: Array<number>, };
+
+export type BreakpointAdded = { id: number, };

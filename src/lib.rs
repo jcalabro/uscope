@@ -1117,6 +1117,13 @@ impl DebuggerHandle {
         })
     }
 
+    /// Reads a source file a module image names, through the handle's
+    /// [`SourcePathMap`], returning the path read and its contents. Only
+    /// files the debug information names can be read this way.
+    pub async fn read_source_file(&self, file: &SourceFile) -> Result<(PathBuf, String)> {
+        self.read_source(&file.path).await
+    }
+
     /// Reads the first candidate for a recorded source path that exists. A
     /// file that exists but cannot be read is an error rather than skipped.
     async fn read_source(&self, recorded: &Path) -> Result<(PathBuf, String)> {

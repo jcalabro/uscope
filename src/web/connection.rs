@@ -27,7 +27,7 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
         name: joined.name.clone(),
         cwd: session.cwd().display().to_string(),
     });
-    let state = ServerMessage::State((**joined.state.borrow_and_update()).clone());
+    let state = ServerMessage::State(Arc::clone(&joined.state.borrow_and_update()));
     let mut opening = vec![encode(&hello), encode(&state)];
     opening.extend(joined.history.iter().map(|text| Utf8Bytes::from(&**text)));
     for text in opening {
@@ -56,7 +56,7 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
                 if changed.is_err() {
                     break;
                 }
-                let state = (**joined.state.borrow_and_update()).clone();
+                let state = Arc::clone(&joined.state.borrow_and_update());
                 encode(&ServerMessage::State(state))
             }
             Some(answer) = pending.recv() => answer,
