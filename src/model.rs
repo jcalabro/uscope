@@ -2537,6 +2537,11 @@ pub struct FunctionInfo {
     pub language: SourceLanguage,
     /// What the function is to unwinding and stepping.
     pub role: CodeRole,
+    /// The function whose loop this one is the body of, when a compiler
+    /// made a loop's body a function of its own, as Go does for a range
+    /// over a function. A step treats the body as its enclosing function's
+    /// own code, and the code between them as a call it makes.
+    pub enclosing: Option<FunctionId>,
 }
 
 /// What a function is to unwinding and stepping, whatever its language.

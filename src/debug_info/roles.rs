@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use super::gopclntab::{GoFunctionFacts, SpecialFunction};
-use crate::{CodeRole, FunctionInfo, SourceFile};
+use crate::{CodeRole, FunctionInfo, SourceFile, SourceLanguage};
 
 /// The file Go declares the code it generates in: wrappers, but also
 /// package initializers and equality functions, which do work of their own.
@@ -41,6 +41,35 @@ pub fn abi_wrappers(functions: &[FunctionInfo], source_files: &[SourceFile]) -> 
         .iter()
         .map(|function| generated(function) && written.contains(&function.name))
         .collect()
+}
+
+/// Links each loop body a compiler made a function of its own to the
+/// function whose loop it is. Go names a range-over-func body after its
+/// enclosing function, `F-rangeN`, and a body within a body
+/// `F-rangeN-rangeM`. Where an ABI wrapper shares the enclosing function's
+/// name, the body belongs to the function, not the wrapper.
+pub fn link_loop_bodies(functions: &mut [FunctionInfo]) {
+    let mut by_name = std::collections::HashMap::new();
+    for function in functions.iter().filter(|function| {
+        function.language == SourceLanguage::Go && function.role != CodeRole::Wrapper
+    }) {
+        by_name.entry(function.name.clone()).or_insert(function.id);
+    }
+    for function in functions
+        .iter_mut()
+        .filter(|function| function.language == SourceLanguage::Go)
+    {
+        function.enclosing = go_loop_parent(&function.name)
+            .and_then(|parent| by_name.get(parent))
+            .copied();
+    }
+}
+
+/// The name of the function whose loop a Go range-over-func body is.
+fn go_loop_parent(name: &str) -> Option<&str> {
+    let (parent, number) = name.rsplit_once("-range")?;
+    (!parent.is_empty() && !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(parent)
 }
 
 /// The role of code that only a linker symbol describes.

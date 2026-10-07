@@ -72,6 +72,7 @@ mod internal_stops;
 mod language_exceptions;
 mod libraries;
 mod lifecycle;
+mod loops;
 mod memory;
 mod modules;
 mod native;
@@ -434,6 +435,9 @@ struct StepStart {
     /// or task reaches one of its plan's breakpoints. Meanwhile the thread
     /// may run anything, such as another of its runtime's tasks.
     escape: Option<VirtualAddress>,
+    /// The loops whose bodies, functions of their own, a step over or out
+    /// treats as its own code.
+    loops: Option<loops::StepLoops>,
 }
 
 /// Whether a step kind executes machine instructions rather than source
