@@ -34,6 +34,13 @@ describe("a link's query", () => {
     expect(
       validateLook(parseSearch("src=nofile&asm=main&mem=0x10&view=hex&w=&x=args/a&src=b.c:2")),
     ).toEqual({ mem: "0x10", x: ["args/a"] });
+    // Memory may say how many bytes the value it shows occupies.
+    expect(validateLook(parseSearch("mem=0x10:16&view=memory"))).toEqual({
+      mem: "0x10:16",
+      view: "memory",
+    });
+    expect(validateLook(parseSearch("mem=0x10:x"))).toEqual({});
+    expect(validateLook(parseSearch("mem=0x10:0"))).toEqual({});
     expect(validateLook(parseSearch("view=source&src=a.c:0"))).toEqual({});
   });
 });
@@ -79,10 +86,10 @@ describe("places and paths", () => {
     expect(parseAt({ stop: "12", thread: "x", frame: "0" })).toBeNull();
   });
 
-  it("follows a new stop keeping watches and expansion, not the place", () => {
+  it("follows a new stop keeping the view, watches, and expansion, not the place", () => {
     expect(
       followedLook({ src: "a.c:3", asm: "0x10", view: "disassembly", w: ["a"], x: ["args/b"] }),
-    ).toEqual({ w: ["a"], x: ["args/b"] });
+    ).toEqual({ view: "disassembly", w: ["a"], x: ["args/b"] });
     expect(followedLook({ mem: "0x10", view: "memory" })).toEqual({ mem: "0x10", view: "memory" });
   });
 });

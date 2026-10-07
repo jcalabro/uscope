@@ -8,6 +8,7 @@ import { useRequest } from "../data";
 import { controls } from "../model";
 import type { Children, Row } from "../protocol";
 import { useConnection, useModel } from "../store";
+import { flash } from "../tab";
 import { childKey, recall, toggled } from "../tree";
 import { useLook } from "./navigation";
 import { useFocus } from "./Workspace";
@@ -161,6 +162,7 @@ export function ValueRow({
         </span>
         <ValueText row={row} failed={failed} changed={changed} was={was} />
         {row.type && <span className="value-type">{row.type}</span>}
+        <RowActions row={row} />
         {actions}
       </div>
       {open && row.children && (
@@ -169,6 +171,53 @@ export function ValueRow({
         </ul>
       )}
     </li>
+  );
+}
+
+/**
+ * What a value's memory offers: showing it, and, for a value stored there,
+ * stopping when it changes.
+ */
+function RowActions({ row }: { row: Row }) {
+  const { at, stale } = useFocus();
+  const control = useModel(controls);
+  const connection = useConnection();
+  const look = useLook();
+  if (!row.memory) {
+    return null;
+  }
+  const memory = row.memoryBytes ? `${row.memory}:${row.memoryBytes}` : row.memory;
+  const watchable = control && at && !stale && row.path !== null && row.memoryBytes !== null;
+  return (
+    <span className="row-actions">
+      <button
+        type="button"
+        className="icon"
+        aria-label={`Memory of ${row.name}`}
+        title={`Show the memory at ${row.memory}`}
+        onClick={() =>
+          look((current) => ({ ...current, mem: memory, view: "memory" }), { replace: false })
+        }
+      >
+        ▦
+      </button>
+      {watchable && (
+        <button
+          type="button"
+          className="icon"
+          aria-label={`Watch ${row.name} for changes`}
+          title="Stop when this value changes"
+          onClick={() =>
+            connection
+              .request("addWatchpoint", { ...at, target: row.path ?? "", access: "change" })
+              .then(() => flash(`Stopping when ${row.path} changes`))
+              .catch((failure: Error) => flash(failure.message))
+          }
+        >
+          ◉
+        </button>
+      )}
+    </span>
   );
 }
 

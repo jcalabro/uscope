@@ -24,6 +24,8 @@ export function write(key: string, value: unknown): void {
 
 export const isString = (value: unknown): value is string => typeof value === "string";
 
+export const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
+
 export interface RecentLaunch {
   program: string;
   arguments: string;

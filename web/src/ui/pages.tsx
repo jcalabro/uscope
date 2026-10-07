@@ -100,13 +100,15 @@ export function SessionPage() {
     }
   }, [current, session, navigate]);
 
-  // Answers belong to one session; the files a program has change as its
-  // libraries load, so each stop asks again. Values change when someone
-  // writes one, and their handles belong to one connection.
+  // Answers belong to one session; the files and modules a program has
+  // change as its libraries load, so each stop asks again. What a stop holds
+  // changes when someone writes a value or memory, and value handles belong
+  // to one connection. Signal policies change without a stop.
   const latest = state ? latestStop(state) : undefined;
   const writes = state?.writes;
+  const settings = state?.settings;
   const connection = useModel((model) => model.hello?.connection);
-  const cached = useRef({ current, latest, writes, connection });
+  const cached = useRef({ current, latest, writes, settings, connection });
   const before = cached.current;
   if (before.current !== current) {
     cache.clear();
@@ -114,14 +116,22 @@ export function SessionPage() {
   } else {
     if (before.latest !== latest) {
       cache.forget("sources ");
+      cache.forget("modules ");
     }
     if (before.writes !== writes || before.connection !== connection) {
-      for (const method of ["scopes ", "children ", "evaluate "]) {
+      for (const method of ["scopes ", "children ", "evaluate ", "readMemory ", "registers "]) {
         cache.forget(method);
       }
     }
+    if (before.writes !== writes) {
+      // Code is memory too.
+      cache.forget("disassemble ");
+    }
+    if (before.settings !== settings) {
+      cache.forget("signals ");
+    }
   }
-  cached.current = { current, latest, writes, connection };
+  cached.current = { current, latest, writes, settings, connection };
 
   if (!state) {
     return <div className="page muted">Connecting to uscope…</div>;

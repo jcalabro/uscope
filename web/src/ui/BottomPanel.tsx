@@ -1,18 +1,21 @@
-// The console, and the program's output, what logpoints wrote, and the
-// program's input.
+// The console; the program's output, what logpoints wrote, and the
+// program's input; how signals are handled; and the loaded modules.
 
 import { useEffect, useRef, useState } from "react";
 import { controls } from "../model";
 import { isString, read, write } from "../storage";
 import { useConnection, useModel } from "../store";
 import { Console } from "./Console";
+import { Modules, Signals } from "./Signals";
 import { useSplit } from "./Split";
 
-type Tab = "console" | "output";
+type Tab = "console" | "output" | "signals" | "modules";
 
 const TABS: readonly { key: Tab; label: string }[] = [
   { key: "console", label: "Console" },
   { key: "output", label: "Output" },
+  { key: "signals", label: "Signals" },
+  { key: "modules", label: "Modules" },
 ];
 
 export function BottomPanel() {
@@ -26,7 +29,7 @@ export function BottomPanel() {
     read(
       "uscope-bottom-tab",
       "output",
-      (value): value is Tab => isString(value) && ["console", "output"].includes(value),
+      (value): value is Tab => isString(value) && TABS.some((tab) => tab.key === value),
     ),
   );
   const choose = (tab: Tab) => {
@@ -57,14 +60,15 @@ export function BottomPanel() {
           ))}
           <span className="end">Alt+6</span>
         </div>
-        {shown === "console" ? (
-          <Console />
-        ) : (
+        {shown === "console" && <Console />}
+        {shown === "output" && (
           <>
             <Output />
             <Input />
           </>
         )}
+        {shown === "signals" && <Signals />}
+        {shown === "modules" && <Modules />}
       </section>
     </>
   );

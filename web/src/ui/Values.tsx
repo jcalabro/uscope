@@ -10,17 +10,20 @@ import { useLook } from "./navigation";
 import { Earlier, LinkedExpansion, messageRow, RowList, ValueRow } from "./ValueTree";
 import { type Focus, useFocus } from "./Workspace";
 
-/** Why values are not shown, or null when they are. */
-function hidden(focus: Focus): string | null {
+/**
+ * Why what a stop holds is not shown, or null when it is: `what` names it,
+ * such as "Values".
+ */
+export function hidden(focus: Focus, what = "Values"): string | null {
   const { at, stale } = focus;
   if (!at) {
-    return "Values appear when the program stops.";
+    return `${what} appear when the program stops.`;
   }
   switch (stale) {
     case "running":
-      return "The program is running; values appear when it stops.";
+      return `The program is running; ${what.toLowerCase()} appear when it stops.`;
     case "passed":
-      return `Values hidden: they belong to stop #${at.stop}, which has passed.`;
+      return `${what} hidden: they belong to stop #${at.stop}, which has passed.`;
     case "disconnected":
       return "Reconnecting to uscope…";
     default:
