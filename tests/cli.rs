@@ -741,6 +741,69 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
 }
 
 #[test]
+fn breakpoints_and_watchpoints_are_disabled_enabled_and_advanced_past() {
+    let (stdout, stderr) = piped(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "tbreak counted ==3",
+            "break caller",
+            "disable 2",
+            "breakpoints",
+            "run",
+            "breakpoints",
+            "enable 2",
+            "continue",
+            "adv counted",
+            "print call",
+            "watch last_call",
+            "disable w1 2",
+            "watchpoints",
+            "enable all",
+            // A list naming a missing id changes nothing, so the watchpoint
+            // still stops the next continue.
+            "disable 9 w1",
+            "disable 3-1",
+            "disable x",
+            "advance",
+            "continue",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "temporary breakpoint 1 set at image address ",
+            ", stops at hits ==3\n",
+            "disabled breakpoint 2\n",
+            "1  counted  1 location  hit 0 times  stops at hits ==3  temporary\n",
+            "2  caller  1 location  hit 0 times  disabled\n",
+            "stopped at breakpoint 1 (hit 3) at ",
+            "deleted temporary breakpoint 1\n",
+            "2  caller  1 location  hit 0 times  disabled\n",
+            "enabled breakpoint 2\n",
+            // Hits while disabled are not counted.
+            "stopped at breakpoint 2 (hit 1) at ",
+            "stopped after advance\n",
+            "(uint64_t) call = 4\n",
+            "disabled breakpoint 2 and watchpoint 1\n",
+            "1  change  last_call  8 bytes at 0x",
+            "  hit 0 times  disabled\n",
+            "enabled breakpoint 2 and watchpoint 1\n",
+            "stopped by watchpoint 1 (change, hit 1) on last_call",
+            "\n  old: 3\n  new: 4\n",
+        ],
+    );
+    assert_in_order(
+        &stderr,
+        &[
+            "breakpoint 9 was not found",
+            "range 3-1 is empty",
+            "usage: disable <ids...>",
+            "usage: advance <function|0xaddress|file:line|file:function>",
+        ],
+    );
+}
+
+#[test]
 fn batch_mode_sets_and_clears_breakpoint_conditions() {
     let stdout = batch(
         &["build/test-programs/hit-counts-gcc-o0"],

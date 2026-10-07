@@ -1854,6 +1854,11 @@ impl Session {
     /// The state a debugger breakpoint gives the client's breakpoint: where
     /// it resolved, or that it waits for a module with code for it.
     async fn state_of(&mut self, breakpoint: &uscope::Breakpoint) -> State {
+        if !breakpoint.enabled {
+            return State::Disabled {
+                breakpoint: breakpoint.id,
+            };
+        }
         if breakpoint.locations.is_empty() {
             return State::Pending {
                 breakpoint: breakpoint.id,
@@ -1948,14 +1953,21 @@ impl Session {
                 }
                 return body;
             }
-            State::Pending { message, .. } => (message, "pending"),
-            State::Unresolved { message, pending } => {
-                (message, if *pending { "pending" } else { "failed" })
-            }
+            State::Pending { message, .. } => (message.clone(), Some("pending")),
+            State::Disabled { breakpoint } => (
+                format!("disabled; enable {breakpoint} in the debug console"),
+                None,
+            ),
+            State::Unresolved { message, pending } => (
+                message.clone(),
+                Some(if *pending { "pending" } else { "failed" }),
+            ),
         };
         body["verified"] = false.into();
-        body["message"] = message.as_str().into();
-        body["reason"] = reason.into();
+        body["message"] = message.into();
+        if let Some(reason) = reason {
+            body["reason"] = reason.into();
+        }
         if let (Group::Source(client), Key::Line(line)) = (group, &entry.want.key) {
             body["line"] = self.line_to_client(*line).into();
             body["source"] = source_json(client);
@@ -2283,6 +2295,7 @@ fn breakpoint_options(want: &Want) -> uscope::Result<uscope::BreakpointOptions> 
             .transpose()?,
         // A library loaded later may have code for it.
         pending: true,
+        ..uscope::BreakpointOptions::default()
     })
 }
 

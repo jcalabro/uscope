@@ -91,6 +91,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => {
                 let _ = reply.send(self.add_breakpoint(spec, *options));
             }
+            Edit::SetBreakpointEnabled { id, enabled, reply } => {
+                let _ = reply.send(self.set_breakpoint_enabled(id, enabled));
+            }
             Edit::RemoveBreakpoint { id, reply } => {
                 let _ = reply.send(self.remove_breakpoint(id));
             }
@@ -104,6 +107,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(self.add_watchpoint(spec, access, options));
+            }
+            Edit::SetWatchpointEnabled { id, enabled, reply } => {
+                let _ = reply.send(self.set_watchpoint_enabled(id, enabled));
             }
             Edit::RemoveWatchpoint { id, reply } => {
                 let _ = reply.send(self.remove_watchpoint(id));
@@ -218,7 +224,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// applied and the watched bytes as they now are.
     ///
     /// As with gdb's moribund locations, a hit whose breakpoint or watchpoint
-    /// was removed while it was reported is dropped, and so is a change
+    /// was removed or disabled while it was reported is dropped, and so is a change
     /// watchpoint's hit once another thread restored the bytes. The barrier
     /// then publishes the next most important reason, or turns internal.
     pub(super) fn settle_edited_reasons(&mut self) -> Result<()> {
@@ -231,7 +237,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         // A stop holds a hit or two, so looking each up beats indexing every
         // breakpoint at every stop.
         let breakpoints = &self.breakpoints;
-        let exists = |id| breakpoints.iter().any(|breakpoint| breakpoint.id == id);
+        let exists = |id| {
+            breakpoints
+                .iter()
+                .any(|breakpoint| breakpoint.id == id && breakpoint.enabled)
+        };
         let Some(inferior) = self.inferior.as_mut() else {
             return Ok(());
         };
@@ -247,7 +257,12 @@ impl<P: LinuxTraceOps> Controller<P> {
                 continue;
             }
             thread.watch_hits.retain(|id, _| {
-                inferior.watch.watchpoints.contains_key(id) && !unchanged.contains(id)
+                inferior
+                    .watch
+                    .watchpoints
+                    .get(id)
+                    .is_some_and(|record| record.watchpoint.enabled)
+                    && !unchanged.contains(id)
             });
             match &thread.reason {
                 Some(StopReason::Breakpoint { address, hits }) => {
@@ -310,13 +325,17 @@ impl Edit {
     /// Answers the edit's client with `error` without applying it.
     fn reject(self, error: Error) {
         match self {
-            Self::AddBreakpoint { reply, .. } | Self::RemoveBreakpoint { reply, .. } => {
+            Self::AddBreakpoint { reply, .. }
+            | Self::SetBreakpointEnabled { reply, .. }
+            | Self::RemoveBreakpoint { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             Self::RemoveAllBreakpoints { reply } => {
                 let _ = reply.send(Err(error));
             }
-            Self::AddWatchpoint { reply, .. } | Self::RemoveWatchpoint { reply, .. } => {
+            Self::AddWatchpoint { reply, .. }
+            | Self::SetWatchpointEnabled { reply, .. }
+            | Self::RemoveWatchpoint { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             Self::RemoveAllWatchpoints { reply } => {

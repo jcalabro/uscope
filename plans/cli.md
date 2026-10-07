@@ -331,14 +331,28 @@ shares the CLI and the deletion must be one change with the stop.
 
 ### `advance` (core)
 
-`advance LOCATION` runs until a thread reaches the location or the
-selected frame returns, whichever comes first, as gdb's does. It is a step
-plan like `finish`: the location's addresses, and the frame's return
-address, are plan breakpoints (`BreakpointOwner::Plan`), so
-`cleanup_plan_breakpoints` removes them at whichever stop ends the plan,
-another breakpoint's included, and nothing the user can see is created or
-left behind. The stop says which ended it. Like `finish`, it supports the
-frames `finish` supports.
+`advance LOCATION` runs until the selected thread reaches the location or
+the selected frame returns, whichever comes first, as gdb's does. It is a
+step out of the selected frame whose `StepStart` also carries the
+location's addresses as targets: both are plan breakpoints
+(`BreakpointOwner::Plan`), so `cleanup_plan_breakpoints` removes them at
+whichever stop ends the plan, another breakpoint's included, and nothing
+the user can see is created or left behind. The mid-step cleanups that
+replace a step out's return trap keep the targets. The stop says which
+ended it: `Step { Advance }` at a target, `Step { Out }` at the return.
+Like `finish`, it supports the frames `finish` supports.
+
+As built, only the stepping thread ends it at a target, as only it ends a
+`finish` at the return address; another thread passes the location as it
+passes any plan trap. A thread already standing on a target goes on to
+the next arrival, so `advance` to the current line runs round to it. One
+that stopped there by a trap steps over it, as any resumed thread does;
+one that has yet to execute the trap, as after an attach or an
+instruction step, executes it first, an arrival the user's breakpoints
+there count and which does not end the advance.
+
+The stop deletes a temporary breakpoint as the last step before it is
+published, so a process that ends while the stop forms keeps it.
 
 ### DAP
 
@@ -352,14 +366,16 @@ as a disable would leave deleted breakpoints behind.
 
 What reaches DAP is the debugger's state:
 
-- `enable`, `disable`, `tbreak`, and `advance` work in the debug console,
-  which runs the CLI's commands.
-- `Breakpoints::sync` reports a third change, `Changed`, when a
-  breakpoint's `enabled` flips, and the adapter sends a `breakpoint` event
-  with reason `changed`. A disabled breakpoint is reported `verified:
-  false` with the message `disabled; enable N in the debug console`. A
-  client breakpoint shares its debugger breakpoint with an identical
-  console one, so disabling either is reported on both.
+- `enable`, `disable`, and `tbreak` work in the debug console, which runs
+  the CLI's commands. `advance` runs the program, so the console refuses it
+  as it refuses `finish`; the client's controls run the program.
+- A disabled breakpoint is a fourth entry state, `State::Disabled`, so the
+  existing state comparison in `sync_breakpoints` sends the `breakpoint`
+  event with reason `changed` when `enabled` flips; no new kind of change
+  is needed. It is reported `verified: false` with the message `disabled;
+  enable N in the debug console`. A client breakpoint shares its debugger
+  breakpoint with an identical console one, so disabling either is
+  reported on both.
 - A temporary breakpoint's deletion at its stop reaches the client as a
   `removed` event, as console deletions do now.
 - Data breakpoints follow the same rules through `SetWatchpointEnabled`.
@@ -619,7 +635,13 @@ changed; `just all`, `just stress`, and `just sim 600` run once at the end.
 2. **Enable, disable, temporary, advance.** Core requests and options, the
    simulator's client choosing them and its hit oracles knowing a disabled
    breakpoint counts nothing and a temporary one is gone after its stop,
-   coverage marks the gate's seeds reach, and DAP's `Changed`. Tests, each
+   coverage marks the gate's seeds reach, DAP's disabled state, and the
+   commands `enable`, `disable`, `tbreak`, and `advance` in their plain
+   forms, which phase 3 extends with inline options and id lists for
+   `delete` and `unwatch`. The simulator draws its new choices from a
+   stream of their own, `Control`, so the existing seeds keep the runs
+   they named and the gate's sabotage tests keep finding their lies.
+   Tests, each
    written to fail first: a scenario that disables a breakpoint while the
    program runs, sees it not stop and keep its count, and enables it
    again; one that enables a breakpoint after its library moved and was
@@ -629,7 +651,7 @@ changed; `just all`, `just stress`, and `just sim 600` run once at the end.
    ownership oracle checks this); a DAP scenario of console `disable` and
    the `changed` event.
 3. **Breakpoint commands and saving.** Inline options, new location forms,
-   id lists, `tbreak`, `advance`, `rbreak`, the tables, suggestions, saved
+   id lists for `delete` and `unwatch`, `rbreak`, the tables, suggestions, saved
    breakpoints, `save breakpoints`. Tests: rendered tables; a session that
    saves, ends, and restores a disabled conditional breakpoint; a changed
    line warns; a malformed saved file is not overwritten; batch sessions

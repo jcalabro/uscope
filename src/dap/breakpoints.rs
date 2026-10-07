@@ -96,6 +96,10 @@ pub enum State {
         breakpoint: BreakpointId,
         message: String,
     },
+    /// Installed in the debugger but disabled there, from the console,
+    /// whose `enable` is the only way back: the protocol has no enabled
+    /// flag.
+    Disabled { breakpoint: BreakpointId },
     Unresolved {
         message: String,
         /// Whether it may still resolve later, such as once the program
@@ -115,9 +119,9 @@ pub struct Entry {
 impl Entry {
     pub const fn breakpoint(&self) -> Option<BreakpointId> {
         match &self.state {
-            State::Resolved { breakpoint, .. } | State::Pending { breakpoint, .. } => {
-                Some(*breakpoint)
-            }
+            State::Resolved { breakpoint, .. }
+            | State::Pending { breakpoint, .. }
+            | State::Disabled { breakpoint } => Some(*breakpoint),
             State::Unresolved { .. } => None,
         }
     }
@@ -517,6 +521,8 @@ mod tests {
             condition: None,
             log_message: None,
             hit_count: 0,
+            enabled: true,
+            temporary: false,
         };
         let changes = breakpoints.sync(&[core(4), core(9)]);
         assert_eq!(

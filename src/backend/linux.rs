@@ -452,6 +452,13 @@ struct StepStart {
     /// be ended only by a stop the user sees.
     running_on: bool,
     plan_addresses: BTreeSet<VirtualAddress>,
+    /// For an advance, the addresses that end it when its thread reaches
+    /// one. They are plan sites too, but no step logic retires them.
+    targets: BTreeSet<VirtualAddress>,
+    /// The target an advance's thread stood at without having trapped
+    /// there. It arrives there first, which the user's breakpoints count
+    /// and which does not end the advance.
+    standing: Option<VirtualAddress>,
     epilogue_traversal: Option<EpilogueTraversal>,
     return_traversal: Option<ReturnTraversal>,
     /// Where a signal handler returns to the instruction it interrupted.
@@ -570,6 +577,11 @@ enum Edit {
         options: Box<crate::BreakpointOptions>,
         reply: Reply<Breakpoint>,
     },
+    SetBreakpointEnabled {
+        id: BreakpointId,
+        enabled: bool,
+        reply: Reply<Breakpoint>,
+    },
     RemoveBreakpoint {
         id: BreakpointId,
         reply: Reply<Breakpoint>,
@@ -581,6 +593,11 @@ enum Edit {
         spec: crate::WatchpointSpec,
         access: WatchAccess,
         options: crate::WatchpointOptions,
+        reply: Reply<Watchpoint>,
+    },
+    SetWatchpointEnabled {
+        id: WatchpointId,
+        enabled: bool,
         reply: Reply<Watchpoint>,
     },
     RemoveWatchpoint {
@@ -1279,6 +1296,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => {
                 let _ = reply.send(self.set_breakpoint_hit_condition(id, hit_condition));
             }
+            Request::SetBreakpointEnabled { id, enabled, reply } => {
+                self.edit(Edit::SetBreakpointEnabled { id, enabled, reply });
+            }
             Request::RemoveBreakpoint { id, reply } => {
                 self.edit(Edit::RemoveBreakpoint { id, reply });
             }
@@ -1311,6 +1331,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(self.set_watchpoint_hit_condition(id, hit_condition));
+            }
+            Request::SetWatchpointEnabled { id, enabled, reply } => {
+                self.edit(Edit::SetWatchpointEnabled { id, enabled, reply });
             }
             Request::RemoveWatchpoint { id, reply } => {
                 self.edit(Edit::RemoveWatchpoint { id, reply });
@@ -1358,6 +1381,23 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => match debug_pid(thread_id) {
                 Ok(pid) => self.step(
                     process_id, stop_id, pid, frame, kind, scope, exception, reply,
+                ),
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            },
+            Request::Advance {
+                process_id,
+                stop_id,
+                thread_id,
+                frame,
+                spec,
+                scope,
+                exception,
+                reply,
+            } => match debug_pid(thread_id) {
+                Ok(pid) => self.advance(
+                    process_id, stop_id, pid, frame, spec, scope, exception, reply,
                 ),
                 Err(error) => {
                     let _ = reply.send(Err(error));
@@ -1695,11 +1735,13 @@ impl<P: InspectionOps> Controller<P> {
             Request::AddBreakpoint { .. }
             | Request::SetBreakpointHitCondition { .. }
             | Request::SetBreakpointCondition { .. }
+            | Request::SetBreakpointEnabled { .. }
             | Request::RemoveBreakpoint { .. }
             | Request::RemoveAllBreakpoints { .. }
             | Request::AddWatchpoint { .. }
             | Request::SetWatchpointCondition { .. }
             | Request::SetWatchpointHitCondition { .. }
+            | Request::SetWatchpointEnabled { .. }
             | Request::RemoveWatchpoint { .. }
             | Request::RemoveAllWatchpoints { .. }
             | Request::Launch { .. }
@@ -1707,6 +1749,7 @@ impl<P: InspectionOps> Controller<P> {
             | Request::LaunchByExec { .. }
             | Request::Continue { .. }
             | Request::Step { .. }
+            | Request::Advance { .. }
             | Request::Pause { .. }
             | Request::WriteMemory { .. }
             | Request::Kill { .. }

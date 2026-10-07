@@ -159,6 +159,8 @@ pub enum Error {
     },
     #[error("cannot step from the selected frame: {0}")]
     FrameStepUnsupported(Arc<str>),
+    #[error("an advance runs to a location, so it is requested with the location")]
+    AdvanceWithoutLocation,
     #[error("a step of thread {stepping} cannot resume thread {resumed} alone")]
     StepScopeMismatch {
         stepping: crate::ThreadId,

@@ -21,6 +21,9 @@ pub struct DataEntry {
     /// as none.
     conditions: Conditions,
     pub watchpoint: Result<WatchpointId, String>,
+    /// Whether the console disabled its watchpoint, as the client was last
+    /// told.
+    disabled: bool,
 }
 
 /// A data breakpoint's condition and hit condition as the client wrote
@@ -54,6 +57,7 @@ impl Conditions {
                 .as_deref()
                 .map(uscope::Condition::parse)
                 .transpose()?,
+            ..WatchpointOptions::default()
         })
     }
 }
@@ -313,6 +317,7 @@ impl Session {
                             access,
                             conditions: Conditions::of(breakpoint),
                             watchpoint,
+                            disabled: false,
                         }
                     }
                 }
@@ -322,6 +327,7 @@ impl Session {
                     access: WatchAccess::Change,
                     conditions: Conditions::of(breakpoint),
                     watchpoint: Err(message),
+                    disabled: false,
                 },
             };
             entries.push(entry);
@@ -407,6 +413,29 @@ impl Session {
             .collect::<Vec<_>>();
         for id in self.data.forget(&gone) {
             self.data_removed(id).await?;
+        }
+        // The console enables and disables watchpoints too.
+        let mut changed = Vec::new();
+        for entry in &mut self.data.entries {
+            let Ok(id) = entry.watchpoint else {
+                continue;
+            };
+            let disabled = snapshot
+                .watchpoints
+                .iter()
+                .any(|watchpoint| watchpoint.id == id && !watchpoint.enabled);
+            if disabled != entry.disabled {
+                entry.disabled = disabled;
+                changed.push(data_json(entry));
+            }
+        }
+        for breakpoint in changed {
+            self.client
+                .event(
+                    "breakpoint",
+                    json!({"reason": "changed", "breakpoint": breakpoint}),
+                )
+                .await?;
         }
         Ok(())
     }
@@ -503,6 +532,11 @@ fn unwatchable(reason: &str) -> Value {
 
 fn data_json(entry: &DataEntry) -> Value {
     match &entry.watchpoint {
+        Ok(id) if entry.disabled => json!({
+            "id": entry.id,
+            "verified": false,
+            "message": format!("disabled; enable w{id} in the debug console"),
+        }),
         Ok(_) => json!({"id": entry.id, "verified": true}),
         Err(message) => {
             json!({"id": entry.id, "verified": false, "message": message, "reason": "failed"})

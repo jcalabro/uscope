@@ -1,16 +1,19 @@
 //! What the client inspects at a stop for the semantic oracles: backtraces,
 //! steps, and the selected frame's variables.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use super::breakpoints::Added;
 use super::{Client, Evaluated, Observation, Purpose, protocol};
 use crate::sim::choices::Stream;
 use crate::sim::marks::Mark;
 use crate::sim::report::Failure;
 use crate::{
-    Backtrace, Error, Expression, FrameKind, PresentedFrame, ScalarValue, StackFrameId,
-    StateSnapshot, StepKind, StopContext, StopId, ThreadState, UnwindTermination, VariableSnapshot,
-    VariableState, VariableValue, VariableValueSource, VirtualAddress,
+    Backtrace, BreakpointLocation, BreakpointOptions, BreakpointSpec, Error, Expression, FrameKind,
+    LogMessage, PresentedFrame, ScalarValue, StackFrameId, StateSnapshot, StepKind, StopContext,
+    StopId, StopReason, ThreadState, UnwindTermination, VariableSnapshot, VariableState,
+    VariableValue, VariableValueSource, VirtualAddress,
 };
 
 impl Client {
@@ -74,6 +77,7 @@ impl Client {
                 thread,
                 kind,
                 presentation: before.presentation.clone(),
+                targets: BTreeSet::new(),
             });
         }
         let result = self.handle.step(kind).await;
@@ -122,6 +126,149 @@ impl Client {
             (Err(error), Caller::Trusted) => {
                 return Err(protocol(format!("step {kind:?} failed: {error}")));
             }
+        }
+        Ok(())
+    }
+
+    /// Runs to a location, or until the selected frame returns first, which
+    /// is refused as a step out of it is. The client learns where the
+    /// location is from a disabled breakpoint, which plants nothing.
+    pub(super) async fn advance(&self, breakpoints: &[Added]) -> Result<(), Failure> {
+        let spec = self.choose_spec(Stream::Control);
+        let Some(targets) = self.advance_targets(&spec, breakpoints).await? else {
+            return Ok(());
+        };
+        let before = self.snapshot().await?;
+        let ambiguous = presented_ambiguously(&before);
+        let caller = if ambiguous {
+            Caller::Trusted
+        } else {
+            let backtrace = self
+                .handle
+                .backtrace()
+                .await
+                .map_err(|error| protocol(format!("backtrace failed: {error}")))?;
+            let caller = Caller::of(&backtrace);
+            if let Some(stop) = before.stop_id {
+                self.observe(Observation::Backtrace { stop, backtrace });
+            }
+            caller
+        };
+        self.note(format!("advance to {spec}: {targets:#x?}"));
+        if let Some(thread) = before.selected_thread {
+            self.observe(Observation::StepBegins {
+                thread,
+                kind: StepKind::Advance,
+                presentation: before.presentation.clone(),
+                targets,
+            });
+        }
+        let result = self.handle.advance(spec.clone()).await;
+        self.observe(Observation::StepEnded(result.as_ref().ok().cloned()));
+        if ambiguous {
+            if !matches!(result, Err(Error::AmbiguousInlineFrame)) {
+                return Err(protocol(format!(
+                    "advance from an ambiguous inline frame returned {result:?}"
+                )));
+            }
+            return self.unchanged_by_refusal(&before, "advance").await;
+        }
+        match (result, &caller) {
+            (
+                Ok(reason),
+                Caller::Trusted | Caller::Outermost(UnwindTermination::NoUnwindInfo { .. }),
+            ) => {
+                match reason {
+                    StopReason::Step {
+                        kind: StepKind::Advance,
+                    } => self.mark(Mark::AdvanceReached),
+                    StopReason::Step {
+                        kind: StepKind::Out,
+                    } => self.mark(Mark::AdvanceReturned),
+                    _ => {}
+                }
+                self.note(format!("advanced: {reason:?}"));
+            }
+            (Err(Error::EventStreamLagged(_)), _) => self.mark(Mark::ClientLagged),
+            (Err(error), _) if self.refused_unarmed(&error).await? => {}
+            (Err(error), Caller::Outermost(_) | Caller::Corrupt(_)) => {
+                self.unchanged_by_refusal(&before, "advance").await?;
+                self.note(format!("advance from a frame {caller} refused: {error}"));
+                self.mark(Mark::StepOutRefused);
+            }
+            (Ok(reason), caller) => {
+                return Err(protocol(format!(
+                    "advanced from a frame {caller}: {reason:?}"
+                )));
+            }
+            (Err(error), Caller::Trusted) => {
+                return Err(protocol(format!("advance to {spec} failed: {error}")));
+            }
+        }
+        Ok(())
+    }
+
+    /// The image addresses `spec` names, learned from a disabled breakpoint
+    /// that plants nothing, or `None` when the oracle cannot follow an
+    /// advance there.
+    async fn advance_targets(
+        &self,
+        spec: &BreakpointSpec,
+        breakpoints: &[Added],
+    ) -> Result<Option<BTreeSet<u64>>, Failure> {
+        let probe = match self
+            .handle
+            .add_breakpoint_with(
+                spec.clone(),
+                BreakpointOptions {
+                    enabled: false,
+                    log_message: Some(LogMessage::parse("advance").expect("a valid message")),
+                    ..BreakpointOptions::default()
+                },
+            )
+            .await
+        {
+            Ok(probe) => probe,
+            Err(error) if self.names_no_code(spec, &error) => return Ok(None),
+            Err(error) => {
+                return Err(protocol(format!("resolving {spec} failed: {error}")));
+            }
+        };
+        if breakpoints.iter().any(|added| added.id() == probe.id) {
+            return Err(protocol(format!(
+                "a probe for {spec} returned the client's own breakpoint {}",
+                probe.id
+            )));
+        }
+        self.handle
+            .remove_breakpoint(probe.id)
+            .await
+            .map_err(|error| protocol(format!("removing probe {} failed: {error}", probe.id)))?;
+        let mut targets = BTreeSet::new();
+        for location in probe.locations.iter() {
+            match location.location {
+                BreakpointLocation::Image(address) => {
+                    targets.insert(address.get());
+                }
+                // Code outside the program is not where the oracle can
+                // follow an advance to.
+                BreakpointLocation::Virtual(_) => return Ok(None),
+            }
+        }
+        Ok(Some(targets))
+    }
+
+    /// Fails unless a refused request left the state as it was.
+    async fn unchanged_by_refusal(
+        &self,
+        before: &StateSnapshot,
+        request: &str,
+    ) -> Result<(), Failure> {
+        let after = self.snapshot().await?;
+        if after != *before {
+            return Err(protocol(format!(
+                "a refused {request} changed the state from {before:?} to {after:?}"
+            )));
         }
         Ok(())
     }
