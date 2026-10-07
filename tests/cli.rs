@@ -1220,6 +1220,10 @@ fn a_stop_names_its_thread_when_the_process_has_several() {
         .lines()
         .find(|line| line.starts_with("stopped at breakpoint 1 (hit 1) in contended at "))
         .unwrap_or_else(|| panic!("no stop in:\n{stdout}"));
+    // A run of a second or more, as under load, also says how long it took.
+    let header = header
+        .rsplit_once(" (ran ")
+        .map_or(header, |(header, _)| header);
     // Every worker is running when the first reaches the breakpoint.
     assert!(header.ends_with(" of 5]"), "{header}");
     assert!(
