@@ -407,6 +407,17 @@ impl RuntimeModel for GoRuntime {
         if pc == 0 || sp == 0 {
             return Err(format!("goroutine {number} has no saved registers").into());
         }
+        // A parked goroutine's frames are on its own stack, which a
+        // corrupted record would have the walk read anywhere.
+        let stack = self.stack(stop, g)?;
+        if !stack.contains(&sp) {
+            return Err(format!(
+                "goroutine {number}'s saved stack pointer {sp:#x} is outside its stack \
+                 {:#x}..{:#x}",
+                stack.start, stack.end
+            )
+            .into());
+        }
         let mut registers = RegisterFile::new([(RIP, pc), (RSP, sp)]);
         // A saved frame pointer of zero is unknown, not a frame at zero.
         if bp != 0 {
