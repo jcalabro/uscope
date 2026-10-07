@@ -1962,8 +1962,14 @@ pub fn stack_frame(
             )
         )
     });
+    // A function that left by a tail call is no activation of its own.
+    let tail = if frame.kind == uscope::FrameKind::TailCall {
+        format!(" {}", renderer.paint(Role::Metadata, "[tail call]"))
+    } else {
+        String::new()
+    };
     format!(
-        "{} {} in {}{iterator}{place}",
+        "{} {} in {}{tail}{iterator}{place}",
         renderer.paint(
             if selected {
                 Role::Current

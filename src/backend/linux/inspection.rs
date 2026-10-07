@@ -64,8 +64,10 @@ impl<P: InspectionOps> Controller<P> {
         } else {
             Some(self.resolve_frame(inferior, root, frame)?)
         };
+        let discarded = crate::unwind::RegisterFile::new([]);
         let caller = match resolved.as_ref().map(|frame| &frame.registers) {
             Some(FrameRegisters::Caller(registers)) => Some(registers),
+            Some(FrameRegisters::Discarded) => Some(&discarded),
             Some(FrameRegisters::Thread(_)) | None => None,
         };
         Ok(x86_64_register_snapshot(
@@ -596,6 +598,12 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
             FrameRegisters::Thread(native) => native,
             FrameRegisters::Caller(registers) => {
                 return x86_64_caller_variable_register(registers, register);
+            }
+            FrameRegisters::Discarded => {
+                return Err(VariableUnavailableReason::CallFrameUnavailable(
+                    crate::CallFrameUnavailableReason::TailCall,
+                )
+                .into());
             }
         };
         if let Some(value) = x86_64_general_variable_register(native, register) {

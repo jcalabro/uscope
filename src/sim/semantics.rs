@@ -73,7 +73,7 @@ pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwoun
     let physical = backtrace
         .frames
         .iter()
-        .filter(|frame| frame.kind != FrameKind::Inline)
+        .filter(|frame| !matches!(frame.kind, FrameKind::Inline | FrameKind::TailCall))
         .collect::<Vec<_>>();
     for (level, frame) in physical.iter().enumerate() {
         let address = frame.instruction.get();
@@ -136,6 +136,89 @@ pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwoun
         )),
         (false, true) => Ok(Some(Unwound::Whole)),
     }
+}
+
+/// Tail calls: between a frame and its caller, a backtrace may show the
+/// functions that left by tail calls on the way from the call that began
+/// the frame's activation to the frame's function, the last first. Each
+/// must be at a jump the activation took with its stack as the call left
+/// it: the outermost in the function the call entered, each to the next
+/// one's function, and the last to the frame's. Functions are as binutils
+/// bound them. Returns how many the backtrace showed.
+pub fn tail_frames(
+    kernel: &Kernel,
+    facts: &Facts,
+    bias: u64,
+    backtrace: &Backtrace,
+) -> Result<usize, String> {
+    let Some(thread) = backtrace
+        .context
+        .as_thread()
+        .and_then(|thread| stopped(kernel, thread))
+    else {
+        return Ok(0);
+    };
+    let function = |address: u64| {
+        address
+            .checked_sub(bias)
+            .and_then(|address| facts.function(address))
+            .map(|function| function.start + bias)
+    };
+    let calls = &thread.shadow.calls;
+    let mut shown = 0;
+    let mut level = 0;
+    let mut frames = backtrace
+        .frames
+        .iter()
+        .filter(|frame| frame.kind != FrameKind::Inline)
+        .peekable();
+    while let Some(frame) = frames.next() {
+        let mut tails = Vec::new();
+        while let Some(tail) = frames.next_if(|frame| frame.kind == FrameKind::TailCall) {
+            tails.push(tail);
+        }
+        if tails.is_empty() {
+            level += 1;
+            continue;
+        }
+        let tid = thread.tid;
+        let Some(index) = calls.len().checked_sub(level + 1) else {
+            return Err(format!(
+                "thread {tid}'s frame at {} has functions that left by tail calls below it,                  but no call began its activation",
+                frame.instruction
+            ));
+        };
+        let call = calls[index];
+        let jumps = thread.shadow.jumps(index);
+        // A caller's code is just before its return address.
+        let code = frame.instruction.get() - u64::from(level != 0);
+        let mut inner = function(code);
+        shown += tails.len();
+        for tail in tails {
+            let at = tail.instruction.get();
+            let Some(jump) = jumps.iter().find(|jump| at == jump.from || at == jump.next) else {
+                return Err(format!(
+                    "thread {tid}'s frame {} says its function left by a tail call at                      {at:#x}, but its activation took no such jump: {jumps:x?}",
+                    tail.level
+                ));
+            };
+            if Some(jump.to) != inner {
+                return Err(format!(
+                    "thread {tid}'s frame {} left by the jump at {:#x} to {:#x}, but the                      frame inside it runs the function at {inner:x?}",
+                    tail.level, jump.from, jump.to
+                ));
+            }
+            inner = function(jump.from);
+        }
+        if inner != Some(call.target) {
+            return Err(format!(
+                "thread {tid}'s tail calls below the frame at {} began in the function at                  {inner:x?}, but the call entered {:#x}",
+                frame.instruction, call.target
+            ));
+        }
+        level += 1;
+    }
+    Ok(shown)
 }
 
 /// Where a step began.
@@ -1097,6 +1180,83 @@ mod tests {
                 .collect(),
             termination,
         }
+    }
+
+    /// A function a backtrace shows as having left by a tail call must be
+    /// one the frame's activation left by a jump, in the order the jumps
+    /// ran from the function its call entered.
+    #[test]
+    fn tail_frames_are_jumps_the_activation_took() {
+        use crate::sim::kernel::shadow::Jump;
+
+        let corpus = Corpus::load().expect("load the golden corpus");
+        let variant = &corpus.programs[0].variants[0];
+        let (mut kernel, tid) = kernel_with_calls(variant, &[0x9000]);
+        // The call entered `a`, which jumped to `b`, which jumped to `c`.
+        let function = |name: &str, start| facts::Function {
+            name: name.into(),
+            start,
+            end: start + 0x100,
+        };
+        let facts = Facts {
+            functions: vec![
+                function("a", 0x1000),
+                function("b", 0x1100),
+                function("c", 0x1200),
+            ],
+            ..Facts::default()
+        };
+        let shadow = &mut kernel.threads.get_mut(&tid).expect("the thread").shadow;
+        shadow.calls[0].target = 0x1000;
+        shadow.jumps = vec![vec![
+            Jump {
+                from: 0x1050,
+                next: 0x1055,
+                to: 0x1100,
+            },
+            Jump {
+                from: 0x1150,
+                next: 0x1152,
+                to: 0x1200,
+            },
+        ]];
+        let judge = |tails: &[u64]| {
+            let frames = std::iter::once((FrameKind::Physical, 0x1210))
+                .chain(tails.iter().map(|&address| (FrameKind::TailCall, address)))
+                .chain([(FrameKind::Physical, 0x9000)])
+                .enumerate()
+                .map(|(level, (kind, address))| {
+                    StackFrame::new(
+                        u32::try_from(level).expect("few frames"),
+                        kind,
+                        None,
+                        VirtualAddress::new(address),
+                    )
+                })
+                .collect();
+            tail_frames(
+                &kernel,
+                &facts,
+                0,
+                &Backtrace {
+                    context: ThreadId::new(u64::try_from(tid).expect("a positive tid")).into(),
+                    frames,
+                    termination: UnwindTermination::Complete,
+                },
+            )
+        };
+        // At each jump, or the instruction after it.
+        assert_eq!(judge(&[0x1150, 0x1050]), Ok(2));
+        assert_eq!(judge(&[0x1152, 0x1055]), Ok(2));
+        assert_eq!(judge(&[]), Ok(0));
+        // Where no jump left.
+        assert!(judge(&[0x1150, 0x1060]).is_err());
+        // Out of order.
+        assert!(judge(&[0x1050, 0x1150]).is_err());
+        // Missing the function the call entered.
+        assert!(judge(&[0x1150]).is_err());
+        // Missing a function between.
+        assert!(judge(&[0x1050]).is_err());
     }
 
     /// A name reaches the innermost variable it names, never a value a

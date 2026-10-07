@@ -341,7 +341,7 @@ address: string,
  */
 module: string | null, source: SourceLine | null, };
 
-export type FrameKind = "physical" | "inline" | "signal";
+export type FrameKind = "physical" | "inline" | "signal" | "tailCall";
 
 export type SourceLine = { path: string, line: number, column: number | null, };
 

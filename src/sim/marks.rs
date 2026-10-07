@@ -82,6 +82,9 @@ marks! {
     /// A backtrace ended at a caller read from a return address the program
     /// overwrote.
     CorruptCaller,
+    /// A backtrace showed functions that left by tail calls, at jumps
+    /// their activation took.
+    TailCallFrames,
     /// The stepping oracle judged where a step ended.
     StepJudged,
     /// A source step in unoptimized code passed the exact rules.

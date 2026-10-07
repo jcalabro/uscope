@@ -1395,6 +1395,14 @@ build_fixture clang "$c_fixtures_dir/tail-calls.c" "$output_dir/tail-calls-clang
 require_tail_jump "$output_dir/tail-calls-clang-o2" outer_tail add_one
 require_tail_jump "$output_dir/tail-calls-clang-o2" outer_chain chain_helper
 require_tail_jump "$output_dir/tail-calls-clang-o2" descend_tail mutual_tail
+for variant in gcc-o2:gcc:-gdwarf-5 gcc-o2-dwarf4:gcc:-gdwarf-4 clang-o2:clang:-gdwarf-5; do
+    IFS=: read -r name compiler dwarf <<<"$variant"
+    build_fixture "$compiler" "$c_fixtures_dir/tail-frames.c" "$output_dir/tail-frames-$name" \
+        -O2 -g3 "$dwarf" -fomit-frame-pointer -fPIE -pie
+    require_tail_jump "$output_dir/tail-frames-$name" top middle
+    require_tail_jump "$output_dir/tail-frames-$name" middle leaf
+    require_tail_jump "$output_dir/tail-frames-$name" either leaf
+done
 build_fixture gcc "$c_fixtures_dir/step-over-libc.c" "$output_dir/step-over-libc" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/orphan-frames.c" "$output_dir/orphan-frames" \

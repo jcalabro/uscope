@@ -315,3 +315,51 @@ async fn a_step_out_lists_what_the_function_returned() {
     assert_eq!(row(&fields["rows"], "i")["text"], "42", "{fields}");
     assert_eq!(row(&fields["rows"], "d")["text"], "0.5", "{fields}");
 }
+
+/// A backtrace shows the functions that left by tail calls, and selecting
+/// one shows what was passed to it.
+#[tokio::test]
+async fn the_stack_shows_functions_that_left_by_tail_calls() {
+    let web = Web::start("tail", &[&fixture("tail-frames-gcc-o2")]);
+    let mut tab = web.control("tab").await;
+    tab.state("the program loaded", |state| state["session"].is_string())
+        .await;
+    tab.ok("addBreakpoint", json!({"location": "leaf"})).await;
+    tab.ok("continue", json!({})).await;
+    let stopped = tab.inferior("stopped").await;
+    let (stop, thread) = (
+        stopped["inferior"]["stop"].clone(),
+        stopped["inferior"]["thread"].clone(),
+    );
+    let trace = tab
+        .ok("backtrace", json!({"stop": stop, "thread": thread}))
+        .await;
+    let frames = trace["frames"].as_array().expect("frames");
+    assert_eq!(
+        frames[..4]
+            .iter()
+            .map(|frame| (frame["name"].clone(), frame["kind"].clone()))
+            .collect::<Vec<_>>(),
+        [
+            (json!("leaf"), json!("physical")),
+            (json!("middle"), json!("tailCall")),
+            (json!("top"), json!("tailCall")),
+            (json!("main"), json!("physical")),
+        ],
+        "{trace}"
+    );
+    let scopes = tab
+        .ok(
+            "scopes",
+            json!({"stop": stop, "thread": thread, "frame": frames[1]["index"]}),
+        )
+        .await;
+    let arguments = scopes["scopes"]
+        .as_array()
+        .expect("scopes")
+        .iter()
+        .find(|scope| scope["key"] == "args")
+        .expect("arguments")
+        .clone();
+    assert_eq!(row(&arguments["rows"], "value")["text"], "6", "{arguments}");
+}

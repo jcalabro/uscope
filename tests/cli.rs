@@ -4234,3 +4234,42 @@ fn step_goes_into_one_call_of_the_line() {
         &["error: stdin:10: no call on this line calls nothing; `info calls` lists them"],
     );
 }
+
+/// A backtrace shows the functions that left by tail calls between a frame
+/// and its caller, and selecting one shows what was passed to it.
+#[test]
+fn backtraces_show_the_functions_that_left_by_tail_calls() {
+    let line = |marker: &str| support::source_line("tests/fixtures/c/tail-frames.c", marker);
+    let (output, errors) = piped(
+        &["build/test-programs/tail-frames-gcc-o2"],
+        &[
+            &format!("break tail-frames.c:{}", line("frames: leaf")),
+            "run",
+            "bt",
+            "frame 1",
+            "print value",
+            "print $pc",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "stopped at breakpoint 1 (hit 1) in leaf",
+            &format!(
+                " in middle [tail call] at tests/fixtures/c/tail-frames.c:{}",
+                line("frames: middle")
+            ),
+            &format!(
+                " in top [tail call] at tests/fixtures/c/tail-frames.c:{}",
+                line("frames: top")
+            ),
+            &format!(
+                " in main at tests/fixtures/c/tail-frames.c:{}",
+                line("frames: call top")
+            ),
+            "(int) value = 6",
+            "(u64) $pc = <unavailable: a tail call discarded the frame>",
+        ],
+    );
+    assert!(errors.is_empty(), "{errors}");
+}
