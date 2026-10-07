@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { formatPlace } from "../focus";
+import { latestStop } from "../follow";
 import type { Place, StopEntry } from "../protocol";
 import { tab, useTab } from "../tab";
 import { useGo, useLinkPaths } from "./navigation";
@@ -31,6 +32,8 @@ export function Banner() {
   const entry = (stop: number): StopEntry | undefined =>
     state.stops.find((candidate) => candidate.stop === stop);
   const shown = entry(at.stop);
+  // A link can name a stop beyond any this session has made.
+  const unreached = !shown && at.stop > (latestStop(state) ?? 0);
 
   if (stale === "passed" && stayed !== at.stop) {
     const now = inferior.state === "stopped" ? inferior : null;
@@ -38,7 +41,11 @@ export function Banner() {
     return (
       <div className="stop-banner" role="status" data-testid="passed">
         <div>
-          <b>Stop #{at.stop} has passed.</b>{" "}
+          <b>
+            {unreached
+              ? `This session has not reached stop #${at.stop}.`
+              : `Stop #${at.stop} has passed.`}
+          </b>{" "}
           {now
             ? `The session is at stop #${now.stop}, ${placeText(now.place)} in ${thread?.name ?? `thread ${now.thread}`}.`
             : inferior.state === "running"
