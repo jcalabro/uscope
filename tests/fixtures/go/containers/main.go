@@ -1,4 +1,4 @@
-// Maps, channels, and interfaces, which the built-in views and the
+// Maps, channels, interfaces, and pointers, which the built-in views and the
 // debugger present. Each `VIEW:` marker says what its expression must show,
 // evaluated in main() where barrier() is called; `(any order)` lets a map's
 // entries come in any order, and `count:` gives only how many there are.
@@ -26,12 +26,17 @@ type Point struct {
 // Handle is stored in an interface directly, being a pointer.
 type Handle *Point
 
+// Pair points to points.
+type Pair struct {
+	Left, Right *Point
+}
+
 func main() {
 	small := map[string]int{"one": 1, "two": 2} // VIEW: small => len=2 {"one": 1, "two": 2} (any order)
-	empty := map[int]int{}                       // VIEW: empty => len=0 {}
-	var none map[int]int                         // VIEW: none => nil
-	counts := Counts{"a": 1}                     // VIEW: counts => len=1 {"a": 1}
-	big := map[int]int{}                         // VIEW: big => count: 300
+	empty := map[int]int{}                      // VIEW: empty => len=0 {}
+	var none map[int]int                        // VIEW: none => nil
+	counts := Counts{"a": 1}                    // VIEW: counts => len=1 {"a": 1}
+	big := map[int]int{}                        // VIEW: big => count: 300
 	for index := 0; index < 300; index++ {
 		big[index] = index * 10
 	}
@@ -57,13 +62,20 @@ func main() {
 	unbuffered := make(chan bool) // VIEW: unbuffered => len=0 []
 	var no_channel chan int       // VIEW: no_channel => nil
 
-	var number any = 42                   // VIEW: number => int 42
-	var text any = "hi"                   // VIEW: text => string "hi"
-	var nothing any                       // VIEW: nothing => nil
-	var point any = Point{X: 1, Y: 2}     // VIEW: point => main.Point {X: 1, Y: 2}
-	var stringer fmt.Stringer = nil       // VIEW: stringer => nil
-	var failure error = errors.New("bad") // VIEW: failure => *errors.errorString *"bad"
+	var number any = 42                         // VIEW: number => int 42
+	var text any = "hi"                         // VIEW: text => string "hi"
+	var nothing any                             // VIEW: nothing => nil
+	var point any = Point{X: 1, Y: 2}           // VIEW: point => main.Point {X: 1, Y: 2}
+	var stringer fmt.Stringer = nil             // VIEW: stringer => nil
+	var failure error = errors.New("bad")       // VIEW: failure => *errors.errorString *"bad"
 	var direct any = Handle(&Point{X: 3, Y: 4}) // VIEW: direct => main.Handle *{X: 3, Y: 4}
+
+	// A pointer shows what it points to, as Go's debuggers show one, and
+	// expands to its members.
+	pointer := &Point{X: 5, Y: 6} // VIEW: pointer => *{X: 5, Y: 6}
+	// VIEW: pointer => children: X = 5, Y = 6, [raw]
+	var no_pointer *Point                   // VIEW: no_pointer => nil
+	pair := &Pair{Left: &Point{X: 7, Y: 8}} // VIEW: pair => *{Left: *{X: 7, Y: 8}, Right: nil}
 	barrier(&small)
 	runtime.KeepAlive(empty)
 	runtime.KeepAlive(none)
@@ -81,4 +93,7 @@ func main() {
 	runtime.KeepAlive(stringer)
 	runtime.KeepAlive(failure)
 	runtime.KeepAlive(direct)
+	runtime.KeepAlive(pointer)
+	runtime.KeepAlive(no_pointer)
+	runtime.KeepAlive(pair)
 }

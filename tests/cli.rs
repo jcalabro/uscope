@@ -2302,6 +2302,22 @@ fn print_and_p_render_scalars_and_print_lists_every_variable() {
     }
 }
 
+/// An array of several dimensions prints as rows of rows, as its program
+/// writes it, and a row the elements shown end inside of is closed.
+#[test]
+fn arrays_of_several_dimensions_print_as_nested_rows() {
+    let arguments = ["--color", "never", "build/test-programs/records-c-gcc-o0"];
+    let commands = ["break main", "run", "print matrix"];
+    assert!(
+        batch(&arguments, &commands).contains("(int32_t[2][3]) matrix = [[1, 2, 3], [4, 5, 6]]\n")
+    );
+    let stdout = batch_with_settings("[print]\nmax-elements = 4\n", &arguments, &commands);
+    assert!(
+        stdout.contains("(int32_t[2][3]) matrix = [[1, 2, 3], [4], <2 omitted>]\n"),
+        "{stdout}"
+    );
+}
+
 /// Floats print in every format their programs hold them in, each with
 /// its own precision: a quad precision tenth is a tenth.
 #[test]

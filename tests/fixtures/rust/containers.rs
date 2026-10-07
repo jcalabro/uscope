@@ -28,6 +28,10 @@ struct Point {
     y: i32,
 }
 
+/// A tuple struct, which the debugger presents as Rust writes one.
+#[expect(dead_code, reason = "the debugger reads it")]
+struct Meters(u32);
+
 #[inline(never)]
 fn barrier(fixture: *const u8) {
     black_box(fixture);
@@ -125,6 +129,13 @@ fn main() {
     let shape = Shape::Square { side: 4 }; // VIEW: shape => Square {side: 4}
     let dynamic: Box<dyn Debug> = Box::new(Point { x: 1, y: 2 }); // VIEW: dynamic => Point {x: 1, y: 2}
 
+    // Tuples and tuple structs, as Rust writes them.
+    let pair = (1, "two", 3.5); // VIEW: pair => (1, "two", 3.5)
+    // VIEW: pair => children: __0 = 1, __1 = "two", __2 = 3.5, [raw]
+    let meters = Meters(7); // VIEW: meters => Meters(7)
+    let nested = ((1_u8, 2_u8), Meters(3)); // VIEW: nested => ((1, 2), Meters(3))
+    let wrapping = std::num::Wrapping(5_u8); // VIEW: wrapping => Wrapping(5)
+
     black_box((
         &text,
         &empty_text,
@@ -177,6 +188,7 @@ fn main() {
         &shape,
         &dynamic,
     ));
+    black_box((&pair, &meters, &nested, &wrapping));
     barrier(std::ptr::from_ref(&text).cast());
     std::process::exit(i32::from(ints.len() + many.len() != 303));
 }

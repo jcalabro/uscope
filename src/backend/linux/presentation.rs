@@ -851,12 +851,14 @@ impl Sum {
             // nothing.
             [member] if member_name(member) == Some(name) && holds_nothing(member) => Vec::new(),
             [member] if member_name(member) == Some(name) => match &member.state {
+                // Rust's tuple variant is a record of `__0` and on, which
+                // is presented as a tuple of its own.
                 VariableState::Available {
                     value: crate::VariableValue::Record,
                     children: ValueChildren::Available(reference),
-                    presentation: None,
+                    presentation,
                     ..
-                } => {
+                } if presentation.as_deref().is_none_or(is_rust_tuple) => {
                     let reference = Arc::clone(reference);
                     machine.children_of(&reference)?
                 }
@@ -906,6 +908,14 @@ impl Sum {
         Ok(Self { payload, summary })
     }
 }
+
+/// Whether a presentation is the debugger's own of a Rust tuple.
+fn is_rust_tuple(presentation: &Presentation) -> bool {
+    &*presentation.view.source == "uscope" && &*presentation.view.header == RUST_TUPLES
+}
+
+/// The header of the debugger's own presentation of Rust tuples.
+const RUST_TUPLES: &str = "Rust tuples";
 
 /// Whether a variant's member holds nothing: of no size, or of a type
 /// that is no type, as Zig's `void` and the type of `null` are.
@@ -1149,16 +1159,20 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 },
             };
             let (text, presentation) = self.pointee_text(target, place)?;
-            if let VariableState::Available {
-                text: state_text,
-                presentation: state_presentation,
-                ..
-            } = &mut value.state
-            {
-                *state_text = text.map(Arc::new);
-                *state_presentation = presentation.map(Arc::new);
+            // A pointer to what is not text may still be shown as what
+            // it points to, as Go's debuggers show one.
+            if text.is_some() || presentation.is_some() {
+                if let VariableState::Available {
+                    text: state_text,
+                    presentation: state_presentation,
+                    ..
+                } = &mut value.state
+                {
+                    *state_text = text.map(Arc::new);
+                    *state_presentation = presentation.map(Arc::new);
+                }
+                return Ok(value);
             }
-            return Ok(value);
         }
         let (
             Some(type_info),
@@ -1218,6 +1232,37 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             && let Some(dynamic) = self.dynamic(&value)?
         {
             return self.with_dynamic(value, dynamic);
+        }
+        if let Some(type_info) = &value.type_info
+            && self.is_go_pointer(type_info)
+            && let Some(raw) = self.place_of(type_info, &value.state)
+        {
+            let nil = matches!(
+                &value.state,
+                VariableState::Available {
+                    value: crate::VariableValue::Address(address),
+                    ..
+                } if address.address.get() == 0
+            );
+            let pointee = if nil {
+                Some(("nil".to_owned(), None))
+            } else {
+                self.pointee_summary(&value.state)?
+            };
+            if let Some((summary, lent)) = pointee {
+                let shape = if nil {
+                    PresentedShape::Empty
+                } else {
+                    PresentedShape::Value
+                };
+                return Ok(present_as(
+                    value,
+                    built_in_presentation("Go pointers", shape, summary, &raw, lent),
+                ));
+            }
+        }
+        if let Some(tuple) = self.rust_tuple(&value)? {
+            return Ok(tuple);
         }
         let (
             Some(type_info),
@@ -1619,7 +1664,85 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         }
         Ok(self
             .record_summary(&pointee.state, 0)?
-            .map(|fields| (format!("*{fields}"), None)))
+            .map(|fields| (format!("*{fields}"), lent(&pointee.state))))
+    }
+
+    /// A Rust tuple, `(1, "two")`, or tuple struct, `Meters(7)`, as Rust
+    /// writes one: a record whose members are `__0`, `__1`, and on.
+    fn rust_tuple(
+        &mut self,
+        value: &InspectedValue,
+    ) -> std::result::Result<Option<InspectedValue>, Stop> {
+        let (
+            Some(type_info),
+            VariableState::Available {
+                value: crate::VariableValue::Record,
+                children: ValueChildren::Available(reference),
+                presentation: None,
+                ..
+            },
+        ) = (&value.type_info, &value.state)
+        else {
+            return Ok(None);
+        };
+        let Some(identity) = type_info.identity.as_ref() else {
+            return Ok(None);
+        };
+        if identity.language != crate::SourceLanguage::Rust || reference.total() == 0 {
+            return Ok(None);
+        }
+        let reference = Arc::clone(reference);
+        let children = self.children_of(&reference)?;
+        let positional = !children.is_empty()
+            && children.iter().enumerate().all(|(index, child)| {
+                matches!(&child.relationship, ValueChildRelationship::Member(member)
+                    if !member.artificial
+                        && member.name.as_deref() == Some(format!("__{index}").as_str()))
+            });
+        if !positional {
+            return Ok(None);
+        }
+        let fields = children
+            .iter()
+            .map(|child| crate::view::summary::value(Some(&child.type_info), &child.state))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // rustc names a tuple by its elements' types, `(i32, &str)`.
+        let name = if type_info.name.starts_with('(') {
+            ""
+        } else {
+            identity.base.as_ref()
+        };
+        let summary = format!("{name}({fields})");
+        Ok(Some(present_as(
+            value.clone(),
+            built_in_presentation(
+                RUST_TUPLES,
+                PresentedShape::Value,
+                summary,
+                &reference,
+                lent(&value.state),
+            ),
+        )))
+    }
+
+    /// Whether a type is a Go pointer, which Go's debuggers show as what it
+    /// points to.
+    fn is_go_pointer(&self, type_info: &TypeInfo) -> bool {
+        let chain = typedef_chain(self, type_info.reference);
+        chain.iter().any(|info| {
+            info.identity
+                .as_ref()
+                .is_some_and(|identity| identity.language == crate::SourceLanguage::Go)
+        }) && chain.last().is_some_and(|info| {
+            matches!(
+                info.kind,
+                TypeKind::Pointer {
+                    target: Some(_),
+                    ..
+                }
+            )
+        })
     }
 
     /// The `name: value` parts of a record's members, its bases' first.

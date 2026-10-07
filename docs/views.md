@@ -744,6 +744,10 @@ are:
 - A Rust enum, and a Zig optional, error union, or tagged union, shows as
   the variant it holds: `Some(4)`, `Err("no")`, `Square {side: 4}`, or a
   Zig optional's or error union's payload itself, `null`, or `error.Bad`.
+- A Rust tuple shows as Rust writes it, `(1, "two", 3.5)`, and a tuple
+  struct with its name, `Meters(7)` or `Wrapping(5)`.
+- A Go pointer shows as what it points to, as Go's debuggers show one,
+  `*{X: 5, Y: 6}` or `nil`, and expands to its target's members.
 - A C++ object of a class with virtual functions shows as the object it
   is part of, `Square {id: 7, side: 3}`, when its vtable pointer is one
   the program's symbols name. A Rust trait object shows as the value its
