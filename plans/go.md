@@ -1,6 +1,6 @@
 # Go: plan
 
-Status: proposed, 2026-10-06. Nothing here is built yet. Decisions marked
+Status: built, 2026-10-07; each item says where it is tested. Decisions marked
 *(settled)* were made with the maintainer. Scope is kept deliberately
 small: Go support is as simple as it can be while staying rigorous, and
 anything that is not needed for that waits.
