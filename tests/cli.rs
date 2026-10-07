@@ -615,7 +615,7 @@ fn help_lists_every_command_and_details_one_by_name_or_alias() {
         "delete <ids...>",
         "aliases: del, d",
         "  Run until the selected frame returns to its caller\n  aliases: fin, f",
-        "  aliases: b\n  usage: break [location] [if condition...] [hits hit-condition] [log message]",
+        "  aliases: b\n  usage: break [location] [if condition...] [hits hit-condition] [log message] [disabled]",
         "  Show the selected frame's execution location",
         "  Continue execution\n  aliases: c",
     ] {
@@ -753,6 +753,43 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
             "inferior exited with status 0\n",
             "1   +     40  counted at tests/fixtures/c/hit-counts.c:11  hits ==2 (no later hit can stop)\n",
         ],
+    );
+}
+
+#[test]
+fn saved_breakpoint_commands_recreate_the_breakpoints() {
+    let directory = support::ScratchDir::new("cli-save-breakpoints");
+    let file = directory.path().join("breakpoints.uscope");
+    let file_name = file.to_str().expect("a UTF-8 path");
+    let stdout = batch(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "break counted hits ==3 if call > 1",
+            r#"break shared log "total \"{shared_total}\"" disabled"#,
+            "tbreak caller",
+            &format!("save breakpoints {file_name}"),
+        ],
+    );
+    assert!(
+        stdout.contains(&format!("saved 3 breakpoints to {file_name}")),
+        "{stdout}"
+    );
+    let text = std::fs::read_to_string(&file).expect("the file was written");
+    assert_eq!(
+        text,
+        "break counted hits ==3 if call > 1\n\
+         break shared log \"total \\\"{shared_total}\\\"\" disabled\n\
+         tbreak caller\n"
+    );
+    let table = |stdout: String| stdout[stdout.find("Id  On").expect("a table")..].to_owned();
+    let program = "build/test-programs/hit-counts-gcc-o0";
+    let restored = table(batch(&["-c", file_name, program], &["breakpoints"]));
+    let mut commands = text.lines().collect::<Vec<_>>();
+    commands.push("breakpoints");
+    assert_eq!(restored, table(batch(&[program], &commands)));
+    assert!(
+        restored.contains("2   -      0  shared, 2 locations"),
+        "{restored}"
     );
 }
 
@@ -895,7 +932,7 @@ fn breakpoints_take_options_inline_and_lines_from_the_selected_frame() {
     assert_in_order(
         &stderr,
         &[
-            "usage: break [location] [if condition...] [hits hit-condition] [log message]",
+            "usage: break [location] [if condition...] [hits hit-condition] [log message] [disabled]",
             "invalid line offset '+x'",
             "source line numbers are one-based",
             // A list naming a missing id deletes nothing.

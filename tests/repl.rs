@@ -17,11 +17,13 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// A uscope command for a terminal that supports color, with history kept
-/// under `state` and no color settings in the environment.
+/// under `state` and no color settings in the environment. It runs in
+/// `state`, whose project an interactive session keeps its breakpoints in.
 fn command(executable: &Path, state: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
     command
         .arg(executable)
+        .current_dir(state)
         .env("XDG_STATE_HOME", state)
         .env("USCOPE_CONFIG", "")
         .env("TERM", "xterm-256color")
@@ -211,4 +213,136 @@ fn interactive_history_persists_across_sessions() {
         .expect("history was loaded in second session");
     session.send_line("quit").expect("quit second repl");
     session.expect(Eof).expect("second repl exited");
+}
+
+/// A project in `scratch` with its own copy of `hit-counts.c`, which a
+/// session maps the program's sources to so that a test may edit it.
+fn project_with_sources(scratch: &Path) -> PathBuf {
+    let project = scratch.join("project");
+    std::fs::create_dir_all(project.join("src")).expect("create the project");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/hit-counts.c"),
+        project.join("src/hit-counts.c"),
+    )
+    .expect("copy the source");
+    project
+}
+
+/// An interactive session's command in `project`, which keeps its
+/// breakpoints there, with the program's sources mapped to the project's.
+fn kept_command(project: &Path, state: &Path) -> Command {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut command = command(&fixture("hit-counts-gcc-o0"), state);
+    command
+        .current_dir(project)
+        .env(
+            "USCOPE_CONFIG",
+            manifest.join("tests/support/settings/ascii.toml"),
+        )
+        .args(["--color", "never", "--source-map"])
+        .arg(manifest.join("tests/fixtures/c"))
+        .arg(project.join("src"));
+    command
+}
+
+/// Starts a session in `project`, waiting for what it says before its
+/// first prompt.
+fn kept_session(project: &Path, state: &Path, said: &[&str]) -> OsSession {
+    let mut session = spawn(kept_command(project, state));
+    for text in said {
+        session
+            .expect(*text)
+            .unwrap_or_else(|error| panic!("expected {text:?}: {error}"));
+    }
+    session.expect("(uscope) ").expect("initial prompt");
+    session
+}
+
+fn run(session: &mut OsSession, line: &str, expected: &str) {
+    session.send_line(line).expect("type a command");
+    session
+        .expect(expected)
+        .unwrap_or_else(|error| panic!("{line}: expected {expected:?}: {error}"));
+    session.expect("(uscope) ").expect("next prompt");
+}
+
+fn quit(mut session: OsSession) {
+    session.send_line("quit").expect("quit");
+    session.expect(Eof).expect("the session ended");
+}
+
+#[test]
+fn an_interactive_session_keeps_its_breakpoints_for_the_next_one() {
+    let scratch = support::ScratchDir::new("kept-breakpoints");
+    let project = project_with_sources(scratch.path());
+    let state = project.join(".uscope/state");
+    let saved = state.join("breakpoints.toml");
+
+    let mut session = kept_session(&project, scratch.path(), &[]);
+    run(
+        &mut session,
+        "break hit-counts.c:11 if call > 2 hits >=2",
+        "tests/fixtures/c/hit-counts.c:11, stops at hits >=2 where call > 2",
+    );
+    run(&mut session, "disable 1", "disabled breakpoint 1");
+    // Temporary breakpoints belong to one stop, and are not kept.
+    run(&mut session, "tbreak caller", "temporary breakpoint 2 set");
+    quit(session);
+    let text = std::fs::read_to_string(&saved).expect("the breakpoints were saved");
+    assert_eq!(
+        text,
+        "version = 1\n\n[[breakpoint]]\nlocation = \"hit-counts.c:11\"\n\
+         condition = \"call > 2\"\nhits = \">=2\"\nenabled = false\n\
+         line-text = \"    last_call = call;\"\n",
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join(".gitignore")).expect("state is ignored"),
+        "*\n"
+    );
+
+    // The next session restores it, disabled and conditional as it was.
+    let mut session = kept_session(&project, scratch.path(), &["restored 1 breakpoint"]);
+    run(
+        &mut session,
+        "breakpoints",
+        "/tests/fixtures/c/hit-counts.c:11  hits >=2  if call > 2",
+    );
+    quit(session);
+
+    // A line that reads differently since is restored where it was, and
+    // said to have changed.
+    let source = project.join("src/hit-counts.c");
+    let edited = std::fs::read_to_string(&source)
+        .expect("read the source")
+        .replace("    last_call = call;", "    last_call = call + 0;");
+    std::fs::write(&source, edited).expect("edit the source");
+    quit(kept_session(
+        &project,
+        scratch.path(),
+        &["hit-counts.c:11 changed since it was saved"],
+    ));
+
+    // A file that does not parse is reported and never overwritten.
+    std::fs::write(&saved, "version = 1\n[[breakpoint]\n").expect("break the file");
+    let mut session = kept_session(
+        &project,
+        scratch.path(),
+        &["none are saved until it is fixed or deleted"],
+    );
+    run(&mut session, "break counted", "breakpoint 1 set");
+    quit(session);
+    assert_eq!(
+        std::fs::read_to_string(&saved).expect("the file is kept"),
+        "version = 1\n[[breakpoint]\n"
+    );
+
+    // Batch sessions neither restore nor save.
+    std::fs::remove_file(&saved).expect("remove the file");
+    let output = kept_command(&project, scratch.path())
+        .args(["--batch", "-e", "break counted"])
+        .output()
+        .expect("run a batch session");
+    assert!(output.status.success(), "{output:?}");
+    assert!(!saved.exists());
 }

@@ -497,7 +497,17 @@ line-text = "    if (len > max) {"
   a typo is never overwritten.
 
 Batch sessions, `--batch`, neither restore nor save, so that a script
-behaves the same in every checkout. DAP sessions do neither: editors keep
+behaves the same in every checkout. As built, only a session reading
+commands at a terminal keeps breakpoints, since one reading a pipe is a
+script too. A location is saved as written, so `break parse.c:120` saves
+`parse.c:120` however the debug information records the path, and the
+line text is read where the session's source map finds the file. A saved
+breakpoint that cannot be restored, such as a hand edit whose condition
+no longer parses, is warned about and written back unchanged rather than
+dropped. A session that restored any says `restored N breakpoints`.
+`break` gains a `disabled` option, so that `save breakpoints` writes one
+command per breakpoint, since ids differ between sessions and a later
+`disable N` could name the wrong one. DAP sessions do neither: editors keep
 their own breakpoints, and two sources of truth for one set would fight.
 
 ## Printing
