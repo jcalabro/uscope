@@ -124,16 +124,19 @@ export function Watch() {
       <div className="pane-body">
         <LinkedExpansion>
           <ul className="value-list" aria-label="Watches" data-testid="watches">
-            {watches.map((expression, index) => (
-              <WatchRow
-                // Watches can repeat; the index keeps them apart.
-                // biome-ignore lint/suspicious/noArrayIndexKey: a watch is its text and place
-                key={`${index}:${expression}`}
-                expression={expression}
-                hidden={why}
-                onRemove={() => remove(index)}
-              />
-            ))}
+            {watches.map((expression, index) => {
+              // A repeated watch is its own row, as a repeated name is.
+              const occurrence = watches.slice(0, index).filter((w) => w === expression).length + 1;
+              return (
+                <WatchRow
+                  key={`${expression}~${occurrence}`}
+                  expression={expression}
+                  occurrence={occurrence}
+                  hidden={why}
+                  onRemove={() => remove(index)}
+                />
+              );
+            })}
           </ul>
         </LinkedExpansion>
         <form
@@ -162,10 +165,12 @@ export function Watch() {
 
 function WatchRow({
   expression,
+  occurrence,
   hidden,
   onRemove,
 }: {
   expression: string;
+  occurrence: number;
   hidden: string | null;
   onRemove(): void;
 }) {
@@ -184,7 +189,14 @@ function WatchRow({
   );
   if (hidden !== null) {
     return (
-      <ValueRow row={messageRow(expression, "—")} parent="w" depth={0} actions={remove} failed />
+      <ValueRow
+        row={messageRow(expression, "—")}
+        parent="w"
+        depth={0}
+        occurrence={occurrence}
+        actions={remove}
+        failed
+      />
     );
   }
   if (value.error) {
@@ -201,13 +213,19 @@ function WatchRow({
   if (!value.data) {
     return (
       <Earlier when>
-        <ValueRow row={messageRow(expression, "…")} parent="w" depth={0} actions={remove} />
+        <ValueRow
+          row={messageRow(expression, "…")}
+          parent="w"
+          depth={0}
+          occurrence={occurrence}
+          actions={remove}
+        />
       </Earlier>
     );
   }
   return (
     <Earlier when={!value.current}>
-      <ValueRow row={value.data} parent="w" depth={0} actions={remove} />
+      <ValueRow row={value.data} parent="w" depth={0} occurrence={occurrence} actions={remove} />
     </Earlier>
   );
 }

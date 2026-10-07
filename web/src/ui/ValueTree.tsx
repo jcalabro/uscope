@@ -83,18 +83,23 @@ export function RowList({
   parent: string;
   depth: number;
 }) {
+  // Names can repeat, as shadowed variables do; each repeat is its own row.
+  const seen = new Map<string, number>();
   return (
     <>
-      {rows.map((row, index) => (
-        <ValueRow
-          // Names can repeat, as shadowed variables do; the index keeps them apart.
-          // biome-ignore lint/suspicious/noArrayIndexKey: rows have no other identity
-          key={`${index}:${row.name}`}
-          row={row}
-          parent={parent}
-          depth={depth}
-        />
-      ))}
+      {rows.map((row) => {
+        const occurrence = (seen.get(row.name) ?? 0) + 1;
+        seen.set(row.name, occurrence);
+        return (
+          <ValueRow
+            key={`${row.name}~${occurrence}`}
+            row={row}
+            parent={parent}
+            depth={depth}
+            occurrence={occurrence}
+          />
+        );
+      })}
     </>
   );
 }
@@ -107,13 +112,22 @@ export interface ValueRowProps {
   actions?: ReactNode;
   /** The row says why there is no value. */
   failed?: boolean;
+  /** How many rows with this name come before it, plus one. */
+  occurrence?: number;
 }
 
 /** One value, which opens to its children. */
-export function ValueRow({ row, parent, depth, actions, failed = false }: ValueRowProps) {
+export function ValueRow({
+  row,
+  parent,
+  depth,
+  actions,
+  failed = false,
+  occurrence = 1,
+}: ValueRowProps) {
   const { at, stale } = useFocus();
   const expansion = useExpansion();
-  const key = childKey(parent, row.name);
+  const key = childKey(parent, row.name, occurrence);
   const open = row.children !== null && expansion.isOpen(key);
   let was: string | undefined;
   if (expansion.remember && at && !stale && !row.truncated && !failed) {

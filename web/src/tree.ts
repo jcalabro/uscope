@@ -3,14 +3,17 @@
 // tree opens the same rows at the next stop, and changed values compare a
 // path's text with the stop seen before.
 
-/** One step of a path: a name, with `/` and `%` escaped so it stays one. */
+/** One step of a path: a name, with `/`, `%`, and `~` escaped so it stays one. */
 function segment(name: string): string {
-  return name.replaceAll("%", "%25").replaceAll("/", "%2F");
+  return name.replaceAll("%", "%25").replaceAll("/", "%2F").replaceAll("~", "%7E");
 }
 
-/** The path of a child row named `name` under `parent`. */
-export function childKey(parent: string, name: string): string {
-  return `${parent}/${segment(name)}`;
+/**
+ * The path of a child row named `name` under `parent`. Names can repeat, as
+ * shadowed variables do: `occurrence` counts this name's rows so far.
+ */
+export function childKey(parent: string, name: string, occurrence = 1): string {
+  return `${parent}/${segment(name)}${occurrence > 1 ? `~${occurrence}` : ""}`;
 }
 
 /**
