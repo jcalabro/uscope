@@ -1456,7 +1456,9 @@ pointer is outside its stack.)*
 
   It checks that every step ends on its own goroutine, that no stop is
   lost, and that the program exits normally. Every wait has a deadline,
-  and the iteration count is bounded.
+  and the iteration count is bounded. *(Done: `tests/go/torture.rs`. A
+  hit is counted by the worker's own id and round, whether its stop
+  reports it or another thread's does, as when it lands as a step ends.)*
 
 ### Narrow tests, only where logic is intricate
 
