@@ -890,6 +890,11 @@ pub enum StepKind {
     OverSource,
     /// Run until the selected frame returns to its caller.
     Out,
+    /// Advance as [`StepKind::OverSource`] does, unless the stepping task
+    /// starts another task before the line completes: then stop where the
+    /// first such task begins its function, in that task, which the step
+    /// then belongs to.
+    IntoNewTask,
 }
 
 /// Selects what happens to an exception pending on a stopped thread.

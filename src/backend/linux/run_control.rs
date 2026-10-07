@@ -17,6 +17,7 @@ use super::breakpoints::{install_plan_breakpoint, remove_breakpoint_owner_from};
 use super::classify::{format_raw_stop, visible_stop_priority};
 use super::loops::LoopReach;
 use super::native::{LinuxTraceOps, is_vanished_tracee};
+use super::new_task::NewTask;
 use super::{
     ActiveExecution, ActiveKind, BreakpointOwner, ClassifiedStop, Controller, ExpectedStop,
     Inferior, LinuxError, NativeThreadState, PendingSignal, PublicStop, RepairGroup, Resume,
@@ -98,7 +99,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             Ok(None) => {}
         }
         let task = self.step_task(pid);
-        let result = self.step_start(pid, kind, frame).and_then(|start| {
+        // A step into a new task steps over its line until a task starts.
+        let (requested, kind) = (
+            kind,
+            match kind {
+                StepKind::IntoNewTask => StepKind::OverSource,
+                kind => kind,
+            },
+        );
+        let result = self.step_start(pid, kind, frame).and_then(|mut start| {
+            if requested == StepKind::IntoNewTask {
+                start.new_task = Some(NewTask::Watching(self.task_starters()));
+            }
             self.begin_execution(
                 process_id,
                 stop_id,
@@ -106,6 +118,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ActiveKind::Step {
                     owner: StepOwner { thread: pid, task },
                     kind,
+                    requested,
                     start: Box::new(start),
                     progress_owed: false,
                 },
@@ -139,7 +152,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         let mut installed = Vec::new();
         let mut failure = None;
         if let ActiveKind::Step { start, .. } = &kind {
-            for &address in start.plan_addresses.union(&start.panic_guards) {
+            let starters = match &start.new_task {
+                Some(NewTask::Watching(starters)) => starters.keys().copied().collect(),
+                _ => Vec::new(),
+            };
+            for &address in start
+                .plan_addresses
+                .union(&start.panic_guards)
+                .chain(&starters)
+            {
                 if let Err(error) =
                     install_plan_breakpoint(&self.ptrace, inferior, address, execution_id)
                 {
@@ -678,10 +699,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.follow_step(pid);
         }
         if let Some((_, kind)) = planned {
-            if let Some(start) = self.active_step_mut() {
-                start.escape = None;
-            }
-            if self.reach_signal_guard(pid, address)? {
+            if self.reach_waypoint(pid, address)? {
                 return Ok(());
             }
             match self.reach_loop(pid, address, kind)? {
@@ -738,7 +756,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// breakpoint that declined this hit still owns the site, which the
     /// thread then steps over; otherwise the thread goes on by single
     /// steps of `stepping`, or runs.
-    fn go_on_without_plan(
+    pub(super) fn go_on_without_plan(
         &mut self,
         pid: Pid,
         address: VirtualAddress,
@@ -1081,6 +1099,20 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    /// Handles a site of a step's plan that its task reached on the way to
+    /// where the step may end: the start of a task the step goes into, or
+    /// the return from a signal handler. Returns whether it did.
+    fn reach_waypoint(&mut self, pid: Pid, address: VirtualAddress) -> Result<bool> {
+        if self.reach_new_task(pid, address)? {
+            return Ok(true);
+        }
+        // The step's task is back on its plan, from wherever it escaped to.
+        if let Some(start) = self.active_step_mut() {
+            start.escape = None;
+        }
+        self.reach_signal_guard(pid, address)
+    }
+
     /// Recognizes the stepping thread's return from a signal handler to the
     /// instruction it interrupted, where the step resumes. Returns whether
     /// the site was the guard and has been handled.
@@ -1177,6 +1209,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// thread, unless a barrier is already doing so. Among coincident stops,
     /// the highest-priority reason is published.
     pub(super) fn begin_visible_stop(&mut self, pid: Pid, reason: StopReason) -> Result<()> {
+        let reason = self.requested_step_reason(reason);
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let thread = inferior.thread_mut(pid)?;
         thread.state = NativeThreadState::Stopped;

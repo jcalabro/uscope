@@ -306,8 +306,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Step,
         "step",
         ["s"],
-        "step",
-        "Step into at source level",
+        "step [task]",
+        "Step into at source level, or with `task` into the task the line starts",
         repeatable
     ),
     command!(
@@ -451,6 +451,15 @@ pub fn aliases(command: &CommandSpec) -> impl Iterator<Item = &'static str> {
     command.aliases.iter().copied().chain(runtime)
 }
 
+/// Whether `word` names a task: `task`, or a runtime's own name for one,
+/// such as Go's `goroutine`.
+fn names_a_task(word: &str) -> bool {
+    word == "task"
+        || uscope::TASK_NOUNS
+            .iter()
+            .any(|(singular, _)| *singular == word)
+}
+
 /// The command a line starts with, and the name it is written with, which
 /// excludes a format such as the `/x` of `p/x`.
 pub fn line_command(line: &str) -> Option<(&'static CommandSpec, &str)> {
@@ -517,7 +526,11 @@ impl Cli {
             Command::Set => self.set(rest, spec).await?,
             Command::Stepi => self.step(StepKind::Instruction).await?,
             Command::Nexti => self.step(StepKind::OverInstruction).await?,
-            Command::Step => self.step(StepKind::IntoSource).await?,
+            Command::Step => match first {
+                None => self.step(StepKind::IntoSource).await?,
+                Some(noun) if names_a_task(noun) => self.step(StepKind::IntoNewTask).await?,
+                Some(_) => return Err(spec.usage_error()),
+            },
             Command::Next => self.step(StepKind::OverSource).await?,
             Command::Finish => self.step(StepKind::Out).await?,
             Command::Examine => {

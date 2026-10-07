@@ -1101,6 +1101,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
 
         match kind {
+            StepKind::IntoNewTask => unreachable!("{STEPS_OVER}"),
             StepKind::Instruction | StepKind::OverInstruction => Ok(true),
             StepKind::IntoSource => self.step_into_source_is_complete(pid, &registers, start),
             _ if start.following => self.step_into_source_is_complete(pid, &registers, start),
@@ -1376,6 +1377,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         // Neither does stepping over from code no debug information
         // describes, which steps as stepping in does.
         let activation = match kind {
+            StepKind::IntoNewTask => unreachable!("{STEPS_OVER}"),
             StepKind::Instruction | StepKind::OverInstruction => None,
             StepKind::IntoSource => self.top_activation(pid, &registers).ok(),
             StepKind::OverSource if code_instance.is_none() => {
@@ -1813,6 +1815,10 @@ pub(super) const fn innermost_frame(native: &libc::user_regs_struct) -> FrameCon
         signal_frame: false,
     }
 }
+
+/// Why no step runs as a step into a new task: run control steps over its
+/// line until a task starts (see `new_task`).
+const STEPS_OVER: &str = "a step into a new task runs as a step over";
 
 /// Whether code in this role is a language runtime's own: its machinery,
 /// its outermost frames, and what it enters by a trap.

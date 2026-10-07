@@ -18,11 +18,17 @@ fn line(marker: &str) -> u64 {
 /// A fixture stopped at the first line of `main.run`'s walk, with no
 /// breakpoint left, and the goroutine it runs in.
 async fn at_the_walk(fixture: &str) -> (Scenario, i128) {
+    stopped_at(fixture, "// STEP: map").await
+}
+
+/// A fixture stopped at the line `marker` ends, with no breakpoint left,
+/// and the goroutine it runs in.
+async fn stopped_at(fixture: &str, marker: &str) -> (Scenario, i128) {
     let mut scenario = crate::invariants::checked(fixture);
     let breakpoint = scenario
         .add_breakpoint_spec(BreakpointSpec::Source {
             path: "steps/main.go".into(),
-            line: LineNumber::new(line("// STEP: map")).expect("one-based"),
+            line: LineNumber::new(line(marker)).expect("one-based"),
         })
         .await;
     let reason = scenario
@@ -114,4 +120,69 @@ async fn optimized_steps_stop_only_in_code_the_program_wrote() {
         );
     }
     scenario.shutdown().await;
+}
+
+/// A step into the goroutine a line starts stops where the function the
+/// `go` statement names begins, on the new goroutine: through the wrapper
+/// that passes the call's arguments, or at once for a closure without
+/// any. On a line that starts none, it ends as a step over does.
+#[tokio::test]
+async fn stepping_into_a_new_goroutine_stops_where_it_begins() {
+    let kind = StepKind::IntoNewTask;
+    let starts = [
+        (
+            "// STEP: go",
+            "main.spawned",
+            "// STEP: spawned",
+            "// STEP: send",
+        ),
+        (
+            "// STEP: start",
+            "main.main.func1",
+            "// STEP: start",
+            "// STEP: body",
+        ),
+    ];
+    for fixture in ["steps-go-o0", "steps-go-o2"] {
+        for (statement, function, declaration, body) in starts {
+            let context = format!("{fixture} from {statement}");
+            let (mut scenario, task) = stopped_at(fixture, statement).await;
+            assert_eq!(
+                scenario.step_to_stop(kind).await,
+                StopReason::Step { kind },
+                "{context}"
+            );
+            let (stopped, at) = place(&scenario).await;
+            assert_eq!(stopped, function, "{context}");
+            // Optimized, the prologue may end on the body's first line.
+            assert!(
+                [line(declaration), line(body)].contains(&at),
+                "{context}: line {at}"
+            );
+            let started = integer(&scenario, "$task").await.expect("a goroutine");
+            assert_ne!(started, task, "{context}");
+            // The step belongs to the new goroutine from then on.
+            scenario.step_to_stop(StepKind::OverSource).await;
+            assert_eq!(
+                integer(&scenario, "$task").await,
+                Some(started),
+                "{context}"
+            );
+            scenario.shutdown().await;
+        }
+
+        let (mut scenario, task) = stopped_at(fixture, "// STEP: grow").await;
+        assert_eq!(
+            scenario.step_to_stop(kind).await,
+            StopReason::Step { kind },
+            "{fixture}"
+        );
+        assert_eq!(
+            place(&scenario).await,
+            ("main.run".to_owned(), line("// STEP: after")),
+            "{fixture}"
+        );
+        assert_eq!(integer(&scenario, "$task").await, Some(task), "{fixture}");
+        scenario.shutdown().await;
+    }
 }

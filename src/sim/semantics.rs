@@ -295,7 +295,7 @@ pub fn step(
                 before.last().map_or(0, |call| call.return_address)
             ))
         }
-        StepKind::IntoSource | StepKind::OverSource => {
+        StepKind::IntoSource | StepKind::OverSource | StepKind::IntoNewTask => {
             source_step(begun, thread, retired, positions, variant).map(Some)
         }
     }
@@ -389,10 +389,12 @@ fn source_step(
     let entered = after.len() > before.len() && after[..before.len()] == before[..];
     // Begun in code no line describes, stepping over has no line to step
     // over, and steps as stepping in does.
-    let kind = if lines.row(start).is_none() {
-        StepKind::IntoSource
-    } else {
-        begun.kind
+    // A process without a language runtime starts no task, so stepping
+    // into one steps over the line.
+    let kind = match begun.kind {
+        _ if lines.row(start).is_none() => StepKind::IntoSource,
+        StepKind::IntoNewTask => StepKind::OverSource,
+        kind => kind,
     };
 
     // Stepping into an inline frame hidden at the stop moves nothing.

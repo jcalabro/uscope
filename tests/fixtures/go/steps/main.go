@@ -32,8 +32,8 @@ func fresh(seed int) int { // STEP: fresh
 }
 
 //go:noinline
-func spawned(done chan<- int) {
-	done <- 1
+func spawned(done chan<- int) { // STEP: spawned
+	done <- 1 // STEP: send
 }
 
 //go:noinline
@@ -54,8 +54,8 @@ func main() {
 	done := make(chan int)
 	finished := make(chan struct{})
 	// run begins on a new goroutine's small stack.
-	go func() {
-		run(done)
+	go func() { // STEP: start
+		run(done) // STEP: body
 		close(finished)
 	}()
 	<-finished

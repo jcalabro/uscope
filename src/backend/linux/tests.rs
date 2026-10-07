@@ -808,6 +808,7 @@ fn step_execution(thread: Pid, kind: StepKind, start: StepStart) -> ActiveKind {
     ActiveKind::Step {
         owner: StepOwner { thread, task: None },
         kind,
+        requested: kind,
         start: Box::new(start),
         progress_owed: false,
     }
