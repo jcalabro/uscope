@@ -1777,3 +1777,374 @@ textarea.input {
   background: var(--surface);
   box-shadow: var(--shadow);
 }
+
+/* ---------- disassembly and memory ---------- */
+
+.segmented.small button {
+  padding: 2px 9px;
+  font-size: 11.5px;
+}
+
+.file-tabs-end {
+  gap: 10px;
+}
+
+.view-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.view-head .segmented {
+  margin-left: auto;
+}
+
+.view-note {
+  flex: none;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--warn-line);
+  background: var(--warn-bg);
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.asm,
+.mem {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.asm-function {
+  color: var(--f);
+  font: 600 12px var(--mono);
+}
+
+.asm-body,
+.mem-body {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 0;
+  overflow: auto;
+  font: 12.5px / var(--row) var(--mono);
+}
+
+.asm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--row);
+  padding-right: 12px;
+  white-space: pre;
+}
+
+.asm-row.pc {
+  background: var(--pc-bg);
+}
+
+.asm-row.frame {
+  background: var(--frame-bg);
+}
+
+.asm-gutter {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.dot.none {
+  background: none;
+}
+
+.asm-gutter:hover .dot.none {
+  background: var(--bp);
+  opacity: 0.35;
+}
+
+.asm-mark {
+  width: 1ch;
+  flex: none;
+  color: var(--pc-mark);
+}
+
+.asm-address {
+  flex: none;
+  color: var(--ink-3);
+}
+
+.asm-offset {
+  width: 6ch;
+  flex: none;
+  overflow: hidden;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+}
+
+.asm-bytes {
+  width: 22ch;
+  flex: none;
+  overflow: hidden;
+  color: var(--c);
+  text-overflow: ellipsis;
+}
+
+.asm-text {
+  color: var(--ink);
+}
+
+.tk-mnemonic,
+.tk-prefix,
+.tk-keyword {
+  color: var(--k);
+}
+
+.tk-register {
+  color: var(--t);
+}
+
+.tk-number,
+.tk-address {
+  color: var(--n);
+}
+
+.tk-punctuation {
+  color: var(--ink-2);
+}
+
+.asm-target {
+  margin-left: 1ch;
+  color: var(--f);
+}
+
+.asm-comment {
+  color: var(--c);
+}
+
+.asm-source {
+  display: flex;
+  gap: 1.5ch;
+  width: 100%;
+  margin-top: 4px;
+  padding: 0 12px 0 36px;
+  border: 0;
+  background: none;
+  font: 12px / var(--row) var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+
+.asm-source:hover {
+  background: var(--surface-2);
+}
+
+.asm-place {
+  flex: none;
+  color: var(--accent);
+}
+
+.asm-line {
+  overflow: hidden;
+  color: var(--ink-2);
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
+.asm-note {
+  padding: 2px 12px;
+  color: var(--ink-3);
+  font-style: italic;
+}
+
+.goto {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.goto .input {
+  width: 28ch;
+}
+
+.mem-pages {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 0;
+  font-size: 12px;
+}
+
+.mem-row {
+  display: flex;
+  gap: 2ch;
+  padding: 0 12px;
+  white-space: pre;
+}
+
+.mem-address {
+  color: var(--ink-3);
+}
+
+.mem-bytes {
+  display: flex;
+  gap: 0.6ch;
+}
+
+.byte,
+.byte-edit .input {
+  width: 2.6ch;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: center;
+  cursor: default;
+}
+
+.byte:nth-child(8) {
+  margin-right: 0.8ch;
+}
+
+.byte.in-value {
+  background: var(--accent-soft);
+}
+
+.byte.selected {
+  outline: 1.5px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.byte.unread {
+  color: var(--ink-3);
+}
+
+.byte-edit .input {
+  width: 6ch;
+  height: calc(var(--row) - 2px);
+  border: 1px solid var(--accent);
+  background: var(--surface);
+  text-align: left;
+}
+
+.mem-text {
+  color: var(--ink-2);
+}
+
+.mem-selection {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--line);
+  font: 12px var(--mono);
+}
+
+/* ---------- value actions, registers, watchpoints ---------- */
+
+.row-actions {
+  display: inline-flex;
+  flex: none;
+  opacity: 0;
+}
+
+.value-row:hover .row-actions,
+.value-row:focus-within .row-actions {
+  opacity: 1;
+}
+
+.pane.registers {
+  flex: 0 1 auto;
+  max-height: 38%;
+}
+
+.pane-head .twist {
+  margin-left: -4px;
+}
+
+.dot.watch {
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.watch-target {
+  overflow: hidden;
+  font-family: var(--mono);
+  text-overflow: ellipsis;
+}
+
+.watch-adder {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.watch-adder .input:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.watch-adder select {
+  flex: none;
+  width: auto;
+}
+
+/* ---------- tables ---------- */
+
+.table-body {
+  padding: 0;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.table th {
+  position: sticky;
+  top: 0;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-3);
+  font-weight: 600;
+  text-align: left;
+}
+
+.table td {
+  max-width: 40ch;
+  padding: 2px 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table tr:hover td {
+  background: var(--surface-2);
+}
+
+fieldset.segmented {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.pane.registers .value-name {
+  width: 8ch;
+}

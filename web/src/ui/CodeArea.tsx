@@ -1,13 +1,17 @@
-// The code at the focus: the file and lines the link names, or else the
-// frame's own line, or, before the program runs, its main function (D2).
+// The code at the focus, in one of three views of the place. Source shows
+// the file and lines the link names, or else the frame's own line, or,
+// before the program runs, its main function (D2). A frame with no source
+// shows its instructions instead.
 
 import { useEffect, useMemo, useState } from "react";
 import { cache, useRequest } from "../data";
-import { formatPlace, parsePlace, showingSource } from "../focus";
+import { formatPlace, inView, parsePlace, showingSource, type View } from "../focus";
 import { controls } from "../model";
 import type { Breakpoint, Row } from "../protocol";
 import { useConnection, useModel } from "../store";
 import { closeFile, openFile, tab, useTab } from "../tab";
+import { Disassembly } from "./Disassembly";
+import { Memory } from "./Memory";
 import { useLinkPaths, useLook } from "./navigation";
 import { fileName } from "./paths";
 import { useInlineValues } from "./source/inline";
@@ -44,8 +48,14 @@ export function useShown(): Shown | null {
   return null;
 }
 
+const VIEWS: readonly { view: View; label: string; key: string }[] = [
+  { view: "source", label: "Source", key: "Alt+S" },
+  { view: "disassembly", label: "Disassembly", key: "Alt+D" },
+  { view: "memory", label: "Memory", key: "Alt+M" },
+];
+
 export function CodeArea() {
-  const { at, trace, state, stale } = useFocus();
+  const { at, trace, state, stale, look: current } = useFocus();
   const shown = useShown();
   const files = useTab((current) => current.files);
   const look = useLook();
@@ -61,6 +71,9 @@ export function CodeArea() {
   }, [path, line]);
 
   const frame = at ? trace?.frames.find((candidate) => candidate.index === at.frame) : undefined;
+  // A frame with no source, and no file named, shows its instructions.
+  const sourceless = !shown && frame !== undefined && !frame.source;
+  const view = current.view ?? (sourceless ? "disassembly" : "source");
   const show = (path: string) =>
     look(
       (current) => showingSource(current, formatPlace({ path: paths.link(path), line: 1, end: 1 })),
@@ -96,9 +109,33 @@ export function CodeArea() {
           {stale === "running" && at && (
             <span className="showing">Showing stop #{at.stop} · program running</span>
           )}
+          <fieldset className="segmented small" aria-label="View">
+            {VIEWS.map((choice) => (
+              <button
+                key={choice.view}
+                type="button"
+                aria-pressed={view === choice.view}
+                title={choice.key}
+                onClick={() => look((look) => inView(look, choice.view), { replace: false })}
+              >
+                {choice.label}
+              </button>
+            ))}
+          </fieldset>
         </span>
       </nav>
-      {shown ? (
+      {view === "disassembly" ? (
+        <>
+          {sourceless && (
+            <div className="view-note" data-testid="no-source">
+              {frame.name} has no source: showing its instructions
+            </div>
+          )}
+          <Disassembly />
+        </>
+      ) : view === "memory" ? (
+        <Memory />
+      ) : shown ? (
         <SourceFile shown={shown} />
       ) : (
         <div className="empty center-message">

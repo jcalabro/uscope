@@ -9,7 +9,8 @@ export interface Look {
   src?: string;
   /** Disassembly at an address. */
   asm?: string;
-  /** Memory at an address. */
+  /** Memory at an address, and how many bytes the value there occupies:
+   *  `0xADDRESS` or `0xADDRESS:BYTES`. */
   mem?: string;
   /** Which of the three views of the place is shown; source when absent. */
   view?: View;
@@ -81,7 +82,7 @@ export function validateLook(search: Record<string, unknown>): Look {
     look.asm = asm;
   }
   const mem = text("mem");
-  if (mem && isAddress(mem)) {
+  if (mem && /^0x[0-9a-f]{1,16}(:[1-9]\d{0,8})?$/i.test(mem)) {
     look.mem = mem;
   }
   const view = text("view");
@@ -206,15 +207,22 @@ export function parseAt(params: { stop: string; thread: string; frame: string })
 
 /**
  * What a followed link keeps at a new stop: how the tab looks, but not where
- * it looked, since the code view follows the program counter.
+ * it looked, since source and disassembly follow the program counter.
+ * Memory stays where it is.
  */
 export function followedLook(look: Look): Look {
-  const { src: _src, asm: _asm, view, ...kept } = look;
-  return view === "memory" ? { ...kept, view } : kept;
+  const { src: _src, asm: _asm, ...kept } = look;
+  return kept;
 }
 
 /** The same look, showing the source at `src`. */
 export function showingSource(look: Look, src: string): Look {
   const { view: _view, ...rest } = look;
   return { ...rest, src };
+}
+
+/** The same look, in `view`: source is the view a look names by none. */
+export function inView(look: Look, view: View): Look {
+  const { view: _view, ...rest } = look;
+  return view === "source" ? rest : { ...rest, view };
 }

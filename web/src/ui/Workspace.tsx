@@ -15,6 +15,7 @@ import { Banner } from "./Banner";
 import { BottomPanel } from "./BottomPanel";
 import { Breakpoints } from "./Breakpoints";
 import { CodeArea } from "./CodeArea";
+import { Registers } from "./Registers";
 import { useSplit } from "./Split";
 import { Stack } from "./Stack";
 import { Threads } from "./Threads";
@@ -121,6 +122,7 @@ export function Workspace() {
         <div className="column right">
           <Watch />
           <Variables />
+          <Registers />
         </div>
       </main>
     </FocusContext>

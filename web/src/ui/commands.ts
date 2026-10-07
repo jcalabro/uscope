@@ -5,7 +5,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useCallback } from "react";
 import { type ActionName, action } from "../actions";
 import type { Connection } from "../connection";
-import { followedLook, stopPath, stringifySearch } from "../focus";
+import { followedLook, inView, stopPath, stringifySearch, type View } from "../focus";
 import type { Command } from "../keys";
 import type { Model } from "../model";
 import { useConnection, useStoreApi } from "../store";
@@ -22,6 +22,12 @@ const ACTIONS = new Set<string>([
   "instruction",
   "overInstruction",
 ]);
+
+const VIEWS: Record<"viewSource" | "viewDisassembly" | "viewMemory", View> = {
+  viewSource: "source",
+  viewDisassembly: "disassembly",
+  viewMemory: "memory",
+};
 
 /** Runs commands, returning whether the command did anything here. */
 export function useCommands(): (command: Command) => boolean {
@@ -94,11 +100,25 @@ export function useCommands(): (command: Command) => boolean {
           flash(`Watching ${expression}`);
           return true;
         }
+        case "viewSource":
+        case "viewDisassembly":
+        case "viewMemory": {
+          if (!current.session) {
+            return false;
+          }
+          const view = VIEWS[command];
+          void navigate({
+            href: window.location.pathname + stringifySearch({ ...inView(current.look, view) }),
+          });
+          return true;
+        }
         case "back": {
           if (current.look.view && current.session) {
-            const { view: _view, ...look } = current.look;
-            const path = window.location.pathname;
-            void navigate({ href: path + stringifySearch({ ...look }), replace: true });
+            const look = inView(current.look, "source");
+            void navigate({
+              href: window.location.pathname + stringifySearch({ ...look }),
+              replace: true,
+            });
             return true;
           }
           return false;

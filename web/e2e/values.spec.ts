@@ -2,28 +2,10 @@
 // watches a link carries, hovers and inline values, and the console.
 
 import type { Page } from "@playwright/test";
+import { stopInHandleRequest, valueRow } from "./kvstore";
 import { expect, fixture, join, test } from "./server";
 
 test.use({ program: [fixture("kvstore")] });
-
-/** Breaks after handle_request looks its key up, and runs there. */
-async function stopInHandleRequest(page: Page) {
-  const adder = page.getByRole("textbox", { name: "Add a breakpoint" });
-  await adder.fill("kvstore.c:92");
-  await adder.press("Enter");
-  await expect(page.getByTestId("breakpoints")).toContainText("kvstore.c:92");
-  await adder.press("Escape");
-  await page.keyboard.press("F5");
-  await expect(page.locator(".cm-pc-line")).toContainText("int status = 0;");
-}
-
-/** The value row named `name` in a pane. */
-const valueRow = (page: Page, pane: string, name: string) =>
-  page
-    .getByTestId(pane)
-    .locator(".value-row")
-    .filter({ has: page.locator(".value-name", { hasText: new RegExp(`^${name}$`) }) })
-    .first();
 
 /** Moves the pointer over `word` in the source line holding `line`. */
 async function hoverWord(page: Page, line: string, word: string) {
@@ -86,7 +68,7 @@ test("watches travel in the link, and a changed value reaches every tab", async 
 }) => {
   await join(page, uscope.link);
   await stopInHandleRequest(page);
-  const add = page.getByRole("textbox", { name: "Add a watch" });
+  const add = page.getByRole("textbox", { name: "Add a watch", exact: true });
   await add.fill("s->stats.puts + 100");
   await add.press("Enter");
   await expect(page).toHaveURL(/[?&]w=s-%3Estats.puts/);
