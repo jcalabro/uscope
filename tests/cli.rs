@@ -1720,6 +1720,40 @@ fn a_stripped_programs_goroutines_are_unavailable() {
     );
 }
 
+/// A `-trimpath` build records its sources without the directory it was
+/// built in, which the missing source's reason says, with the way to map
+/// them; `--source-map` then finds them.
+#[test]
+fn a_trimpath_programs_sources_say_why_they_are_missing() {
+    const SERVER: &str = "tests/fixtures/go/server/main.go";
+    let recorded = "./github.com/jcalabro/uscope-go/tests/fixtures/go/server/main.go";
+    let stdout = batch(
+        &["build/test-programs/server-go-trimpath"],
+        &["break main.greet", "run"],
+    );
+    assert!(
+        stdout.contains(&format!(
+            "source unavailable: source file {recorded} does not exist; it was recorded \
+             without the directory the program was built in, as `-trimpath` builds record \
+             paths, so it was looked for in the current directory; a source map can say where \
+             it is"
+        )),
+        "{stdout}"
+    );
+    let root = env!("CARGO_MANIFEST_DIR");
+    let mapped = batch(
+        &[
+            "--source-map",
+            "github.com/jcalabro/uscope-go",
+            root,
+            "build/test-programs/server-go-trimpath",
+        ],
+        &["break main.greet", "run"],
+    );
+    let greet = support::source_line(SERVER, "func greet(");
+    assert!(mapped.contains(&format!("=> {greet} |")), "{mapped}");
+}
+
 #[test]
 fn a_goroutine_is_selected_or_inspected_by_its_id() {
     let stdout = at_go_checkpoint(&[

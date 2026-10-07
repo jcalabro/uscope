@@ -376,7 +376,13 @@ finds renamed or relocated copies, used only when they match.
 Source files are read from the paths in the debug information, and read
 lazily. For a program built elsewhere, `--source-map FROM TO` reads files
 recorded under `FROM` from `TO`, matching whole path components. A missing
-source names every path tried. Breakpoints still use recorded paths, or their
+source names every path tried. A path recorded without the directory the
+program was built in, as a Go `-trimpath` build records
+`github.com/you/app/main.go` and `net/http/server.go`, is looked for in the
+current directory, and a missing one says so; a rule from
+`github.com/you/app` maps it, with or without the leading `./` it is
+shown with. uscope does not guess where Go's own sources or the module
+cache are. Breakpoints still use recorded paths, or their
 trailing components, as in `break main.c:10`.
 
 ## Output
