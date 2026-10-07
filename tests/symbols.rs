@@ -654,6 +654,10 @@ struct OracleFile {
     symbols: Vec<OracleSymbol>,
     /// The code range of every call-frame entry.
     unwind: Vec<(u64, u64)>,
+    /// The entry size of every executable section, by section index.
+    entry_sizes: BTreeMap<u32, u64>,
+    /// The PLT stubs objdump names, as `name@plt`, with their addresses.
+    plt: Vec<(String, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -676,6 +680,7 @@ impl Oracle {
             files: names.iter().map(|name| OracleFile::read(name)).collect(),
             data: Vec::new(),
         };
+        oracle.add_plt_symbols();
         oracle.data = oracle
             .symbols()
             .filter(|(_, symbol)| symbol.kind == Some(SymbolKind::Data) && symbol.binding.is_some())
@@ -687,6 +692,63 @@ impl Oracle {
             })
             .collect();
         oracle
+    }
+
+    /// Adds a local function symbol for each PLT stub objdump names, one
+    /// section entry long. objdump names a stub whose slot an
+    /// `R_X86_64_IRELATIVE` relocation fills by its resolver's address,
+    /// `*ABS*+0x...@plt`; uscope names it after the indirect function the
+    /// resolver is: an exported one first, then the first by name.
+    fn add_plt_symbols(&mut self) {
+        let mut stubs = Vec::new();
+        for (index, file) in self.files.iter().enumerate() {
+            for (name, address) in &file.plt {
+                let name = name.strip_suffix("@plt").expect("a PLT stub's name");
+                let name = name
+                    .strip_prefix("*ABS*+0x")
+                    .and_then(|resolver| self.indirect_function_at(resolver))
+                    .unwrap_or_else(|| name.to_owned());
+                let (section, size) = file
+                    .executable_sections
+                    .iter()
+                    .find(|(_, (start, end))| (*start..*end).contains(address))
+                    .map(|(section, _)| (*section, file.entry_sizes[section]))
+                    .expect("a PLT stub's section");
+                stubs.push((
+                    index,
+                    OracleSymbol {
+                        name: format!("{name}@plt"),
+                        address: *address,
+                        size,
+                        kind: Some(SymbolKind::Function),
+                        binding: Some(SymbolBinding::Local),
+                        section: Some(section),
+                        dynamic: false,
+                    },
+                ));
+            }
+        }
+        for (index, stub) in stubs {
+            self.files[index].symbols.push(stub);
+        }
+    }
+
+    /// The indirect function whose resolver is at the hexadecimal
+    /// `resolver`: an exported one first, then the first by name.
+    fn indirect_function_at(&self, resolver: &str) -> Option<String> {
+        let resolver = u64::from_str_radix(resolver, 16).expect("resolver");
+        self.symbols()
+            .filter(|(_, symbol)| {
+                symbol.address == resolver && symbol.kind == Some(SymbolKind::IndirectFunction)
+            })
+            .map(|(_, symbol)| {
+                let exported = self.symbols().any(|(_, other)| {
+                    other.dynamic && other.name == symbol.name && other.address == resolver
+                });
+                (!exported, symbol.name.clone())
+            })
+            .min()
+            .map(|(_, name)| name)
     }
 
     fn symbols(&self) -> impl Iterator<Item = (&OracleFile, &OracleSymbol)> {
@@ -732,19 +794,18 @@ impl OracleFile {
         let mut section_flags = BTreeMap::new();
         let mut symbols = Vec::new();
         let mut unwind = Vec::new();
+        let mut entry_sizes = BTreeMap::new();
+        let mut plt = Vec::new();
         let mut dynamic = false;
 
         for line in text.lines() {
             let trimmed = line.trim_start();
-            // "OFFSET LENGTH CIE_POINTER FDE cie=OFFSET pc=START..END"
-            if line.contains(" FDE ")
-                && let Some(range) = line.split("pc=").nth(1)
-                && let Some((start, end)) = range.split_once("..")
-            {
-                unwind.push((
-                    u64::from_str_radix(start, 16).expect("frame start"),
-                    u64::from_str_radix(end.trim(), 16).expect("frame end"),
-                ));
+            if let Some(range) = fde_range(line) {
+                unwind.push(range);
+                continue;
+            }
+            if let Some(stub) = plt_stub(line) {
+                plt.push(stub);
                 continue;
             }
             if let Some(table) = trimmed.strip_prefix("Symbol table '") {
@@ -762,6 +823,8 @@ impl OracleFile {
                     let size = u64::from_str_radix(fields[4], 16).expect("section size");
                     if fields[6].contains('X') {
                         executable_sections.insert(index, (start, start + size));
+                        let entry_size = u64::from_str_radix(fields[5], 16).expect("entry size");
+                        entry_sizes.insert(index, entry_size);
                     }
                     section_flags.insert(fields[0].to_owned(), fields[6].to_owned());
                     // A thread-local NOBITS section only describes a template.
@@ -825,8 +888,35 @@ impl OracleFile {
             section_flags,
             symbols,
             unwind,
+            entry_sizes,
+            plt,
         }
     }
+}
+
+/// A call-frame entry's code range, from readelf's line
+/// `OFFSET LENGTH CIE_POINTER FDE cie=OFFSET pc=START..END`.
+fn fde_range(line: &str) -> Option<(u64, u64)> {
+    let (start, end) = line
+        .contains(" FDE ")
+        .then(|| line.split("pc=").nth(1))??
+        .split_once("..")?;
+    Some((
+        u64::from_str_radix(start, 16).expect("frame start"),
+        u64::from_str_radix(end.trim(), 16).expect("frame end"),
+    ))
+}
+
+/// A PLT stub objdump names, from its line `ADDRESS <name@plt>:`.
+fn plt_stub(line: &str) -> Option<(String, u64)> {
+    let (address, rest) = line.split_once(" <")?;
+    let name = rest
+        .strip_suffix(">:")
+        .filter(|name| name.ends_with("@plt"))?;
+    Some((
+        name.to_owned(),
+        u64::from_str_radix(address, 16).expect("stub address"),
+    ))
 }
 
 /// Compares one module image's symbols with readelf's reading of the same

@@ -2,7 +2,6 @@
 
 ## Debugger
 
-- Synthesize `name@plt` symbols for PLT stubs.
 - Break on symbol names in modules without DWARF.
 - Show symbol versions where they distinguish otherwise identical names.
 - Separate debug information: `.gnu_debuglink`, build-id directories, and debuginfod.

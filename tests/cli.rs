@@ -902,6 +902,25 @@ fn function_types_read_as_gdb_reads_them() {
     }
 }
 
+/// A PLT stub is named after the function it jumps to, so a breakpoint can
+/// name it and a backtrace through it reads as gdb's does.
+#[test]
+fn plt_stubs_are_named_after_their_targets() {
+    let output = batch(
+        &["build/test-programs/disassembly-gcc-o0"],
+        &["break printf@plt", "run", "bt"],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "stopped at breakpoint 1 (hit 1) in printf@plt at 0x",
+            "#0  0x",
+            " in printf@plt from disassembly-gcc-o0\n#1  0x",
+            " in main at tests/fixtures/c/disassembly/main.c:",
+        ],
+    );
+}
+
 #[test]
 fn pp_lays_values_out_to_the_width_and_print_formats_combine() {
     let records = ["build/test-programs/records-c-gcc-o0"];
@@ -3366,7 +3385,7 @@ fn disassemble_renders_the_stopped_function_with_named_targets_and_source_lines(
         " <disasm_helper>",
         "# 0x",
         " <disasm_counter>",
-        " <.plt+0x",
+        " <printf@plt>",
         "push rbp",
     ] {
         assert!(
@@ -3503,7 +3522,7 @@ fn disassemble_names_the_targets_indirect_branches_read_at_the_stop() {
     let stub = find("jmp qword ptr [rip+", false);
     assert!(
         stub.ends_with(&format!(
-            "jmp qword ptr [rip+{:#x}]  # {:#x} <.got.plt+0x18> -> {:#x} <.plt+0x16>",
+            "jmp qword ptr [rip+{:#x}]  # {:#x} <.got.plt+0x18> -> {:#x} <printf@plt+0x6>",
             got_plt + 0x18 - (plt + 0x16),
             got_plt + 0x18,
             plt + 0x16
