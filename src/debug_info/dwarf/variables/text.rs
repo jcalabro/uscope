@@ -273,7 +273,7 @@ impl DwarfVariableInfo {
                     Ok(address) => address,
                     Err(stopped) => return Some(stopped.summary(Some(*length))),
                 };
-                Some(reader.counted_text(address, *length))
+                Some(self.slice_text(reader.counted_text(address, *length), shape))
             }
             (
                 ValueShape::Record {
@@ -294,7 +294,7 @@ impl DwarfVariableInfo {
                     ValueShape::Record {
                         record, members, ..
                     } => self.record_text(record, &members, &storage, &mut reader),
-                    ValueShape::Slice { text: true, .. } => {
+                    shape @ ValueShape::Slice { text: true, .. } => {
                         let length = match self.read_word(
                             &storage,
                             self.pointer_bytes() as u64,
@@ -307,7 +307,7 @@ impl DwarfVariableInfo {
                             Ok(address) => address,
                             Err(stopped) => return Some(stopped.summary(Some(length))),
                         };
-                        Some(reader.counted_text(address, length))
+                        Some(self.slice_text(reader.counted_text(address, length), &shape))
                     }
                     _ => None,
                 }
@@ -405,6 +405,30 @@ impl DwarfVariableInfo {
 
     /// Whether a type is a one-byte character, through typedefs and
     /// qualifiers.
+    /// A text slice's text. Text of C's characters, as a Rust `CStr` is,
+    /// ends with its NUL, which is not part of it.
+    fn slice_text(&self, mut text: TextSummary, slice: &ValueShape) -> TextSummary {
+        let ValueShape::Slice { element, .. } = slice else {
+            return text;
+        };
+        let c_characters = self.value_shape(*element).is_ok_and(|shape| {
+            shape.scalar().is_some_and(|base| {
+                base.byte_size == 1
+                    && matches!(
+                        base.encoding,
+                        BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter
+                    )
+            })
+        });
+        if c_characters
+            && text.completion == TextCompletion::Complete
+            && text.bytes.last() == Some(&0)
+        {
+            text.bytes = text.bytes[..text.bytes.len() - 1].into();
+        }
+        text
+    }
+
     fn is_character(&self, id: TypeId) -> bool {
         self.character_width(id) == Some(1)
     }

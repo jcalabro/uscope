@@ -120,6 +120,25 @@ view rust alloc::**::Rc<T, _> {
     field weak = inner(shared->weak) - 1
 }
 
+# An Rc or Arc of str points with a wider pointer, whose length counts the
+# text after the counts.
+view rust alloc::**::Rc<str, _> {
+    type Shared = typeof(*inner(ptr).data_ptr)
+    let shared = inner(ptr)
+    show text((shared.data_ptr as *u8) + offsetof(Shared, value), shared.length)
+    field strong = inner(shared.data_ptr->strong)
+    field weak = inner(shared.data_ptr->weak) - 1
+}
+
+view rust alloc::**::Arc<str, _> {
+    type Shared = typeof(*inner(ptr).data_ptr)
+    let shared = inner(ptr)
+    let weak = inner(shared.data_ptr->weak)
+    show text((shared.data_ptr as *u8) + offsetof(Shared, data), shared.length)
+    field strong = inner(shared.data_ptr->strong)
+    field weak = weak == (usize)-1 ? 0 : weak - 1
+}
+
 view rust alloc::**::Arc<T, _> {
     let shared = inner(ptr)
     let weak = inner(shared->weak)
@@ -176,4 +195,79 @@ view rust std::**::Mutex<T> {
     show value(data.value)
     field locked = inner(inner.futex) != 0
     field poisoned = inner(poison.failed) != 0
+}
+
+# A RwLock is a futex word whose low 30 bits count its readers, or are all
+# set while it is locked for writing.
+view rust std::**::RwLock<T> {
+    let state = inner(inner.state) & 0x3fffffff
+    show value(data.value)
+    field readers = state == 0x3fffffff ? 0 : state
+    field writer = state == 0x3fffffff
+    field poisoned = inner(poison.failed) != 0
+}
+
+# A OnceCell is the Option OnceCell::get returns.
+view rust core::**::OnceCell<T> {
+    show value(inner.value)
+}
+
+# A OnceLock holds its value once its Once's state, the low two bits of a
+# futex word, is 0, complete.
+view rust std::**::OnceLock<T> {
+    let held = value.value.value.value.0 or value.value.value.value
+    show if (inner(once.inner.state_and_queued) & 3) == 0 { value(held) } else { empty("uninitialized") }
+}
+
+# An atomic is the value it holds; a bool is stored as a byte.
+view rust core::**::Atomic<bool> {
+    show value(inner(v) != 0)
+}
+
+view rust core::**::Atomic<T> {
+    show value(inner(v))
+}
+
+view rust core::**::NonZero<T> {
+    show value(inner(self))
+}
+
+view rust core::**::NonNull<T> {
+    show value(pointer)
+}
+
+view rust core::**::Pin<_> {
+    show value(pointer)
+}
+
+# A Duration is seconds and nanoseconds; a SystemTime is a reading of the
+# realtime clock, and an Instant of the monotonic one, each a timespec.
+view rust core::**::Duration {
+    show value(secs * 1000000000 + inner(nanos))
+    format self as duration(ns)
+}
+
+view rust std::**::SystemTime {
+    let time = inner(self)
+    show value(time.tv_sec * 1000000000 + inner(time.tv_nsec))
+    format self as time(ns)
+}
+
+view rust std::**::Instant {
+    let time = inner(self)
+    show value(time.tv_sec * 1000000000 + inner(time.tv_nsec))
+    format self as duration(ns)
+}
+
+# A LinkedList's links are Option<NonNull<Node>>, a pointer that is null
+# for None.
+view rust alloc::**::LinkedList<T, _> {
+    type Node = alloc::collections::linked_list::Node<T>
+    check sizeof(head) == sizeof(usize)
+    show sequence(len) for node in list(*(&head as *usize) as *Node, p => *(&p->next as *usize) as *Node)
+        => node->element
+}
+
+view rust alloc::**::BinaryHeap<T, _> {
+    show value(data)
 }
