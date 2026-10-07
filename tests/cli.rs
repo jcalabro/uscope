@@ -1820,10 +1820,10 @@ fn a_cores_goroutines_show_their_labels_and_the_runtimes_their_entries() {
             && line.ends_with(r#"— chan receive {job: resize, tenant: "a b"}"#)),
         "{stdout}"
     );
+    // The runtime numbers its goroutines in batches, so its own ids vary.
     assert!(
-        stdout
-            .lines()
-            .any(|line| line == "  [2] runtime.forcegchelper — force gc (idle)"),
+        stdout.lines().any(|line| line.starts_with("  [")
+            && line.ends_with("] runtime.forcegchelper — force gc (idle)")),
         "{stdout}"
     );
 }

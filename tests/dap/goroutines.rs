@@ -56,9 +56,11 @@ fn goroutines_are_threads_named_where_the_program_has_them() {
     for (id, name) in &workers {
         assert_eq!(*name, format!("[{id}] main.worker — chan receive"));
     }
-    // The runtime's own goroutines, such as its second, are left out.
+    // The runtime's own goroutines are left out.
     assert!(
-        !listed.iter().any(|(_, name)| name.starts_with("[2] ")),
+        !listed
+            .iter()
+            .any(|(_, name)| name.contains("runtime.forcegchelper")),
         "{listed:?}"
     );
 
@@ -96,7 +98,11 @@ fn goroutines_are_threads_named_where_the_program_has_them() {
 fn launch_options_list_the_runtimes_goroutines_cut_the_list_or_list_threads() {
     let (mut dap, _) = at_checkpoint(json!({"runtimeTasks": true}));
     let all = threads(&mut dap);
-    assert!(all.iter().any(|(id, _)| *id == 2), "{all:?}");
+    assert!(
+        all.iter()
+            .any(|(_, name)| name.contains("runtime.forcegchelper")),
+        "{all:?}"
+    );
     dap.finish();
 
     let (mut dap, _) = at_checkpoint(json!({"maxTasks": 3}));
