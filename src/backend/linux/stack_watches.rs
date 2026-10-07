@@ -119,6 +119,10 @@ impl<P: InspectionOps> Controller<P> {
         let bounds = match self.task_stack_bounds(inferior, task) {
             Ok(Some(bounds)) => bounds,
             Ok(None) => return Ok(Some(WatchpointInvalidation::ScopeExited)),
+            #[cfg_attr(
+                not(debug_assertions),
+                expect(unused_variables, reason = "only recorded")
+            )]
             Err(reason) => {
                 record!("task {task}'s stack is unreadable: {reason}");
                 return Ok(Some(WatchpointInvalidation::StackMoved));
@@ -297,6 +301,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                 },
                 // A move of a stack the runtime cannot name may be any
                 // watched task's.
+                #[cfg_attr(
+                    not(debug_assertions),
+                    expect(unused_variables, reason = "only recorded")
+                )]
                 Err(reason) => {
                     record!("a stack moves whose task is unknown: {reason}");
                     let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
@@ -343,8 +351,16 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// stacks. Watches that could not be are ended, rather than left where
     /// their objects may no longer be.
     pub(super) fn follow_stacks(&mut self) {
+        #[cfg_attr(
+            not(debug_assertions),
+            expect(unused_variables, reason = "only recorded")
+        )]
         if let Err(error) = self.try_follow_stacks() {
             record!("stack watches could not follow their stacks: {error}");
+            #[cfg_attr(
+                not(debug_assertions),
+                expect(unused_variables, reason = "only recorded")
+            )]
             if let Err(error) = self.end_task_watches(|_| true) {
                 record!("stack watches could not be ended: {error}");
             }
@@ -382,6 +398,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                 // A task that is gone ended its activation; the next stop
                 // says so.
                 Ok(None) => {}
+                #[cfg_attr(
+                    not(debug_assertions),
+                    expect(unused_variables, reason = "only recorded")
+                )]
                 Err(reason) => {
                     record!("task {}'s stack is unreadable: {reason}", watch.task);
                     lost.push(id);

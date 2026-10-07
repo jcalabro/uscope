@@ -79,6 +79,10 @@ impl<P: InspectionOps> Controller<P> {
                 values: values.into(),
             }),
             Ok(None) => None,
+            #[cfg_attr(
+                not(debug_assertions),
+                expect(unused_variables, reason = "only recorded")
+            )]
             Err(error) => {
                 record!("the returned values are unreadable: {error}");
                 None
