@@ -427,3 +427,13 @@ view c++ std::mutex {
 view c++ std::recursive_mutex {
     show value(_M_mutex)
 }
+
+# A thread id is the thread's pthread_t, or 0 for no thread.
+view c++ std::thread::id {
+    show if _M_thread == 0 { empty("no thread") } else { value(_M_thread) }
+}
+
+# An any with a value has a manager for its type, whose name says the type.
+view c++ std::any {
+    show if _M_manager == null { empty("empty") } else { value(_M_manager) }
+}

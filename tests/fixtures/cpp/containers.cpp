@@ -4,6 +4,7 @@
 // of the character c, `problem:` says the view must refuse the value, and
 // why, and `(any order)` that a hash table's entries may come in any order.
 
+#include <any>
 #include <array>
 #include <atomic>
 #include <bitset>
@@ -30,6 +31,7 @@
 #include <stack>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <tuple>
 #include <unordered_set>
@@ -258,6 +260,10 @@ int main() {
     std::mutex locked_mutex;                      // VIEW: locked_mutex => locked
     locked_mutex.lock();
     std::recursive_mutex reentered;               // VIEW: reentered => locked
+    std::thread::id no_thread;                    // VIEW: no_thread => no thread
+    std::thread::id this_thread = std::this_thread::get_id();
+    std::any no_any;                              // VIEW: no_any => empty
+    std::any held_any = 7;
     reentered.lock();
     reentered.lock();
 
@@ -296,7 +302,7 @@ int main() {
     keep(millis), keep(secs), keep(mins), keep(hrs), keep(instant), keep(uptime), keep(counter);
     keep(ready), keep(slot), keep(level), keep(reference), keep(expected), keep(unexpected);
     keep(where), keep(no_callable), keep(callable), keep(unlocked_mutex), keep(locked_mutex);
-    keep(reentered);
+    keep(reentered), keep(no_thread), keep(this_thread), keep(no_any), keep(held_any);
     barrier(&text);
     locked_mutex.unlock();
     reentered.unlock();
