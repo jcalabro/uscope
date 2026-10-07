@@ -18,6 +18,9 @@ use super::value;
 use super::{Cli, Control};
 
 const DEFAULT_HEX_DUMP_BYTES: u64 = 64;
+/// The most breakpoints one `rbreak` sets, so that a pattern like `.` does
+/// not install thousands of traps.
+const MAX_RBREAK: usize = 200;
 pub const MAX_HEX_DUMP_BYTES: u64 = 8 * 1024;
 /// Instructions shown before and from a stop that no function contains.
 const DISASSEMBLY_CONTEXT_BEFORE: u32 = 8;
@@ -29,6 +32,7 @@ pub enum Command {
     Views,
     Break,
     Tbreak,
+    Rbreak,
     Breakpoints,
     Info,
     Delete,
@@ -157,6 +161,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         [],
         "tbreak [location] [if condition...] [hits hit-condition] [log message]",
         "Set a breakpoint that the stop it causes deletes"
+    ),
+    command!(
+        Rbreak,
+        "rbreak",
+        [],
+        "rbreak <regex>",
+        "Set a breakpoint at every function of the loaded modules whose name matches"
     ),
     command!(
         Breakpoints,
@@ -489,6 +500,7 @@ impl Cli {
                 self.add_breakpoint(rest, spec.command == Command::Tbreak, spec)
                     .await?
             }
+            Command::Rbreak => self.rbreak(rest).await?,
             Command::Breakpoints => self.list_breakpoints().await?,
             Command::Info => match (arguments[0], arguments.get(1)) {
                 ("breakpoints" | "break", None) => self.list_breakpoints().await?,
@@ -705,13 +717,123 @@ impl Cli {
             temporary,
             ..uscope::BreakpointOptions::default()
         };
-        let breakpoint = self.debugger.add_breakpoint_with(location, options).await?;
+        let breakpoint = match self.debugger.add_breakpoint_with(location, options).await {
+            Ok(breakpoint) => breakpoint,
+            Err(error) => return Err(self.suggest(error).await),
+        };
         let placed = self.placed(&breakpoint).await;
         Ok(format::breakpoint(
             &breakpoint,
             &placed,
             self.renderers.stdout,
         ))
+    }
+
+    /// Breaks at every function of the loaded modules whose name, demangled,
+    /// matches `pattern`, refusing more than [`MAX_RBREAK`].
+    async fn rbreak(&self, pattern: &str) -> Result<String> {
+        let regex = regex::Regex::new(pattern)
+            .map_err(|error| anyhow!("invalid pattern '{pattern}': {error}"))?;
+        let mut names = std::collections::BTreeSet::new();
+        for image in self.loaded_images().await {
+            for function in image.functions() {
+                if image.instances_for_function(function.id).next().is_some()
+                    && regex.is_match(&function.name)
+                {
+                    names.insert(function.name.to_string());
+                }
+            }
+            // Code without debug information is named by its symbol.
+            for symbol in image.symbols() {
+                let shown = symbol
+                    .demangled_name()
+                    .unwrap_or_else(|| symbol.name.to_string());
+                if symbol.kind == uscope::SymbolKind::Function
+                    && symbol.extent.is_some()
+                    && image.locate(symbol.address).function.is_none()
+                    && regex.is_match(&shown)
+                {
+                    names.insert(symbol.name.to_string());
+                }
+            }
+        }
+        match names.len() {
+            0 => bail!("no function matches '{pattern}'"),
+            count if count > MAX_RBREAK => bail!(
+                "'{pattern}' matches {count} functions; rbreak sets at most {MAX_RBREAK}, so narrow the pattern"
+            ),
+            _ => {}
+        }
+        let mut lines = Vec::new();
+        for name in names {
+            let breakpoint = self
+                .debugger
+                .add_breakpoint(BreakpointSpec::Function(name))
+                .await?;
+            let placed = self.placed(&breakpoint).await;
+            lines.push(format::breakpoint(
+                &breakpoint,
+                &placed,
+                self.renderers.stdout,
+            ));
+        }
+        Ok(lines.join("\n"))
+    }
+
+    /// The images of the loaded modules, or the program's before it runs.
+    async fn loaded_images(&self) -> Vec<std::sync::Arc<uscope::ModuleImage>> {
+        let Ok(loaded) = self.debugger.loaded_modules().await else {
+            return vec![std::sync::Arc::clone(self.debugger.module_image())];
+        };
+        let mut images = Vec::new();
+        for record in loaded.modules.iter() {
+            if let Ok(image) = self.debugger.loaded_module_image(record.module.id).await {
+                images.push(image);
+            }
+        }
+        if images.is_empty() {
+            images.push(std::sync::Arc::clone(self.debugger.module_image()));
+        }
+        images
+    }
+
+    /// A breakpoint's failure, with the nearest names when it names a
+    /// function or source file that no loaded module has.
+    async fn suggest(&self, error: uscope::Error) -> anyhow::Error {
+        let hint = match &error {
+            uscope::Error::FunctionNotFound(name) => {
+                let images = self.loaded_images().await;
+                let names = images.iter().flat_map(|image| {
+                    image
+                        .functions()
+                        .iter()
+                        .map(|function| function.name.as_ref())
+                        .chain(
+                            image
+                                .symbols()
+                                .iter()
+                                .filter(|symbol| symbol.kind == uscope::SymbolKind::Function)
+                                .map(|symbol| symbol.name.as_ref()),
+                        )
+                });
+                super::suggest::did_you_mean(name, names)
+            }
+            uscope::Error::SourceFileNotFound(path) => {
+                let images = self.loaded_images().await;
+                let written = path.to_string_lossy();
+                let names = images
+                    .iter()
+                    .flat_map(|image| image.source_files().iter())
+                    .filter_map(|file| file.path.file_name()?.to_str())
+                    .collect::<Vec<_>>();
+                super::suggest::did_you_mean(&written, names)
+            }
+            _ => None,
+        };
+        match hint {
+            Some(hint) => anyhow!("{error}; {hint}"),
+            None => error.into(),
+        }
     }
 
     /// A line of the selected frame's source file.

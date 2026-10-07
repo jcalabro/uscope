@@ -757,6 +757,45 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
 }
 
 #[test]
+fn rbreak_breaks_at_matching_functions_and_misspelled_names_suggest_near_ones() {
+    let (stdout, stderr) = piped(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "rbreak ^(counted|caller)$",
+            "rbreak ^zzz",
+            "rbreak (",
+            "break countd",
+            "break hit-count.c:11",
+            "run",
+            // libc is loaded now, with far more functions than one pattern
+            // may break at.
+            "rbreak .",
+            "breakpoints",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "breakpoint 1 set at caller at tests/fixtures/c/hit-counts.c:20\n",
+            "breakpoint 2 set at counted at tests/fixtures/c/hit-counts.c:11\n",
+            "stopped at breakpoint 1 (hit 1) at ",
+        ],
+    );
+    assert!(!stdout.contains("breakpoint 3 set"), "{stdout}");
+    assert_in_order(
+        &stderr,
+        &[
+            "no function matches '^zzz'",
+            "invalid pattern '(': ",
+            "no function named 'countd' was found; did you mean 'counted'?",
+            "no source file matching 'hit-count.c' was found; did you mean 'hit-counts.c'?",
+            "'.' matches ",
+            " functions; rbreak sets at most 200, so narrow the pattern",
+        ],
+    );
+}
+
+#[test]
 fn breakpoint_and_watchpoint_tables_show_each_ones_state_place_and_options() {
     let stdout = batch(
         &["build/test-programs/hit-counts-gcc-o0"],

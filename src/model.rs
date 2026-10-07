@@ -2519,6 +2519,15 @@ pub struct SymbolLocation {
     pub provenance: SymbolExtentProvenance,
 }
 
+impl SymbolInfo {
+    /// Returns the source-level spelling of a Rust or C++ mangled name, or
+    /// `None` when the name is not mangled in a recognized scheme.
+    #[must_use]
+    pub fn demangled_name(&self) -> Option<String> {
+        crate::demangle::demangle(&self.name)
+    }
+}
+
 impl SymbolLocation {
     /// Returns the source-level spelling of a Rust or C++ mangled name, or
     /// `None` when the name is not mangled in a recognized scheme.
