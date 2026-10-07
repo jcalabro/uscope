@@ -17,12 +17,14 @@ import {
   EditorView,
   GutterMarker,
   gutter,
+  hoverTooltip,
   lineNumbers,
   ViewPlugin,
   type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
 import { useEffect, useRef } from "react";
+import { expressionAt } from "../../expressions";
 import { highlighting, language } from "./languages";
 
 export type MarkKind = "plain" | "conditional" | "log" | "pending";
@@ -48,6 +50,12 @@ export interface Marks {
   inline: ReadonlyMap<number, readonly InlineValue[]>;
 }
 
+/** What a hover shows: a value and its type. */
+export interface Hovered {
+  text: string;
+  type: string | null;
+}
+
 export interface SourceViewProps {
   path: string;
   text: string;
@@ -57,6 +65,8 @@ export interface SourceViewProps {
   onGutter(line: number): void;
   onLineNumber(line: number, extend: boolean): void;
   onCursor(line: number): void;
+  /** Evaluates what the pointer rests on; absent when values are not shown. */
+  onHover?: ((expression: string) => Promise<Hovered | null>) | undefined;
 }
 
 const setMarks = StateEffect.define<Marks>();
@@ -139,6 +149,26 @@ class Values extends WidgetType {
   }
 }
 
+function hoverDom(expression: string, value: Hovered): HTMLElement {
+  const dom = document.createElement("div");
+  dom.className = "cm-value-tooltip";
+  dom.setAttribute("role", "tooltip");
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = expression;
+  const text = document.createElement("span");
+  text.className = "text";
+  text.textContent = ` = ${value.text}`;
+  dom.append(name, text);
+  if (value.type) {
+    const type = document.createElement("span");
+    type.className = "type";
+    type.textContent = value.type;
+    dom.append(type);
+  }
+  return dom;
+}
+
 function lineDecorations(state: EditorState): DecorationSet {
   const marks = state.field(marksField);
   const doc = state.doc;
@@ -190,13 +220,14 @@ export function SourceView({
   onGutter,
   onLineNumber,
   onCursor,
+  onHover,
 }: SourceViewProps) {
   const parent = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const languageSlot = useRef(new Compartment());
   // Handlers change every render; the editor calls through these.
-  const handlers = useRef({ onGutter, onLineNumber, onCursor });
-  handlers.current = { onGutter, onLineNumber, onCursor };
+  const handlers = useRef({ onGutter, onLineNumber, onCursor, onHover });
+  handlers.current = { onGutter, onLineNumber, onCursor, onHover };
 
   useEffect(() => {
     if (!parent.current) {
@@ -251,6 +282,27 @@ export function SourceView({
           highlighting,
           languageSlot.current.of([]),
           cursorReporter((line) => handlers.current.onCursor(line)),
+          hoverTooltip(
+            async (current, position) => {
+              const evaluate = handlers.current.onHover;
+              const line = current.state.doc.lineAt(position);
+              const found = evaluate ? expressionAt(line.text, position - line.from) : null;
+              if (!evaluate || !found) {
+                return null;
+              }
+              const value = await evaluate(found.text);
+              if (!value) {
+                return null;
+              }
+              return {
+                pos: line.from + found.from,
+                end: line.from + found.to,
+                above: true,
+                create: () => ({ dom: hoverDom(found.text, value) }),
+              };
+            },
+            { hoverTime: 300 },
+          ),
           EditorView.contentAttributes.of({ "aria-label": "Source", "data-keys": "debugger" }),
         ],
       }),

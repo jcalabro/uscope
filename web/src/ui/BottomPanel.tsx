@@ -1,9 +1,19 @@
-// The program's output, what logpoints wrote, and the program's input.
+// The console, and the program's output, what logpoints wrote, and the
+// program's input.
 
 import { useEffect, useRef, useState } from "react";
 import { controls } from "../model";
+import { isString, read, write } from "../storage";
 import { useConnection, useModel } from "../store";
+import { Console } from "./Console";
 import { useSplit } from "./Split";
+
+type Tab = "console" | "output";
+
+const TABS: readonly { key: Tab; label: string }[] = [
+  { key: "console", label: "Console" },
+  { key: "output", label: "Output" },
+];
 
 export function BottomPanel() {
   const split = useSplit("uscope-split-bottom", 220, {
@@ -12,17 +22,49 @@ export function BottomPanel() {
     axis: "rows",
     reversed: true,
   });
+  const [shown, setShown] = useState<Tab>(() =>
+    read(
+      "uscope-bottom-tab",
+      "output",
+      (value): value is Tab => isString(value) && ["console", "output"].includes(value),
+    ),
+  );
+  const choose = (tab: Tab) => {
+    setShown(tab);
+    write("uscope-bottom-tab", tab);
+  };
   return (
     <>
       <div {...split.handle} />
-      <section className="pane bottom" style={{ height: split.size }} aria-label="Output">
-        <div className="pane-head tabs-head">
-          <span className="tab-label on">Output</span>
-          <OutputCount />
+      <section
+        className="pane bottom"
+        style={{ height: split.size }}
+        aria-label="Console and output"
+      >
+        <div className="pane-head tabs-head" role="tablist">
+          {TABS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={shown === tab.key}
+              className={`tab-label ${shown === tab.key ? "on" : ""}`}
+              onClick={() => choose(tab.key)}
+            >
+              {tab.label}
+              {tab.key === "output" && <OutputCount />}
+            </button>
+          ))}
           <span className="end">Alt+6</span>
         </div>
-        <Output />
-        <Input />
+        {shown === "console" ? (
+          <Console />
+        ) : (
+          <>
+            <Output />
+            <Input />
+          </>
+        )}
       </section>
     </>
   );
@@ -30,7 +72,7 @@ export function BottomPanel() {
 
 function OutputCount() {
   const bytes = useModel((model) => model.outputBytes);
-  return bytes > 0 ? <span className="count">{bytes.toLocaleString()} bytes</span> : null;
+  return bytes > 0 ? <span className="count"> {bytes.toLocaleString()} bytes</span> : null;
 }
 
 function Output() {
@@ -50,6 +92,8 @@ function Output() {
     <div
       className="pane-body"
       ref={body}
+      data-pane="6"
+      tabIndex={-1}
       onScroll={(event) => {
         const element = event.currentTarget;
         pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;

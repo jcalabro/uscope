@@ -1,6 +1,7 @@
 // The session's main screen: where the tab looks comes from the URL, and
 // every pane shows that one focus. The left column says where you are, the
-// center shows the code and the program's output.
+// center shows the code, the console, and the program's output, and the
+// right column shows the values at the focus.
 
 import { useLocation, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { createContext, useContext, useEffect, useMemo, useRef } from "react";
@@ -17,6 +18,7 @@ import { CodeArea } from "./CodeArea";
 import { useSplit } from "./Split";
 import { Stack } from "./Stack";
 import { Threads } from "./Threads";
+import { Variables, Watch } from "./Values";
 
 export interface Focus {
   session: string;
@@ -75,6 +77,7 @@ export function Workspace() {
     tab.setState({ frames });
   }, [frames]);
   const left = useSplit("uscope-split-left", 270, { min: 180, max: 520 });
+  const right = useSplit("uscope-split-right", 340, { min: 220, max: 720, reversed: true });
 
   const focus = useMemo((): Focus | null => {
     if (!state) {
@@ -99,7 +102,9 @@ export function Workspace() {
     <FocusContext value={focus}>
       <main
         className="workspace"
-        style={{ gridTemplateColumns: `${left.size}px 5px minmax(0, 1fr)` }}
+        style={{
+          gridTemplateColumns: `${left.size}px 5px minmax(0, 1fr) 5px ${right.size}px`,
+        }}
       >
         <div className="column">
           <Threads />
@@ -111,6 +116,11 @@ export function Workspace() {
           <Banner />
           <CodeArea />
           <BottomPanel />
+        </div>
+        <div {...right.handle} />
+        <div className="column right">
+          <Watch />
+          <Variables />
         </div>
       </main>
     </FocusContext>

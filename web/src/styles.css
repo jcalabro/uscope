@@ -123,16 +123,20 @@ body,
   margin: 0;
 }
 
+/* `->` is two characters in code everywhere, never an arrow. Every `font`
+   shorthand turns ligatures back on, so this outranks them all. */
+*,
+*::before,
+*::after {
+  /* biome-ignore lint/complexity/noImportantStyles: no rule may draw ligatures */
+  font-variant-ligatures: none !important;
+}
+
 body {
   background: var(--paper);
   color: var(--ink);
   font: 13px / 1.45 var(--sans);
   -webkit-font-smoothing: antialiased;
-  /* Code and values show the characters they have: != is two of them. */
-  font-variant-ligatures: none;
-  font-feature-settings:
-    "calt" 0,
-    "liga" 0;
 }
 
 button,
@@ -1256,8 +1260,6 @@ textarea.input {
 .source-view .cm-editor .cm-content {
   padding: 4px 0;
   caret-color: var(--accent);
-  font-variant-ligatures: none;
-  font-feature-settings: inherit;
 }
 
 .source-view .cm-line {
@@ -1461,4 +1463,317 @@ textarea.input {
   border-color: var(--line);
   background: var(--surface);
   color: var(--ink);
+}
+
+/* ---------- values ---------- */
+
+.column.right {
+  border-right: 0;
+  border-left: 1px solid var(--line);
+}
+
+.pane.watch {
+  flex: 0 1 auto;
+  max-height: 40%;
+}
+
+.value-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font: 12px / var(--row) var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.pane-body > .value-list,
+.pane-body > .value-list[role="tree"] {
+  padding: 3px 0;
+}
+
+.value-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--row);
+  padding-right: 8px;
+  white-space: nowrap;
+}
+
+.value-row:hover {
+  background: var(--select-bg);
+}
+
+.value-row.truncated {
+  color: var(--ink-3);
+  font-style: italic;
+}
+
+.twist {
+  flex: none;
+  width: 14px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+}
+
+.value-name {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+}
+
+.value-text {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+}
+
+.value-text.editable {
+  cursor: text;
+}
+
+.value-text.changed {
+  color: var(--changed);
+  font-weight: 600;
+}
+
+.value-text .was {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
+.value-text.error {
+  color: var(--error);
+}
+
+.value-type {
+  flex: none;
+  max-width: 35%;
+  overflow: hidden;
+  color: var(--ink-3);
+  font-size: 11px;
+  text-overflow: ellipsis;
+}
+
+.value-row .remove {
+  opacity: 0;
+}
+
+.value-row:hover .remove,
+.value-row:focus-within .remove {
+  opacity: 1;
+}
+
+.value-edit {
+  display: flex;
+  flex: 1;
+  gap: 6px;
+  min-width: 0;
+}
+
+.value-edit .input {
+  flex: 1;
+  height: calc(var(--row) - 2px);
+  padding: 0 4px;
+  font: inherit;
+}
+
+.value-edit .error {
+  color: var(--error);
+}
+
+.more {
+  height: var(--row);
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.scope-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--row);
+  padding: 0 8px 0 6px;
+  color: var(--ink-3);
+  font: 600 10.5px var(--sans);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.scope-head .count {
+  font: 500 10.5px var(--mono);
+}
+
+.value-list .empty {
+  padding: 0 10px 0 26px;
+  font-size: 12px;
+  line-height: var(--row);
+}
+
+.empty.error,
+.value-list .empty.error {
+  color: var(--error);
+}
+
+.watch-add {
+  padding: 2px 6px 4px 26px;
+}
+
+.watch-add .input,
+.console-input .input {
+  width: 100%;
+  font: 12px var(--mono);
+}
+
+/* ---------- console ---------- */
+
+.console {
+  padding: 4px 0;
+  font: 12px / 1.5 var(--mono);
+}
+
+.console-entries {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.console-entry {
+  padding: 2px 10px 4px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.console-entry pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+
+.console-entry pre.error {
+  color: var(--error);
+}
+
+.console-entry .value-list {
+  margin-left: -6px;
+}
+
+.console-line {
+  color: var(--ink-3);
+}
+
+.console-input {
+  position: relative;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-top: 1px solid var(--line);
+}
+
+.completions {
+  position: absolute;
+  bottom: 100%;
+  left: 24px;
+  z-index: 5;
+  max-width: 420px;
+  max-height: 220px;
+  margin: 0;
+  padding: 3px 0;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  list-style: none;
+  font: 12px / 1.6 var(--mono);
+}
+
+.completions button {
+  width: 100%;
+  padding: 0 10px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.completions button:hover {
+  background: var(--accent-soft);
+}
+
+.tabs-head .tab-label {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+[data-pane]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.source-view .cm-inline-values {
+  margin-left: 2ch;
+  color: var(--ink-3);
+  font-style: italic;
+}
+
+.source-view .cm-inline-values > span + span::before {
+  content: " · ";
+}
+
+.source-view .cm-inline-values .changed {
+  color: var(--changed);
+  font-style: normal;
+}
+
+.cm-value-tooltip {
+  display: flex;
+  gap: 6px;
+  max-width: 560px;
+  padding: 3px 8px;
+  font: 12px / 1.5 var(--mono);
+}
+
+.cm-value-tooltip .text {
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cm-value-tooltip .type {
+  color: var(--ink-3);
+}
+
+.source-view .cm-tooltip {
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
 }
