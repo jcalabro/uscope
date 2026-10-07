@@ -764,6 +764,12 @@ build_fixture gcc "$c_fixtures_dir/enums.c" "$output_dir/enums-c-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/enums.c" "$output_dir/enums-c-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+for variant in "gcc -O0" "gcc -O2" "clang -O2"; do
+    read -r compiler level <<<"$variant"
+    suffix="${level#-}"
+    build_fixture "$compiler" "$c_fixtures_dir/realigned.c" \
+        "$output_dir/realigned-${compiler}-${suffix,,}" "$level" -g3 -gdwarf-5 -fPIE -pie
+done
 for compiler in gcc clang; do
     build_fixture "$compiler" "$c_fixtures_dir/function-types.c" \
         "$output_dir/function-types-${compiler}-o0" -O0 -g3 -gdwarf-5 -fPIE -pie

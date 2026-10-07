@@ -572,3 +572,62 @@ async fn backtraces_unwind_through_a_signal_handler() {
     assert_eq!(trace.termination, UnwindTermination::Complete, "{trace:#?}");
     scenario.shutdown().await;
 }
+
+/// GCC describes a function that realigns its stack through a register
+/// holding the incoming stack pointer with call-frame expressions: its
+/// CFA is read through the saved pointer, and its caller's frame pointer
+/// is where a `DW_CFA_expression` rule computes. The walk goes through it,
+/// and the caller's variables, found from its frame pointer, are its own.
+#[tokio::test]
+async fn backtraces_unwind_through_frames_described_by_expressions() {
+    for fixture in ["realigned-gcc-o0", "realigned-gcc-o2", "realigned-clang-o2"] {
+        let mut scenario = Scenario::launch(fixture);
+        scenario.add_breakpoint("leaf").await;
+        assert!(
+            matches!(scenario.run_to_stop().await, StopReason::Breakpoint { .. }),
+            "{fixture}"
+        );
+        let trace = scenario
+            .operation("backtrace", scenario.handle().backtrace())
+            .await;
+        let names = trace
+            .frames
+            .iter()
+            .map(|frame| {
+                frame
+                    .function
+                    .as_ref()
+                    .map(|function| function.name.to_string())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names[..3],
+            [
+                Some("leaf".to_owned()),
+                Some("realigned".to_owned()),
+                Some("main".to_owned())
+            ],
+            "{fixture}: {trace:#?}"
+        );
+        assert_eq!(
+            trace.termination,
+            UnwindTermination::Complete,
+            "{fixture}: {trace:#?}"
+        );
+        scenario
+            .operation(
+                "select main",
+                scenario.handle().select_frame(trace.frames[2].id),
+            )
+            .await;
+        let local = scenario
+            .operation("local", scenario.handle().variable("local"))
+            .await;
+        assert_eq!(
+            available_value(&local.state),
+            &uscope::VariableValue::Scalar(uscope::ScalarValue::Signed(41)),
+            "{fixture}: {local:?}"
+        );
+        scenario.shutdown().await;
+    }
+}
