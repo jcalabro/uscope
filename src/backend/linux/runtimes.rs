@@ -14,10 +14,11 @@ use crate::runtime_model::{
 };
 use crate::{
     Error, ExecutionContext, ImageAddress, LoadedModule, ModuleImage, Result, RuntimeId,
-    TaskCursor, TaskId, TaskLocation, TaskPage, TaskSnapshot, ThreadActivity, ThreadId,
-    VirtualAddress,
+    StackSegment, TaskCursor, TaskId, TaskLocation, TaskPage, TaskSnapshot, ThreadActivity,
+    ThreadId, VirtualAddress,
 };
 
+use super::activation::TaskStack;
 use super::frames::{RootOrigin, StackRoot};
 use super::memory::read_logical_memory;
 use super::native::InspectionOps;
@@ -310,6 +311,32 @@ impl<P: InspectionOps> Controller<P> {
             }
         }
         found
+    }
+}
+
+impl<P: InspectionOps> Controller<P> {
+    /// The stack of the task a stopped thread runs, as its runtime bounds it
+    /// now, or `None` when the thread runs no task or its stack is unknown.
+    pub(super) fn task_stack(&self, inferior: &Inferior, pid: Pid) -> Option<TaskStack> {
+        let Some(ThreadActivity::Task { task, .. }) = self.thread_activity(inferior, pid) else {
+            return None;
+        };
+        let runtime = self
+            .runtimes(inferior)
+            .into_iter()
+            .find(|runtime| runtime.id == task.runtime)?;
+        let stacks = self.with_runtime_stop(inferior, &runtime, pid, |stop| {
+            runtime.model.thread_stacks(stop, debug_thread_id(pid))
+        });
+        stacks
+            .ok()?
+            .into_iter()
+            .find(|(_, segment)| *segment == StackSegment::Task)
+            .map(|(bounds, _)| TaskStack {
+                task,
+                low: bounds.start,
+                high: bounds.end,
+            })
     }
 }
 

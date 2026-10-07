@@ -499,26 +499,33 @@ impl<P: InspectionOps> Controller<P> {
         })
     }
 
-    /// Whether a stopped thread is running the step `owner` names.
-    #[expect(
-        clippy::unused_self,
-        reason = "every step is a thread's until a runtime's tasks are known"
-    )]
+    /// Whether a stopped thread is running the step `owner` names: the
+    /// step's task, wherever its runtime runs it, or else its thread.
     pub(super) fn runs_step(&self, owner: StepOwner, pid: Pid) -> bool {
-        owner.thread == pid
+        let Some(task) = owner.task else {
+            return owner.thread == pid;
+        };
+        self.inferior.as_ref().is_some_and(|inferior| {
+            matches!(
+                self.thread_activity(inferior, pid),
+                Some(crate::ThreadActivity::Task { task: running, .. }) if running == task
+            )
+        })
     }
 
-    /// How the stack a stopped thread runs on is seen at this stop.
-    #[expect(
-        clippy::unused_self,
-        reason = "every stack is a thread's until a runtime's tasks are known"
-    )]
-    pub(super) const fn stack_view(&self, pid: Pid) -> StackView {
-        StackView::thread(pid)
+    /// How the stacks a stopped thread runs on are seen at this stop.
+    pub(super) fn stack_view(&self, pid: Pid) -> StackView {
+        self.inferior
+            .as_ref()
+            .and_then(|inferior| self.task_stack(inferior, pid))
+            .map_or_else(
+                || StackView::thread(pid),
+                |stack| StackView::task(pid, stack),
+            )
     }
 
-    /// Where a stopped thread's stack pointer lies on its stack.
-    pub(super) const fn stack_position(
+    /// Where a stopped thread's stack pointer lies on its stacks.
+    pub(super) fn stack_position(
         &self,
         pid: Pid,
         native: &libc::user_regs_struct,

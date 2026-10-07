@@ -460,8 +460,11 @@ enum Resume {
 /// Whom a step belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StepOwner {
-    /// The thread the step runs on.
+    /// The thread the step runs on: the one it began on, until its task
+    /// runs on another.
     thread: Pid,
+    /// The task the step began in, which it follows from thread to thread.
+    task: Option<crate::TaskId>,
 }
 
 #[derive(Debug, Clone)]
