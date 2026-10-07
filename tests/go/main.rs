@@ -12,6 +12,7 @@ mod cores;
 mod corrupted;
 mod defers;
 mod failing;
+mod gofmt;
 mod hosted;
 mod invariants;
 mod maps;

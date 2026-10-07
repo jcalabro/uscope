@@ -334,6 +334,15 @@ build_rust_fixture() {
         -C link-arg=-lc "$@"
 }
 
+# Reads the Go toolchain's version and target once.
+read_go_version() {
+    if [[ -z "$go_version" ]]; then
+        go_version=$(go version)
+        go_target=$(go env GOOS GOARCH)
+        go_target=${go_target//$'\n'//}
+    fi
+}
+
 # Builds a Go package without cgo. GO_CGO=1 enables cgo, which an external
 # link needs; GO_CC and GO_CFLAGS then choose its C compiler and flags.
 build_go_fixture() {
@@ -352,12 +361,22 @@ build_go_fixture() {
         env "CGO_ENABLED=${GO_CGO:-0}" ${GO_CC:+"CC=$GO_CC"} ${GO_CFLAGS:+"CGO_CFLAGS=$GO_CFLAGS"}
         go build -buildvcs=false "$@" -o "$output" "${sources[@]}"
     )
-    if [[ -z "$go_version" ]]; then
-        go_version=$(go version)
-        go_target=$(go env GOOS GOARCH)
-        go_target=${go_target//$'\n'//}
-    fi
+    read_go_version
     run_cached_build "$package_dir" "$output" \
+        "compiler=${go_version}"$'\n'"target=${go_target}"$'\n'"backend=gc" \
+        "${command[@]}"
+}
+
+# Builds a command from the pinned Go toolchain's own sources.
+build_go_command() {
+    local package="$1"
+    local output="$2"
+    shift 2
+    local -a command=(
+        env CGO_ENABLED=0 go build -buildvcs=false "$@" -o "$output" "$package"
+    )
+    read_go_version
+    run_cached_build "$(go env GOROOT)/src/$package" "$output" \
         "compiler=${go_version}"$'\n'"target=${go_target}"$'\n'"backend=gc" \
         "${command[@]}"
 }
@@ -1257,6 +1276,9 @@ build_go_fixture "$go_fixtures_dir/workers" "$output_dir/workers-go-o2"
 # DWARF gives, which a position-dependent executable runs at.
 build_go_fixture "$go_fixtures_dir/corrupt" "$output_dir/corrupt-go"
 build_go_fixture "$go_fixtures_dir/scale" "$output_dir/scale-go"
+# A large real program, many packages of the standard library's.
+build_go_command cmd/gofmt "$output_dir/gofmt-go-o0" -buildmode=pie "-gcflags=all=-N -l"
+build_go_command cmd/gofmt "$output_dir/gofmt-go-o2"
 build_go_fixture "$go_fixtures_dir/stacks" "$output_dir/stacks-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/stacks" "$output_dir/stacks-go-o2"
