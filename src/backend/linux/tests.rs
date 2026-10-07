@@ -784,7 +784,7 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
 
 fn step_execution(thread: Pid, kind: StepKind, start: StepStart) -> ActiveKind {
     ActiveKind::Step {
-        owner: StepOwner { thread },
+        owner: StepOwner { thread, task: None },
         kind,
         start: Box::new(start),
         progress_owed: false,

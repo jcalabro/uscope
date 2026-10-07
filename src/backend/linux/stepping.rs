@@ -12,7 +12,7 @@ use crate::protocol::{
 use crate::unwind::{CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext};
 use crate::{
     CodeInstanceKind, Error, ImageAddress, ImageLocation, InlineFrameLookup, LoadedModule, Result,
-    SourceLocation, StackFrameId, VirtualAddress,
+    SourceLocation, StackFrameId, StackSegment, TaskId, ThreadActivity, VirtualAddress,
 };
 
 use super::activation::{Activation, StackPosition};
@@ -201,6 +201,16 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// thread is with [`StopReason::StepIncomplete`]. The program is never
     /// harmed for the debugger's lack of evidence.
     pub(super) fn complete_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
+        if let Some(description) = self.task_left_step(pid, kind) {
+            record!("step {kind:?} lost its task: {description}");
+            return self.begin_visible_stop(
+                pid,
+                StopReason::StepIncomplete {
+                    kind,
+                    description: description.into(),
+                },
+            );
+        }
         match self.advance_user_step(pid, kind) {
             Err(error) if is_lost_step_evidence(&error) && self.thread_is_stopped(pid) => {
                 self.check_still_stopped(pid)?;
@@ -231,6 +241,63 @@ impl<P: LinuxTraceOps> Controller<P> {
                 Ok(Some(step_incomplete(kind, &error)))
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// The task a step begun on a stopped thread follows, whichever thread
+    /// runs it: the task whose own stack the thread is on. Code on the
+    /// thread's own stacks, such as a runtime's scheduler, stays on the
+    /// thread whatever task it serves.
+    pub(super) fn step_task(&self, pid: Pid) -> Option<TaskId> {
+        match self.thread_activity(self.inferior.as_ref()?, pid)? {
+            ThreadActivity::Task {
+                task,
+                stack: StackSegment::Task,
+            } => Some(task),
+            _ => None,
+        }
+    }
+
+    /// Why a source step can follow its task no further, when the task
+    /// stopped running on the thread stepping it. That happens only inside
+    /// the runtime's scheduler, which source steps pass over by breakpoints.
+    fn task_left_step(&self, pid: Pid, kind: StepKind) -> Option<String> {
+        if steps_instructions(kind) {
+            return None;
+        }
+        let inferior = self.inferior.as_ref()?;
+        let ActiveKind::Step { owner, .. } = &inferior.active.as_ref()?.kind else {
+            return None;
+        };
+        let task = owner.task?;
+        if self.runs_step(*owner, pid) {
+            return None;
+        }
+        let noun = self
+            .runtimes(inferior)
+            .into_iter()
+            .find(|runtime| runtime.id == task.runtime)
+            .map_or("task", |runtime| runtime.model.task_noun());
+        Some(format!(
+            "{noun} {} stopped running on thread {pid} during the step",
+            task.number
+        ))
+    }
+
+    /// Moves the active step to `pid`, which now runs the step's task.
+    pub(super) fn follow_step(&mut self, pid: Pid) {
+        if let Some(ActiveKind::Step { owner, .. }) = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.active.as_mut())
+            .map(|active| &mut active.kind)
+            && owner.thread != pid
+        {
+            record!(
+                "step follows its task from thread {} to thread {pid}",
+                owner.thread
+            );
+            owner.thread = pid;
         }
     }
 

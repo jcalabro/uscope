@@ -96,13 +96,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             Ok(None) => {}
         }
+        let task = self.step_task(pid);
         let result = self.step_start(pid, kind, frame).and_then(|start| {
             self.begin_execution(
                 process_id,
                 stop_id,
                 scope,
                 ActiveKind::Step {
-                    owner: StepOwner { thread: pid },
+                    owner: StepOwner { thread: pid, task },
                     kind,
                     start: Box::new(start),
                     progress_owed: false,
@@ -343,7 +344,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         match kind {
             ActiveKind::Step {
-                owner: StepOwner { thread },
+                owner: StepOwner { thread, .. },
                 kind,
                 progress_owed,
                 ..
@@ -663,6 +664,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .get(&address)
                 .is_some_and(|site| site.owners.contains(&BreakpointOwner::Plan(*execution)))
         });
+        if step.is_some() {
+            self.follow_step(pid);
+        }
         if let Some((_, kind)) = planned {
             if self.reach_signal_guard(pid, address)? {
                 return Ok(());
