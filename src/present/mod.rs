@@ -9,6 +9,7 @@
 //! state between requests.
 
 pub mod complete;
+mod completing;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;

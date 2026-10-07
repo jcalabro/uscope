@@ -8,7 +8,7 @@ use serde_json::Value;
 mod protocol;
 
 #[allow(dead_code, reason = "the target exercises the parser only")]
-#[path = "../../src/dap/complete.rs"]
+#[path = "../../src/present/completing.rs"]
 mod complete;
 
 /// Decodes request arguments as each request the adapter serves would.
