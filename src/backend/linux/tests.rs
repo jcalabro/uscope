@@ -3806,6 +3806,280 @@ fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_
     );
 }
 
+/// A runtime whose threads run the tasks a test sets, so run control's
+/// following of a task is tested without any language's runtime.
+#[derive(Debug, Default)]
+struct ScriptedRuntime {
+    running: std::sync::Mutex<BTreeMap<crate::ThreadId, u64>>,
+}
+
+impl ScriptedRuntime {
+    fn runs(&self, thread: Pid, task: u64) {
+        self.running
+            .lock()
+            .expect("the script")
+            .insert(debug_thread_id(thread), task);
+    }
+}
+
+impl crate::runtime_model::RuntimeModel for ScriptedRuntime {
+    fn tasks(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _start: u64,
+        _limit: usize,
+        _program_only: bool,
+    ) -> crate::runtime_model::Partial<crate::runtime_model::TaskPage> {
+        crate::runtime_model::Partial {
+            value: crate::runtime_model::TaskPage {
+                tasks: Vec::new(),
+                next: None,
+            },
+            gaps: Vec::new(),
+        }
+    }
+    fn thread_activity(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        thread: crate::ThreadId,
+    ) -> crate::runtime_model::ThreadActivity {
+        self.running
+            .lock()
+            .expect("the script")
+            .get(&thread)
+            .map_or(crate::runtime_model::ThreadActivity::Idle, |&number| {
+                crate::runtime_model::ThreadActivity::Task {
+                    number,
+                    stack: crate::StackSegment::Task,
+                }
+            })
+    }
+    fn task_context(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _task: crate::runtime_model::TaskRef,
+    ) -> std::result::Result<Option<crate::runtime_model::TaskContext>, Arc<str>> {
+        Ok(None)
+    }
+    fn thread_stacks(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _thread: crate::ThreadId,
+    ) -> std::result::Result<Vec<(std::ops::Range<u64>, crate::StackSegment)>, Arc<str>> {
+        Ok(Vec::new())
+    }
+    fn cross(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _thread: crate::ThreadId,
+        _frame: &RegisterFile,
+        _after_call: bool,
+    ) -> std::result::Result<crate::runtime_model::Crossing, Arc<str>> {
+        Ok(crate::runtime_model::Crossing::Stay)
+    }
+    fn signals(&self) -> crate::runtime_model::RuntimeSignals {
+        crate::runtime_model::RuntimeSignals::default()
+    }
+    fn hooks(&self) -> &[crate::runtime_model::RuntimeHook] {
+        &[]
+    }
+    fn exception(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _hook: ImageAddress,
+        _registers: &RegisterFile,
+    ) -> std::result::Result<crate::runtime_model::RuntimeException, Arc<str>> {
+        Err("the script has no exceptions".into())
+    }
+    fn dynamic_value(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _representation: &str,
+        _value: crate::runtime_model::StoredValue<'_>,
+    ) -> Option<std::result::Result<crate::runtime_model::DynamicValue, Arc<str>>> {
+        None
+    }
+    fn stack_mover(&self) -> Option<ImageAddress> {
+        None
+    }
+    fn moving_task(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _registers: &RegisterFile,
+    ) -> std::result::Result<u64, Arc<str>> {
+        Err("the script moves no stacks".into())
+    }
+    fn task_stack(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _task: crate::runtime_model::TaskRef,
+    ) -> std::result::Result<Option<std::ops::Range<u64>>, Arc<str>> {
+        Ok(None)
+    }
+    fn call_out(
+        &self,
+        _entry: ImageAddress,
+        _registers: &RegisterFile,
+    ) -> Option<std::result::Result<VirtualAddress, Arc<str>>> {
+        None
+    }
+    fn task_starter(&self) -> Option<ImageAddress> {
+        None
+    }
+    fn started_task(
+        &self,
+        _stop: &dyn crate::runtime_model::RuntimeStop,
+        _registers: &RegisterFile,
+    ) -> std::result::Result<crate::runtime_model::RuntimeTask, Arc<str>> {
+        Err("the script starts no tasks".into())
+    }
+    fn task_noun(&self) -> &'static str {
+        "task"
+    }
+}
+
+/// A stack of one frame, whose CFA is 0x1000 wherever it is.
+struct FlatUnwindInfo;
+
+impl UnwindInfo for FlatUnwindInfo {
+    fn cfa(
+        &self,
+        _address: ImageAddress,
+        _registers: &RegisterFile,
+        _memory: &mut dyn MemoryReader,
+    ) -> std::result::Result<VirtualAddress, UnwindTermination> {
+        Ok(VirtualAddress::new(0x1000))
+    }
+
+    fn unwind(
+        &self,
+        _address: ImageAddress,
+        _registers: &RegisterFile,
+        _memory: &mut dyn MemoryReader,
+    ) -> std::result::Result<crate::unwind::UnwindStep, UnwindTermination> {
+        Err(UnwindTermination::Complete)
+    }
+}
+
+/// Begins a source step over a line of `task`, which `thread` runs, with
+/// its plan's site at 0x40.
+fn begin_task_step(harness: &mut WatchHarness, thread: Pid, task: crate::TaskId) {
+    harness.start_continue();
+    let inferior = harness.inferior();
+    let active = inferior.active.as_mut().expect("execution");
+    let mut kind = step_execution(
+        thread,
+        StepKind::OverSource,
+        StepStart {
+            plan_addresses: BTreeSet::from([VirtualAddress::new(0x40)]),
+            ..StepStart::default()
+        },
+    );
+    if let ActiveKind::Step { owner, .. } = &mut kind {
+        owner.task = Some(task);
+    }
+    active.kind = kind;
+    let execution = active.id;
+    inferior
+        .plan_sites
+        .insert(execution, BTreeSet::from([VirtualAddress::new(0x40)]));
+    inferior.breakpoints.insert(
+        VirtualAddress::new(0x40),
+        BreakpointSite {
+            original_byte: 0x90,
+            installed: true,
+            owners: BTreeSet::from([BreakpointOwner::Plan(execution)]),
+        },
+    );
+}
+
+/// A step that belongs to a task follows it to whichever thread its
+/// runtime runs it on: another task's thread at the step's site is stepped
+/// over unseen, and the task's new thread takes the step on.
+#[test]
+fn a_step_follows_its_task_to_another_thread_and_passes_the_others() {
+    let mut harness = watch_harness(3);
+    harness.controller.unwind_info = Arc::new(FlatUnwindInfo);
+    let (first, moved, other) = (harness.threads[0], harness.threads[1], harness.threads[2]);
+    let runtime = Arc::new(ScriptedRuntime::default());
+    let image = Arc::clone(&harness.controller.module_image);
+    harness
+        .controller
+        .runtime_models
+        .borrow_mut()
+        .insert(image.id(), Some(Ok(Arc::clone(&runtime) as _)));
+    let task = crate::TaskId {
+        runtime: crate::RuntimeId::new(harness.inferior().loaded_module.id.get()),
+        number: 1,
+    };
+    runtime.runs(first, 1);
+    begin_task_step(&mut harness, first, task);
+    harness.published();
+    harness.trace().take_actions();
+    // The runtime moves the task to another thread, and runs another task
+    // where it was.
+    runtime.runs(first, 2);
+    runtime.runs(moved, 1);
+    runtime.runs(other, 3);
+    let owner = |harness: &mut WatchHarness| match &harness.inferior().active.as_ref()?.kind {
+        ActiveKind::Step { owner, .. } => Some(owner.thread),
+        _ => None,
+    };
+
+    harness.hit_at(other, 0x40).expect("another task's trap");
+    harness.settle_requested_stops();
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            "set_registers 5002 rip=0x40",
+            "request_stop 5000",
+            "request_stop 5001",
+            "remove_site 0x40",
+            "step 5002",
+        ],
+        "another task's thread is stepped over the site alone"
+    );
+    harness
+        .trap(other, libc::TRAP_TRACE, debug_registers::STATUS_IDLE)
+        .expect("the repair step");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            "reinstall_site 0x40",
+            "continue 5000 None",
+            "continue 5001 None",
+            "continue 5002 None",
+        ]
+    );
+    assert_eq!(owner(&mut harness), Some(first));
+
+    harness.hit_at(moved, 0x40).expect("the task's trap");
+    assert_eq!(
+        owner(&mut harness),
+        Some(moved),
+        "the step follows its task"
+    );
+    harness.settle_requested_stops();
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            "set_registers 5001 rip=0x40",
+            "request_stop 5000",
+            "request_stop 5002",
+            "remove_site 0x40",
+            "step 5001",
+        ],
+        "the task's new thread steps on from the site"
+    );
+    assert!(
+        !harness
+            .published()
+            .iter()
+            .any(|event| matches!(event, DebuggerEvent::InferiorStopped { .. })),
+        "neither hit is reported"
+    );
+}
+
 #[test]
 fn ending_a_plan_removes_only_the_sites_it_still_owns() {
     let mut harness = watch_harness(1);

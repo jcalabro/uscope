@@ -822,7 +822,6 @@ struct ThreadGs {
 }
 
 impl GoRuntime {
-    /// The goroutine numbered `number`: its g, and what it is.
     /// The g of a goroutine and the goroutine it is: at its locator, when
     /// the g there still has its number, or else the first g in `allgs`
     /// that does.
@@ -1070,3 +1069,6 @@ fn string(stop: &dyn RuntimeStop, header: VirtualAddress) -> Option<Arc<str>> {
         .then_some(())?;
     String::from_utf8(bytes).ok().map(Arc::from)
 }
+
+#[cfg(test)]
+mod tests;

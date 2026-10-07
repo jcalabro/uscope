@@ -196,3 +196,35 @@ impl GoSession {
         }
     }
 }
+
+/// The comparison fails on the lies it exists to catch: a goroutine left
+/// out, one listed twice, one in the wrong state, and a dropped frame.
+#[tokio::test]
+async fn the_truth_fails_on_the_lies_it_looks_for() {
+    let session = GoSession::launch("workers-go-o0").await;
+    let truth = session.checkpoint("parked");
+    let (tasks, gaps) = session.tasks(64).await;
+    assert!(gaps.is_empty(), "{gaps:?}");
+    truth.check_tasks(&tasks).expect("the listing holds");
+    let program = tasks
+        .iter()
+        .position(|task| !task.internal && task.thread.is_none())
+        .expect("a parked goroutine of the program's");
+
+    let mut missing = tasks.clone();
+    missing.remove(program);
+    assert!(truth.check_tasks(&missing).is_err());
+    let mut twice = tasks.clone();
+    twice.push(tasks[program].clone());
+    assert!(truth.check_tasks(&twice).is_err());
+    let mut running = tasks.clone();
+    running[program].state = TaskState::Running;
+    assert!(truth.check_tasks(&running).is_err());
+
+    let dumped = &truth.tasks[&tasks[program].id.number];
+    dumped
+        .check_frames(&dumped.frames)
+        .expect("the dump's frames");
+    assert!(dumped.check_frames(&dumped.frames[1..]).is_err());
+    session.scenario.shutdown().await;
+}
