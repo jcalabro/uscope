@@ -4,6 +4,7 @@ import { commandFor, isTextBox } from "../keys";
 import { targetName } from "../model";
 import { useModel } from "../store";
 import { useCommands } from "./commands";
+import { KeyHelp } from "./KeyHelp";
 import { NeedsLink } from "./pages";
 import { Strip } from "./Strip";
 import { Toolbar } from "./Toolbar";
@@ -41,6 +42,7 @@ export function Shell() {
       <Toolbar />
       <Outlet />
       <Strip />
+      <KeyHelp />
     </div>
   );
 }

@@ -12,6 +12,9 @@ import { browserAuthorized, browserConnect } from "./connection";
 import { createAppRouter } from "./router";
 import { isString, read } from "./storage";
 import { createSession, SessionContext } from "./store";
+import { apply, savedTheme } from "./theme";
+
+apply(savedTheme());
 
 const session = createSession(
   { connect: browserConnect, authorized: browserAuthorized },

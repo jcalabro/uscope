@@ -23,6 +23,41 @@ export type Command =
   | "viewDisassembly"
   | "viewMemory";
 
+/** What each command is called in the palette and the key help. */
+export const LABELS: Record<Command, string> = {
+  continue: "Continue",
+  pause: "Pause",
+  kill: "Kill",
+  restart: "Restart",
+  over: "Step over",
+  into: "Step into",
+  out: "Step out",
+  instruction: "Step one instruction",
+  overInstruction: "Step over one instruction",
+  toggleBreakpoint: "Toggle breakpoint",
+  editBreakpoint: "Edit breakpoint condition",
+  frameUp: "Frame up",
+  frameDown: "Frame down",
+  copyLink: "Copy link",
+  pin: "Pin this tab",
+  watchSelection: "Watch selection",
+  palette: "Command palette",
+  files: "Open file",
+  line: "Go to line",
+  help: "Every key",
+  back: "Back to source",
+  pane1: "Focus threads",
+  pane2: "Focus the call stack",
+  pane3: "Focus breakpoints",
+  pane4: "Focus watches",
+  pane5: "Focus variables",
+  pane6: "Focus the console and output",
+  pane7: "Focus registers",
+  viewSource: "Show source",
+  viewDisassembly: "Show disassembly",
+  viewMemory: "Show memory",
+};
+
 export interface Binding {
   key: string;
   shift?: boolean;
