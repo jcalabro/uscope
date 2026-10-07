@@ -71,7 +71,11 @@ test("every stop is in the palette, and ? lists every key", async ({ page, uscop
     .getByRole("option", { name: /#2 breakpoint/ })
     .click();
   await expect(page).toHaveURL(/\/stop\/2\//);
-  await expect(page.getByTestId("passed")).toBeVisible();
+  await expect(page.getByTestId("passed")).toContainText("Stop #2 has passed");
+
+  // A stop the session never reached is not one that passed.
+  await page.goto(page.url().replace(/\/stop\/2\//, "/stop/99/"));
+  await expect(page.getByTestId("passed")).toContainText("This session has not reached stop #99");
 
   await page.keyboard.press("?");
   const help = page.getByRole("dialog", { name: "Keys" });
