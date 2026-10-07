@@ -133,6 +133,17 @@
                 "default": [],
                 "description": "View files that present values, ahead of the project's .uscope/views, the user's, the program's own, and the built-in views. Later files come first."
               },
+              "debugDirectories": {
+                "type": "array",
+                "items": { "type": "string" },
+                "default": [],
+                "description": "Directories searched for the separate debug files of stripped modules, by build-id under .build-id and by .gnu_debuglink, before NIX_DEBUG_INFO_DIRS and /usr/lib/debug."
+              },
+              "debuginfod": {
+                "type": "boolean",
+                "default": false,
+                "description": "Download debug files no directory holds from the debuginfod servers DEBUGINFOD_URLS lists, keeping them in debuginfod's cache."
+              },
               "disassemblySyntax": {
                 "type": "string",
                 "enum": ["intel", "att"],
@@ -217,6 +228,17 @@
                 "items": { "type": "string" },
                 "default": [],
                 "description": "View files that present values, ahead of the project's .uscope/views, the user's, the program's own, and the built-in views. Later files come first."
+              },
+              "debugDirectories": {
+                "type": "array",
+                "items": { "type": "string" },
+                "default": [],
+                "description": "Directories searched for the separate debug files of stripped modules, by build-id under .build-id and by .gnu_debuglink, before NIX_DEBUG_INFO_DIRS and /usr/lib/debug."
+              },
+              "debuginfod": {
+                "type": "boolean",
+                "default": false,
+                "description": "Download debug files no directory holds from the debuginfod servers DEBUGINFOD_URLS lists, keeping them in debuginfod's cache."
               },
               "disassemblySyntax": {
                 "type": "string",

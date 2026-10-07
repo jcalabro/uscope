@@ -1308,9 +1308,13 @@ mod tests {
                 let start = usize::try_from(address.checked_sub(text.address())?).ok()?;
                 code_bytes.get(start..start.checked_add(length)?)
             };
-            let image = crate::debug_info::load_bytes(std::path::Path::new(name), &bytes)
-                .expect("load the fixture's DWARF")
-                .image;
+            let image = crate::debug_info::load_program(
+                std::path::Path::new(name),
+                &bytes,
+                &crate::debug_info::DebugFileSearch::default(),
+            )
+            .expect("load the fixture's DWARF")
+            .image;
             let mut compared = 0;
             for instance in image
                 .code_instances()

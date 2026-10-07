@@ -557,10 +557,11 @@ impl Session {
         };
         let program = launch.program.clone();
         let title = format!("Loading {}", launch.program.display());
+        let debug_files = configuration.debug_files.clone();
         let debugger = self
             .with_progress(
                 title,
-                tokio::task::spawn_blocking(move || Debugger::new(&program)),
+                tokio::task::spawn_blocking(move || Debugger::new_with(&program, &debug_files)),
             )
             .await
             .map_err(|error| ErrorBody::shown(error.to_string()))?
@@ -591,16 +592,16 @@ impl Session {
                     process_id: process,
                     start_time,
                 });
+                let debug_files = &configuration.debug_files;
                 let attached = async {
-                    match (executable, held) {
-                        (Some(executable), Some(held)) => {
-                            Debugger::attach_held_with_executable(held, executable).await
+                    match held {
+                        Some(held) => {
+                            Debugger::attach_held_with(held, executable.as_deref(), debug_files)
+                                .await
                         }
-                        (None, Some(held)) => Debugger::attach_held(held).await,
-                        (Some(executable), None) => {
-                            Debugger::attach_with_executable(process, executable).await
+                        None => {
+                            Debugger::attach_with(process, executable.as_deref(), debug_files).await
                         }
-                        (None, None) => Debugger::attach(process).await,
                     }
                 };
                 let attached = self
@@ -688,6 +689,7 @@ impl Session {
             follow_forks,
             inherited,
             threads,
+            debug_files: _,
         } = configuration;
         let launched = matches!(start, Start::Launch(_));
         let core = matches!(start, Start::Core(_));

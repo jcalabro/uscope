@@ -162,6 +162,21 @@ struct Args {
     )]
     source_map: Vec<PathBuf>,
 
+    /// Search DIR for the separate debug files of modules stripped of their
+    /// debug information, before the system's directories. May be repeated.
+    #[arg(
+        long = "debug-directory",
+        value_name = "DIR",
+        hide_short_help = true,
+        help_heading = "Debug information"
+    )]
+    debug_directories: Vec<PathBuf>,
+
+    /// Download debug files no directory holds from the debuginfod servers
+    /// `DEBUGINFOD_URLS` lists.
+    #[arg(long, hide_short_help = true, help_heading = "Debug information")]
+    debuginfod: bool,
+
     /// Present values with the views in FILE, ahead of the project's, the
     /// user's, the program's own, and the built-in ones. May be repeated;
     /// later files come first.
@@ -396,7 +411,7 @@ fn project_launches() -> bool {
 }
 
 async fn run(session: Session, renderers: Renderers) -> Result<()> {
-    let debugger = open_debugger(&session.target).await?;
+    let debugger = open_debugger(&session.target, &session.debug_files).await?;
     let handle = debugger
         .handle()
         .with_source_paths(session.source_paths.clone());
@@ -561,25 +576,36 @@ async fn run_views(args: &ViewsArgs) -> Result<bool> {
     Ok(succeeded && usable)
 }
 
-async fn open_debugger(target: &Target) -> Result<Debugger> {
+async fn open_debugger(
+    target: &Target,
+    debug_files: &uscope::DebugFileOptions,
+) -> Result<Debugger> {
     match target {
-        Target::Core(options) => Debugger::open_core(options)
-            .with_context(|| format!("failed to open core dump {}", options.core.display())),
+        Target::Core(options) => {
+            let options = uscope::CoreDumpOptions {
+                debug_files: debug_files.clone(),
+                ..options.clone()
+            };
+            Debugger::open_core(&options)
+                .with_context(|| format!("failed to open core dump {}", options.core.display()))
+        }
         Target::Attach {
             process,
             executable: Some(executable),
-        } => Debugger::attach_with_executable(*process, executable)
+        } => Debugger::attach_with(*process, Some(executable), debug_files)
             .await
             .with_context(|| format!("failed to attach to process {process}")),
         Target::Attach {
             process,
             executable: None,
-        } => Debugger::attach(*process).await.with_context(|| {
-            format!(
-                "failed to attach to process {process}; if automatic /proc executable discovery is unavailable, pass EXECUTABLE explicitly"
-            )
-        }),
-        Target::Program(executable) => Debugger::new(executable).with_context(|| {
+        } => Debugger::attach_with(*process, None, debug_files)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to attach to process {process}; if automatic /proc executable discovery is unavailable, pass EXECUTABLE explicitly"
+                )
+            }),
+        Target::Program(executable) => Debugger::new_with(executable, debug_files).with_context(|| {
             format!("failed to initialize debugger for {}", executable.display())
         }),
     }

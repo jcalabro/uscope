@@ -43,9 +43,13 @@ struct Image {
 
 impl Image {
     fn load() -> Self {
-        let module = crate::debug_info::load_module(&fixture_path(), crate::ModuleImageId::new(0))
-            .expect("run `just build-test-programs`")
-            .image;
+        let module = crate::debug_info::load_module(
+            &fixture_path(),
+            crate::ModuleImageId::new(0),
+            &crate::debug_info::DebugFileSearch::default(),
+        )
+        .expect("run `just build-test-programs`")
+        .image;
         Self {
             module,
             hidden: Vec::new(),

@@ -352,6 +352,8 @@ pub struct ModuleImage {
     /// The views the image carries for its own types, in its
     /// `.debug_uscope_views` section.
     views: Arc<crate::view::ViewSet>,
+    /// The separate debug file found for the image.
+    debug_file: Option<crate::DebugFile>,
 }
 
 /// The first type, in identifier order, that each Go runtime type
@@ -512,6 +514,7 @@ impl ModuleImage {
             thread_locals: std::mem::take(&mut metadata.thread_locals),
             go_runtime_types: go_runtime_types(&metadata.types),
             views: crate::view::ViewSet::empty(),
+            debug_file: None,
         }
     }
 
@@ -528,6 +531,29 @@ impl ModuleImage {
     pub(crate) fn with_views(mut self, views: Arc<crate::view::ViewSet>) -> Self {
         self.views = views;
         self
+    }
+
+    /// Records the separate debug file found for the image.
+    pub(crate) fn with_debug_file(mut self, debug_file: Option<crate::DebugFile>) -> Self {
+        self.debug_file = debug_file;
+        self
+    }
+
+    /// The separate debug file the image's debug information and symbols
+    /// came from, when its own file was stripped of them.
+    #[must_use]
+    pub const fn debug_file(&self) -> Option<&Arc<PathBuf>> {
+        match &self.debug_file {
+            Some(crate::DebugFile::Used(path)) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// The separate debug file found for the image, whether it was used or
+    /// could not be.
+    #[must_use]
+    pub const fn separate_debug_file(&self) -> Option<&crate::DebugFile> {
+        self.debug_file.as_ref()
     }
 
     /// The views the image carries for its own types.

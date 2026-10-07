@@ -67,6 +67,7 @@ iced-x86 = { version = "1.21", default-features = false, features = ["decoder", 
 lzma-rs = "0.3"
 nix = { version = "0.31", features = ["fs", "personality", "ptrace", "process", "signal", "term", "uio"] }
 object = { version = "0.39", features = ["read"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 rustc-demangle = "0.1"
 
 [dev-dependencies]

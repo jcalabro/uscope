@@ -52,6 +52,10 @@ show-bytes = true
 [breakpoints]
 save = true               # keep breakpoints and displays in the project's .uscope/state
 
+[debug-info]
+directories = []          # searched for separate debug files before the system's
+debuginfod = false        # download missing debug files from DEBUGINFOD_URLS
+
 [history]
 size = 10000              # lines kept in $XDG_STATE_HOME/uscope/history
 

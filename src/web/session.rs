@@ -136,6 +136,8 @@ enum Chosen {
 pub struct Session {
     cwd: PathBuf,
     home: Option<PathBuf>,
+    /// Where every program's separate debug files are found.
+    debug_files: uscope::DebugFileOptions,
     /// The address links name, such as `127.0.0.1:7341`.
     address: String,
     tokens: Tokens,
@@ -195,7 +197,12 @@ pub struct Joined {
 }
 
 impl Session {
-    pub fn new(cwd: PathBuf, address: String, tokens: Tokens) -> Arc<Self> {
+    pub fn new(
+        cwd: PathBuf,
+        address: String,
+        tokens: Tokens,
+        debug_files: uscope::DebugFileOptions,
+    ) -> Arc<Self> {
         let (state, _) = watch::channel(Arc::new(State::idle(None)));
         let (messages, _) = broadcast::channel(1024);
         let default_name = std::env::var("USER")
@@ -205,6 +212,7 @@ impl Session {
         Arc::new(Self {
             cwd,
             home: std::env::var_os("HOME").map(PathBuf::from),
+            debug_files,
             address,
             tokens,
             default_name,
@@ -1112,7 +1120,7 @@ impl Session {
     async fn open_target(&self, target: &mut Option<Target>, start: Start) -> Result<(), Failure> {
         self.history.lock().expect("history lock").clear();
         self.loading(&start);
-        let opened = open(&start).await;
+        let opened = open(&start, &self.debug_files).await;
         let debugger = match opened {
             Ok(debugger) => debugger,
             Err(message) => {
@@ -1406,20 +1414,24 @@ fn to_value<T: serde::Serialize>(value: &T) -> Value {
 
 /// Opens the debugger `start` describes, off the async threads where it
 /// loads debug information.
-async fn open(start: &Start) -> Result<Debugger, String> {
+async fn open(start: &Start, debug_files: &uscope::DebugFileOptions) -> Result<Debugger, String> {
     match start {
         Start::Launch { spec, .. } => {
             let program = spec.program.clone();
-            tokio::task::spawn_blocking(move || Debugger::new(&program))
+            let debug_files = debug_files.clone();
+            tokio::task::spawn_blocking(move || Debugger::new_with(&program, &debug_files))
                 .await
                 .map_err(|error| error.to_string())?
                 .map_err(|error| format!("failed to load {}: {error}", spec.program.display()))
         }
-        Start::Attach(process) => Debugger::attach(*process)
+        Start::Attach(process) => Debugger::attach_with(*process, None, debug_files)
             .await
             .map_err(|error| format!("failed to attach to process {process}: {error}")),
         Start::Core(options) => {
-            let options = options.clone();
+            let options = uscope::CoreDumpOptions {
+                debug_files: debug_files.clone(),
+                ..options.clone()
+            };
             let core = options.core.display().to_string();
             tokio::task::spawn_blocking(move || Debugger::open_core(&options))
                 .await

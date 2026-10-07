@@ -1104,6 +1104,7 @@ pub struct Modules {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Module {
     pub id: u64,
@@ -1115,6 +1116,11 @@ pub struct Module {
     /// `debug` with debug information, `symbols` with only a symbol table,
     /// or `none`.
     pub symbols: String,
+    /// The separate file its debug information came from, when its own
+    /// file was stripped of it.
+    pub debug_file: Option<String>,
+    /// Why the separate debug file found for it could not be used.
+    pub debug_file_problem: Option<String>,
 }
 
 /// The answer to `share`.

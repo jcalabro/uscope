@@ -152,10 +152,11 @@ macro_rules! command {
 }
 
 /// The subcommands `info` accepts, by their primary names.
-pub const INFO_SUBCOMMANDS: [&str; 6] = [
+pub const INFO_SUBCOMMANDS: [&str; 7] = [
     "breakpoints",
     "watchpoints",
     "signals",
+    "modules",
     "core",
     "symbol",
     "view",
@@ -194,8 +195,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Info,
         "info",
         [],
-        "info breakpoints|watchpoints|signals|core|symbol|view [argument...]",
-        "Show debugger information, the symbol and section containing an address, or which view presents an expression's value and why"
+        "info breakpoints|watchpoints|signals|modules|core|symbol|view [argument...]",
+        "Show debugger information, the loaded modules and where their debug information came from, the symbol and section containing an address, or which view presents an expression's value and why"
     ),
     command!(
         Handle,
@@ -742,12 +743,47 @@ impl Cli {
                 renderer,
             ),
             ("signals" | "handle", None) => self.list_signals().await?,
+            ("modules" | "sharedlibrary" | "shared", None) => self.list_modules().await?,
             ("view", Some(_)) => {
                 let text = rest.trim_start()["view".len()..].trim();
                 self.explain_view(text).await?
             }
             _ => return Err(spec.usage_error()),
         })
+    }
+
+    /// The loaded modules: where each is, what describes its code, and the
+    /// separate file its debug information came from.
+    async fn list_modules(&self) -> Result<String> {
+        let loaded = match self.debugger.loaded_modules().await {
+            Ok(loaded) => loaded,
+            // Before the program runs, only its own image is known.
+            Err(uscope::Error::NotRunning) => {
+                let image = std::sync::Arc::clone(self.debugger.module_image());
+                return Ok(format::modules(
+                    &[format::ModuleRow {
+                        path: std::sync::Arc::new(image.path().to_path_buf()),
+                        load_bias: None,
+                        image: Some(image),
+                    }],
+                    self.renderers.stdout,
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut modules = Vec::with_capacity(loaded.modules.len());
+        for record in loaded.modules.iter() {
+            modules.push(format::ModuleRow {
+                path: std::sync::Arc::clone(&record.path),
+                load_bias: Some(record.module.load_bias),
+                image: self
+                    .debugger
+                    .loaded_module_image(record.module.id)
+                    .await
+                    .ok(),
+            });
+        }
+        Ok(format::modules(&modules, self.renderers.stdout))
     }
 
     /// Runs one command for a client that controls execution itself, such

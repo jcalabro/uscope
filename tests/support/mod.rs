@@ -225,6 +225,16 @@ pub struct Scenario {
 
 impl Scenario {
     pub fn new(name: impl Into<String>, fixture: impl AsRef<Path>) -> Self {
+        Self::with_debug_files(name, fixture, &uscope::DebugFileOptions::default())
+    }
+
+    /// A scenario whose modules' separate debug files are found as
+    /// `debug_files` says.
+    pub fn with_debug_files(
+        name: impl Into<String>,
+        fixture: impl AsRef<Path>,
+        debug_files: &uscope::DebugFileOptions,
+    ) -> Self {
         let name = name.into();
         let fixture = fixture.as_ref();
         assert!(
@@ -232,7 +242,8 @@ impl Scenario {
             "missing test fixture {}; run `just build-test-programs`",
             fixture.display()
         );
-        let debugger = Debugger::new(fixture).expect("initialize debugger scenario");
+        let debugger =
+            Debugger::new_with(fixture, debug_files).expect("initialize debugger scenario");
         Self::from_debugger(name, debugger)
     }
 

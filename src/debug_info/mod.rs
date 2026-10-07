@@ -8,6 +8,8 @@ mod elf;
 #[cfg(target_os = "linux")]
 mod gopclntab;
 mod roles;
+#[cfg(target_os = "linux")]
+mod separate;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod x86_64;
 
@@ -472,16 +474,31 @@ pub trait UnwindInfo: Send + Sync {
     ) -> std::result::Result<UnwindStep, UnwindTermination>;
 }
 
+#[cfg(target_os = "linux")]
+pub use separate::DebugFileSearch;
+
+/// Loads a program's debug information from its own file alone.
+#[cfg(any(test, feature = "sim"))]
 pub fn load_bytes(path: &Path, data: &[u8]) -> Result<DebugInfo> {
-    dwarf::load_bytes(path, data, crate::ModuleImageId::new(0))
+    load_program(path, data, &DebugFileSearch::default())
+}
+
+/// Loads a program's debug information, from a separate debug file that
+/// `search` finds when its own file has none.
+pub fn load_program(path: &Path, data: &[u8], search: &DebugFileSearch) -> Result<DebugInfo> {
+    dwarf::load_bytes(path, data, crate::ModuleImageId::new(0), search)
 }
 
 #[expect(
     clippy::redundant_pub_crate,
     reason = "the private debug-info edge is shared by sibling backend modules"
 )]
-pub(crate) fn load_module(path: &Path, id: crate::ModuleImageId) -> Result<DebugInfo> {
-    dwarf::load(path, id)
+pub(crate) fn load_module(
+    path: &Path,
+    id: crate::ModuleImageId,
+    search: &DebugFileSearch,
+) -> Result<DebugInfo> {
+    dwarf::load(path, id, search)
 }
 
 #[expect(
@@ -492,6 +509,7 @@ pub(crate) fn load_module_bytes(
     path: &Path,
     data: &[u8],
     id: crate::ModuleImageId,
+    search: &DebugFileSearch,
 ) -> Result<DebugInfo> {
-    dwarf::load_bytes(path, data, id)
+    dwarf::load_bytes(path, data, id, search)
 }

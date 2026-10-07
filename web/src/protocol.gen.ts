@@ -620,4 +620,13 @@ start: string | null, end: string | null,
  * `debug` with debug information, `symbols` with only a symbol table,
  * or `none`.
  */
-symbols: string, };
+symbols: string, 
+/**
+ * The separate file its debug information came from, when its own
+ * file was stripped of it.
+ */
+debugFile: string | null, 
+/**
+ * Why the separate debug file found for it could not be used.
+ */
+debugFileProblem: string | null, };

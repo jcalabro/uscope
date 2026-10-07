@@ -551,7 +551,13 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
         build_id: main_build_id,
         file: main_file,
     } = resolve_executable(core, &images, &locator, options)?;
-    let main_debug = crate::debug_info::load_bytes(&main_file.path, &main_file.data)?;
+    // A dump written elsewhere has its machine's debug files in its sysroot.
+    let mut debug_files = options.debug_files.clone();
+    if let Some(sysroot) = &options.sysroot {
+        debug_files.directories.push(sysroot.join("usr/lib/debug"));
+    }
+    let search = crate::debug_info::DebugFileSearch::new(&debug_files);
+    let main_debug = crate::debug_info::load_program(&main_file.path, &main_file.data, &search)?;
     let main_loaded = LoadedModule::main(main_debug.image.id(), main_file.load_bias);
 
     let mut modules = vec![core_module(
@@ -589,7 +595,8 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
         let number = u32::try_from(libraries.len() + 1)
             .map_err(|_| backend_error(LinuxError::ModuleIdExhausted))?;
         let image_id = ModuleImageId::new(number);
-        let debug = crate::debug_info::load_module_bytes(&file.path, &file.data, image_id)?;
+        let debug =
+            crate::debug_info::load_module_bytes(&file.path, &file.data, image_id, &search)?;
         let loaded = LoadedModule {
             id: ModuleId::new(number),
             image: image_id,
@@ -659,9 +666,12 @@ fn resolve_vdso(
     };
     let build_id = elf_build_id(image.data.as_slice());
     let image_id = ModuleImageId::new(number);
-    let Ok(debug) =
-        crate::debug_info::load_module_bytes(Path::new(VDSO_NAME), &image.data, image_id)
-    else {
+    let Ok(debug) = crate::debug_info::load_module_bytes(
+        Path::new(VDSO_NAME),
+        &image.data,
+        image_id,
+        &crate::debug_info::DebugFileSearch::default(),
+    ) else {
         return Ok(Some((recorded(build_id, CoreModuleState::Missing), None)));
     };
     let loaded = LoadedModule {
@@ -741,6 +751,8 @@ pub fn open_core(
         },
         data: main_file.data,
         process_start_time: None,
+        // Every module a dump has is loaded already.
+        debug_files: crate::debug_info::DebugFileSearch::default(),
     };
     let (ready_sender, ready) = std::sync::mpsc::sync_channel(1);
     let controller = thread::Builder::new()

@@ -1166,6 +1166,63 @@ pub fn source_context(
     lines.join("\n")
 }
 
+/// One module `info modules` lists.
+pub struct ModuleRow {
+    pub path: Arc<PathBuf>,
+    /// Where it is loaded, once it is.
+    pub load_bias: Option<u64>,
+    pub image: Option<Arc<uscope::ModuleImage>>,
+}
+
+/// The modules, one per line with the range each occupies and what
+/// describes its code, and below one stripped of its debug information the
+/// separate file that holds it, or why that file could not be used.
+pub fn modules(modules: &[ModuleRow], renderer: Renderer) -> String {
+    let mut lines = Vec::with_capacity(modules.len());
+    for module in modules {
+        let range = match (&module.image, module.load_bias) {
+            (Some(image), Some(bias)) => {
+                let range = image.address_range();
+                format!(
+                    "{:#x}-{:#x}",
+                    range.start.get().wrapping_add(bias),
+                    range.end.get().wrapping_add(bias)
+                )
+            }
+            (_, None) => "not loaded".to_owned(),
+            (None, Some(_)) => "?".to_owned(),
+        };
+        let described = match &module.image {
+            Some(image) if !image.functions().is_empty() => "debug",
+            Some(image) if !image.symbols().is_empty() => "symbols",
+            _ => "none",
+        };
+        lines.push(format!(
+            "{}  {described:<7}  {}",
+            renderer.paint(Role::Metadata, format!("{range:<29}")),
+            renderer.path(&module.path)
+        ));
+        match module
+            .image
+            .as_ref()
+            .and_then(|image| image.separate_debug_file())
+        {
+            Some(uscope::DebugFile::Used(path)) => lines.push(format!(
+                "  {} {}",
+                renderer.paint(Role::Muted, "debug information from"),
+                renderer.path(path)
+            )),
+            Some(uscope::DebugFile::Unusable { path, reason }) => lines.push(format!(
+                "  {} {}: {reason}",
+                renderer.paint(Role::Warning, "cannot use the debug file"),
+                renderer.path(path)
+            )),
+            None => {}
+        }
+    }
+    lines.join("\n")
+}
+
 pub fn core_dump(core: &CoreDumpInfo, renderer: Renderer) -> String {
     let mut lines = vec![
         format!(

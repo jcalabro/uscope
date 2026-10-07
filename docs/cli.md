@@ -31,6 +31,8 @@ is described in [dap.md](dap.md), and `uscope views` in [views.md](views.md).
 | `--allow-module-mismatch` | Use a core dump's module files that cannot be proven to match it. |
 | `--source-map FROM TO` | Read sources recorded under `FROM` from `TO`. Repeatable; the first matching rule wins. |
 | `--views FILE` | Load views from `FILE` ahead of the others. Repeatable; later files come first. |
+| `--debug-directory DIR` | Search `DIR` for the separate debug files of stripped modules, ahead of `[debug-info] directories`, `NIX_DEBUG_INFO_DIRS`, and `/usr/lib/debug`. Repeatable. |
+| `--debuginfod` | Download debug files no directory holds from the servers `DEBUGINFOD_URLS` lists, as `[debug-info] debuginfod = true` does. |
 | `-c, --command FILE` | Run the commands in `FILE`. Repeatable. |
 | `-e, --eval COMMAND` | Run one command, after any `-c` files. Repeatable. |
 | `--batch` | Exit after the commands instead of starting the REPL; with no `-c` or `-e`, read commands from stdin. A failing command ends the session with an error naming its source. |
@@ -85,6 +87,7 @@ config check` checks every file, for a project's CI.
 | `[print]` | `style` (`compact` or `pretty`), `radix`, `width`, `indent`, `max-depth`, `max-elements` |
 | `[disassembly]` | `syntax`, `show-bytes` |
 | `[breakpoints]` | `save` |
+| `[debug-info]` | `directories`, searched for separate debug files after `--debug-directory`'s and relative to the project root, and `debuginfod` |
 | `[history]` | `size` |
 | `[signals]` | `SIGUSR1 = "nostop noprint pass"`, as `handle` takes them |
 | `[[source-map]]` | `from` and `to`, as `--source-map` takes them, after the command line's rules; `to` is relative to the project root |
@@ -560,6 +563,7 @@ points at is unavailable rather than shown from whatever is there now.
 | `disassemble`, `disas` [*function*\|*0xaddress*] [*count*] | Disassemble a whole function, or *count* instructions from an address. |
 | `address` *symbol* | Show a symbol's runtime address. |
 | `info symbol` *0xaddress* | Name the module, section, and symbol containing an address. |
+| `info modules`, `info sharedlibrary` | List the loaded modules, where each is, what describes its code, and the separate file its debug information came from. |
 
 `disassemble` shows every range of a function, including split `.cold` parts,
 with breakpoint traps hidden. Each line shows the address, its symbol offset,
@@ -648,6 +652,23 @@ and is reported missing if the dump did not save it.
 For a dump from another machine or a container, `--sysroot DIR` resolves
 every recorded path inside `DIR` as if it were `/`, and `--module-path DIR`
 finds renamed or relocated copies, used only when they match.
+
+## Separate debug information
+
+A module stripped of its debug information, as distributions ship their
+programs and libraries, takes it from a separate debug file, found as gdb
+finds them: by the module's build-id under a debug directory's `.build-id`,
+then by the file name and checksum its `.gnu_debuglink` records, beside the
+module, in its `.debug` directory, or under a debug directory at the
+module's own path. The debug directories are those `--debug-directory` and
+`[debug-info] directories` name, then those `NIX_DEBUG_INFO_DIRS` lists,
+then `/usr/lib/debug`. With `--debuginfod`, a file no directory holds is
+downloaded from the debuginfod servers `DEBUGINFOD_URLS` lists and kept in
+debuginfod's cache, which other debuggers share; no server is asked
+otherwise. Every candidate must prove it describes the module, by build-id
+or checksum. A debug file that uses a dwz supplementary file
+(`.gnu_debugaltlink`), as most distributions' do, cannot be read yet: the
+module is described by its own file, and `info modules` says why.
 
 ## Sources
 

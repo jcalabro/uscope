@@ -63,6 +63,62 @@ fn modules_and_sources_describe_the_loaded_program() {
     dap.finish();
 }
 
+/// A module stripped of its debug information names the separate file it
+/// came from, found in the configuration's debug directories, and one whose
+/// debug file cannot be used says why.
+#[test]
+fn modules_name_their_separate_debug_files() {
+    let module = |dap: &mut Dap, name: &str| {
+        let modules = dap.request("modules", json!({}));
+        modules["modules"]
+            .as_array()
+            .expect("modules")
+            .iter()
+            .find(|module| module["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {name} in {modules}"))
+    };
+    let program = fixture("split/basic-build-id");
+    let root = |name: &str| fixture(&format!("split/{name}")).display().to_string();
+    let mut dap = Dap::start("separate debug files");
+    let started = dap.launch(
+        Profile::VsCode,
+        &program,
+        json!({"stopOnEntry": true, "debugDirectories": [root("debug-root")]}),
+        &Configuration::default(),
+    );
+    dap.stopped(started.mark);
+    let described = module(&mut dap, "basic-build-id");
+    assert_eq!(described["symbolStatus"], "debug information loaded");
+    let debug_file = described["symbolFilePath"].as_str().expect("a debug file");
+    assert!(
+        debug_file.starts_with(&root("debug-root"))
+            && std::path::Path::new(debug_file)
+                .extension()
+                .is_some_and(|extension| extension == "debug"),
+        "{described}"
+    );
+    dap.finish();
+
+    let mut dap = Dap::start("unusable debug file");
+    let started = dap.launch(
+        Profile::VsCode,
+        &program,
+        json!({"stopOnEntry": true, "debugDirectories": [root("altlink-root")]}),
+        &Configuration::default(),
+    );
+    dap.stopped(started.mark);
+    let described = module(&mut dap, "basic-build-id");
+    let status = described["symbolStatus"].as_str().expect("a status");
+    assert!(
+        status.starts_with("symbols only, no debug information; cannot use the debug file ")
+            && status.contains("dwz supplementary file"),
+        "{described}"
+    );
+    assert_eq!(described.get("symbolFilePath"), None, "{described}");
+    dap.finish();
+}
+
 fn source_path(path: &str) -> String {
     source(path).display().to_string()
 }

@@ -63,7 +63,7 @@ pub use model::{
     Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArgumentOrigin,
     ArrayDimension, Backtrace, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding,
     BreakpointEntry, BreakpointLocation, ByteOrder, CBaseType, CallFrameUnavailableReason,
-    CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole, ColumnNumber,
+    CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole, ColumnNumber, DebugFile,
     DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue,
     EmbeddedSymbolTable, EntryProvenance, EntryValueUnavailableReason, EnumerationOrigin,
     Enumerator, ExecutionContext, ExecutionLocation, FloatValue, FrameKind, FunctionId,
@@ -94,7 +94,7 @@ pub use model::{
 };
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, ConditionOwner,
-    CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, DebuggerEvent,
+    CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, DebugFileOptions, DebuggerEvent,
     ExceptionDisposition, ExceptionInfo, ExceptionStops, ExecutionId, ExitStatus,
     FramePresentation, GlobalVariableQuery, HeldChild, HeldProcess, HitComparison, HitCondition,
     InferiorState, InvalidatedWatchpoint, KernelSource, LanguageException, LanguageExceptionKind,
@@ -327,14 +327,20 @@ pub struct DebuggerHandle {
 impl Debugger {
     /// Creates a debugger for a native executable and starts its backend controller.
     pub fn new(executable: impl AsRef<Path>) -> Result<Self> {
-        let executable = backend::executable_source(executable.as_ref())?;
+        Self::new_with(executable, &DebugFileOptions::default())
+    }
+
+    /// Creates a debugger for a native executable whose modules' separate
+    /// debug files are found as `debug_files` says.
+    pub fn new_with(executable: impl AsRef<Path>, debug_files: &DebugFileOptions) -> Result<Self> {
+        let mut executable = backend::executable_source(executable.as_ref())?;
+        executable.debug_files = debug_info::DebugFileSearch::new(debug_files);
         Self::from_executable_source(executable)
     }
 
     /// Attaches to an existing local process and returns once it is coherently stopped.
     pub async fn attach(process: ProcessId) -> Result<Self> {
-        let executable = backend::process_executable_source(process)?;
-        Self::attach_from_source(process, executable, false).await
+        Self::attach_with(process, None, &DebugFileOptions::default()).await
     }
 
     /// Attaches using an explicitly supplied executable when automatic discovery is unavailable.
@@ -342,7 +348,27 @@ impl Debugger {
         process: ProcessId,
         executable: impl AsRef<Path>,
     ) -> Result<Self> {
-        let executable = backend::executable_source(executable.as_ref())?;
+        Self::attach_with(
+            process,
+            Some(executable.as_ref()),
+            &DebugFileOptions::default(),
+        )
+        .await
+    }
+
+    /// Attaches to an existing local process, reading its executable from
+    /// `executable` when given, and finding its modules' separate debug
+    /// files as `debug_files` says.
+    pub async fn attach_with(
+        process: ProcessId,
+        executable: Option<&Path>,
+        debug_files: &DebugFileOptions,
+    ) -> Result<Self> {
+        let mut executable = match executable {
+            Some(executable) => backend::executable_source(executable)?,
+            None => backend::process_executable_source(process)?,
+        };
+        executable.debug_files = debug_info::DebugFileSearch::new(debug_files);
         Self::attach_from_source(process, executable, false).await
     }
 
@@ -351,11 +377,7 @@ impl Debugger {
     /// coherently stopped. The process must still be the one held: one that
     /// ended, and whose identifier was given to another, is refused.
     pub async fn attach_held(held: HeldProcess) -> Result<Self> {
-        let executable = backend::process_executable_source(held.process_id)?;
-        if executable.process_start_time != Some(held.start_time) {
-            return Err(Error::HeldProcessGone(held.process_id.get()));
-        }
-        Self::attach_from_source(held.process_id, executable, true).await
+        Self::attach_held_with(held, None, &DebugFileOptions::default()).await
     }
 
     /// Attaches to a held process as [`Self::attach_held`] does, using an
@@ -364,9 +386,35 @@ impl Debugger {
         held: HeldProcess,
         executable: impl AsRef<Path>,
     ) -> Result<Self> {
-        let mut executable = backend::executable_source(executable.as_ref())?;
-        // The attach checks this once it has seized the process.
-        executable.process_start_time = Some(held.start_time);
+        Self::attach_held_with(
+            held,
+            Some(executable.as_ref()),
+            &DebugFileOptions::default(),
+        )
+        .await
+    }
+
+    /// Attaches to a held process as [`Self::attach_held`] does, reading
+    /// its executable from `executable` when given, and finding its
+    /// modules' separate debug files as `debug_files` says.
+    pub async fn attach_held_with(
+        held: HeldProcess,
+        executable: Option<&Path>,
+        debug_files: &DebugFileOptions,
+    ) -> Result<Self> {
+        let mut executable = if let Some(executable) = executable {
+            let mut executable = backend::executable_source(executable)?;
+            // The attach checks this once it has seized the process.
+            executable.process_start_time = Some(held.start_time);
+            executable
+        } else {
+            let executable = backend::process_executable_source(held.process_id)?;
+            if executable.process_start_time != Some(held.start_time) {
+                return Err(Error::HeldProcessGone(held.process_id.get()));
+            }
+            executable
+        };
+        executable.debug_files = debug_info::DebugFileSearch::new(debug_files);
         Self::attach_from_source(held.process_id, executable, true).await
     }
 
@@ -407,7 +455,11 @@ impl Debugger {
     }
 
     fn from_executable_source(executable: backend::ExecutableSource) -> Result<Self> {
-        let debug_info = debug_info::load_bytes(&executable.display_path, &executable.data)?;
+        let debug_info = debug_info::load_program(
+            &executable.display_path,
+            &executable.data,
+            &executable.debug_files,
+        )?;
         Self::start(|channels| {
             let image = Arc::clone(&debug_info.image);
             let controller = backend::spawn_controller(executable, debug_info, channels)?;

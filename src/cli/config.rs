@@ -39,6 +39,7 @@ pub struct Config {
     pub print: Print,
     pub disassembly: Disassembly,
     pub breakpoints: Breakpoints,
+    pub debug_info: DebugInfo,
     pub history: History,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub signals: BTreeMap<String, SignalActions>,
@@ -230,6 +231,17 @@ impl Default for Breakpoints {
     fn default() -> Self {
         Self { save: true }
     }
+}
+
+/// Where separate debug files are found.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct DebugInfo {
+    /// Debug directories searched before the system's, relative to the
+    /// project root.
+    pub directories: Vec<PathBuf>,
+    /// Download debug files no directory holds from debuginfod servers.
+    pub debuginfod: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]

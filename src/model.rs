@@ -2941,6 +2941,20 @@ pub struct SymbolInfo {
     pub role: CodeRole,
 }
 
+/// The separate debug file found for a module stripped of its debug
+/// information.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DebugFile {
+    /// The file the module's debug information and symbols came from.
+    Used(Arc<PathBuf>),
+    /// A file that names the module but could not be loaded, which leaves
+    /// the module as its own file describes it.
+    Unusable {
+        path: Arc<PathBuf>,
+        reason: Arc<str>,
+    },
+}
+
 /// A slot of a module's global offset table that the loader fills with a
 /// function's address as it relocates the module.
 #[derive(Debug, Clone, PartialEq, Eq)]
