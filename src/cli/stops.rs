@@ -123,6 +123,7 @@ const fn in_code(reason: &StopReason) -> bool {
             | StopReason::Watchpoint { .. }
             | StopReason::Exception(_)
             | StopReason::Pause
+            | StopReason::Jump
     )
 }
 

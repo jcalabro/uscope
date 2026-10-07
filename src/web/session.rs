@@ -540,6 +540,7 @@ impl Session {
         Ok(Some(match request {
             Request::Continue(protocol::Continue { stop }) => self.resume(connection, stop).await?,
             Request::Step(step) => self.step(connection, step).await?,
+            Request::Jump(jump) => self.jump(connection, jump).await?,
             Request::Pause => {
                 let handle = self.current_handle().await?;
                 self.caused(connection, "paused");
@@ -677,6 +678,26 @@ impl Session {
             )
             .await?;
         Ok(action.to_owned())
+    }
+
+    async fn jump(&self, connection: u32, jump: protocol::Jump) -> Result<String, Failure> {
+        let handle = self.current_handle().await?;
+        let location = jump.location.trim();
+        let spec = crate::cli::commands::parse_breakpoint_location(location)
+            .map_err(|error| Failure::new(ErrorKind::Invalid, format!("{error:#}")))?
+            .ok_or_else(|| {
+                Failure::new(
+                    ErrorKind::Invalid,
+                    "a thread moves to FILE:LINE, FILE:FUNCTION, or 0xADDRESS",
+                )
+            })?;
+        let context = inspect::context(&handle, jump.stop, jump.thread, 0).await?;
+        let action = format!("moved thread {} to {location}", jump.thread);
+        self.caused(connection, &action);
+        handle
+            .start_jump(context.stop, context.execution, spec)
+            .await?;
+        Ok(action)
     }
 
     async fn input(&self, input: protocol::Input) -> Result<(), Failure> {

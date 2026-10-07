@@ -52,6 +52,9 @@ export function useCommands(): (command: Command) => boolean {
         case "editBreakpoint":
           breakpoint(command, model, connection);
           return true;
+        case "jumpToCursor":
+          jump(model, connection);
+          return true;
         case "frameUp":
         case "frameDown": {
           const at = current.at;
@@ -152,6 +155,33 @@ export function useCommands(): (command: Command) => boolean {
     },
     [store, connection, navigate],
   );
+}
+
+/** Moves the shown thread, without running it, to the cursor's line. */
+function jump(model: Model, connection: Connection) {
+  const current = tab.getState();
+  const inferior = model.state?.inferior;
+  const at = current.at;
+  if (!current.cursor || current.cursor.path !== current.shown?.path) {
+    flash("Put the cursor on the line the thread should resume at");
+    return;
+  }
+  if (model.hello?.role !== "control") {
+    flash("This link can only view the session");
+    return;
+  }
+  if (inferior?.state !== "stopped" || !at) {
+    flash("The program is not stopped");
+    return;
+  }
+  if (at.stop !== inferior.stop) {
+    flash(`This tab shows stop #${at.stop}; go to stop #${inferior.stop} to jump`);
+    return;
+  }
+  const { path, line } = current.cursor;
+  connection
+    .request("jump", { stop: at.stop, thread: at.thread, location: `${path}:${line}` })
+    .catch((failure: Error) => flash(failure.message));
 }
 
 /** Toggles the breakpoint at the cursor, or the line the frame is at. */

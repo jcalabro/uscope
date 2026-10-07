@@ -152,7 +152,7 @@ is answered with them, and an alias the settings define wins over a prefix. A
 mistyped command is answered with the nearest ones.
 
 Tab completes the word at the cursor: a command, a location after `break`,
-`tbreak`, `advance`, or `disassemble` (a function, or a file followed by its
+`tbreak`, `advance`, `jump`, or `disassemble` (a function, or a file followed by its
 line or function), breakpoint and watchpoint ids, `info` and `handle` words,
 and in expressions the selected frame's variables, globals, and, after `.` or
 `->`, the members of the value before it, which the debugger reads.
@@ -175,6 +175,7 @@ or `$VISUAL` or `$EDITOR` with `+line path`.
 | `stepi`, `si` / `nexti`, `ni` | Step one instruction, into / over calls. |
 | `finish`, `fin` | Run until the selected frame returns. |
 | `advance`, `adv` *location* | Run until the selected thread reaches a location, or the selected frame returns. |
+| `jump`, `j` *location* | Move the selected thread, without running it, to resume at a location in its function. |
 | `quit`, `q` | Exit, killing a launched program and detaching from an attached one. |
 
 Ctrl-C pauses a running program. The terminal's `SIGINT` also reaches the
@@ -229,6 +230,19 @@ names, as a breakpoint there would stop it, or until the selected frame
 returns, whichever comes first, so `advance 42` leaves a loop without
 leaving the function. Other threads run meanwhile and pass the location
 without stopping. A breakpoint reached on the way stops it as usual.
+
+`jump` moves the selected thread to resume at a line of the selected
+frame's file, such as `jump 42`, `jump +2`, or `jump -3`, or at a
+`file:line` or `0xaddress`, without running anything. The location must be
+in the code of the function the thread is stopped in, at one place: leaving
+the function would leave its frame for another's, so a location elsewhere,
+or a line inlined into the function several times, is refused. Nothing
+else changes, so the function's variables keep their values. The stop is
+shown again at its new place, and a breakpoint there stops the thread as it
+resumes, before it runs anything, as gdb's does. Assigning `$pc`, as `set var $pc =
+0x401136`, moves the thread anywhere, which is rarely safe. A thread
+stopped in a system call that the kernel would restart, as one paused in
+`read` is, no longer restarts it once moved.
 
 A forked child is not followed: it runs on its own, without the breakpoints
 it inherited. A program that calls `exec` is followed, with its breakpoints.
@@ -514,7 +528,7 @@ Past Go code, only the stack pointer is recovered.
 | --- | --- |
 | `print`, `p` [*expression*] | Print a value, or every parameter and local of the selected frame. |
 | `pp` [*expression*] | Print a value laid out to the width, or every parameter and local of the selected frame, expanded. |
-| `set` [`var`] *assignment* | Assign, as in `set var x = y + 1`. |
+| `set` [`var`] *assignment* | Assign, as in `set var x = y + 1`, or a register of the innermost frame, as in `set var $rax = 0`. |
 | `whatis` *expression* | Show an expression's type. |
 | `ptype` *expression or type* | Show a type's definition. |
 | `globals` [*filter*] | List globals and their types without reading them. |

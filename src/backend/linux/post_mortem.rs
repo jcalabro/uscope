@@ -912,6 +912,7 @@ impl Controller<CoreTarget> {
                 | Request::Continue { reply, .. }
                 | Request::Step { reply, .. }
                 | Request::Advance { reply, .. }
+                | Request::Jump { reply, .. }
                 | Request::Pause { reply, .. } => reject(reply),
                 Request::Attach { reply, .. } => reject(reply),
                 Request::Kill { reply }

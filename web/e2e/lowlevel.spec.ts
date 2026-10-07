@@ -99,6 +99,12 @@ test("registers, watchpoints, signals, and modules", async ({ page, uscope }) =>
   await page.getByRole("button", { name: "Remove breakpoint 1" }).click();
   await page.keyboard.press("Shift+S");
   await expect(rip.locator(".value-text.changed")).toBeVisible();
+  // The innermost frame's registers change in place.
+  await valueRow(page, "registers", "r11").locator(".value-text").dblclick();
+  const input = page.getByRole("textbox", { name: "New value of r11" });
+  await input.fill("0x2a");
+  await input.press("Enter");
+  await expect(valueRow(page, "registers", "r11")).toContainText("0x000000000000002a");
 
   await valueRow(page, "variables", "status")
     .getByRole("button", { name: "Watch status for changes" })

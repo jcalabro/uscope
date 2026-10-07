@@ -1619,6 +1619,9 @@ impl<'a, S: Scope> Binder<'a, S> {
         span: Span,
     ) -> BindResult<S> {
         let target = self.bind(target)?;
+        if matches!(target.op, Op::Register(_)) {
+            return self.register_assignment(op, target, value, span);
+        }
         let target = self.settle(target)?;
         if !target.is_place() || !matches!(target.ty, Ty::Program(_)) {
             return Err(Self::error(
@@ -1670,6 +1673,50 @@ impl<'a, S: Scope> Binder<'a, S> {
                     "`{}` cannot be assigned to `{}`",
                     type_name(self.scope, &value.ty),
                     type_name(self.scope, &target.ty)
+                ),
+            ));
+        }
+        let (ty, value_span) = (target.ty.clone(), value.span);
+        let fitted = self.node(Op::Fit(Box::new(value)), ty.clone(), value_span)?;
+        self.node(
+            Op::Assign {
+                target: Box::new(target),
+                value: Box::new(fitted),
+            },
+            ty,
+            span,
+        )
+    }
+
+    /// `$register = value`: a number the register's width holds, or a
+    /// pointer.
+    fn register_assignment(
+        &mut self,
+        op: Option<BinaryOp>,
+        target: Bound<S>,
+        value: NodeId,
+        span: Span,
+    ) -> BindResult<S> {
+        let value = self.bind(value)?;
+        let value = match op {
+            None => value,
+            Some(op) => self.binary_bound(op, target.clone(), value, span)?,
+        };
+        let value = self.operand(value)?;
+        if !matches!(
+            self.category(&value.ty),
+            Category::Integer { .. }
+                | Category::Float(_)
+                | Category::Bool
+                | Category::Pointer(_)
+                | Category::Null
+        ) {
+            return Err(Self::error(
+                value.span,
+                ErrorKind::Type,
+                format!(
+                    "`{}` cannot be assigned to a register; only numbers and pointers can",
+                    type_name(self.scope, &value.ty)
                 ),
             ));
         }

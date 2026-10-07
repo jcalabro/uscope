@@ -308,6 +308,20 @@ pub struct BreakpointLocationsArguments {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+pub struct GotoTargetsArguments {
+    pub source: Source,
+    pub line: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GotoArguments {
+    pub thread_id: i64,
+    pub target_id: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct DataBreakpointInfoArguments {
     pub variables_reference: Option<i64>,
     pub name: String,

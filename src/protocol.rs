@@ -1212,6 +1212,9 @@ pub enum StopReason {
     },
     /// Execution stopped at the user's request.
     Pause,
+    /// A thread was moved to resume elsewhere, by a jump or by assigning
+    /// its program counter, without running.
+    Jump,
     /// Execution stopped because of an exception.
     Exception(ExceptionInfo),
     /// A language runtime reported an exception: one its program raised, or
@@ -1592,6 +1595,16 @@ pub enum Request {
         exception: ExceptionDisposition,
         reply: Reply<ExecutionId>,
     },
+    /// Moves `context`'s thread, without running it, to resume at the one
+    /// location `spec` resolves to in the function it is stopped in, and
+    /// publishes the stop again there.
+    Jump {
+        process_id: ProcessId,
+        stop_id: StopId,
+        context: ExecutionContext,
+        spec: BreakpointSpec,
+        reply: Reply<ExecutionId>,
+    },
     Pause {
         process_id: ProcessId,
         reply: Reply<ExecutionId>,
@@ -1825,6 +1838,12 @@ impl Request {
             } => format!(
                 "advance to {spec:?} {stop_id:?} {context:?} {frame:?} {scope:?} {exception:?}"
             ),
+            Self::Jump {
+                stop_id,
+                context,
+                spec,
+                ..
+            } => format!("jump to {spec:?} {stop_id:?} {context:?}"),
             Self::Pause { process_id, .. } => format!("pause {process_id}"),
             Self::AddBreakpoint { spec, .. } => format!("add breakpoint {spec:?}"),
             Self::SetBreakpointEnabled { id, enabled, .. } => {

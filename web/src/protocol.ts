@@ -27,6 +27,7 @@ export interface Results {
   kill: null;
   restart: null;
   step: null;
+  jump: null;
   setFocus: null;
   backtrace: P.Backtrace;
   sources: P.SourceFiles;

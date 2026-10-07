@@ -278,3 +278,274 @@ async fn memory_writes_keep_breakpoints_installed_and_span_words() {
     );
     scenario.shutdown().await;
 }
+
+fn jump_line(marker: &str) -> u64 {
+    source_line("tests/fixtures/c/jump.c", &format!("jump: {marker}"))
+}
+
+fn jump_source(marker: &str) -> BreakpointSpec {
+    BreakpointSpec::Source {
+        path: "jump.c".into(),
+        line: uscope::LineNumber::new(jump_line(marker)).expect("a line"),
+    }
+}
+
+/// Stops `jump` at the first line of `checked`, which, run on, exits 111.
+async fn stopped_in_checked() -> (Scenario, uscope::StopId, uscope::ThreadId) {
+    let mut scenario = Scenario::launch("jump");
+    scenario
+        .add_source_breakpoint("jump.c", jump_line("start"))
+        .await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let InferiorState::Stopped {
+        stop_id, thread_id, ..
+    } = scenario.snapshot().await.inferior
+    else {
+        panic!("not stopped");
+    };
+    (scenario, stop_id, thread_id)
+}
+
+async fn stopped_line(scenario: &Scenario) -> Option<u64> {
+    let location = scenario
+        .operation("location", scenario.handle().current_location())
+        .await;
+    location_line(&location)
+}
+
+/// A jump moves the thread without running it, and publishes the stop
+/// again under a new stop, so that what clients read of the old one fails.
+#[tokio::test]
+async fn a_jump_moves_a_thread_within_its_function_under_a_new_stop() {
+    let (mut scenario, before, thread) = stopped_in_checked().await;
+    // The thread has yet to arrive at a breakpoint where it lands.
+    let target = scenario
+        .add_source_breakpoint("jump.c", jump_line("target"))
+        .await;
+    assert_eq!(
+        scenario.jump_to_stop(jump_source("target")).await,
+        StopReason::Jump
+    );
+    let InferiorState::Stopped {
+        stop_id, reason, ..
+    } = scenario.snapshot().await.inferior
+    else {
+        panic!("not stopped");
+    };
+    assert_ne!(stop_id, before);
+    assert_eq!(reason, StopReason::Jump);
+    assert_eq!(stopped_line(&scenario).await, Some(jump_line("target")));
+    // Nothing ran: `status = value` never did.
+    assert_eq!(
+        support::evaluate_value(&scenario, "status").await.signed(),
+        0
+    );
+    let stale = scenario
+        .attempt(
+            "jump from the old stop",
+            scenario
+                .handle()
+                .start_jump(before, thread, jump_source("return")),
+        )
+        .await;
+    assert!(matches!(stale, Err(Error::StaleStop)), "{stale:?}");
+    let StopReason::Breakpoint { hits, .. } = scenario.resume_to_stop().await else {
+        panic!("the breakpoint where the thread landed did not stop it");
+    };
+    assert_eq!(hits[0].breakpoint, target.id);
+    assert_eq!(stopped_line(&scenario).await, Some(jump_line("target")));
+    assert_eq!(
+        support::evaluate_value(&scenario, "status").await.signed(),
+        0
+    );
+    // Only `status += 100` runs.
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(100))
+    );
+    scenario.shutdown().await;
+}
+
+/// A jump stays in the function the thread is stopped in, at one place,
+/// and one it refuses changes nothing.
+#[tokio::test]
+async fn a_jump_is_refused_out_of_its_function_or_to_several_places() {
+    let (mut scenario, before, _) = stopped_in_checked().await;
+    for (spec, message) in [
+        (
+            BreakpointSpec::Function("elsewhere".to_owned()),
+            "elsewhere has no code in the function the thread is stopped in",
+        ),
+        (jump_source("call"), "has no code in the function"),
+        (
+            jump_source("inlined"),
+            "has code in several places of the function",
+        ),
+    ] {
+        let refused = scenario
+            .attempt("refused jump", scenario.handle().jump(spec.clone()))
+            .await;
+        let message_text = refused.map_err(|error| error.to_string());
+        assert!(
+            message_text
+                .as_ref()
+                .is_err_and(|text| text.contains(message)),
+            "{spec}: {message_text:?}"
+        );
+    }
+    let InferiorState::Stopped { stop_id, .. } = scenario.snapshot().await.inferior else {
+        panic!("not stopped");
+    };
+    assert_eq!(stop_id, before);
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(111))
+    );
+    scenario.shutdown().await;
+}
+
+/// Assigning `$pc` moves the thread anywhere, as a jump does.
+#[tokio::test]
+async fn assigning_the_program_counter_moves_the_thread_under_a_new_stop() {
+    let (mut scenario, before, _) = stopped_in_checked().await;
+    let target = scenario
+        .add_source_breakpoint("jump.c", jump_line("target"))
+        .await;
+    let BreakpointLocation::Image(image_address) = target.locations[0].location else {
+        panic!("{target:?}");
+    };
+    let modules = scenario
+        .operation("modules", scenario.handle().loaded_modules())
+        .await;
+    let address = modules.modules[0].module.load_bias + image_address.get();
+    scenario.remove_breakpoint(target.id).await;
+    let context = frame_view(&mut scenario, 0).await;
+    let handle = scenario.handle().clone();
+    let assigned = scenario
+        .operation(
+            "assign $pc",
+            assign(&handle.at(context), "$pc", &format!("{address:#x}")),
+        )
+        .await;
+    assert!(
+        matches!(
+            available_value(&assigned.state),
+            uscope::VariableValue::Scalar(ScalarValue::Unsigned(value)) if *value == u128::from(address)
+        ),
+        "{assigned:?}"
+    );
+    let InferiorState::Stopped {
+        stop_id, reason, ..
+    } = scenario.snapshot().await.inferior
+    else {
+        panic!("not stopped");
+    };
+    assert_ne!(stop_id, before);
+    assert_eq!(reason, StopReason::Jump);
+    assert_eq!(stopped_line(&scenario).await, Some(jump_line("target")));
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(100))
+    );
+    scenario.shutdown().await;
+}
+
+/// A register assigned in the innermost frame is what the thread computes
+/// with; a caller's registers are what unwinding recovered, and refused.
+#[tokio::test]
+async fn assigned_registers_are_what_the_thread_computes_with() {
+    let mut scenario = Scenario::launch("jump");
+    scenario.add_breakpoint("elsewhere").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let caller = frame_view(&mut scenario, 1).await;
+    let handle = scenario.handle().clone();
+    let refused = scenario
+        .attempt(
+            "assign a caller's register",
+            assign(&handle.at(caller), "$rbx", "1"),
+        )
+        .await;
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("a caller's registers")),
+        "{refused:?}"
+    );
+    // Back in main, the call's result is in rax, which main stores next.
+    scenario.remove_all_breakpoints().await;
+    assert!(matches!(
+        scenario.step_to_stop(StepKind::Out).await,
+        StopReason::Step { .. }
+    ));
+    let innermost = frame_view(&mut scenario, 0).await;
+    let view = handle.at(innermost);
+    let rax = scenario.operation("read $rax", read(&view, "$rax")).await;
+    assert!(
+        matches!(
+            available_value(&rax.state),
+            uscope::VariableValue::Scalar(ScalarValue::Unsigned(7))
+        ),
+        "{rax:?}"
+    );
+    scenario
+        .operation("assign $rax", assign(&view, "$rax", "42"))
+        .await;
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(42))
+    );
+    scenario.shutdown().await;
+}
+
+/// A thread stopped in a system call that the kernel would restart, by
+/// moving it back to the call as it resumes, resumes where it was moved
+/// to instead.
+#[tokio::test]
+async fn a_thread_moved_out_of_a_system_call_resumes_where_it_was_moved() {
+    let mut scenario = Scenario::launch("jump");
+    assert_eq!(
+        scenario
+            .run_with_to_stop(LaunchOptions {
+                arguments: vec!["wait".into()],
+                stop_at_entry: true,
+                ..LaunchOptions::default()
+            })
+            .await,
+        StopReason::Entry
+    );
+    let _resumed = scenario.start_resuming().await;
+    let InferiorState::Running { process_id, .. } = scenario.snapshot().await.inferior else {
+        panic!("not running");
+    };
+    support::wait_for_system_call(process_id, 34);
+    let reason = scenario.operation("pause", scenario.handle().pause()).await;
+    assert_eq!(reason, StopReason::Pause);
+    let registers = scenario
+        .operation("registers", scenario.handle().registers())
+        .await;
+    assert_eq!(
+        registers
+            .registers
+            .iter()
+            .find(|value| &*value.register.name == "orig_rax")
+            .and_then(|value| value.bytes.as_deref())
+            .map(|bytes| bytes[0]),
+        Some(34),
+        "stopped in pause(2)"
+    );
+    assert_eq!(
+        scenario.jump_to_stop(jump_source("resumed")).await,
+        StopReason::Jump
+    );
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(5))
+    );
+    scenario.shutdown().await;
+}

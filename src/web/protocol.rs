@@ -69,6 +69,9 @@ pub enum Request {
     Restart,
     /// Steps one thread of a stop.
     Step(Step),
+    /// Moves one thread of a stop, without running it, to resume at a
+    /// location in its function.
+    Jump(Jump),
     /// Says where this tab is looking, for everyone's presence list.
     SetFocus(SetFocus),
     /// A thread's stack at a stop.
@@ -207,6 +210,16 @@ pub struct Step {
     #[cfg_attr(test, ts(optional = nullable))]
     pub frame: u32,
     pub kind: StepKind,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Jump {
+    /// The stop the thread is moved at, which must still be current.
+    pub stop: u64,
+    pub thread: u64,
+    /// `FILE:LINE`, or another location a breakpoint takes.
+    pub location: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -1151,6 +1164,7 @@ mod tests {
         OpenCore::decl,
         Continue::decl,
         Step::decl,
+        Jump::decl,
         StepKind::decl,
         SetFocus::decl,
         Focus::decl,

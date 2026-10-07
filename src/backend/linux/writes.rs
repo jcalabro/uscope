@@ -1,12 +1,17 @@
 //! Changing memory, variables, and registers at a stop.
 
+use std::sync::Arc;
+
 use nix::unistd::Pid;
 
-use crate::protocol::StopId;
-use crate::{Error, ProcessId, Result, VirtualAddress};
+use crate::protocol::{BreakpointSpec, DebuggerEvent, ExecutionId, Reply, StopId, StopReason};
+use crate::{CodeInstanceId, Error, ModuleId, ProcessId, Result, VirtualAddress};
 
 use super::native::LinuxTraceOps;
-use super::{Controller, LinuxError, backend_error, validate_process, validate_public_stop};
+use super::{
+    Controller, LinuxError, backend_error, debug_thread_id, process_id, validate_process,
+    validate_public_stop, validate_resumable, validate_stopped_thread,
+};
 
 /// The most bytes one request writes.
 pub(super) const MAX_PUBLIC_MEMORY_WRITE: u64 = 64 * 1024;
@@ -106,7 +111,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(written)
     }
 
-    /// Writes the low bytes of a general register of the innermost frame.
+    /// Writes the low bytes of a register of the innermost frame. A thread
+    /// whose program counter is written is no longer where a system call
+    /// it was in would restart, which the kernel would otherwise do by
+    /// moving it back.
     pub(super) fn write_register(
         &self,
         pid: Pid,
@@ -115,11 +123,145 @@ impl<P: LinuxTraceOps> Controller<P> {
     ) -> Result<()> {
         self.views.forget_scans();
         let mut registers = self.ptrace.registers(pid)?;
-        let slot = super::registers::x86_64_general_register_slot(&mut registers, register)
+        let slot = super::registers::x86_64_register_slot(&mut registers, register)
             .ok_or_else(|| backend_error(LinuxError::UnsupportedRegisterWrite))?;
         let mut value = slot.to_le_bytes();
         value[..bytes.len().min(8)].copy_from_slice(&bytes[..bytes.len().min(8)]);
         *slot = u64::from_le_bytes(value);
+        if super::registers::is_program_counter(register) {
+            registers.orig_rax = u64::MAX;
+        }
         self.ptrace.set_registers(pid, registers)
+    }
+
+    /// Moves a stopped thread, without running it, to resume at the one
+    /// location `spec` resolves to in the function it is stopped in, and
+    /// publishes the stop again there.
+    pub(super) fn jump(
+        &mut self,
+        process_id: ProcessId,
+        stop_id: StopId,
+        pid: Pid,
+        spec: BreakpointSpec,
+        reply: Reply<ExecutionId>,
+    ) {
+        let moved = self
+            .jump_target(process_id, stop_id, pid, spec)
+            .and_then(|target| {
+                record!("jump {pid} to {target}");
+                let program_counter = crate::RegisterId::new(super::registers::PROGRAM_COUNTER);
+                self.write_register(pid, program_counter, &target.get().to_le_bytes())?;
+                self.publish_moved_thread(pid)
+            });
+        match moved {
+            // Acknowledge the jump before publishing the stop it made.
+            Ok((execution, stopped)) => {
+                let _ = reply.send(Ok(execution));
+                let _ = self.events.send(stopped);
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
+
+    /// Where a jump moves a thread: the one address `spec` resolves to in
+    /// the code of the function the thread is stopped in. Leaving the
+    /// function would leave its frame for another's, so only an
+    /// assignment of the program counter does that.
+    fn jump_target(
+        &self,
+        process_id: ProcessId,
+        stop_id: StopId,
+        pid: Pid,
+        spec: BreakpointSpec,
+    ) -> Result<VirtualAddress> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_process(inferior, process_id)?;
+        validate_public_stop(inferior, Some(stop_id))?;
+        validate_resumable(inferior)?;
+        validate_stopped_thread(inferior, pid)?;
+        let pc = VirtualAddress::new(self.ptrace.registers(pid)?.rip);
+        let function = self
+            .physical_function_at(pc)
+            .ok_or(Error::JumpWithoutFunction)?;
+        let described = Arc::<str>::from(spec.to_string());
+        let targets = self
+            .advance_targets(spec)?
+            .into_iter()
+            .filter(|target| self.physical_function_at(*target) == Some(function))
+            .collect::<Vec<_>>();
+        match targets.as_slice() {
+            [target] => Ok(*target),
+            [] => Err(Error::JumpOutsideFunction(described)),
+            _ => Err(Error::AmbiguousJump(described)),
+        }
+    }
+
+    /// The module and out-of-line code instance holding an address.
+    fn physical_function_at(&self, address: VirtualAddress) -> Option<(ModuleId, CodeInstanceId)> {
+        let inferior = self.inferior.as_ref()?;
+        let main = (
+            ModuleId::new(0),
+            &self.module_image,
+            &inferior.loaded_module,
+        );
+        std::iter::once(main)
+            .chain(
+                self.modules
+                    .iter()
+                    .filter(|(id, _)| **id != ModuleId::new(0))
+                    .map(|(id, module)| (*id, &module.image, &module.loaded)),
+            )
+            .find_map(|(id, image, loaded)| {
+                let address = loaded.image_address(address).ok()?;
+                image.contains_address(address).then_some(())?;
+                Some((id, image.locate(address).physical_instance?))
+            })
+    }
+
+    /// Publishes the stop again after a thread was moved to resume
+    /// elsewhere: under a new stop, as everything a client read from the
+    /// old one, from frames to values, may now differ. A thread that
+    /// reported a breakpoint's trap and stands there still steps over it as
+    /// it resumes; one moved anywhere else has not arrived at a breakpoint
+    /// where it lands, which reports it as it resumes, as gdb does.
+    pub(super) fn publish_moved_thread(
+        &mut self,
+        pid: Pid,
+    ) -> Result<(ExecutionId, DebuggerEvent)> {
+        let reason = StopReason::Jump;
+        let presentation = self.presentation_for_thread(pid, Some(&reason))?;
+        let pc = VirtualAddress::new(self.ptrace.registers(pid)?.rip);
+        let stop_id = self.ptrace.allocate_stop_id();
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let execution = ExecutionId::new(inferior.next_execution.wrapping_add(1));
+        inferior.next_execution = execution.get();
+        let thread = inferior.thread_mut(pid)?;
+        thread.stopped_at_breakpoint = thread.stopped_at_breakpoint.filter(|trap| *trap == pc);
+        thread.reason = Some(reason.clone());
+        let stop = inferior.public_stop.as_mut().ok_or(Error::NotStopped)?;
+        stop.id = stop_id;
+        stop.triggering_thread = pid;
+        stop.reason = reason.clone();
+        stop.selected = crate::ExecutionContext::Thread(debug_thread_id(pid));
+        stop.selected_thread = Some(pid);
+        stop.selected_frames.clear();
+        stop.returned = None;
+        stop.presentations.insert(pid, presentation);
+        stop.task_locators.borrow_mut().clear();
+        let process_id = process_id(inferior.tgid);
+        self.bump_revision();
+        Ok((
+            execution,
+            DebuggerEvent::InferiorStopped {
+                revision: self.revision,
+                process_id,
+                execution_id: Some(execution),
+                stop_id,
+                thread_id: debug_thread_id(pid),
+                reason,
+            },
+        ))
     }
 }
