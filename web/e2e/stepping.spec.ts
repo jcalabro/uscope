@@ -162,6 +162,8 @@ test("the gutter sets and clears breakpoints, and conditions narrow them", async
   // Only every third request is a get, so at least two hits did not stop.
   await expect(breakpoints).toContainText(/(^|\D)([3-9]|\d\d+) hits/);
 
+  // The stop may have scrolled the source; measure the line where it is now.
+  await scrollTo(page, 90);
   await clickGutter(page, 90);
   await expect(breakpoints.locator("[data-breakpoint]")).toHaveCount(0);
 });
