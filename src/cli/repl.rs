@@ -16,7 +16,8 @@ use super::terminal::Role;
 use super::{Cli, Renderers};
 
 enum Input {
-    Line(String),
+    /// A line, and the terminal's width when it was entered.
+    Line(String, Option<usize>),
     Eof,
     Failed(String),
 }
@@ -48,7 +49,10 @@ pub async fn run(cli: &Cli) -> Result<()> {
     let mut last_repeatable = None;
     while let Some(input) = inputs.recv().await {
         let keep_running = match input {
-            Input::Line(text) => {
+            Input::Line(text, columns) => {
+                if let Some(columns) = columns {
+                    cli.set_columns(columns);
+                }
                 let entered = text.trim();
                 // An empty line repeats the last repeatable command.
                 let command = if entered.is_empty() {
@@ -145,7 +149,8 @@ fn line_editor(
                 {
                     warn(format!("failed to record command history: {error}"));
                 }
-                if input.blocking_send(Input::Line(line)).is_err()
+                let columns = editor.dimensions().map(|(columns, _)| usize::from(columns));
+                if input.blocking_send(Input::Line(line, columns)).is_err()
                     || !acknowledgements.recv().unwrap_or(false)
                 {
                     break;

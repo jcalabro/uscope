@@ -222,6 +222,8 @@ pub struct Cli {
     views: std::sync::Mutex<ViewSources>,
     /// The breakpoints an interactive session keeps for the next one.
     kept: std::sync::OnceLock<std::sync::Mutex<saved::Kept>>,
+    /// The terminal's width as the line editor last measured it, or 0.
+    columns: std::sync::atomic::AtomicUsize,
 }
 
 /// The view files a session loads: those it was given or loaded, most
@@ -250,6 +252,22 @@ impl Cli {
                 discovered: Vec::new(),
             }),
             kept: std::sync::OnceLock::new(),
+            columns: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Records the terminal's width, as the line editor measured it.
+    pub fn set_columns(&self, columns: usize) {
+        self.columns
+            .store(columns, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The width a value is laid out to: the terminal's, or 80 when output
+    /// is not one, so that piped and batch output is the same everywhere.
+    pub fn columns(&self) -> usize {
+        match self.columns.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => 80,
+            columns => columns,
         }
     }
 
