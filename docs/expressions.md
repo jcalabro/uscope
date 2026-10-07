@@ -281,9 +281,11 @@ uc & u16v              => 250 : short unsigned int
 ## Floating point
 
 Floats compute in the widest format among their operands, and an integer
-operand converts to the nearest value. x87 `long double` values compute
-exactly in their own format, never rounded through a double. Floats compare
-with integers exactly.
+operand converts to the nearest value. x87 `long double`, half precision
+(`_Float16`, `f16`), bfloat16 (`__bf16`), and quad precision (`__float128`,
+`f128`) values compute exactly in their own formats, never rounded through a
+double; half and bfloat16 together, neither of which holds the other's
+values, compute as `f32`. Floats compare with integers exactly.
 
 ```uscope-example
 world: scalars

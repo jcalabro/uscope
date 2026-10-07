@@ -459,6 +459,41 @@ pub enum BaseTypeEncoding {
     ComplexFloating,
 }
 
+/// The format of a float type's values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatLayout {
+    Binary16,
+    BFloat16,
+    Binary32,
+    Binary64,
+    X87Extended,
+    Binary128,
+}
+
+impl BaseType {
+    /// The format a float type's values are in: by its size, and by its
+    /// name where formats share a size, so that a format the name does not
+    /// say is never guessed.
+    #[must_use]
+    pub fn float_layout(&self) -> Option<FloatLayout> {
+        if self.encoding != BaseTypeEncoding::Floating {
+            return None;
+        }
+        let name = self.base_name.as_ref();
+        Some(match (self.byte_size, name) {
+            (2, "_Float16" | "__fp16" | "f16") => FloatLayout::Binary16,
+            (2, "__bf16") => FloatLayout::BFloat16,
+            (4, _) => FloatLayout::Binary32,
+            (8, _) => FloatLayout::Binary64,
+            (10 | 12 | 16, "long double" | "__float80" | "_Float64x" | "f80" | "c_longdouble") => {
+                FloatLayout::X87Extended
+            }
+            (16, "_Float128" | "__float128" | "f128") => FloatLayout::Binary128,
+            _ => return None,
+        })
+    }
+}
+
 /// A resolved scalar type independent of its debug-information encoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseType {
@@ -1011,10 +1046,16 @@ impl TypeNode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FloatValue {
+    /// IEEE binary16 bits: C's `_Float16`, and Rust's and Zig's `f16`.
+    Binary16(u16),
+    /// bfloat16 bits: binary32's top half, as C's `__bf16`.
+    BFloat16(u16),
     /// IEEE binary32 bits.
     Binary32(u32),
     /// IEEE binary64 bits.
     Binary64(u64),
+    /// IEEE binary128 bits: C's `__float128`, and Rust's and Zig's `f128`.
+    Binary128(u128),
     /// The meaningful 80 bits of an x87 extended value.
     X87Extended {
         /// The explicit integer bit and fraction.

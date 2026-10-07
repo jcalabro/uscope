@@ -1157,6 +1157,8 @@ build_rust_fixture "$rust_fixtures_dir/records.rs" "$output_dir/records-rust-o2"
     -C opt-level=2 -C force-frame-pointers=no
 build_rust_fixture "$rust_fixtures_dir/strings.rs" "$output_dir/strings-rust-o0" \
     -C opt-level=0 -C force-frame-pointers=yes
+build_rust_fixture "$rust_fixtures_dir/floats.rs" "$output_dir/floats-rust" \
+    -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/enums.rs" "$output_dir/enums-rust-o0" \
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/enums.rs" "$output_dir/enums-rust-o2" \
@@ -1269,6 +1271,7 @@ build_zig_fixture "$zig_fixtures_dir/expressions.zig" "$output_dir/expressions-z
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/expressions.zig" "$output_dir/expressions-zig-o2" \
     -O ReleaseFast -fPIE -fomit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/floats.zig" "$output_dir/floats-zig" -O Debug
 build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-o2" \
@@ -1329,6 +1332,10 @@ build_program rustc "$rust_fixtures_dir/kvstore.rs" "$output_dir/kvstore-rust" \
 build_go_fixture "$go_fixtures_dir/kvstore" "$output_dir/kvstore-go" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_fixture gcc "$c_fixtures_dir/strings.c" "$output_dir/strings-c-gcc-o0" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/floats.c" "$output_dir/floats-c-gcc" \
+    -O0 -g3 -fPIE -pie
+build_fixture clang "$c_fixtures_dir/floats.c" "$output_dir/floats-c-clang" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/line-sliding.c" "$output_dir/line-sliding" \
     -O0 -g3 -fPIE -pie

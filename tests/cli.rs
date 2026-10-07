@@ -2302,6 +2302,40 @@ fn print_and_p_render_scalars_and_print_lists_every_variable() {
     }
 }
 
+/// Floats print in every format their programs hold them in, each with
+/// its own precision: a quad precision tenth is a tenth.
+#[test]
+fn floats_of_every_format_print_exactly() {
+    for fixture in ["floats-c-gcc", "floats-c-clang"] {
+        let stdout = batch(
+            &[&format!("build/test-programs/{fixture}")],
+            &["break floats_target", "run", "up", "print"],
+        );
+        assert_in_order(
+            &stdout,
+            &[
+                "(_Float16) half = 1.5\n",
+                "(__bf16) brain = -3.14\n",
+                "(float) single = 0.25\n",
+                "(double) precision = 2.5\n",
+                "(long double) extended = 3.125\n",
+                // GCC names `__float128` `_Float128`.
+                "128) quad = 0.1\n",
+            ],
+        );
+    }
+    let stdout = batch(
+        &["build/test-programs/floats-rust"],
+        &["break floats_target", "run", "print half", "print quad"],
+    );
+    assert_in_order(&stdout, &["(f16) half = 1.5\n", "(f128) quad = 0.1\n"]);
+    let stdout = batch(
+        &["build/test-programs/floats-zig"],
+        &["break floats.zig:8", "run", "print half", "print quad"],
+    );
+    assert_in_order(&stdout, &["(f16) half = 1.5\n", "(f128) quad = 0.1\n"]);
+}
+
 #[test]
 fn info_symbol_and_x_describe_memory_by_address() {
     let executable = fixture("build/test-programs/variables-gcc-nopie");

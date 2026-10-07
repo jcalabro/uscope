@@ -1549,12 +1549,18 @@ async fn c_enums_and_raw_unions_preserve_values_names_aliases_and_interpretation
                 uscope::IntegerValue::Signed(0),
                 &["SIGNED_ZERO", "SIGNED_ZERO_ALIAS"][..],
             ),
-            ("flags", uscope::IntegerValue::Unsigned(3), &[][..]),
+            // Single bits are flags, and a value is the ones it sets.
+            (
+                "flags",
+                uscope::IntegerValue::Unsigned(3),
+                &["FLAG_READ", "FLAG_WRITE"][..],
+            ),
             (
                 "byte_value",
                 uscope::IntegerValue::Unsigned(255),
                 &["BYTE_MAX"][..],
             ),
+            ("sequence", uscope::IntegerValue::Unsigned(3), &[][..]),
         ] {
             let inspected = dereference_named(&scenario, name, 1).await;
             let uscope::VariableValue::Enumeration { value, matches } =

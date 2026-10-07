@@ -1219,6 +1219,35 @@ mod tests {
             float(uscope::FloatValue::Binary32(f32::MAX.to_bits())),
             "3.4028235e38"
         );
+        // Formats Rust has no type for take as few digits as read back.
+        let quad = |text: &str| {
+            use rustc_apfloat::Float as _;
+            let value = rustc_apfloat::ieee::Quad::from_str_r(
+                text,
+                rustc_apfloat::Round::NearestTiesToEven,
+            )
+            .expect("a number")
+            .value;
+            float(uscope::FloatValue::Binary128(value.to_bits()))
+        };
+        assert_eq!(quad("0.1"), "0.1");
+        assert_eq!(quad("123456"), "123456");
+        assert_eq!(quad("-1e30"), "-1e30");
+        assert_eq!(quad("1e-9"), "1e-9");
+        assert_eq!(quad("0.000001"), "0.000001");
+        assert_eq!(float(uscope::FloatValue::Binary16(0x3e00)), "1.5");
+        // The largest half is 65504, but 65500 reads back as it.
+        assert_eq!(float(uscope::FloatValue::Binary16(0x7bff)), "65500");
+        assert_eq!(float(uscope::FloatValue::Binary16(1)), "6e-8");
+        assert_eq!(float(uscope::FloatValue::Binary16(0x7c00)), "inf");
+        assert_eq!(float(uscope::FloatValue::BFloat16(0xc049)), "-3.14");
+        assert_eq!(
+            float(uscope::FloatValue::X87Extended {
+                significand: 0xcccc_cccc_cccc_cccd,
+                sign_exponent: 0x3ffb,
+            }),
+            "0.1"
+        );
         assert_eq!(
             uscope::scalar_text(
                 &ScalarValue::Complex {
