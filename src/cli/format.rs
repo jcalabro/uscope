@@ -1235,7 +1235,7 @@ fn indirect_target_text(
 
 /// Names an encoded address by its symbol or, failing that, its section,
 /// adding the module when it differs from the instruction's.
-fn reference_name(
+pub fn reference_name(
     description: &AddressDescription,
     from: Option<ModuleId>,
     modules: &LoadedModuleSnapshot,

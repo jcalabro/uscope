@@ -1166,6 +1166,8 @@ build_fixture gcc "$c_fixtures_dir/process-environment.c" "$output_dir/process-e
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/output-streams.c" "$output_dir/output-streams" \
     -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/kvstore.c" "$output_dir/kvstore" \
+    -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/strings.c" "$output_dir/strings-c-gcc-o0" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/line-sliding.c" "$output_dir/line-sliding" \
