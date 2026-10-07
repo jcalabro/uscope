@@ -117,6 +117,8 @@ pub enum Request {
     SetSignal(SignalPolicy),
     /// The modules the program has loaded.
     Modules,
+    /// Functions whose names hold the query, best matches first.
+    Functions(FunctionQuery),
 }
 
 #[derive(Debug, Deserialize)]
@@ -430,6 +432,16 @@ pub struct SignalPolicy {
     pub stop: bool,
     pub print: bool,
     pub pass: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FunctionQuery {
+    pub query: String,
+    /// How many to return; 50 when absent, and never more than 200.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -852,6 +864,24 @@ pub struct SourceFiles {
     pub entry: Option<SourceLine>,
 }
 
+/// The answer to `functions`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Functions {
+    pub functions: Vec<FunctionMatch>,
+    /// Whether more functions match than were returned.
+    pub more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FunctionMatch {
+    pub name: String,
+    /// Where it is declared, when the debug information says.
+    pub path: Option<String>,
+    pub line: Option<u64>,
+}
+
 /// The answer to `source`.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -1102,105 +1132,110 @@ mod tests {
 
     const GENERATED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/web/src/protocol.gen.ts");
 
+    /// Every message type, in the order the TypeScript declares them.
+    const DECLARATIONS: &[fn(&Config) -> String] = &[
+        Role::decl,
+        Envelope::decl,
+        Request::decl,
+        SetName::decl,
+        Share::decl,
+        CompletePath::decl,
+        Launch::decl,
+        Attach::decl,
+        OpenCore::decl,
+        Continue::decl,
+        Step::decl,
+        StepKind::decl,
+        SetFocus::decl,
+        Focus::decl,
+        ThreadAt::decl,
+        SourcePath::decl,
+        AddBreakpoint::decl,
+        EditBreakpoint::decl,
+        BreakpointRef::decl,
+        Input::decl,
+        ServerMessage::decl,
+        Hello::decl,
+        State::decl,
+        Target::decl,
+        TargetKind::decl,
+        Inferior::decl,
+        StopReason::decl,
+        Place::decl,
+        StopEntry::decl,
+        Breakpoint::decl,
+        Thread::decl,
+        ErrorBody::decl,
+        ErrorKind::decl,
+        Output::decl,
+        Stream::decl,
+        Presence::decl,
+        Person::decl,
+        Notice::decl,
+        PathCompletions::decl,
+        PathEntry::decl,
+        PathKind::decl,
+        Processes::decl,
+        Process::decl,
+        ShareLink::decl,
+        Backtrace::decl,
+        Frame::decl,
+        FrameKind::decl,
+        SourceLine::decl,
+        SourceFiles::decl,
+        FunctionQuery::decl,
+        Functions::decl,
+        FunctionMatch::decl,
+        SourceText::decl,
+        Added::decl,
+        FrameAt::decl,
+        ChildrenOf::decl,
+        Evaluate::decl,
+        SetValue::decl,
+        Complete::decl,
+        ConsoleLine::decl,
+        Scopes::decl,
+        Scope::decl,
+        ScopeKey::decl,
+        Row::decl,
+        Children::decl,
+        Rows::decl,
+        Completions::decl,
+        Completion::decl,
+        ConsoleResult::decl,
+        Disassemble::decl,
+        ReadMemory::decl,
+        WriteMemory::decl,
+        AddWatchpoint::decl,
+        EditWatchpoint::decl,
+        WatchpointRef::decl,
+        WatchAccess::decl,
+        Syntax::decl,
+        SignalPolicy::decl,
+        Watchpoint::decl,
+        Disassembled::decl,
+        Instruction::decl,
+        Token::decl,
+        BranchTarget::decl,
+        Memory::decl,
+        Registers::decl,
+        Register::decl,
+        Signals::decl,
+        Modules::decl,
+        Module::decl,
+    ];
+
     /// Writes every message type as TypeScript.
     fn typescript() -> String {
         let config = Config::new().with_large_int("number");
-        let declarations = [
-            Role::decl(&config),
-            Envelope::decl(&config),
-            Request::decl(&config),
-            SetName::decl(&config),
-            Share::decl(&config),
-            CompletePath::decl(&config),
-            Launch::decl(&config),
-            Attach::decl(&config),
-            OpenCore::decl(&config),
-            Continue::decl(&config),
-            Step::decl(&config),
-            StepKind::decl(&config),
-            SetFocus::decl(&config),
-            Focus::decl(&config),
-            ThreadAt::decl(&config),
-            SourcePath::decl(&config),
-            AddBreakpoint::decl(&config),
-            EditBreakpoint::decl(&config),
-            BreakpointRef::decl(&config),
-            Input::decl(&config),
-            ServerMessage::decl(&config),
-            Hello::decl(&config),
-            State::decl(&config),
-            Target::decl(&config),
-            TargetKind::decl(&config),
-            Inferior::decl(&config),
-            StopReason::decl(&config),
-            Place::decl(&config),
-            StopEntry::decl(&config),
-            Breakpoint::decl(&config),
-            Thread::decl(&config),
-            ErrorBody::decl(&config),
-            ErrorKind::decl(&config),
-            Output::decl(&config),
-            Stream::decl(&config),
-            Presence::decl(&config),
-            Person::decl(&config),
-            Notice::decl(&config),
-            PathCompletions::decl(&config),
-            PathEntry::decl(&config),
-            PathKind::decl(&config),
-            Processes::decl(&config),
-            Process::decl(&config),
-            ShareLink::decl(&config),
-            Backtrace::decl(&config),
-            Frame::decl(&config),
-            FrameKind::decl(&config),
-            SourceLine::decl(&config),
-            SourceFiles::decl(&config),
-            SourceText::decl(&config),
-            Added::decl(&config),
-            FrameAt::decl(&config),
-            ChildrenOf::decl(&config),
-            Evaluate::decl(&config),
-            SetValue::decl(&config),
-            Complete::decl(&config),
-            ConsoleLine::decl(&config),
-            Scopes::decl(&config),
-            Scope::decl(&config),
-            ScopeKey::decl(&config),
-            Row::decl(&config),
-            Children::decl(&config),
-            Rows::decl(&config),
-            Completions::decl(&config),
-            Completion::decl(&config),
-            ConsoleResult::decl(&config),
-            Disassemble::decl(&config),
-            ReadMemory::decl(&config),
-            WriteMemory::decl(&config),
-            AddWatchpoint::decl(&config),
-            EditWatchpoint::decl(&config),
-            WatchpointRef::decl(&config),
-            WatchAccess::decl(&config),
-            Syntax::decl(&config),
-            SignalPolicy::decl(&config),
-            Watchpoint::decl(&config),
-            Disassembled::decl(&config),
-            Instruction::decl(&config),
-            Token::decl(&config),
-            BranchTarget::decl(&config),
-            Memory::decl(&config),
-            Registers::decl(&config),
-            Register::decl(&config),
-            Signals::decl(&config),
-            Modules::decl(&config),
-            Module::decl(&config),
-        ];
         let mut text = format!(
             "// Generated from src/web/protocol.rs by `cargo test`; do not edit.\n\n\
              export const PROTOCOL_VERSION = {VERSION};\n"
         );
-        for declaration in declarations {
+        for declare in DECLARATIONS {
             text.push('\n');
             text.push_str("export ");
-            text.push_str(&declaration);
+            text.push_str(&declare(&config));
             text.push('\n');
         }
         text

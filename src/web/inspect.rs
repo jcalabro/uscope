@@ -6,7 +6,10 @@ use std::path::Path;
 use uscope::{DebuggerHandle, FrameKind, LineNumber, StackFrameId, StopContext, UnwindTermination};
 
 use super::describe::{Images, frame_name, hex};
-use super::protocol::{self, Backtrace, ErrorKind, Frame, SourceFiles, SourceLine, SourceText};
+use super::protocol::{
+    self, Backtrace, ErrorKind, Frame, FunctionMatch, FunctionQuery, Functions, SourceFiles,
+    SourceLine, SourceText,
+};
 use super::session::Failure;
 
 /// The context of a thread's innermost frame at a stop.
@@ -112,6 +115,66 @@ pub async fn sources(images: &Images) -> SourceFiles {
     SourceFiles {
         files: files.into_iter().collect(),
         entry,
+    }
+}
+
+/// Functions whose names hold `query`, case aside: whole names first, then
+/// those it begins, holds, or holds the letters of in order, and shorter
+/// names before longer ones.
+pub async fn functions(images: &Images, query: &FunctionQuery) -> Functions {
+    let wanted = query.query.trim().to_lowercase();
+    let limit = query.limit.map_or(50, |limit| limit.min(200)) as usize;
+    if wanted.is_empty() {
+        return Functions {
+            functions: Vec::new(),
+            more: false,
+        };
+    }
+    let mut found = BTreeSet::new();
+    for image in images.with_sources().await {
+        for function in image.functions() {
+            let Some(rank) = rank(&function.name.to_lowercase(), &wanted) else {
+                continue;
+            };
+            let declared = function.declaration.as_ref();
+            found.insert((
+                rank,
+                function.name.len(),
+                FunctionMatch {
+                    name: function.name.to_string(),
+                    path: declared
+                        .and_then(|declared| image.source_file(declared.file))
+                        .map(|file| file.path.display().to_string()),
+                    line: declared.map(|declared| declared.line.get()),
+                },
+            ));
+        }
+    }
+    let more = found.len() > limit;
+    Functions {
+        functions: found
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, function)| function)
+            .collect(),
+        more,
+    }
+}
+
+/// How well `name` matches `query`, best first, or none.
+fn rank(name: &str, query: &str) -> Option<u8> {
+    if name == query {
+        Some(0)
+    } else if name.starts_with(query) {
+        Some(1)
+    } else if name.contains(query) {
+        Some(2)
+    } else {
+        let mut letters = name.chars();
+        query
+            .chars()
+            .all(|wanted| letters.any(|letter| letter == wanted))
+            .then_some(3)
     }
 }
 

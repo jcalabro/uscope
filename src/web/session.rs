@@ -334,6 +334,7 @@ impl Session {
                 | Request::Registers(_)
                 | Request::Signals
                 | Request::Modules
+                | Request::Functions(_)
         );
         if !reads && role != Role::Control {
             return Err(Failure::new(
@@ -404,6 +405,10 @@ impl Session {
             Request::Sources => {
                 let (_, images) = self.current_images().await?;
                 Ok(to_value(&inspect::sources(&images).await))
+            }
+            Request::Functions(query) => {
+                let (_, images) = self.current_images().await?;
+                Ok(to_value(&inspect::functions(&images, &query).await))
             }
             Request::Source(protocol::SourcePath { path }) => {
                 let (handle, images) = self.current_images().await?;

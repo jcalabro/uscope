@@ -224,3 +224,44 @@ async fn the_console_completes_and_runs_commands_in_the_tabs_frame() {
         assert_eq!(kind, "forbidden", "{method}");
     }
 }
+
+#[tokio::test]
+async fn functions_are_found_by_any_part_of_their_name() {
+    let web = Web::start("functions", &[&fixture("kvstore")]);
+    let mut tab = web.control("tab").await;
+    tab.state("the program loaded", |state| state["session"].is_string())
+        .await;
+    let names = |found: &Value| {
+        found["functions"]
+            .as_array()
+            .expect("functions")
+            .iter()
+            .map(|function| function["name"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    // Before the program runs, where each is declared.
+    let found = tab.ok("functions", json!({"query": "handle_req"})).await;
+    assert_eq!(found["functions"][0]["name"], "handle_request", "{found}");
+    assert_eq!(found["functions"][0]["line"], 89);
+    assert!(
+        found["functions"][0]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("kvstore.c")),
+        "{found}"
+    );
+    // Letters in order find a name, after names that hold them together.
+    let scattered = tab.ok("functions", json!({"query": "tfind"})).await;
+    assert!(
+        names(&scattered).contains(&"table_find".to_owned()),
+        "{scattered}"
+    );
+    let entry = tab.ok("functions", json!({"query": "entry"})).await;
+    assert_eq!(names(&entry)[0], "entry_set", "{entry}");
+
+    let few = tab.ok("functions", json!({"query": "e", "limit": 2})).await;
+    assert_eq!(names(&few).len(), 2);
+    assert_eq!(few["more"], true);
+    let none = tab.ok("functions", json!({"query": "  "})).await;
+    assert!(names(&none).is_empty());
+}
