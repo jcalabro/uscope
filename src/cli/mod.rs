@@ -866,7 +866,21 @@ fn page(pager: &str, text: &str) -> io::Result<bool> {
         // A pager that quits early closes its input, which is no error.
         let _ = input.write_all(text.as_bytes());
     }
-    Ok(child.wait()?.code() != Some(127))
+    Ok(wait_for_child(&mut child)?.is_none_or(|status| status.code() != Some(127)))
+}
+
+/// Waits for a process the CLI started, returning its status when it can
+/// still be read. While a program is traced the debugger collects the exit
+/// of every child of this process, so a child already collected has ended,
+/// with a status no one can read now.
+pub fn wait_for_child(
+    child: &mut std::process::Child,
+) -> io::Result<Option<std::process::ExitStatus>> {
+    match child.wait() {
+        Ok(status) => Ok(Some(status)),
+        Err(error) if error.raw_os_error() == Some(nix::libc::ECHILD) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn emit(text: &str) -> io::Result<()> {

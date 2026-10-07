@@ -674,6 +674,15 @@ which is waiting on the editor, and waits up to two seconds for the
 names. `edit`, `display`, and `undisplay` are refused in the debug
 console, whose client shows files and watches values itself.
 
+The pager and the editor are the CLI's only child processes. While a
+program is traced the debugger's waiter collects every child's exit, so
+the CLI may find its child already collected; it then knows the child
+ended but not its status. The controller records such an exit as a
+thread that vanished before its clone event, and that record outlives
+it: a new thread of the program given the same pid after the pids wrap
+would be taken for that vanished thread. Telling the controller which
+children are the CLI's would close this, and is left for later.
+
 ## Phases
 
 Each phase ends with its tests passing and `just sim 60` where the core
