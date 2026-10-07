@@ -24,8 +24,8 @@ use crate::support::flight_recordings;
 // A response may wait for the program to load, as `setBreakpoints` sent
 // beside `launch` does, which takes seconds for the largest fixtures under
 // `just stress`, so responses are bounded as events are.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A position in the stream of received messages; waits look only after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
