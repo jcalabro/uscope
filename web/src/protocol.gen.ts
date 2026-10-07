@@ -73,7 +73,7 @@ stop: number, thread: number,
  * The frame a step out leaves; every other step starts from the
  * innermost frame.
  */
-frame: number, kind: StepKind, };
+frame?: number, kind: StepKind, };
 
 export type StepKind = "over" | "into" | "out" | "instruction" | "overInstruction";
 
@@ -105,21 +105,21 @@ export type AddBreakpoint = {
 /**
  * A function, `FILE:LINE`, `FILE:FUNCTION`, or `0xADDRESS`.
  */
-location: string, condition: string | null, 
+location: string, condition?: string | null, 
 /**
  * Which hits stop, such as `>=5` or `%10`.
  */
-hitCondition: string | null, 
+hitCondition?: string | null, 
 /**
  * A message to log instead of stopping, with expressions in braces.
  */
-logMessage: string | null, };
+logMessage?: string | null, };
 
 export type EditBreakpoint = { id: number, 
 /**
  * Absent to remove.
  */
-condition: string | null, hitCondition: string | null, logMessage: string | null, };
+condition?: string | null, hitCondition?: string | null, logMessage?: string | null, };
 
 export type BreakpointRef = { id: number, };
 
@@ -323,7 +323,11 @@ export type SourceFiles = {
 /**
  * Paths as the debug information records them, sorted.
  */
-files: Array<string>, };
+files: Array<string>, 
+/**
+ * Where the program's main function is declared, when it has one.
+ */
+entry: SourceLine | null, };
 
 export type SourceText = { path: string, 
 /**

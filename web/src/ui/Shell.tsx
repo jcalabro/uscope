@@ -1,9 +1,9 @@
 import { Outlet, useLocation } from "@tanstack/react-router";
 import { useEffect } from "react";
-import { action } from "../actions";
 import { commandFor, isTextBox } from "../keys";
 import { targetName } from "../model";
-import { useConnection, useModel, useStoreApi } from "../store";
+import { useModel } from "../store";
+import { useCommands } from "./commands";
 import { NeedsLink } from "./pages";
 import { Strip } from "./Strip";
 import { Toolbar } from "./Toolbar";
@@ -47,22 +47,31 @@ export function Shell() {
 
 /** Runs the debugger keys, claiming them from the browser while it does. */
 function useKeys() {
-  const store = useStoreApi();
-  const connection = useConnection();
+  const run = useCommands();
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
-      const command = commandFor(event, isTextBox(document.activeElement));
-      if (command === null || command === "palette" || command === "help") {
+      if (event.isComposing) {
         return;
       }
-      // Claimed even when unavailable, so F5 never reloads the debugger away.
-      event.preventDefault();
-      const current = action(command, store.getState());
-      if (current.enabled) {
-        void current.run(connection).catch(() => undefined);
+      const typing = isTextBox(document.activeElement);
+      const command = commandFor(event, typing);
+      if (command === null) {
+        // Escape leaves a text box, giving the keys back to the debugger.
+        if (typing && event.key === "Escape" && document.activeElement instanceof HTMLElement) {
+          const box = document.activeElement;
+          // After the box's own handlers, which may close what holds it.
+          setTimeout(() => box.blur(), 0);
+        }
+        return;
+      }
+      // Function keys are claimed even when unavailable, so F5 never reloads
+      // the debugger away; other keys only when they did something.
+      if (run(command) || /^F\d+$/.test(event.key)) {
+        event.preventDefault();
       }
     };
+    // Captured, so the debugger's keys reach it before any pane's handlers.
     window.addEventListener("keydown", listener, { capture: true });
     return () => window.removeEventListener("keydown", listener, { capture: true });
-  }, [store, connection]);
+  }, [run]);
 }

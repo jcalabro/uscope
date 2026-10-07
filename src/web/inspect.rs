@@ -89,14 +89,29 @@ pub async fn backtrace(
 }
 
 pub async fn sources(images: &Images) -> SourceFiles {
+    let images = images.with_sources().await;
     let mut files = BTreeSet::new();
-    for image in images.with_sources().await {
+    for image in &images {
         for file in image.source_files() {
             files.insert(file.path.display().to_string());
         }
     }
+    // The executable's image comes first; Go names its main function
+    // main.main.
+    let entry = images.first().and_then(|image| {
+        let main = ["main", "main.main"]
+            .into_iter()
+            .find_map(|name| image.function_named(name).ok())?;
+        let declared = main.declaration.as_ref()?;
+        Some(SourceLine {
+            path: image.source_file(declared.file)?.path.display().to_string(),
+            line: declared.line.get(),
+            column: None,
+        })
+    });
     SourceFiles {
         files: files.into_iter().collect(),
+        entry,
     }
 }
 

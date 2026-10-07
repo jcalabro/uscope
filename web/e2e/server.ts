@@ -144,5 +144,5 @@ export function expectErrors(...errors: string[]): void {
 /** Opens the join link and waits until the page shows the session. */
 export async function join(page: Page, link: string): Promise<void> {
   await page.goto(link);
-  await page.waitForURL(/\/(s\/[0-9a-f]+|pick)$/);
+  await page.waitForURL(/\/(s\/[0-9a-f]+|pick)(\/|\?|$)/);
 }

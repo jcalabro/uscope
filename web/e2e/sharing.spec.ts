@@ -12,6 +12,9 @@ test("a view link shows a coworker the same session without its controls", async
   await expect(page.getByTestId("status")).toContainText("Running");
   await page.getByRole("button", { name: /Pause/ }).click();
   await expect(page.getByTestId("status")).toContainText("Stopped");
+  // The link carries the whole look, even watches holding `&` and `#`.
+  await page.goto(`${page.url()}?w=${encodeURIComponent("a & b#c")}&w=d`);
+  await expect(page.getByTestId("status")).toContainText("Stopped");
 
   await page.getByRole("button", { name: "Share" }).click();
   const dialog = page.getByRole("dialog", { name: "Share this session" });
@@ -24,7 +27,12 @@ test("a view link shows a coworker the same session without its controls", async
 
   const coworker = await (await browser.newContext()).newPage();
   await coworker.goto(link);
-  await expect(coworker).toHaveURL(page.url());
+  const look = (url: string) => {
+    const { pathname, searchParams } = new URL(url);
+    return { pathname, watches: searchParams.getAll("w") };
+  };
+  await expect.poll(() => look(coworker.url())).toEqual(look(page.url()));
+  expect(look(page.url()).watches).toEqual(["a & b#c", "d"]);
   await expect(coworker.getByTestId("status")).toHaveText(
     (await page.getByTestId("status").textContent()) ?? "",
   );
@@ -37,6 +45,14 @@ test("a view link shows a coworker the same session without its controls", async
   // Each sees the other, and the controller's continue reaches both.
   await expect(page.getByTestId("people").getByRole("listitem")).toHaveCount(2);
   await expect(coworker.getByTestId("people").getByRole("listitem")).toHaveCount(2);
+
+  // Hovering the controller says where they look; clicking goes there.
+  await page.keyboard.press("u");
+  await expect(page).toHaveURL(/\/f\/1\?/);
+  const owner = coworker.getByRole("button", { name: /Go to tester's focus, .*frame 1/ });
+  await owner.click();
+  await expect.poll(() => look(coworker.url())).toEqual(look(page.url()));
+
   await page.keyboard.press("F5");
   await expect(coworker.getByTestId("status")).toContainText("Running");
 });

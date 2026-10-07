@@ -25,6 +25,14 @@
   --warn-line: #e3bd5f;
   --error: #b42525;
   --error-bg: #fde6e6;
+  --frame-bg: #e9eefb;
+  --select-bg: #eef2fb;
+  --k: #7b3fb5;
+  --t: #0f7287;
+  --f: #2f56c9;
+  --s: #3b7d23;
+  --n: #a24a1a;
+  --c: #7b8696;
   --shadow: 0 1px 2px rgb(20 30 50 / 6%), 0 8px 24px rgb(20 30 50 / 10%);
 
   --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -57,6 +65,14 @@
     --warn-line: #7c6526;
     --error: #ff8a8a;
     --error-bg: #3a1a1c;
+    --frame-bg: #1c2638;
+    --select-bg: #1b2231;
+    --k: #c69bff;
+    --t: #5fc8d8;
+    --f: #8fb0ff;
+    --s: #9bd47a;
+    --n: #f0a070;
+    --c: #6f7a89;
     --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 24px rgb(0 0 0 / 40%);
   }
 }
@@ -85,6 +101,14 @@
   --warn-line: #7c6526;
   --error: #ff8a8a;
   --error-bg: #3a1a1c;
+  --frame-bg: #1c2638;
+  --select-bg: #1b2231;
+  --k: #c69bff;
+  --t: #5fc8d8;
+  --f: #8fb0ff;
+  --s: #9bd47a;
+  --n: #f0a070;
+  --c: #6f7a89;
   --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 24px rgb(0 0 0 / 40%);
 }
 
@@ -104,6 +128,11 @@ body {
   color: var(--ink);
   font: 13px / 1.45 var(--sans);
   -webkit-font-smoothing: antialiased;
+  /* Code and values show the characters they have: != is two of them. */
+  font-variant-ligatures: none;
+  font-feature-settings:
+    "calt" 0,
+    "liga" 0;
 }
 
 button,
@@ -145,6 +174,8 @@ kbd {
 .app {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  /* The window's width, never the toolbar's: its status shrinks instead. */
+  grid-template-columns: minmax(0, 1fr);
   height: 100%;
 }
 
@@ -156,8 +187,22 @@ kbd {
   padding: 4px 8px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
-  /* Wraps rather than scrolls: a scrolling box would clip its popovers. */
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+}
+
+/* Narrow windows wrap the toolbar rather than scroll it, since a scrolling
+   box would clip its popovers. */
+@media (width < 900px) {
+  .toolbar {
+    flex-wrap: wrap;
+  }
+}
+
+/* Step buttons keep their glyphs and tooltips where labels do not fit. */
+@media (width < 1360px) {
+  .tb .label {
+    display: none;
+  }
 }
 
 .brand {
@@ -250,11 +295,19 @@ kbd {
 
 .status {
   display: flex;
+  flex: 0 1 auto;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  overflow: hidden;
   color: var(--ink-2);
   white-space: nowrap;
+}
+
+.status .detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status .program {
@@ -357,11 +410,23 @@ kbd {
   opacity: 0.85;
 }
 
+.avatar button {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
 /* ---------- panes ---------- */
 
 .workspace {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
   min-height: 0;
 }
 
@@ -840,4 +905,560 @@ textarea.input {
 
 .muted {
   color: var(--ink-3);
+}
+
+/* ---------- splits ---------- */
+
+.gutter {
+  position: relative;
+  z-index: 1;
+  background: var(--line);
+  touch-action: none;
+}
+
+.gutter.columns {
+  width: 5px;
+  margin: 0 -2px;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.gutter.columns::after {
+  position: absolute;
+  inset: 0 2px;
+  background: var(--line);
+  content: "";
+}
+
+.gutter.rows {
+  flex: none;
+  height: 5px;
+  margin: -2px 0;
+  background: transparent;
+  cursor: row-resize;
+}
+
+.gutter.rows::after {
+  position: absolute;
+  inset: 2px 0;
+  background: var(--line);
+  content: "";
+}
+
+.gutter:hover::after,
+.gutter:focus-visible::after {
+  background: var(--accent);
+}
+
+.column.center {
+  border-right: 0;
+}
+
+/* ---------- rows that act ---------- */
+
+.button-row {
+  width: 100%;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.button-row:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.button-row.selected:hover {
+  background: var(--accent-soft);
+}
+
+.button-row:disabled {
+  cursor: default;
+}
+
+.row .index {
+  width: 1.4em;
+  flex: none;
+  text-align: right;
+}
+
+.row .fn {
+  overflow: hidden;
+  color: var(--f);
+  text-overflow: ellipsis;
+}
+
+.row .fn.subtle {
+  color: var(--ink-2);
+}
+
+.row.sub {
+  height: 18px;
+  padding-left: 29px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+.row.sub.error,
+.error {
+  color: var(--error);
+  font-size: 12px;
+}
+
+.icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--ink-3);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.icon:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/* ---------- breakpoints ---------- */
+
+.dot {
+  display: inline-block;
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--bp);
+}
+
+.dot.conditional {
+  box-shadow: inset 0 0 0 2px var(--surface);
+  outline: 1.5px solid var(--bp);
+}
+
+.dot.log {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  transform: rotate(45deg);
+}
+
+.dot.pending {
+  border: 1.5px solid var(--bp);
+  background: none;
+}
+
+.breakpoint .link-row {
+  flex: none;
+  max-width: 70%;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.breakpoint .link-row:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.breakpoint .fn-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Faded rather than hidden, so the keyboard and touch still reach them. */
+.breakpoint .icon {
+  opacity: 0;
+}
+
+.breakpoint:hover .icon,
+.breakpoint:focus-within .icon {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .breakpoint .icon {
+    opacity: 1;
+  }
+}
+
+.editor-form {
+  display: grid;
+  gap: 6px;
+  margin: 4px 8px;
+  padding: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-family: var(--sans);
+}
+
+.editor-form label {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.editor-title {
+  font: 600 12px var(--mono);
+}
+
+.input.quiet {
+  border-color: transparent;
+  background: transparent;
+}
+
+.input.quiet:focus {
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
+.adder {
+  padding: 2px 4px 6px;
+}
+
+.button.small {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+/* ---------- code ---------- */
+
+.pane.code {
+  overflow: hidden;
+}
+
+.file-tabs {
+  display: flex;
+  flex: none;
+  align-items: stretch;
+  height: 30px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.file-tab {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px 0 2px;
+  border-right: 1px solid var(--line);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.file-tab.on {
+  background: var(--surface);
+  box-shadow: inset 0 2px 0 var(--accent);
+  color: var(--ink);
+}
+
+.file-tab .file-name {
+  padding: 0 6px 0 8px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.file-tab .close {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.file-tab .close:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.file-tabs-end {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  padding: 0 10px;
+}
+
+.showing {
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.center-message {
+  margin: auto;
+  max-width: 60ch;
+  text-align: center;
+}
+
+.inline-error {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--error) 40%, transparent);
+  background: var(--error-bg);
+  color: var(--error);
+  font-size: 12px;
+}
+
+.inline-error .icon {
+  margin-left: auto;
+}
+
+.source-view {
+  flex: 1;
+  min-height: 0;
+}
+
+.source-view .cm-editor {
+  height: 100%;
+  background: var(--surface);
+  color: var(--ink);
+  font: 12px / var(--row) var(--mono);
+}
+
+.source-view .cm-editor.cm-focused {
+  outline: none;
+}
+
+.source-view .cm-scroller {
+  font: inherit;
+  line-height: var(--row);
+}
+
+.source-view .cm-editor .cm-content {
+  padding: 4px 0;
+  caret-color: var(--accent);
+  font-variant-ligatures: none;
+  font-feature-settings: inherit;
+}
+
+.source-view .cm-line {
+  padding: 0 12px 0 6px;
+}
+
+.source-view .cm-gutters {
+  border-right: 0;
+  background: var(--surface);
+  color: var(--ink-3);
+}
+
+.source-view .cm-lineNumbers .cm-gutterElement {
+  min-width: 34px;
+  padding: 0 10px 0 2px;
+  cursor: pointer;
+}
+
+.source-view .cm-lineNumbers .cm-gutterElement:hover {
+  color: var(--ink);
+}
+
+.source-view .cm-breakpoints {
+  width: 18px;
+  cursor: pointer;
+}
+
+.source-view .cm-breakpoints .cm-gutterElement {
+  display: grid;
+  place-items: center;
+}
+
+.source-view .dot.hint {
+  width: 7px;
+  height: 7px;
+  background: transparent;
+}
+
+.source-view .cm-breakpoints .cm-gutterElement:hover .dot.hint {
+  background: color-mix(in srgb, var(--bp) 45%, transparent);
+}
+
+.source-view .cm-activeLine,
+.source-view .cm-activeLineGutter {
+  background: transparent;
+}
+
+.source-view .cm-selectionBackground,
+.source-view .cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground {
+  /* biome-ignore lint/complexity/noImportantStyles: CodeMirror's base theme sets it inline-specific */
+  background: color-mix(in srgb, var(--accent) 22%, transparent) !important;
+}
+
+.source-view .cm-selected-line {
+  background: var(--select-bg);
+}
+
+.source-view .cm-frame-line {
+  background: var(--frame-bg);
+}
+
+.source-view .cm-pc-line {
+  background: var(--pc-bg);
+  box-shadow: inset 3px 0 0 var(--pc-mark);
+}
+
+.source-view .cm-inline-values {
+  margin-left: 18px;
+  color: var(--ink-3);
+  font-style: italic;
+}
+
+.source-view .cm-inline-values > span + span::before {
+  content: " · ";
+}
+
+.source-view .cm-inline-values .changed {
+  color: var(--changed);
+  font-style: normal;
+}
+
+.tk-k {
+  color: var(--k);
+}
+
+.tk-t {
+  color: var(--t);
+}
+
+.tk-f {
+  color: var(--f);
+}
+
+.tk-s {
+  color: var(--s);
+}
+
+.tk-n {
+  color: var(--n);
+}
+
+.tk-c {
+  color: var(--c);
+  font-style: italic;
+}
+
+.tk-p {
+  color: var(--k);
+}
+
+/* ---------- banners ---------- */
+
+.stop-banner {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--warn-line);
+  background: var(--warn-bg);
+  font-size: 12.5px;
+}
+
+.stop-banner.quiet {
+  border-color: var(--line);
+  background: var(--surface-2);
+}
+
+/* ---------- output and input ---------- */
+
+.pane.bottom {
+  flex: none;
+  border-top: 0;
+}
+
+.tab-label {
+  color: var(--ink-3);
+}
+
+.tab-label.on {
+  color: var(--ink);
+}
+
+.output .log {
+  color: var(--accent);
+}
+
+.program-input {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-top: 1px solid var(--line);
+}
+
+.program-input .prompt {
+  color: var(--accent);
+  font: 12px var(--mono);
+}
+
+.program-input .error {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- stop history ---------- */
+
+.strip .stops {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.strip .stop {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--ink-3);
+  font: 11.5px var(--mono);
+  cursor: pointer;
+}
+
+.strip .stop:hover {
+  color: var(--ink);
+}
+
+.strip .stop.current {
+  color: var(--ink-2);
+}
+
+.strip .stop.on {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--ink);
 }

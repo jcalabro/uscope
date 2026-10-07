@@ -30,12 +30,14 @@ export function shown(model: Model): Shown {
       return { pill: "idle", label: "Not started", detail: "F5 runs it" };
     case "running":
       return { pill: "running", label: "Running", detail: `process ${inferior.pid}` };
-    case "stopped":
+    case "stopped": {
+      const thread = state.threads.find((candidate) => candidate.id === inferior.thread);
       return {
         pill: "stopped",
         label: state.target.kind === "core" ? "Core dump" : "Stopped",
-        detail: inferior.reason.description,
+        detail: `stop #${inferior.stop} · ${inferior.reason.description} · ${thread?.name ?? `thread ${inferior.thread}`}`,
       };
+    }
     case "exited":
       return { pill: "idle", label: "Exited", detail: inferior.description };
     case "detached":
@@ -60,7 +62,11 @@ export function Status() {
       <span className={`pill ${pill}`} data-state={pill}>
         {label}
       </span>
-      {detail && <span title={detail}>{detail}</span>}
+      {detail && (
+        <span className="detail" title={detail}>
+          {detail}
+        </span>
+      )}
     </div>
   );
 }

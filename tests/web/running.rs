@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 
 use crate::support::Scenario;
-use crate::web::Web;
+use crate::web::{Client, Web};
 
 fn fixture(name: &str) -> String {
     Scenario::fixture(name).display().to_string()
@@ -22,6 +22,19 @@ fn source_named(files: &Value, name: &str) -> String {
         .to_owned()
 }
 
+/// Steps `thread` at `stop` and waits for the stop it ends in.
+async fn step(tab: &mut Client, stop: &Value, thread: &Value, kind: &str) -> Value {
+    tab.ok(
+        "step",
+        json!({"stop": stop, "thread": thread, "kind": kind}),
+    )
+    .await;
+    tab.state(&format!("a step {kind}"), |state| {
+        state["inferior"]["state"] == "stopped" && state["inferior"]["stop"] != *stop
+    })
+    .await
+}
+
 #[tokio::test]
 async fn a_breakpoint_set_before_running_stops_there_and_steps_walk_the_source() {
     let web = Web::start("steps", &[&fixture("basic")]);
@@ -32,6 +45,9 @@ async fn a_breakpoint_set_before_running_stops_there_and_steps_walk_the_source()
     // Sources come from the debug information before the program runs.
     let files = tab.ok("sources", json!(null)).await;
     let path = source_named(&files, "basic.c");
+    // A page opens a program that has not run on its main function.
+    assert_eq!(files["entry"]["path"], path.as_str());
+    assert_eq!(files["entry"]["line"], 9);
     let source = tab.ok("source", json!({"path": path})).await;
     assert!(
         source["text"]
@@ -83,43 +99,16 @@ async fn a_breakpoint_set_before_running_stops_there_and_steps_walk_the_source()
     assert_eq!(top["source"]["line"], 10);
 
     // Into the call, out again, and over the next line.
-    tab.ok(
-        "step",
-        json!({"stop": stop, "thread": thread, "kind": "into"}),
-    )
-    .await;
-    let into = tab
-        .state("a step into the call", |state| {
-            state["inferior"]["state"] == "stopped" && state["inferior"]["stop"] != stop
-        })
-        .await;
+    let into = step(&mut tab, &stop, &thread, "into").await;
     assert_eq!(
         into["inferior"]["place"]["function"], "breakpoint_target",
         "{into}"
     );
     let stop = into["inferior"]["stop"].clone();
-    tab.ok(
-        "step",
-        json!({"stop": stop, "thread": thread, "kind": "out"}),
-    )
-    .await;
-    let out = tab
-        .state("a step out of it", |state| {
-            state["inferior"]["state"] == "stopped" && state["inferior"]["stop"] != stop
-        })
-        .await;
+    let out = step(&mut tab, &stop, &thread, "out").await;
     assert_eq!(out["inferior"]["place"]["function"], "main", "{out}");
     let stop = out["inferior"]["stop"].clone();
-    tab.ok(
-        "step",
-        json!({"stop": stop, "thread": thread, "kind": "over"}),
-    )
-    .await;
-    let over = tab
-        .state("a step over the next line", |state| {
-            state["inferior"]["state"] == "stopped" && state["inferior"]["stop"] != stop
-        })
-        .await;
+    let over = step(&mut tab, &stop, &thread, "over").await;
     assert_eq!(over["inferior"]["reason"]["kind"], "step");
     assert_eq!(over["inferior"]["place"]["line"], 11, "{over}");
 
@@ -151,12 +140,12 @@ async fn breakpoints_change_their_conditions_and_go_before_the_program_runs() {
         json!({"id": id, "condition": "uscope_value == 0", "hitCondition": ">=2"}),
     )
     .await;
-    let edited = tab
+    let changed = tab
         .state("the condition", |state| {
             state["breakpoints"][0]["condition"] == "uscope_value == 0"
         })
         .await;
-    assert_eq!(edited["breakpoints"][0]["hitCondition"], ">=2");
+    assert_eq!(changed["breakpoints"][0]["hitCondition"], ">=2");
     let (kind, message) = tab
         .request("editBreakpoint", json!({"id": id, "hitCondition": "2"}))
         .await
@@ -181,14 +170,29 @@ async fn a_logpoint_writes_its_message_instead_of_stopping() {
     let mut tab = web.control("tab").await;
     tab.state("the program loaded", |state| state["session"].is_string())
         .await;
+    let id = tab
+        .ok(
+            "addBreakpoint",
+            json!({"location": "counted", "logMessage": "{call}", "hitCondition": "%20"}),
+        )
+        .await["id"]
+        .clone();
+    // The message changes in place: the same breakpoint, never a second one.
     tab.ok(
-        "addBreakpoint",
-        json!({"location": "counted", "logMessage": "call {call}", "hitCondition": "%20"}),
+        "editBreakpoint",
+        json!({"id": id, "logMessage": "call {call}", "hitCondition": "%20"}),
     )
     .await;
+    let changed = tab
+        .state("the new message", |state| {
+            state["breakpoints"][0]["logMessage"] == "call {call}"
+        })
+        .await;
+    assert_eq!(changed["breakpoints"].as_array().map(Vec::len), Some(1));
+    assert_eq!(changed["breakpoints"][0]["id"], id);
     tab.ok("continue", json!({})).await;
     let log = tab.output_until("log", "call 40").await;
-    assert_eq!(log.matches("call ").count(), 2, "{log}");
+    assert_eq!(log.lines().count(), 2, "{log}");
     assert!(log.contains("call 20\n"), "{log}");
     let exited = tab.inferior("exited").await;
     assert_eq!(exited["breakpoints"][0]["hits"], 40);
@@ -271,4 +275,22 @@ async fn a_viewer_reads_stacks_and_sources_but_cannot_step_or_break() {
                 })
         })
         .await;
+    // Another person's focus and a link's target are opened by others, so
+    // neither may lead off this page: a browser reads `//` and `/\` as a host.
+    for url in [
+        "//elsewhere.example/",
+        "/\\elsewhere.example/",
+        "https://elsewhere.example/",
+    ] {
+        let (kind, _) = viewer
+            .request("setFocus", json!({"focus": {"url": url, "label": "x"}}))
+            .await
+            .expect_err("a focus off the page");
+        assert_eq!(kind, "invalid", "{url}");
+        let (kind, _) = viewer
+            .request("share", json!({"role": "view", "to": url}))
+            .await
+            .expect_err("a link off the page");
+        assert_eq!(kind, "invalid", "{url}");
+    }
 }

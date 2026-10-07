@@ -1,5 +1,6 @@
 // The URL is the focus: each route is a place in the session that a link
-// can name.
+// can name. The path names the debugger state, the query how a tab looks at
+// it (see focus.ts).
 
 import {
   createRootRoute,
@@ -7,9 +8,11 @@ import {
   createRouter,
   type RouterHistory,
 } from "@tanstack/react-router";
+import { parseSearch, stringifySearch, validateLook } from "./focus";
 import { Picker, pickerSearch } from "./ui/Picker";
 import { Home, Join, SessionPage } from "./ui/pages";
 import { Shell } from "./ui/Shell";
+import { Workspace } from "./ui/Workspace";
 
 const rootRoute = createRootRoute({ component: Shell });
 
@@ -33,13 +36,44 @@ const pickRoute = createRoute({
 const sessionRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/s/$session",
+  validateSearch: validateLook,
   component: SessionPage,
 });
 
-const routeTree = rootRoute.addChildren([homeRoute, joinRoute, pickRoute, sessionRoute]);
+/** The session wherever it is, following it. */
+const sessionIndexRoute = createRoute({
+  getParentRoute: () => sessionRoute,
+  path: "/",
+  component: Workspace,
+});
+
+/** The same, by a name that says so. */
+const liveRoute = createRoute({
+  getParentRoute: () => sessionRoute,
+  path: "/live",
+  component: Workspace,
+});
+
+const stopRoute = createRoute({
+  getParentRoute: () => sessionRoute,
+  path: "/stop/$stop/t/$thread/f/$frame",
+  component: Workspace,
+});
+
+const routeTree = rootRoute.addChildren([
+  homeRoute,
+  joinRoute,
+  pickRoute,
+  sessionRoute.addChildren([sessionIndexRoute, liveRoute, stopRoute]),
+]);
 
 export function createAppRouter(history?: RouterHistory) {
-  return createRouter({ routeTree, ...(history ? { history } : {}) });
+  return createRouter({
+    routeTree,
+    parseSearch,
+    stringifySearch,
+    ...(history ? { history } : {}),
+  });
 }
 
 declare module "@tanstack/react-router" {
