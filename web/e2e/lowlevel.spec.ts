@@ -23,7 +23,12 @@ test("disassembly marks the frame's instruction and follows its calls", async ({
   await expect(page).toHaveURL(/[?&]view=disassembly/);
   await expect(disassembly(page)).toContainText("handle_request");
   await expect(marked(page)).toContainText("mov dword ptr [rbp-0xc], 0");
-  await expect(disassembly(page).getByRole("button", { name: /kvstore\.c:92$/ })).toBeVisible();
+  const source = disassembly(page).getByRole("button", { name: /kvstore\.c:92$/ });
+  await expect(source).toBeVisible();
+  // The source text reads after where it is, not over it.
+  const place = await source.locator(".asm-place").boundingBox();
+  const text = await source.getByText("int status = 0;").boundingBox();
+  expect(text && place && text.x >= place.x + place.width).toBe(true);
 
   // A call links where it goes, and the browser comes back.
   await disassembly(page).getByRole("link", { name: "table_find" }).click();

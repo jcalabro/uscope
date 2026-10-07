@@ -158,7 +158,7 @@ function Lines({
         return (
           <div
             key={line.key}
-            className="asm-line"
+            className="asm-slot"
             style={{ transform: `translateY(${item.start}px)` }}
           >
             {line.kind === "note" ? (
