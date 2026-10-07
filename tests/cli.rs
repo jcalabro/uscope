@@ -2369,11 +2369,23 @@ fn a_stripped_programs_goroutines_are_unavailable() {
 #[test]
 fn a_trimpath_programs_sources_say_why_they_are_missing() {
     const SERVER: &str = "tests/fixtures/go/server/main.go";
-    let recorded = "./github.com/jcalabro/uscope-go/tests/fixtures/go/server/main.go";
     let stdout = batch(
         &["build/test-programs/server-go-trimpath"],
         &["break main.greet", "run"],
     );
+    // The import path the build recorded depends on where the checkout
+    // that built it is, so it is read from the breakpoint's location.
+    let greet = support::source_line(SERVER, "func greet(");
+    let recorded = stdout
+        .split_whitespace()
+        .find_map(|word| word.strip_suffix(&format!(":{greet}")))
+        .filter(|path| path.ends_with(SERVER))
+        .unwrap_or_else(|| panic!("no recorded path in {stdout}"));
+    let import = recorded
+        .strip_prefix("./")
+        .and_then(|path| path.strip_suffix(SERVER))
+        .and_then(|path| path.strip_suffix('/'))
+        .unwrap_or_else(|| panic!("{recorded} is no import path"));
     assert!(
         stdout.contains(&format!(
             "source unavailable: source file {recorded} does not exist; it was recorded \
@@ -2387,13 +2399,12 @@ fn a_trimpath_programs_sources_say_why_they_are_missing() {
     let mapped = batch(
         &[
             "--source-map",
-            "github.com/jcalabro/uscope-go",
+            import,
             root,
             "build/test-programs/server-go-trimpath",
         ],
         &["break main.greet", "run"],
     );
-    let greet = support::source_line(SERVER, "func greet(");
     assert!(mapped.contains(&format!("=> {greet} |")), "{mapped}");
 }
 
