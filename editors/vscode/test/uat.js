@@ -764,8 +764,13 @@ async function goroutinesStepsPanicsAndStacks() {
         .filter((frame) => frame.presentationHint === 'label')
         .map((frame) => frame.name);
     assert.deepStrictEqual(labels.slice(0, 2), ["on the runtime's stack", "on the task's stack"], JSON.stringify(trace));
-    // The program goes on to signal itself, so the session ends here.
+    // The program goes on to signal itself, and past that it only ends, so
+    // stopping it there ends it however its end races the request's.
     await remove(switched);
+    const signalled = event('stopped', (body) => body.reason === 'exception' && body.text === 'SIGUSR1');
+    await vscode.commands.executeCommand('workbench.action.debug.continue');
+    assert.strictEqual((await signalled).message.body.threadId, stacks.threadId);
+    await focus();
     await stop(stacks.session);
 }
 
