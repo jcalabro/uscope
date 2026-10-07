@@ -125,7 +125,9 @@ namespaces such as libc++'s `std::__1` may be spelled or left out.
 - A capitalized name captures an argument: a type, which the view's
   expressions may name, or a value, which they may use as a number.
 - An integer matches an argument of that value, and a pattern matches a
-  type argument.
+  type argument. An argument the debug information describes as no type
+  of its own, as rustc describes `str`, is matched by a bare name that
+  spells it as the type's name does: `alloc::**::Rc<str, _>`.
 - A pattern that reaches a C++ parameter pack spells all of it:
   `std::tuple<A, B>` names only tuples of two, and `std::tuple`, with no
   arguments, every tuple.
