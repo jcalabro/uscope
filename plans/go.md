@@ -1507,6 +1507,13 @@ pointer is outside its stack.)*
 - The DAP harness then runs the panic and scale scenarios through the
   adapter.
 
+*(Done: `goroutinesStepsPanicsAndStacks` in `editors/vscode/test/uat.js`,
+against the panic program, whose workers park, and the stacks program,
+replayed from `tests/dap/traffic/vscode-go.log` and `vscode-go-stacks.log`.
+The panic and scale scenarios are `tests/dap/goroutines.rs` and
+`tests/dap/server.rs`. VS Code asks for `exceptionInfo` from an editor
+only once someone has used one, so the scenario asks for it itself.)*
+
 ### Written first
 
 Each failure found in the experiments becomes a test that fails before

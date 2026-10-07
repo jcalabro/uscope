@@ -221,6 +221,16 @@ fn vscode_opening_a_core_dump() {
 }
 
 #[test]
+fn vscode_stepping_a_goroutine_into_a_panic() {
+    replay("vscode-go");
+}
+
+#[test]
+fn vscode_showing_a_stack_that_crosses_stacks() {
+    replay("vscode-go-stacks");
+}
+
+#[test]
 fn nvim_dap_launching_stepping_and_evaluating() {
     replay("nvim-launch");
 }
