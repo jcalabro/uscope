@@ -153,7 +153,14 @@ uat-nvim NVIM_DAP DIR="target/uat": build
     sed -i "s#$PWD#\${root}#g" "$2"/nvim-*.log
 
 # Screenshots every screen in light and dark at three widths into
-# target/web-shots, with PROGRAM loaded (the threads fixture by default).
+# target/web-shots, with PROGRAM loaded (the kvstore fixture by default).
 web-shot *PROGRAM: web build-test-programs
     cargo build --quiet
     cd web && node e2e/shots.ts "$@"
+
+# Drives PROGRAM through STEPS in headless Chromium, saving a screenshot after
+# each and printing the page's console: `just web-probe build/test-programs/basic
+# key:F9 key:F5 wait:Stopped`. See web/e2e/probe.ts for the steps.
+web-probe PROGRAM *STEPS: web
+    cargo build --quiet
+    cd web && node e2e/probe.ts "$(realpath "../$1")" "${@:2}"

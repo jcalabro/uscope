@@ -32,6 +32,21 @@ describe("debugger keys", () => {
     expect(commandFor(key("F5", { altKey: true }), false)).toBeNull();
   });
 
+  it("steps as VS Code does, and by letter", () => {
+    expect(commandFor(key("F10"), true)).toBe("over");
+    expect(commandFor(key("F11"), true)).toBe("into");
+    expect(commandFor(key("F11", { shiftKey: true }), true)).toBe("out");
+    expect(commandFor(key("n"), false)).toBe("over");
+    expect(commandFor(key("N", { shiftKey: true }), false)).toBe("overInstruction");
+    expect(commandFor(key("S", { shiftKey: true }), false)).toBe("instruction");
+    expect(commandFor(key("?", { shiftKey: true }), false)).toBe("help");
+  });
+
+  it("reads Alt chords by the key pressed, whatever Alt makes it type", () => {
+    expect(commandFor(key("¡", { altKey: true, code: "Digit1" }), false)).toBe("pane1");
+    expect(commandFor(key("∂", { altKey: true, code: "KeyD" }), true)).toBe("viewDisassembly");
+  });
+
   it("never binds one press to two commands", () => {
     const presses = BINDINGS.map((b) => `${b.key}/${b.shift}/${b.ctrl}/${b.alt}`);
     expect(new Set(presses).size).toBe(presses.length);
@@ -41,7 +56,10 @@ describe("debugger keys", () => {
     expect(describeKey("continue")).toBe("F5");
     expect(describeKey("kill")).toBe("⇧F5");
     expect(describeKey("restart")).toBe("Ctrl+⇧F5");
-    expect(describeKey("palette")).toBeNull();
+    expect(describeKey("out")).toBe("⇧F11");
+    expect(describeKey("palette")).toBe("Ctrl+K");
+    expect(describeKey("over", true)).toBe("n");
+    expect(describeKey("frameUp")).toBeNull();
   });
 });
 

@@ -1,9 +1,11 @@
-import { Link, Navigate, useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { Link, Navigate, Outlet, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { login } from "../connection";
+import { cache } from "../data";
+import { isPagePath } from "../focus";
+import { latestStop } from "../follow";
 import { targetName } from "../model";
 import { useConnection, useModel } from "../store";
-import { Session } from "./Session";
 
 /** `/`: wherever the session is. */
 export function Home() {
@@ -46,7 +48,8 @@ export function Join() {
           return;
         }
         connection.start();
-        void navigate({ to: to?.startsWith("/") ? to : "/", replace: true });
+        // `href`, since the link holds a query of its own.
+        void navigate({ href: isPagePath(to) ? to : "/", replace: true });
       })
       .catch(() => setFailed(true));
   }, [connection, navigate, to]);
@@ -96,11 +99,22 @@ export function SessionPage() {
     }
   }, [current, session, navigate]);
 
+  // Answers belong to one session; the files a program has change as its
+  // libraries load, so each stop asks again.
+  const latest = state ? latestStop(state) : undefined;
+  const cached = useRef({ current, latest });
+  if (cached.current.current !== current) {
+    cache.clear();
+  } else if (cached.current.latest !== latest) {
+    cache.forget("sources ");
+  }
+  cached.current = { current, latest };
+
   if (!state) {
     return <div className="page muted">Connecting to uscope…</div>;
   }
   if (current === session) {
-    return <Session />;
+    return <Outlet />;
   }
   if (state.busy) {
     return <div className="page muted">{state.busy}…</div>;

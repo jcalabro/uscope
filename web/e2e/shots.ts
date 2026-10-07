@@ -7,7 +7,7 @@ import { chromium, type Page } from "@playwright/test";
 import { fixture, root, startUscope } from "./server.ts";
 
 const out = path.join(root, "target", "web-shots");
-const program = process.argv[2] ?? fixture("threads");
+const program = process.argv[2] ?? fixture("kvstore");
 const widths = [1440, 1024, 720];
 
 async function shoot(page: Page, name: string): Promise<void> {
@@ -26,6 +26,13 @@ const server = await startUscope([program], "");
 const browser = await chromium.launch();
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 800 } });
+  // What went wrong in the page, printed as it happens.
+  page.on("pageerror", (error) => console.error(`page error: ${error.stack ?? error.message}`));
+  page.on("console", (message) => {
+    if (message.type() === "error") {
+      console.error(`console: ${message.text()}`);
+    }
+  });
   const status = page.getByTestId("status");
   await page.goto(server.link);
   await page.waitForURL(/\/s\//);

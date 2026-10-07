@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -197,7 +198,7 @@ impl Session {
         let to = if to == "/" || to.is_empty() {
             String::new()
         } else {
-            format!("?to={to}")
+            format!("?to={}", escape_query(to))
         };
         format!(
             "http://{}/join{to}#{}",
@@ -550,7 +551,7 @@ impl Session {
 
     fn refocus(&self, connection: u32, focus: Option<protocol::Focus>) -> Result<(), Failure> {
         if focus.as_ref().is_some_and(|focus| {
-            !focus.url.starts_with('/') || focus.url.len() > 4096 || focus.label.len() > 200
+            !is_page_path(&focus.url) || focus.url.len() > 4096 || focus.label.len() > 200
         }) {
             return Err(Failure::new(
                 ErrorKind::Invalid,
@@ -580,7 +581,7 @@ impl Session {
                 "only control access can share control",
             ));
         }
-        if !to.starts_with('/') {
+        if !is_page_path(to) {
             return Err(Failure::new(ErrorKind::Invalid, "a link opens a page path"));
         }
         Ok(to_value(&ShareLink {
@@ -914,12 +915,9 @@ async fn edit_breakpoint(
             )
         })?;
     if current.log_message != wanted.log_message {
-        // A message is part of what a breakpoint is: the debugger keeps
-        // it from creation, so changing it makes the breakpoint again.
-        return Err(Failure::new(
-            ErrorKind::Unsupported,
-            "remove the breakpoint and add it again to change its message",
-        ));
+        handle
+            .set_breakpoint_log_message(id, wanted.log_message)
+            .await?;
     }
     if current.hit_condition != wanted.hit_condition {
         handle
@@ -1127,4 +1125,26 @@ fn observe(describer: &mut Describer, outlet: &Outlet, event: &DebuggerEvent) {
         }
         _ => {}
     }
+}
+
+/// Whether `text` names a path on this page, never another host: browsers
+/// read `//host` and `/\\host` as one.
+fn is_page_path(text: &str) -> bool {
+    text.starts_with('/')
+        && !text[1..].starts_with(['/', '\\'])
+        && !text.contains(|c: char| c.is_control())
+}
+
+/// Escapes a query value: a page path's own query holds `&`, `#`, and `+`.
+/// `/` and `:` stay readable, as the page writes them.
+fn escape_query(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/:".contains(&byte) {
+            escaped.push(char::from(byte));
+        } else {
+            let _ = write!(escaped, "%{byte:02X}");
+        }
+    }
+    escaped
 }

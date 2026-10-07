@@ -1,11 +1,31 @@
 // What each run-control action does in the current state, or why it is
 // unavailable. Toolbar buttons and keys both ask here, so they always agree.
+// Steps act on the tab's focus: the stop, thread, and frame it shows.
 
 import type { Connection } from "./connection";
+import type { At } from "./focus";
 import type { Model } from "./model";
 import { controls } from "./model";
+import type { StepKind } from "./protocol";
 
-export type ActionName = "continue" | "pause" | "kill" | "restart";
+export type ActionName =
+  | "continue"
+  | "pause"
+  | "kill"
+  | "restart"
+  | "over"
+  | "into"
+  | "out"
+  | "instruction"
+  | "overInstruction";
+
+export const STEPS: Record<string, StepKind> = {
+  over: "over",
+  into: "into",
+  out: "out",
+  instruction: "instruction",
+  overInstruction: "overInstruction",
+};
 
 export interface Available {
   enabled: true;
@@ -22,7 +42,8 @@ export type Action = Available | Unavailable;
 
 const unavailable = (reason: string): Unavailable => ({ enabled: false, reason });
 
-export function action(name: ActionName, model: Model): Action {
+/** `at` is where the tab looks, when it looks at a stop. */
+export function action(name: ActionName, model: Model, at: At | null = null): Action {
   const state = model.state;
   if (model.link !== "open") {
     return unavailable("not connected to uscope");
@@ -38,6 +59,23 @@ export function action(name: ActionName, model: Model): Action {
   }
   const inferior = state.inferior;
   const launched = state.target.kind === "launch";
+  const kind = STEPS[name];
+  if (kind) {
+    if (inferior.state !== "stopped") {
+      return unavailable("the program is not stopped");
+    }
+    // A step leaves the thread and frame shown, which must be this stop's.
+    if (at && at.stop !== inferior.stop) {
+      return unavailable(`this tab shows stop #${at.stop}; go to stop #${inferior.stop} to step`);
+    }
+    const thread = at?.thread ?? inferior.thread;
+    const frame = kind === "out" ? (at?.frame ?? 0) : 0;
+    const stop = inferior.stop;
+    return {
+      enabled: true,
+      run: (connection) => connection.request("step", { stop, thread, frame, kind }),
+    };
+  }
   switch (name) {
     case "continue":
       if (inferior.state === "stopped") {
@@ -63,6 +101,8 @@ export function action(name: ActionName, model: Model): Action {
       return launched
         ? { enabled: true, run: (connection) => connection.request("restart") }
         : unavailable("only a launched program can restart");
+    default:
+      return unavailable("unknown action");
   }
 }
 

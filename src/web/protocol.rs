@@ -169,6 +169,7 @@ pub struct Step {
     /// The frame a step out leaves; every other step starts from the
     /// innermost frame.
     #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub frame: u32,
     pub kind: StepKind,
 }
@@ -227,12 +228,15 @@ pub struct AddBreakpoint {
     /// A function, `FILE:LINE`, `FILE:FUNCTION`, or `0xADDRESS`.
     pub location: String,
     #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub condition: Option<String>,
     /// Which hits stop, such as `>=5` or `%10`.
     #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub hit_condition: Option<String>,
     /// A message to log instead of stopping, with expressions in braces.
     #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub log_message: Option<String>,
 }
 
@@ -243,10 +247,13 @@ pub struct EditBreakpoint {
     pub id: u64,
     /// Absent to remove.
     #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub condition: Option<String>,
     #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub hit_condition: Option<String>,
     #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub log_message: Option<String>,
 }
 
@@ -613,6 +620,8 @@ pub struct SourceLine {
 pub struct SourceFiles {
     /// Paths as the debug information records them, sorted.
     pub files: Vec<String>,
+    /// Where the program's main function is declared, when it has one.
+    pub entry: Option<SourceLine>,
 }
 
 /// The answer to `source`.

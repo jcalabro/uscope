@@ -4,6 +4,7 @@ import { type ActionName, action, continueLabel } from "../actions";
 import { describe } from "../keys";
 import { targetName } from "../model";
 import { useConnection, useModel } from "../store";
+import { useTab } from "../tab";
 import { People } from "./People";
 import { Share } from "./Share";
 import { Status } from "./Status";
@@ -11,6 +12,9 @@ import { Status } from "./Status";
 const BUTTONS: { name: ActionName; glyph: string; label?: string }[] = [
   { name: "continue", glyph: "▶" },
   { name: "pause", glyph: "⏸", label: "Pause" },
+  { name: "over", glyph: "↷", label: "Over" },
+  { name: "into", glyph: "↓", label: "Into" },
+  { name: "out", glyph: "↑", label: "Out" },
   { name: "restart", glyph: "⟲", label: "Restart" },
   { name: "kill", glyph: "■", label: "Kill" },
 ];
@@ -21,6 +25,7 @@ export function Toolbar() {
   const navigate = useNavigate();
   const [failure, setFailure] = useState<string | null>(null);
   const control = model.hello?.role === "control";
+  const at = useTab((current) => current.at);
 
   return (
     <header className="toolbar">
@@ -35,7 +40,7 @@ export function Toolbar() {
       )}
       {control &&
         BUTTONS.map(({ name, glyph, label }) => {
-          const current = action(name, model);
+          const current = action(name, model, at);
           const key = describe(name);
           const primary =
             (name === "continue" || name === "pause") &&
@@ -47,7 +52,7 @@ export function Toolbar() {
               type="button"
               className={`tb ${primary ? "primary" : ""}`}
               disabled={!current.enabled}
-              title={current.enabled ? (key ?? undefined) : current.reason}
+              title={`${label ?? continueLabel(model)}${key ? ` (${key})` : ""}${current.enabled ? "" : `: ${current.reason}`}`}
               data-action={name}
               onClick={() => {
                 if (current.enabled) {
@@ -57,7 +62,9 @@ export function Toolbar() {
               }}
             >
               <span className="glyph">{glyph}</span>
-              {label ?? continueLabel(model)}
+              <span className={name === "continue" || name === "pause" ? "" : "label"}>
+                {label ?? continueLabel(model)}
+              </span>
               {key && <span className="hint">{key}</span>}
             </button>
           );

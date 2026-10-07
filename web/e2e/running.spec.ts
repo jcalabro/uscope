@@ -30,6 +30,8 @@ test("reloading keeps the session and its output", async ({ page, uscope }) => {
   const server = await uscope.start([fixture("output-streams")]);
   await join(page, server.link);
   await page.keyboard.press("F5");
+  // It reads its input to the end, which Ctrl+D closes.
+  await page.getByRole("textbox", { name: "Program input" }).press("Control+d");
   await expect(page.getByTestId("status")).toContainText("Exited");
   const output = page.getByTestId("output");
   await expect(output).toContainText("stdin: eof");

@@ -15,7 +15,8 @@ export function Share() {
   const [error, setError] = useState<string | null>(null);
   const field = useRef<HTMLInputElement>(null);
   const anchor = useRef<HTMLDivElement>(null);
-  const to = location.pathname;
+  // The whole look travels: the path and its query, never the hash.
+  const to = location.pathname + location.searchStr;
   const port = window.location.port || "80";
 
   useEffect(() => {

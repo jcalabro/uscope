@@ -1,4 +1,7 @@
+import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
+import { isPagePath } from "../focus";
+import type { Person } from "../protocol";
 import { write } from "../storage";
 import { useConnection, useModel } from "../store";
 
@@ -26,14 +29,7 @@ export function People() {
     <div className="people">
       <ul className="avatars" data-testid="people" aria-label="People in this session">
         {people.map((person) => (
-          <li
-            key={person.connection}
-            className={`avatar ${person.role}`}
-            style={{ background: `hsl(${hue(person.name)} 55% 45%)` }}
-            title={`${person.name}${person.connection === me ? " (you)" : ""} · can ${person.role}`}
-          >
-            {person.name.slice(0, 2)}
-          </li>
+          <Avatar key={person.connection} person={person} me={person.connection === me} />
         ))}
       </ul>
       {editing && mine ? (
@@ -71,5 +67,32 @@ export function People() {
         </button>
       )}
     </div>
+  );
+}
+
+/** One person: hovering says where they look, and clicking goes there. */
+function Avatar({ person, me }: { person: Person; me: boolean }) {
+  const navigate = useNavigate();
+  const style = { background: `hsl(${hue(person.name)} 55% 45%)` };
+  const who = `${person.name}${me ? " (you)" : ""} · can ${person.role}`;
+  const url = person.focus?.url;
+  if (me || !isPagePath(url)) {
+    return (
+      <li className={`avatar ${person.role}`} style={style} title={who}>
+        {person.name.slice(0, 2)}
+      </li>
+    );
+  }
+  return (
+    <li className={`avatar ${person.role}`} style={style}>
+      <button
+        type="button"
+        title={`${who}\nat ${person.focus?.label}; click to go there`}
+        aria-label={`Go to ${person.name}'s focus, ${person.focus?.label}`}
+        onClick={() => void navigate({ href: url })}
+      >
+        {person.name.slice(0, 2)}
+      </button>
+    </li>
   );
 }
