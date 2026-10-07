@@ -965,11 +965,24 @@ impl DebuggerHandle {
         address: VirtualAddress,
         byte_count: u64,
     ) -> Result<MemoryRead> {
+        let stop = self.stopped_selection().await?.stop;
+        self.read_memory_at(stop, address, byte_count).await
+    }
+
+    /// Reads memory as [`Self::read_memory`] does, but only at `stop`: once
+    /// the program has left it, the read fails with [`Error::StaleStop`]
+    /// instead of reading a later stop's memory.
+    pub async fn read_memory_at(
+        &self,
+        stop: StopId,
+        address: VirtualAddress,
+        byte_count: u64,
+    ) -> Result<MemoryRead> {
         let selection = self.stopped_selection().await?;
 
         self.request(|reply| Request::ReadMemory {
             process_id: selection.process,
-            stop_id: selection.stop,
+            stop_id: stop,
             address,
             byte_count,
             reply,
@@ -1010,11 +1023,24 @@ impl DebuggerHandle {
     /// which fails when it is the first. Debugger breakpoint traps stay in
     /// place, hiding the written bytes as they hid the old ones.
     pub async fn write_memory(&self, address: VirtualAddress, bytes: &[u8]) -> Result<u64> {
+        let stop = self.stopped_selection().await?.stop;
+        self.write_memory_at(stop, address, bytes).await
+    }
+
+    /// Writes memory as [`Self::write_memory`] does, but only at `stop`:
+    /// once the program has left it, the write fails with
+    /// [`Error::StaleStop`].
+    pub async fn write_memory_at(
+        &self,
+        stop: StopId,
+        address: VirtualAddress,
+        bytes: &[u8],
+    ) -> Result<u64> {
         let selection = self.stopped_selection().await?;
 
         self.request(|reply| Request::WriteMemory {
             process_id: selection.process,
-            stop_id: selection.stop,
+            stop_id: stop,
             address,
             bytes: bytes.into(),
             reply,

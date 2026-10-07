@@ -6,7 +6,7 @@ use std::str::FromStr as _;
 
 use uscope::{
     AddressDescription, BlockCompletion, DebuggerHandle, DisassembledInstruction, DisassemblyQuery,
-    DisassemblyRange, DisassemblyView, Expression, FrameKind, InferiorState, InstructionContent,
+    DisassemblyRange, DisassemblyView, Expression, FrameKind, InstructionContent,
     InstructionReferenceKind, InstructionTokenKind, LoadedModuleSnapshot, RegisterRole, StopId,
     VirtualAddress, WatchpointOptions, WatchpointSpec,
 };
@@ -252,19 +252,6 @@ const fn token_kind(kind: InstructionTokenKind) -> &'static str {
     }
 }
 
-/// Fails unless the program is stopped at `stop`: memory has no stop of its
-/// own to check, and reading another stop's would be a convincing lie.
-async fn at_stop(handle: &DebuggerHandle, stop: u64) -> Result<(), Failure> {
-    match handle.snapshot().await?.inferior {
-        InferiorState::Stopped { stop_id, .. } if stop_id == StopId::new(stop) => Ok(()),
-        InferiorState::Stopped { .. } => Err(uscope::Error::StaleStop.into()),
-        _ => Err(Failure::new(
-            ErrorKind::NotStopped,
-            "memory is read while the program is stopped",
-        )),
-    }
-}
-
 pub async fn read_memory(
     handle: &DebuggerHandle,
     request: &protocol::ReadMemory,
@@ -276,8 +263,10 @@ pub async fn read_memory(
             format!("read at most {MOST_BYTES} bytes at once"),
         ));
     }
-    at_stop(handle, request.stop).await?;
-    let read = handle.read_memory(start, request.count).await?;
+
+    let read = handle
+        .read_memory_at(StopId::new(request.stop), start, request.count)
+        .await?;
     let mut bytes = String::with_capacity(read.bytes.len() * 2);
     for byte in read.bytes.iter() {
         let _ = write!(bytes, "{byte:02x}");
@@ -310,8 +299,10 @@ pub async fn write_memory(
         .map(|index| u8::from_str_radix(text.get(index..index + 2)?, 16).ok())
         .collect::<Option<Vec<u8>>>()
         .ok_or_else(invalid)?;
-    at_stop(handle, request.stop).await?;
-    let written = handle.write_memory(start, &bytes).await?;
+
+    let written = handle
+        .write_memory_at(StopId::new(request.stop), start, &bytes)
+        .await?;
     if written != bytes.len() as u64 {
         return Err(Failure::new(
             ErrorKind::Failed,

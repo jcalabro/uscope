@@ -959,7 +959,8 @@ pub struct Watchpoint {
     pub expression: Option<String>,
     pub address: String,
     pub bytes: u64,
-    /// Such as `frame 2 of thread 41872` for a local, which ends with it.
+    /// Such as `thread 41872's frame at 0x7ffe…, until it returns` for a
+    /// local, which ends with its frame; empty for a global.
     pub scope: String,
     pub condition: Option<String>,
     pub hit_condition: Option<String>,
