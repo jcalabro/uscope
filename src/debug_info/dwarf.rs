@@ -2378,4 +2378,37 @@ mod tests {
         assert!(index.first_error.is_some());
         check_fde_index(&section, &bases, &index, &[0x1050, 0x1150, 0x1fff, 0x3050]);
     }
+
+    /// Loading a large real program, gofmt, does work in proportion to its
+    /// debug information, counted as what the loading thread allocates: a
+    /// regression bound that a loader doing far more than it did fails.
+    /// Loading allocates about 100 bytes, in 0.47 blocks, for each byte of
+    /// gofmt's; the bounds are half again as much.
+    #[test]
+    fn loading_a_large_program_allocates_in_proportion_to_its_debug_information() {
+        use crate::test_memory::memory_cap::allocated;
+        use object::{Object, ObjectSection};
+
+        for fixture in ["gofmt-go-o0", "gofmt-go-o2"] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("build/test-programs")
+                .join(fixture);
+            let data = fs::read(&path).expect("run `just build-test-programs`");
+            let object = object::File::parse(&*data).expect("ELF");
+            let debug = object
+                .sections()
+                .filter(|section| section.name().is_ok_and(|name| name.starts_with(".debug_")))
+                .map(|section| section.uncompressed_data().expect("a section").len() as u64)
+                .sum::<u64>();
+            let before = allocated();
+            let info = load_bytes(&path, &data, crate::ModuleImageId::new(0)).expect("load");
+            let after = allocated();
+            let blocks = after.blocks - before.blocks;
+            let bytes = after.bytes - before.bytes;
+            assert!(info.image.functions().len() > 4000, "{fixture}");
+            let work = format!("{fixture}: {debug} debug bytes: {blocks} blocks, {bytes} bytes");
+            assert!(blocks <= debug * 7 / 10, "{work}");
+            assert!(bytes <= debug * 150, "{work}");
+        }
+    }
 }

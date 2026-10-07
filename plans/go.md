@@ -1396,7 +1396,12 @@ at every stop.
    - The work per page is bounded, measured as counted memory reads from
      the inspection usage, not as time.
    - DAP's thread list is cut with a final "N more" entry.
-9. **A large real program.**
+9. **A large real program.** *(Done: `tests/go/gofmt.rs` formats a file
+   the test wrote, as gofmt does alone, checking what it parsed and
+   `go/token`'s keyword map entry by entry. The load bound is
+   `loading_a_large_program_allocates_in_proportion_to_its_debug_information`:
+   loading allocates, on its own thread, about 100 bytes for each byte of
+   debug information, and the bound is half again as much.)*
    - `cmd/gofmt`, built from the pinned GOROOT with and without `-N -l`,
      which needs no network.
    - Thousands of functions across many packages: breakpoints by package
@@ -1459,7 +1464,9 @@ pointer is outside its stack.)*
   - The stack-switch table, the TLS formulas per build mode, `_Gscan`
     masking, and partial results.
   - Checkpoint cores are the preferred input, since they are real memory.
-- **The `pclntab` reader against `debug/gosym`.**
+- **The `pclntab` reader against `debug/gosym`.** *(Done:
+  `the_reader_agrees_with_go_debug_gosym`, for a normal and a stripped
+  binary.)*
   - Its function names, entries, and sampled lines must match what Go's
     own reader says.
   - That reference output is recorded at build time for a normal and a
