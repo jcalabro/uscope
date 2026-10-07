@@ -214,6 +214,10 @@ pub async fn run(args: &WebArgs) -> Result<()> {
     };
     if let Some(starting) = starting {
         // Whatever it started is ended below, not left half launched.
+        // Loading cannot be interrupted, so a large program is waited for.
+        if !starting.is_finished() {
+            eprintln!("uscope web: stopping once the program has loaded");
+        }
         let _ = starting.await;
     }
     session.shutdown().await;
