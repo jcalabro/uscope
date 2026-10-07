@@ -1064,6 +1064,10 @@ Each phase ends with its fixtures, docs, and README row updated, and with
    - cgo (gcc and clang; Go → C and C → Go) and `c-shared` hosts.
    - `-trimpath`, with a precise reason when a source cannot be found and
      the GOROOT and module-cache mapping guessed only with evidence.
+     *(Done: the reason says the path was recorded without its build
+     directory and that a source map can place it; no mapping is guessed,
+     since nothing in the image proves where a local GOROOT or module
+     cache matches it.)*
    - Stripped binaries, attach, and `step` into a new goroutine.
    - README changes the Go row to "Full".
    - Remove the TODO line.

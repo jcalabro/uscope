@@ -206,7 +206,7 @@ pub enum Error {
         path: PathBuf,
         error: std::io::Error,
     },
-    #[error("source file {path} does not exist{}", missing_source_detail(.tried))]
+    #[error("source file {path} does not exist{}", missing_source_detail(.path, .tried))]
     SourceFileMissing { path: PathBuf, tried: Vec<PathBuf> },
     #[error("a source path rule needs a nonempty prefix to replace")]
     EmptySourcePathPrefix,
@@ -312,16 +312,25 @@ impl Error {
 
 /// Names the mapped locations tried for a missing source file, which follow
 /// the recorded path itself.
-fn missing_source_detail(tried: &[PathBuf]) -> String {
+fn missing_source_detail(path: &std::path::Path, tried: &[PathBuf]) -> String {
     let mapped = &tried[..tried.len().saturating_sub(1)];
-    if mapped.is_empty() {
-        return String::new();
+    let mut detail = if mapped.is_empty() {
+        String::new()
+    } else {
+        let paths = mapped
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        format!(", nor do its mapped paths {}", paths.join(", "))
+    };
+    if path.is_relative() {
+        detail.push_str(
+            "; it was recorded without the directory the program was built in, as `-trimpath` \
+             builds record paths, so it was looked for in the current directory; a source map \
+             can say where it is",
+        );
     }
-    let paths = mapped
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    format!(", nor do its mapped paths {}", paths.join(", "))
+    detail
 }
 
 fn nearest_statement_lines(before: Option<u64>, after: Option<u64>) -> String {
