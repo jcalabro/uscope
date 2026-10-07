@@ -134,7 +134,7 @@ async fn go_function_locations_stop_in_every_function_they_name() {
                             assert!(
                                 entry.functions.contains(&function.as_str())
                                     && file.ends_with(entry.file),
-                                "{fixture}: {} stopped in {function} at {file}:{line}",
+                                "{fixture}: {} stopped thread {thread} in {function} at {file}:{line}",
                                 entry.location
                             );
                             if let Some((path, marker)) = entry.lines {
@@ -148,8 +148,8 @@ async fn go_function_locations_stop_in_every_function_they_name() {
                             }
                             hit.entry(breakpoint).or_default().insert(function.clone());
                         }
-                        reason = scenario.resume_to_stop().await;
                     }
+                    reason = scenario.resume_to_stop().await;
                 }
                 // The runtime's preemption signal.
                 StopReason::Exception(ref exception) if exception.code == 23 => {
