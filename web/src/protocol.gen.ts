@@ -8,9 +8,9 @@ export type Envelope = {
 /**
  * Chosen by the tab; the answer carries it back.
  */
-id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input });
+id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine });
 
-export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input };
+export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine };
 
 export type SetName = { name: string, };
 
@@ -166,7 +166,12 @@ revision: number, inferior: Inferior, threads: Array<Thread>, breakpoints: Array
 /**
  * The latest stops of this session, oldest first.
  */
-stops: Array<StopEntry>, };
+stops: Array<StopEntry>, 
+/**
+ * Counts changes made to the program's values, which make values read
+ * earlier at the same stop out of date.
+ */
+writes: number, };
 
 export type Target = { kind: TargetKind, 
 /**
@@ -340,3 +345,98 @@ read: string, text: string,
 breakable: Array<number>, };
 
 export type BreakpointAdded = { id: number, };
+
+export type FrameAt = { stop: number, thread: number, frame: number, };
+
+export type ChildrenOf = { 
+/**
+ * A row's `children.handle`, which belongs to this connection and the
+ * row's stop.
+ */
+handle: number, start: number, count: number, };
+
+export type Evaluate = { expression: string, stop: number, thread: number, frame: number, };
+
+export type SetValue = { 
+/**
+ * The expression that names what changes, a row's `path`.
+ */
+path: string, 
+/**
+ * An expression for the new value.
+ */
+value: string, stop: number, thread: number, frame: number, };
+
+export type Complete = { 
+/**
+ * The line up to the cursor.
+ */
+text: string, 
+/**
+ * The frame whose names complete; absent when nothing is stopped.
+ */
+stop?: number | null, thread?: number | null, frame?: number | null, };
+
+export type ConsoleLine = { line: string, 
+/**
+ * The frame the line runs in; absent when nothing is stopped.
+ */
+stop?: number | null, thread?: number | null, frame?: number | null, };
+
+export type Scopes = { scopes: Array<Scope>, };
+
+export type Scope = { key: ScopeKey, name: string, rows: Array<Row>, 
+/**
+ * Why the scope's rows could not be read, when they could not.
+ */
+problem: string | null, };
+
+export type ScopeKey = "args" | "locals" | "statics";
+
+export type Row = { name: string, 
+/**
+ * The value's summary, or why there is none.
+ */
+text: string, type: string | null, 
+/**
+ * An expression that evaluates the value again.
+ */
+path: string | null, children: Children | null, 
+/**
+ * Whether `setValue` can change it.
+ */
+editable: boolean, 
+/**
+ * The address of its natural memory, as hexadecimal.
+ */
+memory: string | null, 
+/**
+ * A row that only says where reading stopped short.
+ */
+truncated: boolean, };
+
+export type Children = { handle: number, 
+/**
+ * How many children are elements, when it is known.
+ */
+indexed: number | null, 
+/**
+ * How many are named, when it is known.
+ */
+named: number | null, };
+
+export type Rows = { rows: Array<Row>, };
+
+export type Completions = { 
+/**
+ * Where the completed part starts, in characters.
+ */
+start: number, items: Array<Completion>, };
+
+export type Completion = { label: string, 
+/**
+ * `keyword`, `value`, `variable`, or `field`.
+ */
+kind: string, };
+
+export type ConsoleResult = { output: string | null, row: Row | null, };

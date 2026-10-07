@@ -17,7 +17,7 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,21 +27,24 @@ use tokio::net::unix::pipe;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use uscope::{
-    BreakpointOptions, CoreDumpOptions, Debugger, DebuggerEvent, DebuggerHandle,
-    ExceptionDisposition, InferiorState, LaunchOptions, ProcessId, ResumeScope, StopId,
+    BreakpointOptions, CoreDumpOptions, Debugger, DebuggerEvent, DebuggerHandle, EvaluationMode,
+    ExceptionDisposition, Expression, InferiorState, InspectionLimits, LaunchOptions, ProcessId,
+    ResumeScope, StopId,
 };
 
 use super::auth::{Tokens, random_hex};
 use super::describe::{Cause, Describer, Images};
 use super::protocol::{
-    self, BreakpointAdded, ErrorBody, ErrorKind, Inferior, Output, PathCompletions, Person,
-    Presence, Processes, Request, Role, ServerMessage, ShareLink, State, StepKind, Stream,
-    TargetKind,
+    self, BreakpointAdded, ConsoleResult, ErrorBody, ErrorKind, FrameAt, Inferior, Output,
+    PathCompletions, Person, Presence, Processes, Request, Role, ServerMessage, ShareLink, State,
+    StepKind, Stream, TargetKind,
 };
-use super::{inspect, picker};
+use super::{inspect, picker, values};
 use crate::cli::format;
 use crate::cli::terminal::Renderer;
+use crate::cli::{Cli, LaunchSettings, Renderers};
 use crate::dap::output;
+use crate::present::{self, Code};
 
 /// The most program output kept for tabs that join later.
 const OUTPUT_HISTORY: usize = 256 * 1024;
@@ -132,9 +135,13 @@ pub struct Session {
     next_connection: AtomicU32,
     /// Who last ran the program, for the stop the run ends at.
     cause: Arc<Mutex<Option<Cause>>>,
+    /// Each connection's handles to values it was shown.
+    handles: values::Handles,
 }
 
 struct Target {
+    /// The session id, which a new target replaces.
+    id: String,
     debugger: Option<Debugger>,
     handle: DebuggerHandle,
     images: Arc<Images>,
@@ -144,6 +151,11 @@ struct Target {
     pump: JoinHandle<()>,
     readers: Vec<JoinHandle<()>>,
     name: String,
+    /// Runs the console's commands, one at a time: each selects the tab's
+    /// frame first, so the selection never changes under another's.
+    console: Arc<tokio::sync::Mutex<Cli>>,
+    /// Counts the changes tabs make to the program's values.
+    writes: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -182,6 +194,7 @@ impl Session {
             people: Mutex::default(),
             next_connection: AtomicU32::new(1),
             cause: Arc::default(),
+            handles: values::Handles::default(),
         })
     }
 
@@ -242,6 +255,7 @@ impl Session {
     }
 
     pub fn leave(&self, connection: u32) {
+        self.handles.forget(connection);
         self.people.lock().expect("people lock").remove(&connection);
         self.announce_presence();
     }
@@ -289,6 +303,11 @@ impl Session {
                 | Request::Backtrace(_)
                 | Request::Sources
                 | Request::Source(_)
+                | Request::Scopes(_)
+                | Request::Children(_)
+                | Request::Evaluate(_)
+                | Request::Complete(_)
+                | Request::Console(_)
         );
         if !reads && role != Role::Control {
             return Err(Failure::new(
@@ -313,6 +332,19 @@ impl Session {
             | Request::EditBreakpoint(_)
             | Request::RemoveBreakpoint(_) => {
                 return self.breakpoints(connection, request).await;
+            }
+            Request::SetValue(set) => {
+                let row = self
+                    .reader(connection)
+                    .await?
+                    .set_value(set.at, &set.path, &set.value)
+                    .await?;
+                self.wrote().await;
+                self.notice(
+                    connection,
+                    format!("set {} = {}", set.path, set.value.trim()),
+                );
+                return Ok(to_value(&row));
             }
             request => self.control(connection, request).await?,
         };
@@ -346,6 +378,28 @@ impl Session {
                 let (handle, images) = self.current_images().await?;
                 Ok(to_value(&inspect::source(&handle, &images, &path).await?))
             }
+            Request::Scopes(at) => Ok(to_value(&self.reader(connection).await?.scopes(at).await?)),
+            Request::Children(of) => Ok(to_value(&protocol::Rows {
+                rows: self.reader(connection).await?.children(&of).await?,
+            })),
+            Request::Evaluate(evaluate) => Ok(to_value(
+                &self
+                    .reader(connection)
+                    .await?
+                    .evaluate(evaluate.at, &evaluate.expression, EvaluationMode::Read)
+                    .await?,
+            )),
+            Request::Complete(complete) => {
+                let at = frame_at(complete.stop, complete.thread, complete.frame);
+                Ok(to_value(
+                    &self
+                        .reader(connection)
+                        .await?
+                        .complete(&complete.text, at)
+                        .await?,
+                ))
+            }
+            Request::Console(line) => Ok(to_value(&self.console(connection, role, line).await?)),
             _ => unreachable!("only reads are read"),
         }
     }
@@ -695,6 +749,175 @@ impl Session {
             .ok_or_else(|| Failure::new(ErrorKind::Invalid, "nothing is being debugged"))
     }
 
+    /// Reads values for `connection` from the current session.
+    async fn reader(&self, connection: u32) -> Result<values::Reader<'_>, Failure> {
+        let (handle, images, session) = self
+            .target
+            .lock()
+            .await
+            .as_ref()
+            .map(|target| {
+                (
+                    target.handle.clone(),
+                    Arc::clone(&target.images),
+                    target.id.clone(),
+                )
+            })
+            .ok_or_else(|| Failure::new(ErrorKind::Invalid, "nothing is being debugged"))?;
+        let code = Code::new(images.loaded().await);
+        Ok(values::Reader {
+            handle,
+            images,
+            code,
+            handles: &self.handles,
+            connection,
+            session,
+        })
+    }
+
+    /// Tells every tab that values it read at this stop may have changed.
+    async fn wrote(&self) {
+        let Some(writes) = self
+            .target
+            .lock()
+            .await
+            .as_ref()
+            .map(|target| Arc::clone(&target.writes))
+        else {
+            return;
+        };
+        let count = writes.fetch_add(1, Ordering::Relaxed) + 1;
+        self.state.send_modify(|state| {
+            let mut next = State::clone(state);
+            next.writes = count;
+            *state = Arc::new(next);
+        });
+    }
+
+    /// Runs a console line: an expression, unless it is a command the
+    /// frame does not know as a name, so that `x`, `n`, or `list` read as
+    /// themselves. Viewers evaluate without assigning, and run no commands.
+    async fn console(
+        &self,
+        connection: u32,
+        role: Role,
+        line: protocol::ConsoleLine,
+    ) -> Result<ConsoleResult, Failure> {
+        let text = line.line.trim();
+        let at = frame_at(line.stop, line.thread, line.frame);
+        let command = crate::cli::commands::line_command(text);
+        let expression = match (Expression::parse(text), command) {
+            (Ok(expression), _) => expression,
+            (Err(_), Some(_)) => return self.command(role, text, at).await,
+            (Err(failure), None) => {
+                return Err(Failure::new(
+                    ErrorKind::Invalid,
+                    crate::cli::format::expression_error(text, &failure),
+                ));
+            }
+        };
+        let Some(at) = at else {
+            if command.is_some() {
+                return self.command(role, text, at).await;
+            }
+            return Err(Failure::new(
+                ErrorKind::NotStopped,
+                "expressions need a stopped program",
+            ));
+        };
+        let assigns = expression.assignment_target().is_some();
+        if assigns && role != Role::Control {
+            return Err(Failure::new(
+                ErrorKind::Forbidden,
+                "this link can only view the session; it cannot change values",
+            ));
+        }
+        let reader = self.reader(connection).await?;
+        let context = inspect::context(&reader.handle, at.stop, at.thread, at.frame).await?;
+        let mode = if role == Role::Control {
+            EvaluationMode::Assign
+        } else {
+            EvaluationMode::Read
+        };
+        let evaluation = match reader
+            .handle
+            .at(context)
+            .evaluate_with(&expression, mode, InspectionLimits::default())
+            .await
+        {
+            Ok(evaluation) => evaluation,
+            // The frame does not know the command's name, so it is the command.
+            Err(uscope::Error::Expression(failure))
+                if command.is_some_and(|(_, name)| present::names_only(&failure, name)) =>
+            {
+                drop(reader);
+                return self.command(role, text, Some(at)).await;
+            }
+            Err(uscope::Error::Expression(failure)) => {
+                return Err(Failure::new(
+                    ErrorKind::Invalid,
+                    crate::cli::format::expression_error(text, &failure),
+                ));
+            }
+            Err(other) => return Err(other.into()),
+        };
+        let row = reader.present(context, text, expression, evaluation)?;
+        if assigns {
+            self.wrote().await;
+            self.notice(connection, format!("ran {text}"));
+        }
+        Ok(ConsoleResult {
+            output: None,
+            row: Some(row),
+        })
+    }
+
+    /// Runs one of uscope's commands in the frame `at`.
+    async fn command(
+        &self,
+        role: Role,
+        text: &str,
+        at: Option<FrameAt>,
+    ) -> Result<ConsoleResult, Failure> {
+        if role != Role::Control {
+            return Err(Failure::new(
+                ErrorKind::Forbidden,
+                "this link can only view the session; it evaluates, but runs no commands",
+            ));
+        }
+        let (handle, console) = self
+            .target
+            .lock()
+            .await
+            .as_ref()
+            .map(|target| (target.handle.clone(), Arc::clone(&target.console)))
+            .ok_or_else(|| Failure::new(ErrorKind::Invalid, "nothing is being debugged"))?;
+        let console = console.lock().await;
+        if let Some(at) = at {
+            let context = inspect::context(&handle, at.stop, at.thread, at.frame).await?;
+            handle.select_thread(context.thread).await?;
+            handle.select_frame(context.frame).await?;
+        }
+        let output = console
+            .console(text)
+            .await
+            .map_err(|error| Failure::new(ErrorKind::Invalid, format!("{error:#}")))?
+            .ok_or_else(|| {
+                Failure::new(ErrorKind::Invalid, format!("'{text}' is not a command"))
+            })?;
+        drop(console);
+        // `set` changes values the tabs show.
+        if crate::cli::commands::line_command(text)
+            .is_some_and(|(spec, _)| spec.command == crate::cli::commands::Command::Set)
+        {
+            self.wrote().await;
+        }
+        Ok(ConsoleResult {
+            output: Some(output),
+            row: None,
+        })
+    }
+
     /// The handle, the launch spec of a launched program, and whether the
     /// program is running or stopped, rather than not started or ended.
     async fn current_launch(&self) -> Result<(DebuggerHandle, Option<LaunchSpec>, bool), Failure> {
@@ -760,12 +983,27 @@ impl Session {
         self.state
             .send_replace(Arc::new(describer.describe(&snapshot).await));
         let images = Arc::clone(&describer.images);
+        let writes = Arc::clone(&describer.writes);
         let outlet = Outlet {
             history: Arc::clone(&self.history),
             messages: self.messages.clone(),
         };
+        let console = Cli::new(
+            handle.clone(),
+            Renderers::uniform(false),
+            uscope::AssemblySyntax::Intel,
+            LaunchSettings::default(),
+        );
+        // The project's and the user's views apply, as in the terminal.
+        for warning in console.load_view_sources(&self.cwd, &[]).await {
+            outlet.publish(Stream::Log, &format!("views: {warning}\n"));
+        }
+        let session = describer.id.clone();
         let pump = tokio::spawn(pump(Arc::clone(&self.state), describer, events, outlet));
         *target = Some(Target {
+            id: session,
+            console: Arc::new(tokio::sync::Mutex::new(console)),
+            writes,
             debugger: Some(debugger),
             handle: handle.clone(),
             images,
@@ -1147,4 +1385,13 @@ fn escape_query(text: &str) -> String {
         }
     }
     escaped
+}
+
+/// A frame named by a request's optional parts, when all are there.
+fn frame_at(stop: Option<u64>, thread: Option<u64>, frame: Option<u32>) -> Option<FrameAt> {
+    Some(FrameAt {
+        stop: stop?,
+        thread: thread?,
+        frame: frame.unwrap_or(0),
+    })
 }

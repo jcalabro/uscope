@@ -2,6 +2,7 @@
 //! its breakpoints and where they landed, and the stops so far.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use uscope::{
@@ -135,6 +136,8 @@ pub struct Describer {
     pub cause: Arc<Mutex<Option<Cause>>>,
     stops: Vec<StopEntry>,
     pub ended: Ended,
+    /// Counts the changes tabs make to the program's values.
+    pub writes: Arc<AtomicU64>,
 }
 
 impl Describer {
@@ -152,6 +155,7 @@ impl Describer {
             cause,
             stops: Vec::new(),
             ended: Ended::default(),
+            writes: Arc::default(),
         }
     }
 
@@ -206,6 +210,7 @@ impl Describer {
                 .collect(),
             breakpoints,
             stops: self.stops.clone(),
+            writes: self.writes.load(Ordering::Relaxed),
         }
     }
 
