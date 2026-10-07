@@ -2498,6 +2498,107 @@ pub struct TargetDescription {
     pub pointer_width: PointerWidth,
 }
 
+impl TargetDescription {
+    /// The target's C base type, as its C compiler lays it out, or `None`
+    /// for a target whose C data model uscope does not know.
+    #[must_use]
+    pub fn c_base_type(&self, ty: CBaseType) -> Option<BaseType> {
+        use BaseTypeEncoding as E;
+        if self.architecture != Architecture::X86_64 || self.pointer_width != PointerWidth::Bits64 {
+            return None;
+        }
+        // The System V x86-64 data model: LP64, signed `char`, and an x87
+        // `long double` padded to sixteen bytes.
+        let (encoding, byte_size) = match ty {
+            CBaseType::Char | CBaseType::SignedChar => (E::SignedCharacter, 1),
+            CBaseType::UnsignedChar => (E::UnsignedCharacter, 1),
+            CBaseType::Short => (E::Signed, 2),
+            CBaseType::UnsignedShort => (E::Unsigned, 2),
+            CBaseType::Int => (E::Signed, 4),
+            CBaseType::UnsignedInt => (E::Unsigned, 4),
+            CBaseType::Long | CBaseType::LongLong => (E::Signed, 8),
+            CBaseType::UnsignedLong | CBaseType::UnsignedLongLong => (E::Unsigned, 8),
+            CBaseType::Float => (E::Floating, 4),
+            CBaseType::Double => (E::Floating, 8),
+            CBaseType::LongDouble => (E::Floating, 16),
+        };
+        let name: Arc<str> = ty.name().into();
+        Some(BaseType {
+            name: Arc::clone(&name),
+            base_name: name,
+            encoding,
+            byte_size,
+            bit_size: None,
+        })
+    }
+}
+
+/// One of C's base types, by what it is rather than how it is spelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CBaseType {
+    Char,
+    SignedChar,
+    UnsignedChar,
+    Short,
+    UnsignedShort,
+    Int,
+    UnsignedInt,
+    Long,
+    UnsignedLong,
+    LongLong,
+    UnsignedLongLong,
+    Float,
+    Double,
+    LongDouble,
+}
+
+impl CBaseType {
+    /// Every C base type, in declaration order.
+    pub const ALL: [Self; 14] = [
+        Self::Char,
+        Self::SignedChar,
+        Self::UnsignedChar,
+        Self::Short,
+        Self::UnsignedShort,
+        Self::Int,
+        Self::UnsignedInt,
+        Self::Long,
+        Self::UnsignedLong,
+        Self::LongLong,
+        Self::UnsignedLongLong,
+        Self::Float,
+        Self::Double,
+        Self::LongDouble,
+    ];
+
+    /// The type's shortest spelling, such as `unsigned long`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Char => "char",
+            Self::SignedChar => "signed char",
+            Self::UnsignedChar => "unsigned char",
+            Self::Short => "short",
+            Self::UnsignedShort => "unsigned short",
+            Self::Int => "int",
+            Self::UnsignedInt => "unsigned int",
+            Self::Long => "long",
+            Self::UnsignedLong => "unsigned long",
+            Self::LongLong => "long long",
+            Self::UnsignedLongLong => "unsigned long long",
+            Self::Float => "float",
+            Self::Double => "double",
+            Self::LongDouble => "long double",
+        }
+    }
+
+    /// The type a shortest spelling names.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|ty| ty.name() == name)
+    }
+}
+
 /// Why a stopped target-memory read could not continue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

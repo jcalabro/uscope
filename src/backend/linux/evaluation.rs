@@ -314,6 +314,10 @@ impl<P: InspectionOps> TypeSource for Frame<'_, P> {
     fn byte_order(&self) -> ByteOrder {
         self.controller.module_image.target().byte_order
     }
+
+    fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
+        self.controller.module_image.target().c_base_type(ty)
+    }
 }
 
 /// A shallow description of a type's definition, under which two types of
@@ -692,6 +696,10 @@ impl<P: InspectionOps> TypeSource for StopMachine<'_, '_, P> {
 
     fn byte_order(&self) -> ByteOrder {
         self.frame.byte_order()
+    }
+
+    fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
+        self.frame.c_base_type(ty)
     }
 }
 
