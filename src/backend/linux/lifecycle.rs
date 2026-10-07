@@ -364,7 +364,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             .get_mut(&crate::ModuleId::new(0))
             .expect("main module is registered")
             .loaded = inferior.loaded_module;
-        for breakpoint in &self.breakpoints {
+        for breakpoint in self
+            .breakpoints
+            .iter()
+            .filter(|breakpoint| breakpoint.enabled)
+        {
             install_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
         }
         Ok(())

@@ -51,7 +51,15 @@ fn console_commands_see_the_focused_frame_and_cannot_run_the_program() {
     );
     // Lines that are no command are expressions.
     assert_eq!(dap.request("evaluate", json!({"expression": "*pointer_parameter", "frameId": frames[0]["id"], "context": "repl"}))["result"], "42");
-    for command in ["continue", "next", "step", "run", "finish", "quit"] {
+    for command in [
+        "continue",
+        "next",
+        "step",
+        "run",
+        "finish",
+        "advance main",
+        "quit",
+    ] {
         let message = dap.request_error(
             "evaluate",
             json!({"expression": command, "frameId": frames[0]["id"], "context": "repl"}),
@@ -59,7 +67,8 @@ fn console_commands_see_the_focused_frame_and_cannot_run_the_program() {
         assert_eq!(
             message,
             format!(
-                "`{command}` is not available in the debug console; use the debugger's controls"
+                "`{}` is not available in the debug console; use the debugger's controls",
+                command.split(' ').next().expect("a command")
             )
         );
     }
@@ -106,6 +115,32 @@ fn breakpoints_made_in_the_console_are_announced_and_reported() {
     dap.success(resumed);
     let stop = dap.stopped(resumed.mark);
     assert_eq!(stop.body["hitBreakpointIds"], json!([id]));
+    // A disabled breakpoint stays listed, unverified, saying why.
+    let mark = dap.mark();
+    dap.request(
+        "evaluate",
+        json!({"expression": "disable 1", "context": "repl"}),
+    );
+    let disabled = dap.event(mark, "breakpoint", |body| body["reason"] == "changed");
+    assert_eq!(
+        (
+            &disabled["breakpoint"]["id"],
+            &disabled["breakpoint"]["verified"],
+            &disabled["breakpoint"]["message"]
+        ),
+        (
+            &id,
+            &json!(false),
+            &json!("disabled; enable 1 in the debug console")
+        )
+    );
+    let mark = dap.mark();
+    dap.request(
+        "evaluate",
+        json!({"expression": "enable 1", "context": "repl"}),
+    );
+    let enabled = dap.event(mark, "breakpoint", |body| body["reason"] == "changed");
+    assert_eq!(enabled["breakpoint"]["verified"], true);
     let mark = dap.mark();
     dap.request(
         "evaluate",

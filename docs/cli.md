@@ -155,6 +155,7 @@ is answered with the nearest ones.
 | `step`, `s` / `next`, `n` | Step into / over calls, by source line. |
 | `stepi`, `si` / `nexti`, `ni` | Step one instruction, into / over calls. |
 | `finish`, `fin` | Run until the selected frame returns. |
+| `advance`, `adv` *location* | Run until the selected thread reaches a location, or the selected frame returns. |
 | `quit`, `q` | Exit, killing a launched program and detaching from an attached one. |
 
 Ctrl-C pauses a running program. The terminal's `SIGINT` also reaches the
@@ -172,6 +173,12 @@ call that returns to the same address from a deeper activation keeps running.
 It supports frames of the main executable and inline frames of the innermost
 activation. Stepping always starts from the innermost frame.
 
+`advance` runs until the selected thread reaches any location the *location*
+names, as a breakpoint there would stop it, or until the selected frame
+returns, whichever comes first, so `advance 42` leaves a loop without
+leaving the function. Other threads run meanwhile and pass the location
+without stopping. A breakpoint reached on the way stops it as usual.
+
 A forked child is not followed: it runs on its own, without the breakpoints
 it inherited. A program that calls `exec` is followed, with its breakpoints.
 
@@ -180,14 +187,29 @@ it inherited. A program that calls `exec` is followed, with its breakpoints.
 | Command | |
 | --- | --- |
 | `break`, `b` *location* [*hit-condition*] | Break at a `function`, `file:line`, `file:function`, or `0xaddress`. |
+| `tbreak` *location* [*hit-condition*] | Break once: the stop the breakpoint causes deletes it. |
 | `breakpoints`, `info breakpoints` | List breakpoints and their hit counts. |
 | `delete`, `d` *id*\|`all` | Delete breakpoints. |
 | `condition` *id* [*expression*] | Stop only where the [expression](expressions.md) is true; with none, always. |
 | `hits` *id* *hit-condition*\|`always` | Replace the hit condition, keeping the count. |
 | `ignore` *id* *count* | Skip the next *count* hits. |
+| `disable` *ids...* / `enable` *ids...* | Stop using breakpoints and watchpoints, keeping them, and use them again. |
 
 `condition`, `hits`, and `ignore` change a watchpoint too, named by `w` and
 its id: `condition w2 counter > 10`, `hits w2 %100`.
+
+`enable` and `disable` take ids, ranges such as `3-5`, watchpoints such as
+`w2` or `w1-3`, or `all` for every breakpoint and watchpoint; a list naming
+one that does not exist changes nothing. A disabled breakpoint keeps its
+conditions and hit count, counts no hits, and lists the locations it last
+had; enabling it finds its locations again, as for a new breakpoint, so it
+follows code that moved meanwhile. A disabled watchpoint frees its debug
+registers for others, and enabling it may fail when none are left; it reads
+the value again, so a change made while disabled is not reported. A
+watchpoint keeps its storage while disabled and still ends with it.
+
+A temporary breakpoint counts hits like any other, and the first stop it
+causes deletes it, including a stop that several threads reach together.
 
 Addresses are always `0x`-prefixed, so `break add` names a function. Functions
 without debug information, such as libc's, break at their symbol, and

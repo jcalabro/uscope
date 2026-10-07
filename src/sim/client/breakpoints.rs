@@ -11,7 +11,7 @@ use crate::sim::kernel::DebugBehavior;
 use crate::sim::markers::Marker;
 use crate::sim::marks::Mark;
 use crate::sim::report::Failure;
-use crate::sim::watches::Intent;
+use crate::sim::watches::{self, Intent};
 use crate::{
     BreakpointId, BreakpointLocation, BreakpointOptions, BreakpointSpec, Condition, Error,
     HitComparison, HitCondition, LineNumber, LogMessage, ProcessId, StateSnapshot, VirtualAddress,
@@ -22,12 +22,21 @@ use crate::{
 pub(super) struct Added {
     id: BreakpointId,
     pub(super) traps: Vec<u64>,
+    /// Whether the debugger last said it is enabled.
+    enabled: bool,
+    temporary: bool,
     /// The marker line it was set at, if any.
     marker_line: Option<u64>,
     /// What it was asked to do at its hits since the last stop, oldest
     /// first: a change while the program runs applies from a hit the client
     /// cannot know.
     policies: Vec<Policy>,
+}
+
+impl Added {
+    pub(super) const fn id(&self) -> BreakpointId {
+        self.id
+    }
 }
 
 impl Client {
@@ -154,11 +163,13 @@ impl Client {
         let options = WatchpointOptions {
             hit_condition: self.choose_hit_condition(),
             condition: condition.parse(&self.script.markers, None),
+            ..WatchpointOptions::default()
         };
         let policy = Policy {
             hit_condition: options.hit_condition,
             condition: self.known(condition, None, &[]),
             logs: false,
+            enabled: true,
         };
         (options, policy)
     }
@@ -216,6 +227,127 @@ impl Client {
         Ok(())
     }
 
+    /// Disables a watchpoint, or, at a stop, enables a disabled one, which
+    /// the debug registers may then refuse. A watch enabled while the
+    /// program ran would take bytes the oracles cannot know as its last
+    /// observed ones, so only a stop enables.
+    pub(super) async fn toggle_watch(&self, running: bool) -> Result<(), Failure> {
+        let disabled = self
+            .disabled_watches
+            .borrow()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        if !running && !disabled.is_empty() && self.control(2) == 0 {
+            let id = *self.choices.borrow_mut().pick(Stream::Control, &disabled);
+            return self.enable_watch(id).await;
+        }
+        let ids = self
+            .shared
+            .watches
+            .borrow()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let id = *self.choices.borrow_mut().pick(Stream::Control, &ids);
+        // From the moment the client asks, the watchpoint may report no
+        // more.
+        let intent = self
+            .shared
+            .watches
+            .borrow_mut()
+            .remove(&id)
+            .expect("a known watch");
+        let watchpoint = match self
+            .handle
+            .set_watchpoint_enabled(WatchpointId::new(id), false)
+            .await
+        {
+            Ok(watchpoint) => watchpoint,
+            Err(error) => {
+                // A failed edit leaves the watchpoint as it was.
+                self.shared.watches.borrow_mut().insert(id, intent);
+                return Err(protocol(format!(
+                    "disabling watchpoint {id} failed: {error}"
+                )));
+            }
+        };
+        if watchpoint.enabled {
+            return Err(protocol(format!(
+                "disabling watchpoint {id} returned {watchpoint:?}"
+            )));
+        }
+        self.disabled_watches
+            .borrow_mut()
+            .insert(id, (intent, watchpoint.hit_count));
+        if running {
+            self.released_while_running.set(true);
+        }
+        self.note(format!("disabled watchpoint {id}"));
+        self.mark(Mark::WatchDisabled);
+        Ok(())
+    }
+
+    async fn enable_watch(&self, id: u64) -> Result<(), Failure> {
+        match self
+            .handle
+            .set_watchpoint_enabled(WatchpointId::new(id), true)
+            .await
+        {
+            Ok(watchpoint) if watchpoint.enabled => {
+                let (mut intent, _) = self
+                    .disabled_watches
+                    .borrow_mut()
+                    .remove(&id)
+                    .expect("a disabled watch");
+                intent.policies.drain(..intent.policies.len() - 1);
+                self.shared.watches.borrow_mut().insert(id, intent);
+                self.note(format!("enabled watchpoint {id}"));
+                self.mark(Mark::WatchEnabled);
+            }
+            Err(Error::WatchpointCapacity { .. }) => {
+                self.note(format!("no slots to enable watchpoint {id}"));
+            }
+            Err(Error::HardwareWatchpointsUnavailable(description))
+                if self.script.debug == DebugBehavior::Discarding =>
+            {
+                self.note(format!("enabling refused: {description}"));
+            }
+            Err(Error::WatchpointHardwareBusy { thread })
+                if matches!(self.script.debug, DebugBehavior::Contended(_)) =>
+            {
+                self.note(format!("thread {thread}'s slots are busy"));
+            }
+            other => {
+                return Err(protocol(format!(
+                    "enabling watchpoint {id} returned {other:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Watch accounting for disabled watchpoints, at each stop. One whose
+    /// storage ended is gone.
+    fn judge_disabled_watches(&self, snapshot: &StateSnapshot) -> Result<(), Failure> {
+        let mut disabled = self.disabled_watches.borrow_mut();
+        disabled.retain(|id, _| {
+            snapshot
+                .watchpoints
+                .iter()
+                .any(|watchpoint| watchpoint.id.get() == *id)
+        });
+        let counted = disabled
+            .iter()
+            .map(|(&id, (_, counted))| (id, *counted))
+            .collect();
+        watches::judge_disabled(&counted, snapshot)
+            .map_err(|message| Failure::debugger("watch accounting", message))
+    }
+
     /// Removes one watchpoint, if any.
     pub(super) async fn remove_watch(&self) -> Result<(), Failure> {
         let ids = self
@@ -240,35 +372,39 @@ impl Client {
         Ok(())
     }
 
-    /// Adds a breakpoint, returning whether the debugger made one.
-    pub(super) async fn add_breakpoint(
-        &self,
-        breakpoints: &mut Vec<Added>,
-    ) -> Result<bool, Failure> {
-        let spec = if self.draw(2) == 0 {
+    /// A location for a breakpoint or an advance: a function, or a line,
+    /// half of them a marker's.
+    pub(super) fn choose_spec(&self, stream: Stream) -> BreakpointSpec {
+        let draw = |bound| self.choices.borrow_mut().below(stream, bound);
+        if draw(2) == 0 {
             let function = self
                 .choices
                 .borrow_mut()
-                .pick(Stream::Client, &self.script.functions)
+                .pick(stream, &self.script.functions)
                 .clone();
             BreakpointSpec::Function(function)
         } else {
             // Half the lines aim at markers, where the variables oracle
             // judges what the debugger shows.
             let marker_lines = self.script.markers.keys().copied().collect::<Vec<_>>();
-            let line = if !marker_lines.is_empty() && self.draw(2) == 0 {
-                *self
-                    .choices
-                    .borrow_mut()
-                    .pick(Stream::Client, &marker_lines)
+            let line = if !marker_lines.is_empty() && draw(2) == 0 {
+                *self.choices.borrow_mut().pick(stream, &marker_lines)
             } else {
-                self.draw(self.script.source_lines) + 1
+                draw(self.script.source_lines) + 1
             };
             BreakpointSpec::Source {
                 path: self.script.source.clone(),
                 line: LineNumber::new(line).expect("lines count from one"),
             }
-        };
+        }
+    }
+
+    /// Adds a breakpoint, returning whether the debugger made one.
+    pub(super) async fn add_breakpoint(
+        &self,
+        breakpoints: &mut Vec<Added>,
+    ) -> Result<bool, Failure> {
+        let spec = self.choose_spec(Stream::Client);
         let marker_line = match &spec {
             BreakpointSpec::Source { line, .. } => {
                 Some(line.get()).filter(|line| self.script.markers.contains_key(line))
@@ -278,20 +414,7 @@ impl Client {
         let (options, condition) = self.choose_options(marker_line);
         let breakpoint = match self.handle.add_breakpoint_with(spec.clone(), options).await {
             Ok(breakpoint) => breakpoint,
-            // A line outside every function names no code.
-            Err(Error::SourceLineUnavailable { line, .. }) if matches!(&spec, BreakpointSpec::Source { line: wanted, .. } if wanted.get() == line) =>
-            {
-                self.note(format!("{spec} has no code"));
-                return Ok(false);
-            }
-            // Another variant may define a function this one inlined away.
-            Err(Error::FunctionNotFound(name) | Error::SymbolNotFound(name))
-                if matches!(&spec, BreakpointSpec::Function(wanted) if *wanted == name)
-                    && !self.script.defined.contains(&name) =>
-            {
-                self.note(format!("{name} is not in this variant"));
-                return Ok(false);
-            }
+            Err(error) if self.names_no_code(&spec, &error) => return Ok(false),
             Err(error) => {
                 return Err(protocol(format!(
                     "adding a breakpoint at {spec} failed: {error}"
@@ -310,22 +433,25 @@ impl Client {
                 ""
             }
         ));
-        let traps = breakpoint
-            .locations
-            .iter()
-            .filter_map(|location| match location.location {
-                BreakpointLocation::Image(address) => Some(address.get()),
-                BreakpointLocation::Virtual(_) => None,
-            })
-            .collect::<Vec<_>>();
-        self.shared
-            .breakpoints
-            .borrow_mut()
-            .insert(breakpoint.id.get(), traps.iter().copied().collect());
+        let traps = image_traps(&breakpoint);
+        // A temporary breakpoint may be gone at any stop, so only the hit
+        // oracle follows it.
+        if !breakpoint.enabled {
+            self.shared
+                .disabled
+                .borrow_mut()
+                .insert(breakpoint.id.get());
+        } else if !breakpoint.temporary {
+            self.shared
+                .breakpoints
+                .borrow_mut()
+                .insert(breakpoint.id.get(), traps.iter().copied().collect());
+        }
         let policy = Policy {
             hit_condition: breakpoint.hit_condition,
             condition: self.known(condition, marker_line, &traps),
             logs: breakpoint.log_message.is_some(),
+            enabled: breakpoint.enabled,
         };
         // Adding what a breakpoint already is returns it, with the hits it
         // counted under what it was asked before.
@@ -338,10 +464,106 @@ impl Client {
             breakpoints.push(Added {
                 id: breakpoint.id,
                 traps,
+                enabled: breakpoint.enabled,
+                temporary: breakpoint.temporary,
                 marker_line,
                 policies: vec![policy],
             });
         }
+        if breakpoint.temporary {
+            self.mark(Mark::TemporaryAdded);
+        }
+        Ok(true)
+    }
+
+    /// Whether `error` refuses `spec` because it names no code in this
+    /// variant, which the client notes.
+    pub(super) fn names_no_code(&self, spec: &BreakpointSpec, error: &Error) -> bool {
+        match error {
+            // A line outside every function names no code.
+            Error::SourceLineUnavailable { line, .. } if matches!(spec, BreakpointSpec::Source { line: wanted, .. } if wanted.get() == *line) =>
+            {
+                self.note(format!("{spec} has no code"));
+                true
+            }
+            // Another variant may define a function this one inlined away.
+            Error::FunctionNotFound(name) | Error::SymbolNotFound(name)
+                if matches!(spec, BreakpointSpec::Function(wanted) if wanted == name)
+                    && !self.script.defined.contains(name) =>
+            {
+                self.note(format!("{name} is not in this variant"));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Disables an enabled breakpoint or enables a disabled one, which the
+    /// debugger resolves again.
+    pub(super) async fn toggle_breakpoint(
+        &self,
+        breakpoints: &mut [Added],
+    ) -> Result<bool, Failure> {
+        if breakpoints.is_empty() {
+            return Ok(false);
+        }
+        let index = usize::try_from(self.control(breakpoints.len() as u64)).expect("small");
+        let added = &mut breakpoints[index];
+        let (id, enabled) = (added.id, !added.enabled);
+        // From the moment the client asks, either state may apply.
+        if enabled {
+            self.shared.disabled.borrow_mut().remove(&id.get());
+        } else {
+            self.shared.breakpoints.borrow_mut().remove(&id.get());
+        }
+        let mut policy = *added.policies.last().expect("a breakpoint has a policy");
+        policy.enabled = enabled;
+        added.policies.push(policy);
+        let breakpoint = match self.handle.set_breakpoint_enabled(id, enabled).await {
+            Ok(breakpoint) => breakpoint,
+            Err(error) if self.deleted_by_stop(added.temporary, &error) => return Ok(false),
+            Err(error) => {
+                // A failed edit leaves the breakpoint as it was, as when
+                // the process ends during it.
+                policy.enabled = !enabled;
+                added.policies.push(policy);
+                if enabled {
+                    self.shared.disabled.borrow_mut().insert(id.get());
+                } else if !added.temporary {
+                    self.shared
+                        .breakpoints
+                        .borrow_mut()
+                        .insert(id.get(), added.traps.iter().copied().collect());
+                }
+                return Err(protocol(format!(
+                    "{} breakpoint {id} failed: {error}",
+                    if enabled { "enabling" } else { "disabling" }
+                )));
+            }
+        };
+        if breakpoint.enabled != enabled {
+            return Err(protocol(format!(
+                "setting breakpoint {id} enabled {enabled} returned {breakpoint:?}"
+            )));
+        }
+        added.enabled = enabled;
+        if enabled {
+            added.traps = image_traps(&breakpoint);
+            if !added.temporary {
+                self.shared
+                    .breakpoints
+                    .borrow_mut()
+                    .insert(id.get(), added.traps.iter().copied().collect());
+            }
+            self.mark(Mark::BreakpointEnabled);
+        } else {
+            self.shared.disabled.borrow_mut().insert(id.get());
+            self.mark(Mark::BreakpointDisabled);
+        }
+        self.note(format!(
+            "breakpoint {id} {}",
+            if enabled { "enabled" } else { "disabled" }
+        ));
         Ok(true)
     }
 
@@ -407,16 +629,23 @@ impl Client {
     /// Chooses a new breakpoint's options: none, or a hit condition, a
     /// condition, and perhaps a message to log instead of stopping.
     fn choose_options(&self, marker_line: Option<u64>) -> (BreakpointOptions, ConditionChoice) {
-        if self.draw(2) == 0 {
-            return (BreakpointOptions::default(), ConditionChoice::None);
-        }
-        let condition = self.choose_condition(marker_line);
+        let (options, condition) = if self.draw(2) == 0 {
+            (BreakpointOptions::default(), ConditionChoice::None)
+        } else {
+            let condition = self.choose_condition(marker_line);
+            let options = BreakpointOptions {
+                hit_condition: self.choose_hit_condition(),
+                condition: condition.parse(&self.script.markers, marker_line),
+                log_message: (self.draw(3) == 0)
+                    .then(|| LogMessage::parse("hit").expect("a valid message")),
+                ..BreakpointOptions::default()
+            };
+            (options, condition)
+        };
         let options = BreakpointOptions {
-            hit_condition: self.choose_hit_condition(),
-            condition: condition.parse(&self.script.markers, marker_line),
-            log_message: (self.draw(3) == 0)
-                .then(|| LogMessage::parse("hit").expect("a valid message")),
-            pending: false,
+            enabled: self.control(16) != 0,
+            temporary: self.control(4) == 0,
+            ..options
         };
         (options, condition)
     }
@@ -444,8 +673,15 @@ impl Client {
                 .set_breakpoint_condition(id, choice.parse(&self.script.markers, added.marker_line))
                 .await
         };
-        let breakpoint = amended
-            .map_err(|error| protocol(format!("amending breakpoint {id} failed: {error}")))?;
+        let breakpoint = match amended {
+            Ok(breakpoint) => breakpoint,
+            Err(error) if self.deleted_by_stop(added.temporary, &error) => return Ok(()),
+            Err(error) => {
+                return Err(protocol(format!(
+                    "amending breakpoint {id} failed: {error}"
+                )));
+            }
+        };
         self.note(format!(
             "breakpoint {id} now {:?} {:?}",
             breakpoint.hit_condition, breakpoint.condition
@@ -455,19 +691,38 @@ impl Client {
         Ok(())
     }
 
+    /// Whether `error` says a temporary breakpoint is gone, which a stop
+    /// the client has yet to see may have deleted. The hit oracle judges
+    /// that stop when the client sees it.
+    fn deleted_by_stop(&self, temporary: bool, error: &Error) -> bool {
+        let gone = temporary && matches!(error, Error::BreakpointNotFound(_));
+        if gone {
+            self.note(format!("{error}: a stop deleted it"));
+        }
+        gone
+    }
+
     /// Judges the hits counted since the last stop of this process, and
     /// starts again from this one.
     pub(super) fn judge_hits(
         &self,
         process: ProcessId,
         snapshot: &StateSnapshot,
-        breakpoints: &mut [Added],
+        breakpoints: &mut Vec<Added>,
     ) -> Result<(), Failure> {
         let ending = self.ending(process);
         let published = self.shared.published.borrow().clone();
         let policies = breakpoints
             .iter()
-            .map(|added| (added.id.get(), added.policies.clone()))
+            .map(|added| {
+                (
+                    added.id.get(),
+                    hits::Kept {
+                        versions: added.policies.clone(),
+                        temporary: added.temporary,
+                    },
+                )
+            })
             .collect();
         // A process ending as a whole takes its threads out of their stops
         // whatever they hit, so its hits are not judged.
@@ -489,7 +744,22 @@ impl Client {
             if found.logged {
                 self.mark(Mark::HitLogged);
             }
+            if found.temporary_stopped {
+                self.mark(Mark::TemporaryStop);
+            }
+            if found.temporary_shared {
+                self.mark(Mark::TemporaryCoHit);
+            }
+            self.judge_disabled_watches(snapshot)?;
         }
+        // A temporary breakpoint the stop deleted is the client's no more.
+        let remaining = |added: &Added| {
+            snapshot
+                .breakpoints
+                .iter()
+                .any(|breakpoint| breakpoint.id == added.id)
+        };
+        breakpoints.retain(|added| !added.temporary || remaining(added));
         *self.baseline.borrow_mut() = Some(Baseline {
             process,
             counts: snapshot
@@ -515,13 +785,20 @@ impl Client {
             return Ok(false);
         }
         let index = usize::try_from(self.draw(breakpoints.len() as u64)).expect("small");
-        let id = breakpoints.swap_remove(index).id;
+        let removed = breakpoints.swap_remove(index);
+        let id = removed.id;
         // From the moment the client asks, the breakpoint may be gone.
         self.shared.breakpoints.borrow_mut().remove(&id.get());
-        self.handle
-            .remove_breakpoint(id)
-            .await
-            .map_err(|error| protocol(format!("removing breakpoint {id} failed: {error}")))?;
+        self.shared.disabled.borrow_mut().remove(&id.get());
+        match self.handle.remove_breakpoint(id).await {
+            Ok(_) => {}
+            Err(error) if self.deleted_by_stop(removed.temporary, &error) => return Ok(true),
+            Err(error) => {
+                return Err(protocol(format!(
+                    "removing breakpoint {id} failed: {error}"
+                )));
+            }
+        }
         self.note(format!("removed breakpoint {id}"));
         Ok(true)
     }
@@ -559,7 +836,20 @@ const UNCONDITIONAL: Policy = Policy {
     hit_condition: None,
     condition: Known::Absent,
     logs: false,
+    enabled: true,
 };
+
+/// The image addresses of a breakpoint's locations in the program.
+fn image_traps(breakpoint: &crate::Breakpoint) -> Vec<u64> {
+    breakpoint
+        .locations
+        .iter()
+        .filter_map(|location| match location.location {
+            BreakpointLocation::Image(address) => Some(address.get()),
+            BreakpointLocation::Virtual(_) => None,
+        })
+        .collect()
+}
 
 /// The condition a breakpoint or watchpoint is given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

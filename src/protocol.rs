@@ -355,12 +355,18 @@ pub struct Breakpoint {
     /// [`DebuggerEvent::BreakpointsChanged`]. It is exact at every published
     /// stop and after the inferior exits.
     pub hit_count: u64,
+    /// Whether the breakpoint is installed. A disabled breakpoint keeps
+    /// its definition and count but owns no trap and counts no hits, and
+    /// its `locations` are those it last resolved to.
+    pub enabled: bool,
+    /// Whether the stop the breakpoint first causes deletes it.
+    pub temporary: bool,
 }
 
 /// What a breakpoint does at a hit besides counting it. Every hit is
 /// counted; one stops when it meets the hit condition and the condition,
 /// unless the breakpoint logs a message instead.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BreakpointOptions {
     /// Which hits may stop; `None` lets every hit stop.
     pub hit_condition: Option<HitCondition>,
@@ -372,6 +378,23 @@ pub struct BreakpointOptions {
     /// has code for yet, with no locations, until a module that has it
     /// loads. Without this, such a breakpoint is refused.
     pub pending: bool,
+    /// Whether the breakpoint starts enabled; true by default.
+    pub enabled: bool,
+    /// Whether the stop the breakpoint first causes deletes it.
+    pub temporary: bool,
+}
+
+impl Default for BreakpointOptions {
+    fn default() -> Self {
+        Self {
+            hit_condition: None,
+            condition: None,
+            log_message: None,
+            pending: false,
+            enabled: true,
+            temporary: false,
+        }
+    }
 }
 
 /// One part of a logged message.
@@ -595,16 +618,31 @@ pub struct Watchpoint {
     /// As with [`Breakpoint::hit_count`], hits that do not stop publish
     /// nothing, so the count is exact at every published stop.
     pub hit_count: u64,
+    /// Whether the watchpoint holds debug registers. A disabled one counts
+    /// nothing, but still ends with its storage.
+    pub enabled: bool,
 }
 
 /// What a watchpoint does at a hit besides counting it: it stops when the
 /// hit meets the hit condition and the condition.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchpointOptions {
     /// Which hits may stop; `None` lets every hit stop.
     pub hit_condition: Option<HitCondition>,
     /// A condition the accessing thread's innermost frame must meet.
     pub condition: Option<crate::Condition>,
+    /// Whether the watchpoint starts enabled; true by default.
+    pub enabled: bool,
+}
+
+impl Default for WatchpointOptions {
+    fn default() -> Self {
+        Self {
+            hit_condition: None,
+            condition: None,
+            enabled: true,
+        }
+    }
 }
 
 /// One watchpoint reported by one thread's access.
@@ -873,6 +911,10 @@ pub enum StepKind {
     OverSource,
     /// Run until the selected frame returns to its caller.
     Out,
+    /// Run until the stepping thread reaches a location, or the selected
+    /// frame returns first, which ends it as [`StepKind::Out`] does. It is
+    /// requested with [`Request::Advance`], never as a plain step.
+    Advance,
 }
 
 /// Selects what happens to an exception pending on a stopped thread.
@@ -1321,6 +1363,11 @@ pub enum Request {
         condition: Option<crate::Condition>,
         reply: Reply<Breakpoint>,
     },
+    SetBreakpointEnabled {
+        id: BreakpointId,
+        enabled: bool,
+        reply: Reply<Breakpoint>,
+    },
     RemoveBreakpoint {
         id: BreakpointId,
         reply: Reply<Breakpoint>,
@@ -1349,6 +1396,11 @@ pub enum Request {
     SetWatchpointCondition {
         id: WatchpointId,
         condition: Option<crate::Condition>,
+        reply: Reply<Watchpoint>,
+    },
+    SetWatchpointEnabled {
+        id: WatchpointId,
+        enabled: bool,
         reply: Reply<Watchpoint>,
     },
     RemoveWatchpoint {
@@ -1392,6 +1444,18 @@ pub enum Request {
         kind: StepKind,
         /// The threads that run while the step does: every thread, or only
         /// the stepping one.
+        scope: ResumeScope,
+        exception: ExceptionDisposition,
+        reply: Reply<ExecutionId>,
+    },
+    /// Runs until `thread_id` reaches a location `spec` resolves to, or
+    /// `frame` returns first.
+    Advance {
+        process_id: ProcessId,
+        stop_id: StopId,
+        thread_id: ThreadId,
+        frame: StackFrameId,
+        spec: BreakpointSpec,
         scope: ResumeScope,
         exception: ExceptionDisposition,
         reply: Reply<ExecutionId>,
@@ -1576,6 +1640,7 @@ pub enum Request {
 impl Request {
     /// Names the request and what it acts on, for the flight recorder and
     /// the simulator's trace.
+    #[expect(clippy::too_many_lines, reason = "one arm per request")]
     pub(crate) fn describe(&self) -> String {
         match self {
             Self::Launch { options, .. } => format!("launch {:?}", options.arguments),
@@ -1604,8 +1669,22 @@ impl Request {
             } => {
                 format!("step {kind:?} {stop_id:?} {thread_id:?} {frame:?} {scope:?} {exception:?}")
             }
+            Self::Advance {
+                stop_id,
+                thread_id,
+                frame,
+                spec,
+                scope,
+                exception,
+                ..
+            } => format!(
+                "advance to {spec:?} {stop_id:?} {thread_id:?} {frame:?} {scope:?} {exception:?}"
+            ),
             Self::Pause { process_id, .. } => format!("pause {process_id}"),
             Self::AddBreakpoint { spec, .. } => format!("add breakpoint {spec:?}"),
+            Self::SetBreakpointEnabled { id, enabled, .. } => {
+                format!("set {id:?} enabled {enabled}")
+            }
             Self::RemoveBreakpoint { id, .. } => format!("remove breakpoint {id:?}"),
             Self::SetBreakpointCondition { id, .. } => format!("set condition of {id:?}"),
             Self::SetBreakpointHitCondition { id, .. } => format!("set hit condition of {id:?}"),
@@ -1614,6 +1693,9 @@ impl Request {
             }
             Self::SetWatchpointCondition { id, .. } => format!("set condition of {id:?}"),
             Self::SetWatchpointHitCondition { id, .. } => format!("set hit condition of {id:?}"),
+            Self::SetWatchpointEnabled { id, enabled, .. } => {
+                format!("set {id:?} enabled {enabled}")
+            }
             Self::RemoveWatchpoint { id, .. } => format!("remove watchpoint {id:?}"),
             Self::WriteMemory {
                 stop_id,

@@ -188,7 +188,14 @@ pub fn condition_owner(owner: ConditionOwner) -> String {
 pub fn breakpoint(breakpoint: &Breakpoint, renderer: Renderer) -> String {
     let heading = format!(
         "{} {} set",
-        renderer.paint(Role::Success, "breakpoint"),
+        renderer.paint(
+            Role::Success,
+            if breakpoint.temporary {
+                "temporary breakpoint"
+            } else {
+                "breakpoint"
+            }
+        ),
         renderer.paint(Role::Metadata, breakpoint.id),
     );
     let condition = hit_condition(breakpoint.hit_condition, breakpoint.hit_count, renderer)
@@ -262,6 +269,13 @@ pub fn breakpoints(breakpoints: &[Breakpoint], renderer: Renderer) -> String {
                 renderer.paint(Role::Value, message)
             )
             .expect("writing to a String cannot fail");
+        }
+        if breakpoint.temporary {
+            output.push_str("  temporary");
+        }
+        if !breakpoint.enabled {
+            write!(output, "  {}", renderer.paint(Role::Muted, "disabled"))
+                .expect("writing to a String cannot fail");
         }
         for resolved in breakpoint.locations.iter() {
             write!(
@@ -348,6 +362,10 @@ pub fn watchpoints(watchpoints: &[Watchpoint], renderer: Renderer) -> String {
             watchpoint.condition.as_ref(),
             renderer,
         );
+        if !watchpoint.enabled {
+            write!(output, "  {}", renderer.paint(Role::Muted, "disabled"))
+                .expect("writing to a String cannot fail");
+        }
         output
     })
 }
@@ -540,6 +558,7 @@ const fn step_name(kind: StepKind) -> &'static str {
         StepKind::IntoSource => "source step",
         StepKind::OverSource => "source next",
         StepKind::Out => "frame return",
+        StepKind::Advance => "advance",
     }
 }
 

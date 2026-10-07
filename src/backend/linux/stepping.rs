@@ -43,6 +43,62 @@ impl<P: LinuxTraceOps> Controller<P> {
             .ok_or(Error::NotRunning)
     }
 
+    /// Whether the active step is an advance that `address` ends.
+    pub(super) fn is_advance_target(&self, address: VirtualAddress) -> bool {
+        self.inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .is_some_and(|active| {
+                matches!(&active.kind, ActiveKind::Step { start, .. } if start.targets.contains(&address))
+            })
+    }
+
+    /// Whether the advance's thread arrived at `address` where it stood
+    /// when the advance began, which happens once and does not end it.
+    pub(super) fn take_standing_arrival(&mut self, address: VirtualAddress) -> bool {
+        self.active_step_mut()
+            .is_some_and(|start| start.standing.take_if(|at| *at == address).is_some())
+    }
+
+    /// Removes the plan sites of a step that goes on by other means,
+    /// keeping an advance's targets, which end it however it goes on.
+    pub(super) fn retire_step_plan(&mut self, execution: ExecutionId) -> Result<()> {
+        let targets = self
+            .active_step_mut()
+            .map(|start| start.targets.clone())
+            .unwrap_or_default();
+        if targets.is_empty() {
+            return self.cleanup_plan_breakpoints(execution);
+        }
+        let owner = BreakpointOwner::Plan(execution);
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let retired = inferior
+            .plan_sites
+            .get(&execution)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|address| {
+                !targets.contains(address)
+                    && inferior
+                        .breakpoints
+                        .get(address)
+                        .is_some_and(|site| site.owners.contains(&owner))
+            })
+            .collect::<Vec<_>>();
+        for address in retired {
+            self.remove_breakpoint_owner(address, owner)?;
+        }
+        if let Some(sites) = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.plan_sites.get_mut(&execution))
+        {
+            sites.retain(|address| targets.contains(address));
+        }
+        Ok(())
+    }
+
     /// The state of the active step, if one is active.
     pub(super) fn active_step_mut(&mut self) -> Option<&mut StepStart> {
         match &mut self.inferior.as_mut()?.active.as_mut()?.kind {
@@ -408,7 +464,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             return Ok(());
         }
-        self.cleanup_plan_breakpoints(execution)?;
+        self.retire_step_plan(execution)?;
         if let Some(start) = self.active_step_mut() {
             start.plan_addresses.clear();
         }
@@ -420,7 +476,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// a stop the user sees, such as a breakpoint's, ends it.
     pub(super) fn let_step_run_on(&mut self) -> Result<()> {
         let execution = self.active_execution()?;
-        self.cleanup_plan_breakpoints(execution)?;
+        self.retire_step_plan(execution)?;
         if let Some(start) = self.active_step_mut() {
             start.running_on = true;
             start.plan_addresses.clear();
@@ -699,7 +755,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
 
         if kind == StepKind::IntoSource {
-            self.cleanup_plan_breakpoints(execution)?;
+            self.retire_step_plan(execution)?;
             let start = self
                 .active_step_mut()
                 .expect("source step remained active while retiring its return guard");
@@ -823,6 +879,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
 
         match kind {
+            StepKind::Advance => unreachable!("an advance runs as a step out"),
             StepKind::Instruction | StepKind::OverInstruction => Ok(true),
             StepKind::IntoSource => self.step_into_source_is_complete(pid, &registers, start),
             // Begun in code no debug information describes, a step over
@@ -1062,6 +1119,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         // Neither does stepping over from code no debug information
         // describes, which steps as stepping in does.
         let activation = match kind {
+            StepKind::Advance => unreachable!("an advance runs as a step out"),
             StepKind::Instruction | StepKind::OverInstruction => None,
             StepKind::IntoSource => self.top_activation(pid, &registers).ok(),
             StepKind::OverSource if code_instance.is_none() => {

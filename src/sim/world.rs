@@ -379,6 +379,8 @@ impl<'a> World<'a> {
             script: script(&swarm, program, variant, run, attach),
             alone: Cell::new(None),
             baseline: RefCell::new(None),
+            disabled_watches: RefCell::new(BTreeMap::new()),
+            released_while_running: Cell::new(false),
         };
         let first = Session::new(
             TRACER,
@@ -821,7 +823,8 @@ impl<'a> World<'a> {
                     thread,
                     kind,
                     presentation,
-                } => self.begin_step(thread, kind, presentation.as_ref()),
+                    targets,
+                } => self.begin_step(thread, kind, presentation.as_ref(), &targets),
                 Observation::StepEnded(reason) => self.judge_step(reason.as_ref())?,
                 Observation::Variables {
                     stop,
@@ -1068,16 +1071,25 @@ impl<'a> World<'a> {
         thread: crate::ThreadId,
         kind: crate::StepKind,
         presentation: Option<&crate::FramePresentation>,
+        targets: &BTreeSet<u64>,
     ) {
         let mut kernel = self.machine.kernel.borrow_mut();
         let tid = Tid::try_from(thread.get()).expect("a simulated tid fits");
         let Some(stepped) = kernel.threads.get(&tid) else {
             return;
         };
-        let begun = Begun::new(stepped, kind, presentation);
+        let mut begun = Begun::new(stepped, kind, presentation);
+        let bias = self.variant.image.bias();
+        begun.targets = targets.iter().map(|address| address + bias).collect();
         kernel.tracking = Some(Tracking {
             tid,
-            depth: begun.shadow.depth(),
+            // An advance's location may be in a callee, which it must not
+            // pass.
+            depth: if kind == crate::StepKind::Advance {
+                usize::MAX
+            } else {
+                begun.shadow.depth()
+            },
             positions: Vec::new(),
         });
         self.stepping = Some(begun);
@@ -1093,6 +1105,22 @@ impl<'a> World<'a> {
         let stop = self
             .controller()
             .and_then(|controller| controller.truth().public_stop);
+        if begun.kind == crate::StepKind::Advance {
+            let stopped = stop.is_some_and(|stop| self.still_at(crate::StopId::new(stop)));
+            let judged = semantics::advance(
+                &self.machine.kernel.borrow(),
+                &begun,
+                &tracking.positions,
+                reason,
+                stopped,
+                self.variant,
+            )
+            .map_err(|message| Failure::debugger("stepping", message))?;
+            if judged.is_some() {
+                self.machine.marks.borrow_mut().hit(Mark::AdvanceJudged);
+            }
+            return Ok(());
+        }
         let ended = matches!(reason, Some(crate::StopReason::Step { kind }) if *kind == begun.kind);
         if !ended || !stop.is_some_and(|stop| self.still_at(crate::StopId::new(stop))) {
             return Ok(());
@@ -1215,6 +1243,8 @@ impl<'a> World<'a> {
                     &self.shared.intent(self.variant.image.bias()),
                 )
                 .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
+                oracles::disabled_breakpoints(&kernel, &truth, &self.shared.disabled.borrow())
+                    .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
             }
         }
         oracles::output_so_far(&kernel, self.run)
@@ -1448,7 +1478,7 @@ fn marker_rows(program: &Program, variant: &Variant) -> BTreeMap<u64, u64> {
 }
 
 /// A thread's arrival at a trap: where, how many instructions it had
-/// completed, and the breakpoints that counted it.
+/// completed, and the breakpoints that counted it and still own the site.
 #[derive(Default)]
 struct Arrival {
     address: u64,

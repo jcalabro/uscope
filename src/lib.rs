@@ -585,6 +585,18 @@ impl DebuggerHandle {
         .await
     }
 
+    /// Enables or disables a breakpoint, keeping its definition and count.
+    /// Like adding and removing breakpoints, this stops every running
+    /// thread briefly, without a reported stop.
+    pub async fn set_breakpoint_enabled(
+        &self,
+        id: BreakpointId,
+        enabled: bool,
+    ) -> Result<Breakpoint> {
+        self.request(|reply| Request::SetBreakpointEnabled { id, enabled, reply })
+            .await
+    }
+
     /// Removes one logical breakpoint and returns its prior definition.
     pub async fn remove_breakpoint(&self, id: BreakpointId) -> Result<Breakpoint> {
         self.request(|reply| Request::RemoveBreakpoint { id, reply })
@@ -690,6 +702,18 @@ impl DebuggerHandle {
             reply,
         })
         .await
+    }
+
+    /// Enables or disables a watchpoint. A disabled one releases its debug
+    /// registers; enabling it plans them again, and fails, leaving it
+    /// disabled, when other watchpoints hold them.
+    pub async fn set_watchpoint_enabled(
+        &self,
+        id: WatchpointId,
+        enabled: bool,
+    ) -> Result<Watchpoint> {
+        self.request(|reply| Request::SetWatchpointEnabled { id, enabled, reply })
+            .await
     }
 
     /// Disarms one watchpoint and returns its prior definition.
@@ -917,6 +941,29 @@ impl DebuggerHandle {
                 ResumeScope::Process(selection.process),
                 ExceptionDisposition::Pass,
             )
+            .await?;
+
+        self.wait_for_execution(&mut events, execution).await
+    }
+
+    /// Runs, every thread with it, until the selected thread reaches a
+    /// location `spec` resolves to, stopping with [`StepKind::Advance`], or
+    /// the selected frame returns first, stopping as [`StepKind::Out`]
+    /// does. Nothing it plants outlives the stop that ends it.
+    pub async fn advance(&self, spec: BreakpointSpec) -> Result<StopReason> {
+        let selection = self.stopped_selection().await?;
+        let mut events = self.subscribe();
+        let execution = self
+            .request(|reply| Request::Advance {
+                process_id: selection.process,
+                stop_id: selection.stop,
+                thread_id: selection.thread,
+                frame: selection.frame,
+                spec,
+                scope: ResumeScope::Process(selection.process),
+                exception: ExceptionDisposition::Pass,
+                reply,
+            })
             .await?;
 
         self.wait_for_execution(&mut events, execution).await

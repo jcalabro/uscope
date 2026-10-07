@@ -533,22 +533,27 @@ and site ownership judge every session's controller):
 
 **Breakpoint accounting:**
 
-- *Unseen hits:* from the client's add reply until it asks to remove the
-  breakpoint, no thread executes the program's own instruction at its
-  address except to step over the trap it just reported there.
+- *Unseen hits:* from the client's add or enable reply until it asks to
+  remove or disable the breakpoint, no thread executes the program's own
+  instruction at its address except to step over the trap it just
+  reported there. A temporary breakpoint, which any stop may delete, is
+  judged by its hits instead.
 - *Hit counts, per arrival:* handling one message counts at most the trap
   it reports. A thread's arrival at a trap counts one hit for every user
   breakpoint owning the site then. A repeat of the arrival (the same thread
   at the same address, having executed nothing since, as when a signal
   interrupts its step over the trap) counts nothing for a breakpoint that
-  counted it, and at most one for one that came to the site since: whether
-  a thread resumed there ever ran, a debugger can only guess. A new
+  counted it and owned the site since, and at most one for one that came
+  to the site since, as one disabled and enabled again does: whether a
+  thread resumed there ever ran, a debugger can only guess. A new
   inferior starts every count again. A trap heard once the controller has
   been asked to shut down is no hit: the controller kills a launched
   process, and releases an attached one with the thread rewound to execute
   the instruction untraced.
 - *Ownership:* while a stop is published, every breakpoint the client was
-  told exists owns an installed site at each of its locations.
+  told exists and is enabled owns an installed site at each of its
+  locations, and one it was told is disabled, and has not asked to enable
+  since, owns none, unless the process is ending as a whole.
 - *Conditions* (`hits.rs`, judged by the client at each stop): every hit
   counts. A hit stops when the hit condition accepts its number, its
   condition holds or fails to evaluate, and the breakpoint logs no message;
@@ -560,6 +565,14 @@ and site ownership judge every session's controller):
   condition or its negation at the start of the marker's line in
   unoptimized code. A policy changed while the program runs applies from a
   hit the client cannot know, so every policy since the last stop counts.
+  A disabled breakpoint counts nothing and stops nowhere. A temporary one
+  is gone from the snapshot of the stop it causes, and every thread that
+  stopped at it there shows the hit; no breakpoint the client keeps is gone
+  otherwise. A stop event names one thread's reason, so a temporary one
+  may also be gone after a stop the client heard of and saw no snapshot
+  of, as when it killed the process first, or after events it fell behind
+  on. A process that ends while a stop forms keeps the temporaries of a
+  stop never published.
 
 **Watch accounting** (`watches.rs`): no thread accesses a watched range
 unless an armed slot covers the access, and none runs on from an access to
@@ -577,7 +590,9 @@ stores or on any access counts exactly as many hits as instructions
 accessed it, and a watch on changes at most as many. A hit's number lies in
 those counted since the last stop, and some policy since lets it stop,
 judged as breakpoint conditions are. The client's watch conditions are
-constants, so none may fail to evaluate.
+constants, so none may fail to evaluate. A watch the debugger said it
+disabled counts and reports nothing; the client enables one again only at a
+stop, whose bytes are then its baseline, as a new watch's are.
 
 **Semantic** (`semantics.rs`, judged by the world after each poll, against
 shadow state and facts). At each new stop the client reads the selected
@@ -602,7 +617,11 @@ judged once its stop is over or its process is ending.
   - a source step stopped in a statement row with a line, never at an
     epilogue marker; stepping over never stopped in a callee; stepping into
     an inline frame hidden at the stop moved nothing; and a step over begun
-    in code no line describes steps as stepping in does.
+    in code no line describes steps as stepping in does;
+  - an advance executed no instruction at its location, which a disabled
+    breakpoint's locations name, except once where it stood, whatever
+    ended it; `Step { kind: Advance }` left it at its location, and
+    `Step { kind: Out }` where stepping out of the frame would have.
 
   In unoptimized code, which has no inlining, split functions, or calls
   turned into jumps, source steps are judged exactly too: a step within its

@@ -28,9 +28,12 @@ pub enum Command {
     Handle,
     Views,
     Break,
+    Tbreak,
     Breakpoints,
     Info,
     Delete,
+    Enable,
+    Disable,
     Ignore,
     Hits,
     Condition,
@@ -51,6 +54,7 @@ pub enum Command {
     Step,
     Next,
     Finish,
+    Advance,
     Examine,
     Disassemble,
     Address,
@@ -144,6 +148,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Set a breakpoint, optionally stopping only at hits such as >=5, ==3, or %10"
     ),
     command!(
+        Tbreak,
+        "tbreak",
+        [],
+        "tbreak <function|0xaddress|file:line|file:function> [hit-condition]",
+        "Set a breakpoint that the stop it causes deletes"
+    ),
+    command!(
         Breakpoints,
         "breakpoints",
         [],
@@ -170,6 +181,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         ["del", "d"],
         "delete <id|all>",
         "Delete logical breakpoints"
+    ),
+    command!(
+        Enable,
+        "enable",
+        [],
+        "enable <ids...>",
+        "Enable breakpoints, and watchpoints wID, by id, range such as 3-5 or w1-2, or all"
+    ),
+    command!(
+        Disable,
+        "disable",
+        [],
+        "disable <ids...>",
+        "Disable breakpoints, and watchpoints wID, keeping their conditions and counts, by id, range such as 3-5 or w1-2, or all"
     ),
     command!(
         Ignore,
@@ -319,6 +344,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         repeatable
     ),
     command!(
+        Advance,
+        "advance",
+        ["adv"],
+        "advance <function|0xaddress|file:line|file:function>",
+        "Run until the selected thread reaches a location, or the selected frame returns first"
+    ),
+    command!(
         Examine,
         "x",
         [],
@@ -449,9 +481,14 @@ impl Cli {
         let debugger = &self.debugger;
 
         let output = match spec.command {
-            Command::Break => {
-                self.add_breakpoint(arguments[0], arguments.get(1).copied(), spec)
-                    .await?
+            Command::Break | Command::Tbreak => {
+                self.add_breakpoint(
+                    arguments[0],
+                    arguments.get(1).copied(),
+                    spec.command == Command::Tbreak,
+                    spec,
+                )
+                .await?
             }
             Command::Breakpoints => self.list_breakpoints().await?,
             Command::Info => match (arguments[0], arguments.get(1)) {
@@ -474,6 +511,8 @@ impl Cli {
             },
             Command::Handle => self.handle_signal(&arguments).await?,
             Command::Delete => self.delete_breakpoints(arguments[0], spec).await?,
+            Command::Enable => self.set_enabled(&arguments, true, spec).await?,
+            Command::Disable => self.set_enabled(&arguments, false, spec).await?,
             Command::Ignore => self.ignore(arguments[0], arguments[1], spec).await?,
             Command::Hits => self.hits(arguments[0], arguments[1], spec).await?,
             Command::Condition => self.condition(arguments[0], &arguments[1..], spec).await?,
@@ -501,6 +540,11 @@ impl Cli {
             Command::Step => self.step(StepKind::IntoSource).await?,
             Command::Next => self.step(StepKind::OverSource).await?,
             Command::Finish => self.step(StepKind::Out).await?,
+            Command::Advance => {
+                let location =
+                    parse_breakpoint_location(arguments[0])?.ok_or_else(|| spec.usage_error())?;
+                self.execute_until_stop(debugger.advance(location)).await?
+            }
             Command::Examine => {
                 let address = parse_address(arguments[0])?;
                 let byte_count = parse_memory_byte_count(arguments.get(1).copied(), spec)?;
@@ -548,6 +592,7 @@ impl Cli {
                 | Command::Stepi
                 | Command::Nexti
                 | Command::Finish
+                | Command::Advance
                 | Command::Clear
                 | Command::Quit
         ) {
@@ -592,18 +637,79 @@ impl Cli {
         &self,
         location: &str,
         condition: Option<&str>,
+        temporary: bool,
         spec: &CommandSpec,
     ) -> Result<String> {
         let location = parse_breakpoint_location(location)?.ok_or_else(|| spec.usage_error())?;
-        let breakpoint = match condition {
-            Some(condition) => {
-                self.debugger
-                    .add_breakpoint_with_hit_condition(location, condition.parse()?)
-                    .await?
-            }
-            None => self.debugger.add_breakpoint(location).await?,
+        let options = uscope::BreakpointOptions {
+            hit_condition: condition.map(str::parse).transpose()?,
+            temporary,
+            ..uscope::BreakpointOptions::default()
         };
+        let breakpoint = self.debugger.add_breakpoint_with(location, options).await?;
         Ok(format::breakpoint(&breakpoint, self.renderers.stdout))
+    }
+
+    /// Enables or disables the breakpoints and watchpoints `words` name,
+    /// once every one is known to exist.
+    async fn set_enabled(
+        &self,
+        words: &[&str],
+        enabled: bool,
+        spec: &CommandSpec,
+    ) -> Result<String> {
+        let snapshot = self.debugger.snapshot().await?;
+        let ids = match parse_ids(words, spec)? {
+            None => snapshot
+                .breakpoints
+                .iter()
+                .map(|breakpoint| CountedId::Breakpoint(breakpoint.id))
+                .chain(
+                    snapshot
+                        .watchpoints
+                        .iter()
+                        .map(|watchpoint| CountedId::Watchpoint(watchpoint.id)),
+                )
+                .collect(),
+            Some(ids) => {
+                let renderer = Renderer::new(false);
+                for &id in &ids {
+                    let known = match id {
+                        CountedId::Breakpoint(id) => snapshot
+                            .breakpoints
+                            .iter()
+                            .any(|breakpoint| breakpoint.id == id),
+                        CountedId::Watchpoint(id) => snapshot
+                            .watchpoints
+                            .iter()
+                            .any(|watchpoint| watchpoint.id == id),
+                    };
+                    if !known {
+                        bail!("{} was not found", id.describe(renderer));
+                    }
+                }
+                ids
+            }
+        };
+        if ids.is_empty() {
+            return Ok("no breakpoints or watchpoints".to_owned());
+        }
+        for &id in &ids {
+            match id {
+                CountedId::Breakpoint(id) => {
+                    self.debugger.set_breakpoint_enabled(id, enabled).await?;
+                }
+                CountedId::Watchpoint(id) => {
+                    self.debugger.set_watchpoint_enabled(id, enabled).await?;
+                }
+            }
+        }
+        let renderer = self.renderers.stdout;
+        Ok(format!(
+            "{} {}",
+            renderer.paint(Role::Success, if enabled { "enabled" } else { "disabled" }),
+            describe_ids(&ids, renderer)
+        ))
     }
 
     async fn hits(&self, id: &str, condition: &str, spec: &CommandSpec) -> Result<String> {
@@ -1453,6 +1559,33 @@ impl Cli {
                     renderer,
                 )
             }
+            StopReason::Breakpoint { hits, .. } => {
+                let mut output = format::stop(reason, renderer);
+                // A stop deletes the temporary breakpoints it hit before it
+                // is published, so the hits missing now were temporaries.
+                if let Ok(snapshot) = self.debugger.snapshot().await {
+                    let deleted = hits
+                        .iter()
+                        .filter(|hit| {
+                            !snapshot
+                                .breakpoints
+                                .iter()
+                                .any(|breakpoint| breakpoint.id == hit.breakpoint)
+                        })
+                        .map(|hit| CountedId::Breakpoint(hit.breakpoint))
+                        .collect::<Vec<_>>();
+                    if !deleted.is_empty() {
+                        write!(
+                            output,
+                            "\n{} temporary {}",
+                            renderer.paint(Role::Success, "deleted"),
+                            describe_ids(&deleted, renderer)
+                        )
+                        .expect("writing to a String cannot fail");
+                    }
+                }
+                output
+            }
             _ => format::stop(reason, renderer),
         };
         if matches!(
@@ -1566,6 +1699,77 @@ fn parse_counted_id(argument: &str, spec: &CommandSpec) -> Result<CountedId> {
             },
         )
         .map_err(|_| spec.usage_error())
+}
+
+/// Parses breakpoint and watchpoint ids, ranges of them such as `3-5` or
+/// `w1-2`, or `all` as `None`.
+fn parse_ids(words: &[&str], spec: &CommandSpec) -> Result<Option<Vec<CountedId>>> {
+    if words == ["all"] {
+        return Ok(None);
+    }
+    let mut ids = Vec::new();
+    for word in words {
+        let (watch, digits) = word
+            .strip_prefix('w')
+            .map_or((false, *word), |digits| (true, digits));
+        let (first, last) = digits.split_once('-').unwrap_or((digits, digits));
+        let parse = |digits: &str| digits.parse::<u64>().map_err(|_| spec.usage_error());
+        let (first, last) = (parse(first)?, parse(last)?);
+        if first > last {
+            bail!("range {word} is empty");
+        }
+        for id in first..=last {
+            let id = if watch {
+                CountedId::Watchpoint(WatchpointId::new(id))
+            } else {
+                CountedId::Breakpoint(BreakpointId::new(id))
+            };
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    Ok(Some(ids))
+}
+
+/// `breakpoints 1, 3 and watchpoint 2`.
+fn describe_ids(ids: &[CountedId], renderer: Renderer) -> String {
+    let list = |kind: &str, ids: Vec<u64>| -> Option<String> {
+        if ids.is_empty() {
+            return None;
+        }
+        let numbers = ids
+            .iter()
+            .map(|id| renderer.paint(Role::Metadata, id).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "{kind}{} {numbers}",
+            if ids.len() == 1 { "" } else { "s" }
+        ))
+    };
+    let breakpoints = ids
+        .iter()
+        .filter_map(|id| match id {
+            CountedId::Breakpoint(id) => Some(id.get()),
+            CountedId::Watchpoint(_) => None,
+        })
+        .collect();
+    let watchpoints = ids
+        .iter()
+        .filter_map(|id| match id {
+            CountedId::Watchpoint(id) => Some(id.get()),
+            CountedId::Breakpoint(_) => None,
+        })
+        .collect();
+    [
+        list("breakpoint", breakpoints),
+        list("watchpoint", watchpoints),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" and ")
 }
 
 /// Parses `all` as `None` or a numeric identifier.
