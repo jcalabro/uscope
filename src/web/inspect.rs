@@ -118,11 +118,11 @@ pub async fn sources(images: &Images) -> SourceFiles {
     }
 }
 
-/// Functions whose names hold `query`, case aside: whole names first, then
-/// those it begins, holds, or holds the letters of in order, and shorter
-/// names before longer ones.
+/// Functions whose names hold `query`, ASCII case aside: whole names first,
+/// then those it begins, holds, or holds the letters of in order, and
+/// shorter names before longer ones.
 pub async fn functions(images: &Images, query: &FunctionQuery) -> Functions {
-    let wanted = query.query.trim().to_lowercase();
+    let wanted = query.query.trim().to_ascii_lowercase();
     let limit = query.limit.map_or(50, |limit| limit.min(200)) as usize;
     if wanted.is_empty() {
         return Functions {
@@ -130,51 +130,70 @@ pub async fn functions(images: &Images, query: &FunctionQuery) -> Functions {
             more: false,
         };
     }
-    let mut found = BTreeSet::new();
-    for image in images.with_sources().await {
-        for function in image.functions() {
-            let Some(rank) = rank(&function.name.to_lowercase(), &wanted) else {
-                continue;
-            };
-            let declared = function.declaration.as_ref();
-            found.insert((
-                rank,
-                function.name.len(),
-                FunctionMatch {
-                    name: function.name.to_string(),
-                    path: declared
-                        .and_then(|declared| image.source_file(declared.file))
-                        .map(|file| file.path.display().to_string()),
-                    line: declared.map(|declared| declared.line.get()),
-                },
-            ));
+    let images = images.with_sources().await;
+    // A short query matches most of a large program, so candidates are
+    // ranked before any of them is described.
+    let mut candidates = Vec::new();
+    let mut lower = String::new();
+    for (module, image) in images.iter().enumerate() {
+        for (index, function) in image.functions().iter().enumerate() {
+            lower.clear();
+            lower.extend(function.name.chars().map(|char| char.to_ascii_lowercase()));
+            if let Some(rank) = rank(&lower, &wanted) {
+                candidates.push((rank, function.name.len(), &function.name, module, index));
+            }
         }
     }
-    let more = found.len() > limit;
+    // Only the best few are sorted. Repeated declarations can take some of
+    // their places, so more than the limit is kept.
+    let keep = limit.saturating_mul(8).max(1);
+    let mut more = candidates.len() > keep;
+    if more {
+        candidates.select_nth_unstable(keep);
+        candidates.truncate(keep);
+    }
+    candidates.sort_unstable();
+    let mut found = Vec::new();
+    for &(_, _, _, module, index) in &candidates {
+        let image = &images[module];
+        let function = &image.functions()[index];
+        let declared = function.declaration.as_ref();
+        let described = FunctionMatch {
+            name: function.name.to_string(),
+            path: declared
+                .and_then(|declared| image.source_file(declared.file))
+                .map(|file| file.path.display().to_string()),
+            line: declared.map(|declared| declared.line.get()),
+        };
+        // Declarations repeat a function in each unit that names it.
+        if found.contains(&described) {
+            continue;
+        }
+        if found.len() == limit {
+            more = true;
+            break;
+        }
+        found.push(described);
+    }
     Functions {
-        functions: found
-            .into_iter()
-            .take(limit)
-            .map(|(_, _, function)| function)
-            .collect(),
+        functions: found,
         more,
     }
 }
 
-/// How well `name` matches `query`, best first, or none.
+/// How well `name` matches `query`, both lowercase, best first, or none.
 fn rank(name: &str, query: &str) -> Option<u8> {
-    if name == query {
-        Some(0)
-    } else if name.starts_with(query) {
-        Some(1)
-    } else if name.contains(query) {
-        Some(2)
-    } else {
-        let mut letters = name.chars();
-        query
-            .chars()
-            .all(|wanted| letters.any(|letter| letter == wanted))
-            .then_some(3)
+    match name.find(query) {
+        Some(0) if name.len() == query.len() => Some(0),
+        Some(0) => Some(1),
+        Some(_) => Some(2),
+        None => {
+            let mut letters = name.chars();
+            query
+                .chars()
+                .all(|wanted| letters.any(|letter| letter == wanted))
+                .then_some(3)
+        }
     }
 }
 
