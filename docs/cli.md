@@ -247,7 +247,8 @@ uses, and the function's frame shows the rest.
 
 The selected frame applies to `print`, `watch`, `where`, `list`,
 `disassemble`, `registers`, and `finish`. Each stop selects the innermost
-frame; each thread keeps its own selection until the next stop. An outer
+frame, except that a language runtime's exception selects the frame that
+raised it; each thread keeps its own selection until the next stop. An outer
 frame's variables are shown as they were at its call, read from where its
 callees saved them. A value in a register that callees may overwrite without
 saving is reported as not saved rather than shown with the callee's value.
