@@ -8,3 +8,4 @@ mod web;
 
 mod access;
 mod sessions;
+mod terminal;
