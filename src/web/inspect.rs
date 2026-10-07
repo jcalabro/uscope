@@ -144,17 +144,20 @@ pub async fn functions(images: &Images, query: &FunctionQuery) -> Functions {
             }
         }
     }
-    // Only the best few are sorted. Repeated declarations can take some of
-    // their places, so more than the limit is kept.
-    let keep = limit.saturating_mul(8).max(1);
-    let mut more = candidates.len() > keep;
-    if more {
+    // Only the best few are sorted: the rest only when repeated declarations
+    // of the same functions took all of their places.
+    let keep = limit.saturating_mul(8).max(1).min(candidates.len());
+    if keep < candidates.len() {
         candidates.select_nth_unstable(keep);
-        candidates.truncate(keep);
     }
-    candidates.sort_unstable();
+    candidates[..keep].sort_unstable();
     let mut found = Vec::new();
-    for &(_, _, _, module, index) in &candidates {
+    let mut more = false;
+    for position in 0..candidates.len() {
+        if position == keep {
+            candidates[keep..].sort_unstable();
+        }
+        let (_, _, _, module, index) = candidates[position];
         let image = &images[module];
         let function = &image.functions()[index];
         let declared = function.declaration.as_ref();
