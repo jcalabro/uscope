@@ -19,6 +19,7 @@ use crate::eval::types::{Ty, TypeSource};
 use crate::inspection::InspectionBudget;
 use crate::model::{ValueStorage, ViewChildren};
 use crate::protocol::StopId;
+use crate::runtime_model::DynamicValue;
 use crate::view::bind::BoundShape;
 use crate::view::kernel::Recordings;
 use crate::view::run::{Child, Failure};
@@ -761,34 +762,6 @@ fn polymorphic(types: &dyn TypeSource, ty: TypeReference, depth: usize) -> bool 
         }))
 }
 
-/// The offset and type of member `name` in the record a pointer of type
-/// `pointer` points to.
-fn pointee_member(
-    types: &dyn TypeSource,
-    pointer: TypeReference,
-    name: &str,
-) -> Option<(u64, TypeReference)> {
-    let (_, info) = crate::eval::types::representation(types, pointer).ok()?;
-    let TypeKind::Pointer {
-        target: Some(target),
-        ..
-    } = info.kind
-    else {
-        return None;
-    };
-    let (_, record) = crate::eval::types::representation(types, target).ok()?;
-    let TypeKind::Record { members, .. } = &record.kind else {
-        return None;
-    };
-    let member = members
-        .iter()
-        .find(|member| member.name.as_deref() == Some(name))?;
-    match member.layout {
-        crate::RecordMemberLayout::ByteOffset(offset) => Some((offset, member.type_ref)),
-        _ => None,
-    }
-}
-
 /// The one type a name means in an image, as its several units' copies of
 /// one type are one.
 fn one_type(image: &crate::ModuleImage, name: &str) -> Option<TypeReference> {
@@ -1307,7 +1280,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         match language {
             Some(crate::SourceLanguage::Cpp) => self.cpp_dynamic(type_info, &place),
             Some(crate::SourceLanguage::Rust) => self.rust_dynamic(type_info, &place),
-            Some(crate::SourceLanguage::Go) => self.go_dynamic(type_info, &place),
+            Some(crate::SourceLanguage::Go) => Ok(self.go_dynamic(type_info, &place)),
             _ => Ok(None),
         }
     }
@@ -1437,93 +1410,34 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         Ok(Some(Dynamic::at(module, ty, data)))
     }
 
-    /// A Go interface holds the value of the type its runtime type
-    /// describes: its `_type`, or its `tab`'s `Type`, whose offset from
-    /// `runtime.types` a type's `DW_AT_go_runtime_type` gives. The value is
-    /// the data word itself when its type is stored directly, which Go 1.26
-    /// says in `TFlag` and earlier Go in `Kind_`, and otherwise what the
-    /// word points to. A nil interface holds nothing.
-    fn go_dynamic(
-        &mut self,
-        type_info: &TypeInfo,
-        place: &StopPlace,
-    ) -> std::result::Result<Option<Dynamic>, Stop> {
-        // Go marks a type's kind on a typedef, which a same-named typedef
-        // may stand over.
-        let is_interface = typedef_chain(self, type_info.reference).iter().any(|info| {
-            info.identity
-                .as_ref()
-                .and_then(|identity| identity.go)
-                .is_some_and(|go| go.kind == crate::GoKind::Interface)
-        });
-        let Ok((_, record)) = crate::eval::types::representation(self, type_info.reference) else {
-            return Ok(None);
-        };
-        let (true, TypeKind::Record { members, .. }, ValueStorage::Memory(address)) =
-            (is_interface, &record.kind, &place.located.storage)
+    /// A Go interface holds what the runtime the module carries says it
+    /// does: the value of the type its runtime type descriptor describes,
+    /// which a type's `DW_AT_go_runtime_type` names, or nothing. Where the
+    /// runtime cannot say, the interface shows as the record it is.
+    fn go_dynamic(&self, type_info: &TypeInfo, place: &StopPlace) -> Option<Dynamic> {
+        let (_, record) = crate::eval::types::representation(self, type_info.reference).ok()?;
+        let (TypeKind::Record { .. }, ValueStorage::Memory(address)) =
+            (&record.kind, &place.located.storage)
         else {
-            return Ok(None);
+            return None;
         };
-        let address = address.get();
-        let offset = |name: &str| {
-            members
-                .iter()
-                .find(|member| member.name.as_deref() == Some(name))
-                .and_then(|member| match member.layout {
-                    crate::RecordMemberLayout::ByteOffset(offset) => {
-                        Some((offset, member.type_ref))
-                    }
-                    _ => None,
-                })
+        let Some(Ok(held)) = self
+            .frame
+            .runtime_dynamic(place.module, &record.name, *address)
+        else {
+            return None;
         };
-        let Some((data_offset, _)) = offset("data") else {
-            return Ok(None);
+        let DynamicValue::Held {
+            descriptor,
+            offset,
+            address,
+        } = held
+        else {
+            return Some(Dynamic::Nil);
         };
-        // The runtime type, and the pointer type its DWARF describes it by.
-        let (descriptor, descriptor_type) = if let Some((type_offset, ty)) = offset("_type") {
-            (self.word(address + type_offset)?, ty)
-        } else if let Some((tab_offset, tab_type)) = offset("tab") {
-            let Some((type_field, ty)) = pointee_member(self, tab_type, "Type") else {
-                return Ok(None);
-            };
-            let tab = self.word(address + tab_offset)?;
-            (
-                if tab == 0 {
-                    0
-                } else {
-                    self.word(tab + type_field)?
-                },
-                ty,
-            )
-        } else {
-            return Ok(None);
-        };
-        if descriptor == 0 {
-            return Ok(Some(Dynamic::Nil));
-        }
-        let Some((module, image)) = self.module_at(descriptor) else {
-            return Ok(None);
-        };
-        let Ok(types) = module.image.symbol_named("runtime.types") else {
-            return Ok(None);
-        };
-        let Some(runtime_offset) = image.get().checked_sub(types.address.get()) else {
-            return Ok(None);
-        };
-        let Some(ty) = module.image.go_runtime_type(runtime_offset) else {
-            return Ok(None);
-        };
-        let (Some((tflag, _)), Some((kind, _))) = (
-            pointee_member(self, descriptor_type, "TFlag"),
-            pointee_member(self, descriptor_type, "Kind_"),
-        ) else {
-            return Ok(None);
-        };
-        let direct = self.read(descriptor + tflag, 1)?[0] & 0x20 != 0
-            || self.read(descriptor + kind, 1)?[0] & 0x20 != 0;
-        let data = address + data_offset;
-        let storage = if direct { data } else { self.word(data)? };
-        Ok(Some(Dynamic::at(module, ty, storage)))
+        let (module, _) = self.module_at(descriptor.get())?;
+        let ty = module.image.go_runtime_type(offset)?;
+        Some(Dynamic::at(module, ty, address.get()))
     }
 
     /// `value` with the presentation of what it dynamically is.

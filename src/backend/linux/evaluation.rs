@@ -134,6 +134,26 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
             .frame_runtime(self.inferior, self.root, self.resolved, module)
     }
 
+    /// What the value at `address` dynamically holds, when the runtime
+    /// the module `module` carries records it in the record named
+    /// `representation`.
+    pub(super) fn runtime_dynamic(
+        &self,
+        module: ModuleId,
+        representation: &str,
+        address: VirtualAddress,
+    ) -> Option<std::result::Result<crate::runtime_model::DynamicValue, Arc<str>>> {
+        let runtime = self
+            .controller
+            .runtimes(self.inferior)
+            .into_iter()
+            .find(|runtime| runtime.module.id == module)?;
+        self.controller
+            .with_runtime_stop(self.inferior, &runtime, self.root.reader(), |stop| {
+                runtime.model.dynamic_value(stop, representation, address)
+            })
+    }
+
     /// Modules in the order names are looked up: the frame's first.
     fn modules(&self) -> impl Iterator<Item = &'a RuntimeModule> + 'a {
         let first = self.code.map(|(module, ..)| module);
