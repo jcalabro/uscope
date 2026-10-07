@@ -2133,11 +2133,11 @@ impl Session {
     }
 
     /// The code of the modules the client was told are loaded.
-    pub(super) fn code(&self) -> super::values::Code {
+    pub(super) fn code(&self) -> crate::present::Code {
         let Some(target) = &self.target else {
-            return super::values::Code::default();
+            return crate::present::Code::default();
         };
-        super::values::Code::new(
+        crate::present::Code::new(
             self.modules
                 .values()
                 .filter_map(|record| {
