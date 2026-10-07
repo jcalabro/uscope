@@ -69,12 +69,6 @@ fn languages_stay_at_their_seams() {
     const RUNTIME_NAMES: [&str; 4] = ["\"runtime.", "allgs", "goroutine", "goid"];
     let root = source_root();
     let allowed = [root.join("runtime_model/go"), root.join("debug_info")];
-    // Each still knows Go's runtime, until its knowledge moves into the
-    // model, and says why.
-    let pending = [(
-        root.join("backend/linux/presentation.rs"),
-        "the interface convention, which reads `runtime.types`",
-    )];
     for directory in [
         "backend",
         "cli",
@@ -97,9 +91,7 @@ fn languages_stay_at_their_seams() {
             vec![(path, source)]
         };
         for (path, source) in found {
-            if allowed.iter().any(|allowed| path.starts_with(allowed))
-                || pending.iter().any(|(pending, _)| *pending == path)
-            {
+            if allowed.iter().any(|allowed| path.starts_with(allowed)) {
                 continue;
             }
             // Documentation may name a runtime as an example; code may not.

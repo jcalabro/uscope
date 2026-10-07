@@ -6,14 +6,16 @@
 
 mod exceptions;
 mod layout;
+mod types;
 
 use std::sync::{Arc, OnceLock};
 
 use layout::{Goroutines, Labels, Layout, Missing, Threads};
 
 use super::{
-    CodeAddress, Crossing, Partial, RuntimeException, RuntimeHook, RuntimeImage, RuntimeModel,
-    RuntimeSignals, RuntimeStop, RuntimeTask, TaskContext, TaskLabels, TaskPage, ThreadActivity,
+    CodeAddress, Crossing, DynamicValue, Partial, RuntimeException, RuntimeHook, RuntimeImage,
+    RuntimeModel, RuntimeSignals, RuntimeStop, RuntimeTask, TaskContext, TaskLabels, TaskPage,
+    ThreadActivity,
 };
 use crate::unwind::RegisterFile;
 use crate::{AddressRange, ImageAddress, StackSegment, TaskState, ThreadId, VirtualAddress};
@@ -91,6 +93,8 @@ struct GoRuntime {
     /// they report is laid out.
     hooks: exceptions::Hooks,
     exceptions: Result<exceptions::Layout, Missing>,
+    /// How interface values hold their dynamic values.
+    interfaces: Result<types::Interfaces, Missing>,
 }
 
 impl GoRuntime {
@@ -125,6 +129,7 @@ impl GoRuntime {
             internal: Internal::bind(image.as_ref()),
             hooks: exceptions::Hooks::bind(image.as_ref()),
             exceptions: exceptions::Layout::bind(image.as_ref()),
+            interfaces: types::Interfaces::bind(image.as_ref()),
             image,
             unverified,
             starting,
@@ -408,6 +413,18 @@ impl RuntimeModel for GoRuntime {
 
     fn task_noun(&self) -> &'static str {
         TASK_NOUN.0
+    }
+
+    fn dynamic_value(
+        &self,
+        stop: &dyn RuntimeStop,
+        representation: &str,
+        address: VirtualAddress,
+    ) -> Option<Result<DynamicValue, Arc<str>>> {
+        match &self.interfaces {
+            Ok(interfaces) => interfaces.value(stop, representation, address),
+            Err(missing) => Some(Err(Arc::clone(missing))),
+        }
     }
 
     /// The runtime preempts a goroutine with SIGURG, and rechecks that it

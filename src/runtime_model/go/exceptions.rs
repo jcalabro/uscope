@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use super::layout::{Missing, constant, member, offset, symbol};
+use super::types::TypeTables;
 use super::{read_unsigned, word};
 use crate::runtime_model::{RuntimeException, RuntimeHook, RuntimeImage, RuntimeStop};
 use crate::unwind::RegisterFile;
@@ -19,8 +20,6 @@ const RAX: u16 = 0;
 const RBX: u16 = 3;
 /// The most panics one chain is read through.
 const MAX_PANICS: usize = 64;
-/// The most modules a type is looked for in.
-const MAX_MODULES: usize = 256;
 /// The longest message read; the runtime prints longer ones in full, so
 /// one longer is refused rather than cut.
 const MAX_MESSAGE: u64 = 1 << 16;
@@ -94,12 +93,8 @@ pub struct Layout {
     name: u64,
     extra_star: u64,
     kinds: Kinds,
-    /// `runtime.firstmoduledata`, and where a module's types begin, end,
-    /// and the next module is.
-    first_module: ImageAddress,
-    types: u64,
-    end_types: u64,
-    next_module: u64,
+    /// The tables of each module's types, which a type's name is in.
+    tables: TypeTables,
     /// `runtime.sigtable`, and where each entry's name is.
     signals: ImageAddress,
     signal_stride: u64,
@@ -132,7 +127,6 @@ impl Layout {
     pub fn bind(image: &dyn RuntimeImage) -> Result<Self, Missing> {
         const PANIC: &str = "runtime._panic";
         const TYPE: &str = "internal/abi.Type";
-        const MODULE: &str = "runtime.moduledata";
         let kind = |name: &str| constant(image, &format!("internal/abi.{name}"));
         Ok(Self {
             arg: offset(image, PANIC, &["arg"], 16)?,
@@ -163,10 +157,7 @@ impl Layout {
                 complex128: kind("Complex128")?,
                 string: kind("String")?,
             },
-            first_module: symbol(image, "runtime.firstmoduledata")?,
-            types: offset(image, MODULE, &["types"], 8)?,
-            end_types: offset(image, MODULE, &["etypes"], 8)?,
-            next_module: offset(image, MODULE, &["next"], 8)?,
+            tables: TypeTables::bind(image)?,
             signals: symbol(image, "runtime.sigtable")?,
             signal_stride: member(image, "runtime.sigTabT", &[])?.size,
             signal_name: offset(image, "runtime.sigTabT", &["name"], 16)?,
@@ -410,26 +401,7 @@ impl Reader<'_> {
             4,
         )
         .ok_or("a type's name is unreadable")?;
-        let mut module = layout
-            .first_module
-            .get()
-            .wrapping_add(self.stop.load_bias());
-        let mut base = None;
-        for _ in 0..MAX_MODULES {
-            if module == 0 {
-                break;
-            }
-            let types = self.word(module.wrapping_add(layout.types), "a module's types")?;
-            let end = self.word(module.wrapping_add(layout.end_types), "a module's types")?;
-            if (types..end).contains(&ty) {
-                base = Some(types);
-                break;
-            }
-            module = self.word(module.wrapping_add(layout.next_module), "a module's link")?;
-        }
-        let name = base
-            .ok_or("the panic's type is in no module's types")?
-            .wrapping_add(offset);
+        let name = layout.tables.base(self.stop, ty)?.wrapping_add(offset);
         // A name is a flags byte, its length as a varint, then its bytes.
         let mut length = 0_u64;
         let mut at = name.wrapping_add(1);

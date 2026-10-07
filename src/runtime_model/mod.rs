@@ -201,6 +201,22 @@ pub struct RuntimeException {
     pub value: Option<Arc<str>>,
 }
 
+/// What a value of a type whose dynamic type the runtime records holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynamicValue {
+    /// Nothing, as a nil interface holds.
+    Nil,
+    /// A value of the type the runtime describes at `descriptor`.
+    Held {
+        descriptor: VirtualAddress,
+        /// The descriptor's offset in the type table of the module holding
+        /// it, which that module's debug information names its types by.
+        offset: u64,
+        /// Where the value is.
+        address: VirtualAddress,
+    },
+}
+
 /// What a language runtime tells the debugger at a stop.
 pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     /// The runtime's tasks from `start`, an index into its own order, at
@@ -244,6 +260,15 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         hook: ImageAddress,
         registers: &RegisterFile,
     ) -> Result<RuntimeException, Arc<str>>;
+    /// What the value at `address` dynamically holds, when the record its
+    /// type is represented by, named `representation`, is one the runtime
+    /// records a dynamic type in; `None` for any other record.
+    fn dynamic_value(
+        &self,
+        stop: &dyn RuntimeStop,
+        representation: &str,
+        address: VirtualAddress,
+    ) -> Option<Result<DynamicValue, Arc<str>>>;
     /// What the runtime calls one of its tasks.
     fn task_noun(&self) -> &'static str;
 }
