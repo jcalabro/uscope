@@ -159,11 +159,12 @@ pub fn symbol_role(name: &str) -> CodeRole {
 ///    generated.
 /// 6. `Panic`: `gopanic`, which calls deferred functions as a panic
 ///    unwinds.
-/// 7. `RuntimeInternal`: what the runtime's traceback hides, that is a
+/// 7. `Dispatch`: `execute`, which makes a goroutine the thread's own.
+/// 8. `RuntimeInternal`: what the runtime's traceback hides, that is a
 ///    `runtime.` function or method that is not exported, or a name with no
 ///    package, and anything under `internal/runtime/` or
 ///    `runtime/internal/`.
-/// 8. `Ordinary`: everything else.
+/// 9. `Ordinary`: everything else.
 pub fn go_role(name: &str, facts: Option<GoFunctionFacts>, generated: bool) -> CodeRole {
     let special = facts.and_then(|facts| facts.special);
     if name == "runtime.sigreturn__sigaction" {
@@ -202,6 +203,9 @@ pub fn go_role(name: &str, facts: Option<GoFunctionFacts>, generated: bool) -> C
     }
     if name == "runtime.gopanic" {
         return CodeRole::Panic;
+    }
+    if name == "runtime.execute" {
+        return CodeRole::Dispatch;
     }
     if is_runtime_internal(name) {
         return CodeRole::RuntimeInternal;

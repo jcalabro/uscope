@@ -341,6 +341,7 @@ impl<P: InspectionOps> Controller<P> {
             },
             cross: &mut cross,
             carried: None,
+            dispatched: false,
         };
         Ok((native, after_call, walk(&mut provider, initial)))
     }
@@ -1206,6 +1207,9 @@ pub(super) struct RoleCallerProvider<'a, 'c> {
     /// signal interrupted it. A runtime knows its stacks' bounds only
     /// roughly where the system gave them, as the top of a thread's.
     pub(super) carried: Option<StackSegment>,
+    /// Whether a frame on the current stack gave the thread to a task, so
+    /// that the task that switched to this stack may have left it.
+    pub(super) dispatched: bool,
 }
 
 impl RoleCallerProvider<'_, '_> {
@@ -1257,6 +1261,7 @@ impl RoleCallerProvider<'_, '_> {
         self.dwarf.first = false;
         self.dwarf.registers = registers;
         self.carried = None;
+        self.dispatched = false;
         CallerResult::Caller(FrameContext {
             instruction: VirtualAddress::new(instruction),
             cfa: Some(VirtualAddress::new(context)),
@@ -1322,9 +1327,15 @@ impl RoleCallerProvider<'_, '_> {
                     Some(Ok(Crossing::Outermost)) => {
                         CallerResult::Finished(UnwindTermination::Complete)
                     }
+                    // The task the runtime names now may not be the one
+                    // that switched here, whose frames lie beyond.
+                    Some(Ok(Crossing::Resume(_) | Crossing::Continue(_))) if self.dispatched => {
+                        CallerResult::Finished(UnwindTermination::Complete)
+                    }
                     Some(Ok(Crossing::Resume(registers))) => {
                         self.dwarf.registers = registers;
                         self.carried = None;
+                        self.dispatched = false;
                         self.dwarf.caller(current)
                     }
                     Some(Ok(Crossing::Continue(registers))) => {
@@ -1334,6 +1345,7 @@ impl RoleCallerProvider<'_, '_> {
                         self.dwarf.first = false;
                         self.dwarf.registers = registers;
                         self.carried = None;
+                        self.dispatched = false;
                         CallerResult::Caller(FrameContext {
                             instruction: VirtualAddress::new(instruction),
                             cfa: None,
@@ -1341,6 +1353,10 @@ impl RoleCallerProvider<'_, '_> {
                         })
                     }
                 }
+            }
+            Some((_, CodeRole::Dispatch)) => {
+                self.dispatched = true;
+                self.dwarf.caller(current)
             }
             // The runtime entered the frame by a trap, faking a call from
             // the instruction that trapped, which its caller's pc names.

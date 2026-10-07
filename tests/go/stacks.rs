@@ -302,6 +302,35 @@ async fn a_thread_switching_to_a_goroutine_unwinds_on_its_system_stack() {
     }
 }
 
+/// A goroutine that parks switches to the system stack, where the
+/// scheduler may then give the thread to another goroutine, as often to one
+/// that has never run. The goroutine that switched has left the thread, so
+/// its frames are not the thread's: the stack ends at the switch.
+#[tokio::test]
+async fn a_thread_given_to_another_goroutine_ends_where_the_last_switched() {
+    for fixture in BUILDS {
+        let (scenario, trace) = stop_in(fixture, "runtime.gogo", |segments| {
+            segments.first().is_some_and(|(_, names)| {
+                names.iter().any(|name| name == "runtime.execute")
+                    && names.iter().any(|name| name == "runtime.mcall")
+            })
+        })
+        .await;
+        let found = segments(&trace);
+        let context = format!("{fixture}: {trace:#?}");
+        let [(StackSegment::System, names)] = found.as_slice() else {
+            panic!("{context}");
+        };
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some("runtime.mcall"),
+            "{context}"
+        );
+        assert_eq!(trace.termination, UnwindTermination::Complete, "{context}");
+        scenario.shutdown().await;
+    }
+}
+
 /// The runtime reads the clock through the vDSO from the system stack, and
 /// keeps the goroutine's stack pointer in a register the vDSO preserves.
 #[tokio::test]
@@ -332,10 +361,12 @@ async fn a_vdso_call_unwinds_onto_its_caller() {
             )))
             .await;
         let reason = scenario.resume_to_stop().await;
+        // A goroutine's call, not the scheduler's on an idle thread.
         let trace = stop_where(&mut scenario, reason, fixture, |segments| {
-            segments
-                .iter()
-                .any(|(_, names)| names.iter().any(|name| name == "runtime.nanotime1"))
+            segments.windows(2).any(|pair| {
+                pair[0].1.iter().any(|name| name == "runtime.nanotime1")
+                    && pair[1].0 == StackSegment::Task
+            })
         })
         .await;
         let context = format!("{fixture}: {trace:#?}");
