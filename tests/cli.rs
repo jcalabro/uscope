@@ -779,6 +779,18 @@ fn batch_with_settings(settings: &str, arguments: &[&str], commands: &[&str]) ->
 }
 
 #[test]
+fn words_c_reserves_for_types_name_a_rust_programs_variables() {
+    let output = batch(
+        &["build/test-programs/strings-rust-o0"],
+        &["break strings_target", "run", "whatis long", "p *long"],
+    );
+    assert_in_order(
+        &output,
+        &["type = &alloc::string::String", "(String) *long = \"zzz"],
+    );
+}
+
+#[test]
 fn pp_lays_values_out_to_the_width_and_print_formats_combine() {
     let records = ["build/test-programs/records-c-gcc-o0"];
     let commands = ["break inspect_records", "run", "pp *records", "up", "pp"];
