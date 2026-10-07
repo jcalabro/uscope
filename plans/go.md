@@ -1296,7 +1296,9 @@ at every stop.
    - `finish` returns into the closure that started the worker.
    - A breakpoint condition selects one goroutine (`$task == …`).
 2. **HTTP server and client in one process.** `net/http` on
-   `127.0.0.1:0`.
+   `127.0.0.1:0`. *(Done: `tests/go/server.rs`, `tests/dap/server.rs`.
+   A raised panic of one of the runtime's own errors reads as its
+   method puts it, as the recovered handler's does.)*
    - A breakpoint in a handler; its backtrace passes through `net/http`
      to `goexit`.
    - A handler panic, which the server recovers: no stop by default, and

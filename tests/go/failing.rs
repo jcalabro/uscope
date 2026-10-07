@@ -206,15 +206,14 @@ async fn exceptions_stop_as_chosen() {
     };
     for fixture in BUILDS {
         // Each panic stops as it is raised, in the frame that raised it,
-        // the one the program recovers from too. A value whose type may
-        // have methods is named by its type, since the runtime has not yet
-        // called them.
+        // the one the program recovers from too. The runtime's own errors
+        // read as their methods would put them.
         let (mut scenario, reason) = launched(fixture, "recovered", raised).await;
         let (kind, message) = exception(&reason, fixture);
         assert_eq!(kind, LanguageExceptionKind::Raised, "{fixture}");
-        assert!(
-            message.starts_with("panic with a runtime."),
-            "{fixture}: {message}"
+        assert_eq!(
+            message, "panic: runtime error: invalid memory address or nil pointer dereference",
+            "{fixture}"
         );
         let line = support::source_line(SOURCE, "// FAIL: dereference");
         assert_eq!(
