@@ -1276,11 +1276,12 @@ impl RoleCallerProvider<'_, '_> {
 
 /// Where Linux's x86-64 `ucontext` keeps the interrupted registers: its
 /// `uc_mcontext`, after `uc_flags`, `uc_link`, and `uc_stack`.
-const UCONTEXT_MCONTEXT: u64 = 40;
+pub(super) const UCONTEXT_MCONTEXT: u64 = 40;
 
 /// The DWARF numbers of the general registers in the order the kernel's
 /// `sigcontext` saves them, from r8 to rip.
-const SIGCONTEXT_REGISTERS: [u16; 17] = [8, 9, 10, 11, 12, 13, 14, 15, 5, 4, 6, 3, 1, 0, 2, 7, 16];
+pub(super) const SIGCONTEXT_REGISTERS: [u16; 17] =
+    [8, 9, 10, 11, 12, 13, 14, 15, 5, 4, 6, 3, 1, 0, 2, 7, 16];
 
 /// Asks the runtime whose module holds a frame's code where the frame,
 /// with these registers, goes on past the stack switch it makes; `None`

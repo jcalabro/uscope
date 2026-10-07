@@ -6062,3 +6062,67 @@ fn nested_presentations_share_one_interval_between_looks_for_run_control() {
     assert!(interrupted, "the work never looked for run control");
     assert_eq!(charges, INTERRUPT_INTERVAL);
 }
+
+/// glibc describes its signal trampoline, `__restore_rt`, with call-frame
+/// expressions that find every register in the `ucontext` the kernel
+/// saved. Evaluating them must agree with the kernel's `sigcontext`
+/// layout, which unwinding through a trampoline reads directly.
+#[test]
+fn glibc_signal_trampoline_expressions_find_the_kernels_saved_registers() {
+    use super::frames::{SIGCONTEXT_REGISTERS, UCONTEXT_MCONTEXT};
+
+    struct Saved(BTreeMap<u64, u64>);
+    impl MemoryReader for Saved {
+        fn read_u64(&mut self, address: VirtualAddress) -> Option<u64> {
+            self.0.get(&address.get()).copied()
+        }
+    }
+
+    let maps = std::fs::read_to_string("/proc/self/maps").expect("read our own maps");
+    let libc = maps
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(5))
+        .find(|path| path.ends_with("/libc.so.6"))
+        .expect("the tests link glibc");
+    let debug =
+        crate::debug_info::load_module(std::path::Path::new(libc), crate::ModuleImageId::new(1))
+            .expect("load libc");
+    let trampoline = debug
+        .image
+        .symbols_named("__restore_rt")
+        .next()
+        .expect("glibc's signal trampoline")
+        .address;
+
+    // A handler's frame returned into the trampoline, whose stack holds the
+    // ucontext; each saved register gets a value of its own.
+    let stack = 0x7fff_0000_u64;
+    let expected: Vec<(u16, u64)> = SIGCONTEXT_REGISTERS
+        .iter()
+        .enumerate()
+        .map(|(slot, &register)| (register, 0x1000 + slot as u64 * 0x11))
+        .collect();
+    let mut memory = Saved(
+        expected
+            .iter()
+            .enumerate()
+            .map(|(slot, &(_, value))| (stack + UCONTEXT_MCONTEXT + 8 * slot as u64, value))
+            .collect(),
+    );
+    let registers = RegisterFile::new([(7, stack), (16, trampoline.get())]);
+    let step = debug
+        .unwind
+        .unwind(trampoline, &registers, &mut memory)
+        .expect("glibc's CFI unwinds its trampoline");
+    assert!(
+        step.signal_frame,
+        "the trampoline's CIE marks a signal frame"
+    );
+    for (register, value) in expected {
+        assert_eq!(
+            step.registers.get(register),
+            Some(value),
+            "DWARF register {register}"
+        );
+    }
+}

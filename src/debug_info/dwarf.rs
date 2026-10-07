@@ -840,8 +840,14 @@ where
         }
     }
 
+    let rules = RuleContext {
+        current: registers,
+        cfa,
+        section,
+        encoding: fde.cie().encoding(),
+    };
     for &(register, ref rule) in row.registers() {
-        apply_register_rule(&mut caller, registers, memory, cfa, register.0, rule)?;
+        rules.apply(&mut caller, memory, register.0, rule)?;
     }
     caller.set(7, cfa.get());
 
@@ -896,7 +902,14 @@ where
             ))
         }
         CfaRule::Expression(expression) => {
-            evaluate_unwind_expression(expression, section, encoding, registers, memory)
+            match evaluate_unwind_expression(
+                expression, section, encoding, registers, memory, None, "CFA",
+            )? {
+                Evaluated::Address(address) => Ok(VirtualAddress::new(address)),
+                Evaluated::Value(_) => Err(UnwindTermination::UnsupportedUnwindInfo {
+                    feature: "CFA expression: non-address result".into(),
+                }),
+            }
         }
     }
 }
@@ -905,25 +918,39 @@ where
 // backward branch cannot hang the controller thread.
 const MAX_UNWIND_EXPRESSION_ITERATIONS: u32 = 10_000;
 
+/// What an unwind expression computed: an address, or with
+/// `DW_OP_stack_value`, a value.
+enum Evaluated {
+    Address(u64),
+    Value(u64),
+}
+
+/// Evaluates a CFA or register rule's expression. A register rule's
+/// expression starts with the CFA on its stack, as `initial`.
 fn evaluate_unwind_expression<'data, S>(
     expression: &UnwindExpression<usize>,
     section: &S,
     encoding: Encoding,
     registers: &RegisterFile,
     memory: &mut dyn MemoryReader,
-) -> std::result::Result<VirtualAddress, UnwindTermination>
+    initial: Option<u64>,
+    rule: &str,
+) -> std::result::Result<Evaluated, UnwindTermination>
 where
     S: UnwindSection<Reader<'data>>,
 {
     let unsupported = |feature: &str| UnwindTermination::UnsupportedUnwindInfo {
-        feature: format!("CFA expression: {feature}").into(),
+        feature: format!("{rule} expression: {feature}").into(),
     };
     let corrupt = |error: gimli::Error| UnwindTermination::CorruptUnwindInfo {
-        description: format!("CFA expression: {error}").into(),
+        description: format!("{rule} expression: {error}").into(),
     };
     let expression = expression.get(section).map_err(corrupt)?;
     let mut evaluation = expression.evaluation(encoding);
     evaluation.set_max_iterations(MAX_UNWIND_EXPRESSION_ITERATIONS);
+    if let Some(initial) = initial {
+        evaluation.set_initial_value(initial);
+    }
     let mut result = evaluation.evaluate().map_err(corrupt)?;
     loop {
         result = match result {
@@ -971,60 +998,109 @@ where
         return Err(unsupported("compound location"));
     };
     match piece.location {
-        Location::Address { address } => Ok(VirtualAddress::new(address)),
-        _ => Err(unsupported("non-address result")),
+        Location::Address { address } => Ok(Evaluated::Address(address)),
+        Location::Value {
+            value: Value::Generic(value),
+        } => Ok(Evaluated::Value(value)),
+        _ => Err(unsupported(
+            "a result that is neither an address nor a word",
+        )),
     }
 }
 
-fn apply_register_rule(
-    caller: &mut RegisterFile,
-    current: &RegisterFile,
-    memory: &mut dyn MemoryReader,
+/// What a row's register rules are applied with.
+struct RuleContext<'a, S> {
+    /// The registers of the frame being unwound.
+    current: &'a RegisterFile,
     cfa: VirtualAddress,
-    register: u16,
-    rule: &RegisterRule<usize>,
-) -> std::result::Result<(), UnwindTermination> {
-    let value = match rule {
-        RegisterRule::Undefined => {
-            caller.remove(register);
-            return Ok(());
-        }
-        RegisterRule::SameValue => current
-            .get(register)
-            .ok_or_else(|| register_unavailable(register))?,
-        RegisterRule::Offset(offset) => {
-            let address =
-                VirtualAddress::new(checked_add(cfa.get(), *offset).ok_or_else(|| {
-                    UnwindTermination::InvalidCaller {
-                        description: "saved-register address overflow".into(),
-                    }
-                })?);
-            memory
-                .read_u64(address)
-                .ok_or(UnwindTermination::MemoryReadFailed { address })?
-        }
-        RegisterRule::ValOffset(offset) => {
-            checked_add(cfa.get(), *offset).ok_or_else(|| UnwindTermination::InvalidCaller {
-                description: "register value overflow".into(),
-            })?
-        }
-        RegisterRule::Register(source) => current
-            .get(source.0)
-            .ok_or_else(|| register_unavailable(source.0))?,
-        RegisterRule::Constant(value) => *value,
-        RegisterRule::Expression(_) | RegisterRule::ValExpression(_) => {
-            return Err(UnwindTermination::UnsupportedUnwindInfo {
-                feature: "register expression".into(),
-            });
-        }
-        RegisterRule::Architectural => {
-            return Err(UnwindTermination::UnsupportedUnwindInfo {
-                feature: "architectural register rule".into(),
-            });
-        }
-    };
-    caller.set(register, value);
-    Ok(())
+    section: &'a S,
+    encoding: Encoding,
+}
+
+impl<'data, S: UnwindSection<Reader<'data>>> RuleContext<'_, S> {
+    fn apply(
+        &self,
+        caller: &mut RegisterFile,
+        memory: &mut dyn MemoryReader,
+        register: u16,
+        rule: &RegisterRule<usize>,
+    ) -> std::result::Result<(), UnwindTermination> {
+        let cfa = self.cfa;
+        let value = match rule {
+            RegisterRule::Undefined => {
+                caller.remove(register);
+                return Ok(());
+            }
+            RegisterRule::SameValue => self
+                .current
+                .get(register)
+                .ok_or_else(|| register_unavailable(register))?,
+            RegisterRule::Offset(offset) => {
+                let address =
+                    VirtualAddress::new(checked_add(cfa.get(), *offset).ok_or_else(|| {
+                        UnwindTermination::InvalidCaller {
+                            description: "saved-register address overflow".into(),
+                        }
+                    })?);
+                memory
+                    .read_u64(address)
+                    .ok_or(UnwindTermination::MemoryReadFailed { address })?
+            }
+            RegisterRule::ValOffset(offset) => {
+                checked_add(cfa.get(), *offset).ok_or_else(|| UnwindTermination::InvalidCaller {
+                    description: "register value overflow".into(),
+                })?
+            }
+            RegisterRule::Register(source) => self
+                .current
+                .get(source.0)
+                .ok_or_else(|| register_unavailable(source.0))?,
+            RegisterRule::Constant(value) => *value,
+            // The register was saved where the expression computes.
+            RegisterRule::Expression(expression) => match self.evaluate(expression, memory)? {
+                Evaluated::Address(address) => {
+                    let address = VirtualAddress::new(address);
+                    memory
+                        .read_u64(address)
+                        .ok_or(UnwindTermination::MemoryReadFailed { address })?
+                }
+                Evaluated::Value(_) => {
+                    return Err(UnwindTermination::CorruptUnwindInfo {
+                        description: "register expression: a value where a saved \
+                                          register's address belongs"
+                            .into(),
+                    });
+                }
+            },
+            // The register's value is what the expression computes.
+            RegisterRule::ValExpression(expression) => match self.evaluate(expression, memory)? {
+                Evaluated::Address(value) | Evaluated::Value(value) => value,
+            },
+            RegisterRule::Architectural => {
+                return Err(UnwindTermination::UnsupportedUnwindInfo {
+                    feature: "architectural register rule".into(),
+                });
+            }
+        };
+        caller.set(register, value);
+        Ok(())
+    }
+
+    fn evaluate(
+        &self,
+        expression: &UnwindExpression<usize>,
+        memory: &mut dyn MemoryReader,
+    ) -> std::result::Result<Evaluated, UnwindTermination> {
+        evaluate_unwind_expression(
+            expression,
+            self.section,
+            self.encoding,
+            self.current,
+            memory,
+            Some(self.cfa.get()),
+            "register",
+        )
+    }
 }
 
 fn register_unavailable(register: u16) -> UnwindTermination {
@@ -2162,22 +2238,49 @@ mod tests {
         }
     }
 
+    const TEST_ENCODING: Encoding = Encoding {
+        format: Format::Dwarf32,
+        version: 4,
+        address_size: 8,
+    };
+
     #[test]
     fn register_rules_distinguish_locations_values_and_frozen_registers() {
         let current = RegisterFile::new([(1, 100), (2, 200), (3, 300)]);
         let mut caller = current.clone();
         let mut memory = TestMemory {
-            values: std::iter::once((VirtualAddress::new(0xff8), 0xfeed)).collect(),
+            values: [(0xff8, 0xfeed), (0x64, 0xbeef)]
+                .into_iter()
+                .map(|(address, value)| (VirtualAddress::new(address), value))
+                .collect(),
         };
+        // Each expression starts with the CFA on its stack.
+        let expressions: [&[u8]; 5] = [
+            &[0x38, 0x1c],       // DW_OP_lit8, DW_OP_minus: saved at CFA - 8
+            &[0x40, 0x22],       // DW_OP_lit16, DW_OP_plus: CFA + 16 is the value
+            &[0x31, 0x22, 0x9f], // DW_OP_lit1, DW_OP_plus, DW_OP_stack_value
+            &[0x71, 0x00],       // DW_OP_breg1 0: saved where register 1 points
+            &[0x9f],             // DW_OP_stack_value: no address at all
+        ];
+        let bytes = expressions.concat();
+        let section = EhFrame::new(&bytes, RunTimeEndian::Little);
+        let mut offset = 0;
+        let [below, above, stack_value, through_register, malformed] = expressions.map(|bytes| {
+            let expression = UnwindExpression {
+                offset,
+                length: bytes.len(),
+            };
+            offset += bytes.len();
+            expression
+        });
         let mut apply = |caller: &mut RegisterFile, cfa, register, rule| {
-            apply_register_rule(
-                caller,
-                &current,
-                &mut memory,
-                VirtualAddress::new(cfa),
-                register,
-                &rule,
-            )
+            RuleContext {
+                current: &current,
+                cfa: VirtualAddress::new(cfa),
+                section: &section,
+                encoding: TEST_ENCODING,
+            }
+            .apply(caller, &mut memory, register, &rule)
         };
         for (register, rule) in [
             (1, RegisterRule::Constant(999)),
@@ -2185,6 +2288,10 @@ mod tests {
             (5, RegisterRule::Offset(-8)),
             (6, RegisterRule::ValOffset(-8)),
             (3, RegisterRule::Undefined),
+            (7, RegisterRule::Expression(below)),
+            (8, RegisterRule::ValExpression(above)),
+            (9, RegisterRule::ValExpression(stack_value)),
+            (10, RegisterRule::Expression(through_register)),
         ] {
             apply(&mut caller, 0x1000, register, rule).unwrap();
         }
@@ -2193,6 +2300,22 @@ mod tests {
         assert_eq!(caller.get(5), Some(0xfeed));
         assert_eq!(caller.get(6), Some(0xff8));
         assert_eq!(caller.get(3), None);
+        assert_eq!(caller.get(7), Some(0xfeed));
+        assert_eq!(caller.get(8), Some(0x1010));
+        assert_eq!(caller.get(9), Some(0x1001));
+        assert_eq!(
+            caller.get(10),
+            Some(0xbeef),
+            "expressions read the callee's registers"
+        );
+        assert_eq!(
+            apply(&mut caller, 0x1000, 11, RegisterRule::Expression(malformed)),
+            Err(UnwindTermination::CorruptUnwindInfo {
+                description: "register expression: a value where a saved register's address \
+                              belongs"
+                    .into(),
+            })
+        );
 
         for (cfa, rule, failure) in [
             (
@@ -2232,22 +2355,24 @@ mod tests {
             offset: 0usize,
             length: bytes.len(),
         };
-        let encoding = Encoding {
-            format: Format::Dwarf32,
-            version: 4,
-            address_size: 8,
-        };
         let registers = RegisterFile::new([]);
         let mut memory = TestMemory {
             values: BTreeMap::new(),
         };
 
-        assert_eq!(
-            evaluate_unwind_expression(&expression, &section, encoding, &registers, &mut memory),
-            Err(UnwindTermination::UnsupportedUnwindInfo {
-                feature: "CFA expression: non-default memory address space".into()
-            })
-        );
+        assert!(matches!(
+            evaluate_unwind_expression(
+                &expression,
+                &section,
+                TEST_ENCODING,
+                &registers,
+                &mut memory,
+                None,
+                "CFA",
+            ),
+            Err(UnwindTermination::UnsupportedUnwindInfo { feature })
+                if &*feature == "CFA expression: non-default memory address space"
+        ));
     }
 
     /// Checks that looking an address up in an [`FdeIndex`] finds the entry

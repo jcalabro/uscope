@@ -2,7 +2,6 @@
 
 ## Debugger
 
-- Evaluate CFI expression rules (`DW_CFA_expression` and `DW_CFA_val_expression`).
 - Synthesize `name@plt` symbols for PLT stubs.
 - Break on symbol names in modules without DWARF.
 - Show symbol versions where they distinguish otherwise identical names.
