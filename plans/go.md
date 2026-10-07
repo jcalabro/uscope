@@ -1299,7 +1299,7 @@ at every stop.
 #### Working programs
 
 1. **Worker pool.** Channels, a `WaitGroup`, and `context`
-   cancellation.
+   cancellation. *(Done: `tests/go/workers.rs` and `tests/go/siblings.rs`.)*
    - The checkpoint invariants hold.
    - Selecting a parked worker shows its frames and locals.
    - `next` walks a worker's loop while siblings run the same function,
@@ -1316,13 +1316,18 @@ at every stop.
      the client sees the error response.
    - DAP's every-panic filter stops on it.
    - With `-trimpath` the same breakpoints bind through a source map.
-3. **Recursion that grows and shrinks its stack.**
+3. **Recursion that grows and shrinks its stack.** *(Done:
+   `tests/go/steps.rs`, `siblings.rs`, and `watches.rs`. A function
+   breakpoint is placed past the stack check, so `morestack` runs before
+   it and a call that grows the stack stops once.)*
    - `next` over the growing call, `finish` from a frame whose stack
      moves, and `step` into a prologue that calls `morestack`.
    - A function breakpoint is hit once per call, not twice.
    - A watchpoint on a local follows the copy, and ends when its frame
      returns.
-4. **Generics, iterators, closures, and defers.**
+4. **Generics, iterators, closures, and defers.** *(Done:
+   `tests/debugger/names.rs`, `tests/go/ranges.rs`, `tests/go/defers.rs`,
+   and the `values` fixture's `funcs` and shape checkpoints.)*
    - `break main.Sum` binds every instantiation.
    - Values show their concrete types.
    - `next` and `finish` inside a range-over-func body stay in the loop.
@@ -1336,6 +1341,13 @@ at every stop.
    - maps (small, large, mid-growth), channels, and interfaces stored
      directly and indirectly;
    - promoted fields and shape-typed generics.
+
+   *(Done: the `values`, `containers`, `stdlib`, and `expressions`
+   fixtures. Go's maps grow by splitting a full table, not by evacuating
+   buckets, so mid-growth is `tests/go/maps.rs`: at every instruction
+   that installs a split table's halves, the map lists exactly what it
+   holds, or, while the directory holds neither half whole, is refused
+   as generating fewer entries than it counts.)*
    
    Each is marked with `VIEW:` or `TRUTH`, and checked in both builds by
    the never-wrong invariant.

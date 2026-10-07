@@ -122,6 +122,37 @@ async fn optimized_steps_stop_only_in_code_the_program_wrote() {
     scenario.shutdown().await;
 }
 
+/// A function breakpoint stops once per call, even when the call's stack
+/// check grows the stack and the function then begins again.
+#[tokio::test]
+async fn a_function_breakpoint_stops_once_for_a_call_that_grows_the_stack() {
+    for fixture in ["steps-go-o0", "steps-go-o2"] {
+        let mut scenario = crate::invariants::checked(fixture);
+        let fresh = scenario.add_breakpoint("main.fresh").await;
+        let after = scenario
+            .add_source_breakpoint("steps/main.go", line("// STEP: after"))
+            .await;
+        let stopped_by = |reason: &StopReason| match reason {
+            StopReason::Breakpoint { hits, .. } => {
+                hits.iter().map(|hit| hit.breakpoint).collect::<Vec<_>>()
+            }
+            reason => panic!("{fixture}: {reason:?}"),
+        };
+        let reason = scenario
+            .run_with_to_stop(LaunchOptions {
+                stdout: Some(Stdio::null()),
+                ..LaunchOptions::default()
+            })
+            .await;
+        assert_eq!(stopped_by(&reason), [fresh.id], "{fixture}");
+        let task = integer(&scenario, "$task").await;
+        let reason = scenario.resume_to_stop().await;
+        assert_eq!(stopped_by(&reason), [after.id], "{fixture}");
+        assert_eq!(integer(&scenario, "$task").await, task, "{fixture}");
+        scenario.shutdown().await;
+    }
+}
+
 /// A step into the goroutine a line starts stops where the function the
 /// `go` statement names begins, on the new goroutine: through the wrapper
 /// that passes the call's arguments, or at once for a closure without

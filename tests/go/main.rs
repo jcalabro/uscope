@@ -14,6 +14,7 @@ mod defers;
 mod failing;
 mod hosted;
 mod invariants;
+mod maps;
 mod preemption;
 mod ranges;
 mod scale;

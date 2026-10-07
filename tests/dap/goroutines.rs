@@ -139,7 +139,9 @@ fn a_hundred_thousand_goroutines_are_cut_with_a_count_of_the_rest() {
     let listed = threads(&mut dap);
     assert_eq!(listed.len(), 1001);
     assert!(
-        listed[0].1.starts_with("[1] main.checkpoint — at breakpoint 1 "),
+        listed[0]
+            .1
+            .starts_with("[1] main.checkpoint — at breakpoint 1 "),
         "{:?}",
         listed[0]
     );
