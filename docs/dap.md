@@ -72,6 +72,8 @@ A launch configuration:
   "console": "internalConsole",  // or "integratedTerminal" or "externalTerminal"
   "sourceMap": [["/build/src", "${workspaceFolder}/src"]],  // earlier rules first; {"from": "to"} also works
   "viewFiles": ["${workspaceFolder}/app.views"],  // ahead of .uscope/views, the user's, the program's, the built-in
+  "debugDirectories": ["/srv/debug"],  // separate debug files, ahead of NIX_DEBUG_INFO_DIRS and /usr/lib/debug
+  "debuginfod": false,           // download missing debug files from DEBUGINFOD_URLS
   "disassemblySyntax": "intel",  // or "att"
   "signals": { "SIGUSR1": "nostop", "SIGPIPE": ["stop", "print"] },
   "followForks": false,          // debug forked processes in sessions of their own
@@ -92,6 +94,7 @@ Attaching to a process, or opening a core dump:
   "allowModuleMismatch": false }
 ```
 
+- A module stripped of its debug information takes it from a separate debug file: by build-id under a debug directory's `.build-id`, by `.gnu_debuglink` beside it, in its `.debug` directory, or under a debug directory, and, with `debuginfod`, from a debuginfod server. The `modules` request names the file as a module's `symbolFilePath`.
 - `pid` may be a number or a numeric string, as VS Code's `${command:pickProcess}` produces.
 - Attaching continues the process unless `stopOnEntry` is set.
 - Disconnecting detaches from an attached process and kills a launched one, unless the client asks otherwise with `terminateDebuggee`.
@@ -103,7 +106,7 @@ Attaching to a process, or opening a core dump:
 
 `"followForks": true`, in a launch or attach configuration, debugs every process the program forks in a session of its own. The child runs no instruction before its session has attached to it and set its breakpoints, so a breakpoint on the line after `fork()` stops in the child too.
 
-- **How.** The debugger removes the parent's breakpoints from the child, stops it, and releases it untraced. The adapter then asks the client to start a child session with `startDebugging`, as an attach configuration naming the child (`"name": "app (fork 1234)"`, `"pid"`), the parent's `type`, `followForks`, `sourceMap`, `viewFiles`, `disassemblySyntax`, `signals`, and `cwd`, an attach's `program`, and `"held": {"startTime": …}`, which tells the child's session to end the stop the child waits in. The child session continues the child once it is configured, unless `stopOnEntry` is set.
+- **How.** The debugger removes the parent's breakpoints from the child, stops it, and releases it untraced. The adapter then asks the client to start a child session with `startDebugging`, as an attach configuration naming the child (`"name": "app (fork 1234)"`, `"pid"`), the parent's `type`, `followForks`, `sourceMap`, `viewFiles`, `debugDirectories`, `debuginfod`, `disassemblySyntax`, `signals`, and `cwd`, an attach's `program`, and `"held": {"startTime": …}`, which tells the child's session to end the stop the child waits in. The child session continues the child once it is configured, unless `stopOnEntry` is set.
 - **Clients.** It needs a client that starts child sessions (`supportsStartDebuggingRequest`), such as VS Code and nvim-dap. With any other, the adapter says so once and the children run on their own. Each child session runs its own adapter, and ends independently of the parent's.
 - **Children no session takes run on their own.** The adapter releases a child the client refuses to debug or does not answer for within 60 seconds, and one no session has attached to 60 seconds after the client answered, and says so. A child session that fails to attach releases its child at once. A child forked while the parent's session ends is released too. A released child receives the SIGCONT that ends its stop, as after a shell's `fg`.
 - **Yama.** A child session attaches to a process that is not its adapter's descendant, which Yama refuses while `kernel.yama.ptrace_scope` is 1, Ubuntu's default, or more. Set it to 0 (`sudo sysctl kernel.yama.ptrace_scope=0`), or, at 1 or 2, give `uscope` the `cap_sys_ptrace` capability. A child session that cannot attach releases the child, which runs on its own.

@@ -477,6 +477,18 @@ pub async fn modules(handle: &DebuggerHandle, images: &Images) -> Result<Vec<Mod
                 _ => "none",
             }
             .to_owned(),
+            debug_file: image
+                .as_ref()
+                .and_then(|image| image.separate_debug_file())
+                .map(|debug_file| match debug_file {
+                    uscope::DebugFile::Used(path) | uscope::DebugFile::Unusable { path, .. } => {
+                        path.display().to_string()
+                    }
+                }),
+            debug_file_problem: match image.as_ref().and_then(|image| image.separate_debug_file()) {
+                Some(uscope::DebugFile::Unusable { reason, .. }) => Some(reason.to_string()),
+                _ => None,
+            },
         });
     }
     Ok(modules)

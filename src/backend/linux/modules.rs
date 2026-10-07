@@ -303,8 +303,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         vdso_image
             .take_if(|_| path.as_os_str() == VDSO_NAME)
             .map_or_else(
-                || self.ptrace.load_module(path, image),
-                |data| crate::debug_info::load_module_bytes(path, &data, image),
+                || self.ptrace.load_module(path, image, &self.debug_files),
+                |data| {
+                    crate::debug_info::load_module_bytes(
+                        path,
+                        &data,
+                        image,
+                        &crate::debug_info::DebugFileSearch::default(),
+                    )
+                },
             )
     }
 }

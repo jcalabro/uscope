@@ -289,6 +289,45 @@ derive_stripped_library() {
         bash -c "$script" _ "$input" "$output" "$embedded"
 }
 
+# Splits the debug information off a program or library as distributions
+# ship it, stripping every symbol table but the dynamic one from OUTPUT. With
+# LAYOUT `debuglink`, OUTPUT names its debug file by `.gnu_debuglink`, which
+# sits beside it under `.debug`; with `build-id`, the debug file is filed
+# under ROOT/.build-id by the build-id OUTPUT keeps.
+derive_split_debug() {
+    local input="$1"
+    local output="$2"
+    local layout="$3"
+    local root="${4:-}"
+    local script
+    # shellcheck disable=SC2016
+    script='
+        set -euo pipefail
+        input="$1"; output="$2"; layout="$3"; root="$4"
+        objcopy --only-keep-debug "$input" "$output.debug.tmp"
+        strip --strip-all -o "$output.tmp" "$input"
+        case "$layout" in
+            debuglink)
+                directory="$(dirname "$output")/.debug"
+                mkdir -p "$directory"
+                debug="$directory/$(basename "$output").debug"
+                mv "$output.debug.tmp" "$debug"
+                objcopy "--add-gnu-debuglink=$debug" "$output.tmp"
+                ;;
+            build-id)
+                id=$(readelf -n "$input" | awk "/Build ID:/ { print \$3 }")
+                [[ -n "$id" ]] || { echo "$input has no build-id" >&2; exit 1; }
+                mkdir -p "$root/.build-id/${id:0:2}"
+                mv "$output.debug.tmp" "$root/.build-id/${id:0:2}/${id:2}.debug"
+                ;;
+        esac
+        mv "$output.tmp" "$output"
+    '
+    run_cached_build "$input" "$output" \
+        "derivation=split-debug-v1"$'\n'"layout=${layout}"$'\n'"root=${root}" \
+        bash -c "$script" _ "$input" "$output" "$layout" "$root"
+}
+
 # Fails the build when the symbol fixture library no longer has the symbol
 # tables and layout the symbolization tests depend on. TABLES names which
 # tables must exist: full, dynamic, or embedded.
@@ -879,6 +918,44 @@ build_fixture clang "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-f
 build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-frames-gcc-nopie" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie \
     "-L$output_dir" -lmodule-frames '-Wl,-rpath,$ORIGIN'
+# Programs and a library whose debug information is a separate file, found
+# by `.gnu_debuglink` beside them, by build-id under a debug directory, or
+# from a debuginfod server.
+mkdir -p "$output_dir/split"
+build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/split/basic-debuglink.full" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie
+derive_split_debug "$output_dir/split/basic-debuglink.full" "$output_dir/split/basic-debuglink" \
+    debuglink
+build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/split/basic-build-id.full" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie -Wl,--build-id
+derive_split_debug "$output_dir/split/basic-build-id.full" "$output_dir/split/basic-build-id" \
+    build-id "$output_dir/split/debug-root"
+# The same debug file under another debug directory, naming a dwz
+# supplementary file as distributions' debug files do, which uscope refuses
+# with its reason rather than misread.
+altlinked_script='
+    set -euo pipefail
+    root="$1"; output="$2"
+    rm -rf "$output"
+    cp -r "$root" "$output"
+    debug=$(find "$output/.build-id" -name "*.debug")
+    printf "/usr/lib/debug/.dwz/uscope-fixture\0\x01\x02\x03\x04" >"$output/altlink"
+    objcopy --add-section ".gnu_debugaltlink=$output/altlink" "$debug"
+    rm "$output/altlink"
+    # The build cache counts only an executable output as built.
+    touch "$output/ready"
+    chmod +x "$output/ready"
+'
+run_cached_build "$output_dir/split/basic-build-id" "$output_dir/split/altlink-root/ready" \
+    "derivation=altlinked-v1" \
+    bash -c "$altlinked_script" _ "$output_dir/split/debug-root" "$output_dir/split/altlink-root"
+build_shared_fixture gcc "$c_fixtures_dir/module-frames/library.c" \
+    "$output_dir/split/libmodule-frames.so.full" -O0 -g3 -gdwarf-5 -Wl,--build-id \
+    -Wl,-soname,libmodule-frames.so
+derive_split_debug "$output_dir/split/libmodule-frames.so.full" \
+    "$output_dir/split/libmodule-frames.so" debuglink
+build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/split/module-frames" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie "-L$output_dir/split" -lmodule-frames '-Wl,-rpath,$ORIGIN'
 build_symbols_library gcc "$output_dir/libelf-symbols-gcc.so"
 build_symbols_library clang "$output_dir/libelf-symbols-clang.so"
 # Stripped libraries keep the soname they were linked with, so each derived

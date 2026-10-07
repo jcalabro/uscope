@@ -151,30 +151,91 @@ struct DwarfUnwindInfo {
     go: Option<Arc<super::gopclntab::GoUnwind>>,
 }
 
-pub fn load(path: &Path, image_id: crate::ModuleImageId) -> Result<DebugInfo> {
+pub fn load(
+    path: &Path,
+    image_id: crate::ModuleImageId,
+    search: &super::DebugFileSearch,
+) -> Result<DebugInfo> {
     let data: Arc<[u8]> = fs::read(path)?.into();
-    load_debug_info(path, &data, image_id).map_err(Error::debug_info)
+    load_debug_info(path, &data, image_id, search).map_err(Error::debug_info)
 }
 
-pub fn load_bytes(path: &Path, data: &[u8], image_id: crate::ModuleImageId) -> Result<DebugInfo> {
-    load_debug_info(path, data, image_id).map_err(Error::debug_info)
+pub fn load_bytes(
+    path: &Path,
+    data: &[u8],
+    image_id: crate::ModuleImageId,
+    search: &super::DebugFileSearch,
+) -> Result<DebugInfo> {
+    load_debug_info(path, data, image_id, search).map_err(Error::debug_info)
+}
+
+/// Loads an image's debug information. A file without DWARF of its own may
+/// have a separate debug file, whose DWARF, symbols, and call-frame
+/// information describe the code here. One that cannot be loaded leaves
+/// the image as its own file describes it, with the reason recorded.
+fn load_debug_info(
+    path: &Path,
+    data: &[u8],
+    image_id: crate::ModuleImageId,
+    search: &super::DebugFileSearch,
+) -> std::result::Result<DebugInfo, DwarfError> {
+    let object = object::File::parse(data)?;
+    let Some(separate) = search.find(path, &object) else {
+        return load_image(path, data, image_id, Separate::None);
+    };
+    // dwz moves what several debug files share into a supplementary file,
+    // whose units and strings the loader does not read.
+    if object::File::parse(separate.data.as_slice())
+        .is_ok_and(|debug| debug.section_by_name(".gnu_debugaltlink").is_some())
+    {
+        let reason = "it shares debug information with other files through a dwz supplementary \
+                      file (.gnu_debugaltlink), which uscope does not read";
+        return load_image(
+            path,
+            data,
+            image_id,
+            Separate::Unusable(&separate.path, reason.into()),
+        );
+    }
+    load_image(path, data, image_id, Separate::Used(&separate)).or_else(|error| {
+        load_image(
+            path,
+            data,
+            image_id,
+            Separate::Unusable(&separate.path, error.to_string().into()),
+        )
+    })
+}
+
+/// What a separate debug file contributes to an image.
+enum Separate<'a> {
+    None,
+    Used(&'a super::separate::DebugFile),
+    /// One found but unusable, for the reason given.
+    Unusable(&'a Path, Arc<str>),
 }
 
 #[expect(
     clippy::too_many_lines,
     reason = "one loader assembles every table of an image from its sources"
 )]
-fn load_debug_info(
+fn load_image(
     path: &Path,
     data: &[u8],
     image_id: crate::ModuleImageId,
+    separate: Separate<'_>,
 ) -> std::result::Result<DebugInfo, DwarfError> {
     let object = object::File::parse(data)?;
     let target = target_description(&object)?;
+    let debug_object = match &separate {
+        Separate::Used(file) => Some(object::File::parse(file.data.as_slice())?),
+        Separate::None | Separate::Unusable(..) => None,
+    };
+    let dwarf_object = debug_object.as_ref().unwrap_or(&object);
 
     let sections = DwarfSections::load(
         |id: SectionId| -> std::result::Result<Cow<'_, [u8]>, DwarfError> {
-            match object.section_by_name(id.name()) {
+            match dwarf_object.section_by_name(id.name()) {
                 Some(section) => Ok(section.uncompressed_data()?),
                 None => Ok(Cow::Borrowed(&[])),
             }
@@ -286,8 +347,15 @@ fn load_debug_info(
     let go_unwind = go_table
         .as_ref()
         .map(|table| Arc::new(super::gopclntab::GoUnwind::new(Arc::clone(table), code)));
-    let unwind = Arc::new(load_unwind_info(&object, target, go_code, go_unwind)?);
-    let mut symbols = super::elf::load_symbols(&object, &unwind.function_ranges());
+    let unwind = Arc::new(load_unwind_info(
+        &object,
+        debug_object.as_ref(),
+        target,
+        go_code,
+        go_unwind,
+    )?);
+    let mut symbols =
+        super::elf::load_symbols(&object, debug_object.as_ref(), &unwind.function_ranges());
     symbols.sources.runtime_function_table = runtime_function_table;
     if let Some(table) = &go_table {
         assign_go_symbol_roles(table, &mut symbols.symbols);
@@ -318,7 +386,15 @@ fn load_debug_info(
             },
         )
         .with_id(image_id)
-        .with_views(embedded_views(path, &object)?),
+        .with_views(embedded_views(path, dwarf_object)?)
+        .with_debug_file(match separate {
+            Separate::None => None,
+            Separate::Used(file) => Some(crate::DebugFile::Used(Arc::new(file.path.clone()))),
+            Separate::Unusable(path, reason) => Some(crate::DebugFile::Unusable {
+                path: Arc::new(path.to_path_buf()),
+                reason,
+            }),
+        }),
     );
 
     Ok(DebugInfo {
@@ -512,11 +588,12 @@ fn image_address_range(
 
 fn load_unwind_info(
     object: &object::File<'_>,
+    debug_object: Option<&object::File<'_>>,
     target: TargetDescription,
     go_code: Vec<AddressRange<ImageAddress>>,
     go: Option<Arc<super::gopclntab::GoUnwind>>,
 ) -> std::result::Result<DwarfUnwindInfo, DwarfError> {
-    let section_data = |name| -> std::result::Result<Arc<[u8]>, DwarfError> {
+    let data_in = |object: &object::File<'_>, name| -> std::result::Result<Arc<[u8]>, DwarfError> {
         Ok(object
             .section_by_name(name)
             .as_ref()
@@ -524,6 +601,16 @@ fn load_unwind_info(
             .transpose()?
             .unwrap_or_default()
             .into())
+    };
+    let section_data = |name| data_in(object, name);
+    // A separate debug file may hold the `.debug_frame` the module's file
+    // was stripped of.
+    let debug_frame = match section_data(".debug_frame")? {
+        frame if frame.is_empty() => match debug_object {
+            Some(debug_object) => data_in(debug_object, ".debug_frame")?,
+            None => frame,
+        },
+        frame => frame,
     };
     let mut bases = BaseAddresses::default();
     if let Some(section) = object.section_by_name(".eh_frame") {
@@ -538,7 +625,7 @@ fn load_unwind_info(
 
     let mut unwind = DwarfUnwindInfo {
         eh_frame: section_data(".eh_frame")?,
-        debug_frame: section_data(".debug_frame")?,
+        debug_frame,
         eh_frame_index: FdeIndex::default(),
         debug_frame_index: FdeIndex::default(),
         endian: match target.byte_order {
@@ -2412,7 +2499,7 @@ mod tests {
             let data = fs::read(&path).expect("run `just build-test-programs`");
             let object = object::File::parse(&*data).expect("ELF");
             let target = target_description(&object).expect("target");
-            let unwind = load_unwind_info(&object, target, Vec::new(), None).expect("CFI");
+            let unwind = load_unwind_info(&object, None, target, Vec::new(), None).expect("CFI");
             check_fde_index(
                 &unwind.eh_frame(),
                 &unwind.bases,
@@ -2528,7 +2615,13 @@ mod tests {
                 .map(|section| section.uncompressed_data().expect("a section").len() as u64)
                 .sum::<u64>();
             let before = allocated();
-            let info = load_bytes(&path, &data, crate::ModuleImageId::new(0)).expect("load");
+            let info = load_bytes(
+                &path,
+                &data,
+                crate::ModuleImageId::new(0),
+                &super::super::DebugFileSearch::default(),
+            )
+            .expect("load");
             let after = allocated();
             let blocks = after.blocks - before.blocks;
             let bytes = after.bytes - before.bytes;

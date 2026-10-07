@@ -569,7 +569,7 @@ fn command_errors_show_the_usage_or_the_reason() {
             "cls",
         ],
     );
-    let info = "usage: info breakpoints|watchpoints|signals|core|symbol|view [argument...]";
+    let info = "usage: info breakpoints|watchpoints|signals|modules|core|symbol|view [argument...]";
     let clear = "cannot clear screen: stdout is not an ANSI terminal";
     assert_in_order(
         &stderr,
@@ -4048,5 +4048,63 @@ fn vdso_code_is_shown_in_the_module_the_kernel_names() {
         (innermost.contains(" in time+0x") || innermost.contains(" in __vdso_time+0x"))
             && innermost.ends_with(" from [vdso]"),
         "{live}"
+    );
+}
+
+/// `info modules` says what describes each module, and for one stripped of
+/// its debug information which separate file it came from, or why the
+/// one found could not be used.
+#[test]
+fn info_modules_names_separate_debug_files_and_why_one_is_unusable() {
+    const PROGRAM: &str = "build/test-programs/split/basic-build-id";
+    let output = batch(
+        &[
+            "--debug-directory",
+            "build/test-programs/split/debug-root",
+            PROGRAM,
+        ],
+        &[
+            "info modules",
+            "break breakpoint_target",
+            "run",
+            "info modules",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "not loaded",
+            "debug",
+            "basic-build-id",
+            "\n  debug information from ",
+            ".debug",
+            "breakpoint 1 set at breakpoint_target at ",
+            "stopped at breakpoint 1",
+            "\n0x",
+            "debug",
+            "basic-build-id",
+            "\n  debug information from ",
+            "split/debug-root/.build-id/",
+            "symbols  ",
+            "libc.so.6",
+        ],
+    );
+    let output = batch(
+        &[
+            "--debug-directory",
+            "build/test-programs/split/altlink-root",
+            PROGRAM,
+        ],
+        &["info modules"],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "not loaded",
+            "symbols",
+            "basic-build-id",
+            "\n  cannot use the debug file ",
+            ": it shares debug information with other files through a dwz supplementary file",
+        ],
     );
 }

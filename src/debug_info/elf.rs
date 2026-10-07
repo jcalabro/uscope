@@ -64,6 +64,7 @@ struct RawSymbol {
 /// the inferred extents of unsized symbols.
 pub fn load_symbols(
     object: &object::File<'_>,
+    debug_object: Option<&object::File<'_>>,
     unwind_functions: &[AddressRange<ImageAddress>],
 ) -> SymbolTable {
     let sections = ImageSections {
@@ -73,6 +74,18 @@ pub fn load_symbols(
     let mut raw = BTreeMap::new();
 
     collect(object, object.symbols(), &sections, false, &mut raw);
+    // A separate debug file keeps the static table its module was stripped
+    // of, with the module's section headers, which match by identity as an
+    // embedded object's do.
+    if let Some(debug_object) = debug_object {
+        collect(
+            debug_object,
+            debug_object.symbols(),
+            &sections,
+            false,
+            &mut raw,
+        );
+    }
     let embedded_table = object
         .section_by_name(".gnu_debugdata")
         .map_or(EmbeddedSymbolTable::Absent, |section| {
@@ -88,7 +101,8 @@ pub fn load_symbols(
         symbols: normalize(raw, unwind_functions),
         got_slots,
         sources: SymbolTableSources {
-            static_table: object.symbol_table().is_some(),
+            static_table: object.symbol_table().is_some()
+                || debug_object.is_some_and(|debug_object| debug_object.symbol_table().is_some()),
             dynamic_table: object.dynamic_symbol_table().is_some(),
             embedded_table,
             runtime_function_table: EmbeddedSymbolTable::Absent,
@@ -874,7 +888,7 @@ pub(super) fn fuzz(data: &[u8]) {
     let Ok(object) = object::File::parse(bytes.as_slice()) else {
         return;
     };
-    let table = load_symbols(&object, &unwind);
+    let table = load_symbols(&object, None, &unwind);
     let sections = image_sections(&object, is_code);
     let storage_sections = image_sections(&object, holds_storage);
     for (index, symbol) in table.symbols.iter().enumerate() {
@@ -1221,7 +1235,7 @@ mod tests {
                 end: ImageAddress::new(end),
             })
             .collect::<Vec<_>>();
-        load_symbols(&object, &unwind)
+        load_symbols(&object, None, &unwind)
     }
 
     type Summary<'a> = (&'a str, SymbolKind, SymbolBinding, Option<(u64, u64)>);
@@ -1394,7 +1408,7 @@ mod tests {
         let bytes = object.write().expect("write test object");
         let object = object::File::parse(bytes.as_slice()).expect("parse test object");
 
-        let storage = load_symbols(&object, &[])
+        let storage = load_symbols(&object, None, &[])
             .symbols
             .into_iter()
             .map(|symbol| {

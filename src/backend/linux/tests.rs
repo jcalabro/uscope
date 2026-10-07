@@ -1144,7 +1144,12 @@ impl LinuxTraceOps for FakeTrace {
     fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
         None
     }
-    fn load_module(&self, _path: &Path, _id: crate::ModuleImageId) -> Result<DebugInfo> {
+    fn load_module(
+        &self,
+        _path: &Path,
+        _id: crate::ModuleImageId,
+        _search: &crate::debug_info::DebugFileSearch,
+    ) -> Result<DebugInfo> {
         panic!("unexpected module load")
     }
     fn thread_group_id(&self, _pid: Pid) -> Result<Pid> {
@@ -1551,6 +1556,7 @@ fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness
             data: sectionless_elf(),
             identity: FileIdentity { inode: 0 },
             process_start_time: None,
+            debug_files: crate::debug_info::DebugFileSearch::default(),
         },
         DebugInfo {
             image: Arc::clone(image),
@@ -6085,9 +6091,12 @@ fn glibc_signal_trampoline_expressions_find_the_kernels_saved_registers() {
         .filter_map(|line| line.split_whitespace().nth(5))
         .find(|path| path.ends_with("/libc.so.6"))
         .expect("the tests link glibc");
-    let debug =
-        crate::debug_info::load_module(std::path::Path::new(libc), crate::ModuleImageId::new(1))
-            .expect("load libc");
+    let debug = crate::debug_info::load_module(
+        std::path::Path::new(libc),
+        crate::ModuleImageId::new(1),
+        &crate::debug_info::DebugFileSearch::default(),
+    )
+    .expect("load libc");
     let trampoline = debug
         .image
         .symbols_named("__restore_rt")

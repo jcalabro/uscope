@@ -1138,6 +1138,8 @@ struct Controller<P: InspectionOps> {
     module_image: Arc<ModuleImage>,
     unwind_info: Arc<dyn UnwindInfo>,
     modules: BTreeMap<crate::ModuleId, RuntimeModule>,
+    /// Where loaded modules' separate debug files are found.
+    debug_files: crate::debug_info::DebugFileSearch,
     /// The canonical path and load bias computed for each mapping, so known
     /// modules are not re-read from disk at every stop.
     mapped_modules: BTreeMap<ModuleMapping, (PathBuf, u64)>,
@@ -1259,6 +1261,7 @@ impl<P: InspectionOps> Controller<P> {
             executable_data: executable.data,
             executable_identity: executable.identity,
             expected_process_start_time: executable.process_start_time,
+            debug_files: executable.debug_files,
             module_image,
             unwind_info,
             modules: BTreeMap::from([(main.loaded.id, main)]),

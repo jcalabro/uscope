@@ -3,6 +3,7 @@ mod support;
 
 mod attach;
 mod concurrency;
+mod debug_files;
 mod exec;
 mod execution;
 mod expressions;

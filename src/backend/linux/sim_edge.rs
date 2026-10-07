@@ -546,7 +546,12 @@ impl LinuxTraceOps for SimTrace {
         None
     }
 
-    fn load_module(&self, _path: &Path, _id: crate::ModuleImageId) -> Result<DebugInfo> {
+    fn load_module(
+        &self,
+        _path: &Path,
+        _id: crate::ModuleImageId,
+        _search: &crate::debug_info::DebugFileSearch,
+    ) -> Result<DebugInfo> {
         self.gap("loading a library")
     }
 
@@ -780,6 +785,7 @@ impl SimController {
                     inode: executable.inode,
                 },
                 process_start_time: executable.start_time,
+                debug_files: crate::debug_info::DebugFileSearch::default(),
             },
             parts.debug_info,
             ControllerChannels {

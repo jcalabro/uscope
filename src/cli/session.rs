@@ -42,6 +42,8 @@ pub struct Session {
     /// The session's view files, those named last first.
     pub views: Vec<PathBuf>,
     pub source_paths: SourcePathMap,
+    /// Where modules' separate debug files are found.
+    pub debug_files: uscope::DebugFileOptions,
 }
 
 impl Session {
@@ -130,7 +132,24 @@ pub fn prepare(args: &Args, warnings: Renderer) -> Result<Session> {
             .push(&rule.from, settings.root.join(&rule.to))
             .context("invalid [[source-map]] rule")?;
     }
+    let debug_info = &settings.config.debug_info;
+    let debug_files = uscope::DebugFileOptions {
+        directories: args
+            .debug_directories
+            .iter()
+            .cloned()
+            .chain(
+                debug_info
+                    .directories
+                    .iter()
+                    .map(|directory| settings.root.join(directory)),
+            )
+            .collect(),
+        debuginfod: args.debuginfod || debug_info.debuginfod,
+        ..uscope::DebugFileOptions::default()
+    };
     Ok(Session {
+        debug_files,
         settings,
         target,
         launch,
@@ -232,6 +251,7 @@ fn launch_target(
                         .map(|path| root.join(path))
                         .collect(),
                     allow_module_mismatch: chosen.allow_module_mismatch,
+                    debug_files: uscope::DebugFileOptions::default(),
                 }),
                 LaunchTarget::Program(_) => unreachable!("matched above"),
             }
@@ -248,6 +268,7 @@ fn explicit_target(args: &Args) -> Result<Target> {
             sysroot: args.sysroot.clone(),
             module_paths: args.module_paths.clone(),
             allow_module_mismatch: args.allow_module_mismatch,
+            debug_files: uscope::DebugFileOptions::default(),
         }));
     }
     if let Some(attach) = &args.attach {

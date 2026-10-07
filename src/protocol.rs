@@ -766,6 +766,34 @@ pub struct LaunchOptions {
     pub stop_at_entry: bool,
 }
 
+/// Where a session finds the debug information that modules' files leave
+/// out, as distributions ship it in separate debug files.
+///
+/// A module whose file has no DWARF takes it from the file its build-id
+/// names under a debug directory's `.build-id`, or else from the file its
+/// `.gnu_debuglink` names, beside it, in its `.debug` directory, or under a
+/// debug directory at its own path, or last from a debuginfod server. Each
+/// must prove it describes the module, by build-id or by the checksum the
+/// link records.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DebugFileOptions {
+    /// Debug directories searched before the system's: those
+    /// `NIX_DEBUG_INFO_DIRS` lists, then `/usr/lib/debug`.
+    pub directories: Vec<PathBuf>,
+    /// Whether to download the debug files no directory holds from
+    /// debuginfod servers. As with gdb, sessions ask no server unless told
+    /// to, since a download sends a module's build-id over the network and
+    /// may take long.
+    pub debuginfod: bool,
+    /// The debuginfod servers to ask, in order, or `None` for those
+    /// `DEBUGINFOD_URLS` lists.
+    pub debuginfod_urls: Option<Vec<String>>,
+    /// Where downloaded debug files are kept, or `None` for debuginfod's own
+    /// cache, which other debuggers share: `DEBUGINFOD_CACHE_PATH`, or else
+    /// `debuginfod_client` in the user's cache directory.
+    pub debuginfod_cache: Option<PathBuf>,
+}
+
 /// Selects a post-mortem core dump and how its module files are found and
 /// trusted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -796,6 +824,8 @@ pub struct CoreDumpOptions {
     /// save. A file that cannot be placed at its recorded image is still
     /// refused, since relocating it would be a guess.
     pub allow_module_mismatch: bool,
+    /// Where the modules' separate debug files are found.
+    pub debug_files: DebugFileOptions,
 }
 
 impl CoreDumpOptions {
@@ -808,6 +838,7 @@ impl CoreDumpOptions {
             sysroot: None,
             module_paths: Vec::new(),
             allow_module_mismatch: false,
+            debug_files: DebugFileOptions::default(),
         }
     }
 }

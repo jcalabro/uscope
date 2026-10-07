@@ -227,15 +227,25 @@ pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImag
     });
     if let Some(image) = image {
         let debug_information = !image.functions().is_empty();
-        module["symbolStatus"] = if debug_information {
+        let status = if debug_information {
             "debug information loaded"
         } else if !image.symbols().is_empty() {
             "symbols only, no debug information"
         } else {
             "no symbols"
+        };
+        module["symbolStatus"] = match image.separate_debug_file() {
+            Some(uscope::DebugFile::Unusable { path, reason }) => format!(
+                "{status}; cannot use the debug file {}: {reason}",
+                path.display()
+            ),
+            _ => status.to_owned(),
         }
         .into();
-        if debug_information {
+        // A separate debug file, when the module's own was stripped.
+        if let Some(debug_file) = image.debug_file() {
+            module["symbolFilePath"] = debug_file.display().to_string().into();
+        } else if debug_information {
             module["symbolFilePath"] = image.path().display().to_string().into();
         }
         let range = image.address_range();
