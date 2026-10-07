@@ -11,6 +11,7 @@ mod connection;
 mod picker;
 mod protocol;
 mod session;
+pub mod terminal;
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -156,6 +157,19 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         port: address.port(),
     });
 
+    // Before any debugger exists: see `terminal`.
+    let link = session.join_link(Role::Control, "/");
+    let keys = if terminal::interactive() {
+        match terminal::start_opener() {
+            Ok(opener) => Some(terminal::Keys::listen(link.clone(), opener)?),
+            Err(error) => {
+                eprintln!("warning: pressing o cannot open a browser: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     {
         let mut stdout = std::io::stdout().lock();
         writeln!(
@@ -163,8 +177,11 @@ pub async fn run(args: &WebArgs) -> Result<()> {
             "uscope web: serving http://{}",
             app.origins.primary()
         )?;
-        writeln!(stdout, "open {}", session.join_link(Role::Control, "/"))?;
+        writeln!(stdout, "open {link}")?;
         writeln!(stdout, "anyone with this link can control the program")?;
+        if keys.is_some() {
+            writeln!(stdout, "press o to open it in your browser")?;
+        }
         stdout.flush()?;
     }
 
@@ -186,6 +203,7 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         () = terminated => Ok(()),
     };
     session.shutdown().await;
+    drop(keys);
     served
 }
 

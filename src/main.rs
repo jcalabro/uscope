@@ -220,6 +220,13 @@ fn main() -> ExitCode {
     {
         return dap::launcher::run(std::env::args_os().skip(1));
     }
+    // So is the helper that opens browsers, which forks.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|command| command == web::terminal::HELPER)
+    {
+        return web::terminal::run_helper(std::env::args_os().skip(2));
+    }
     #[cfg(debug_assertions)]
     start_flight_recording();
     match tokio::runtime::Runtime::new() {
