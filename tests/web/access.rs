@@ -155,3 +155,19 @@ async fn malformed_requests_are_answered_not_fatal() {
         .expect_err("nothing to continue");
     assert_eq!(kind, "invalid");
 }
+
+#[tokio::test]
+async fn the_page_can_ask_whether_its_cookie_is_good() {
+    let web = Web::start("check", &[]);
+    let check = |cookie: &str| {
+        let response = web.http(&format!(
+            "POST /api/check HTTP/1.1\r\nHost: {}\r\nOrigin: {}\r\nCookie: {cookie}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            web.address,
+            web.origin()
+        ));
+        response.split(' ').nth(1).map(str::to_owned)
+    };
+    let cookie = web.cookie(&web.control_token.clone());
+    assert_eq!(check(&cookie).as_deref(), Some("204"));
+    assert_eq!(check("uscope-1=c-0").as_deref(), Some("403"));
+}

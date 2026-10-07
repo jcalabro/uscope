@@ -185,13 +185,14 @@ async fn the_picker_replaces_one_session_with_another_only_when_asked() {
         json!({"program": fixture("basic"), "replace": true}),
     )
     .await;
-    let second = tab
-        .state("basic loaded", |state| {
-            state["target"]["program"]
-                .as_str()
-                .is_some_and(|program| program.ends_with("/basic"))
-        })
-        .await;
+    // The answer follows the new session's state, so the page can open it.
+    let second = tab.latest_state().expect("a state").clone();
+    assert!(
+        second["target"]["program"]
+            .as_str()
+            .is_some_and(|program| program.ends_with("/basic")),
+        "answered before the new session's state: {second}"
+    );
     assert_ne!(second["session"], first_session);
     wait_gone(first_pid);
 
@@ -204,10 +205,13 @@ async fn the_picker_replaces_one_session_with_another_only_when_asked() {
         .expect_err("a missing program");
     assert_eq!(kind, "failed");
     assert!(message.contains("/nonexistent/program"), "{message}");
-    tab.state("nothing debugged after the failure", |state| {
-        state["session"].is_null()
-    })
-    .await;
+    // An answer never arrives ahead of the state its request left behind.
+    let state = tab.latest_state().expect("a state");
+    assert!(state["session"].is_null(), "{state}");
+    assert!(
+        state["busy"].is_null(),
+        "still busy after the failure: {state}"
+    );
     tab.save_traffic("picker");
 }
 
@@ -253,6 +257,15 @@ async fn interrupting_the_server_kills_the_program_it_launched() {
     let status = web.interrupt();
     assert!(status.success(), "{status}");
     wait_gone(pid);
+}
+
+#[tokio::test]
+async fn interrupting_the_server_while_it_starts_the_program_shuts_it_down() {
+    let program = fixture("spin");
+    // The link is printed before the program starts, so this lands mid-launch.
+    let mut web = Web::start("early-shutdown", &["--run", &program]);
+    let status = web.interrupt();
+    assert!(status.success(), "{status}");
 }
 
 #[tokio::test]

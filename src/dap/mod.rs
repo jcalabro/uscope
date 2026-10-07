@@ -95,13 +95,18 @@ pub async fn run(args: &DapArgs) -> Result<()> {
 
 /// Completes when the adapter is asked to stop: an editor closing the
 /// session may send SIGTERM, SIGINT, or SIGHUP instead of disconnecting.
-pub async fn termination() {
+/// The signals are caught from this call on, before the future is polled.
+pub fn termination() -> impl Future<Output = ()> {
     let signals = [
         SignalKind::terminate(),
         SignalKind::interrupt(),
         SignalKind::hangup(),
     ]
     .map(|kind| signal(kind).ok());
+    terminated(signals)
+}
+
+async fn terminated(signals: [Option<tokio::signal::unix::Signal>; 3]) {
     let [mut terminate, mut interrupt, mut hangup] = signals;
     let wait = |signal: Option<tokio::signal::unix::Signal>| async move {
         match signal {

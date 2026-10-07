@@ -151,7 +151,11 @@ pub enum ServerMessage {
     /// The whole debugger state, sent on connecting and at every change.
     State(State),
     /// A request succeeded.
-    Result { id: u64, result: Value },
+    Result {
+        id: u64,
+        #[cfg_attr(test, ts(type = "unknown"))]
+        result: Value,
+    },
     /// A request failed.
     Error { id: u64, error: ErrorBody },
     /// Bytes the program wrote.

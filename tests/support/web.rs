@@ -48,6 +48,8 @@ impl Web {
         let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
         command
             .args(["web", "--port", "0"])
+            // Names in presence and notices, and so in transcripts.
+            .env("USER", "tester")
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -386,6 +388,11 @@ impl Client {
             .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
     }
 
+    /// The newest state received so far, without waiting.
+    pub const fn latest_state(&self) -> Option<&Value> {
+        self.state.as_ref()
+    }
+
     /// Waits until the newest state satisfies `condition`, returning it.
     pub async fn state(&mut self, what: &str, condition: impl Fn(&Value) -> bool) -> Value {
         if let Some(state) = &self.state
@@ -472,7 +479,20 @@ impl Client {
         let text = self
             .traffic
             .iter()
-            .map(|line| line.to_string().replace(root, "<root>"))
+            .map(|line| {
+                // Keep a burst of output from bloating the checked-in file.
+                let mut line = line.clone();
+                if let Some(output) = line["message"]["text"].as_str()
+                    && output.len() > 200
+                {
+                    let mut end = 120;
+                    while !output.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    line["message"]["text"] = Value::from(format!("{}…", &output[..end]));
+                }
+                line.to_string().replace(root, "<root>")
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let path = PathBuf::from(directory).join(format!("{name}.jsonl"));
