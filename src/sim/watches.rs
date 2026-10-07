@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::hits::{Known, Policy};
 use super::kernel::{Kernel, Tid};
 use super::marks::Mark;
-use crate::{StopReason, WatchAccess, WatchpointHit};
+use crate::{StateSnapshot, StopReason, ThreadState, WatchAccess, WatchpointHit};
 
 /// A watchpoint the client was told exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,4 +244,117 @@ fn judge_counts(stop: &Stop<'_>, stopped: &BTreeMap<u64, BTreeSet<u64>>) -> Resu
 
 fn count_of(counts: &BTreeMap<u64, u64>, id: u64) -> u64 {
     counts.get(&id).copied().unwrap_or(0)
+}
+
+/// Judges disabled watchpoints at a stop, given the hits each had counted
+/// when the debugger said it disabled it: one counts no hit and reports
+/// none. A thread not resumed since keeps an older stop's hits.
+pub fn judge_disabled(
+    disabled: &BTreeMap<u64, u64>,
+    snapshot: &StateSnapshot,
+) -> Result<(), String> {
+    for watchpoint in snapshot.watchpoints.iter() {
+        let Some(&counted) = disabled.get(&watchpoint.id.get()) else {
+            continue;
+        };
+        if watchpoint.enabled || watchpoint.hit_count != counted {
+            return Err(format!(
+                "watchpoint {} was disabled with {counted} hits, but is {watchpoint:?}",
+                watchpoint.id
+            ));
+        }
+    }
+    for thread in snapshot.threads.iter() {
+        let ThreadState::Stopped {
+            reason: Some(StopReason::Watchpoint { hits }),
+        } = &thread.state
+        else {
+            continue;
+        };
+        if let Some(hit) = hits.iter().find(|hit| {
+            disabled
+                .get(&hit.watchpoint.get())
+                .is_some_and(|&counted| hit.hit_count > counted)
+        }) {
+            return Err(format!(
+                "disabled watchpoint {} reported {hit:?}",
+                hit.watchpoint
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{
+        AddressRange, InferiorState, ThreadId, ThreadSnapshot, VirtualAddress, WatchScope,
+        Watchpoint, WatchpointId,
+    };
+
+    /// A stop at which watchpoint 1, `enabled` or not, counted `count`
+    /// hits, and a thread stopped at its hits `reported`.
+    fn stop(enabled: bool, count: u64, reported: &[u64]) -> StateSnapshot {
+        let hits = reported
+            .iter()
+            .map(|&hit_count| WatchpointHit {
+                watchpoint: WatchpointId::new(1),
+                thread: ThreadId::new(1000),
+                hit_count,
+                previous: None,
+                current: None,
+            })
+            .collect::<Arc<[_]>>();
+        StateSnapshot {
+            revision: 1,
+            inferior: InferiorState::NotRunning,
+            stop_id: None,
+            selected_thread: None,
+            selected_frame: None,
+            threads: Arc::from([ThreadSnapshot {
+                id: ThreadId::new(1000),
+                state: ThreadState::Stopped {
+                    reason: Some(StopReason::Watchpoint { hits }),
+                },
+                name: None,
+            }]),
+            presentation: None,
+            breakpoints: Arc::from([]),
+            watchpoints: Arc::from([Watchpoint {
+                id: WatchpointId::new(1),
+                access: WatchAccess::Write,
+                expression: None,
+                address: VirtualAddress::new(0x1000),
+                byte_size: 8,
+                type_info: None,
+                scope: WatchScope::Location,
+                coverage: Arc::from([AddressRange {
+                    start: VirtualAddress::new(0x1000),
+                    end: VirtualAddress::new(0x1008),
+                }]),
+                hit_condition: None,
+                condition: None,
+                hit_count: count,
+                enabled,
+            }]),
+        }
+    }
+
+    /// A disabled watchpoint counts and reports nothing after it was
+    /// disabled, though a thread still stopped since may show an older hit.
+    #[test]
+    fn disabled_watchpoints_count_and_report_nothing() {
+        let disabled = BTreeMap::from([(1, 3)]);
+        assert_eq!(judge_disabled(&disabled, &stop(false, 3, &[3])), Ok(()));
+        assert!(judge_disabled(&disabled, &stop(false, 4, &[])).is_err());
+        assert!(judge_disabled(&disabled, &stop(false, 3, &[4])).is_err());
+        assert!(judge_disabled(&disabled, &stop(true, 3, &[])).is_err());
+        assert_eq!(
+            judge_disabled(&BTreeMap::new(), &stop(true, 4, &[4])),
+            Ok(())
+        );
+    }
 }

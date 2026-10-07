@@ -381,6 +381,7 @@ pub async fn add_watchpoint(
         hit_condition: given(request.hit_condition)
             .map(|text| uscope::HitCondition::from_str(&text))
             .transpose()?,
+        enabled: true,
     };
     let access = match request.access {
         WatchAccess::Change => uscope::WatchAccess::Change,

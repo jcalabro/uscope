@@ -295,7 +295,7 @@ fn the_store_mode_stops_at_every_store_even_of_the_value_held() {
 }
 
 #[test]
-fn data_breakpoints_the_console_removes_are_removed_from_the_client() {
+fn data_breakpoints_the_console_disables_or_removes_stay_so_in_the_client() {
     let mut dap = Dap::start("console unwatch");
     let (stop, frame) = stopped_in(&mut dap, "watch-gcc-o0", "scalar_stores");
     dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
@@ -308,6 +308,32 @@ fn data_breakpoints_the_console_removes_are_removed_from_the_client() {
         json!({"breakpoints": [{"dataId": info["dataId"], "accessType": "write"}]}),
     );
     let id = breakpoints(&set)[0]["id"].clone();
+    // A disabled data breakpoint stays the client's, unverified, through
+    // the client's next update of the same set.
+    let mark = dap.mark();
+    dap.request(
+        "evaluate",
+        json!({"expression": "disable w1", "frameId": frame["id"], "context": "repl"}),
+    );
+    let disabled = dap.event(mark, "breakpoint", |body| body["reason"] == "changed");
+    let unverified = (
+        id.clone(),
+        json!(false),
+        json!("disabled; enable w1 in the debug console"),
+    );
+    let row = |breakpoint: &Value| {
+        (
+            breakpoint["id"].clone(),
+            breakpoint["verified"].clone(),
+            breakpoint["message"].clone(),
+        )
+    };
+    assert_eq!(row(&disabled["breakpoint"]), unverified);
+    let again = dap.request(
+        "setDataBreakpoints",
+        json!({"breakpoints": [{"dataId": info["dataId"], "accessType": "write"}]}),
+    );
+    assert_eq!(row(&breakpoints(&again)[0]), unverified);
     let mark = dap.mark();
     let output = dap.request(
         "evaluate",

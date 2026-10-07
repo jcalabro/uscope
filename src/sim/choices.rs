@@ -22,16 +22,21 @@ pub enum Stream {
     Preempt,
     /// When planned faults fire.
     Fault,
+    /// Which breakpoints and watchpoints the client enables, disables, and
+    /// makes temporary, and where it advances to. Drawn apart from
+    /// [`Stream::Client`], so seeds that never use them choose as before.
+    Control,
 }
 
 impl Stream {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Swarm,
         Self::Schedule,
         Self::Client,
         Self::Program,
         Self::Preempt,
         Self::Fault,
+        Self::Control,
     ];
 
     const fn name(self) -> &'static str {
@@ -42,6 +47,7 @@ impl Stream {
             Self::Program => "program",
             Self::Preempt => "preempt",
             Self::Fault => "fault",
+            Self::Control => "control",
         }
     }
 

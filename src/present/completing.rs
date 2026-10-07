@@ -36,7 +36,7 @@ pub fn completing(typed: &str) -> (Completing<'_>, &str, usize) {
         Completing::Register
     } else if let Some(operator) = before
         .strip_suffix("->")
-        .or_else(|| before.strip_suffix('.'))
+        .or_else(|| before.strip_suffix('.').filter(|rest| !rest.ends_with('.')))
     {
         base_start(operator).map_or(Completing::Nothing, |base| Completing::Member {
             base: &operator[base..],
@@ -171,6 +171,8 @@ mod tests {
             ("x == ", Completing::Nothing, ""),
             ("1 + .", Completing::Nothing, ""),
             ("a[1.", member("1"), ""),
+            // A range's dots access no member.
+            ("a[1..en", Completing::Name { first: false }, "en"),
             ("a)].", Completing::Nothing, ""),
         ] {
             let (found, completed, start) = completing(typed);

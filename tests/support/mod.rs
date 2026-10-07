@@ -377,6 +377,15 @@ impl Scenario {
         self.wait_for_request(task, "step").await
     }
 
+    /// Runs until the selected thread reaches a location or its selected
+    /// frame returns.
+    pub async fn advance_to_stop(&mut self, spec: BreakpointSpec) -> StopReason {
+        let task = self.spawn_request(&format!("advance {spec:?}"), move |handle| async move {
+            handle.advance(spec).await
+        });
+        self.wait_for_request(task, "advance").await
+    }
+
     /// Steps the selected thread while every other thread stays stopped.
     pub async fn step_alone_to_stop(&mut self, kind: StepKind) -> StopReason {
         let task = self.spawn_request(&format!("step {kind:?} alone"), move |handle| async move {

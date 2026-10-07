@@ -109,6 +109,47 @@ pub fn still_held(held: &crate::HeldProcess) -> Result<bool> {
     native::process_held(lifecycle::requested_pid(held.process_id)?, held.start_time)
 }
 
+/// The processes named `name`, as `pgrep -x` matches them: by the
+/// command name the kernel records, or by the file name of the first
+/// argument, which outlasts the kernel's fifteen-character limit. This
+/// process is never one of them.
+pub fn processes_named(name: &str) -> Result<Vec<crate::ProcessId>> {
+    let own = std::process::id();
+    let mut found = Vec::new();
+    let entries = std::fs::read_dir("/proc")?;
+    for entry in entries.filter_map(std::result::Result::ok) {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == own {
+            continue;
+        }
+        // A process that ended meanwhile matches nothing.
+        let command = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+        let first_argument = std::fs::read(entry.path().join("cmdline"))
+            .ok()
+            .and_then(|line| {
+                let first = line.split(|byte| *byte == 0).next()?.to_vec();
+                let first = String::from_utf8(first).ok()?;
+                Some(
+                    std::path::Path::new(&first)
+                        .file_name()?
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            });
+        if command.trim_end_matches('\n') == name || first_argument.as_deref() == Some(name) {
+            found.push(crate::ProcessId::new(u64::from(pid)));
+        }
+    }
+    found.sort_unstable_by_key(|pid| pid.get());
+    Ok(found)
+}
+
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_core_dump(data: &[u8]) {
     core_dump::fuzz(data);
@@ -411,6 +452,13 @@ struct StepStart {
     /// be ended only by a stop the user sees.
     running_on: bool,
     plan_addresses: BTreeSet<VirtualAddress>,
+    /// For an advance, the addresses that end it when its thread reaches
+    /// one. They are plan sites too, but no step logic retires them.
+    targets: BTreeSet<VirtualAddress>,
+    /// The target an advance's thread stood at without having trapped
+    /// there. It arrives there first, which the user's breakpoints count
+    /// and which does not end the advance.
+    standing: Option<VirtualAddress>,
     epilogue_traversal: Option<EpilogueTraversal>,
     return_traversal: Option<ReturnTraversal>,
     /// Where a signal handler returns to the instruction it interrupted.
@@ -529,6 +577,11 @@ enum Edit {
         options: Box<crate::BreakpointOptions>,
         reply: Reply<Breakpoint>,
     },
+    SetBreakpointEnabled {
+        id: BreakpointId,
+        enabled: bool,
+        reply: Reply<Breakpoint>,
+    },
     RemoveBreakpoint {
         id: BreakpointId,
         reply: Reply<Breakpoint>,
@@ -540,6 +593,11 @@ enum Edit {
         spec: crate::WatchpointSpec,
         access: WatchAccess,
         options: crate::WatchpointOptions,
+        reply: Reply<Watchpoint>,
+    },
+    SetWatchpointEnabled {
+        id: WatchpointId,
+        enabled: bool,
         reply: Reply<Watchpoint>,
     },
     RemoveWatchpoint {
@@ -1245,6 +1303,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => {
                 let _ = reply.send(self.set_breakpoint_log_message(id, log_message));
             }
+            Request::SetBreakpointEnabled { id, enabled, reply } => {
+                self.edit(Edit::SetBreakpointEnabled { id, enabled, reply });
+            }
             Request::RemoveBreakpoint { id, reply } => {
                 self.edit(Edit::RemoveBreakpoint { id, reply });
             }
@@ -1277,6 +1338,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(self.set_watchpoint_hit_condition(id, hit_condition));
+            }
+            Request::SetWatchpointEnabled { id, enabled, reply } => {
+                self.edit(Edit::SetWatchpointEnabled { id, enabled, reply });
             }
             Request::RemoveWatchpoint { id, reply } => {
                 self.edit(Edit::RemoveWatchpoint { id, reply });
@@ -1324,6 +1388,23 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => match debug_pid(thread_id) {
                 Ok(pid) => self.step(
                     process_id, stop_id, pid, frame, kind, scope, exception, reply,
+                ),
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            },
+            Request::Advance {
+                process_id,
+                stop_id,
+                thread_id,
+                frame,
+                spec,
+                scope,
+                exception,
+                reply,
+            } => match debug_pid(thread_id) {
+                Ok(pid) => self.advance(
+                    process_id, stop_id, pid, frame, spec, scope, exception, reply,
                 ),
                 Err(error) => {
                     let _ = reply.send(Err(error));
@@ -1662,11 +1743,13 @@ impl<P: InspectionOps> Controller<P> {
             | Request::SetBreakpointHitCondition { .. }
             | Request::SetBreakpointCondition { .. }
             | Request::SetBreakpointLogMessage { .. }
+            | Request::SetBreakpointEnabled { .. }
             | Request::RemoveBreakpoint { .. }
             | Request::RemoveAllBreakpoints { .. }
             | Request::AddWatchpoint { .. }
             | Request::SetWatchpointCondition { .. }
             | Request::SetWatchpointHitCondition { .. }
+            | Request::SetWatchpointEnabled { .. }
             | Request::RemoveWatchpoint { .. }
             | Request::RemoveAllWatchpoints { .. }
             | Request::Launch { .. }
@@ -1674,6 +1757,7 @@ impl<P: InspectionOps> Controller<P> {
             | Request::LaunchByExec { .. }
             | Request::Continue { .. }
             | Request::Step { .. }
+            | Request::Advance { .. }
             | Request::Pause { .. }
             | Request::WriteMemory { .. }
             | Request::Kill { .. }

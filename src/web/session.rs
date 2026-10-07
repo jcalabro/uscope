@@ -1098,10 +1098,13 @@ impl Session {
             history: Arc::clone(&self.history),
             messages: self.messages.clone(),
         };
+        // The console's commands read no settings files, as the debug
+        // adapter's do not.
+        let root = crate::cli::config::project_root(&self.cwd);
         let console = Cli::new(
             handle.clone(),
-            Renderers::uniform(false),
-            uscope::AssemblySyntax::Intel,
+            Renderers::console(false, root.clone()),
+            crate::cli::config::Settings::defaults(root),
             LaunchSettings::default(),
         );
         // The project's and the user's views apply, as in the terminal.
@@ -1347,6 +1350,8 @@ fn options(
             .transpose()
             .map_err(invalid)?,
         pending: false,
+        enabled: true,
+        temporary: false,
     })
 }
 

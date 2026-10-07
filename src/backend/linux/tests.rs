@@ -1935,6 +1935,8 @@ fn stale_status_is_never_consulted_outside_debug_exceptions() {
         condition: None,
         log_message: None,
         hit_count: 0,
+        enabled: true,
+        temporary: false,
     });
     harness.start_continue();
     harness.trace().take_actions();
@@ -3572,6 +3574,8 @@ fn hit_harness(thread_count: i32, hit_condition: &str) -> WatchHarness {
         condition: None,
         log_message: None,
         hit_count: 0,
+        enabled: true,
+        temporary: false,
     });
     harness.inferior().breakpoints.insert(
         VirtualAddress::new(HIT_SITE),

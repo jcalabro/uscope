@@ -118,6 +118,22 @@ marks! {
     ConditionHeld,
     /// A breakpoint logged a message instead of stopping.
     HitLogged,
+    /// The debugger disabled a breakpoint.
+    BreakpointDisabled,
+    /// The debugger enabled a disabled breakpoint again.
+    BreakpointEnabled,
+    /// The debugger made a temporary breakpoint.
+    TemporaryAdded,
+    /// A temporary breakpoint stopped the program and was gone.
+    TemporaryStop,
+    /// A temporary breakpoint's stop found more than one thread at it.
+    TemporaryCoHit,
+    /// An advance reached its location.
+    AdvanceReached,
+    /// An advance ended where the selected frame returned.
+    AdvanceReturned,
+    /// The stepping oracle judged where an advance ended.
+    AdvanceJudged,
     /// The debugger armed a watchpoint.
     WatchAdded,
     /// The debug registers refused a watchpoint, discarding writes or with
@@ -139,6 +155,10 @@ marks! {
     WatchConditionHeld,
     /// The client changed a watchpoint's hit condition or condition.
     WatchAmended,
+    /// The debugger disabled a watchpoint.
+    WatchDisabled,
+    /// The debugger enabled a disabled watchpoint again.
+    WatchEnabled,
     /// A new thread could not be armed, its slots busy.
     WatchArmFailed,
     /// The debugger refused to run while a thread could not be armed.

@@ -216,6 +216,11 @@ pub fn still_held(held: &crate::HeldProcess) -> Result<bool> {
     linux::still_held(held)
 }
 
+/// The processes with a name, as `pgrep -x` finds them.
+pub fn processes_named(name: &str) -> Result<Vec<crate::ProcessId>> {
+    linux::processes_named(name)
+}
+
 /// Finds a signal's exception code by name.
 pub fn signal_named(name: &str) -> Option<u64> {
     linux::Signal::named(name).map(linux::Signal::code)

@@ -679,10 +679,21 @@ impl Session {
         let core = matches!(start, Start::Core(_));
         let handle = debugger.handle().with_source_paths(source_paths.clone());
         self.events = Some(handle.subscribe());
+        // The console's commands read no settings files: an editor's
+        // sessions take their settings from its launch arguments.
+        let root = crate::cli::config::project_root(
+            &working_directory
+                .clone()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_default(),
+        );
+        let renderers = Renderers::console(self.support().ansi, root.clone());
+        let mut settings = crate::cli::config::Settings::defaults(root);
+        settings.config.disassembly.syntax = syntax.into();
         let console = Cli::new(
             handle.clone(),
-            Renderers::uniform(self.support().ansi),
-            syntax,
+            renderers,
+            settings,
             LaunchSettings::default(),
         );
         let mut default_policies = HashMap::new();
@@ -791,7 +802,10 @@ impl Session {
             .unwrap_or_default();
         let warnings = target
             .console
-            .load_view_sources(&working_directory, view_files)
+            .load_view_sources(
+                &crate::cli::config::project_root(&working_directory),
+                view_files,
+            )
             .await;
         for warning in warnings {
             self.client.important(format!("views: {warning}")).await?;
@@ -1840,6 +1854,11 @@ impl Session {
     /// The state a debugger breakpoint gives the client's breakpoint: where
     /// it resolved, or that it waits for a module with code for it.
     async fn state_of(&mut self, breakpoint: &uscope::Breakpoint) -> State {
+        if !breakpoint.enabled {
+            return State::Disabled {
+                breakpoint: breakpoint.id,
+            };
+        }
         if breakpoint.locations.is_empty() {
             return State::Pending {
                 breakpoint: breakpoint.id,
@@ -1934,14 +1953,21 @@ impl Session {
                 }
                 return body;
             }
-            State::Pending { message, .. } => (message, "pending"),
-            State::Unresolved { message, pending } => {
-                (message, if *pending { "pending" } else { "failed" })
-            }
+            State::Pending { message, .. } => (message.clone(), Some("pending")),
+            State::Disabled { breakpoint } => (
+                format!("disabled; enable {breakpoint} in the debug console"),
+                None,
+            ),
+            State::Unresolved { message, pending } => (
+                message.clone(),
+                Some(if *pending { "pending" } else { "failed" }),
+            ),
         };
         body["verified"] = false.into();
-        body["message"] = message.as_str().into();
-        body["reason"] = reason.into();
+        body["message"] = message.into();
+        if let Some(reason) = reason {
+            body["reason"] = reason.into();
+        }
         if let (Group::Source(client), Key::Line(line)) = (group, &entry.want.key) {
             body["line"] = self.line_to_client(*line).into();
             body["source"] = source_json(client);
@@ -2269,6 +2295,7 @@ fn breakpoint_options(want: &Want) -> uscope::Result<uscope::BreakpointOptions> 
             .transpose()?,
         // A library loaded later may have code for it.
         pending: true,
+        ..uscope::BreakpointOptions::default()
     })
 }
 

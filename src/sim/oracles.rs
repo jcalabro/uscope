@@ -180,7 +180,7 @@ pub struct HeardTrap {
     pub address: u64,
     /// When the thread executes the trap again, having executed nothing
     /// since it last trapped there, the breakpoints that counted its
-    /// arrival.
+    /// arrival and have owned the site ever since.
     pub again: Option<BTreeSet<u64>>,
     /// Whether the controller had begun to shut down.
     pub in_shutdown: bool,
@@ -190,8 +190,9 @@ pub struct HeardTrap {
 /// the trap it reports, one hit for every user breakpoint owning the site.
 /// The same arrival again (a signal interrupted the step over the trap)
 /// counts nothing for a breakpoint that counted it, and at most one for one
-/// that came to the site since: whether the thread ever ran there, a
-/// debugger can only guess. A new inferior starts every count again. A trap
+/// that came to the site since, a breakpoint that left the site and came
+/// back among them: whether the thread ever ran there, a debugger can only
+/// guess. A new inferior starts every count again. A trap
 /// may go uncounted once its process is exiting as a whole, and one heard
 /// during a shutdown is no hit: the controller kills a launched process and
 /// releases an attached one with the thread rewound.
@@ -246,6 +247,15 @@ pub fn hit_counts(
     Ok(())
 }
 
+/// Keeps, of the breakpoints that counted a thread's arrival at `address`,
+/// those that still own the site there. One that left it, because it was
+/// disabled or lost the location, has come to the site since if it comes
+/// back.
+pub fn still_counting(counted: &mut BTreeSet<u64>, truth: &Truth, address: u64) {
+    let owners = truth.sites.get(&address).map(|site| &site.users);
+    counted.retain(|id| owners.is_some_and(|users| users.contains(id)));
+}
+
 /// Breakpoint accounting, ownership: while a stop is published, every
 /// breakpoint the user was told exists, and has not asked to remove, owns
 /// an installed site at each of its locations.
@@ -284,6 +294,28 @@ pub fn user_breakpoints(
                     truth.sites.get(address)
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Breakpoint accounting, disabled breakpoints: one the debugger said it
+/// disabled, and the user has not asked to enable or remove since, owns no
+/// site. A process ending as a whole cannot have its memory written, so its
+/// sites stay as they were, as a removed breakpoint's do.
+pub fn disabled_breakpoints(
+    kernel: &Kernel,
+    truth: &Truth,
+    disabled: &BTreeSet<u64>,
+) -> Result<(), String> {
+    if truth.inferior.is_some_and(|tgid| ending(kernel, tgid)) {
+        return Ok(());
+    }
+    for (&address, site) in &truth.sites {
+        if let Some(id) = site.users.intersection(disabled).next() {
+            return Err(format!(
+                "disabled breakpoint {id} owns the site at {address:#x}: {site:?}"
+            ));
         }
     }
     Ok(())
@@ -661,6 +693,17 @@ mod tests {
         );
     }
 
+    /// An arrival stays counted by the breakpoints that still own its site.
+    #[test]
+    fn arrivals_stay_counted_only_by_breakpoints_that_stay() {
+        let truth = with_hits([0, 0, 0]);
+        let mut counted = BTreeSet::from([1, 2, 3]);
+        still_counting(&mut counted, &truth, 0x1000);
+        assert_eq!(counted, BTreeSet::from([1, 2]));
+        still_counting(&mut counted, &truth, 0x2000);
+        assert!(counted.is_empty());
+    }
+
     /// Every breakpoint the user was told exists owns an installed site at
     /// each of its locations while a stop is published.
     #[test]
@@ -688,5 +731,23 @@ mod tests {
         assert!(user_breakpoints(&kernel, &truth, &intent(vec![(1, 0x3000)])).is_err());
         // Breakpoint 3's location has no site.
         assert!(user_breakpoints(&kernel, &truth, &intent(vec![(3, 0x2000)])).is_err());
+    }
+
+    /// A breakpoint the user was told is disabled owns no site.
+    #[test]
+    fn disabled_breakpoints_own_no_site() {
+        let corpus = Corpus::load().expect("load the golden corpus");
+        let variant = &corpus.programs[0].variants[0];
+        let mut kernel = Kernel::new(100);
+        let tgid = kernel.spawn(Arc::clone(&variant.image), &variant.path, &[], [0; 16]);
+        let truth = Truth {
+            inferior: Some(tgid),
+            ..with_hits([0, 0, 0])
+        };
+        assert_eq!(
+            disabled_breakpoints(&kernel, &truth, &BTreeSet::from([3])),
+            Ok(())
+        );
+        assert!(disabled_breakpoints(&kernel, &truth, &BTreeSet::from([2, 3])).is_err());
     }
 }
