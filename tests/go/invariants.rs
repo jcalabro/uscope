@@ -105,12 +105,7 @@ async fn backtrace(
 /// Whether a backtrace ends properly, names every frame of the program's
 /// image `main`, and changes stacks only where the runtime switches them.
 pub fn check_backtrace(trace: &Backtrace, main: ModuleId) -> Result<(), String> {
-    let role = |index: usize| {
-        trace.frames[index]
-            .function
-            .as_ref()
-            .map(|function| function.role)
-    };
+    let role = |index: usize| Some(trace.frames[index].role);
     // A runtime's stack may also end where it switched from a task that
     // has since gone elsewhere, as an idle thread's does at `mcall`, and a
     // thread the kernel just started, before its runtime gives it a stack,

@@ -1326,11 +1326,28 @@ at every stop.
    
    Each is marked with `VIEW:` or `TRUTH`, and checked in both builds by
    the never-wrong invariant.
-6. **cgo.**
+6. **cgo.** *(Done: `tests/go/cgo.rs`, Go built with and without
+   optimization against C from gcc and clang.)*
    - Go calls C, which calls back into Go.
    - A backtrace from C reaches the Go frames above `asmcgocall`, and
      one from the callback shows the C frames between.
-   - `step` from Go into C and back.
+   - `step` from Go into C and back, and from C into the Go it calls;
+     `finish` from that Go stops in the C; a fault in C is fatal there.
+   - What it took:
+     - `asmcgocall` saves the goroutine and its depth below the stack's
+       top at the base of the C frame, so its caller is found on the
+       goroutine's stack even after the stack moved; `cgocallback`'s
+       C frames are under `m.g0.sched.sp`.
+     - A frame's stack is its callee's unless the callee switched
+       stacks or a signal interrupted it, since the runtime knows a
+       cgo thread's system stack only roughly.
+     - The code cgo generates, declared in `_cgo_gotypes.go`,
+       `cgo-gcc-prolog`, and `_cgo_export.c`, is a wrapper, and the
+       runtime's C in `runtime/cgo` its own machinery. Code a wrapper
+       inlines plays its own function's role.
+     - A step into `runtime.cgocall` or `crosscall2` also runs to the
+       function it is given, which the runtime model names.
+     - A step's walks to its activation cross stacks as backtraces do.
 7. **Attach to a running server.** The server is an `ExternalProcess`.
    - Its goroutines are listed, and a breakpoint is hit by a request.
    - Detaching leaves it serving: a second request succeeds.

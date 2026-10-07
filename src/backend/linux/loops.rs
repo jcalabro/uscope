@@ -418,7 +418,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .collect()
     }
 
-    fn active_step(&self) -> Option<&StepStart> {
+    pub(super) fn active_step(&self) -> Option<&StepStart> {
         match &self.inferior.as_ref()?.active.as_ref()?.kind {
             ActiveKind::Step { start, .. } => Some(start),
             _ => None,

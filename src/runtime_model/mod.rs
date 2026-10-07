@@ -261,12 +261,15 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         thread: ThreadId,
     ) -> Result<Vec<(std::ops::Range<u64>, StackSegment)>, Arc<str>>;
     /// Where unwinding goes from a frame of a stopped thread whose code
-    /// switches stacks, given the frame's registers.
+    /// switches stacks, given the frame's registers. `after_call` says the
+    /// frame's instruction is a return address, as every frame's is but
+    /// the innermost and one a signal interrupted: the frame is in a call.
     fn cross(
         &self,
         stop: &dyn RuntimeStop,
         thread: ThreadId,
         frame: &RegisterFile,
+        after_call: bool,
     ) -> Result<Crossing, Arc<str>>;
     /// How the runtime uses signals.
     fn signals(&self) -> RuntimeSignals;
@@ -307,6 +310,15 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         stop: &dyn RuntimeStop,
         number: u64,
     ) -> Result<Option<std::ops::Range<u64>>, Arc<str>>;
+    /// The program's code that the runtime function at `entry` goes on to
+    /// call for the program, as Go's calls between Go and C do, given the
+    /// registers of a stopped thread entering it; `None` when it calls
+    /// none.
+    fn call_out(
+        &self,
+        entry: ImageAddress,
+        registers: &RegisterFile,
+    ) -> Option<Result<VirtualAddress, Arc<str>>>;
     /// What the runtime calls one of its tasks.
     fn task_noun(&self) -> &'static str;
 }

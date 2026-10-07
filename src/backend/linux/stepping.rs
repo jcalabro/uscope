@@ -17,11 +17,11 @@ use crate::{
     VirtualAddress,
 };
 
-use super::activation::{Activation, StackPosition};
+use super::activation::{Activation, StackPosition, StackView};
 use super::breakpoints::install_plan_breakpoint;
 use super::frames::{
-    DwarfCallerProvider, StackRoot, code_instance_is_active, frame_lookup_address,
-    make_presentation, presentation_visible_count, selected_code_instance,
+    DwarfCallerProvider, RoleCallerProvider, StackRoot, code_instance_is_active,
+    frame_lookup_address, make_presentation, presentation_visible_count, selected_code_instance,
     source_for_code_instance, source_line_changed, source_step_destination,
 };
 use super::loops::{StepLoops, inline_loop_step_is_complete};
@@ -153,12 +153,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         if uses_plan_breakpoints {
             return self.continue_thread(pid);
         }
-        if matches!(
-            self.step_mode(kind),
-            StepKind::IntoSource | StepKind::OverSource
-        ) && (self.stopped_outside_described_code(pid)?
-            || self.stopped_where_step_leaves(pid)?)
-            && self.escape_undescribed_code(pid)?
+        let mode = self.step_mode(kind);
+        if matches!(mode, StepKind::IntoSource | StepKind::OverSource)
+            && (self.stopped_outside_described_code(pid)? || self.stopped_where_step_leaves(pid)?)
+            && self.escape_undescribed_code(pid, mode == StepKind::IntoSource)?
         {
             return Ok(());
         }
@@ -202,8 +200,12 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// information, as a PLT stub's does, or else from the top of the stack,
     /// and is trusted only where debug information describes it. Returns
     /// false, to single-step instead, when no return address is trusted.
-    pub(super) fn escape_undescribed_code(&mut self, pid: Pid) -> Result<bool> {
+    ///
+    /// A step `into` a runtime function that calls the program's code for
+    /// it, as cgo's calls between Go and C do, also runs to that code.
+    pub(super) fn escape_undescribed_code(&mut self, pid: Pid, into: bool) -> Result<bool> {
         let registers = self.ptrace.registers(pid)?;
+        let call_out = into.then(|| self.call_out(pid, &registers)).flatten();
         let candidate = match self.caller_address(pid, &registers) {
             Ok(address) => address,
             Err(_) => match self.ptrace.read_word(pid, registers.rsp) {
@@ -220,6 +222,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         let execution = self.active_execution()?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         install_plan_breakpoint(&self.ptrace, inferior, candidate, execution)?;
+        if let Some(target) = call_out {
+            install_plan_breakpoint(&self.ptrace, inferior, target, execution)?;
+        }
         if let Some(start) = self.active_step_mut() {
             start.escape = Some(candidate);
         }
@@ -319,7 +324,8 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Turns a step over or out into one that follows the runtime's calls
     /// into the program, when its task began a panic, or its frame returned
     /// into a wrapper, such as the one that calls a function's deferred
-    /// functions as it returns. The program's code those call runs as the
+    /// functions as it returns, or left an inlined function for the wrapper
+    /// it was inlined into. The program's code those call runs as the
     /// step's own, so the step goes on as a step in does, from here, to the
     /// next statement the program runs. Returns whether it began following.
     ///
@@ -330,14 +336,18 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !matches!(kind, StepKind::OverSource | StepKind::Out) {
             return Ok(false);
         }
-        let Some((following, frame)) = self
+        let Some((following, frame, inlined)) = self
             .inferior
             .as_ref()
             .and_then(|inferior| inferior.active.as_ref())
             .and_then(|active| match &active.kind {
-                ActiveKind::Step { owner, start, .. } if self.runs_step(*owner, pid) => {
-                    Some((start.following, start.returned_to.or(start.activation)))
-                }
+                ActiveKind::Step { owner, start, .. } if self.runs_step(*owner, pid) => Some((
+                    start.following,
+                    start.returned_to.or(start.activation),
+                    start
+                        .code_instance
+                        .filter(|instance| start.physical_instance != Some(*instance)),
+                )),
                 _ => None,
             })
         else {
@@ -355,9 +365,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             .code_role(VirtualAddress::new(registers.rip))
             .unwrap_or_default();
         let returned = frame.is_some_and(|frame| frame.has_returned(position));
+        let left_inlined =
+            inlined.is_some_and(|instance| !code_instance_is_active(&location, instance));
         let enters = match role {
             CodeRole::Panic => true,
-            CodeRole::Wrapper => returned,
+            CodeRole::Wrapper => returned || left_inlined,
             _ => false,
         };
         if !enters {
@@ -776,6 +788,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Ok(return_address) = self.caller_address(pid, &registers) else {
             return Ok(false);
         };
+        // Nor does a step end in a caller it passes over, such as the
+        // runtime's switch back from C's stack; it goes on from there.
+        let passed_over = self.code_role(return_address).is_some_and(|role| {
+            self.active_step()
+                .is_some_and(|start| passes_over(role, start))
+        });
+        if passed_over {
+            return Ok(false);
+        }
         let Ok(caller_image) = loaded_module.image_address(return_address) else {
             return Ok(false);
         };
@@ -1221,24 +1242,31 @@ impl<P: LinuxTraceOps> Controller<P> {
         let location = self.image_location(VirtualAddress::new(registers.rip));
         // Undescribed instructions are not source-step destinations, and
         // neither is code the program's author did not write.
-        if location.as_ref().is_none_or(undescribed)
-            || self
-                .code_role(VirtualAddress::new(registers.rip))
-                .is_some_and(|role| passes_over(role, start))
-        {
+        let Some(described) = location.as_ref().filter(|location| !undescribed(location)) else {
             return Ok(false);
-        }
+        };
         let presentation = self.presentation_for_thread(
             pid,
             Some(&StopReason::Step {
                 kind: StepKind::IntoSource,
             }),
         )?;
-        let current_instance = location
-            .as_ref()
-            .map(|location| selected_code_instance(location, &presentation))
-            .transpose()?
-            .flatten();
+        let current_instance = selected_code_instance(described, &presentation)?;
+        // Code inlined into other code is its own function's, as the
+        // program's function a wrapper calls may be.
+        let physical_role = self.code_role(VirtualAddress::new(registers.rip));
+        let role = current_instance
+            .filter(|instance| described.physical_instance != Some(*instance))
+            .and_then(|instance| self.module_image.code_instance(instance))
+            .and_then(|instance| self.module_image.function(instance.function))
+            .map(|function| function.role)
+            .or(physical_role);
+        if role.is_some_and(|role| passes_over(role, start)) {
+            return Ok(false);
+        }
+        // Such code begins past the entry of the code it is inlined into,
+        // which the step passed over.
+        let inlined_in_passed = physical_role.is_some_and(|role| passes_over(role, start));
         let source = location.as_ref().and_then(|location| {
             current_instance.and_then(|instance| {
                 source_for_code_instance(&self.module_image, location, instance)
@@ -1285,7 +1313,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         .any(|entry| entry.address == location.address)
                 })
         });
-        if entered_physical_activation && !at_recommended_entry {
+        if entered_physical_activation && !at_recommended_entry && !inlined_in_passed {
             return Ok(false);
         }
 
@@ -1624,14 +1652,35 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         let view = self.stack_view(pid);
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        let mut context = innermost_frame(native);
-        let mut provider = self.stack_unwinder(inferior, pid, native);
+        // The activation may be on another stack than the thread is now,
+        // such as a goroutine's that called C a callback runs below.
+        let (_, _, found) = self.walk_stack(
+            inferior,
+            &StackRoot::of_thread(pid),
+            Some(native),
+            |provider, innermost| {
+                self.find_activation(inferior, view, provider, innermost, activation)
+            },
+        )?;
+        found
+    }
 
+    /// Walks a stack outward to `activation`: where it runs, or `None`
+    /// once the walk passes it, as when it has returned.
+    fn find_activation(
+        &self,
+        inferior: &Inferior,
+        view: StackView,
+        provider: &mut RoleCallerProvider<'_, '_>,
+        mut context: FrameContext,
+        activation: Activation,
+    ) -> Result<Option<ImageLocation>> {
         for level in 0..DEFAULT_MAX_FRAMES {
             // Each frame is known by its own CFA, so the starting activation
             // is recognized even when its return address cannot be read.
             let frame = view.activation(
                 provider
+                    .dwarf
                     .frame_cfa(&context)
                     .map_err(|reason| backend_error(LinuxError::CallerUnavailable(reason)))?,
             );
@@ -1716,6 +1765,29 @@ impl<P: LinuxTraceOps> Controller<P> {
                 pid,
             },
             first: true,
+        }
+    }
+
+    /// The program's code that the runtime function a stopped thread is
+    /// entering goes on to call, where that is executable.
+    fn call_out(&self, pid: Pid, registers: &libc::user_regs_struct) -> Option<VirtualAddress> {
+        let inferior = self.inferior.as_ref()?;
+        let rip = VirtualAddress::new(registers.rip);
+        let file = x86_64_registers(registers);
+        let target = self.runtimes(inferior).into_iter().find_map(|runtime| {
+            let entry = runtime.module.image_address(rip).ok()?;
+            runtime.model.call_out(entry, &file)
+        })?;
+        match target {
+            Ok(target) if self.ptrace.executable(pid, target).unwrap_or(false) => Some(target),
+            Ok(target) => {
+                record!("the runtime calls {target}, which is not executable");
+                None
+            }
+            Err(reason) => {
+                record!("the runtime's call out is unknown: {reason}");
+                None
+            }
         }
     }
 
