@@ -378,7 +378,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 80ch; }
 }
 .frag .row { padding: 0 8px; height: 19px; }
 .frag .ph { height: 22px; }
-.term { background: #13171d; color: #d5dbe4; border-color: #13171d; padding: 8px 10px; white-space: pre; overflow-x: auto; }
+.term { background: #13171d; color: #d5dbe4; border-color: #13171d; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .term .p { color: #7f8a9a; } .term .u { color: #9bb8ff; } .term .w { color: #f0c46a; }
 .banner {
   display: grid; gap: 6px; padding: 9px 10px; background: var(--warn-bg); border-bottom: 1px solid var(--warn-line);
@@ -498,7 +498,7 @@ td .q { color: var(--accent); }
 <div class="page">
   <nav class="toc" aria-label="Contents">
     <b>uscope web</b>
-    <a href="#decisions">Decisions for you</a>
+    <a href="#decisions">Decisions</a>
     <a href="#interface">The interface</a>
     <a href="#flows">User flows</a>
     <a href="#panes">More screens</a>
@@ -516,7 +516,7 @@ td .q { color: var(--accent); }
   <main>
     <header class="top">
       <div class="meta">
-        <span class="chip draft">Draft for review</span>
+        <span class="chip draft">Reviewed · decisions made</span>
         <span class="chip mono">branch web-ui</span>
         <span class="chip">2026-10-06</span>
         <span>Nothing implemented yet</span>
@@ -551,8 +551,8 @@ td .q { color: var(--accent); }
 
     <!-- ===================================================== decisions -->
     <section id="decisions">
-      <span class="eyebrow">Your call</span>
-      <h2>Decisions for you</h2>
+      <span class="eyebrow">Decided 2026-10-06</span>
+      <h2>Decisions</h2>
       <div class="decided">
         <span>Already decided:</span>
         <span class="chip">Links join the same live session</span>
@@ -564,48 +564,48 @@ td .q { color: var(--accent); }
           <header><span class="id">D1</span><h3>What access does the startup link give?</h3></header>
           <p><code>uscope web</code> prints one link when it starts. Share can make others.</p>
           <div class="options">
-            <div class="option rec"><span class="tag">Rec</span><b>Control, and Share defaults to view</b><span class="why">You can drive your own session at once; links you hand out are read-only unless you choose otherwise.</span></div>
-            <div class="option alt"><span class="tag">Alt</span><b>View, with control behind a second link</b><span class="why">Safer if the terminal output is ever pasted somewhere, at the cost of one more step every time.</span></div>
+            <div class="option rec"><span class="tag">Chosen</span><b>Control, and Share defaults to view</b><span class="why">You can drive your own session at once; links you hand out are read-only unless you choose otherwise.</span></div>
+            <div class="option alt"><span class="tag">Passed</span><b>View, with control behind a second link</b><span class="why">Safer if the terminal output is ever pasted somewhere, at the cost of one more step every time.</span></div>
           </div>
         </article>
         <article class="decision">
           <header><span class="id">D2</span><h3>Does the program start running right away?</h3></header>
           <p>The page can open before the program runs, which leaves time to set breakpoints.</p>
           <div class="options">
-            <div class="option rec"><span class="tag">Rec</span><b>Wait for the first Continue</b><span class="why">Like gdb's <code>run</code>. The page opens on <code>main</code>, you set breakpoints, then press <kbd>F5</kbd>. <code>--run</code> starts it at once.</span></div>
-            <div class="option alt"><span class="tag">Alt</span><b>Start immediately</b><span class="why">Matches <code>uscope dap</code> launch. Early breakpoints need the command line or saved breakpoints.</span></div>
+            <div class="option rec"><span class="tag">Chosen</span><b>Wait for the first Continue</b><span class="why">Like gdb's <code>run</code>. The page opens on <code>main</code>, you set breakpoints, then press <kbd>F5</kbd>. <code>--run</code> starts it at once.</span></div>
+            <div class="option alt"><span class="tag">Passed</span><b>Start immediately</b><span class="why">Matches <code>uscope dap</code> launch. Early breakpoints need the command line or saved breakpoints.</span></div>
           </div>
         </article>
         <article class="decision">
           <header><span class="id">D3</span><h3>What happens to other tabs at a new stop?</h3></header>
           <p>When anyone steps or a breakpoint hits, every tab learns about the new stop.</p>
           <div class="options">
-            <div class="option rec"><span class="tag">Rec</span><b>Follow it, unless pinned</b><span class="why">Tabs jump to the new stop's thread and frame, like any debugger. A tab opened on an old stop, or pinned with <kbd>p</kbd>, stays and shows a banner.</span></div>
-            <div class="option alt"><span class="tag">Alt</span><b>Stay, and offer to follow</b><span class="why">Nobody's view moves under them, but every stop needs a click in every tab.</span></div>
+            <div class="option rec"><span class="tag">Chosen</span><b>Follow it, unless pinned</b><span class="why">Tabs jump to the new stop's thread and frame, like any debugger. A tab opened on an old stop, or pinned with <kbd>p</kbd>, stays and shows a banner.</span></div>
+            <div class="option alt"><span class="tag">Passed</span><b>Stay, and offer to follow</b><span class="why">Nobody's view moves under them, but every stop needs a click in every tab.</span></div>
           </div>
         </article>
         <article class="decision">
           <header><span class="id">D4</span><h3>Which router?</h3></header>
           <p>The URL scheme is small, so either fits.</p>
           <div class="options">
-            <div class="option rec"><span class="tag">Rec</span><b>TanStack Router</b><span class="why">Typed, validated search params, which is most of this app's state.</span></div>
-            <div class="option alt"><span class="tag">Alt</span><b>About 100 lines over <code>URLSearchParams</code></b><span class="why">No dependency, but parsing and validation are ours to write and test.</span></div>
+            <div class="option rec"><span class="tag">Chosen</span><b>TanStack Router</b><span class="why">Typed, validated search params, which is most of this app's state.</span></div>
+            <div class="option alt"><span class="tag">Passed</span><b>About 100 lines over <code>URLSearchParams</code></b><span class="why">No dependency, but parsing and validation are ours to write and test.</span></div>
           </div>
         </article>
         <article class="decision">
           <header><span class="id">D5</span><h3>Launch and attach from the page?</h3></header>
-          <p>Picking a program or process in the browser means restarting the session's debugger in place.</p>
+          <p>Picking a program or process in the browser means replacing the session's debugger in place.</p>
           <div class="options">
-            <div class="option rec"><span class="tag">Rec</span><b>Later</b><span class="why">Phase 1 takes the program, <code>--attach PID</code>, or <code>--core FILE</code> on the command line. Restart works from the page.</span></div>
-            <div class="option alt"><span class="tag">Alt</span><b>In phase 1</b><span class="why">A process picker and recent programs from day one, with more lifecycle to test.</span></div>
+            <div class="option rec"><span class="tag">Chosen</span><b>In phase 1</b><span class="why">Launch, attach, and open a core from the page from day one. <code>uscope web</code> with no program opens the picker; with one, it starts there. See <a href="#pick">Pick what to debug</a>.</span></div>
+            <div class="option alt"><span class="tag">Passed</span><b>Later</b><span class="why">Command line only at first, with less lifecycle to build and test.</span></div>
           </div>
         </article>
         <article class="decision">
           <header><span class="id">D6</span><h3>How are people named?</h3></header>
           <p>Presence shows who else is connected and where they are looking.</p>
           <div class="options">
-            <div class="option rec"><span class="tag">Rec</span><b>Each person picks a name, kept in their browser</b><span class="why">No accounts. Default to the OS user for the person who started uscope, and <code>guest-2</code> and so on for others.</span></div>
-            <div class="option alt"><span class="tag">Alt</span><b>Anonymous colors only</b><span class="why">Less to build. Less useful once three people are in.</span></div>
+            <div class="option rec"><span class="tag">Chosen</span><b>Each person picks a name, kept in their browser</b><span class="why">No accounts. Default to the OS user for the person who started uscope, and <code>guest-2</code> and so on for others.</span></div>
+            <div class="option alt"><span class="tag">Passed</span><b>Anonymous colors only</b><span class="why">Less to build. Less useful once three people are in.</span></div>
           </div>
         </article>
       </div>
@@ -821,6 +821,41 @@ td .q { color: var(--accent); }
       <span class="eyebrow">How it is used</span>
       <h2>User flows</h2>
 
+      <h3 id="pick">Pick what to debug</h3>
+      <ol class="flow">
+        <li>
+          <h4>Run uscope web alone</h4>
+          <div class="frag term"><span class="p">$</span> uscope web
+<span class="p">open</span>  <span class="u">http://127.0.0.1:7341/join#c-7f3a9d2e41b8</span></div>
+          <p>No program yet. The page opens on the picker, which is also <kbd>Ctrl</kbd>+<kbd>K</kbd> › <i>Debug something else</i> later.</p>
+        </li>
+        <li>
+          <h4>Launch a program</h4>
+          <div class="frag">
+            <div class="row"><span class="dim">program</span>&nbsp;./build/kvstore</div>
+            <div class="row"><span class="dim">args</span>&nbsp;--port 7000</div>
+            <div class="row dim">recent: kvstore · frames · go/hello</div>
+          </div>
+          <p>Paths complete as you type, against the server's disk. Arguments, working directory, and environment are optional; recent launches come back with theirs.</p>
+        </li>
+        <li>
+          <h4>Or attach, or open a core</h4>
+          <div class="frag">
+            <div class="row"><span class="dim">41870</span><span>kvstore --port 7000</span><span class="loc">2m</span></div>
+            <div class="row"><span class="dim">39112</span><span>postgres: checkpointer</span><span class="loc">3d</span></div>
+          </div>
+          <p>Your processes from <span class="mono">/proc</span>, filtered as you type. If the kernel refuses (<span class="mono">ptrace_scope</span>), the page says why and what to change.</p>
+        </li>
+        <li>
+          <h4>Switch to something else</h4>
+          <div class="frag">
+            <div class="banner"><span><b>End the kvstore session?</b> It is running. Launching stops it and ends links to it.</span>
+              <span class="actions"><span class="btn primary">Kill and launch</span><span class="btn">Cancel</span></span></div>
+          </div>
+          <p>One debugger at a time. Switching ends the current session inline, never in a dialog: a launched program is killed, an attached one is detached and keeps running. The new program gets a new session id, so old links say the session ended.</p>
+        </li>
+      </ol>
+
       <h3>Start a session and stop somewhere</h3>
       <ol class="flow">
         <li>
@@ -829,7 +864,7 @@ td .q { color: var(--accent); }
 <span class="p">debugging</span> ./build/kvstore <span class="p">(not started)</span>
 <span class="p">open</span>  <span class="u">http://127.0.0.1:7341/join#c-7f3a9d2e41b8</span>
 <span class="w">anyone with this link can control the program</span></div>
-          <p>One process, one program. <code>--attach PID</code> and <code>--core FILE</code> work the same way; <code>--open</code> opens the browser.</p>
+          <p>With a program, the page opens on it. With none, the page opens the picker. <code>--attach PID</code> and <code>--core FILE</code> work too; <code>--open</code> opens the browser.</p>
         </li>
         <li>
           <h4>Open the link</h4>
@@ -992,6 +1027,23 @@ td .q { color: var(--accent); }
       <span class="eyebrow">Mockups</span>
       <h2>More screens</h2>
       <div class="gallery">
+        <figure>
+          <div class="pop" style="max-width:560px">
+            <div class="hd">Debug something <span class="seg" style="margin-left:auto"><span class="on">Launch</span><span>Attach</span><span>Core dump</span></span></div>
+            <div class="bd" style="font-family:var(--mono);font-size:12px">
+              <div class="field"><span style="color:var(--ink)">./build/kv</span><b>Launch</b></div>
+              <div class="frag" style="background:var(--surface)">
+                <div class="row sel"><span>./build/kvstore</span><span class="loc">executable · 2.1 MB</span></div>
+                <div class="row"><span>./build/kvbench</span><span class="loc">executable · 1.4 MB</span></div>
+                <div class="row"><span>./build/kv.o</span><span class="loc dim">not executable</span></div>
+              </div>
+              <div class="row" style="padding:0"><span class="dim">args</span>&nbsp;--port 7000</div>
+              <div class="row" style="padding:0"><span class="dim">cwd</span>&nbsp;~/src/kvstore&nbsp;&nbsp;<span class="dim">env</span>&nbsp;RUST_LOG=debug</div>
+              <div class="row" style="padding:0"><span class="dim">☐ stop at entry</span></div>
+            </div>
+          </div>
+          <figcaption>The picker: launch with arguments, working directory, and environment; attach to one of your processes; or open a core dump with its executable. Only control access can use it.</figcaption>
+        </figure>
         <figure>
           <div class="frag asm">
             <div class="ph">Disassembly <span class="count">handle_request</span><span class="key">intel · at&amp;t</span></div>
@@ -1187,7 +1239,7 @@ td .q { color: var(--accent); }
       </div>
       <div class="prose">
         <ul>
-          <li><b>Requests:</b> <code>backtrace</code>, <code>scopes</code>, <code>children</code>, <code>evaluate</code>, <code>complete</code>, <code>console</code>, <code>disassemble</code>, <code>readMemory</code>, <code>registers</code>, <code>source</code>, <code>breakpointLines</code>, <code>modules</code>, and the changes: <code>continue</code>, <code>step</code>, <code>pause</code>, <code>kill</code>, <code>restart</code>, breakpoints, watchpoints, <code>setVariable</code>, <code>writeMemory</code>, signal policy.</li>
+          <li><b>Requests:</b> <code>backtrace</code>, <code>scopes</code>, <code>children</code>, <code>evaluate</code>, <code>complete</code>, <code>console</code>, <code>disassemble</code>, <code>readMemory</code>, <code>registers</code>, <code>source</code>, <code>breakpointLines</code>, <code>modules</code>, the picker's <code>completePath</code> and <code>processes</code>, and the changes: <code>launch</code>, <code>attach</code>, <code>openCore</code>, <code>continue</code>, <code>step</code>, <code>pause</code>, <code>kill</code>, <code>restart</code>, breakpoints, watchpoints, <code>setVariable</code>, <code>writeMemory</code>, signal policy.</li>
           <li><b>Errors</b> are a closed set the UI handles: <code>staleStop</code>, <code>notStopped</code>, <code>forbidden</code>, <code>invalid</code>, <code>unsupported</code>, <code>failed</code>, each with the debugger's message.</li>
           <li><b>Value handles</b> (<code>children: 31</code>) belong to one connection and one stop, and fail as stale afterwards. The UI keys expansion by <code>path</code> and re-opens the same paths at the next stop. "Changed" compares summaries at the same path.</li>
           <li><b>Types</b> are Rust structs in <code>src/web/protocol.rs</code>. A test generates <code>web/src/protocol.gen.ts</code> with ts-rs and fails if the checked-in file differs, so the two sides cannot drift.</li>
@@ -1207,6 +1259,7 @@ td .q { color: var(--accent); }
           <li><b>A token per run, per role.</b> The join link's token is traded for an HttpOnly, SameSite=Strict cookie and removed from the address bar, so ordinary copied links carry no secret. Control and view tokens differ; a viewer's changes fail with <code>forbidden</code>.</li>
           <li><b>Host and Origin checks.</b> <code>Host</code> must name the server (which stops DNS rebinding) and <code>Origin</code> must be its own. The DAP server's rule of refusing any browser stays as it is: different endpoint, different policy.</li>
           <li><b>Nothing else is served.</b> Assets, <code>/join</code>, and <code>/api/ws</code>. No CORS. Source reads are limited to files the debug information names.</li>
+          <li><b>The picker is control-only.</b> Path completion and the process list reveal the machine, and launching runs programs, so viewers get <code>forbidden</code>. Path completion lists names and kinds, never contents.</li>
         </ul>
       </div>
     </section>
@@ -1257,7 +1310,7 @@ td .q { color: var(--accent); }
       <span class="eyebrow">Order of work</span>
       <h2>Phases</h2>
       <ol class="phases">
-        <li><div><h3>Skeleton</h3><p>Flake tooling; <code>web/</code> with Vite, React, TypeScript, Biome, Vitest, Playwright; embedded assets; <code>uscope web</code> with a program, <code>--attach</code>, or <code>--core</code>; tokens, roles, Host and Origin checks; <code>hello</code> and <code>state</code>; a page showing the session live in two tabs; recipes and the screenshot tool.</p></div></li>
+        <li><div><h3>Skeleton</h3><p>Flake tooling; <code>web/</code> with Vite, React, TypeScript, Biome, Vitest, Playwright; embedded assets; <code>uscope web</code> with a program, <code>--attach</code>, <code>--core</code>, or nothing; the picker for launching, attaching, and opening cores, replacing the session's debugger in place; tokens, roles, Host and Origin checks; <code>hello</code> and <code>state</code>; a page showing the session live in two tabs; recipes and the screenshot tool.</p></div></li>
         <li><div><h3>Run and see</h3><p>Run control, threads, call stack, source with the gutter, breakpoints with conditions, hit counts, and logpoints, program output and input, the URL scheme and copy link, presence and notices, keys, the main layout.</p></div></li>
         <li><div><h3>Inspect</h3><p>Scopes, the value tree with views and paging, watches in the URL, changed values, hover and inline values, editing values, the console with completion.</p></div></li>
         <li><div><h3>Low level</h3><p>Disassembly, memory, registers, watchpoints, signal policy, modules.</p></div></li>
@@ -1271,7 +1324,7 @@ td .q { color: var(--accent); }
       <h2>Limits</h2>
       <div class="prose">
         <ul>
-          <li><b>One program per <code>uscope web</code>.</b> The debugger reaps every child of its process, so two debuggers cannot share one. Debug two programs with two servers.</li>
+          <li><b>One program per <code>uscope web</code>.</b> The debugger reaps every child of its process, so two debuggers cannot share one. The picker replaces the session's program; to debug two at once, run two servers.</li>
           <li><b>No fork following.</b> DAP follows forks by asking the editor to start another session; the web equivalent needs a second server per child.</li>
           <li><b>No accounts or internet exposure.</b> Sharing assumes a shared machine or a tunnel.</li>
           <li><b>No recording.</b> A link to a past stop can show where it was, but not its values. Saving a stop as a core dump would make links that last; that is a later idea.</li>
