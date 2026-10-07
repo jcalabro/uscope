@@ -2,14 +2,15 @@
 // frame's own line, or, before the program runs, its main function (D2).
 
 import { useEffect, useMemo, useState } from "react";
-import { useRequest } from "../data";
+import { cache, useRequest } from "../data";
 import { formatPlace, parsePlace, showingSource } from "../focus";
 import { controls } from "../model";
-import type { Breakpoint } from "../protocol";
+import type { Breakpoint, Row } from "../protocol";
 import { useConnection, useModel } from "../store";
 import { closeFile, openFile, tab, useTab } from "../tab";
 import { useLinkPaths, useLook } from "./navigation";
 import { fileName } from "./paths";
+import { useInlineValues } from "./source/inline";
 import { type MarkKind, type Marks, SourceView } from "./source/SourceView";
 import { useFocus } from "./Workspace";
 
@@ -143,13 +144,25 @@ export function breakpointLines(
 }
 
 function SourceFile({ shown }: { shown: Shown }) {
-  const { at, trace, state } = useFocus();
+  const { at, trace, state, stale } = useFocus();
   const connection = useConnection();
   const control = useModel(controls);
   const paths = useLinkPaths();
   const look = useLook();
   const source = useRequest("source", { path: shown.path });
   const [error, setError] = useState<string | null>(null);
+
+  // Values show for the frame shown, while its stop is the program's.
+  const live = at && !stale ? at : null;
+  const shownFrame = at
+    ? trace?.frames.find((candidate) => candidate.index === at.frame)
+    : undefined;
+  const frameLine = shownFrame?.source?.path === shown.path ? shownFrame.source.line : null;
+  const inline = useInlineValues(
+    live,
+    source.data?.path === shown.path ? source.data.text : undefined,
+    live ? frameLine : null,
+  );
 
   const marks = useMemo((): Marks => {
     const innermost = trace?.frames[0];
@@ -161,9 +174,9 @@ function SourceFile({ shown }: { shown: Shown }) {
       frame:
         frame && frame.index > 0 && frame.source?.path === shown.path ? frame.source.line : null,
       selection: shown.selection,
-      inline: new Map(),
+      inline,
     };
-  }, [trace, at, state.breakpoints, shown, source.data]);
+  }, [trace, at, state.breakpoints, shown, source.data, inline]);
 
   if (source.error) {
     return (
@@ -222,6 +235,18 @@ function SourceFile({ shown }: { shown: Shown }) {
           );
         }}
         onCursor={(line) => tab.setState({ cursor: { path: shown.path, line } })}
+        onHover={
+          live
+            ? (expression) =>
+                cache
+                  .get(connection, "evaluate", { ...live, expression })
+                  .promise.then((settled) =>
+                    settled.ok
+                      ? { text: (settled.value as Row).text, type: (settled.value as Row).type }
+                      : null,
+                  )
+            : undefined
+        }
       />
     </>
   );

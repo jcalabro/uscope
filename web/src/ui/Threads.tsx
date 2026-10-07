@@ -13,7 +13,13 @@ export function Threads() {
   const choosable = at !== null && stale === null;
 
   return (
-    <section className="pane" style={{ flex: "0 1 auto", maxHeight: "30%" }} aria-label="Threads">
+    <section
+      className="pane"
+      style={{ flex: "0 1 auto", maxHeight: "30%" }}
+      aria-label="Threads"
+      data-pane="1"
+      tabIndex={-1}
+    >
       <div className="pane-head">
         Threads <span className="count">{state.threads.length}</span>
         <span className="end">Alt+1</span>

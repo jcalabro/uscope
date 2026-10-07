@@ -21,6 +21,8 @@ export function Breakpoints() {
       className="pane"
       style={{ flex: "0 1 auto", maxHeight: "40%" }}
       aria-label="Breakpoints"
+      data-pane="3"
+      tabIndex={-1}
     >
       <div className="pane-head">
         Breakpoints <span className="count">{breakpoints.length}</span>

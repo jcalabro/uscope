@@ -3,7 +3,7 @@
 // stop, so a cached answer is never out of date; a new stop asks anew.
 // Answers lost to a dropped connection are not kept, so they are asked again.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Connection } from "./connection";
 import { type Method, type ParamsOf, RequestError, type Results } from "./protocol";
 import { useConnection } from "./store";
@@ -20,6 +20,23 @@ const LIMIT = 400;
 
 export class Cache {
   readonly #entries = new Map<string, Entry>();
+  readonly #listeners = new Set<() => void>();
+  /** Counts forgetting, so readers of a forgotten answer ask again. */
+  #version = 0;
+
+  readonly subscribe = (listener: () => void): (() => void) => {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  };
+
+  readonly version = (): number => this.#version;
+
+  #forgot(): void {
+    this.#version += 1;
+    for (const listener of this.#listeners) {
+      listener();
+    }
+  }
 
   /** The answer to a request, asked once while it is kept. */
   get(connection: Connection, method: Method, params: unknown): Entry {
@@ -65,14 +82,20 @@ export class Cache {
   /** Forgets everything, as when the session changes. */
   clear(): void {
     this.#entries.clear();
+    this.#forgot();
   }
 
   /** Forgets answers whose key starts with `prefix`, such as one method's. */
   forget(prefix: string): void {
+    let forgot = false;
     for (const key of [...this.#entries.keys()]) {
       if (key.startsWith(prefix)) {
         this.#entries.delete(key);
+        forgot = true;
       }
+    }
+    if (forgot) {
+      this.#forgot();
     }
   }
 }
@@ -102,6 +125,8 @@ export function useRequest<M extends Method>(
 ): Requested<Results[M]> {
   const connection = useConnection();
   const key = params === null ? null : cacheKey(method, params);
+  // Forgetting answers asks again for any that were forgotten.
+  const version = useSyncExternalStore(source.subscribe, source.version);
   const [shown, setShown] = useState<{ key: string | null; settled?: Settled }>(() => {
     if (key === null) {
       return { key };
@@ -114,6 +139,7 @@ export function useRequest<M extends Method>(
   const asked = useRef(params);
   asked.current = params;
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new version means answers were forgotten, so ask again
   useEffect(() => {
     const params = asked.current;
     if (key === null || params === null) {
@@ -134,7 +160,7 @@ export function useRequest<M extends Method>(
     return () => {
       live = false;
     };
-  }, [key, connection, method, source]);
+  }, [key, connection, method, source, version]);
 
   const current = shown.key === key && key !== null;
   const settled = shown.settled;

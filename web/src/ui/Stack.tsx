@@ -50,7 +50,7 @@ export function Stack() {
     );
   }
   return (
-    <section className="pane grow" aria-label="Call stack">
+    <section className="pane grow" aria-label="Call stack" data-pane="2" tabIndex={-1}>
       <div className="pane-head">
         Call stack
         {thread && <span className="count">{thread.name ?? thread.id}</span>}

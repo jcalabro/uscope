@@ -76,6 +76,24 @@ export function useCommands(): (command: Command) => boolean {
               : "Unpinned: this tab follows the program",
           );
           return true;
+        case "watchSelection": {
+          const expression = window.getSelection()?.toString().trim() ?? "";
+          if (!expression || expression.includes("\n")) {
+            flash("Select an expression in the source, then press w to watch it");
+            return true;
+          }
+          const w = current.look.w ?? [];
+          if (!w.includes(expression)) {
+            void navigate({
+              href:
+                window.location.pathname +
+                stringifySearch({ ...current.look, w: [...w, expression] }),
+              replace: true,
+            });
+          }
+          flash(`Watching ${expression}`);
+          return true;
+        }
         case "back": {
           if (current.look.view && current.session) {
             const { view: _view, ...look } = current.look;
