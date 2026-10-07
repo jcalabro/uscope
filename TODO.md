@@ -22,7 +22,6 @@
 ## Clients
 
 - A richer interactive or TUI client.
-- Richer breakpoint management and stop presentation in the CLI.
 
 ## Reliability
 
