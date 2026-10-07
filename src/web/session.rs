@@ -351,7 +351,7 @@ impl Session {
             | Request::Launch(_)
             | Request::Attach(_)
             | Request::OpenCore(_)
-            | Request::End => match self.choose(request).await? {
+            | Request::End => match self.choose(connection, request).await? {
                 Chosen::Answer(answer) => return Ok(answer),
                 Chosen::Notice(text) => Some(text),
             },
@@ -462,7 +462,7 @@ impl Session {
     }
 
     /// Serves the picker: what there is to debug, and choosing it.
-    async fn choose(&self, request: Request) -> Result<Chosen, Failure> {
+    async fn choose(&self, connection: u32, request: Request) -> Result<Chosen, Failure> {
         Ok(Chosen::Notice(match request {
             Request::CompletePath(protocol::CompletePath { text }) => {
                 let entries = picker::complete(&text, &self.cwd, self.home.as_deref());
@@ -478,11 +478,12 @@ impl Session {
                 let (replace, run) = (launch.replace, launch.run);
                 let spec = self.launch_spec(launch);
                 let name = spec.program.display().to_string();
-                self.start(Start::Launch { spec, run }, replace).await?;
+                self.choose_target(connection, Start::Launch { spec, run }, replace)
+                    .await?;
                 format!("launched {name}")
             }
             Request::Attach(protocol::Attach { pid, replace }) => {
-                self.start(Start::Attach(ProcessId::new(pid)), replace)
+                self.choose_target(connection, Start::Attach(ProcessId::new(pid)), replace)
                     .await?;
                 format!("attached to process {pid}")
             }
@@ -496,12 +497,34 @@ impl Session {
                 options.executable = executable
                     .filter(|path| !path.is_empty())
                     .map(|path| resolve(&path));
-                self.start(Start::Core(options), replace).await?;
+                self.choose_target(connection, Start::Core(options), replace)
+                    .await?;
                 format!("opened {core}")
             }
             Request::End => self.end_current().await?,
             _ => unreachable!("only the picker's requests choose"),
         }))
+    }
+
+    /// Starts what the picker chose. Tabs on a session that a failed
+    /// replacement ended learn why it ended.
+    async fn choose_target(
+        &self,
+        connection: u32,
+        start: Start,
+        replace: bool,
+    ) -> Result<(), Failure> {
+        self.replace(start, replace)
+            .await
+            .map_err(|(failure, ended)| {
+                if let Some(name) = ended {
+                    self.notice(
+                        connection,
+                        format!("ended the {name} session, but {}", failure.0.message),
+                    );
+                }
+                failure
+            })
     }
 
     /// Runs, stops, or feeds the program, returning what to tell others.
@@ -1053,18 +1076,40 @@ impl Session {
     }
 
     pub async fn start(&self, start: Start, replace: bool) -> Result<(), Failure> {
+        self.replace(start, replace)
+            .await
+            .map_err(|(failure, _)| failure)
+    }
+
+    /// Starts debugging `start`, ending the current target first when
+    /// `replace` allows it. A failure names the session it ended, if any.
+    async fn replace(&self, start: Start, replace: bool) -> Result<(), (Failure, Option<String>)> {
         let mut target = self.target.lock().await;
         if let Some(current) = target.as_ref()
             && !replace
         {
-            return Err(Failure::new(
-                ErrorKind::Busy,
-                format!("{} is being debugged; replace it to continue", current.name),
+            return Err((
+                Failure::new(
+                    ErrorKind::Busy,
+                    format!("{} is being debugged; replace it to continue", current.name),
+                ),
+                None,
             ));
         }
-        if let Some(current) = target.take() {
-            let _ = self.end(current).await;
-        }
+        let ended = match target.take() {
+            Some(current) => {
+                let name = current.name.clone();
+                let _ = self.end(current).await;
+                Some(name)
+            }
+            None => None,
+        };
+        let opened = self.open_target(&mut target, start).await;
+        drop(target);
+        opened.map_err(|failure| (failure, ended))
+    }
+
+    async fn open_target(&self, target: &mut Option<Target>, start: Start) -> Result<(), Failure> {
         self.history.lock().expect("history lock").clear();
         self.loading(&start);
         let opened = open(&start).await;
