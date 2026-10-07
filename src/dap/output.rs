@@ -53,7 +53,7 @@ pub fn spawn(
 
 /// Splits text into pieces of at most `limit` bytes without splitting a
 /// character.
-fn pieces(text: &str, limit: usize) -> impl Iterator<Item = &str> {
+pub fn pieces(text: &str, limit: usize) -> impl Iterator<Item = &str> {
     let mut rest = text;
     std::iter::from_fn(move || {
         if rest.is_empty() {
@@ -71,7 +71,7 @@ fn pieces(text: &str, limit: usize) -> impl Iterator<Item = &str> {
 
 /// Takes the decodable prefix of `bytes`, leaving an incomplete final
 /// character for the next read unless the stream has ended.
-fn decode(bytes: &mut Vec<u8>, end: bool) -> String {
+pub fn decode(bytes: &mut Vec<u8>, end: bool) -> String {
     let mut text = String::new();
     let mut rest = &bytes[..];
     loop {
