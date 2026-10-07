@@ -52,6 +52,9 @@ pub trait RuntimeImage: std::fmt::Debug {
     fn constant(&self, name: &str) -> Option<IntegerValue>;
     /// A named object or function.
     fn symbol(&self, name: &str) -> Option<ImageSymbol>;
+    /// Whether the image has a function of this name, by its debug
+    /// information, its symbols, or a language's own function table.
+    fn has_function(&self, name: &str) -> bool;
     /// Where the named function's body begins, past the prologue that sets
     /// up its frame, or `None` when that is not known.
     fn function_body(&self, name: &str) -> Option<ImageAddress>;
@@ -351,6 +354,10 @@ impl RuntimeImage for ModuleImage {
 
     fn constant(&self, name: &str) -> Option<IntegerValue> {
         Self::constant(self, name)
+    }
+
+    fn has_function(&self, name: &str) -> bool {
+        self.functions_named(name).next().is_some() || self.symbol_named(name).is_ok()
     }
 
     fn symbol(&self, name: &str) -> Option<ImageSymbol> {

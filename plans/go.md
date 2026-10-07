@@ -337,7 +337,10 @@ gives:
 
 A stripped Go binary therefore gets named, unwound frames and function and
 line breakpoints. Tasks and values need DWARF, and are reported unavailable
-without it rather than reconstructed from a version's guessed layout. The
+without it rather than reconstructed from a version's guessed layout.
+*(Done: the Go model refuses an image that names `runtime.goexit` without
+a Go producer, and that refusal is every thread's activity and a gap in
+the task list; `tests/go/stripped.rs`.)* The
 per-step unwind cost is fixed at the same time: `.debug_frame` lookup scans
 every FDE linearly today, and an index (or `pclntab`'s `findfunctab`)
 replaces it.

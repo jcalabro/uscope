@@ -864,8 +864,11 @@ impl Cli {
             .iter()
             .filter(|(task, _)| all || !task.internal)
             .collect::<Vec<_>>();
-        if traces.tasks.is_empty() && traces.gaps.is_empty() {
-            bail!("the program has no {name}");
+        if traces.tasks.is_empty() {
+            match traces.gaps.as_slice() {
+                [] => bail!("the program has no {name}"),
+                gaps => bail!("{name} could not be read: {}", gaps.join("; ")),
+            }
         }
         let mut lines = Vec::new();
         if grouped {
