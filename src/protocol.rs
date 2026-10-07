@@ -1321,6 +1321,11 @@ pub enum Request {
         condition: Option<crate::Condition>,
         reply: Reply<Breakpoint>,
     },
+    SetBreakpointLogMessage {
+        id: BreakpointId,
+        log_message: Option<crate::LogMessage>,
+        reply: Reply<Breakpoint>,
+    },
     RemoveBreakpoint {
         id: BreakpointId,
         reply: Reply<Breakpoint>,
@@ -1609,6 +1614,7 @@ impl Request {
             Self::RemoveBreakpoint { id, .. } => format!("remove breakpoint {id:?}"),
             Self::SetBreakpointCondition { id, .. } => format!("set condition of {id:?}"),
             Self::SetBreakpointHitCondition { id, .. } => format!("set hit condition of {id:?}"),
+            Self::SetBreakpointLogMessage { id, .. } => format!("set log message of {id:?}"),
             Self::AddWatchpoint { spec, access, .. } => {
                 format!("add watchpoint {spec:?} {access:?}")
             }

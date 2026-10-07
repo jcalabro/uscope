@@ -2,6 +2,8 @@
 
 mod cli;
 mod dap;
+mod present;
+mod web;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -199,6 +201,8 @@ enum Tool {
     Dap(dap::DapArgs),
     /// Check and explain how views present program types.
     Views(ViewsArgs),
+    /// Serve a debugger to web browsers.
+    Web(web::WebArgs),
 }
 
 fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsString), String> {
@@ -216,6 +220,13 @@ fn main() -> ExitCode {
         .is_some_and(|command| command == "dap-launcher")
     {
         return dap::launcher::run(std::env::args_os().skip(1));
+    }
+    // So is the helper that opens browsers, which forks.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|command| command == web::terminal::HELPER)
+    {
+        return web::terminal::run_helper(std::env::args_os().skip(2));
     }
     #[cfg(debug_assertions)]
     start_flight_recording();
@@ -270,6 +281,17 @@ async fn async_main() -> ExitCode {
             };
             // Reading stdin blocks a runtime thread that would keep the
             // runtime from shutting down after the client left.
+            std::process::exit(code);
+        }
+        Some(Tool::Web(web_args)) => {
+            let code = match web::run(web_args).await {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    1
+                }
+            };
+            // Tabs still connected would keep the runtime from shutting down.
             std::process::exit(code);
         }
         Some(Tool::Views(views)) => {

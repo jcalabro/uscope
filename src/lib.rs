@@ -578,6 +578,22 @@ impl DebuggerHandle {
         .await
     }
 
+    /// Replaces the message a breakpoint logs instead of stopping; `None`
+    /// makes it stop again. Like a condition, this needs no stop and applies
+    /// from the next hit.
+    pub async fn set_breakpoint_log_message(
+        &self,
+        id: BreakpointId,
+        log_message: Option<LogMessage>,
+    ) -> Result<Breakpoint> {
+        self.request(|reply| Request::SetBreakpointLogMessage {
+            id,
+            log_message,
+            reply,
+        })
+        .await
+    }
+
     /// Removes one logical breakpoint and returns its prior definition.
     pub async fn remove_breakpoint(&self, id: BreakpointId) -> Result<Breakpoint> {
         self.request(|reply| Request::RemoveBreakpoint { id, reply })
@@ -949,11 +965,24 @@ impl DebuggerHandle {
         address: VirtualAddress,
         byte_count: u64,
     ) -> Result<MemoryRead> {
+        let stop = self.stopped_selection().await?.stop;
+        self.read_memory_at(stop, address, byte_count).await
+    }
+
+    /// Reads memory as [`Self::read_memory`] does, but only at `stop`: once
+    /// the program has left it, the read fails with [`Error::StaleStop`]
+    /// instead of reading a later stop's memory.
+    pub async fn read_memory_at(
+        &self,
+        stop: StopId,
+        address: VirtualAddress,
+        byte_count: u64,
+    ) -> Result<MemoryRead> {
         let selection = self.stopped_selection().await?;
 
         self.request(|reply| Request::ReadMemory {
             process_id: selection.process,
-            stop_id: selection.stop,
+            stop_id: stop,
             address,
             byte_count,
             reply,
@@ -994,11 +1023,24 @@ impl DebuggerHandle {
     /// which fails when it is the first. Debugger breakpoint traps stay in
     /// place, hiding the written bytes as they hid the old ones.
     pub async fn write_memory(&self, address: VirtualAddress, bytes: &[u8]) -> Result<u64> {
+        let stop = self.stopped_selection().await?.stop;
+        self.write_memory_at(stop, address, bytes).await
+    }
+
+    /// Writes memory as [`Self::write_memory`] does, but only at `stop`:
+    /// once the program has left it, the write fails with
+    /// [`Error::StaleStop`].
+    pub async fn write_memory_at(
+        &self,
+        stop: StopId,
+        address: VirtualAddress,
+        bytes: &[u8],
+    ) -> Result<u64> {
         let selection = self.stopped_selection().await?;
 
         self.request(|reply| Request::WriteMemory {
             process_id: selection.process,
-            stop_id: selection.stop,
+            stop_id: stop,
             address,
             bytes: bytes.into(),
             reply,
@@ -1115,6 +1157,13 @@ impl DebuggerHandle {
             location,
             lines,
         })
+    }
+
+    /// Reads a source file a module image names, through the handle's
+    /// [`SourcePathMap`], returning the path read and its contents. Only
+    /// files the debug information names can be read this way.
+    pub async fn read_source_file(&self, file: &SourceFile) -> Result<(PathBuf, String)> {
+        self.read_source(&file.path).await
     }
 
     /// Reads the first candidate for a recorded source path that exists. A

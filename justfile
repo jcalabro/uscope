@@ -9,10 +9,10 @@ max_test_threads := "16"
 default: check
 
 # Checks formatting, runs Clippy, and runs the complete test suite.
-check: lint test
+check: lint test web-test
 
 # Runs everything to check before committing.
-all: lint test stress sim
+all: lint test web-test web-e2e stress sim
 
 # Enters the Nix development shell.
 dev *ARGS="":
@@ -77,6 +77,42 @@ stress COUNT="10" *ARGS: build-test-programs
     for (( i = 0; i < cpus / 2; i++ )); do (while :; do :; done) & burners+=($!); done
     XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
 
+# Installs the web page's locked dependencies.
+web-deps:
+    cd web && pnpm install --frozen-lockfile --silent
+
+# Builds the web page into build/web, where `uscope web` serves it from.
+# Development builds of uscope read it from disk, so rebuilding the page
+# needs no Rust rebuild.
+web: web-deps
+    cd web && ./node_modules/.bin/vite build --logLevel warn
+
+# Type-checks and lints the page and runs its tests outside a browser and
+# its component tests in headless Chromium. Arguments go to Vitest.
+web-test *ARGS: web-deps
+    cd web && ./node_modules/.bin/tsc --noEmit && biome check src test e2e && ./node_modules/.bin/vitest run "$@"
+
+# Drives the built page and real `uscope web` servers in Chromium and
+# Firefox. Arguments go to Playwright, e.g. `just web-e2e --project=chromium`.
+web-e2e *ARGS: web build-test-programs
+    cargo build --quiet
+    cd web && ./node_modules/.bin/playwright test "$@"
+
+# Serves PROGRAM on port 7342 with the page from Vite, which reloads on every
+# save: open the join link uscope prints, with 5173 in place of 7342.
+web-dev *ARGS: web-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --quiet
+    ./target/debug/uscope web --port 7342 --allow-origin http://127.0.0.1:5173 "$@" &
+    trap 'kill %1 2>/dev/null || true' EXIT
+    cd web && ./node_modules/.bin/vite
+
+# Rerecords the server traffic the page's replay tests read
+# (web/test/transcripts) from the Rust web tests.
+web-transcripts: build-test-programs
+    USCOPE_WEB_TRANSCRIPTS="$PWD/web/test/transcripts" cargo nextest run --test web
+
 # Rebuilds one golden program and rewrites its manifest, after a deliberate
 # change to its sources or the toolchain. Commit a new manifest on its own.
 golden-record NAME:
@@ -115,3 +151,16 @@ uat-nvim NVIM_DAP DIR="target/uat": build
     rm -f "$2"/nvim-*.log
     PATH="$PWD/target/debug:$PATH" nvim --headless --clean -l editors/nvim/uat.lua "$1" "$PWD" "$2"
     sed -i "s#$PWD#\${root}#g" "$2"/nvim-*.log
+
+# Screenshots every screen in light and dark at three widths into
+# target/web-shots, with PROGRAM loaded (the kvstore fixture by default).
+web-shot *PROGRAM: web build-test-programs
+    cargo build --quiet
+    cd web && node e2e/shots.ts "$@"
+
+# Drives PROGRAM through STEPS in headless Chromium, saving a screenshot after
+# each and printing the page's console: `just web-probe build/test-programs/basic
+# key:F9 key:F5 wait:Stopped`. See web/e2e/probe.ts for the steps.
+web-probe PROGRAM *STEPS: web
+    cargo build --quiet
+    cd web && node e2e/probe.ts "$(realpath "../$1")" "${@:2}"

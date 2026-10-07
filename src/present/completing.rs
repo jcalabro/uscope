@@ -4,7 +4,7 @@
 //! being completed is the name the cursor ends, and what comes before it
 //! decides what kind of name that is. A member's base is the postfix
 //! expression before its `.` or `->`, which the session evaluates to list
-//! its members.
+//! its members. This reads text alone, so a fuzz target includes it.
 
 /// What the text before the cursor asks to complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

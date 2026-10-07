@@ -1,0 +1,131 @@
+// The page's view of the session, built only from what the server says.
+// `reduce` is pure, so every behavior here is tested by replaying real
+// server traffic (test/replay.test.ts).
+
+import type { Hello, Notice, Person, ServerMessage, State, Stream } from "./protocol";
+
+/** How the page is connected. */
+export type Link =
+  | "connecting"
+  | "open"
+  | "reconnecting"
+  /** The browser has no token for this server: it needs a join link. */
+  | "unauthorized"
+  /** The server speaks another protocol version. */
+  | "incompatible";
+
+export interface OutputPiece {
+  /** Counts pieces from the start, so trimming keeps every key. */
+  seq: number;
+  stream: Stream;
+  text: string;
+}
+
+export interface Note extends Notice {
+  /** Milliseconds since the epoch when it arrived. */
+  at: number;
+}
+
+export interface Model {
+  link: Link;
+  hello: Hello | null;
+  state: State | null;
+  people: Person[];
+  output: OutputPiece[];
+  /** How many bytes `output` holds. */
+  outputBytes: number;
+  /** The next piece's sequence number. */
+  outputSeq: number;
+  notices: Note[];
+}
+
+/** The most output a tab keeps; older pieces are dropped first. */
+export const OUTPUT_LIMIT = 1024 * 1024;
+
+/** The most notices a tab keeps. */
+export const NOTICE_LIMIT = 50;
+
+export const initialModel: Model = {
+  link: "connecting",
+  hello: null,
+  state: null,
+  people: [],
+  output: [],
+  outputBytes: 0,
+  outputSeq: 0,
+  notices: [],
+};
+
+export type ModelEvent =
+  | { type: "link"; link: Link }
+  | { type: "message"; message: ServerMessage; at: number };
+
+export function reduce(model: Model, event: ModelEvent): Model {
+  if (event.type === "link") {
+    return { ...model, link: event.link };
+  }
+  const message = event.message;
+  switch (message.type) {
+    case "hello":
+      // A new connection: the server resends its state and recent output.
+      return { ...model, link: "open", hello: message, people: [], output: [], outputBytes: 0 };
+    case "state": {
+      const { type: _, ...state } = message;
+      // Another program's output does not belong to this one.
+      if (model.state && model.state.session !== state.session) {
+        return { ...model, state, output: [], outputBytes: 0 };
+      }
+      return { ...model, state };
+    }
+    case "output":
+      return appendOutput(model, message.stream, message.text);
+    case "presence":
+      return { ...model, people: message.people };
+    case "notice": {
+      const { type: _, ...notice } = message;
+      const notices = [...model.notices, { ...notice, at: event.at }].slice(-NOTICE_LIMIT);
+      return { ...model, notices };
+    }
+    case "result":
+    case "error":
+      // Answers go to the request that asked; the connection routes them.
+      return model;
+    default:
+      return unknownMessage(message);
+  }
+}
+
+function appendOutput(model: Model, stream: Stream, text: string): Model {
+  const piece = { seq: model.outputSeq, stream, text };
+  const output = [...model.output, piece];
+  let bytes = model.outputBytes + piece.text.length;
+  let first = 0;
+  while (bytes > OUTPUT_LIMIT && first < output.length - 1) {
+    bytes -= output[first]?.text.length ?? 0;
+    first += 1;
+  }
+  return {
+    ...model,
+    output: first === 0 ? output : output.slice(first),
+    outputBytes: bytes,
+    outputSeq: model.outputSeq + 1,
+  };
+}
+
+function unknownMessage(message: never): never {
+  throw new Error(`unknown message ${JSON.stringify(message)}`);
+}
+
+/** Whether this tab may run and stop the program. */
+export function controls(model: Model): boolean {
+  return model.hello?.role === "control" && model.link === "open";
+}
+
+/** The short name of what is being debugged, such as `kvstore`. */
+export function targetName(state: State | null): string | null {
+  const program = state?.target?.program;
+  if (!program) {
+    return null;
+  }
+  return program.slice(program.lastIndexOf("/") + 1);
+}

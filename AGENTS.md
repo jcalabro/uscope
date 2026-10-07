@@ -55,6 +55,19 @@ The deterministic simulator (`src/sim`, `plans/simulator.md`) runs the real cont
 - `just all` sweeps for 30 seconds before every commit. Before merging a lifecycle, run-control, attach, or concurrency change, or a change to the model, sweep longer: `just sim 600`. A sweep groups failures by what their messages share and reports each group's shortest run; replay it with `just sim-seed SEED`, and see the state at an action with `--at STEP`. The trace includes the controller's flight recording.
 - The golden programs in `tests/golden` are checked in as sources and manifests. `just build-test-programs` builds them into `build/golden` with the pinned toolchain and fails unless every binary matches the hash its manifest records. Re-record a manifest with `just golden-record NAME` only on purpose, in a commit of its own.
 
+## Web UI
+
+`uscope web` (`src/web`, `plans/web-ui.html`) serves a React page (`web/`) to every tab that joins one session over a WebSocket. Like the CLI and DAP, the server is a `DebuggerHandle` client.
+
+- The server sends tabs state and notices; tabs send requests that name the `StopId` they read. Cache answers for a stop by request; forget them on writes, setting changes, and session changes.
+- Formatting lives in `src/present` and is shared with the CLI. Do not copy it into the page.
+- `web/src/protocol.gen.ts` is generated from `src/web/protocol.rs` with ts-rs. A test fails when it is stale; regenerate it with `USCOPE_UPDATE_PROTOCOL=1`.
+- Debug builds read the built page from `build/web` at run time, so `just web` is enough after a page change. Release builds embed it.
+- The page's address bar holds the tab's whole view (stop, thread, frame, source, view, memory). A shared link opens the same view.
+- `just web-test` runs tsc, biome, and Vitest in seconds. `just web-e2e` runs Playwright against real servers in Chromium and Firefox; pass `--project=chromium -g NAME` for a single test. Rerecord the replay transcripts with `just web-transcripts`.
+- To see the page yourself, run `just web-probe PROGRAM STEPS…`. It saves a screenshot after each step and prints the console. Steps are listed in `web/e2e/probe.ts`. `just web-dev` serves the page with live reload.
+- Use the tools in `web/node_modules/.bin` or the Nix shell's `biome`. Never use `npx`, which downloads an unrelated package when a name is missing.
+
 ## Local Development
 
 Run all project commands inside the pinned Nix environment. Do not run `cargo`,
