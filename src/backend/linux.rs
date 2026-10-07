@@ -413,6 +413,9 @@ struct StepStart {
     /// For a step over a call instruction, the return address and the stack
     /// pointer the call returns with.
     call_return: Option<(VirtualAddress, StackPosition)>,
+    /// Whether the step began in a language runtime's own code, where it
+    /// may then stop, as it may not when it began elsewhere.
+    began_in_runtime: bool,
 }
 
 /// Whether a step kind executes machine instructions rather than source
