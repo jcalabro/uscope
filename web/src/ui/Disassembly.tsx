@@ -3,11 +3,12 @@
 // the instructions compiled from them and lead back to the source; calls
 // and jumps link where they go.
 
-import { useEffect, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRequest } from "../data";
 import { formatPlace, type Look, showingSource, stringifySearch } from "../focus";
 import { controls } from "../model";
-import type { Breakpoint, Instruction, SourceLine, Syntax } from "../protocol";
+import type { Breakpoint, Disassembled, Instruction, SourceLine, Syntax } from "../protocol";
 import { isString, read, write } from "../storage";
 import { useConnection, useModel } from "../store";
 import { flash } from "../tab";
@@ -42,18 +43,6 @@ export function Disassembly() {
   const disassembled = answer.data;
   const body = useRef<HTMLDivElement>(null);
 
-  // The marked instruction comes into view whenever it moves.
-  const marked = answer.current ? disassembled?.marked : undefined;
-  useEffect(() => {
-    if (marked) {
-      body.current
-        ?.querySelector(`[data-address="${marked}"]`)
-        ?.scrollIntoView({ block: "center" });
-    } else if (answer.current) {
-      body.current?.scrollTo({ top: 0 });
-    }
-  }, [marked, answer.current]);
-
   let content: React.ReactNode;
   if (why) {
     content = <div className="empty center-message">{why}</div>;
@@ -62,24 +51,13 @@ export function Disassembly() {
   } else if (!disassembled) {
     content = <div className="empty center-message">Disassembling…</div>;
   } else {
-    const start = disassembled.function ? disassembled.instructions[0]?.address : undefined;
     content = (
-      <>
-        {disassembled.notes.map((note) => (
-          <div key={note} className="asm-note">
-            {note}
-          </div>
-        ))}
-        {disassembled.instructions.map((instruction) => (
-          <Row
-            key={instruction.address}
-            instruction={instruction}
-            start={start}
-            marked={instruction.address === disassembled.marked}
-            innermost={at?.frame === 0}
-          />
-        ))}
-      </>
+      <Lines
+        disassembled={disassembled}
+        body={body}
+        current={answer.current}
+        innermost={at?.frame === 0}
+      />
     );
   }
 
@@ -110,6 +88,94 @@ export function Disassembly() {
   );
 }
 
+/** Every line of a listing is one row high, so only the rows in view exist. */
+const LINE = 20;
+
+type Line =
+  | { kind: "note"; key: string; note: string }
+  | { kind: "source"; key: string; source: SourceLine }
+  | { kind: "instruction"; key: string; instruction: Instruction };
+
+/**
+ * The listing, with notes first and each source line before the
+ * instructions compiled from it. A function holds thousands of
+ * instructions, so the rows are virtual.
+ */
+function Lines({
+  disassembled,
+  body,
+  current,
+  innermost,
+}: {
+  disassembled: Disassembled;
+  body: React.RefObject<HTMLDivElement | null>;
+  current: boolean;
+  innermost: boolean;
+}) {
+  const lines = useMemo(() => {
+    const lines: Line[] = disassembled.notes.map((note) => ({ kind: "note", key: note, note }));
+    for (const instruction of disassembled.instructions) {
+      if (instruction.source) {
+        lines.push({
+          kind: "source",
+          key: `source:${instruction.address}`,
+          source: instruction.source,
+        });
+      }
+      lines.push({ kind: "instruction", key: instruction.address, instruction });
+    }
+    return lines;
+  }, [disassembled]);
+  const rows = useVirtualizer({
+    count: lines.length,
+    getScrollElement: () => body.current,
+    estimateSize: () => LINE,
+    overscan: 40,
+  });
+
+  // The marked instruction comes into view whenever it moves.
+  const marked = current ? disassembled.marked : undefined;
+  useEffect(() => {
+    const index = marked
+      ? lines.findIndex((line) => line.kind === "instruction" && line.key === marked)
+      : -1;
+    if (index >= 0) {
+      rows.scrollToIndex(index, { align: "center" });
+    } else if (current) {
+      rows.scrollToOffset(0);
+    }
+  }, [marked, current, lines, rows]);
+
+  const start = disassembled.function ? disassembled.instructions[0]?.address : undefined;
+  return (
+    <div className="asm-lines" style={{ height: rows.getTotalSize() }}>
+      {rows.getVirtualItems().map((item) => {
+        const line = lines[item.index] as Line;
+        return (
+          <div
+            key={line.key}
+            className="asm-line"
+            style={{ transform: `translateY(${item.start}px)` }}
+          >
+            {line.kind === "note" ? (
+              <div className="asm-note">{line.note}</div>
+            ) : line.kind === "source" ? (
+              <SourceHead source={line.source} />
+            ) : (
+              <Row
+                instruction={line.instruction}
+                start={start}
+                marked={line.instruction.address === disassembled.marked}
+                innermost={innermost}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function Row({
   instruction,
   start,
@@ -123,38 +189,35 @@ function Row({
 }) {
   const offset = start ? BigInt(instruction.address) - BigInt(start) : null;
   return (
-    <>
-      {instruction.source && <SourceHead source={instruction.source} />}
-      <div
-        className={`asm-row ${marked ? (innermost ? "pc" : "frame") : ""}`}
-        data-address={instruction.address}
-        aria-current={marked ? "true" : undefined}
-      >
-        <Gutter address={instruction.address} />
-        <span className="asm-mark" aria-hidden="true">
-          {marked ? "▶" : ""}
-        </span>
-        <span className="asm-address">{instruction.address}</span>
-        <span className="asm-offset">
-          {offset === null ? (instruction.symbol ?? "") : `+${offset}`}
-        </span>
-        <span className="asm-bytes">{instruction.bytes}</span>
-        <span className="asm-text">
-          {instruction.invalid ? (
-            <span className="error">{instruction.invalid}</span>
-          ) : (
-            instruction.tokens.map((token, index) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: tokens repeat, and never move
-              <span key={index} className={`tk-${token.kind}`}>
-                {token.text}
-              </span>
-            ))
-          )}
-          {instruction.target?.name && <Target {...instruction.target} />}
-          {instruction.comment && <span className="asm-comment"> ; {instruction.comment}</span>}
-        </span>
-      </div>
-    </>
+    <div
+      className={`asm-row ${marked ? (innermost ? "pc" : "frame") : ""}`}
+      data-address={instruction.address}
+      aria-current={marked ? "true" : undefined}
+    >
+      <Gutter address={instruction.address} />
+      <span className="asm-mark" aria-hidden="true">
+        {marked ? "▶" : ""}
+      </span>
+      <span className="asm-address">{instruction.address}</span>
+      <span className="asm-offset">
+        {offset === null ? (instruction.symbol ?? "") : `+${offset}`}
+      </span>
+      <span className="asm-bytes">{instruction.bytes}</span>
+      <span className="asm-text">
+        {instruction.invalid ? (
+          <span className="error">{instruction.invalid}</span>
+        ) : (
+          instruction.tokens.map((token, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: tokens repeat, and never move
+            <span key={index} className={`tk-${token.kind}`}>
+              {token.text}
+            </span>
+          ))
+        )}
+        {instruction.target?.name && <Target {...instruction.target} />}
+        {instruction.comment && <span className="asm-comment"> ; {instruction.comment}</span>}
+      </span>
+    </div>
   );
 }
 
