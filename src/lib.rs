@@ -1104,11 +1104,28 @@ impl DebuggerHandle {
     /// first. A page holds at most `limit` tasks, and says why it may be
     /// incomplete.
     pub async fn tasks(&self, from: Option<TaskCursor>, limit: usize) -> Result<TaskPage> {
+        self.task_page(from, limit, false).await
+    }
+
+    /// One page of the tasks that run the program's code, as
+    /// [`Self::tasks`] gives, leaving out those a runtime runs for its own
+    /// work before paging, so a page holds only the program's.
+    pub async fn program_tasks(&self, from: Option<TaskCursor>, limit: usize) -> Result<TaskPage> {
+        self.task_page(from, limit, true).await
+    }
+
+    async fn task_page(
+        &self,
+        from: Option<TaskCursor>,
+        limit: usize,
+        program_only: bool,
+    ) -> Result<TaskPage> {
         let selection = self.stopped_selection().await?;
         self.request(|reply| Request::Tasks {
             stop_id: selection.stop,
             from,
             limit,
+            program_only,
             reply,
         })
         .await

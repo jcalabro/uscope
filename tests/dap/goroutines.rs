@@ -120,6 +120,44 @@ fn launch_options_list_the_runtimes_goroutines_cut_the_list_or_list_threads() {
     dap.finish();
 }
 
+/// A hundred thousand goroutines are cut to `maxTasks`, the stopped one
+/// first, with the rest counted in a last entry.
+#[test]
+fn a_hundred_thousand_goroutines_are_cut_with_a_count_of_the_rest() {
+    let mut dap = Dap::start("scale");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("scale-go"),
+        json!({}),
+        &Configuration {
+            functions: vec!["main.checkpoint".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    let stop = dap.stopped(started.mark);
+    assert_eq!(stop.reason, "function breakpoint", "{stop:?}");
+    let listed = threads(&mut dap);
+    assert_eq!(listed.len(), 1001);
+    assert!(
+        listed[0].1.starts_with("[1] main.checkpoint — at breakpoint 1 "),
+        "{:?}",
+        listed[0]
+    );
+    assert!(
+        listed[1..1000]
+            .iter()
+            .all(|(_, name)| name.ends_with("main.park — chan receive")),
+        "{:?}",
+        &listed[..8]
+    );
+    // main's goroutine and every parked one.
+    assert_eq!(
+        listed[1000].1,
+        "99001 more goroutines not shown; maxTasks lists 1000"
+    );
+    dap.finish();
+}
+
 #[test]
 fn a_stack_that_crosses_stacks_labels_each_run_of_frames() {
     let mut dap = Dap::start("stack labels");

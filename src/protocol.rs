@@ -1467,6 +1467,8 @@ pub enum Request {
         stop_id: StopId,
         from: Option<crate::TaskCursor>,
         limit: usize,
+        /// Whether to leave out the tasks runtimes run for their own work.
+        program_only: bool,
         reply: Reply<crate::TaskPage>,
     },
     /// The stop, thread, and frame that implicit inspection uses, without

@@ -624,6 +624,9 @@ struct PublicStop {
     selected_frames: BTreeMap<ExecutionContext, StackFrameId>,
     /// What each thread runs for a language runtime, read once asked for.
     activities: RefCell<BTreeMap<Pid, Option<crate::ThreadActivity>>>,
+    /// Where each runtime said it keeps the tasks it listed at this stop,
+    /// forgotten once the debugger writes memory.
+    task_locators: RefCell<BTreeMap<crate::TaskId, u64>>,
     /// What the function a step out finished returned.
     returned: Option<returns::Returned>,
 }
@@ -1436,9 +1439,10 @@ impl<P: InspectionOps> Controller<P> {
                 stop_id,
                 from,
                 limit,
+                program_only,
                 reply,
             } => {
-                let _ = reply.send(self.tasks(stop_id, from, limit));
+                let _ = reply.send(self.tasks(stop_id, from, limit, program_only));
             }
             Request::LoadedModule { reply } => {
                 let _ = reply.send(self.loaded_module());
@@ -2051,6 +2055,7 @@ impl PublicStop {
             selected_thread: Some(triggering_thread),
             selected_frames: BTreeMap::new(),
             activities: RefCell::default(),
+            task_locators: RefCell::default(),
             returned: None,
         }
     }

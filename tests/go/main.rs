@@ -16,6 +16,7 @@ mod hosted;
 mod invariants;
 mod preemption;
 mod ranges;
+mod scale;
 mod server;
 mod siblings;
 mod stacks;

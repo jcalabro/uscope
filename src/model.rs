@@ -347,6 +347,8 @@ pub struct TaskPage {
     /// as a task whose memory could not be read. A page with none is
     /// complete.
     pub gaps: Arc<[Arc<str>]>,
+    /// What reading the page cost: the memory read of the runtimes.
+    pub usage: crate::InspectionUsage,
 }
 
 /// Where a request inspects or controls execution: an operating-system
