@@ -5,7 +5,7 @@
 //! uses real-time signals, such as the one behind `pthread_cancel`, so every
 //! wait status and every signal delivery is handled by number.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use nix::errno::Errno;
@@ -101,10 +101,13 @@ impl Signal {
     pub const SIGUSR1: Self = Self(libc::SIGUSR1);
 }
 
-/// How every signal is handled: gdb's defaults unless changed.
+/// How every signal is handled: as the user chose, or else as the loaded
+/// language runtimes use it, or else by gdb's defaults.
 #[derive(Debug, Default)]
 pub struct SignalPolicies {
     changed: BTreeMap<Signal, SignalPolicy>,
+    /// Signals a loaded runtime handles as part of the program's own work.
+    handled: BTreeSet<i32>,
 }
 
 impl SignalPolicies {
@@ -112,20 +115,40 @@ impl SignalPolicies {
         self.changed
             .get(&signal)
             .copied()
-            .unwrap_or_else(|| default_policy(signal))
+            .unwrap_or_else(|| self.default_policy(signal))
     }
 
     /// Changes how `signal` is handled and returns the previous policy.
     pub fn set(&mut self, signal: Signal, policy: SignalPolicy) -> SignalPolicy {
         let previous = self.get(signal);
-        if policy == default_policy(signal) {
+        if policy == self.default_policy(signal) {
             self.changed.remove(&signal);
         } else {
             self.changed.insert(signal, policy);
         }
         previous
     }
+
+    /// Replaces the signals the loaded runtimes handle themselves, which
+    /// pass silently unless the user chose otherwise.
+    pub fn set_runtime_handled(&mut self, handled: impl IntoIterator<Item = i32>) {
+        self.handled = handled.into_iter().collect();
+    }
+
+    fn default_policy(&self, signal: Signal) -> SignalPolicy {
+        if self.handled.contains(&signal.0) {
+            return QUIET_POLICY;
+        }
+        default_policy(signal)
+    }
 }
+
+/// A signal that neither stops nor prints, and is delivered.
+const QUIET_POLICY: SignalPolicy = SignalPolicy {
+    stop: false,
+    print: false,
+    pass: true,
+};
 
 /// gdb's default handling: signals that programs use for routine work
 /// neither stop nor print and are delivered, an interrupt from the
@@ -143,11 +166,7 @@ fn default_policy(signal: Signal) -> SignalPolicy {
         libc::SIGPWR,
     ];
     if QUIET.contains(&signal.0) {
-        SignalPolicy {
-            stop: false,
-            print: false,
-            pass: true,
-        }
+        QUIET_POLICY
     } else {
         SignalPolicy {
             stop: true,

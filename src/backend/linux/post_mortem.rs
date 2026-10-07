@@ -900,6 +900,10 @@ impl Controller<CoreTarget> {
                 Request::Attach { reply, .. } => reject(reply),
                 Request::Kill { reply } | Request::Terminate { reply } => reject(reply),
                 Request::WriteMemory { reply, .. } => reject(reply),
+                // A dump runs nothing, but the choice stays the session's.
+                Request::SetExceptionStops { stops, reply } => {
+                    let _ = reply.send(Ok(std::mem::replace(&mut self.exception_stops, stops)));
+                }
                 request => self.handle_inspection_request(request),
             }
         }

@@ -13,13 +13,18 @@ use crate::{ImageAddress, IntegerValue};
 /// A missing name, which makes a feature unavailable.
 pub type Missing = Arc<str>;
 
-fn member(image: &dyn RuntimeImage, ty: &str, path: &[&str]) -> Result<Member, Missing> {
+pub(super) fn member(image: &dyn RuntimeImage, ty: &str, path: &[&str]) -> Result<Member, Missing> {
     image
         .member(ty, path)
         .ok_or_else(|| format!("the runtime has no member {ty}.{}", path.join(".")).into())
 }
 
-fn offset(image: &dyn RuntimeImage, ty: &str, path: &[&str], size: u64) -> Result<u64, Missing> {
+pub(super) fn offset(
+    image: &dyn RuntimeImage,
+    ty: &str,
+    path: &[&str],
+    size: u64,
+) -> Result<u64, Missing> {
     let found = member(image, ty, path)?;
     if found.size != size {
         return Err(format!(
@@ -32,14 +37,14 @@ fn offset(image: &dyn RuntimeImage, ty: &str, path: &[&str], size: u64) -> Resul
     Ok(found.offset)
 }
 
-fn symbol(image: &dyn RuntimeImage, name: &str) -> Result<ImageAddress, Missing> {
+pub(super) fn symbol(image: &dyn RuntimeImage, name: &str) -> Result<ImageAddress, Missing> {
     image
         .symbol(name)
         .map(|symbol| symbol.address)
         .ok_or_else(|| format!("the runtime has no symbol {name}").into())
 }
 
-fn constant(image: &dyn RuntimeImage, name: &str) -> Result<u64, Missing> {
+pub(super) fn constant(image: &dyn RuntimeImage, name: &str) -> Result<u64, Missing> {
     match image.constant(name) {
         Some(IntegerValue::Signed(value)) => u64::try_from(value).ok(),
         Some(IntegerValue::Unsigned(value)) => u64::try_from(value).ok(),

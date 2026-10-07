@@ -10,11 +10,11 @@ use uscope::{
     CoreDumpInfo, CoreModuleState, DecodedInstruction, DisassembledInstruction, Disassembly,
     DisassemblyBlock, DisassemblyView, ExitStatus, FunctionInfo, FunctionOrigin,
     GlobalVariablePage, HitCondition, IndirectTarget, InstructionContent, InstructionReferenceKind,
-    InstructionTokenKind, InvalidatedWatchpoint, LoadedModuleSnapshot, MemoryRead,
-    MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage, RegisterSnapshot, SourceContext,
-    StackFrame, StackSegment, StateSnapshot, StepKind, StopReason, SymbolExtentProvenance,
-    SymbolLocation, TargetBoundary, TaskSnapshot, ThreadActivity, ThreadState, VirtualAddress,
-    WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
+    InstructionTokenKind, InvalidatedWatchpoint, LanguageException, LanguageExceptionKind,
+    LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage,
+    RegisterSnapshot, SourceContext, StackFrame, StackSegment, StateSnapshot, StepKind, StopReason,
+    SymbolExtentProvenance, SymbolLocation, TargetBoundary, TaskSnapshot, ThreadActivity,
+    ThreadState, VirtualAddress, WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
 
 use super::commands::{COMMANDS, CommandSpec, aliases};
@@ -434,6 +434,21 @@ fn numbered_hits(
     format!("{noun}{plural} {hits}")
 }
 
+/// A runtime's exception, followed by its message as the runtime prints
+/// it, which may take several lines.
+fn language_exception(raised: &LanguageException, renderer: Renderer) -> String {
+    format!(
+        "{} {}:\n{}",
+        renderer.paint(Role::Error, "stopped"),
+        match raised.kind {
+            LanguageExceptionKind::Raised => "as an exception was raised",
+            LanguageExceptionKind::Unhandled => "by an unhandled exception",
+            LanguageExceptionKind::Fatal => "by a fatal runtime error",
+        },
+        renderer.paint(Role::Error, &raised.message)
+    )
+}
+
 /// Summarizes a stop on one line, without watched values or source.
 pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
     let stopped = |role| renderer.paint(role, "stopped");
@@ -483,6 +498,12 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             "{} by {}",
             stopped(Role::Error),
             exception(&info.description, info.code, renderer)
+        ),
+        StopReason::LanguageException(raised) => language_exception(raised, renderer),
+        StopReason::ProgramBreakpoint { address } => format!(
+            "{} by the program's breakpoint instruction at {}",
+            stopped(Role::Current),
+            renderer.paint(Role::Metadata, address)
         ),
         StopReason::Exec { followed } => format!(
             "inferior {} its executable image",

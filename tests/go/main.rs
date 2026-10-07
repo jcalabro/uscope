@@ -8,6 +8,7 @@ mod support;
 
 mod cores;
 mod defers;
+mod failing;
 mod preemption;
 mod siblings;
 mod stacks;

@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use crate::unwind::RegisterFile;
 use crate::{
-    ImageAddress, IntegerValue, ModuleImage, RecordMemberLayout, StackSegment, TaskState, ThreadId,
-    TypeInfo, TypeKind, TypeNode, VirtualAddress,
+    ImageAddress, IntegerValue, LanguageExceptionKind, ModuleImage, RecordMemberLayout,
+    StackSegment, TaskState, ThreadId, TypeInfo, TypeKind, TypeNode, VirtualAddress,
 };
 
 /// A result with the reasons it may be incomplete, such as a task whose
@@ -177,6 +177,28 @@ pub struct RuntimeSignals {
     /// thread's next continue, rather than running a handler that may wait
     /// for threads the debugger holds.
     pub deferrable: &'static [i32],
+    /// Signals the runtime handles as part of the program's own work, such
+    /// as the faults Go turns into panics. By default they neither stop
+    /// nor print, and are delivered; the runtime reports any it cannot
+    /// handle as an exception of its own.
+    pub handled: &'static [i32],
+}
+
+/// A runtime function that reports an exception as it is entered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeHook {
+    pub kind: LanguageExceptionKind,
+    pub address: ImageAddress,
+}
+
+/// What a runtime reports as one of its hooks is entered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeException {
+    /// The runtime's message, as the runtime would print it.
+    pub message: Arc<str>,
+    /// An expression for the value the exception carries, when one can
+    /// name it.
+    pub value: Option<Arc<str>>,
 }
 
 /// What a language runtime tells the debugger at a stop.
@@ -211,6 +233,17 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     ) -> Result<Crossing, Arc<str>>;
     /// How the runtime uses signals.
     fn signals(&self) -> RuntimeSignals;
+    /// The functions that report the runtime's exceptions as they are
+    /// entered.
+    fn hooks(&self) -> &[RuntimeHook];
+    /// What a stopped thread reports as it enters the hook at `hook`,
+    /// given the thread's registers there.
+    fn exception(
+        &self,
+        stop: &dyn RuntimeStop,
+        hook: ImageAddress,
+        registers: &RegisterFile,
+    ) -> Result<RuntimeException, Arc<str>>;
     /// What the runtime calls one of its tasks.
     fn task_noun(&self) -> &'static str;
 }

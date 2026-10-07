@@ -92,14 +92,14 @@ pub use model::{
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, ConditionOwner,
     CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, DebuggerEvent,
-    ExceptionDisposition, ExceptionInfo, ExecutionId, ExitStatus, FramePresentation,
-    GlobalVariableQuery, HitComparison, HitCondition, InferiorState, InvalidatedWatchpoint,
-    KernelSource, LaunchOptions, LogPart, ModuleIdentity, PresentedFrame, ProcessId,
-    ResolvedBreakpointLocation, ResumeScope, SignalPolicy, StateSnapshot, StepKind, StopId,
-    StopReason, ThreadSnapshot, ThreadState, TypeViews, ValueChildQuery, VariableQuery,
-    ViewCandidate, ViewCheck, ViewExplanation, WatchAccess, WatchScope, WatchTarget, Watchpoint,
-    WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions,
-    WatchpointSpec,
+    ExceptionDisposition, ExceptionInfo, ExceptionStops, ExecutionId, ExitStatus,
+    FramePresentation, GlobalVariableQuery, HitComparison, HitCondition, InferiorState,
+    InvalidatedWatchpoint, KernelSource, LanguageException, LanguageExceptionKind, LaunchOptions,
+    LogPart, ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation, ResumeScope,
+    SignalPolicy, StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState,
+    TypeViews, ValueChildQuery, VariableQuery, ViewCandidate, ViewCheck, ViewExplanation,
+    WatchAccess, WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit,
+    WatchpointId, WatchpointInvalidation, WatchpointOptions, WatchpointSpec,
 };
 pub use runtime_model::TASK_NOUNS;
 pub use source_map::SourcePathMap;
@@ -679,6 +679,14 @@ impl DebuggerHandle {
             reply,
         })
         .await
+    }
+
+    /// Changes which exceptions a language runtime reports stop the
+    /// inferior, and returns the previous choice. The change applies at
+    /// once and lasts for the whole session.
+    pub async fn set_exception_stops(&self, stops: ExceptionStops) -> Result<ExceptionStops> {
+        self.request(|reply| Request::SetExceptionStops { stops, reply })
+            .await
     }
 
     /// Kills the inferior and waits until it is gone, keeping the session:

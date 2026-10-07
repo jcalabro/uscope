@@ -907,6 +907,67 @@ pub struct SignalPolicy {
     pub pass: bool,
 }
 
+/// Which exceptions a language runtime reports stop the inferior. By
+/// default one nothing handled and a fatal error stop, and one the program
+/// may yet handle does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExceptionStops {
+    /// Every exception as it is raised, such as each Go panic, whether or
+    /// not the program then recovers from it.
+    pub raised: bool,
+    /// An exception nothing handled, such as a Go panic no deferred call
+    /// recovered, as it ends the program.
+    pub unhandled: bool,
+    /// A fatal error the runtime ends the program with, such as Go's
+    /// report that every goroutine is asleep.
+    pub fatal: bool,
+}
+
+impl Default for ExceptionStops {
+    fn default() -> Self {
+        Self {
+            raised: false,
+            unhandled: true,
+            fatal: true,
+        }
+    }
+}
+
+impl ExceptionStops {
+    /// Whether an exception of `kind` stops.
+    #[must_use]
+    pub const fn stops(self, kind: LanguageExceptionKind) -> bool {
+        match kind {
+            LanguageExceptionKind::Raised => self.raised,
+            LanguageExceptionKind::Unhandled => self.unhandled,
+            LanguageExceptionKind::Fatal => self.fatal,
+        }
+    }
+}
+
+/// What a language runtime reports about an exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LanguageExceptionKind {
+    /// An exception as it is raised, which the program may yet handle.
+    Raised,
+    /// An exception nothing handled, which ends the program.
+    Unhandled,
+    /// A fatal error, which ends the program.
+    Fatal,
+}
+
+/// An exception a language runtime reported, such as a Go panic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageException {
+    pub kind: LanguageExceptionKind,
+    /// The runtime's own message, as it prints it or would, with any
+    /// exceptions before this one that it prints too.
+    pub message: Arc<str>,
+    /// An expression for the exception's value, which a client may
+    /// evaluate at the stop, when the runtime keeps one.
+    pub value: Option<Arc<str>>,
+}
+
 /// Platform-neutral information about an exception that stopped an inferior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExceptionInfo {
@@ -987,6 +1048,15 @@ pub enum StopReason {
     Pause,
     /// Execution stopped because of an exception.
     Exception(ExceptionInfo),
+    /// A language runtime reported an exception: one its program raised, or
+    /// a fatal error. The frame the runtime blames is selected.
+    LanguageException(LanguageException),
+    /// The program executed a breakpoint instruction of its own, such as
+    /// Go's `runtime.Breakpoint`. It resumes after the instruction.
+    ProgramBreakpoint {
+        /// The breakpoint instruction.
+        address: VirtualAddress,
+    },
     /// The process replaced its executable image.
     Exec {
         /// Whether the new image is this debugger's executable, which is
@@ -1498,6 +1568,10 @@ pub enum Request {
         policy: SignalPolicy,
         reply: Reply<SignalPolicy>,
     },
+    SetExceptionStops {
+        stops: ExceptionStops,
+        reply: Reply<ExceptionStops>,
+    },
     Shutdown {
         reply: Reply<()>,
     },
@@ -1553,6 +1627,7 @@ impl Request {
             Self::SetSignalPolicy { signal, policy, .. } => {
                 format!("set signal policy {signal} {policy:?}")
             }
+            Self::SetExceptionStops { stops, .. } => format!("set exception stops {stops:?}"),
             Self::RemoveAllBreakpoints { .. } => "remove all breakpoints".to_owned(),
             Self::ResolveWatchTarget { .. } => "resolve watch target".to_owned(),
             Self::RemoveAllWatchpoints { .. } => "remove all watchpoints".to_owned(),

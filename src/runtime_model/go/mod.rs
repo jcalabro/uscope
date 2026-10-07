@@ -4,6 +4,7 @@
 //! The model checks every g it follows against `allgs`, so a corrupted
 //! pointer is reported, never read as a goroutine.
 
+mod exceptions;
 mod layout;
 
 use std::sync::{Arc, OnceLock};
@@ -11,8 +12,8 @@ use std::sync::{Arc, OnceLock};
 use layout::{Goroutines, Labels, Layout, Missing, Threads};
 
 use super::{
-    CodeAddress, Crossing, Partial, RuntimeImage, RuntimeModel, RuntimeSignals, RuntimeStop,
-    RuntimeTask, TaskContext, TaskLabels, TaskPage, ThreadActivity,
+    CodeAddress, Crossing, Partial, RuntimeException, RuntimeHook, RuntimeImage, RuntimeModel,
+    RuntimeSignals, RuntimeStop, RuntimeTask, TaskContext, TaskLabels, TaskPage, ThreadActivity,
 };
 use crate::unwind::RegisterFile;
 use crate::{AddressRange, ImageAddress, StackSegment, TaskState, ThreadId, VirtualAddress};
@@ -31,6 +32,10 @@ const RIP: u16 = 16;
 pub(super) const TASK_NOUN: (&str, &str) = ("goroutine", "goroutines");
 /// Linux's signal for urgent socket data, which the runtime preempts with.
 const SIGURG: i32 = 23;
+/// Linux's signals for faults, which the runtime turns into panics.
+const SIGBUS: i32 = 7;
+const SIGFPE: i32 = 8;
+const SIGSEGV: i32 = 11;
 /// The first release whose runtime the model can read at all.
 const OLDEST: (u64, u64) = (1, 20);
 /// The most goroutines one list reads, so a corrupted `allglen` cannot
@@ -82,6 +87,10 @@ struct GoRuntime {
     /// The runtime's names for goroutine statuses and wait reasons, which
     /// are static data read at the first stop that needs them.
     names: OnceLock<Names>,
+    /// The functions that report panics and fatal errors, and how what
+    /// they report is laid out.
+    hooks: exceptions::Hooks,
+    exceptions: Result<exceptions::Layout, Missing>,
 }
 
 impl GoRuntime {
@@ -114,6 +123,8 @@ impl GoRuntime {
         Ok(Self {
             layout: Layout::bind(image.as_ref()),
             internal: Internal::bind(image.as_ref()),
+            hooks: exceptions::Hooks::bind(image.as_ref()),
+            exceptions: exceptions::Layout::bind(image.as_ref()),
             image,
             unverified,
             starting,
@@ -400,11 +411,26 @@ impl RuntimeModel for GoRuntime {
     }
 
     /// The runtime preempts a goroutine with SIGURG, and rechecks that it
-    /// still wants to whenever one arrives.
+    /// still wants to whenever one arrives. A fault in Go code becomes a
+    /// panic, and one the runtime cannot turn into a panic is fatal.
     fn signals(&self) -> RuntimeSignals {
         RuntimeSignals {
             deferrable: &[SIGURG],
+            handled: &[SIGBUS, SIGFPE, SIGSEGV],
         }
+    }
+
+    fn hooks(&self) -> &[RuntimeHook] {
+        self.hooks.all()
+    }
+
+    fn exception(
+        &self,
+        stop: &dyn RuntimeStop,
+        hook: ImageAddress,
+        registers: &RegisterFile,
+    ) -> Result<RuntimeException, Arc<str>> {
+        exceptions::exception(&self.hooks, &self.exceptions, stop, hook, registers)
     }
 
     /// The runtime's own traceback crosses the same switches

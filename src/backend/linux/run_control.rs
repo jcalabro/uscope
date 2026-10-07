@@ -585,6 +585,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.restart_after_internal(pid)
             }
             ClassifiedStop::Breakpoint(address) => self.handle_breakpoint_stop(pid, address),
+            // The program goes on after its own trap, which it raised for
+            // the debugger; the SIGTRAP is not delivered.
+            ClassifiedStop::ProgramTrap(address) => {
+                self.begin_visible_stop(pid, StopReason::ProgramBreakpoint { address })
+            }
             ClassifiedStop::Watch(owners) => self.handle_watch_stop(pid, owners),
             ClassifiedStop::Trace { watch } => self.handle_trace_stop(pid, watch),
             ClassifiedStop::SignalDelivery(pending) => self.handle_signal_stop(pid, pending),
@@ -644,6 +649,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                     hits: stopping,
                 },
             );
+        }
+        if let Some(reason) = self.runtime_exception(pid, address) {
+            return self.begin_visible_stop(pid, reason);
         }
 
         // No user breakpoint stops at this hit: none owns the site, or each
@@ -1343,6 +1351,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         ));
         let execution = inferior.active.take().map(|active| active.id);
         let process_id = process_id(inferior.tgid);
+        if matches!(reason, StopReason::LanguageException(_)) {
+            self.select_blamed_frame(triggering_thread);
+        }
         self.bump_revision();
         if self.attach_reply.is_some() {
             let _ = self.events.send(DebuggerEvent::InferiorAttached {

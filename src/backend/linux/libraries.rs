@@ -92,6 +92,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn refresh_libraries(&mut self) -> Result<()> {
         let lost_locations = self.refresh_modules()?;
         self.ensure_loader_breakpoint()?;
+        self.sync_runtime_hooks()?;
         self.reresolve_breakpoints(lost_locations)
     }
 
