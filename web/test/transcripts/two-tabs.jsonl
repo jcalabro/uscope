@@ -1,0 +1,18 @@
+{"message":{"id":1,"method":"continue","params":{}},"to":"server"}
+{"message":{"connection":1,"cwd":"<root>","name":"tester","role":"control","type":"hello","version":1},"to":"page"}
+{"message":{"busy":null,"inferior":{"state":"notStarted"},"revision":0,"session":"01db24f5","target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[],"type":"state"},"to":"page"}
+{"message":{"people":[{"connection":1,"name":"tester","role":"control"}],"type":"presence"},"to":"page"}
+{"message":{"people":[{"connection":1,"name":"tester","role":"control"},{"connection":2,"name":"tester","role":"control"}],"type":"presence"},"to":"page"}
+{"message":{"busy":null,"inferior":{"pid":1947057,"state":"running"},"revision":1,"session":"01db24f5","target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[{"id":1947057,"name":null,"stopped":false}],"type":"state"},"to":"page"}
+{"message":{"id":1,"result":null,"type":"result"},"to":"page"}
+{"message":{"connection":1,"name":"tester","text":"started the program","type":"notice"},"to":"page"}
+{"message":{"busy":null,"inferior":{"pid":1947057,"reason":{"description":"stopped at the program entry","kind":"entry"},"state":"stopped","stop":2,"thread":1947057},"revision":4,"session":"01db24f5","target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[{"id":1947057,"name":"spin","stopped":true}],"type":"state"},"to":"page"}
+{"message":{"id":2,"method":"continue","params":{"stop":2}},"to":"server"}
+{"message":{"id":2,"result":null,"type":"result"},"to":"page"}
+{"message":{"connection":1,"name":"tester","text":"continued","type":"notice"},"to":"page"}
+{"message":{"busy":null,"inferior":{"pid":1947057,"state":"running"},"revision":5,"session":"01db24f5","target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[{"id":1947057,"name":"spin","stopped":false}],"type":"state"},"to":"page"}
+{"message":{"busy":null,"inferior":{"pid":1947057,"state":"running"},"revision":6,"session":"01db24f5","target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[{"id":1947057,"name":"spin","stopped":false}],"type":"state"},"to":"page"}
+{"message":{"connection":2,"name":"tester","text":"paused","type":"notice"},"to":"page"}
+{"message":{"busy":null,"inferior":{"pid":1947057,"reason":{"description":"paused","kind":"pause"},"state":"stopped","stop":3,"thread":1947057},"revision":7,"session":"01db24f5","target":{"arguments":[],"kind":"launch","pid":null,"program":"<root>/build/test-programs/spin"},"threads":[{"id":1947057,"name":"spin","stopped":true}],"type":"state"},"to":"page"}
+{"message":{"id":3,"method":"kill"},"to":"server"}
+{"message":{"id":3,"result":null,"type":"result"},"to":"page"}

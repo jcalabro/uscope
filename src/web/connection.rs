@@ -39,7 +39,10 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
 
     let (answers, mut pending) = mpsc::channel::<Utf8Bytes>(PENDING_ANSWERS);
     loop {
+        // Biased, in this order: requests are read even during a flood of
+        // output, and a request's state change goes out before its answer.
         let outgoing = tokio::select! {
+            biased;
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(text))) => {
                     dispatch(&session, connection, role, text.as_str(), answers.clone());
@@ -49,7 +52,6 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                 Some(Ok(Message::Close(_)) | Err(_)) | None => break,
             },
-            Some(answer) = pending.recv() => answer,
             changed = joined.state.changed() => {
                 if changed.is_err() {
                     break;
@@ -57,6 +59,7 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
                 let state = (**joined.state.borrow_and_update()).clone();
                 encode(&ServerMessage::State(state))
             }
+            Some(answer) = pending.recv() => answer,
             message = joined.messages.recv() => match message {
                 Ok(text) => Utf8Bytes::from(&*text),
                 // Output was dropped; the state, which matters, is sent whole.

@@ -550,12 +550,18 @@ impl Session {
             || info.program.clone(),
             |name| name.to_string_lossy().into_owned(),
         );
+        // The new session's state goes out before the request is answered,
+        // so a page can open it; the pump takes every later change.
+        let events = handle.subscribe();
+        let snapshot = handle.snapshot().await?;
+        self.state
+            .send_replace(Arc::new(describe(&id, &info, &snapshot, &Ended::default())));
         let pump = tokio::spawn(pump(
             Arc::clone(&self.state),
             id,
             info,
             handle.clone(),
-            handle.subscribe(),
+            events,
         ));
         *target = Some(Target {
             debugger: Some(debugger),
@@ -737,7 +743,14 @@ async fn pump(
         let Ok(snapshot) = handle.snapshot().await else {
             return;
         };
-        state.send_replace(Arc::new(describe(&id, &target, &snapshot, &ended)));
+        let described = describe(&id, &target, &snapshot, &ended);
+        state.send_if_modified(|current| {
+            let changed = **current != described;
+            if changed {
+                *current = Arc::new(described);
+            }
+            changed
+        });
         match events.recv().await {
             Ok(event) => ended.observe(&event),
             Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -765,10 +778,7 @@ impl Ended {
     fn observe(&mut self, event: &DebuggerEvent) {
         match event {
             DebuggerEvent::InferiorExited { status, .. } => {
-                self.exited = Some(format::stop(
-                    &StopReason::Exited(status.clone()),
-                    Renderer::new(false),
-                ));
+                self.exited = Some(plain(&StopReason::Exited(status.clone())));
             }
             DebuggerEvent::InferiorDetached { process_id, .. } => {
                 self.detached = Some(process_id.get());
@@ -779,6 +789,14 @@ impl Ended {
             _ => {}
         }
     }
+}
+
+/// Why the program stopped, as the CLI says it but without "inferior":
+/// the page names the program.
+fn plain(reason: &StopReason) -> String {
+    let text = format::stop(reason, Renderer::new(false));
+    text.strip_prefix("inferior ")
+        .map_or_else(|| text.clone(), str::to_owned)
 }
 
 fn describe(
@@ -809,7 +827,7 @@ fn describe(
             thread: thread_id.get(),
             reason: protocol::StopReason {
                 kind: reason_kind(reason).to_owned(),
-                description: format::stop(reason, Renderer::new(false)),
+                description: plain(reason),
             },
         },
     };

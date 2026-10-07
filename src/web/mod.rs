@@ -140,6 +140,9 @@ impl App {
 
 /// Runs the server until it is interrupted.
 pub async fn run(args: &WebArgs) -> Result<()> {
+    // Ctrl+C is caught from here on. One that comes while the program starts
+    // ends the server once it has, so nothing is left half launched.
+    let terminated = crate::dap::termination();
     let start = start_from(args);
     let listener = bind(args).await?;
     let address = listener.local_addr().context("the listening address")?;
@@ -175,11 +178,12 @@ pub async fn run(args: &WebArgs) -> Result<()> {
     let router = Router::new()
         .route("/api/ws", get(socket))
         .route("/api/login", post(login))
+        .route("/api/check", post(check))
         .fallback(get(page))
         .with_state(app);
     let served = tokio::select! {
         served = axum::serve(listener, router) => served.context("the server failed"),
-        () = crate::dap::termination() => Ok(()),
+        () = terminated => Ok(()),
     };
     session.shutdown().await;
     served
@@ -254,6 +258,16 @@ async fn login(State(app): State<Arc<App>>, headers: HeaderMap, body: String) ->
         |_| StatusCode::BAD_REQUEST.into_response(),
         |cookie| (StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response(),
     )
+}
+
+/// Says whether this browser's cookie grants access, which a refused
+/// WebSocket cannot tell the page.
+async fn check(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
+    if app.authorize(&headers).is_some() {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::FORBIDDEN
+    }
 }
 
 async fn page(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
