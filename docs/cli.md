@@ -188,6 +188,7 @@ it inherited. A program that calls `exec` is followed, with its breakpoints.
 | --- | --- |
 | `break`, `b` [*location*] [*options*] | Break at a `function`, `file:line`, `file:function`, `0xaddress`, or a line of the selected frame's file. |
 | `tbreak` [*location*] [*options*] | Break once: the stop the breakpoint causes deletes it. |
+| `rbreak` *regex* | Break at every function of the loaded modules whose name matches, at most 200. |
 | `breakpoints`, `info breakpoints` | List breakpoints and their hit counts. |
 | `delete`, `d` *ids...* | Delete breakpoints, and watchpoints written `w2`; `all` deletes every breakpoint. |
 | `condition` *id* [*expression*] | Stop only where the [expression](expressions.md) is true; with none, always. |
@@ -244,6 +245,12 @@ Id  On  Hits  Where                                 Options
               └ 0x7ffff7fb9136  parse_header at src/parse.c:41 in libparse.so
 3   ●      0  render at src/view.c:88               temporary
 ```
+
+`rbreak` matches demangled names anywhere in them, as `rbreak ^parse_`
+does, and sets one breakpoint per function, as `break` would; a pattern
+matching more than 200 is refused with the count. A function or source
+file that no loaded module has is answered with the nearest names, as in
+`no function named 'proces' was found; did you mean 'process'?`.
 
 Addresses are always `0x`-prefixed, so `break add` names a function. Functions
 without debug information, such as libc's, break at their symbol, and
