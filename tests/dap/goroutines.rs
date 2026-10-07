@@ -160,6 +160,41 @@ fn a_hundred_thousand_goroutines_are_cut_with_a_count_of_the_rest() {
     dap.finish();
 }
 
+/// A panic nothing recovers stops in the runtime, with the program's frame
+/// that panicked selected. Clients focus the first frame whose source is
+/// not deemphasized, so the runtime's frames above it are.
+#[test]
+fn an_unrecovered_panic_is_shown_where_the_program_panicked() {
+    let mut dap = Dap::start("panic");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("panic-go-o0"),
+        json!({}),
+        &Configuration::default(),
+    );
+    let stop = dap.stopped(started.mark);
+    assert_eq!(stop.reason, "exception", "{stop:?}");
+    let trace = dap.request("stackTrace", json!({"threadId": stop.thread}));
+    let frames = trace["stackFrames"].as_array().expect("frames");
+    let focused = frames
+        .iter()
+        .find(|frame| {
+            frame["source"].is_object() && frame["source"]["presentationHint"] != "deemphasize"
+        })
+        .unwrap_or_else(|| panic!("{trace}"));
+    assert_eq!(focused["name"], "main.explode", "{trace}");
+    // Below it, the program's callers are shown as they are.
+    let caller = frames
+        .iter()
+        .find(|frame| frame["name"] == "main.main")
+        .unwrap_or_else(|| panic!("{trace}"));
+    assert!(
+        caller["source"].get("presentationHint").is_none(),
+        "{trace}"
+    );
+    dap.finish();
+}
+
 #[test]
 fn a_stack_that_crosses_stacks_labels_each_run_of_frames() {
     let mut dap = Dap::start("stack labels");
