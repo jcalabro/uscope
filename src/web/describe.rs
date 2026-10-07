@@ -129,7 +129,9 @@ fn watchpoint(watchpoint: &uscope::Watchpoint) -> protocol::Watchpoint {
         bytes: watchpoint.byte_size,
         scope: match &watchpoint.scope {
             uscope::WatchScope::ThreadLocal { thread } => format!("thread {thread}'s instance"),
-            uscope::WatchScope::Frame { .. } => "until its function returns".to_owned(),
+            uscope::WatchScope::Frame { thread, activation } => {
+                format!("thread {thread}'s frame at {activation}, until it returns")
+            }
             _ => String::new(),
         },
         condition: watchpoint.condition.as_ref().map(ToString::to_string),
