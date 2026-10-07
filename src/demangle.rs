@@ -35,7 +35,7 @@ pub fn spells(mangled: &str, name: &str) -> bool {
     let (written, written_parameters) = split_parameters(name);
     // Only a mangled name holding the name's last part can demangle to it,
     // which spares demangling every symbol of a module.
-    let last = written.rsplit("::").next().unwrap_or(written);
+    let last = last_part(name);
     if last.is_empty() || !mangled.contains(last) {
         return false;
     }
@@ -57,6 +57,13 @@ pub fn spells(mangled: &str, name: &str) -> bool {
             || parameters
                 .strip_prefix(written_parameters)
                 .is_some_and(|qualifiers| qualifiers.starts_with(' ')))
+}
+
+/// The part of a written or demangled name after its last scope, without
+/// its parameters, which a name `spells` must share with its symbol's.
+pub fn last_part(name: &str) -> &str {
+    let (written, _) = split_parameters(name);
+    written.rsplit("::").next().unwrap_or(written)
 }
 
 /// A function's name and its parameter list, which begins at the first

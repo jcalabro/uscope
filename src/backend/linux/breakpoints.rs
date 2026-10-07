@@ -115,7 +115,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         if let Some(existing) = self.breakpoints.identical(&spec, &options) {
             return Ok(existing.clone());
         }
-        if self.sites_live() {
+        // Only a function breakpoint can wait on an indirect function's
+        // resolver.
+        let follows_resolvers = self.follows_resolvers(&spec);
+        if follows_resolvers {
             self.learn_from_got(Some(&spec));
         }
 
@@ -141,7 +144,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         self.next_breakpoint_id = next_id;
         self.breakpoints.push(breakpoint.clone());
-        if self.sites_live() {
+        if follows_resolvers {
             self.sync_resolvers()?;
         }
         self.publish_breakpoints_changed();
@@ -288,6 +291,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(locations.into())
     }
 
+    /// Whether a breakpoint's spec can name an indirect function, whose
+    /// resolver's entries and returns follow the breakpoint once sites are
+    /// live.
+    fn follows_resolvers(&self, spec: &BreakpointSpec) -> bool {
+        self.sites_live() && matches!(spec, BreakpointSpec::Function(_))
+    }
+
     /// Whether the program or a loaded module imports a function of the
     /// name.
     fn imports_function(&self, name: &str) -> bool {
@@ -333,7 +343,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             remove_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
         }
         self.breakpoints.remove(index);
-        if self.sites_live() {
+        if self.follows_resolvers(&breakpoint.spec) {
             self.sync_resolvers()?;
         }
         self.publish_breakpoints_changed();
@@ -363,7 +373,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let mut breakpoint = current.clone();
         breakpoint.enabled = enabled;
         if enabled {
-            if self.sites_live() {
+            if self.follows_resolvers(&breakpoint.spec) {
                 self.learn_from_got(Some(&breakpoint.spec));
             }
             // A spec that resolves nowhere now is kept pending, as one
@@ -382,7 +392,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         }
         self.breakpoints[index] = breakpoint.clone();
-        if self.sites_live() {
+        if self.follows_resolvers(&breakpoint.spec) {
             self.sync_resolvers()?;
         }
         self.publish_breakpoints_changed();
