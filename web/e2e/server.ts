@@ -107,7 +107,7 @@ export const test = base.extend<{ program: string[]; uscope: Uscope; quiet: unde
     { auto: true },
   ],
   program: [[fixture("spin")], { option: true }],
-  uscope: async ({ program }, use, info) => {
+  uscope: async ({ program, context }, use, info) => {
     const servers: Uscope[] = [];
     await mkdir(info.outputDir, { recursive: true });
     const recording = (index: number) => info.outputPath(`uscope-${index}.flight.log`);
@@ -121,6 +121,11 @@ export const test = base.extend<{ program: string[]; uscope: Uscope; quiet: unde
         return another;
       },
     });
+    // Pages go before their server, so none sees it vanish and reconnects
+    // while the test's errors are counted.
+    for (const page of context.pages()) {
+      await page.close();
+    }
     for (const server of servers) {
       await server.stop();
     }
