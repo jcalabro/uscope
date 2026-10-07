@@ -1761,6 +1761,48 @@ fn strings_print_as_quoted_escaped_text() {
     );
 }
 
+/// Characters wider than a byte print as their numbers and what they are,
+/// and pointers to text of them as the text.
+#[test]
+fn wide_characters_print_as_their_numbers_and_characters() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cpp/strings.cpp");
+    let line = std::fs::read_to_string(&path)
+        .expect("source")
+        .lines()
+        .position(|line| line.contains("strings stop here"))
+        .expect("marker")
+        + 1;
+    let stdout = batch(
+        &[
+            "--color",
+            "never",
+            "build/test-programs/strings-cpp-clang-o0",
+        ],
+        &[&format!("break strings.cpp:{line}"), "run", "print"],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "(wchar_t) wide = 233 'é'\n",
+            "(char8_t) eight = 97 'a'\n",
+            "(char16_t) sixteen = 955 'λ'\n",
+            "(char32_t) thirty_two = 129408 '🦀'\n",
+            // A surrogate is a code unit, not a character.
+            "(char16_t) surrogate = 55296\n",
+            "(const char16_t *) sixteen_text = 0x",
+            " \"λx\"\n",
+            "(const char8_t *) eight_text = 0x",
+            " \"éight\"\n",
+        ],
+    );
+    let stdout = batch(
+        &["--color", "never", "build/test-programs/strings-rust-o0"],
+        &["break strings_target", "run", "print letter"],
+    );
+    assert!(stdout.contains("(char) letter = 955 'λ'\n"), "{stdout}");
+}
+
 /// `print` shows a value as its view presents it, with its elements up to
 /// the inspection's budget; `print/r` and `set views off` show it as
 /// stored; and `info view` says which view presents it, or why none does.

@@ -812,6 +812,19 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             gimli::DW_ATE_complex_float if byte_size % 2 == 0 => {
                 Some(BaseTypeEncoding::ComplexFloating)
             }
+            // `char8_t`, `char16_t`, `char32_t`, and Rust's `char` are code
+            // units of UTF-8, UTF-16, and UTF-32.
+            gimli::DW_ATE_UTF if matches!(byte_size, 1 | 2 | 4) => {
+                Some(BaseTypeEncoding::UnsignedCharacter)
+            }
+            // C++'s `wchar_t` is a type of its own, which compilers encode
+            // as an integer; on Linux it holds UTF-32.
+            gimli::DW_ATE_signed if name.as_ref() == "wchar_t" => {
+                Some(BaseTypeEncoding::SignedCharacter)
+            }
+            gimli::DW_ATE_unsigned if name.as_ref() == "wchar_t" => {
+                Some(BaseTypeEncoding::UnsignedCharacter)
+            }
             _ => integer_encoding(raw_encoding),
         };
         let Some(encoding) = encoding else {

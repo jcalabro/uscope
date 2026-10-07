@@ -58,13 +58,15 @@ impl TextReader<'_> {
     }
 
     /// Reads up to `limit` bytes at `address`, a page at a time, stopping
-    /// at the first byte `stop` accepts. Returns the bytes before it,
-    /// whether it was found, and why reading stopped short, if it did.
+    /// at the first code unit of `width` bytes that is zero when the text
+    /// ends at a NUL. Returns the bytes before it, whether it was found,
+    /// and why reading stopped short, if it did.
     fn read_text(
         &mut self,
         address: VirtualAddress,
         limit: usize,
-        stop: impl Fn(u8) -> bool,
+        width: usize,
+        nul_terminated: bool,
     ) -> (Vec<u8>, bool, Option<Stopped>) {
         let mut bytes = Vec::new();
         while bytes.len() < limit {
@@ -84,27 +86,37 @@ impl TextReader<'_> {
             let Ok(chunk) = self.runtime.read_memory(next, granted) else {
                 return (bytes, false, Some(Stopped::Unreadable(next)));
             };
-            if let Some(position) = chunk.iter().position(|byte| stop(*byte)) {
-                bytes.extend_from_slice(&chunk[..position]);
+            // A unit may straddle the chunks, so the search begins at the
+            // unit the chunk's first byte belongs to.
+            let first = bytes.len() - bytes.len() % width;
+            bytes.extend_from_slice(&chunk);
+            if nul_terminated
+                && let Some(position) = bytes[first..]
+                    .chunks_exact(width)
+                    .position(|unit| unit.iter().all(|byte| *byte == 0))
+            {
+                bytes.truncate(first + position * width);
                 return (bytes, true, None);
             }
-            bytes.extend_from_slice(&chunk);
         }
         (bytes, false, None)
     }
 
-    /// The NUL-terminated text at an address.
-    fn c_string(&mut self, address: VirtualAddress) -> TextSummary {
+    /// The NUL-terminated text of `width`-byte characters at an address.
+    fn c_string(
+        &mut self,
+        address: VirtualAddress,
+        width: usize,
+        byte_order: crate::ByteOrder,
+    ) -> TextSummary {
         let (bytes, terminated, stopped) =
-            self.read_text(address, TextSummary::MAX_BYTES, |byte| byte == 0);
-        TextSummary {
-            bytes: bytes.into(),
-            completion: match stopped {
-                Some(stopped) => stopped.completion(None),
-                None if terminated => TextCompletion::Complete,
-                None => TextCompletion::Truncated { length: None },
-            },
-        }
+            self.read_text(address, TextSummary::MAX_BYTES * width, width, true);
+        let completion = match stopped {
+            Some(stopped) => stopped.completion(None),
+            None if terminated => TextCompletion::Complete,
+            None => TextCompletion::Truncated { length: None },
+        };
+        text(bytes, width, byte_order, completion)
     }
 
     /// The `length` bytes of text at an address.
@@ -112,7 +124,7 @@ impl TextReader<'_> {
         let limit = usize::try_from(length)
             .unwrap_or(usize::MAX)
             .min(TextSummary::MAX_BYTES);
-        let (bytes, _, stopped) = self.read_text(address, limit, |_| false);
+        let (bytes, _, stopped) = self.read_text(address, limit, 1, false);
         TextSummary {
             bytes: bytes.into(),
             completion: match stopped {
@@ -160,6 +172,23 @@ impl TextReader<'_> {
     }
 }
 
+/// Text read as bytes, of characters `width` bytes wide.
+fn text(
+    bytes: Vec<u8>,
+    width: usize,
+    byte_order: crate::ByteOrder,
+    completion: TextCompletion,
+) -> TextSummary {
+    if width == 1 {
+        TextSummary {
+            bytes: bytes.into(),
+            completion,
+        }
+    } else {
+        TextSummary::from_units(&bytes, width, byte_order, completion)
+    }
+}
+
 impl Stopped {
     const fn completion(self, length: Option<u64>) -> TextCompletion {
         match self {
@@ -196,10 +225,18 @@ impl DwarfVariableInfo {
                     ..
                 },
                 VariableValue::Address(address),
-            ) if address.address.get() != 0
-                && (self.is_character(*target) || self.is_sentinel_text(type_id)) =>
-            {
-                Some(reader.c_string(address.address))
+            ) if address.address.get() != 0 && self.is_sentinel_text(type_id) => {
+                Some(reader.c_string(address.address, 1, self.target.byte_order))
+            }
+            (
+                ValueShape::Indirection {
+                    target: Some(target),
+                    ..
+                },
+                VariableValue::Address(address),
+            ) if address.address.get() != 0 && self.character_width(*target).is_some() => {
+                let width = self.character_width(*target)?;
+                Some(reader.c_string(address.address, width, self.target.byte_order))
             }
             (
                 ValueShape::Array {
@@ -208,22 +245,28 @@ impl DwarfVariableInfo {
                     ..
                 },
                 _,
-            ) if dimensions.len() == 1 && self.is_character(*element) => {
+            ) if dimensions.len() == 1 && self.character_width(*element).is_some() => {
+                let width = self.character_width(*element)?;
                 let count = usize::try_from(dimensions[0].count).ok()?;
-                let bytes =
-                    match reader.storage_bytes(storage, 0, count.min(TextSummary::MAX_BYTES))? {
-                        Ok(bytes) => bytes,
-                        Err(stopped) => return Some(stopped.summary(None)),
-                    };
-                let terminated = bytes.iter().position(|byte| *byte == 0);
-                Some(TextSummary {
-                    bytes: Arc::from(&bytes[..terminated.unwrap_or(bytes.len())]),
-                    completion: if terminated.is_none() && count > TextSummary::MAX_BYTES {
+                let shown = count.min(TextSummary::MAX_BYTES);
+                let bytes = match reader.storage_bytes(storage, 0, shown.checked_mul(width)?)? {
+                    Ok(bytes) => bytes,
+                    Err(stopped) => return Some(stopped.summary(None)),
+                };
+                let terminated = bytes
+                    .chunks_exact(width)
+                    .position(|unit| unit.iter().all(|byte| *byte == 0));
+                let end = terminated.map_or(bytes.len(), |units| units * width);
+                Some(text(
+                    bytes[..end].to_vec(),
+                    width,
+                    self.target.byte_order,
+                    if terminated.is_none() && count > TextSummary::MAX_BYTES {
                         TextCompletion::Truncated { length: None }
                     } else {
                         TextCompletion::Complete
                     },
-                })
+                ))
             }
             (ValueShape::Slice { text: true, .. }, VariableValue::Slice { length, .. }) => {
                 let address = match self.read_pointer(storage, 0, &mut reader)? {
@@ -363,15 +406,50 @@ impl DwarfVariableInfo {
     /// Whether a type is a one-byte character, through typedefs and
     /// qualifiers.
     fn is_character(&self, id: TypeId) -> bool {
-        self.value_shape(id).is_ok_and(|shape| {
-            shape.scalar().is_some_and(|base| {
-                base.byte_size == 1
-                    && matches!(
-                        base.encoding,
-                        BaseTypeEncoding::SignedCharacter | BaseTypeEncoding::UnsignedCharacter
-                    )
-            })
-        })
+        self.character_width(id) == Some(1)
+    }
+
+    /// How many bytes wide a character type's characters are, through
+    /// typedefs and qualifiers: a character type's size, or the size of
+    /// the integer C's `wchar_t`, `char16_t`, and `char32_t` name.
+    fn character_width(&self, id: TypeId) -> Option<usize> {
+        let base = self.value_shape(id).ok()?.scalar()?.clone();
+        let width = usize::try_from(base.byte_size).ok()?;
+        if matches!(
+            base.encoding,
+            BaseTypeEncoding::SignedCharacter | BaseTypeEncoding::UnsignedCharacter
+        ) {
+            return matches!(width, 1 | 2 | 4).then_some(width);
+        }
+        if !matches!(
+            base.encoding,
+            BaseTypeEncoding::Signed | BaseTypeEncoding::Unsigned
+        ) {
+            return None;
+        }
+        let mut current = id;
+        for _ in 0..MAX_STRING_DEPTH {
+            let info = self.type_info(current).ok()?;
+            match &info.kind {
+                TypeKind::Named {
+                    target: Some(target),
+                    ..
+                } => {
+                    let named = match info.name.as_ref() {
+                        "wchar_t" | "char32_t" => 4,
+                        "char16_t" => 2,
+                        _ => 0,
+                    };
+                    if named != 0 {
+                        return (named == width).then_some(width);
+                    }
+                    current = target.id;
+                }
+                TypeKind::Modified { target, .. } => current = target.id,
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// Whether a type is Zig's NUL-terminated pointer to bytes,
@@ -524,7 +602,11 @@ mod tests {
             runtime: &mut Filled,
             budget: &mut budget,
         };
-        let text = reader.c_string(VirtualAddress::new(u64::MAX - 2));
+        let text = reader.c_string(
+            VirtualAddress::new(u64::MAX - 2),
+            1,
+            crate::ByteOrder::Little,
+        );
         assert_eq!(&*text.bytes, b"xxx");
         assert_eq!(text.completion, TextCompletion::Truncated { length: None });
     }

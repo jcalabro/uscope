@@ -1147,7 +1147,79 @@ fn read_text<M: Machine>(
             VariableUnavailableReason::ValueAccess(ValueAccessUnavailableReason::NullPointer),
         )));
     }
-    read_bytes(machine, address, length)
+    let width = source.width();
+    if width == 1 {
+        return read_bytes(machine, address, length);
+    }
+    read_units(machine, address, length, width)
+}
+
+/// The text of `width`-byte characters at `address`, `length` of them or
+/// up to a NUL, decoded from UTF-16 or UTF-32. A length it gives is in
+/// bytes.
+fn read_units<M: Machine>(
+    machine: &mut M,
+    address: u64,
+    length: Option<u64>,
+    width: usize,
+) -> Result<TextSummary, Failure> {
+    let limit = TextSummary::MAX_BYTES as u64;
+    let wide = width as u64;
+    let wanted = length.map_or(limit, |length| length.min(limit)) * wide;
+    let in_bytes = |length: Option<u64>| length.and_then(|length| length.checked_mul(wide));
+    let mut bytes = Vec::new();
+    let stopped = loop {
+        let read = bytes.len() as u64;
+        if read == wanted {
+            break None;
+        }
+        let Some(next) = address.checked_add(read) else {
+            break None;
+        };
+        let size = (PAGE_SIZE - next % PAGE_SIZE).min(wanted - read);
+        let chunk = match machine.read(next, usize::try_from(size).unwrap_or(usize::MAX)) {
+            Ok(chunk) => chunk,
+            Err(Stop::Missing(state)) => {
+                break Some(match *state {
+                    VariableState::Unavailable(VariableUnavailableReason::InspectionLimit(
+                        exhaustion,
+                    )) => TextCompletion::Limited {
+                        length: in_bytes(length),
+                        exhaustion,
+                    },
+                    _ => TextCompletion::Unreadable {
+                        address: crate::VirtualAddress::new(next),
+                    },
+                });
+            }
+            Err(stop) => return Err(stop.into()),
+        };
+        // A unit may straddle the chunks, so the search begins at the unit
+        // the chunk's first byte belongs to.
+        let first = bytes.len() - bytes.len() % width;
+        bytes.extend_from_slice(&chunk);
+        if length.is_none()
+            && let Some(position) = bytes[first..]
+                .chunks_exact(width)
+                .position(|unit| unit.iter().all(|byte| *byte == 0))
+        {
+            bytes.truncate(first + position * width);
+            break Some(TextCompletion::Complete);
+        }
+    };
+    let completion = match (stopped, length) {
+        (Some(completion), _) => completion,
+        (None, Some(length)) if bytes.len() as u64 == length * wide => TextCompletion::Complete,
+        (None, length) => TextCompletion::Truncated {
+            length: in_bytes(length),
+        },
+    };
+    Ok(TextSummary::from_units(
+        &bytes,
+        width,
+        machine.byte_order(),
+        completion,
+    ))
 }
 
 /// Where a `text` shape's characters are: the first one's address, and
@@ -1161,11 +1233,11 @@ fn text_location<M: Machine>(
         .map(|program| count(program, machine, "text's length"))
         .transpose()?;
     Ok(match source {
-        TextSource::Pointer(program) => match interp::value(program, machine)? {
+        TextSource::Pointer { program, .. } => match interp::value(program, machine)? {
             Value::Pointer(address) => (address, declared),
             _ => return Err(internal("a text's pointer is not a pointer")),
         },
-        TextSource::Elements { program, first } => {
+        TextSource::Elements { program, first, .. } => {
             let Value::Place(place) = interp::value(program, machine)? else {
                 return Err(internal("a text's elements are not a place"));
             };
@@ -1199,6 +1271,8 @@ pub fn text_span<M: Machine>(
 ) -> Result<Option<(u64, Option<u64>)>, Failure> {
     let mut machine = ViewMachine::new(machine, bound, this);
     match resolve(bound, &mut machine)? {
+        // Slices of text count bytes, which wider characters are not.
+        BoundShape::Text { source, .. } if source.width() != 1 => Ok(None),
         BoundShape::Text { source, length } => {
             let (address, length) = text_location(source, length.as_ref(), &mut machine)?;
             if address == 0 && length != Some(0) {

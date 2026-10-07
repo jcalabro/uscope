@@ -464,10 +464,7 @@ fn bound_views_reject_what_does_not_type_check() {
             "show sequence(n) for i in range(n) => data[i].x",
             "`data[i]` has no members",
         ),
-        (
-            "show text(n)",
-            "`text` takes a pointer to one-byte characters",
-        ),
+        ("show text(n)", "`text` takes a pointer to characters"),
         (
             "show sequence(data) for i in range(n) => i",
             "is not an integer",
