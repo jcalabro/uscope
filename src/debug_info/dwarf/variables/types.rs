@@ -2528,6 +2528,21 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
     }
 
+    /// The size of a Zig packed struct that Zig's own backend describes by
+    /// the integer that backs it.
+    fn packed_size(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+    ) -> std::result::Result<Option<u64>, Arc<str>> {
+        if self.language(unit_index) != SourceLanguage::Zig {
+            return Ok(None);
+        }
+        Ok(self
+            .target(entry, unit_index)?
+            .and_then(|backing| self.byte_size_of(backing.id)))
+    }
+
     fn build_record_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -2542,6 +2557,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             RecordKind::Struct
         };
         let incomplete = strict_flag(entry, gimli::DW_AT_declaration)?;
+        let explicit_size = match explicit_size {
+            None if !incomplete => self.packed_size(entry, unit_index)?,
+            size => size,
+        };
         if !incomplete && explicit_size.is_none() {
             return Err("complete record type has no byte size".into());
         }
@@ -2829,6 +2848,31 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 });
             }
             return Err("bit-field has no bit offset".into());
+        }
+        // A member placed by its first bit alone, as Zig's own backend
+        // places a packed struct's, spans its type's bits.
+        if let Some(bit_offset) = entry
+            .attr(gimli::DW_AT_data_bit_offset)
+            .and_then(gimli::Attribute::udata_value)
+        {
+            if bit_offset % 8 == 0 {
+                return Ok(RecordMemberLayout::ByteOffset(bit_offset / 8));
+            }
+            let bit_size = match self.entries.get(target.id.index()) {
+                Some(TypeEntry::Resolved(TypeInfo {
+                    kind: TypeKind::Base(base),
+                    ..
+                })) => base.bit_size.or_else(|| base.byte_size.checked_mul(8)),
+                _ => None,
+            }
+            .ok_or_else(|| Arc::from("member placed by bit has no bit width"))?;
+            bit_offset
+                .checked_add(bit_size)
+                .ok_or_else(|| Arc::from("record bit-field range overflows"))?;
+            return Ok(RecordMemberLayout::BitRange {
+                bit_offset,
+                bit_size,
+            });
         }
         Ok(entry.attr(gimli::DW_AT_data_member_location).map_or_else(
             || {
