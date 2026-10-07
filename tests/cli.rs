@@ -762,6 +762,12 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
 fn batch_with_settings(settings: &str, arguments: &[&str], commands: &[&str]) -> String {
     let directory = support::ScratchDir::new("cli-settings");
     let path = directory.path().join("config.toml");
+    // How long a run took depends on the machine's load, as the settings
+    // every other test uses say.
+    let settings = match settings.split_once("[stop]\n") {
+        Some((before, after)) => format!("{before}[stop]\nelapsed = false\n{after}"),
+        None => format!("{settings}\n[stop]\nelapsed = false\n"),
+    };
     std::fs::write(&path, settings).expect("write the settings");
     let mut all = vec!["--batch"];
     for command in commands {
