@@ -211,7 +211,8 @@ pub fn breakpoint(breakpoint: &Breakpoint, placed: &[Placed], renderer: Renderer
     };
     for location in placed {
         let described = self::placed(location, renderer);
-        if location.function.is_none() && location.source.is_none() {
+        // A location without a source line already says its address.
+        if location.source.is_none() {
             write!(output, "\n  {described}")
         } else {
             write!(

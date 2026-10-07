@@ -19,9 +19,9 @@ use object::{
 };
 
 use crate::{
-    AddressRange, EmbeddedSymbolTable, ImageAddress, SectionId, SectionInfo, SymbolBinding,
-    SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolTableSources,
-    ThreadLocal,
+    AddressRange, EmbeddedSymbolTable, GotSlot, GotTarget, ImageAddress, SectionId, SectionInfo,
+    SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind,
+    SymbolTableSources, ThreadLocal,
 };
 
 /// Bounds the decompressed size of an embedded symbol table so a malformed or
@@ -30,6 +30,7 @@ const EMBEDDED_TABLE_LIMIT: usize = 64 << 20;
 
 pub struct SymbolTable {
     pub symbols: Vec<SymbolInfo>,
+    pub got_slots: Vec<GotSlot>,
     pub sources: SymbolTableSources,
 }
 
@@ -80,10 +81,12 @@ pub fn load_symbols(
     collect(object, object.dynamic_symbols(), &sections, true, &mut raw);
     collect_versions(object, &mut raw);
     let mut raw = distinguish_versions(raw);
-    collect_plt(object, &mut raw);
+    let got_slots = got_slots(object);
+    collect_plt(object, &got_slots, &mut raw);
 
     SymbolTable {
         symbols: normalize(raw, unwind_functions),
+        got_slots,
         sources: SymbolTableSources {
             static_table: object.symbol_table().is_some(),
             dynamic_table: object.dynamic_symbol_table().is_some(),
@@ -607,13 +610,53 @@ fn distinguish_versions(
 /// reads: the symbol a `JUMP_SLOT` or `GLOB_DAT` relocation fills the slot
 /// with, or for an `IRELATIVE` one, the indirect function whose resolver
 /// fills it. A stub is one section entry long, and local to the image.
-fn collect_plt(object: &object::File<'_>, raw: &mut BTreeMap<(Box<[u8]>, u64), RawSymbol>) {
+/// The GOT slots the loader fills with functions' addresses: those that
+/// relocations name a function for, and those an indirect function of the
+/// module's own fills.
+fn got_slots(object: &object::File<'_>) -> Vec<GotSlot> {
+    if object.architecture() != object::Architecture::X86_64 {
+        return Vec::new();
+    }
+    let mut slots = Vec::new();
+    for (slot, relocation) in object.dynamic_relocations().into_iter().flatten() {
+        let object::RelocationFlags::Elf { r_type } = relocation.flags() else {
+            continue;
+        };
+        let target = match (r_type, relocation.target()) {
+            (
+                elf::R_X86_64_JUMP_SLOT | elf::R_X86_64_GLOB_DAT,
+                object::RelocationTarget::Symbol(index),
+            ) => object
+                .dynamic_symbol_table()
+                .and_then(|table| table.symbol_by_index(index).ok())
+                // A data import's slot holds no function.
+                .filter(|symbol| symbol.kind() != object::SymbolKind::Data)
+                .and_then(|symbol| symbol.name().ok())
+                .filter(|name| !name.is_empty())
+                .map(|name| GotTarget::Import(Arc::from(name))),
+            (elf::R_X86_64_IRELATIVE, _) => u64::try_from(relocation.addend())
+                .ok()
+                .map(|resolver| GotTarget::Indirect(ImageAddress::new(resolver))),
+            _ => None,
+        };
+        if let Some(target) = target {
+            slots.push(GotSlot {
+                address: ImageAddress::new(slot),
+                target,
+            });
+        }
+    }
+    slots
+}
+
+fn collect_plt(
+    object: &object::File<'_>,
+    slots: &[GotSlot],
+    raw: &mut BTreeMap<(Box<[u8]>, u64), RawSymbol>,
+) {
     let object::File::Elf64(elf) = object else {
         return;
     };
-    if object.architecture() != object::Architecture::X86_64 {
-        return;
-    }
     let endian = elf.endian();
 
     // An indirect function is named by its exported symbol first, then by
@@ -629,31 +672,16 @@ fn collect_plt(object: &object::File<'_>, raw: &mut BTreeMap<(Box<[u8]>, u64), R
             .and_modify(|best| *best = (*best).min(candidate))
             .or_insert(candidate);
     }
-    let mut targets = BTreeMap::<u64, Box<[u8]>>::new();
-    for (slot, relocation) in object.dynamic_relocations().into_iter().flatten() {
-        let object::RelocationFlags::Elf { r_type } = relocation.flags() else {
-            continue;
-        };
-        let name = match (r_type, relocation.target()) {
-            (
-                elf::R_X86_64_JUMP_SLOT | elf::R_X86_64_GLOB_DAT,
-                object::RelocationTarget::Symbol(index),
-            ) => object
-                .dynamic_symbol_table()
-                .and_then(|table| table.symbol_by_index(index).ok())
-                .and_then(|symbol| symbol.name_bytes().ok())
-                .filter(|name| !name.is_empty())
-                .map(Box::from),
-            (elf::R_X86_64_IRELATIVE, _) => u64::try_from(relocation.addend())
-                .ok()
-                .and_then(|resolver| resolvers.get(&resolver))
-                .map(|(_, name)| Box::from(*name)),
-            _ => None,
-        };
-        if let Some(name) = name {
-            targets.insert(slot, name);
-        }
-    }
+    let targets = slots
+        .iter()
+        .filter_map(|slot| {
+            let name: Box<[u8]> = match &slot.target {
+                GotTarget::Import(name) => Box::from(name.as_bytes()),
+                GotTarget::Indirect(resolver) => Box::from(resolvers.get(&resolver.get())?.1),
+            };
+            Some((slot.address.get(), name))
+        })
+        .collect::<BTreeMap<_, _>>();
     if targets.is_empty() {
         return;
     }
@@ -902,6 +930,7 @@ pub(super) fn fuzz(data: &[u8]) {
             code_instances: Vec::new(),
             symbols: table.symbols,
             symbol_sources: table.sources,
+            got_slots: table.got_slots,
             globals: Vec::new(),
             types: Arc::default(),
             source_files: Vec::new(),

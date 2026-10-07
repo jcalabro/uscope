@@ -973,6 +973,8 @@ build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-c
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture g++ "$cpp_fixtures_dir/overloads.cpp" "$output_dir/overloads-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fPIE -pie
+build_cpp_fixture g++ "$cpp_fixtures_dir/overloads.cpp" "$output_dir/overloads-cpp-gcc-nodebug" \
+    -O0 -fPIE -pie
 build_cpp_fixture clang++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-clang-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-gcc-o2" \
@@ -1249,6 +1251,15 @@ build_fixture gcc "$c_fixtures_dir/thread-exec.c" "$output_dir/thread-exec" \
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/reexec.c" "$output_dir/reexec" \
     -O0 -g3 -fPIE -pie
+# Without debug information: breakpoints resolve by symbol, an indirect
+# function's once its resolver has chosen, whether the loader binds at
+# startup, binds lazily, or a static program relocates itself.
+build_fixture gcc "$c_fixtures_dir/measure.c" "$output_dir/measure-gcc-nodebug" \
+    -O0 -fPIE -pie
+build_fixture clang "$c_fixtures_dir/measure.c" "$output_dir/measure-clang-nopie-lazy" \
+    -O1 -fno-pie -no-pie -Wl,-z,lazy
+build_fixture gcc "$c_fixtures_dir/measure.c" "$output_dir/measure-gcc-static" \
+    -O0 -static -L"$GLIBC_STATIC_LIBRARIES"
 build_fixture gcc "$c_fixtures_dir/thread-steps.c" "$output_dir/thread-steps-gcc-o0" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie -pthread
 build_fixture clang "$c_fixtures_dir/thread-steps.c" "$output_dir/thread-steps-clang-o2" \

@@ -294,3 +294,55 @@ async fn a_viewer_reads_stacks_and_sources_but_cannot_step_or_break() {
         assert_eq!(kind, "invalid", "{url}");
     }
 }
+
+/// Breakpoints in code without debug information are placed and shown by
+/// their symbols: an indirect function's at the implementation its
+/// resolver chose.
+#[tokio::test]
+async fn breakpoints_without_debug_information_show_the_symbols_they_stop_in() {
+    let web = Web::start("symbols", &[&fixture("measure-gcc-nodebug")]);
+    let mut tab = web.control("tab").await;
+    tab.state("the program loaded", |state| state["session"].is_string())
+        .await;
+    let measure = tab
+        .ok("addBreakpoint", json!({"location": "measure"}))
+        .await["id"]
+        .clone();
+    let set = tab
+        .state("the breakpoint", |state| {
+            state["breakpoints"][0]["id"] == measure
+        })
+        .await;
+    assert_eq!(set["breakpoints"][0]["places"][0]["function"], "measure");
+    tab.ok("continue", json!({})).await;
+    let stopped = tab.inferior("stopped").await;
+    assert_eq!(stopped["inferior"]["place"]["function"], "measure");
+
+    let strlen = tab.ok("addBreakpoint", json!({"location": "strlen"})).await["id"].clone();
+    let set = tab
+        .state("the breakpoint", |state| {
+            state["breakpoints"][1]["id"] == strlen
+        })
+        .await;
+    let places = set["breakpoints"][1]["places"]
+        .as_array()
+        .expect("places")
+        .iter()
+        .filter_map(|place| place["function"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        places.iter().any(|name| name.starts_with("__strlen_")),
+        "{places:?}"
+    );
+    let stop = stopped["inferior"]["stop"].clone();
+    tab.ok("continue", json!({"stop": stop})).await;
+    let stopped = tab
+        .state("the stop in strlen", |state| {
+            state["inferior"]["state"] == "stopped" && state["inferior"]["stop"] != stop
+        })
+        .await;
+    let function = stopped["inferior"]["place"]["function"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(function.starts_with("__strlen_"), "{stopped}");
+}

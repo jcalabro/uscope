@@ -73,6 +73,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.ensure_loader_breakpoint()?;
         self.sync_runtime_hooks()?;
         self.sync_stack_movers()?;
+        self.learn_from_got(None);
+        self.sync_resolvers()?;
         self.reresolve_breakpoints(lost_locations)
     }
 

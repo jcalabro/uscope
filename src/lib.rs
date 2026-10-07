@@ -33,6 +33,7 @@ mod unwind;
 mod view;
 pub mod view_files;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -68,27 +69,28 @@ pub use model::{
     Enumerator, ExecutionContext, ExecutionLocation, FloatValue, FrameKind, FunctionId,
     FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
     GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
-    GoKind, GoTypeAttributes, ImageAddress, ImageAddressDescription, ImageLocation, InlineChain,
-    InlineFrameLookup, InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit,
-    InspectionLimits, InspectionUsage, IntegerValue, LineNumber, LineSequenceId,
-    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MapKey,
-    MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason, ModuleAddress, ModuleId,
-    ModuleImage, ModuleImageId, NamedTypeRelationship, OptimizedOutReason, PointerWidth,
-    Presentation, PresentedCount, PresentedShape, RecordKind, RecordMember, RecordMemberLayout,
-    ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
-    RuntimeId, ScalarValue, SectionId, SectionInfo, SectionLocation, ShapeUnresolvedReason,
-    SourceContext, SourceFile, SourceFileId, SourceLanguage, SourceLine, SourceLocation,
-    StackFrame, StackFrameId, StackSegment, StatementFlags, StatementRow, SymbolBinding,
-    SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolLocation,
-    SymbolTableSources, TargetDescription, TaskCursor, TaskId, TaskLocation, TaskPage,
-    TaskSnapshot, TaskState, TextCompletion, TextSummary, ThreadActivity, ThreadId, ThreadLocal,
-    TlsUnavailableReason, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier,
-    TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
-    ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
-    ValueChildRelationship, ValueChildren, ValueChildrenReference, Variable, VariableInvalidReason,
-    VariableKind, VariableMalformedKind, VariableMalformedReason, VariableSnapshot, VariableState,
-    VariableUnavailableReason, VariableValue, VariableValueSource, Variant, VariantDiscriminant,
-    VariantSelection, VariantSelector, VariantStorageKind, ViewName, ViewProblem, VirtualAddress,
+    GoKind, GoTypeAttributes, GotSlot, GotTarget, ImageAddress, ImageAddressDescription,
+    ImageLocation, InlineChain, InlineFrameLookup, InspectedValue, InspectionCompletion,
+    InspectionExhaustion, InspectionLimit, InspectionLimits, InspectionUsage, IntegerValue,
+    LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
+    LoadedModuleSnapshot, MapKey, MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason,
+    ModuleAddress, ModuleId, ModuleImage, ModuleImageId, NamedTypeRelationship, OptimizedOutReason,
+    PointerWidth, Presentation, PresentedCount, PresentedShape, RecordKind, RecordMember,
+    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
+    RegisterSnapshot, RegisterValue, RuntimeId, ScalarValue, SectionId, SectionInfo,
+    SectionLocation, ShapeUnresolvedReason, SourceContext, SourceFile, SourceFileId,
+    SourceLanguage, SourceLine, SourceLocation, StackFrame, StackFrameId, StackSegment,
+    StatementFlags, StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId,
+    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TaskCursor,
+    TaskId, TaskLocation, TaskPage, TaskSnapshot, TaskState, TextCompletion, TextSummary,
+    ThreadActivity, ThreadId, ThreadLocal, TlsUnavailableReason, TypeArgument, TypeId,
+    TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
+    UnsupportedVariableFeature, UnwindTermination, ValueAccessUnavailableReason, ValueBitRange,
+    ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren, ValueChildrenReference,
+    Variable, VariableInvalidReason, VariableKind, VariableMalformedKind, VariableMalformedReason,
+    VariableSnapshot, VariableState, VariableUnavailableReason, VariableValue, VariableValueSource,
+    Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind, ViewName,
+    ViewProblem, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, ConditionOwner,
@@ -1124,11 +1126,42 @@ impl DebuggerHandle {
     }
 
     /// Resolves a linker symbol to its address in the running process.
+    ///
+    /// The symbol may be any loaded module's, named as
+    /// [`SymbolInfo::answers_to`] reads names. Where several modules define
+    /// the name, the first in load order that exports it wins, as the
+    /// dynamic loader binds it; otherwise the name must be one address's.
     pub async fn runtime_address(&self, name: &str) -> Result<VirtualAddress> {
-        let image_address = self.module_image.symbol_named(name)?.address;
         let loaded = self.loaded_module().await?;
-
-        loaded.virtual_address(image_address)
+        let mut modules = vec![(loaded, Arc::clone(&self.module_image))];
+        for record in self.loaded_modules().await?.modules.iter() {
+            if record.module.id != loaded.id
+                && let Ok(image) = self.loaded_module_image(record.module.id).await
+            {
+                modules.push((record.module, image));
+            }
+        }
+        let mut found = BTreeSet::new();
+        for (module, image) in &modules {
+            let symbols = image.symbols_answering(name).collect::<Vec<_>>();
+            // A versioned name's default version is the one the loader binds.
+            if let Some(exported) = symbols
+                .iter()
+                .filter(|symbol| symbol.exported)
+                .min_by_key(|symbol| (&*symbol.name != name, !symbol.name.contains("@@")))
+            {
+                return module.virtual_address(exported.address);
+            }
+            for symbol in symbols {
+                found.insert(module.virtual_address(symbol.address)?);
+            }
+        }
+        let mut found = found.into_iter();
+        match (found.next(), found.next()) {
+            (Some(address), None) => Ok(address),
+            (None, _) => Err(Error::SymbolNotFound(name.to_owned())),
+            (Some(_), Some(_)) => Err(Error::DuplicateSymbol(name.to_owned())),
+        }
     }
 
     /// Describes a process address by the loaded module, section, and symbol

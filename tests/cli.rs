@@ -935,38 +935,110 @@ fn symbol_versions_tell_apart_definitions_of_one_name() {
             "break timer_create@GLIBC_2.2.5",
         ],
     );
-    let addresses = |heading: &str| {
+    // The default version keeps the plain name, and the old one is named
+    // by its version alone.
+    let location = |name: &str| {
         output
-            .split(heading)
-            .nth(1)
-            .unwrap_or_else(|| panic!("no {heading:?} in {output}"))
             .lines()
-            .skip(usize::from(heading.ends_with("locations")))
-            .map_while(|line| {
-                let rest = line.trim().strip_prefix("virtual address ")?;
+            .find_map(|line| {
+                let rest = line.split(&format!("{name} at ")).nth(1)?;
                 rest.split_whitespace().next().map(str::to_owned)
             })
-            .collect::<Vec<_>>()
+            .unwrap_or_else(|| panic!("no {name:?} in {output}"))
     };
-    let both = addresses("breakpoint 2 set at 2 locations");
-    let old = addresses("breakpoint 3 set at ");
-    assert_eq!(both.len(), 2, "{output}");
-    assert!(old.len() == 1 && both.contains(&old[0]), "{output}");
-    let mut commands = vec!["break main".to_owned(), "run".to_owned()];
-    commands.extend(both.iter().map(|address| format!("info symbol {address}")));
-    let commands = commands.iter().map(String::as_str).collect::<Vec<_>>();
-    let described = batch(&[BASIC], &commands);
-    for address in &both {
-        let name = if *address == old[0] {
-            "timer_create@GLIBC_2.2.5 in section .text"
-        } else {
-            "timer_create in section .text"
-        };
-        assert!(
-            described.contains(&format!("\n{name}")),
-            "{address}: {described}"
-        );
-    }
+    let (current, old) = (
+        location("timer_create"),
+        location("timer_create@GLIBC_2.2.5"),
+    );
+    assert_ne!(current, old, "{output}");
+    assert_in_order(
+        &output,
+        &[
+            "breakpoint 2 set at 2 locations",
+            &format!("\n  timer_create at {current} in libc.so.6"),
+            &format!("\n  timer_create@GLIBC_2.2.5 at {old} in libc.so.6"),
+            &format!("breakpoint 3 set at timer_create@GLIBC_2.2.5 at {old} in libc.so.6"),
+        ],
+    );
+    let described = batch(
+        &[BASIC],
+        &[
+            "break main",
+            "run",
+            &format!("info symbol {old}"),
+            &format!("info symbol {current}"),
+        ],
+    );
+    assert_in_order(
+        &described,
+        &[
+            "\ntimer_create@GLIBC_2.2.5 in section .text",
+            "\ntimer_create in section .text",
+        ],
+    );
+}
+
+/// Code without debug information is broken at by its symbols: a function
+/// the program imports waits for its library, an indirect function stops
+/// in the implementation chosen for the machine, and C++ names are read
+/// demangled, with or without their scopes and parameters.
+#[test]
+fn functions_without_debug_information_are_found_by_their_symbols() {
+    const MEASURE: &str = "build/test-programs/measure-gcc-nodebug";
+    let output = batch(
+        &[MEASURE],
+        &[
+            "break printf",
+            "break measure",
+            "run",
+            "break strlen",
+            "continue",
+            "address printf",
+            "disassemble printf 1",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "breakpoint 1 set, pending until a module with its code loads",
+            "breakpoint 2 set at measure at 0x",
+            "stopped at breakpoint 2 (hit 1) in measure at 0x",
+            "breakpoint 3 set at 2 locations",
+            "\n  strlen at 0x",
+            " in ld-linux-x86-64.so.2",
+            "\n  __strlen_",
+            " in libc.so.6",
+            "stopped at breakpoint 3 (hit 1) in __strlen_",
+            "printf: 0x",
+            " <printf>:",
+        ],
+    );
+    // A name nothing imports or defines is a mistake, not a wait.
+    let refused = batch_output(&[MEASURE], &["break printff"]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("no function named 'printff' was found")
+    );
+
+    let output = batch(
+        &["build/test-programs/overloads-cpp-gcc-nodebug"],
+        &[
+            "break pick",
+            "break shapes::Widget::pick()",
+            "break pick(double)",
+        ],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "breakpoint 1 set at 3 locations",
+            "\n  pick(int) at 0x",
+            "\n  pick(double) at 0x",
+            "\n  shapes::Widget::pick() const at 0x",
+            "breakpoint 2 set at shapes::Widget::pick() const at 0x",
+            "breakpoint 3 set at pick(double) at 0x",
+        ],
+    );
 }
 
 #[test]

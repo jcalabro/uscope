@@ -889,7 +889,8 @@ impl SimController {
                             }
                             super::BreakpointOwner::Loader
                             | super::BreakpointOwner::Runtime
-                            | super::BreakpointOwner::StackMove => {}
+                            | super::BreakpointOwner::StackMove
+                            | super::BreakpointOwner::Resolver => {}
                         }
                     }
                     (

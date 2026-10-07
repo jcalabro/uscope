@@ -754,10 +754,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.start_next_repair();
         }
 
-        if self.is_loader_site(address) {
-            self.queue_module_refresh()?;
-        }
-        self.note_stack_move(pid, address)?;
+        self.note_internal_sites(pid, address)?;
         let stopping = self.record_breakpoint_hits(pid, address);
         if !stopping.is_empty() {
             return self.begin_visible_stop(
@@ -848,6 +845,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             self.repair_when_alone(pid, address)
         }
+    }
+
+    /// Notes a hit at a site of the debugger's own: the loader's report of
+    /// a change to the loaded libraries, a stack mover, or a resolver.
+    fn note_internal_sites(&mut self, pid: Pid, address: VirtualAddress) -> Result<()> {
+        if self.is_loader_site(address) {
+            self.queue_module_refresh()?;
+        }
+        self.note_stack_move(pid, address)?;
+        self.note_resolver(pid, address)
     }
 
     /// Ends an advance whose thread reached one of its targets, unless it

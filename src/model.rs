@@ -2941,6 +2941,26 @@ pub struct SymbolInfo {
     pub role: CodeRole,
 }
 
+/// A slot of a module's global offset table that the loader fills with a
+/// function's address as it relocates the module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GotSlot {
+    /// Where the slot is in the module.
+    pub address: ImageAddress,
+    /// The function whose address the loader writes there.
+    pub target: GotTarget,
+}
+
+/// The function a [`GotSlot`] holds once its module is relocated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GotTarget {
+    /// A function named for the loader to look up in the loaded modules.
+    Import(Arc<str>),
+    /// The implementation chosen by this module's indirect function whose
+    /// resolver is at this address.
+    Indirect(ImageAddress),
+}
+
 /// Records which symbol tables a module image provided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolTableSources {
@@ -3004,6 +3024,17 @@ impl SymbolInfo {
     #[must_use]
     pub fn demangled_name(&self) -> Option<String> {
         crate::demangle::demangle(&self.name)
+    }
+
+    /// Whether a name a person writes names the symbol: its linker name,
+    /// that name without its version, or its demangled spelling, with or
+    /// without a C++ function's parameters, as `shapes::scale` names
+    /// `_ZN6shapes5scaleEd`, `shapes::scale(double)`.
+    #[must_use]
+    pub fn answers_to(&self, name: &str) -> bool {
+        &*self.name == name
+            || self.unversioned_name() == name
+            || crate::demangle::spells(&self.name, name)
     }
 
     /// The name without the version that tells it apart from other
