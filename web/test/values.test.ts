@@ -14,6 +14,13 @@ describe("tree paths", () => {
     expect(childKey("w", "100%")).toBe("w/100%25");
   });
 
+  it("tell apart rows with the same name, as shadowed variables have", () => {
+    expect(childKey("locals", "i", 1)).toBe("locals/i");
+    expect(childKey("locals", "i", 2)).toBe("locals/i~2");
+    // A name that looks like a second one is still the first of its own.
+    expect(childKey("locals", "i~2", 1)).toBe("locals/i%7E2");
+  });
+
   it("open and close a row in the link's list, in the order opened", () => {
     expect(toggled(undefined, "args/req")).toEqual(["args/req"]);
     expect(toggled(["args/req", "locals/e"], "args/req")).toEqual(["locals/e"]);

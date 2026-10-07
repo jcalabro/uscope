@@ -52,10 +52,12 @@ export function useInlineValues(
     () => (at && text && line ? inlineExpressions(text, line) : new Map<number, string[]>()),
     [at, text, line],
   );
-  const [values, setValues] = useState<{ at: At | null; rows: Map<string, Row> }>({
-    at: null,
-    rows: new Map(),
-  });
+  // The values shown belong to one stop and one count of writes.
+  const [values, setValues] = useState<{
+    at: At | null;
+    writes: number | undefined;
+    rows: Map<string, Row>;
+  }>({ at: null, writes: undefined, rows: new Map() });
 
   useEffect(() => {
     // A stop always comes with a state, which counts the writes.
@@ -80,7 +82,7 @@ export function useInlineValues(
           rows.set(expression, outcome.value as Row);
         }
       }
-      setValues({ at, rows });
+      setValues({ at, writes, rows });
     });
     return () => {
       live = false;
@@ -89,7 +91,7 @@ export function useInlineValues(
 
   return useMemo(() => {
     const shown = new Map<number, InlineValue[]>();
-    if (!at || values.at !== at) {
+    if (!at || values.at !== at || values.writes !== writes) {
       return shown;
     }
     for (const [number, expressions] of wanted) {
@@ -113,5 +115,5 @@ export function useInlineValues(
       }
     }
     return shown;
-  }, [at, values, wanted]);
+  }, [at, values, wanted, writes]);
 }
