@@ -76,6 +76,14 @@ view c str_t {
 }
 ";
 
+/// A built-in view that does not parse is left out, and so escapes the
+/// fixtures' check that every built-in view binds.
+#[test]
+fn every_built_in_view_parses() {
+    let set = ViewSet::built_in();
+    assert!(set.errors().is_empty(), "{:?}", set.errors());
+}
+
 fn set(text: &str) -> ViewSet {
     let set = ViewSet::new([("test.views", text)]);
     assert!(set.errors().is_empty(), "{:?}", set.errors());

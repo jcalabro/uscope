@@ -775,8 +775,10 @@ are:
 - An element of a value presented as a sequence is `v[i]`, and the count
   of a sequence or map is `len(v)`, in any expression: `break f if
   len(queue) > 100`. A Go channel is indexed this way too, though it is
-  stored as a pointer, because Go never indexes one as a pointer. An
-  element in memory can be assigned and its address taken.
+  stored as a pointer, because Go never indexes one as a pointer. A value
+  a view presents as another in memory, as `std::stack` is its container,
+  is indexed as that one is. An element in memory can be assigned and its
+  address taken.
 - A value presented as a map is indexed by key, `m["k"]` or `m[3]`, never
   by position: its entries are searched in order for the key `==` would
   call equal, and a key it does not hold is an error. The values must be

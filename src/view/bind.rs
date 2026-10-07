@@ -641,7 +641,8 @@ pub fn bind<S: Scope>(
         extensions: Vec::new(),
     };
     if !view.extend {
-        check_against(&bound, &bound.named_programs(), scope.self_type, &scope)?;
+        let self_ty = presented(&bound.shape, scope.self_type);
+        check_against(&bound, &bound.named_programs(), &self_ty, &scope)?;
     }
     Ok(bound)
 }
@@ -768,7 +769,16 @@ pub fn check_extension<St>(
 ) -> Result<(), Rejection> {
     let mut named = base.named_programs();
     named.extend(extension.named_programs());
-    check_against(extension, &named, self_type, types)
+    check_against(extension, &named, &presented(&base.shape, self_type), types)
+}
+
+/// What a view's `self` format writes: the value a `value` shape presents,
+/// or else the value itself.
+fn presented<St>(shape: &BoundShape<St>, self_type: TypeReference) -> Ty {
+    match shape {
+        BoundShape::Value(program) => program.result().clone(),
+        _ => Ty::Program(self_type),
+    }
 }
 
 /// Every name `bound` hides or formats is in `named`, or is `self`, and
@@ -776,7 +786,7 @@ pub fn check_extension<St>(
 fn check_against<St>(
     bound: &BoundView<St>,
     named: &[(Arc<str>, &ViewProgram<St>)],
-    self_type: TypeReference,
+    self_ty: &Ty,
     types: &dyn TypeSource,
 ) -> Result<(), Rejection> {
     for (name, line) in &bound.hidden {
@@ -792,7 +802,7 @@ fn check_against<St>(
     for (name, format, line) in &bound.formats {
         let line = *line;
         let result = if name.as_ref() == "self" {
-            Some(Ty::Program(self_type))
+            Some(self_ty.clone())
         } else {
             named
                 .iter()

@@ -264,15 +264,31 @@ impl<P: InspectionOps> Scope for ModuleScope<'_, P> {
 
 /// The program type of a sequence's elements, when every branch that
 /// presents one agrees.
-fn element_type(shape: &BoundShape<StopStep>) -> Option<TypeReference> {
+fn element_type<P: InspectionOps>(
+    controller: &Controller<P>,
+    shape: &BoundShape<StopStep>,
+    depth: u8,
+) -> Option<TypeReference> {
     match shape {
         BoundShape::Sequence { element, .. } => match element.result() {
             Ty::Program(reference) if element.is_place() => Some(*reference),
             _ => None,
         },
+        // A value presented as another has that one's elements, as far as
+        // views present values inside the values they present.
+        BoundShape::Value(program) if depth < MAX_DEPTH => match program.result() {
+            Ty::Program(inner) if program.is_place() => {
+                let bound = controller.view_choice(*inner).bound.clone()?;
+                element_type(controller, &bound.shape, depth + 1)
+            }
+            _ => None,
+        },
         BoundShape::If {
             then, otherwise, ..
-        } => match (element_type(then), element_type(otherwise)) {
+        } => match (
+            element_type(controller, then, depth),
+            element_type(controller, otherwise, depth),
+        ) {
             (Some(left), Some(right)) if left == right => Some(left),
             (Some(found), None) if !otherwise.has_elements() => Some(found),
             (None, Some(found)) if !then.has_elements() => Some(found),
@@ -538,7 +554,7 @@ impl<P: InspectionOps> Controller<P> {
             return None;
         }
         let bound = self.view_choice(from).bound.clone()?;
-        let element = element_type(&bound.shape)?;
+        let element = element_type(self, &bound.shape, 0)?;
         Some(Planned {
             step: StopStep::Element(bound),
             result: Some(element),
@@ -1972,7 +1988,10 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
     }
 
     /// The view that presents the value at `at`, when views are on.
-    fn view_of(&self, at: &StopPlace) -> std::result::Result<Option<Arc<ViewBound>>, Stop> {
+    pub(super) fn view_of(
+        &self,
+        at: &StopPlace,
+    ) -> std::result::Result<Option<Arc<ViewBound>>, Stop> {
         let controller = self.frame.controller;
         if !controller.views.enabled {
             return Ok(None);
