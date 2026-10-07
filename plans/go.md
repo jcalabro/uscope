@@ -510,7 +510,8 @@ following:
   Each is verified against every pinned toolchain by `VIEW:` markers.
 - **A pointer into a goroutine stack** below the goroutine's current sp is
   reported as stale. Go leaves dead slots holding pre-copy addresses
-  (go#75124).
+  (go#75124). *(Done: a frame on its goroutine's stack reads nothing
+  below its own sp, the memory only its callees use, and says why.)*
 
 **Watchpoints on Go stack objects move with the stack** *(done)*.
 

@@ -1682,6 +1682,13 @@ pub enum VariableUnavailableReason {
     NoTask,
     /// A typed live-inspection resource was exhausted.
     InspectionLimit(InspectionExhaustion),
+    /// A pointer's target is on the reading frame's stack below the
+    /// frame's stack pointer, where only the frame's callees' memory is,
+    /// live or freed, so the pointer is stale.
+    BelowStackPointer {
+        /// The pointer's target.
+        address: VirtualAddress,
+    },
     /// A runtime-sized array or slice index is outside its current bounds.
     IndexOutOfBounds {
         /// Requested source index.
@@ -1804,6 +1811,10 @@ impl fmt::Display for VariableUnavailableReason {
                 formatter.write_str("DWARF expression evaluation limit exceeded")
             }
             Self::NoTask => formatter.write_str("the thread runs no task"),
+            Self::BelowStackPointer { address } => write!(
+                formatter,
+                "the pointer is stale: {address} is below the frame's stack pointer, in memory only its callees use"
+            ),
             Self::InspectionLimit(exhaustion) => write!(
                 formatter,
                 "{:?} limit {} exhausted after {} while requesting {}",

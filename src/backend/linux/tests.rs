@@ -5346,6 +5346,7 @@ fn nested_presentations_share_one_interval_between_looks_for_run_control() {
         registers: FrameRegisters::Thread(controller.ptrace.registers(pid).expect("registers")),
         cfa: Err(crate::VariableUnavailableReason::EvaluationLimit.into()),
         activation: 0,
+        below_stack_pointer: None,
     };
     let root = super::frames::StackRoot::of_thread(pid);
     let frame = controller.frame_for(inferior, StopId::new(1), &root, &resolved);

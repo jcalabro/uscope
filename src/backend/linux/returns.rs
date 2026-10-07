@@ -170,6 +170,7 @@ impl<P: InspectionOps> Controller<P> {
                 ),
             )),
             link_map: module.link_map,
+            below_stack_pointer: None,
         }
     }
 }

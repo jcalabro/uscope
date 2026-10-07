@@ -256,7 +256,10 @@ Past Go code, only the stack pointer is recovered.
 Expressions are described in [expressions.md](expressions.md). Every value has
 an explicit state: available, unavailable for a stated reason (optimized out,
 unreadable memory), or invalid for its type. Reads across unreadable memory
-report the address that failed.
+report the address that failed. A goroutine's frame holding a pointer below
+its own stack pointer, into memory only its callees use, holds a stale
+pointer, as a slot Go left unadjusted when it moved the stack does; what it
+points at is unavailable rather than shown from whatever is there now.
 
 ### Memory, symbols, and disassembly
 
