@@ -1436,6 +1436,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             None
         };
+        #[cfg(debug_assertions)]
         if let Some(loops) = &loops {
             record!("step {kind:?} treats loops as its own code: {loops:?}");
         }
@@ -1782,10 +1783,18 @@ impl<P: LinuxTraceOps> Controller<P> {
         })?;
         match target {
             Ok(target) if self.ptrace.executable(pid, target).unwrap_or(false) => Some(target),
+            #[cfg_attr(
+                not(debug_assertions),
+                expect(unused_variables, reason = "only recorded")
+            )]
             Ok(target) => {
                 record!("the runtime calls {target}, which is not executable");
                 None
             }
+            #[cfg_attr(
+                not(debug_assertions),
+                expect(unused_variables, reason = "only recorded")
+            )]
             Err(reason) => {
                 record!("the runtime's call out is unknown: {reason}");
                 None
