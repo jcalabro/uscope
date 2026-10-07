@@ -251,3 +251,46 @@ const fn over() -> StopReason {
         kind: StepKind::OverSource,
     }
 }
+
+#[tokio::test]
+async fn a_backtrace_marks_the_iterators_between_a_body_and_its_loop() {
+    for fixture in BUILDS {
+        for (marker, function, iterator) in [
+            ("// WALK: counted add", "main.counted", "main.Count.func1"),
+            ("// WALK: evens add", "main.evens", "main.Evens.func1"),
+        ] {
+            let context = format!("{fixture} {function}");
+            let scenario = in_the_body(fixture, marker).await;
+            let trace = scenario
+                .operation("backtrace", scenario.handle().backtrace())
+                .await;
+            let names = trace
+                .frames
+                .iter()
+                .map(|frame| frame.function.as_ref().map(|function| &*function.name))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                names.get(..3),
+                Some(
+                    &[
+                        Some(format!("{function}-range1").as_str()),
+                        Some(iterator),
+                        Some(function),
+                    ][..]
+                ),
+                "{context}"
+            );
+            // The iterator runs the loop of the frame that holds it; nothing
+            // else iterates a loop.
+            let mut expected = vec![None; trace.frames.len()];
+            expected[1] = Some(2);
+            assert_eq!(trace.loop_iterators(), expected, "{context}");
+            // Unoptimized, the variables the body uses from its loop's
+            // function are its own.
+            if fixture.ends_with("o0") {
+                assert!(integer(&scenario, "total").await.is_some(), "{context}");
+            }
+            scenario.shutdown().await;
+        }
+    }
+}

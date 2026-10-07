@@ -215,6 +215,11 @@ handlers on another, and a backtrace follows the runtime from them onto the
 goroutine's stack. When a backtrace crosses stacks, each run of frames is
 headed by whose stack it is on: the task's (the goroutine's), the runtime's,
 the signal stack, or the thread's. The runtime's own functions are dimmed.
+The body of a Go `range` over a function is a function of its own, named
+like `main.counted-range1`, which the iterator calls; the iterator's frames
+between the body and its loop's function say so, as `(the iterator of #2's
+loop)`. The body's frame shows the variables of the loop's function it
+uses, and the function's frame shows the rest.
 
 The selected frame applies to `print`, `watch`, `where`, `list`,
 `disassemble`, `registers`, and `finish`. Each stop selects the innermost

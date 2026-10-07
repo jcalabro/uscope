@@ -255,7 +255,8 @@ impl Session {
             .any(|pair| pair[0].segment != pair[1].segment);
         let mut entries = Vec::with_capacity(trace.frames.len() + 2);
         let mut segment = None;
-        for frame in trace.frames.iter() {
+        let iterators = trace.loop_iterators();
+        for (frame, iterates) in trace.frames.iter().zip(iterators) {
             if switches && segment != Some(frame.segment) {
                 segment = Some(frame.segment);
                 entries.push(Err(format!(
@@ -263,7 +264,7 @@ impl Session {
                     crate::cli::format::stack_owner(frame.segment)
                 )));
             }
-            entries.push(Ok(frame));
+            entries.push(Ok((frame, iterates)));
         }
         if trace.termination != UnwindTermination::Complete {
             entries.push(Err(format!("<backtrace stopped: {}>", trace.termination)));
@@ -278,8 +279,8 @@ impl Session {
         let format = arguments.format.unwrap_or_default();
         let mut frames = Vec::new();
         for entry in entries.into_iter().skip(start).take(levels) {
-            let frame = match entry {
-                Ok(frame) => frame,
+            let (frame, iterates) = match entry {
+                Ok(entry) => entry,
                 Err(label) => {
                     frames.push(json!({
                         "id": self.references.label()?,
@@ -292,6 +293,15 @@ impl Session {
                 }
             };
             let mut body = self.stack_frame(stop.id, context, frame).await?;
+            // An iterator recedes behind the loop whose body it runs.
+            if let Some(level) = iterates {
+                body["name"] = format!(
+                    "{} [iterator of #{level}'s loop]",
+                    body["name"].as_str().unwrap_or_default()
+                )
+                .into();
+                body["presentationHint"] = "subtle".into();
+            }
             self.decorate(
                 &mut body,
                 frame,
