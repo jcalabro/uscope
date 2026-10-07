@@ -254,3 +254,46 @@ async fn exceptions_stop_as_chosen() {
         scenario.shutdown().await;
     }
 }
+
+/// The runtime preempts a goroutine through the stack check that begins
+/// most functions: it sets the goroutine's stack guard so the check fails,
+/// and the goroutine yields, to run the function again from its first
+/// instruction, perhaps on another thread. A panic preempted as it begins
+/// is still one panic, which stops once.
+#[tokio::test]
+async fn a_panic_preempted_as_it_begins_stops_once() {
+    let raised = ExceptionStops {
+        raised: true,
+        ..ExceptionStops::default()
+    };
+    for fixture in BUILDS {
+        let (mut scenario, reason) = launched(fixture, "recovered", raised).await;
+        let (kind, _) = exception(&reason, fixture);
+        assert_eq!(kind, LanguageExceptionKind::Raised, "{fixture}");
+        // In the runtime's frame, r14 holds the goroutine, whose stack
+        // guard the check compares the stack pointer with at 16(R14).
+        let trace = scenario
+            .operation("backtrace", scenario.handle().backtrace())
+            .await;
+        scenario
+            .operation(
+                "select the runtime's frame",
+                scenario.handle().select_frame(trace.frames[0].id),
+            )
+            .await;
+        let g = integer(&scenario, "$r14").await.expect("the goroutine");
+        let guard = u64::try_from(g).expect("an address") + 16;
+        // `stackPreempt`, which always fails the check.
+        scenario
+            .operation(
+                "request preemption",
+                scenario
+                    .handle()
+                    .write_word(uscope::VirtualAddress::new(guard), 0xffff_ffff_ffff_fade),
+            )
+            .await;
+        let reason = scenario.resume_to_stop().await;
+        assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)), "{fixture}");
+        scenario.shutdown().await;
+    }
+}

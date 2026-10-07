@@ -42,9 +42,15 @@ pub struct Hooks {
 }
 
 impl Hooks {
+    /// `gopanic` begins with the stack check by which the runtime grows and
+    /// preempts a goroutine's stack, which calls `morestack` to run it
+    /// again from its first instruction, so a panic is reported past the
+    /// check, in its body, where its argument is still in its registers.
+    /// Each of the rest is entered once: it checks no stack, or runs on the
+    /// runtime's own.
     pub fn bind(image: &dyn RuntimeImage) -> Self {
         let entry = |name: &str| symbol(image, name).ok();
-        let panic = entry("runtime.gopanic");
+        let panic = image.function_body("runtime.gopanic");
         let fatal_panic = entry("runtime.fatalpanic");
         let throws = ["runtime.throw", "runtime.fatal"]
             .into_iter()

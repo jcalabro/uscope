@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 use crate::unwind::RegisterFile;
 use crate::{
-    ImageAddress, IntegerValue, LanguageExceptionKind, ModuleImage, RecordMemberLayout,
-    StackSegment, TaskState, ThreadId, TypeInfo, TypeKind, TypeNode, VirtualAddress,
+    EntryProvenance, ImageAddress, IntegerValue, LanguageExceptionKind, ModuleImage,
+    RecordMemberLayout, StackSegment, TaskState, ThreadId, TypeInfo, TypeKind, TypeNode,
+    VirtualAddress,
 };
 
 /// A result with the reasons it may be incomplete, such as a task whose
@@ -51,6 +52,9 @@ pub trait RuntimeImage: std::fmt::Debug {
     fn constant(&self, name: &str) -> Option<IntegerValue>;
     /// A named object or function.
     fn symbol(&self, name: &str) -> Option<ImageSymbol>;
+    /// Where the named function's body begins, past the prologue that sets
+    /// up its frame, or `None` when that is not known.
+    fn function_body(&self, name: &str) -> Option<ImageAddress>;
     /// Where the member reached through `path` lies within a named record,
     /// through nested records.
     fn member(&self, type_name: &str, path: &[&str]) -> Option<Member>;
@@ -318,6 +322,22 @@ impl RuntimeImage for ModuleImage {
             address: symbol.address,
             size,
         })
+    }
+
+    /// Where a function breakpoint enters the function, once that is past
+    /// its first instruction.
+    fn function_body(&self, name: &str) -> Option<ImageAddress> {
+        let entry = self.symbol_named(name).ok()?.address;
+        let instance = self.locate(entry).physical_instance?;
+        self.recommended_entries_for_instance(instance)
+            .filter(|body| {
+                matches!(
+                    body.provenance,
+                    EntryProvenance::AnalyzedPrologue | EntryProvenance::Statement
+                ) && body.address > entry
+            })
+            .map(|body| body.address)
+            .min()
     }
 
     fn member(&self, type_name: &str, path: &[&str]) -> Option<Member> {
