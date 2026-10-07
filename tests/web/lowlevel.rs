@@ -236,7 +236,14 @@ async fn watchpoints_follow_expressions_and_addresses() {
     let gets = tab.ok("evaluate", gets).await;
     assert_eq!(gets["memoryBytes"], 8, "{gets}");
     let address = gets["memory"].clone();
-    let target = format!("{}:8", address.as_str().expect("an address"));
+    // Either case of prefix names an address.
+    let target = format!(
+        "{}:8",
+        address
+            .as_str()
+            .expect("an address")
+            .replacen("0x", "0X", 1)
+    );
     tab.ok(
         "addWatchpoint",
         json!({"target": target, "access": "write"}),

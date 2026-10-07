@@ -24,6 +24,11 @@ export function target(text: string): Target | null {
   return { address: BigInt(match[1] as string), bytes };
 }
 
+/** A target as a link writes it. */
+export function targetText(target: Target): string {
+  return target.bytes ? `${hex(target.address)}:${target.bytes}` : hex(target.address);
+}
+
 export function hex(address: bigint): string {
   return `0x${address.toString(16)}`;
 }

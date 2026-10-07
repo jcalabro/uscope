@@ -26,8 +26,16 @@ const WINDOW_AFTER: u32 = 96;
 /// The most bytes one request reads or writes.
 const MOST_BYTES: u64 = 16 * 1024;
 
+/// The hexadecimal digits after a `0x` or `0X` prefix.
+fn hex_digits(text: &str) -> Option<&str> {
+    let digits = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))?;
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(digits)
+}
+
 pub fn address(text: &str) -> Result<VirtualAddress, Failure> {
-    text.strip_prefix("0x")
+    hex_digits(text)
         .and_then(|digits| u64::from_str_radix(digits, 16).ok())
         .map(VirtualAddress::new)
         .ok_or_else(|| {
@@ -345,7 +353,7 @@ pub async fn add_watchpoint(
 ) -> Result<u64, Failure> {
     let target = request.target.trim();
     let spec = if let Some((start, bytes)) = target.split_once(':')
-        && start.starts_with("0x")
+        && hex_digits(start).is_some()
     {
         WatchpointSpec::Location {
             address: address(start)?,

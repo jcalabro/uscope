@@ -2,9 +2,8 @@
 // of the value it was opened from are marked, a selection reads as the
 // types its length could be, and controllers write bytes in place.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { cache, useRequest } from "../data";
-import { isAddress } from "../focus";
 import {
   dumpRows,
   hex,
@@ -14,6 +13,7 @@ import {
   readAs,
   rowStart,
   type Target,
+  targetText,
 } from "../memory";
 import { controls } from "../model";
 import type { Row } from "../protocol";
@@ -58,6 +58,8 @@ function GoTo() {
   const connection = useConnection();
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Only the latest go-to moves the tab, however its answers are ordered.
+  const latest = useRef(0);
   const go = (mem: string) => {
     look((current) => ({ ...current, mem, view: "memory" }), { replace: false });
     setText("");
@@ -68,9 +70,11 @@ function GoTo() {
       onSubmit={(event) => {
         event.preventDefault();
         const wanted = text.trim();
+        const asked = ++latest.current;
         setError(null);
-        if (isAddress(wanted)) {
-          go(wanted.toLowerCase());
+        const named = parseTarget(wanted);
+        if (named) {
+          go(targetText(named));
           return;
         }
         if (!at || stale) {
@@ -79,6 +83,9 @@ function GoTo() {
         }
         cache.get(connection, "evaluate", { ...at, expression: wanted }).promise.then((settled) => {
           const row = settled.ok ? (settled.value as Row) : null;
+          if (asked !== latest.current) {
+            return;
+          }
           if (!settled.ok) {
             setError(settled.error.message);
           } else if (!row?.memory) {

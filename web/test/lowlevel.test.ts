@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dumpRows, readAs, target } from "../src/memory";
+import { dumpRows, readAs, target, targetText } from "../src/memory";
 
 describe("memory", () => {
   it("names an address and how many bytes the value there occupies", () => {
@@ -7,6 +7,9 @@ describe("memory", () => {
     expect(target("0xffffffffff600000")).toEqual({ address: 0xffffffffff600000n, bytes: null });
     expect(target("0x10:0")).toBeNull();
     expect(target("main")).toBeNull();
+    // As a link writes it.
+    expect(targetText({ address: 0x1fn, bytes: 4 })).toBe("0x1f:4");
+    expect(targetText({ address: 0x1fn, bytes: null })).toBe("0x1f");
   });
 
   it("lays bytes out sixteen to a row, from the row holding the address", () => {
