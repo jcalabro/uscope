@@ -403,6 +403,15 @@ that works.
 outside a string, so an expression containing the word `log` is written in
 parentheses.
 
+As built, `-3` breaks three lines back as `+3` does on, and `delete all`
+still deletes breakpoints only, as it did, while `unwatch all` deletes
+watchpoints: deleting is not undone, so `all` keeps meaning what the
+command names, and only `enable all` and `disable all`, which are undone
+by each other, cover both. A breakpoint set or listed is described by its
+function and line, with its module when that is not the program, as
+`dso_apply at library.c:5 in libmodule.so`, and several locations each
+show their address too, since inline copies of a line read alike.
+
 - `enable` / `disable` *ids* change breakpoints, and watchpoints named
   `w2`, as `condition` does. *ids* are a list and ranges, `1 3-5 w2`, or
   `all`; `delete` and `unwatch` take the same.

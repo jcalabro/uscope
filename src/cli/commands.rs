@@ -86,22 +86,26 @@ pub struct CommandSpec {
 
 impl CommandSpec {
     /// Returns the inclusive range of argument counts the usage accepts. A
-    /// final `[words...]` takes the rest of the line.
+    /// final `[words...]` takes the rest of the line, and every word of a
+    /// bracketed group such as `[hits hit-condition]` is optional.
     fn arity(&self) -> (usize, usize) {
-        self.usage
-            .split_whitespace()
-            .skip(1)
-            .fold((0, 0), |(minimum, maximum), word| {
-                if word.ends_with("...]") {
-                    (minimum, usize::MAX)
-                } else if word.ends_with("...>") {
-                    (minimum + 1, usize::MAX)
-                } else if word.starts_with('[') {
-                    (minimum, maximum + 1)
-                } else {
-                    (minimum + 1, maximum + 1)
-                }
-            })
+        let mut grouped = false;
+        let mut range = (0, 0);
+        for word in self.usage.split_whitespace().skip(1) {
+            let optional = grouped || word.starts_with('[');
+            grouped = optional && !word.ends_with(']');
+            let (minimum, maximum) = range;
+            range = if word.ends_with("...]") {
+                (minimum, usize::MAX)
+            } else if word.ends_with("...>") {
+                (minimum + 1, usize::MAX)
+            } else if optional {
+                (minimum, maximum.saturating_add(1))
+            } else {
+                (minimum + 1, maximum.saturating_add(1))
+            };
+        }
+        range
     }
 
     /// Returns whether usage shows anything beyond the command name.
@@ -144,14 +148,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         Break,
         "break",
         ["b"],
-        "break <function|0xaddress|file:line|file:function> [hit-condition]",
-        "Set a breakpoint, optionally stopping only at hits such as >=5, ==3, or %10"
+        "break [location] [if condition...] [hits hit-condition] [log message]",
+        "Set a breakpoint at a function, file:line, file:function, or 0xaddress, or at the selected frame's line, line N of its file, or +N lines on"
     ),
     command!(
         Tbreak,
         "tbreak",
         [],
-        "tbreak <function|0xaddress|file:line|file:function> [hit-condition]",
+        "tbreak [location] [if condition...] [hits hit-condition] [log message]",
         "Set a breakpoint that the stop it causes deletes"
     ),
     command!(
@@ -179,8 +183,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Delete,
         "delete",
         ["del", "d"],
-        "delete <id|all>",
-        "Delete logical breakpoints"
+        "delete <ids...>",
+        "Delete breakpoints, and watchpoints wID, by id, range such as 3-5, or all breakpoints"
     ),
     command!(
         Enable,
@@ -249,8 +253,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Unwatch,
         "unwatch",
         [],
-        "unwatch <id|all>",
-        "Delete watchpoints"
+        "unwatch <ids...>",
+        "Delete watchpoints by id, range such as 1-3, or all"
     ),
     command!(Run, "run", ["r"], "run", "Launch the inferior"),
     command!(
@@ -482,13 +486,8 @@ impl Cli {
 
         let output = match spec.command {
             Command::Break | Command::Tbreak => {
-                self.add_breakpoint(
-                    arguments[0],
-                    arguments.get(1).copied(),
-                    spec.command == Command::Tbreak,
-                    spec,
-                )
-                .await?
+                self.add_breakpoint(rest, spec.command == Command::Tbreak, spec)
+                    .await?
             }
             Command::Breakpoints => self.list_breakpoints().await?,
             Command::Info => match (arguments[0], arguments.get(1)) {
@@ -510,7 +509,7 @@ impl Cli {
                 _ => return Err(spec.usage_error()),
             },
             Command::Handle => self.handle_signal(&arguments).await?,
-            Command::Delete => self.delete_breakpoints(arguments[0], spec).await?,
+            Command::Delete => self.delete(&arguments, false, spec).await?,
             Command::Enable => self.set_enabled(&arguments, true, spec).await?,
             Command::Disable => self.set_enabled(&arguments, false, spec).await?,
             Command::Ignore => self.ignore(arguments[0], arguments[1], spec).await?,
@@ -520,7 +519,7 @@ impl Cli {
             Command::AccessWatch => self.watch(&arguments, WatchAccess::ReadWrite, spec).await?,
             Command::ReadWatch => self.watch(&arguments, WatchAccess::Read, spec).await?,
             Command::Watchpoints => self.list_watchpoints().await?,
-            Command::Unwatch => self.delete_watchpoints(arguments[0], spec).await?,
+            Command::Unwatch => self.delete(&arguments, true, spec).await?,
             Command::Run => {
                 self.execute_until_stop(debugger.run_with(self.launch.options()))
                     .await?
@@ -616,38 +615,192 @@ impl Cli {
         ))
     }
 
-    async fn delete_breakpoints(&self, argument: &str, spec: &CommandSpec) -> Result<String> {
-        let what = match parse_id_or_all(argument, spec)? {
-            None => plural(
-                self.debugger.remove_all_breakpoints().await?.len() as u64,
-                "breakpoint",
-            ),
-            Some(id) => {
-                let removed = self
-                    .debugger
-                    .remove_breakpoint(BreakpointId::new(id))
-                    .await?;
-                format!("breakpoint {}", removed.id)
-            }
+    /// Deletes the breakpoints and watchpoints `words` name, once every one
+    /// is known to exist; `all` deletes every breakpoint, or for `unwatch`
+    /// every watchpoint, whose ids bare numbers name.
+    async fn delete(&self, words: &[&str], watches: bool, spec: &CommandSpec) -> Result<String> {
+        let renderer = self.renderers.stdout;
+        let Some(ids) = self.existing_ids(words, watches, spec).await? else {
+            let what = if watches {
+                plural(
+                    self.debugger.remove_all_watchpoints().await?.len() as u64,
+                    "watchpoint",
+                )
+            } else {
+                plural(
+                    self.debugger.remove_all_breakpoints().await?.len() as u64,
+                    "breakpoint",
+                )
+            };
+            return Ok(format::deleted(&what, renderer));
         };
-        Ok(format::deleted(&what, self.renderers.stdout))
+        for &id in &ids {
+            match id {
+                CountedId::Breakpoint(id) => {
+                    self.debugger.remove_breakpoint(id).await?;
+                }
+                CountedId::Watchpoint(id) => {
+                    self.debugger.remove_watchpoint(id).await?;
+                }
+            }
+        }
+        Ok(format::deleted(&describe_ids(&ids, renderer), renderer))
     }
 
+    /// The ids `words` name, each known to exist, or `None` for `all`.
+    /// Bare numbers name watchpoints when `watches`, and breakpoints
+    /// otherwise.
+    async fn existing_ids(
+        &self,
+        words: &[&str],
+        watches: bool,
+        spec: &CommandSpec,
+    ) -> Result<Option<Vec<CountedId>>> {
+        let Some(ids) = parse_ids(words, watches, spec)? else {
+            return Ok(None);
+        };
+        let snapshot = self.debugger.snapshot().await?;
+        let renderer = Renderer::new(false);
+        for &id in &ids {
+            let known = match id {
+                CountedId::Breakpoint(id) => snapshot
+                    .breakpoints
+                    .iter()
+                    .any(|breakpoint| breakpoint.id == id),
+                CountedId::Watchpoint(id) => snapshot
+                    .watchpoints
+                    .iter()
+                    .any(|watchpoint| watchpoint.id == id),
+            };
+            if !known {
+                bail!("{} was not found", id.describe(renderer));
+            }
+        }
+        Ok(Some(ids))
+    }
+
+    /// Adds the breakpoint a `break` or `tbreak` line describes.
     async fn add_breakpoint(
         &self,
-        location: &str,
-        condition: Option<&str>,
+        line: &str,
         temporary: bool,
         spec: &CommandSpec,
     ) -> Result<String> {
-        let location = parse_breakpoint_location(location)?.ok_or_else(|| spec.usage_error())?;
+        let parsed = parse_break(line, spec)?;
+        let location = match parsed.location {
+            Some(written) => match frame_line(written)? {
+                Some(line) => self.frame_source(line).await?,
+                None => parse_breakpoint_location(written)?.ok_or_else(|| spec.usage_error())?,
+            },
+            None => self.frame_source(FrameLine::Offset(0)).await?,
+        };
         let options = uscope::BreakpointOptions {
-            hit_condition: condition.map(str::parse).transpose()?,
+            hit_condition: parsed.hits.map(str::parse).transpose()?,
+            condition: parsed.condition.map(uscope::Condition::parse).transpose()?,
+            log_message: parsed
+                .log
+                .as_deref()
+                .map(uscope::LogMessage::parse)
+                .transpose()?,
             temporary,
             ..uscope::BreakpointOptions::default()
         };
         let breakpoint = self.debugger.add_breakpoint_with(location, options).await?;
-        Ok(format::breakpoint(&breakpoint, self.renderers.stdout))
+        let placed = self.placed(&breakpoint).await;
+        Ok(format::breakpoint(
+            &breakpoint,
+            &placed,
+            self.renderers.stdout,
+        ))
+    }
+
+    /// A line of the selected frame's source file.
+    async fn frame_source(&self, line: FrameLine) -> Result<BreakpointSpec> {
+        let location = self.debugger.current_location().await.map_err(|error| {
+            anyhow!("no frame is selected to take a line from ({error}); name a location")
+        })?;
+        let (Some(source), Ok(image)) = (
+            location.image.source.as_ref(),
+            self.debugger.loaded_module_image(location.module).await,
+        ) else {
+            bail!("the selected frame has no source line");
+        };
+        let file = image
+            .source_file(source.file)
+            .ok_or_else(|| anyhow!("the selected frame has no source file"))?;
+        let number = match line {
+            FrameLine::Number(number) => number,
+            FrameLine::Offset(offset) => source
+                .line
+                .get()
+                .checked_add_signed(offset)
+                .filter(|line| *line > 0)
+                .ok_or_else(|| anyhow!("line {} {offset:+} is before the file", source.line))?,
+        };
+        Ok(BreakpointSpec::Source {
+            path: file.path.as_ref().clone(),
+            line: LineNumber::new(number)
+                .ok_or_else(|| anyhow!("source line numbers are one-based"))?,
+        })
+    }
+
+    /// Where each of a breakpoint's locations is, as far as its module
+    /// tells.
+    pub(super) async fn placed(&self, breakpoint: &uscope::Breakpoint) -> Vec<format::Placed> {
+        let mut placed = Vec::new();
+        for resolved in breakpoint.locations.iter() {
+            placed.push(self.place(resolved.location).await);
+        }
+        placed
+    }
+
+    async fn place(&self, location: uscope::BreakpointLocation) -> format::Placed {
+        let mut placed = format::Placed {
+            location,
+            function: None,
+            source: None,
+            module: None,
+        };
+        let (image, address) = match location {
+            uscope::BreakpointLocation::Image(address) => (
+                Some(std::sync::Arc::clone(self.debugger.module_image())),
+                address,
+            ),
+            uscope::BreakpointLocation::Virtual(address) => {
+                let Ok(description) = self.debugger.describe_address(address).await else {
+                    return placed;
+                };
+                let Some(module) = description.module else {
+                    return placed;
+                };
+                if module.path.as_path() != self.debugger.module_image().path() {
+                    placed.module = Some(std::sync::Arc::clone(&module.path));
+                }
+                (
+                    self.debugger.loaded_module_image(module.module).await.ok(),
+                    module.image.address,
+                )
+            }
+        };
+        let Some(image) = image else {
+            return placed;
+        };
+        let located = image.locate(address);
+        let inline = match &located.inline_frames {
+            uscope::InlineFrameLookup::Unique(chain) => chain.instances.last().copied(),
+            _ => None,
+        };
+        placed.function = inline
+            .and_then(|instance| image.code_instance(instance))
+            .and_then(|instance| image.function(instance.function))
+            .or(located.function.as_ref())
+            .map(|function| std::sync::Arc::clone(&function.name));
+        placed.source = located.source.as_ref().and_then(|source| {
+            image
+                .source_file(source.file)
+                .map(|file| (std::sync::Arc::clone(&file.path), source.line))
+        });
+        placed
     }
 
     /// Enables or disables the breakpoints and watchpoints `words` name,
@@ -658,9 +811,11 @@ impl Cli {
         enabled: bool,
         spec: &CommandSpec,
     ) -> Result<String> {
-        let snapshot = self.debugger.snapshot().await?;
-        let ids = match parse_ids(words, spec)? {
-            None => snapshot
+        let ids = if let Some(ids) = self.existing_ids(words, false, spec).await? {
+            ids
+        } else {
+            let snapshot = self.debugger.snapshot().await?;
+            snapshot
                 .breakpoints
                 .iter()
                 .map(|breakpoint| CountedId::Breakpoint(breakpoint.id))
@@ -670,26 +825,7 @@ impl Cli {
                         .iter()
                         .map(|watchpoint| CountedId::Watchpoint(watchpoint.id)),
                 )
-                .collect(),
-            Some(ids) => {
-                let renderer = Renderer::new(false);
-                for &id in &ids {
-                    let known = match id {
-                        CountedId::Breakpoint(id) => snapshot
-                            .breakpoints
-                            .iter()
-                            .any(|breakpoint| breakpoint.id == id),
-                        CountedId::Watchpoint(id) => snapshot
-                            .watchpoints
-                            .iter()
-                            .any(|watchpoint| watchpoint.id == id),
-                    };
-                    if !known {
-                        bail!("{} was not found", id.describe(renderer));
-                    }
-                }
-                ids
-            }
+                .collect()
         };
         if ids.is_empty() {
             return Ok("no breakpoints or watchpoints".to_owned());
@@ -832,23 +968,6 @@ impl Cli {
                 plural(count, "hit")
             )
         })
-    }
-
-    async fn delete_watchpoints(&self, argument: &str, spec: &CommandSpec) -> Result<String> {
-        let what = match parse_id_or_all(argument, spec)? {
-            None => plural(
-                self.debugger.remove_all_watchpoints().await?.len() as u64,
-                "watchpoint",
-            ),
-            Some(id) => {
-                let removed = self
-                    .debugger
-                    .remove_watchpoint(WatchpointId::new(id))
-                    .await?;
-                format!("watchpoint {}", removed.id)
-            }
-        };
-        Ok(format::deleted(&what, self.renderers.stdout))
     }
 
     async fn select_thread(&self, argument: &str) -> Result<String> {
@@ -1701,9 +1820,157 @@ fn parse_counted_id(argument: &str, spec: &CommandSpec) -> Result<CountedId> {
         .map_err(|_| spec.usage_error())
 }
 
+/// A line of the selected frame's file, as `break` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameLine {
+    Number(u64),
+    Offset(i64),
+}
+
+/// Parses `42`, `+3`, or `-3` as a line of the selected frame's file.
+fn frame_line(written: &str) -> Result<Option<FrameLine>> {
+    if let Some(offset) = written.strip_prefix(['+', '-']) {
+        let lines = offset
+            .parse::<i64>()
+            .ok()
+            .filter(|_| offset.bytes().all(|byte| byte.is_ascii_digit()))
+            .ok_or_else(|| anyhow!("invalid line offset '{written}'"))?;
+        return Ok(Some(FrameLine::Offset(if written.starts_with('-') {
+            -lines
+        } else {
+            lines
+        })));
+    }
+    if !written.is_empty() && written.bytes().all(|byte| byte.is_ascii_digit()) {
+        let line = written
+            .parse()
+            .map_err(|_| anyhow!("invalid line number '{written}'"))?;
+        if line == 0 {
+            bail!("source line numbers are one-based");
+        }
+        return Ok(Some(FrameLine::Number(line)));
+    }
+    Ok(None)
+}
+
+/// A `break` line: its location, and the options written after it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BreakLine<'a> {
+    location: Option<&'a str>,
+    condition: Option<&'a str>,
+    hits: Option<&'a str>,
+    log: Option<String>,
+}
+
+const BREAK_OPTIONS: [&str; 3] = ["if", "hits", "log"];
+
+/// Splits a `break` line into its location and its options, each of which
+/// takes the text up to the next option word outside a string or brackets.
+/// A word after the location that is no option is a hit condition, as
+/// `break counted ==3` wrote it before options had names.
+fn parse_break<'a>(line: &'a str, spec: &CommandSpec) -> Result<BreakLine<'a>> {
+    let words = option_words(line);
+    let starts = words
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, word))| BREAK_OPTIONS.contains(word))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let first = starts.first().copied().unwrap_or(words.len());
+    let mut parsed = BreakLine::default();
+    match &words[..first] {
+        [] => {}
+        [(_, location)] => parsed.location = Some(location),
+        [(_, location), (_, hits)] => {
+            parsed.location = Some(location);
+            parsed.hits = Some(hits);
+        }
+        _ => return Err(spec.usage_error()),
+    }
+    for (index, &start) in starts.iter().enumerate() {
+        let (offset, keyword) = words[start];
+        let end = starts
+            .get(index + 1)
+            .map_or(line.len(), |&next| words[next].0);
+        let text = line[offset + keyword.len()..end].trim();
+        if text.is_empty() {
+            return Err(spec.usage_error());
+        }
+        let twice = || anyhow!("`{keyword}` is given twice");
+        match keyword {
+            "if" if parsed.condition.is_none() => parsed.condition = Some(text),
+            "hits" if parsed.hits.is_none() => parsed.hits = Some(text),
+            "log" if parsed.log.is_none() => parsed.log = Some(unquoted(text)?),
+            _ => return Err(twice()),
+        }
+    }
+    Ok(parsed)
+}
+
+/// The words of a line outside strings and brackets, with their offsets;
+/// a string or bracketed text is part of the word around it.
+fn option_words(line: &str) -> Vec<(usize, &str)> {
+    let mut words = Vec::new();
+    let (mut depth, mut quoted, mut escaped) = (0_usize, false, false);
+    let mut start = None;
+    for (offset, character) in line.char_indices() {
+        if quoted {
+            match character {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        if character.is_whitespace() && depth == 0 {
+            if let Some(begun) = start.take() {
+                words.push((begun, &line[begun..offset]));
+            }
+            continue;
+        }
+        start.get_or_insert(offset);
+        match character {
+            '"' => quoted = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    if let Some(begun) = start {
+        words.push((begun, &line[begun..]));
+    }
+    words
+}
+
+/// A log message written in quotes, with `\"` and `\\` escaped, or as it is.
+fn unquoted(text: &str) -> Result<String> {
+    let Some(inner) = text.strip_prefix('"') else {
+        return Ok(text.to_owned());
+    };
+    let mut message = String::new();
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' if characters.as_str().trim().is_empty() => return Ok(message),
+            '"' => bail!("a log message in quotes ends at its closing quote"),
+            '\\' => match characters.next() {
+                Some(escaped @ ('"' | '\\')) => message.push(escaped),
+                Some(other) => {
+                    message.push('\\');
+                    message.push(other);
+                }
+                None => break,
+            },
+            other => message.push(other),
+        }
+    }
+    bail!("a log message in quotes needs its closing quote")
+}
+
 /// Parses breakpoint and watchpoint ids, ranges of them such as `3-5` or
 /// `w1-2`, or `all` as `None`.
-fn parse_ids(words: &[&str], spec: &CommandSpec) -> Result<Option<Vec<CountedId>>> {
+fn parse_ids(words: &[&str], watches: bool, spec: &CommandSpec) -> Result<Option<Vec<CountedId>>> {
     if words == ["all"] {
         return Ok(None);
     }
@@ -1711,7 +1978,7 @@ fn parse_ids(words: &[&str], spec: &CommandSpec) -> Result<Option<Vec<CountedId>
     for word in words {
         let (watch, digits) = word
             .strip_prefix('w')
-            .map_or((false, *word), |digits| (true, digits));
+            .map_or((watches, *word), |digits| (true, digits));
         let (first, last) = digits.split_once('-').unwrap_or((digits, digits));
         let parse = |digits: &str| digits.parse::<u64>().map_err(|_| spec.usage_error());
         let (first, last) = (parse(first)?, parse(last)?);
@@ -1770,14 +2037,6 @@ fn describe_ids(ids: &[CountedId], renderer: Renderer) -> String {
     .flatten()
     .collect::<Vec<_>>()
     .join(" and ")
-}
-
-/// Parses `all` as `None` or a numeric identifier.
-fn parse_id_or_all(argument: &str, spec: &CommandSpec) -> Result<Option<u64>> {
-    if argument == "all" {
-        return Ok(None);
-    }
-    argument.parse().map(Some).map_err(|_| spec.usage_error())
 }
 
 /// Parses `0xaddress:byte-count`. Arguments without the `0x` prefix are value
@@ -1958,7 +2217,7 @@ mod tests {
             );
         }
         assert_eq!(spec(Command::Run).arity(), (0, 0));
-        assert_eq!(spec(Command::Break).arity(), (1, 2));
+        assert_eq!(spec(Command::Break).arity(), (0, usize::MAX));
         assert_eq!(spec(Command::Info).arity(), (1, usize::MAX));
         assert_eq!(spec(Command::Print).arity(), (0, usize::MAX));
         assert_eq!(spec(Command::Whatis).arity(), (1, usize::MAX));
@@ -1969,6 +2228,35 @@ mod tests {
         assert_eq!(spec(Command::Frame).arity(), (0, 1));
         assert!(spec(Command::Up).repeatable && spec(Command::Down).repeatable);
         assert!(!spec(Command::Frame).repeatable);
+    }
+
+    /// Option words inside strings and brackets belong to the text around
+    /// them, and the legacy trailing hit condition still parses.
+    #[test]
+    fn break_options_end_at_option_words_outside_strings_and_brackets() {
+        let spec = spec(Command::Break);
+        let parsed = parse_break(
+            r#"parse.c:12 if name == "log" && (a log b) hits >=2 log "said \"{name}\"""#,
+            spec,
+        )
+        .expect("parses");
+        assert_eq!(
+            parsed,
+            BreakLine {
+                location: Some("parse.c:12"),
+                condition: Some(r#"name == "log" && (a log b)"#),
+                hits: Some(">=2"),
+                log: Some(r#"said "{name}""#.to_owned()),
+            }
+        );
+        assert_eq!(
+            parse_break("counted ==3", spec).expect("parses").hits,
+            Some("==3")
+        );
+        assert_eq!(parse_break("if x", spec).expect("parses").location, None);
+        assert!(parse_break("f if x if y", spec).is_err());
+        assert!(parse_break("f g h", spec).is_err());
+        assert!(parse_break(r#"f log "open"#, spec).is_err());
     }
 
     #[test]

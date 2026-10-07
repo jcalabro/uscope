@@ -186,10 +186,10 @@ it inherited. A program that calls `exec` is followed, with its breakpoints.
 
 | Command | |
 | --- | --- |
-| `break`, `b` *location* [*hit-condition*] | Break at a `function`, `file:line`, `file:function`, or `0xaddress`. |
-| `tbreak` *location* [*hit-condition*] | Break once: the stop the breakpoint causes deletes it. |
+| `break`, `b` [*location*] [*options*] | Break at a `function`, `file:line`, `file:function`, `0xaddress`, or a line of the selected frame's file. |
+| `tbreak` [*location*] [*options*] | Break once: the stop the breakpoint causes deletes it. |
 | `breakpoints`, `info breakpoints` | List breakpoints and their hit counts. |
-| `delete`, `d` *id*\|`all` | Delete breakpoints. |
+| `delete`, `d` *ids...* | Delete breakpoints, and watchpoints written `w2`; `all` deletes every breakpoint. |
 | `condition` *id* [*expression*] | Stop only where the [expression](expressions.md) is true; with none, always. |
 | `hits` *id* *hit-condition*\|`always` | Replace the hit condition, keeping the count. |
 | `ignore` *id* *count* | Skip the next *count* hits. |
@@ -210,6 +210,25 @@ watchpoint keeps its storage while disabled and still ends with it.
 
 A temporary breakpoint counts hits like any other, and the first stop it
 causes deletes it, including a stop that several threads reach together.
+
+A breakpoint's options follow its location, in any order, so one command
+makes the whole breakpoint:
+
+```text
+break parse.c:120 if len > 4
+break handle_request hits >=3 log "request {id} from {peer}"
+break                     # the selected frame's line
+break 42                  # line 42 of the selected frame's file
+break +3                  # three lines on; -3 three lines back
+```
+
+`if` and `log` take the text up to the next option word, `if`, `hits`, or
+`log`, outside a string or brackets, so a condition that uses one of those
+words as a name writes it in parentheses. A log message may be quoted,
+with `\"` for a quote inside it. A hit condition written right after the
+location, as in `break counted ==3`, is the same as `hits ==3`. Lists of
+ids, as `delete 1 3-5 w2`, name only breakpoints and watchpoints that
+exist, or the command changes nothing.
 
 Addresses are always `0x`-prefixed, so `break add` names a function. Functions
 without debug information, such as libc's, break at their symbol, and
@@ -243,7 +262,7 @@ thread stops briefly for the change and resumes without a reported stop.
 | `watch -w` *target* [`if` *condition*] | Stop at every store, even of the same value. |
 | `awatch` *target* [`if` *condition*] | Stop at every load or store. |
 | `watchpoints`, `info watchpoints` | List watchpoints and their hit counts. |
-| `unwatch` *id*\|`all` | Delete watchpoints. |
+| `unwatch` *ids...* | Delete watchpoints. |
 
 The *target* is an expression, or `0xaddress:byte-count` for raw bytes. A stop
 reports the access after the instruction that made it, with the value last

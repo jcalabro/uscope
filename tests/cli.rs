@@ -570,7 +570,8 @@ fn command_errors_show_the_usage_or_the_reason() {
         &stderr,
         &[
             "usage: run\n",
-            "usage: break <function|0xaddress|file:line|file:function>",
+            "no frame is selected to take a line from (the inferior has not been launched); \
+             name a location",
             info,
             info,
             info,
@@ -603,14 +604,14 @@ fn help_lists_every_command_and_details_one_by_name_or_alias() {
         "  break        b       Set a breakpoint",
         "  finish       fin, f  Run until the selected frame returns",
         "  continue     c       Continue execution",
-        "  delete       del, d  Delete logical breakpoints",
+        "  delete       del, d  Delete breakpoints, and watchpoints wID",
         "  clear        cls     Clear and redraw the terminal",
         "  help         h, ?    Show command help",
         "  Clear and redraw the terminal\n  aliases: cls",
-        "delete <id|all>",
+        "delete <ids...>",
         "aliases: del, d",
         "  Run until the selected frame returns to its caller\n  aliases: fin, f",
-        "  Set a breakpoint, optionally stopping only at hits such as >=5, ==3, or %10\n  aliases: b\n  usage: break <function|0xaddress|file:line|file:function> [hit-condition]",
+        "  aliases: b\n  usage: break [location] [if condition...] [hits hit-condition] [log message]",
         "  Show the selected frame's execution location",
         "  Continue execution\n  aliases: c",
     ] {
@@ -638,7 +639,15 @@ fn batch_mode_prints_every_location_of_an_inline_breakpoint() {
         stdout.contains("breakpoint 1 set at 6 locations"),
         "{stdout}"
     );
-    assert_eq!(stdout.matches("  image address ").count(), 6, "{stdout}");
+    // Inline copies of one line differ by address.
+    assert_eq!(
+        stdout
+            .matches(" leaf at tests/fixtures/c/inline.c:")
+            .count(),
+        6,
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches("  0x").count(), 6, "{stdout}");
 }
 
 #[test]
@@ -658,7 +667,8 @@ fn library_breakpoints_resolve_at_runtime_and_frames_show_their_own_sources() {
     assert_in_order(
         &stdout,
         &[
-            "breakpoint 2 set at virtual address 0x",
+            "breakpoint 2 set at dso_apply at tests/fixtures/c/module-frames/library.c:5 in \
+             libmodule-frames.so\n",
             "stopped at breakpoint 2 (hit 1)",
             "module-frames/library.c:5",
             "stopped at breakpoint 3 (hit 1)",
@@ -719,8 +729,7 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
     assert_in_order(
         &stdout,
         &[
-            "breakpoint 1 set at image address ",
-            ", stops at hits ==3\n",
+            "breakpoint 1 set at counted at tests/fixtures/c/hit-counts.c:11, stops at hits ==3\n",
             "breakpoint 2 set at 2 locations, stops at hits %4\n",
             // The fourth hit is the second inline site of the second call.
             "stopped at breakpoint 2 (hit 4) at ",
@@ -736,6 +745,58 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
             "breakpoint 1 stops at hits ==2 (no later hit can stop), hit 9 times so far\n",
             "inferior exited with status 0\n",
             "1  counted  1 location  hit 40 times  stops at hits ==2 (no later hit can stop)\n",
+        ],
+    );
+}
+
+#[test]
+fn breakpoints_take_options_inline_and_lines_from_the_selected_frame() {
+    let (stdout, stderr) = piped(
+        &["build/test-programs/hit-counts-gcc-o0"],
+        &[
+            "break counted hits ==3 if call > 1",
+            "run",
+            "break",
+            "break +1",
+            "break 20",
+            "break counted if",
+            "break +x",
+            "break 0",
+            "delete 9 2",
+            "delete 2-3 4",
+            "watch last_call",
+            "watch shared_total",
+            "unwatch 1-2",
+            "break caller hits ==5 log \"caller {call} of {last_call}\"",
+            "continue",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "breakpoint 1 set at ",
+            ", stops at hits ==3 where call > 1\n",
+            "stopped at breakpoint 1 (hit 3) at ",
+            "breakpoint 2 set at counted at tests/fixtures/c/hit-counts.c:11\n",
+            "breakpoint 3 set at counted at tests/fixtures/c/hit-counts.c:12\n",
+            "breakpoint 4 set at caller at tests/fixtures/c/hit-counts.c:20\n",
+            "deleted breakpoints 2, 3, 4\n",
+            "deleted watchpoints 1, 2\n",
+            "breakpoint 5 set at ",
+            ", stops at hits ==5, logs \"caller {call} of {last_call}\"\n",
+            // Its fifth hit is the fifth call after the stop at the third.
+            "caller 8 of 7\n",
+            "inferior exited with status 0\n",
+        ],
+    );
+    assert_in_order(
+        &stderr,
+        &[
+            "usage: break [location] [if condition...] [hits hit-condition] [log message]",
+            "invalid line offset '+x'",
+            "source line numbers are one-based",
+            // A list naming a missing id deletes nothing.
+            "breakpoint 9 was not found",
         ],
     );
 }
@@ -771,8 +832,8 @@ fn breakpoints_and_watchpoints_are_disabled_enabled_and_advanced_past() {
     assert_in_order(
         &stdout,
         &[
-            "temporary breakpoint 1 set at image address ",
-            ", stops at hits ==3\n",
+            "temporary breakpoint 1 set at counted at tests/fixtures/c/hit-counts.c:11, stops at \
+             hits ==3\n",
             "disabled breakpoint 2\n",
             "1  counted  1 location  hit 0 times  stops at hits ==3  temporary\n",
             "2  caller  1 location  hit 0 times  disabled\n",
@@ -1723,11 +1784,10 @@ fn stops_and_list_show_source_from_any_working_directory() {
         .output()
         .expect("run uscope");
     let stdout = assert_success(output);
-    assert_eq!(
-        stdout.matches("tests/fixtures/c/basic.c:6").count(),
-        2,
-        "{stdout}"
-    );
+    let line = format!("{}:6", fixture("tests/fixtures/c/basic.c").display());
+    // The breakpoint, the stop, and the listing; a root of `/` holds every
+    // path, so they stay absolute.
+    assert_eq!(stdout.matches(&line).count(), 3, "{stdout}");
     assert_eq!(
         stdout.matches("=> 6 |     return uscope_value;").count(),
         2,
