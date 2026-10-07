@@ -30,7 +30,8 @@ export interface Uscope {
 /** Starts `uscope web`, flight-recording to `recording`. */
 export async function startUscope(args: string[], recording: string): Promise<Uscope> {
   const child = spawn(
-    path.join(root, "target", "debug", "uscope"),
+    // A release build can stand in, to see how fast a large program is.
+    process.env.USCOPE_WEB_BINARY ?? path.join(root, "target", "debug", "uscope"),
     ["web", "--port", "0", ...args],
     {
       cwd: root,

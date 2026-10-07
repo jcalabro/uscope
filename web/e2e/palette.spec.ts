@@ -47,6 +47,8 @@ test("the palette finds functions, files, lines, and commands", async ({ page, u
   await search(page).fill("theme dark");
   await page.keyboard.press("Enter");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  // The toolbar says so, and its next choice follows from it.
+  await expect(page.getByRole("button", { name: "Theme: dark" })).toBeVisible();
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(page.locator(".cm-line").first()).toBeVisible();

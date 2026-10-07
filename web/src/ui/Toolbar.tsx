@@ -5,7 +5,7 @@ import { describe } from "../keys";
 import { targetName } from "../model";
 import { useConnection, useModel } from "../store";
 import { tab, useTab } from "../tab";
-import { chooseTheme, savedTheme, THEMES, type Theme } from "../theme";
+import { chooseTheme, THEMES, type Theme, useChosenTheme } from "../theme";
 import { People } from "./People";
 import { Share } from "./Share";
 import { Status } from "./Status";
@@ -123,7 +123,7 @@ function ThemeGlyph({ theme }: { theme: Theme }) {
 
 /** Cycles the theme: the system's, light, then dark. */
 function ThemeButton() {
-  const [theme, setTheme] = useState(savedTheme);
+  const theme = useChosenTheme();
   const next = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length] as Theme;
   return (
     <button
@@ -131,10 +131,7 @@ function ThemeButton() {
       className="tb ghost"
       aria-label={`Theme: ${theme}`}
       title={`Theme: ${theme}; click for ${next}`}
-      onClick={() => {
-        chooseTheme(next);
-        setTheme(next);
-      }}
+      onClick={() => chooseTheme(next)}
     >
       <ThemeGlyph theme={theme} />
     </button>
