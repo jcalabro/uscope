@@ -120,12 +120,15 @@ impl<P: InspectionOps> Controller<P> {
             }
         }
 
-        let reveal_new_inline = matches!(
-            reason,
+        let reveal_new_inline = match reason {
             Some(StopReason::Step {
-                kind: StepKind::IntoSource
-            })
-        );
+                kind: StepKind::IntoSource,
+            }) => true,
+            Some(StopReason::Step {
+                kind: StepKind::IntoNewTask,
+            }) => self.entered_new_task(),
+            _ => false,
+        };
         let visible = default_inline_visible_count(
             &self.module_image,
             chain.instances.as_ref(),

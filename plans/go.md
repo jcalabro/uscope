@@ -400,7 +400,11 @@ a step out of them.
 
 - A step that starts in the runtime may stop in the runtime.
 - `step` on a `go` statement continues as `next`. `step` into the new
-  goroutine is a separate step kind, in a later phase.
+  goroutine is a separate step kind, in a later phase. *(Done:
+  `StepKind::IntoNewTask`, the CLI's `step goroutine`. The step watches
+  `runtime.newproc1`, reads the goroutine it returns, and goes on in it
+  from `startpc` as a step in; `tests/go/steps.rs`. DAP has no
+  `stepInTargets` yet, so it does not offer it.)*
 - `step` at a `return` enters deferred functions. The open-coded calls are
   ordinary calls; the rest go through a breakpoint in `deferreturn`.
 - A panic running defers stops `next` and `finish` in the deferred

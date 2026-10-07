@@ -322,6 +322,16 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         entry: ImageAddress,
         registers: &RegisterFile,
     ) -> Option<Result<VirtualAddress, Arc<str>>>;
+    /// The runtime function that starts a task, which it has once the
+    /// function returns.
+    fn task_starter(&self) -> Option<ImageAddress>;
+    /// The task a stopped thread just started, as it returns from the task
+    /// starter, given its registers at the return address.
+    fn started_task(
+        &self,
+        stop: &dyn RuntimeStop,
+        registers: &RegisterFile,
+    ) -> Result<RuntimeTask, Arc<str>>;
     /// What the runtime calls one of its tasks.
     fn task_noun(&self) -> &'static str;
 }

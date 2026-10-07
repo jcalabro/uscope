@@ -47,6 +47,7 @@ each command.
 | `run`, `r` | Launch the program. |
 | `continue`, `c` | Resume every thread. |
 | `step`, `s` / `next`, `n` | Step into / over calls, by source line. |
+| `step task` | Step into the task the line starts, such as a goroutine. |
 | `stepi`, `si` / `nexti`, `ni` | Step one instruction, into / over calls. |
 | `finish`, `fin` | Run until the selected frame returns. |
 | `quit`, `q` | Exit, killing a launched program and detaching from an attached one. |
@@ -76,7 +77,13 @@ In a program whose language runtime schedules tasks, such as Go's
 goroutines, a step belongs to the task it began in. It follows the task to
 whichever thread the runtime resumes it on, other tasks that run the same
 code meanwhile never end it, and its frames are followed when the runtime
-moves the task's stack.
+moves the task's stack. `step task`, or the runtime's own name for a task
+such as `step goroutine`, steps over the line, unless its task starts
+another task meanwhile, as a `go` statement does, even in a function the
+line calls: the step then belongs to the first task started, and stops
+where that task's function begins, through the wrapper that passes it its
+arguments. The started task is then selected. A line that starts no task
+ends as `next` does.
 
 `step` stops only in code the program's author wrote: it passes through
 the runtime's private machinery, compiler-generated wrappers, and stack

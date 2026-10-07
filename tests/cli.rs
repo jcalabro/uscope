@@ -1669,6 +1669,43 @@ fn goroutines_are_listed_by_the_code_the_program_wrote() {
     );
 }
 
+/// `step goroutine` follows the line's `go` statement into the goroutine
+/// it starts, which is then selected.
+#[test]
+fn step_goroutine_enters_the_goroutine_the_line_starts() {
+    const STEPS: &str = "tests/fixtures/go/steps/main.go";
+    let go = support::source_line(STEPS, "// STEP: go");
+    let spawned = support::source_line(STEPS, "// STEP: spawned");
+    let stdout = batch(
+        &["build/test-programs/steps-go-o0"],
+        &[
+            &format!("break main.go:{go}"),
+            "run",
+            // The line's breakpoint is in the goroutine's wrapper too.
+            "delete 1",
+            "step goroutine",
+            "goroutine",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "stopped after new task step",
+            &format!("steps/main.go:{spawned}\n"),
+        ],
+    );
+    let selected = stdout
+        .lines()
+        .find(|line| line.starts_with("* [") && line.contains("main.spawned at "))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(!selected.starts_with("* [1] "), "{selected}");
+    let failure = batch_output(
+        &["build/test-programs/steps-go-o0"],
+        &[&format!("break main.go:{go}"), "run", "step sideways"],
+    );
+    assert_failure(&failure, "usage: step [task]");
+}
+
 #[test]
 fn a_goroutine_is_selected_or_inspected_by_its_id() {
     let stdout = at_go_checkpoint(&[

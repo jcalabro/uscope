@@ -563,6 +563,7 @@ const fn step_name(kind: StepKind) -> &'static str {
         StepKind::IntoSource => "source step",
         StepKind::OverSource => "source next",
         StepKind::Out => "frame return",
+        StepKind::IntoNewTask => "new task step",
     }
 }
 

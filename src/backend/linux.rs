@@ -78,6 +78,7 @@ mod modules;
 mod native;
 #[cfg(test)]
 pub mod native_tracee;
+mod new_task;
 mod post_mortem;
 mod presentation;
 #[cfg(debug_assertions)]
@@ -448,6 +449,9 @@ struct StepStart {
     /// For a step out of a function's own frame, the function, whose
     /// returned values its stop shows.
     returning: Option<returns::Returning>,
+    /// For a step into a new task, how far it has followed the task's
+    /// start.
+    new_task: Option<new_task::NewTask>,
 }
 
 /// Whether a step kind executes machine instructions rather than source
@@ -509,6 +513,9 @@ enum ActiveKind {
     Step {
         owner: StepOwner,
         kind: StepKind,
+        /// The kind the client asked for, which the step's stop reports:
+        /// a step into a new task runs as a step over until a task starts.
+        requested: StepKind,
         start: Box<StepStart>,
         /// The stepping thread executed an instruction whose effect on the
         /// step has not been evaluated yet, because a breakpoint repair or

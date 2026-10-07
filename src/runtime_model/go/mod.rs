@@ -102,6 +102,9 @@ struct GoRuntime {
     /// `runtime.copystack(gp *g, newsize uintptr)`, which moves a
     /// goroutine's stack to grow or shrink it.
     copystack: Option<ImageAddress>,
+    /// `runtime.newproc1`, which makes the goroutine a `go` statement
+    /// starts and returns it.
+    newproc1: Option<ImageAddress>,
     /// The functions cgo calls between Go and C through, each with the
     /// register that holds what it calls: `runtime.cgocall(fn, arg)` calls
     /// C, and `crosscall2(fn, a, n, ctxt)` the Go that C calls.
@@ -142,6 +145,7 @@ impl GoRuntime {
             exceptions: exceptions::Layout::bind(image.as_ref()),
             interfaces: types::Interfaces::bind(image.as_ref()),
             copystack: layout::symbol(image.as_ref(), "runtime.copystack").ok(),
+            newproc1: layout::symbol(image.as_ref(), "runtime.newproc1").ok(),
             call_outs: [("runtime.cgocall", RAX, "rax"), ("crosscall2", RDI, "rdi")]
                 .into_iter()
                 .filter_map(|(name, register, register_name)| {
@@ -454,6 +458,28 @@ impl RuntimeModel for GoRuntime {
         self.goroutine(stop, names, g)?
             .map(|task| task.number)
             .ok_or_else(|| format!("copystack moves {g:#x}, which runs no goroutine").into())
+    }
+
+    fn task_starter(&self) -> Option<ImageAddress> {
+        self.newproc1
+    }
+
+    /// `newproc1` returns the new goroutine in rax, runnable or parked,
+    /// before anything can run it.
+    fn started_task(
+        &self,
+        stop: &dyn RuntimeStop,
+        registers: &RegisterFile,
+    ) -> Result<RuntimeTask, Arc<str>> {
+        let g = registers
+            .get(RAX)
+            .ok_or("the goroutine newproc1 returns is unavailable")?;
+        if !self.allgs(stop)?.contains(&g) {
+            return Err(format!("newproc1 returns {g:#x}, which is no goroutine").into());
+        }
+        let names = self.names(stop);
+        self.goroutine(stop, names, g)?
+            .ok_or_else(|| format!("newproc1 returns {g:#x}, which is dead").into())
     }
 
     fn call_out(

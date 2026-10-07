@@ -44,6 +44,7 @@ impl Client {
             StepKind::IntoSource,
             StepKind::OverSource,
             StepKind::Out,
+            StepKind::IntoNewTask,
         ];
         let kind = *self.choices.borrow_mut().pick(Stream::Client, &kinds);
         let before = self.snapshot().await?;
