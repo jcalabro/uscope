@@ -1,7 +1,8 @@
 // A Go program that calls C, which calls back into Go. C runs on the
 // thread's system stack, to which `asmcgocall` switches; the Go it calls
 // back runs on the goroutine's own stack again, to which `cgocallback`
-// switches. A fault in C is fatal: only Go code can panic.
+// switches. A fault in C is fatal: only Go code can panic. The C's
+// thread-local storage shares the thread's block with the runtime's.
 package main
 
 /*
@@ -9,9 +10,13 @@ package main
 
 extern int64_t callback(int64_t);
 
+// counts is C's own thread-local storage, beside the runtime's.
+static __thread int64_t counts[4];
+
 // leaf doubles a value.
 static __attribute__((noinline)) int64_t leaf(int64_t value) {
 	int64_t doubled = value * 2; // CGO: leaf
+	counts[value & 3] += doubled;
 	return doubled;
 }
 

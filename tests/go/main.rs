@@ -10,6 +10,7 @@ mod cgo;
 mod cores;
 mod defers;
 mod failing;
+mod hosted;
 mod invariants;
 mod preemption;
 mod ranges;

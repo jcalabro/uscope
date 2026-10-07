@@ -44,6 +44,22 @@ pub struct ModuleMetadata {
     pub producers: Vec<Arc<str>>,
     /// The packages whose units the image has.
     pub packages: Vec<PackageInfo>,
+    /// Where each thread's copy of each of the image's thread-local
+    /// variables is, by name, or why that is unknown.
+    pub thread_locals: BTreeMap<Arc<str>, std::result::Result<ThreadLocal, Arc<str>>>,
+}
+
+/// Where a thread's copy of a thread-local variable is, relative to the
+/// thread's thread pointer, as the image's own code finds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadLocal {
+    /// This far from it, fixed when the program was linked, as an
+    /// executable's own thread-locals are.
+    Offset(i64),
+    /// As far from it as the word at this address says, which the loader
+    /// writes as it loads the image, as a library's code reads its
+    /// thread-locals.
+    Slot(ImageAddress),
 }
 
 #[derive(Debug)]
@@ -319,6 +335,7 @@ pub struct ModuleImage {
     vtables: std::collections::BTreeMap<ImageAddress, TypeReference>,
     constants: BTreeMap<Arc<str>, crate::IntegerValue>,
     producers: Arc<[Arc<str>]>,
+    thread_locals: BTreeMap<Arc<str>, std::result::Result<ThreadLocal, Arc<str>>>,
     /// The index in `types` of the first type each Go runtime type
     /// descriptor offset names.
     go_runtime_types: std::collections::BTreeMap<u64, usize>,
@@ -479,6 +496,7 @@ impl ModuleImage {
             vtables: metadata.vtables.iter().copied().collect(),
             constants: std::mem::take(&mut metadata.constants),
             producers: std::mem::take(&mut metadata.producers).into(),
+            thread_locals: std::mem::take(&mut metadata.thread_locals),
             go_runtime_types: go_runtime_types(&metadata.types),
             views: crate::view::ViewSet::empty(),
         }
@@ -718,6 +736,13 @@ impl ModuleImage {
                 .symbolize(address)
                 .or_else(|| self.symbolize_data(address)),
         }
+    }
+
+    /// Where each thread's copy of the named thread-local variable is, or
+    /// why that is unknown; `None` when the image defines none by the name.
+    #[must_use]
+    pub fn thread_local(&self, name: &str) -> Option<std::result::Result<ThreadLocal, Arc<str>>> {
+        self.thread_locals.get(name).cloned()
     }
 
     /// Returns every global catalog entry in deterministic source order.

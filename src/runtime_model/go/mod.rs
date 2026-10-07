@@ -18,7 +18,9 @@ use super::{
     TaskPage, ThreadActivity,
 };
 use crate::unwind::RegisterFile;
-use crate::{AddressRange, ImageAddress, StackSegment, TaskState, ThreadId, VirtualAddress};
+use crate::{
+    AddressRange, ImageAddress, StackSegment, TaskState, ThreadId, ThreadLocal, VirtualAddress,
+};
 
 /// The release the contract was checked against. Another release is read
 /// the same way wherever its debug information binds, and says it is
@@ -803,7 +805,16 @@ impl GoRuntime {
                 return Err("the thread is starting, before its goroutine is set".into());
             }
         }
-        let slot = VirtualAddress::new(pointer.wrapping_add_signed(threads.tls_g));
+        let offset = match threads.tls_g {
+            ThreadLocal::Offset(offset) => offset,
+            ThreadLocal::Slot(slot) => {
+                let slot = VirtualAddress::new(slot.get().wrapping_add(stop.load_bias()));
+                word(stop, slot)
+                    .map(u64::cast_signed)
+                    .ok_or("the slot of the goroutine's place is unreadable")?
+            }
+        };
+        let slot = VirtualAddress::new(pointer.wrapping_add_signed(offset));
         let g = word(stop, slot).ok_or("the thread's goroutine is unreadable")?;
         if g == 0 {
             return Ok(None);

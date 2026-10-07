@@ -6,8 +6,8 @@
 //!   code for one, or nothing; its state is never unreadable.
 //! - Every backtrace, of every thread and every parked goroutine, ends
 //!   properly: complete at an outermost frame, or with a typed reason. It
-//!   names every frame of the program's own image, and changes stacks only
-//!   where the runtime switches them.
+//!   names every frame of the image carrying the runtime, the program's or
+//!   a library's, and changes stacks only where the runtime switches them.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -43,14 +43,10 @@ async fn check(handle: &DebuggerHandle) -> Result<(), String> {
     let InferiorState::Stopped { stop_id, .. } = snapshot.inferior else {
         return Ok(());
     };
-    let main = handle
-        .loaded_modules()
-        .await
-        .map_err(|error| failed("modules", error))?
-        .modules
-        .first()
-        .map(|module| module.module.id)
-        .ok_or("no module is loaded")?;
+    // Before a library carrying the runtime loads, no image is checked.
+    let Some(main) = go_module(handle).await? else {
+        return Ok(());
+    };
     for thread in snapshot.threads.iter() {
         if let Some(ThreadActivity::Unknown(reason)) = &thread.activity {
             return Err(format!(
@@ -86,6 +82,24 @@ async fn check(handle: &DebuggerHandle) -> Result<(), String> {
     }
 }
 
+/// The loaded module whose image carries Go's runtime.
+async fn go_module(handle: &DebuggerHandle) -> Result<Option<ModuleId>, String> {
+    let modules = handle
+        .loaded_modules()
+        .await
+        .map_err(|error| format!("modules: {error}"))?;
+    for module in modules.modules.iter() {
+        let image = handle
+            .loaded_module_image(module.module.id)
+            .await
+            .map_err(|error| format!("module {:?}: {error}", module.module.id))?;
+        if image.functions_named("runtime.goexit").next().is_some() {
+            return Ok(Some(module.module.id));
+        }
+    }
+    Ok(None)
+}
+
 async fn backtrace(
     handle: &DebuggerHandle,
     stop: StopId,
@@ -102,8 +116,9 @@ async fn backtrace(
         .map_err(|error| format!("{execution:?}'s backtrace: {error}"))
 }
 
-/// Whether a backtrace ends properly, names every frame of the program's
-/// image `main`, and changes stacks only where the runtime switches them.
+/// Whether a backtrace ends properly, names every frame of the image
+/// carrying the runtime, loaded as `main`, and changes stacks only where
+/// the runtime switches them.
 pub fn check_backtrace(trace: &Backtrace, main: ModuleId) -> Result<(), String> {
     let role = |index: usize| Some(trace.frames[index].role);
     // A runtime's stack may also end where it switched from a task that
