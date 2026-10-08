@@ -59,6 +59,7 @@ wasmi = { version = "2.0", default-features = false, features = ["std", "validat
 tokio = { version = "1.52", features = ["fs", "io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
 toml = "1.1"
+mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cpp_demangle = "0.5"
