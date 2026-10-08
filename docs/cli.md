@@ -484,6 +484,13 @@ the process has more than one; a resume that ran over a second says how long:
 stopped at breakpoint 1 (hit 3) in parse_header at src/parse.c:41 [thread 41672 of 4] (ran 1.42s)
 ```
 
+Every other thread the stop found at a breakpoint or watchpoint gets a line
+of its own after it, with the task it runs:
+
+```text
+thread 41673 [7] also stopped at breakpoint 1 (hit 4) in parse_header at src/parse.c:41
+```
+
 Breakpoint, step, watchpoint, signal, and pause stops then print the sections
 `[stop] show` lists, in order: `source`, the lines around the stop as `list`
 shows them; `locals`, as `print` alone; `displays`; `registers`;

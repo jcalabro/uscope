@@ -62,14 +62,22 @@ impl Session {
             None => None,
         };
         let mut threads = Vec::new();
-        for thread in snapshot.iter().flat_map(|snapshot| snapshot.threads.iter()) {
-            threads.push(json!({
-                "id": self.thread_ids.id(ExecutionContext::Thread(thread.id))?,
-                "name": thread.name.as_deref().map_or_else(
-                    || format!("Thread {}", thread.id),
-                    |name| format!("{name} ({})", thread.id)
-                ),
-            }));
+        if let Some(snapshot) = &snapshot {
+            for thread in snapshot.threads.iter() {
+                // A thread the stop found stopped for a reason of its own,
+                // such as a breakpoint it hit too, says what stopped it.
+                let stopped = match &thread.state {
+                    uscope::ThreadState::Stopped {
+                        reason: Some(reason),
+                    } if self.stop.is_some() => Some(self.stopped_detail(reason)),
+                    _ => None,
+                };
+                let context = ExecutionContext::Thread(thread.id);
+                threads.push(json!({
+                    "id": self.thread_ids.id(context)?,
+                    "name": thread_name(snapshot, context, stopped),
+                }));
+            }
         }
         if !threads.is_empty() {
             return Ok(json!({"threads": threads}));

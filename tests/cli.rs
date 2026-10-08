@@ -1,5 +1,6 @@
 mod support;
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -654,6 +655,54 @@ fn batch_mode_prints_every_location_of_an_inline_breakpoint() {
         "{stdout}"
     );
     assert_eq!(stdout.matches("  0x").count(), 6, "{stdout}");
+}
+
+/// Each other thread a stop finds at a breakpoint gets a line of its own
+/// after the stop's, naming its hit and place, as the threads list has it.
+#[test]
+fn every_co_hit_prints_a_line_of_its_own() {
+    let mut commands = vec!["break contended", "run", "threads"];
+    for _ in 0..10 {
+        commands.extend(["continue", "threads"]);
+    }
+    let stdout = batch(&["build/test-programs/hit-count-threads"], &commands);
+    let place = " in contended at tests/fixtures/c/hit-count-threads.c:16";
+    let mut co_hits = 0;
+    for stop in stdout.split("\nstopped at breakpoint 1 ").skip(1) {
+        let stopped = stop
+            .split_once("[thread ")
+            .and_then(|(_, rest)| rest.split_once(' '))
+            .map(|(thread, _)| thread)
+            .expect("the stop names its thread");
+        let mut listed = BTreeSet::new();
+        let mut reported = BTreeSet::new();
+        for line in stop.lines() {
+            if let Some(rest) = line.strip_prefix("thread ") {
+                let (thread, rest) = rest.split_once(' ').expect("a co-hit names its thread");
+                let hit = rest
+                    .strip_prefix("also stopped at breakpoint 1 (hit ")
+                    .and_then(|rest| rest.strip_suffix(&format!("){place}")))
+                    .unwrap_or_else(|| panic!("{line:?}"));
+                reported.insert((thread.to_owned(), hit.to_owned()));
+            } else if let Some((thread, hit)) = line
+                .strip_prefix("  ")
+                .and_then(|rest| rest.split_once(' '))
+                .and_then(|(thread, rest)| {
+                    let (_, hit) = rest.split_once(": stopped at breakpoint 1 (hit ")?;
+                    Some((thread, hit.strip_suffix(')')?))
+                })
+            {
+                listed.insert((thread.to_owned(), hit.to_owned()));
+            } else if let Some(selected) = line.strip_prefix("* ") {
+                assert!(selected.starts_with(&format!("{stopped} ")), "{stop}");
+            }
+        }
+        assert_eq!(reported, listed, "{stop}");
+        co_hits += reported.len();
+    }
+    // The workers call `contended` together, so many of their hits come
+    // at the same stop.
+    assert!(co_hits > 0, "{stdout}");
 }
 
 #[test]
