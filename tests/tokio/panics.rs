@@ -6,7 +6,10 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use uscope::{ExceptionStops, ExitStatus, LanguageExceptionKind, LaunchOptions, StopReason};
+use uscope::{
+    ExceptionStops, ExitStatus, InferiorState, LanguageExceptionKind, LaunchOptions, StopReason,
+    ThreadActivity,
+};
 
 use crate::invariants::checked;
 use crate::stops::{evaluated, line};
@@ -63,8 +66,9 @@ impl Launched {
             .collect()
     }
 
-    /// The message and line the fixture's panic hook saw last.
-    fn hooked(&self) -> (String, u64) {
+    /// The message and line the fixture's panic hook saw last, and the
+    /// task that panicked, if one did.
+    fn hooked(&self) -> (String, u64, Option<u64>) {
         let truth = self.truth();
         let panic = truth
             .iter()
@@ -72,7 +76,11 @@ impl Launched {
             .find(|fields| fields[0] == "panic")
             .unwrap_or_else(|| panic!("no panic reported: {truth:?}"));
         assert!(panic[2].ends_with(SOURCE), "{panic:?}");
-        (panic[1].clone(), panic[3].parse().expect("a line"))
+        (
+            panic[1].clone(),
+            panic[3].parse().expect("a line"),
+            panic[4].parse().ok(),
+        )
     }
 }
 
@@ -100,9 +108,9 @@ async fn selected(scenario: &Scenario) -> (String, u64) {
 }
 
 /// Checks the stop is the panic the hook saw, at the marked line, in the
-/// frame selected.
-async fn check_panic(launched: &Launched, context: &str, message: &str, marker: &str) {
-    let (hooked, at) = launched.hooked();
+/// frame selected, on a thread that runs the task that panicked.
+async fn check_panic(launched: &mut Launched, context: &str, message: &str, marker: &str) {
+    let (hooked, at, task) = launched.hooked();
     assert_eq!(hooked, message, "{context}");
     let expected = line(SOURCE, marker);
     assert_eq!(at, expected, "{context}: the hook's line");
@@ -113,6 +121,20 @@ async fn check_panic(launched: &Launched, context: &str, message: &str, marker: 
     let (path, line) = selected(&launched.scenario).await;
     assert!(path.ends_with(SOURCE), "{context}: {path}");
     assert_eq!(line, expected, "{context}");
+    let snapshot = launched.scenario.snapshot().await;
+    let InferiorState::Stopped { thread_id, .. } = snapshot.inferior else {
+        panic!("{context}: not stopped");
+    };
+    let activity = snapshot
+        .threads
+        .iter()
+        .find(|thread| thread.id == thread_id)
+        .and_then(|thread| thread.activity.clone());
+    let runs = match activity {
+        Some(ThreadActivity::Task { task, .. }) => Some(task.number),
+        _ => None,
+    };
+    assert_eq!(runs, task, "{context}: {activity:?}");
 }
 
 /// A panic stops where the program panicked, with the message its hook
@@ -123,7 +145,7 @@ async fn stops_where_the_program_panicked(case: &str, message: &str, ending: &st
     for fixture in ["tokio-panics-o0", "tokio-panics-o3"] {
         let context = format!("{fixture} {case}");
         let mut launched = launched(fixture, case, None).await;
-        check_panic(&launched, &context, message, &marker).await;
+        check_panic(&mut launched, &context, message, &marker).await;
         let reason = launched.scenario.resume_to_stop().await;
         assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)), "{context}");
         let truth = launched.truth();
@@ -152,8 +174,8 @@ async fn a_formatted_message_stops_where_it_panicked() {
 #[tokio::test]
 async fn a_panic_stops_where_it_panicked_under_legacy_mangling() {
     let message = "formatted 7 times";
-    let launched = launched("tokio-panics-legacy", "format", None).await;
-    check_panic(&launched, "legacy", message, "// PANIC: format").await;
+    let mut launched = launched("tokio-panics-legacy", "format", None).await;
+    check_panic(&mut launched, "legacy", message, "// PANIC: format").await;
     launched.scenario.shutdown().await;
 }
 
@@ -189,7 +211,7 @@ async fn a_panic_the_program_catches_stops_before_it_is_caught() {
 async fn a_panic_in_main_stops_and_then_exits_as_rust_does() {
     for fixture in ["tokio-panics-o0", "tokio-panics-o3"] {
         let mut launched = launched(fixture, "main", None).await;
-        check_panic(&launched, fixture, "in main", "// PANIC: main").await;
+        check_panic(&mut launched, fixture, "in main", "// PANIC: main").await;
         let reason = launched.scenario.resume_to_stop().await;
         assert_eq!(
             reason,
@@ -232,7 +254,7 @@ async fn a_panic_with_a_value_names_its_type() {
 async fn a_resumed_panic_stops_again_as_a_resumption() {
     for fixture in ["tokio-panics-o0", "tokio-panics-o3"] {
         let mut launched = launched(fixture, "resume", None).await;
-        check_panic(&launched, fixture, "first", "// PANIC: first").await;
+        check_panic(&mut launched, fixture, "first", "// PANIC: first").await;
         let reason = launched.scenario.resume_to_stop().await;
         assert_eq!(exception(&reason, fixture), "panic resumed: first");
         let (_, line) = selected(&launched.scenario).await;
@@ -249,10 +271,10 @@ async fn a_resumed_panic_stops_again_as_a_resumption() {
 async fn a_panic_while_unwinding_stops_then_aborts() {
     for fixture in ["tokio-panics-o0", "tokio-panics-o3"] {
         let mut launched = launched(fixture, "drop", None).await;
-        check_panic(&launched, fixture, "unwinding", "// PANIC: unwinding").await;
+        check_panic(&mut launched, fixture, "unwinding", "// PANIC: unwinding").await;
         launched.reason = launched.scenario.resume_to_stop().await;
         check_panic(
-            &launched,
+            &mut launched,
             fixture,
             "dropped while unwinding",
             "// PANIC: drop",
@@ -271,7 +293,13 @@ async fn a_panic_while_unwinding_stops_then_aborts() {
 #[tokio::test]
 async fn an_aborting_panic_stops_before_it_aborts() {
     let mut launched = launched("tokio-panics-abort", "format", None).await;
-    check_panic(&launched, "abort", "formatted 7 times", "// PANIC: format").await;
+    check_panic(
+        &mut launched,
+        "abort",
+        "formatted 7 times",
+        "// PANIC: format",
+    )
+    .await;
     let reason = launched.scenario.resume_to_stop().await;
     assert!(
         matches!(&reason, StopReason::Exception(info) if info.code == SIGABRT),
