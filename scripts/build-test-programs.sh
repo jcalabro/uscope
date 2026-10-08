@@ -2009,6 +2009,17 @@ build_tokio_variant remapped dev \
 # Symbols mangled as rustc did before v0, which name no generic arguments.
 build_tokio_variant legacy dev "-Z unstable-options -C symbol-mangling-version=legacy" panics workers
 
+# The workers fixture's checkpoint, as gdb dumps it, with each runtime
+# flavor. The log keeps what the program reported there. One malloc arena
+# keeps each thread from reserving one of its own, which the core saves.
+export TRUTH_CORE=1 MALLOC_ARENA_MAX=1
+for variant in o0 o3; do
+    program="$output_dir/tokio-workers-${variant}"
+    generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
+    generate_core "${program}-current.core" 5 "$default_core_filter" "$program" "$program" current
+done
+unset TRUTH_CORE MALLOC_ARENA_MAX
+
 # Go's own reading of the function tables of images the Go linker linked,
 # which a test compares uscope's reader with.
 readonly gosym_oracle="$output_dir/gosym-oracle"
