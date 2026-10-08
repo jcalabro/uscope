@@ -10,6 +10,10 @@
 //! next, whichever thread polls it; another future of the same function
 //! that resumes there is not the step's.
 //!
+//! A step may also begin in a task no thread runs, at one of the async
+//! functions it awaits in: it begins waiting for that function's future,
+//! as if a poll of it had just returned `Pending`.
+//!
 //! A future may be dropped while the step waits for it: its runtime drops
 //! a task's future as it cancels the task, and a `select!` or a timeout
 //! drops a future it no longer awaits. The step watches the future's drop
@@ -19,17 +23,20 @@
 
 use nix::unistd::Pid;
 
-use crate::protocol::{StepKind, StopReason, TaskEnding};
+use crate::protocol::{
+    ExceptionDisposition, ExecutionId, ProcessId, ResumeScope, StepKind, StopId, StopReason,
+    TaskEnding,
+};
 use crate::runtime_model::futures::{self, AsyncFrameKind};
 use crate::unwind::DEFAULT_MAX_FRAMES;
 use crate::{
-    CodeInstanceId, CoroutineStateKind, Error, Result, SourceLocation, TypeReference,
-    VirtualAddress,
+    CodeInstanceId, CoroutineStateKind, Error, ExecutionContext, Result, SourceLocation,
+    StackFrameId, TypeReference, VirtualAddress,
 };
 
 use super::frames::{FrameScope, ResolvedFrame, StackRoot};
 use super::native::LinuxTraceOps;
-use super::{ActiveKind, Controller, StepStart};
+use super::{ActiveKind, Controller, StepOwner, StepStart};
 use crate::PresentedFrame;
 
 /// The future whose body a step runs, which the step follows across its
@@ -80,6 +87,108 @@ impl<P: LinuxTraceOps> Controller<P> {
             waiting: None,
             drop_glue: None,
         })
+    }
+
+    /// Begins a step of `kind` in a task no thread runs, from the async
+    /// function `frame` selects among its awaits, or the innermost one that
+    /// awaits it: the step waits for the function's future to resume, and
+    /// goes on from there as the step it is. A step in goes on as a step
+    /// over, since the call the line makes is the await already under way.
+    pub(super) fn step_suspended(
+        &mut self,
+        (process_id, stop_id): (ProcessId, StopId),
+        task: crate::TaskId,
+        frame: StackFrameId,
+        kind: StepKind,
+        scope: ResumeScope,
+        exception: ExceptionDisposition,
+    ) -> Result<ExecutionId> {
+        let parked = || Error::TaskParked(task);
+        if !matches!(
+            kind,
+            StepKind::IntoSource | StepKind::OverSource | StepKind::Out
+        ) || matches!(scope, ResumeScope::Thread(_))
+        {
+            return Err(parked());
+        }
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let root = self.stack_root(stop_id, ExecutionContext::Task(task))?;
+        let super::frames::RootOrigin::Suspended { reader, .. } = root.origin else {
+            return Err(parked());
+        };
+        let stack = self.async_stack(inferior, &root)?.ok_or_else(parked)?;
+        let level = usize::try_from(frame.get()).expect("u32 fits usize");
+        let (await_frame, future) = stack
+            .frames
+            .iter()
+            .zip(&stack.futures)
+            .skip(level)
+            .find(|(_, future)| matches!(future.kind, AsyncFrameKind::Coroutine { .. }))
+            .ok_or_else(|| {
+                Error::FrameStepUnsupported("the task's frames hold no async function".into())
+            })?;
+        if future.ty.image != inferior.loaded_module.image {
+            return Err(Error::FrameStepUnsupported(
+                "the async function is in a library, whose awaits steps do not follow".into(),
+            ));
+        }
+        // The type its awaiter holds it as is a description of its own; the
+        // future is named by the type its body names, as the body's polls
+        // find it.
+        let ty = self
+            .module_image
+            .coroutine_functions(future.ty.id)
+            .first()
+            .and_then(|function| function.coroutine)
+            .map_or(future.ty, |id| TypeReference {
+                image: future.ty.image,
+                id,
+            });
+        let future = RunningFuture {
+            object: future.object,
+            ty,
+        };
+        let resumes = self.resume_point(reader, future).ok_or_else(|| {
+            Error::FrameStepUnsupported(
+                "the async function waits at no await whose resumption is known".into(),
+            )
+        })?;
+        let drop_glue = self.drop_glue(future.ty);
+        record!(
+            "a step of task {task} waits for the future at {} at {resumes}",
+            future.object
+        );
+        let requested = kind;
+        let kind = match kind {
+            StepKind::IntoSource => StepKind::OverSource,
+            kind => kind,
+        };
+        let start = StepStart {
+            plan_addresses: std::iter::once(resumes).chain(drop_glue).collect(),
+            awaiting: Some(AwaitStep {
+                future,
+                source: await_frame.source.clone(),
+                waiting: Some(resumes),
+                drop_glue,
+            }),
+            ..StepStart::default()
+        };
+        self.begin_execution(
+            process_id,
+            stop_id,
+            scope,
+            ActiveKind::Step {
+                owner: StepOwner {
+                    thread: reader,
+                    task: Some(task),
+                },
+                kind,
+                requested,
+                start: Box::new(start),
+                progress_owed: false,
+            },
+            exception,
+        )
     }
 
     /// The future whose body a stopped thread's innermost activation runs

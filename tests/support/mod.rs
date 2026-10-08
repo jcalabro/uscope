@@ -533,6 +533,17 @@ impl Scenario {
         task
     }
 
+    /// Starts a step of the selected thread or task, and returns once it
+    /// runs, with what ends it.
+    pub async fn start_stepping(&mut self, kind: StepKind) -> JoinHandle<Result<StopReason>> {
+        let task = self.spawn_request(&format!("step {kind:?}"), move |handle| async move {
+            handle.step(kind).await
+        });
+        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. }))
+            .await;
+        task
+    }
+
     pub async fn start_resuming(&mut self) -> JoinHandle<Result<StopReason>> {
         let task = self.run_task(false);
         self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. }))

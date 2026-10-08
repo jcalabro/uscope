@@ -1529,6 +1529,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                     exception,
                     reply,
                 ),
+                Err(Error::TaskParked(task)) if call.is_none() => {
+                    let result = self.step_suspended(
+                        (process_id, stop_id),
+                        task,
+                        frame,
+                        kind,
+                        scope,
+                        exception,
+                    );
+                    self.reply_execution(result, scope, reply);
+                }
                 Err(error) => {
                     let _ = reply.send(Err(error));
                 }

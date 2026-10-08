@@ -6,8 +6,13 @@
 //! - `select`: another branch of the `select!` that awaits it finishes;
 //! - `timeout`: the timeout around it elapses;
 //! - `shutdown`: the runtime shuts down.
+//!
+//! With `hold`, the gate opens instead, once a line arrives on standard
+//! input, and the task finishes. Before reading, the program says `held`
+//! once its worker has nothing to run, so that no thread runs the task.
 
 use std::hint::black_box;
+use std::io::BufRead as _;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -57,7 +62,7 @@ fn main() {
         .enable_time()
         .build()
         .expect("a runtime");
-    let (_open, gate) = oneshot::channel::<u64>();
+    let (open, gate) = oneshot::channel::<u64>();
     let result = match mode.as_str() {
         "abort" => {
             let task = runtime.spawn(alone(gate));
@@ -81,7 +86,21 @@ fn main() {
             drop(runtime);
             0
         }
+        "hold" => {
+            let task = runtime.spawn(alone(gate));
+            parked();
+            while !truth::workers_parked(runtime.handle()) {
+                std::thread::yield_now();
+            }
+            truth::line(&[&"held"]);
+            let mut input = String::new();
+            std::io::stdin().lock().read_line(&mut input).expect("a line");
+            open.send(7).expect("the task waits");
+            return truth::line(&[&"result", &runtime.block_on(task).expect("the task ends")]);
+        }
         other => panic!("unknown mode {other}"),
     };
     truth::line(&[&"result", &result]);
+    // The gate stays shut until here.
+    drop(open);
 }

@@ -214,3 +214,121 @@ async fn a_step_past_a_tasks_end_says_it_finished() {
         }
     }
 }
+
+/// A breakpoint whose condition names a task by `$task` stops only in that
+/// task, every time round its loop, on whichever worker runs it, while
+/// every task's arrival counts as a hit: the line's executions.
+#[tokio::test]
+async fn a_task_condition_stops_only_in_its_task() {
+    for fixture in BUILDS {
+        for mode in MODES {
+            let context = format!("{fixture} {mode:?}");
+            let mut scenario = stopped_once(fixture, mode, "// STEP: task").await;
+            let task = stopped_task(&mut scenario).await;
+            let round = scenario.add_breakpoint_spec(at("// STEP: round")).await;
+            scenario
+                .operation(
+                    "condition",
+                    scenario.handle().set_breakpoint_condition(
+                        round.id,
+                        Some(
+                            uscope::Condition::parse(&format!("$task == {task}"))
+                                .expect("a condition"),
+                        ),
+                    ),
+                )
+                .await;
+            let mut rounds = Vec::new();
+            let mut reason = scenario.resume_to_stop().await;
+            while matches!(reason, StopReason::Breakpoint { .. }) {
+                assert_eq!(stopped_task(&mut scenario).await, task, "{context}");
+                rounds.push(integer(&scenario, "round").await);
+                assert!(rounds.len() <= 3, "{context}: {rounds:?}");
+                reason = scenario.resume_to_stop().await;
+            }
+            assert!(
+                matches!(reason, StopReason::Exited(_)),
+                "{context}: {reason:?}"
+            );
+            assert_eq!(rounds, [Some(0), Some(1), Some(2)], "{context}");
+            let hits = scenario
+                .snapshot()
+                .await
+                .breakpoints
+                .iter()
+                .find(|breakpoint| breakpoint.id == round.id)
+                .expect("the breakpoint")
+                .hit_count;
+            assert_eq!(hits, 9, "{context}: three tasks go round three times");
+            scenario.shutdown().await;
+        }
+    }
+}
+
+/// A step of a task no thread runs, selected by its number, waits for the
+/// task to resume, on whichever thread, and goes on from its await: `next`
+/// from its innermost async function stops at that function's next line,
+/// and `finish` from an outer function's frame returns to its awaiter.
+#[tokio::test]
+async fn a_step_of_a_suspended_task_waits_for_it_to_resume() {
+    for fixture in BUILDS {
+        for mode in MODES {
+            for (kind, from, function, marker) in [
+                (
+                    StepKind::OverSource,
+                    "inner",
+                    "inner",
+                    "// STEP: inner-after",
+                ),
+                (StepKind::Out, "outer", "task", "// STEP: task"),
+            ] {
+                let context = format!("{fixture} {mode:?} {kind:?}");
+                // No task passes the gate before the first stops past it,
+                // so the tasks no thread runs wait at the gate.
+                let mut scenario = stopped_once(fixture, mode, "// STEP: inner-after").await;
+                let page = scenario
+                    .operation("tasks", scenario.handle().tasks(None, 16))
+                    .await;
+                let task = page
+                    .tasks
+                    .iter()
+                    .find(|task| task.thread.is_none())
+                    .unwrap_or_else(|| panic!("{context}: {:#?}", page.tasks))
+                    .id;
+                scenario
+                    .operation("select task", scenario.handle().select_context(task))
+                    .await;
+                let frame = crate::stops::backtrace(&scenario)
+                    .await
+                    .frames
+                    .iter()
+                    .find(|frame| {
+                        frame
+                            .function
+                            .as_ref()
+                            .is_some_and(|function| *function.name == *from)
+                    })
+                    .unwrap_or_else(|| panic!("{context}: no frame of {from}"))
+                    .id;
+                scenario
+                    .operation("select frame", scenario.handle().select_frame(frame))
+                    .await;
+                assert_eq!(
+                    step(&mut scenario, kind).await,
+                    (function.to_owned(), line(SOURCE, marker)),
+                    "{context}"
+                );
+                assert_eq!(stopped_task(&mut scenario).await, task.number, "{context}");
+                if kind == StepKind::OverSource {
+                    // What the await keeps of the task's own number.
+                    assert_eq!(
+                        integer(&scenario, "before").await,
+                        Some(i128::from(task.number) * 10),
+                        "{context}"
+                    );
+                }
+                scenario.shutdown().await;
+            }
+        }
+    }
+}
