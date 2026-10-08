@@ -715,7 +715,13 @@ pub async fn expanded(
                 presentation.count,
             )
             else {
-                output.text(presentation.summary.to_string());
+                // A number a view presents is written as that number is.
+                let number = presentation
+                    .number
+                    .as_deref()
+                    .filter(|_| layout.hexadecimal)
+                    .and_then(|number| hexadecimal_text(number.type_info.as_ref()?, &number.state));
+                output.text(number.unwrap_or_else(|| presentation.summary.to_string()));
                 continue;
             };
             let length = match count {

@@ -1304,7 +1304,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         VariantDiscriminant::Stored(member) => {
                             member.declaration = declaration;
                         }
-                        VariantDiscriminant::TagType(_) => {}
+                        VariantDiscriminant::TagType(_) | VariantDiscriminant::Absent => {}
                     }
                 }
                 (
@@ -2369,10 +2369,6 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
         }
         let (discriminant, variants) = part.ok_or("variant aggregate has no variant part")?;
-        if variants.is_empty() {
-            return Err("variant part has no variants".into());
-        }
-        validate_variant_selections(&variants)?;
         Ok(resolved(
             reference,
             name,
@@ -2444,14 +2440,15 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             VariantDiscriminant::Stored(stored)
         } else {
-            VariantDiscriminant::TagType(tag_type.ok_or_else(|| {
-                Arc::from("variant part has neither a discriminator nor a tag type")
-            })?)
+            tag_type.map_or(VariantDiscriminant::Absent, VariantDiscriminant::TagType)
         };
-        let representation = self.resolved_integer_base(match &discriminant {
-            VariantDiscriminant::Stored(member) => member.type_ref.id,
-            VariantDiscriminant::TagType(tag_type) => tag_type.id,
-        })?;
+        let representation = match &discriminant {
+            VariantDiscriminant::Stored(member) => Some(member.type_ref.id),
+            VariantDiscriminant::TagType(tag_type) => Some(tag_type.id),
+            VariantDiscriminant::Absent => None,
+        }
+        .map(|id| self.resolved_integer_base(id))
+        .transpose()?;
 
         let unit = &self.units[unit_index];
         let mut variants = Vec::new();
@@ -2470,8 +2467,19 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 ));
             }
             budget.consume()?;
-            let selection =
-                copy_variant_selection(&variant, &representation, self.byte_order, budget)?;
+            let selection = match &representation {
+                Some(representation) => {
+                    copy_variant_selection(&variant, representation, self.byte_order, budget)?
+                }
+                None if variant.attr_value(gimli::DW_AT_discr_value).is_some()
+                    || variant.attr_value(gimli::DW_AT_discr_list).is_some() =>
+                {
+                    return Err(VariantMetadataError::Malformed(
+                        "a variant selects a discriminant its part does not have".into(),
+                    ));
+                }
+                None => VariantSelection::Default,
+            };
             let name = copy_name(self.dwarf, unit, &variant).map_err(malformed)?;
             let variant_index = variants.len();
             let mut members = Vec::new();
@@ -2506,6 +2514,16 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 selection,
                 members: members.into(),
             });
+        }
+        // A sum with no stored tag selects among its variants by which can
+        // hold a value, not by selectors; one with none holds no value.
+        if !matches!(discriminant, VariantDiscriminant::Absent) {
+            if variants.is_empty() {
+                return Err(VariantMetadataError::Malformed(
+                    "variant part has no variants".into(),
+                ));
+            }
+            validate_variant_selections(&variants)?;
         }
         Ok((discriminant, variants))
     }

@@ -694,7 +694,8 @@ pub enum VariantSelection {
     Selectors(Arc<[VariantSelector]>),
 }
 
-/// A stored discriminator member or a tag type without runtime storage.
+/// A stored discriminator member, a tag type without runtime storage, or
+/// neither.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VariantDiscriminant {
@@ -702,6 +703,10 @@ pub enum VariantDiscriminant {
     Stored(RecordMember),
     /// A tag type is described but no discriminator field exists in storage.
     TagType(TypeReference),
+    /// Nothing is stored or described, as rustc describes a sum type only
+    /// one of whose variants can hold a value, such as `Result<T,
+    /// Infallible>`, or none can, such as `Infallible`.
+    Absent,
 }
 
 /// One variant and the components selected with it.
@@ -2307,6 +2312,9 @@ pub struct Presentation {
     /// With [`PresentedShape::Raw`], why the view failed; otherwise why the
     /// summary stopped short.
     pub problem: Option<ViewProblem>,
+    /// For a value presented as an integer, as an atomic is, that integer,
+    /// so a client can write it as it writes any, such as in hexadecimal.
+    pub number: Option<Arc<InspectedValue>>,
 }
 
 /// The inspection state of one visible variable.

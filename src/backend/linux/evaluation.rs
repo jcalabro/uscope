@@ -69,6 +69,8 @@ pub(super) enum StopStep {
     Element(Arc<ViewBound>),
     /// To the value for a key of a value a view presents as a map.
     Entry(Arc<ViewBound>),
+    /// To the value a view presents a value as, for `*x`.
+    Presented(Arc<ViewBound>),
     /// To a global, from anywhere: a view's `global(NAME)`.
     Global(StopObject),
 }
@@ -82,6 +84,9 @@ impl fmt::Debug for StopStep {
             Self::Provider { module, .. } => write!(formatter, "StopStep({module:?})"),
             Self::Element(bound) => write!(formatter, "StopStep(element of {})", bound.view.header),
             Self::Entry(bound) => write!(formatter, "StopStep(entry of {})", bound.view.header),
+            Self::Presented(bound) => {
+                write!(formatter, "StopStep(presented by {})", bound.view.header)
+            }
             Self::Global(object) => write!(formatter, "StopStep(global {object:?})"),
         }
     }
@@ -577,6 +582,11 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
                 self.controller.view_index(from).map_or(planned, Ok)
             }
             (Err(_), StepKind::Entry) => self.controller.view_entry(from).map_or(planned, Ok),
+            // A value that is no pointer dereferences to the value the
+            // view that presents it presents it as.
+            (Err(_) | Ok(Planned { result: None, .. }), StepKind::Deref) => {
+                self.controller.view_deref(from).map_or(planned, Ok)
+            }
             _ => planned,
         }
     }
@@ -748,7 +758,10 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             StopStep::Provider { step, .. } => step
                 .check_indices(indices)
                 .map_err(|error| Stop::Refused(refusal(&error))),
-            StopStep::Element(_) | StopStep::Entry(_) | StopStep::Global(_) => Ok(()),
+            StopStep::Element(_)
+            | StopStep::Entry(_)
+            | StopStep::Presented(_)
+            | StopStep::Global(_) => Ok(()),
         }
     }
 
@@ -770,6 +783,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 return self.view_element(bound, from, *index);
             }
             StopStep::Global(object) => return self.locate(object),
+            StopStep::Presented(bound) => return self.view_presented(bound, from),
             StopStep::Entry(_) => {
                 return Err(Stop::Refused(Refusal::new(
                     ErrorKind::Type,

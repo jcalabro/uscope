@@ -587,7 +587,8 @@ same everywhere; `[print] width` fixes it.
 
 `print` prints on one line unless `[print] style = "pretty"` makes it print as
 `pp` does. Both take formats, which combine, as in `p/xr` or `pp/x`: `/x`
-prints integers in hexadecimal, members and elements included, `/d` in
+prints integers in hexadecimal, members and elements included, and numbers
+a view presents, such as an atomic's, `/d` in
 decimal, overriding `[print] radix`, `/r` values as stored, without views,
 `/p` laid out as `pp` does, and `/l` on one line.
 
