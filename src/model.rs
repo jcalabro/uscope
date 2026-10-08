@@ -1849,6 +1849,13 @@ pub enum VariableUnavailableReason {
         /// The pointer's target.
         address: VirtualAddress,
     },
+    /// The variable of a function that can suspend was last written
+    /// before the await its current run resumed from, which did not keep
+    /// it, so its storage holds whatever has used that memory since.
+    NotSavedAcrossAwait {
+        /// The line of the await the function resumed from.
+        line: LineNumber,
+    },
     /// A runtime-sized array or slice index is outside its current bounds.
     IndexOutOfBounds {
         /// Requested source index.
@@ -1977,6 +1984,10 @@ impl fmt::Display for VariableUnavailableReason {
                 formatter.write_str("DWARF expression evaluation limit exceeded")
             }
             Self::NoTask => formatter.write_str("the thread runs no task"),
+            Self::NotSavedAcrossAwait { line } => write!(
+                formatter,
+                "the value was not kept across the await at line {line}, which this call resumed from"
+            ),
             Self::BelowStackPointer { address } => write!(
                 formatter,
                 "the pointer is stale: {address} is below the frame's stack pointer, in memory only its callees use"

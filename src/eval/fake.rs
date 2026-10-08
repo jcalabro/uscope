@@ -1528,6 +1528,7 @@ pub fn memory() -> World {
     world.variable("limit", constant, &100_i32.to_le_bytes());
     let int_reference = world.reference(int);
     world.variable("first", int_reference, &arr_address.to_le_bytes());
+    world.variable("$future", record, &s);
     world.register_variable("r", int, "rbx", &9_i32.to_le_bytes());
     world.optimized_out("gone", int);
     world.set_register("rip", 0x40_1000);

@@ -39,6 +39,10 @@ runs, an exact integer: in Go, a goroutine's, so a breakpoint's condition
 a thread runs, `$task` is refused; a thread between tasks, such as one idle
 in Go's scheduler, has none, and `$task` is unavailable there.
 
+`$future` is the future of the selected frame's async function or block,
+which holds the variables it keeps across its awaits and the state it is in.
+A frame that runs no future has none.
+
 ```uscope-example
 ns::counter               => reads as `ns::counter`
 ::counter                 => reads as `::counter`
@@ -82,6 +86,7 @@ $nope                  => error unknown-name at `$nope`
 twice                  => error ambiguous-name at `twice`
 $task                  => 7 : integer
 $task == 7             => true : bool
+$future.a              => 5 : int
 long                   => 3 : int
 long * 2               => 6 : integer
 words.int + words.class => 10 : integer
@@ -92,6 +97,7 @@ sizeof(long)           => 8 : integer
 ```uscope-example
 world: scalars
 $task                  => error unsupported at `$task`
+$future                => error unknown-name at `$future`
 ```
 
 ## Literals
