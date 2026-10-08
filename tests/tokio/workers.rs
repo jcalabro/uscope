@@ -9,11 +9,11 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use uscope::{
-    BreakpointSpec, InferiorState, LaunchOptions, StopReason, TaskPage, TaskSnapshot, TaskState,
+    BreakpointSpec, CodeRole, InferiorState, LaunchOptions, StopReason, TaskPage, TaskSnapshot, TaskState,
     ThreadActivity, ThreadId,
 };
 
-use crate::stops::integer;
+use crate::stops::{backtrace, integer};
 use crate::support::{Scenario, ScratchDir};
 
 const BUILDS: [&str; 2] = ["tokio-workers-o0", "tokio-workers-o3"];
@@ -297,6 +297,65 @@ async fn a_task_at_a_breakpoint_runs_on_a_worker() {
 #[tokio::test]
 async fn a_task_at_a_breakpoint_runs_on_the_current_thread() {
     a_task_at_a_breakpoint_runs_on_its_thread(true).await;
+}
+
+/// tokio's runtime is its machinery in a backtrace, and a task's frames
+/// begin where its scheduler polls it; the program's own frames, and
+/// tokio's libraries it calls, are ordinary.
+async fn tokios_machinery_is_marked(current: bool) {
+    let at = BreakpointSpec::Function("task_reached".into());
+    for fixture in BUILDS {
+        let workers = Workers::stopped_at(fixture, current, at.clone()).await;
+        let trace = backtrace(&workers.scenario).await;
+        let image = workers.scenario.handle().module_image();
+        let path = |frame: &uscope::StackFrame| {
+            frame
+                .source
+                .as_ref()
+                .and_then(|source| image.source_file(source.file))
+                .map(|file| file.path.display().to_string())
+                .unwrap_or_default()
+        };
+        let mut dispatch = None;
+        for (index, frame) in trace.frames.iter().enumerate() {
+            let (path, role) = (path(frame), frame.role);
+            let context = format!("{fixture}: {path} {:?}", frame.function);
+            if path.ends_with("workers/src/main.rs") || path.ends_with("truth/src/lib.rs") {
+                assert_eq!(role, CodeRole::Ordinary, "{context}");
+            } else if path.contains("/tokio-1.52.3/src/runtime/") {
+                assert!(
+                    matches!(role, CodeRole::RuntimeInternal | CodeRole::Dispatch),
+                    "{context}: {role:?}"
+                );
+                if role == CodeRole::Dispatch {
+                    dispatch = dispatch.or(Some(index));
+                }
+            }
+        }
+        // The innermost poll of a task is this task's: its own functions
+        // lie within it. A worker is itself a blocking task, polled below.
+        let dispatch = dispatch.unwrap_or_else(|| panic!("{fixture}: no dispatch: {trace:#?}"));
+        for name in ["leaf", "middle", "top"] {
+            let at = trace.frames.iter().position(|frame| {
+                frame
+                    .function
+                    .as_ref()
+                    .is_some_and(|function| &*function.name == name)
+            });
+            assert!(at.is_some_and(|at| at < dispatch), "{fixture}: {name} {at:?} {dispatch}");
+        }
+        workers.scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn tokios_machinery_is_marked_on_a_worker() {
+    tokios_machinery_is_marked(false).await;
+}
+
+#[tokio::test]
+async fn tokios_machinery_is_marked_on_the_current_thread() {
+    tokios_machinery_is_marked(true).await;
 }
 
 /// Before `main` builds a runtime, no thread has entered one, and there

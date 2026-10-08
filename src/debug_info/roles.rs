@@ -77,6 +77,11 @@ pub fn function_role(name: &str, trampoline: bool) -> CodeRole {
 /// glue rustc generates, which calls the `Drop` impls the program wrote and
 /// carries the lines of what it drops, such as an await's. std's and core's
 /// code that raises a panic is the panic machinery.
+///
+/// tokio's runtime, its tasks' harness, and the drivers and pools beneath
+/// them are its machinery, as is mio's code, which the drivers call; its
+/// libraries the program calls, such as `tokio::sync`, are not. A task's
+/// frames begin where its harness polls it.
 pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
     let within = |path: &str| {
         namespace
@@ -95,6 +100,18 @@ pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
         || (within("std::sys::backtrace") && named("__rust_end_short_backtrace"))
     {
         return Some(CodeRole::Panic);
+    }
+    // `Harness::poll::<T, S>`, which rustc nests in its type, and which
+    // stays a function of its own in every build: optimization inlines
+    // what calls it, and the vtable's `raw::poll` only jumps to it.
+    if namespace == "tokio::runtime::task::harness" && name.starts_with("poll<") {
+        return Some(CodeRole::Dispatch);
+    }
+    if ["tokio::runtime", "tokio::task", "tokio::loom", "tokio::util", "tokio::macros", "mio"]
+        .into_iter()
+        .any(within)
+    {
+        return Some(CodeRole::RuntimeInternal);
     }
     (within("core::future")
         || within("core::pin")
