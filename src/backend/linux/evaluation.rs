@@ -342,8 +342,8 @@ fn definition(image: &crate::ModuleImage, info: &TypeInfo) -> String {
             .type_info(reference)
             .map_or_else(|| "?".to_owned(), |info| info.name.to_string())
     };
-    let shape = match &info.kind {
-        TypeKind::Record { members, .. } | TypeKind::Union { members, .. } => members
+    let members = |members: &[crate::RecordMember]| {
+        members
             .iter()
             .map(|member| {
                 format!(
@@ -354,7 +354,32 @@ fn definition(image: &crate::ModuleImage, info: &TypeInfo) -> String {
                 )
             })
             .collect::<Vec<_>>()
-            .join(","),
+            .join(",")
+    };
+    let shape = match &info.kind {
+        TypeKind::Record { members: fields, .. } | TypeKind::Union { members: fields, .. } => {
+            members(fields)
+        }
+        TypeKind::Variant {
+            common_members,
+            discriminant,
+            variants,
+            ..
+        } => {
+            let tag = match discriminant.as_ref() {
+                crate::VariantDiscriminant::Stored(member) => {
+                    members(std::slice::from_ref(member))
+                }
+                crate::VariantDiscriminant::TagType(tag) => name(*tag),
+                crate::VariantDiscriminant::Absent => String::new(),
+            };
+            let variants = variants
+                .iter()
+                .map(|variant| format!("{:?}={}", variant.selection, members(&variant.members)))
+                .collect::<Vec<_>>()
+                .join(";");
+            format!("{}|{tag}|{variants}", members(common_members))
+        }
         TypeKind::Named {
             target: Some(target),
             ..

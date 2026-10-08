@@ -1992,7 +1992,7 @@ generate_coroutine_oracle() {
 }
 
 # Every fixture, unoptimized and optimized.
-readonly tokio_fixtures=(std-async panics)
+readonly tokio_fixtures=(std-async panics workers)
 build_tokio_variant o0 dev "" "${tokio_fixtures[@]}"
 build_tokio_variant o3 release "" "${tokio_fixtures[@]}"
 # Panics that abort rather than unwind.
