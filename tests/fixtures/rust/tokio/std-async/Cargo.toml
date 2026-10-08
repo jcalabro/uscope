@@ -1,0 +1,5 @@
+[package]
+name = "std-async"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
