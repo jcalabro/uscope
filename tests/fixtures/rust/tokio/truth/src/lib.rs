@@ -172,6 +172,12 @@ pub fn checkpoint(name: &str, handle: Option<&tokio::runtime::Handle>) {
     }
     line(&[&"main", &gettid()]);
     truth_reached();
+    dump_core_if_asked();
+}
+
+/// With `TRUTH_CORE` set, traps, for the debugger that runs the program to
+/// dump its core.
+pub fn dump_core_if_asked() {
     if std::env::var_os("TRUTH_CORE").is_some() {
         remove_stack_guards();
         // SAFETY: raising a signal has no preconditions.

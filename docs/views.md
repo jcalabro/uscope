@@ -783,6 +783,21 @@ The built-in views cover:
   `Instant` as durations, and `SystemTime` as the UTC time it is. `&str`,
   `Box<str>`, `&Path`, `&OsStr`, and `&CStr` are text, and slices
   elements, without a view. `Rc<[T]>` and `Arc<[T]>` show as stored.
+- Rust, in tokio 1.52: a `JoinHandle` as its task's output, or as `task N
+  pending`, `panicked`, `was cancelled`, or `'s output taken`, and a
+  `JoinError` as tokio writes it; a task's `Id`; a `Waker` of a tokio task
+  as the task; `Mutex`, `RwLock`, and `Semaphore` as what they hold, with
+  whether they are locked, the readers and writer, and the tasks waiting,
+  and their guards as what they guard; `mpsc` channels' senders and
+  receivers as the messages queued, with the capacity, whether the channel
+  is closed, and the senders; `oneshot` ends as the value sent, `empty`,
+  `closed`, or `received`; `watch` ends as the value, with its version and
+  whether a receiver has seen it; a `broadcast` sender as the messages sent
+  and a receiver as those it has yet to receive; `Notify` as `empty`,
+  `notified`, or the tasks waiting; `Sleep` as `elapsed` or the time until
+  its deadline, by the runtime's clock, which reads late after the runtime
+  has been idle, and `Interval` as its period and next tick; `Instant` as a
+  duration; and a `JoinSet` as its tasks' join handles.
 - Go: maps and channels, including nil ones, which show as `nil`;
   `time.Duration` as `Duration.String` writes it; `time.Time` as its wall
   clock reading in UTC, its location, and its monotonic reading when it has
