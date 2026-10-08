@@ -340,7 +340,13 @@ impl Session {
             execution,
             frame: frame.id,
         })?;
-        let mut name = if frame.function.is_none() && frame.symbol.is_none() {
+        let mut name = if let uscope::FrameKind::Awaited { ty, .. } = frame.kind {
+            let image = match frame.module {
+                Some(module) => self.image(module).await,
+                None => None,
+            };
+            crate::cli::format::awaited(image.as_deref(), ty)
+        } else if frame.function.is_none() && frame.symbol.is_none() {
             // Code without a name is named by its address and module.
             let module = match frame.module {
                 Some(module) => self.image(module).await.and_then(|image| {
@@ -351,10 +357,10 @@ impl Session {
                 }),
                 None => None,
             };
-            format!(
-                "{:#x}{}",
-                frame.instruction.get(),
-                module.unwrap_or_default()
+            let module = module.unwrap_or_default();
+            frame.instruction.map_or_else(
+                || format!("a suspended frame{module}"),
+                |address| format!("{address:#x}{module}"),
             )
         } else {
             crate::cli::format::code_name(frame.function.as_ref(), frame.symbol.as_ref())
@@ -362,15 +368,20 @@ impl Session {
         match frame.kind {
             uscope::FrameKind::Inline => name.push_str(" [inlined]"),
             uscope::FrameKind::TailCall => name.push_str(" [tail call]"),
-            uscope::FrameKind::Physical | uscope::FrameKind::Signal => {}
+            uscope::FrameKind::Async { .. } => name.insert_str(0, "async "),
+            uscope::FrameKind::Physical
+            | uscope::FrameKind::Signal
+            | uscope::FrameKind::Awaited { .. } => {}
         }
         let mut body = json!({
             "id": id,
             "name": name,
             "line": 0,
             "column": 0,
-            "instructionPointerReference": format!("{:#x}", frame.instruction.get()),
         });
+        if let Some(address) = frame.instruction {
+            body["instructionPointerReference"] = format!("{address:#x}").into();
+        }
         if let Some(module) = frame.module {
             body["moduleId"] = module.get().to_string().into();
         }

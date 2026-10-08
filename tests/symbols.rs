@@ -182,7 +182,11 @@ fn assert_frame_symbols_are_consistent(trace: &Backtrace, modules: &Modules, con
             .symbol(symbol.symbol)
             .unwrap_or_else(|| panic!("{context}: unknown symbol {symbol:?}"));
         assert_eq!(info.name, symbol.name, "{context}");
-        let image_instruction = frame.instruction.get() - modules.bias(module);
+        let image_instruction = frame
+            .instruction
+            .expect("a thread's frame has an instruction")
+            .get()
+            - modules.bias(module);
         assert_eq!(
             image_instruction - info.address.get(),
             symbol.offset,
@@ -472,7 +476,7 @@ async fn live_processes_name_code_and_data_by_elf_symbols() {
             .await;
         let (library_module, _) = modules.named(library);
         assert_eq!(location.module, library_module, "{executable}");
-        assert_eq!(location.address, trace.frames[0].instruction);
+        assert_eq!(Some(location.address), trace.frames[0].instruction);
         assert!(location.image.function.is_none());
         assert!(location.image.source.is_none());
         assert_eq!(
@@ -609,7 +613,14 @@ fn assert_agrees_with_gdb(trace: &Backtrace, modules: &Modules, gdb: &[GdbFrame]
     for (frame, gdb) in trace.frames.iter().zip(gdb) {
         let context = format!("{context}: frame #{} {gdb:?}", frame.level);
         if let Some(address) = gdb.address {
-            assert_eq!(frame.instruction.get(), address, "{context}");
+            assert_eq!(
+                frame
+                    .instruction
+                    .expect("a thread's frame has an instruction")
+                    .get(),
+                address,
+                "{context}"
+            );
         }
         if gdb.has_source {
             let function = frame.function.as_ref().expect("debug-info frame");
@@ -1398,7 +1409,13 @@ async fn instructions_outside_every_module_have_no_location() {
         let [frame] = &trace.frames[..] else {
             panic!("{trace:#?}");
         };
-        assert_eq!(frame.instruction.get(), 0);
+        assert_eq!(
+            frame
+                .instruction
+                .expect("a thread's frame has an instruction")
+                .get(),
+            0
+        );
         assert!(frame.module.is_none() && frame.symbol.is_none() && frame.function.is_none());
         assert!(
             matches!(trace.termination, UnwindTermination::ModuleNotFound { address } if address.get() == 0),

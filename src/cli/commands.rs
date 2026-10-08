@@ -2249,8 +2249,9 @@ impl Cli {
                 .frames
                 .iter()
                 .find(|frame| frame.level == level)
-                .map(|frame| frame.instruction)
-                .ok_or_else(|| anyhow!("the selected frame {level} no longer exists"));
+                .ok_or_else(|| anyhow!("the selected frame {level} no longer exists"))?
+                .instruction
+                .ok_or_else(|| anyhow!("frame {level} is suspended, and runs no code"));
         }
         let registers = self.debugger.registers().await?;
         registers

@@ -816,7 +816,9 @@ impl Caller {
         }
         match backtrace.frames.get(1) {
             None => Self::Outermost(backtrace.termination.clone()),
-            Some(caller) if caller.module.is_none() => Self::Corrupt(caller.instruction),
+            Some(caller) if caller.module.is_none() => {
+                caller.instruction.map_or(Self::Trusted, Self::Corrupt)
+            }
             Some(_) => Self::Trusted,
         }
     }

@@ -1053,7 +1053,7 @@ fn watched_scalar(type_info: &TypeInfo, image: Option<&ModuleImage>) -> Option<W
 /// A type's name with the path its producer's name leaves out, as in
 /// `std::vector<int, std::allocator<int> >`. Go and Zig names already
 /// carry their packages and modules.
-fn qualified_name(type_info: &TypeInfo) -> String {
+pub fn qualified_name(type_info: &TypeInfo) -> String {
     let Some(identity) = type_info.identity.as_deref() else {
         return type_info.name.to_string();
     };

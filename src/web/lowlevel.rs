@@ -67,7 +67,12 @@ pub async fn disassemble(
     let (shown, marked) = if let Some(text) = &request.address {
         (address(text)?, None)
     } else {
-        let executing = executing(&trace.frames, index);
+        let executing = executing(&trace.frames, index).ok_or_else(|| {
+            Failure::new(
+                ErrorKind::Invalid,
+                "the frame is suspended, and runs no code",
+            )
+        })?;
         (executing, Some(executing.get()))
     };
     let query = |range| DisassemblyQuery {
@@ -141,22 +146,25 @@ pub async fn disassemble(
 /// An address inside the instruction a frame is executing. The innermost
 /// activation and one a signal interrupted are at their instruction; any
 /// other returns past its call, so the call holds the byte before. Inline
-/// frames share their activation's address.
-fn executing(frames: &[uscope::StackFrame], index: usize) -> VirtualAddress {
+/// frames share their activation's address. A suspended task's frame
+/// resumes at its instruction, if it has one.
+fn executing(frames: &[uscope::StackFrame], index: usize) -> Option<VirtualAddress> {
     let activation = frames[index..]
         .iter()
         .position(|frame| frame.kind != FrameKind::Inline)
         .map_or(index, |offset| index + offset);
     let frame = &frames[activation];
     let exact = frame.kind == FrameKind::Signal
+        || frame.kind.is_suspended()
         || frames[..activation]
             .iter()
             .all(|frame| frame.kind == FrameKind::Inline);
-    if exact {
-        frame.instruction
+    let instruction = frame.instruction?;
+    Some(if exact {
+        instruction
     } else {
-        VirtualAddress::new(frame.instruction.get().saturating_sub(1))
-    }
+        VirtualAddress::new(instruction.get().saturating_sub(1))
+    })
 }
 
 async fn source_line(images: &Images, instruction: &DisassembledInstruction) -> Option<SourceLine> {

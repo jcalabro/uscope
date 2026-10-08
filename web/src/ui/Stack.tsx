@@ -29,7 +29,7 @@ export function Stack() {
               type="button"
               className={`row button-row ${frame.index === at.frame ? "selected" : ""}`}
               aria-current={frame.index === at.frame ? "true" : undefined}
-              title={`${frame.name} at ${frame.address}`}
+              title={frame.address ? `${frame.name} at ${frame.address}` : frame.name}
               onClick={() => go({ ...at, frame: frame.index })}
             >
               <span className="dim index">{frame.index}</span>
@@ -37,6 +37,7 @@ export function Stack() {
                 {frame.name}
                 {frame.kind === "inline" && <span className="dim"> inlined</span>}
                 {frame.kind === "tailCall" && <span className="dim"> tail call</span>}
+                {frame.kind === "async" && <span className="dim"> async</span>}
               </span>
               <span className="end">{where(frame)}</span>
             </button>
@@ -66,5 +67,5 @@ function where(frame: Frame): string {
   if (frame.source) {
     return `${fileName(frame.source.path)}:${frame.source.line}`;
   }
-  return frame.module ?? frame.address;
+  return frame.module ?? frame.address ?? "";
 }

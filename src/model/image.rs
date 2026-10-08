@@ -340,6 +340,9 @@ pub struct ModuleImage {
     /// Symbols by the last part of each name they answer to, built on the
     /// first search for one, since it demangles every symbol.
     symbols_by_last_part: std::sync::OnceLock<HashMap<Box<str>, Vec<SymbolId>>>,
+    /// The functions that run each coroutine type, by the type's identity,
+    /// built on the first search for one.
+    coroutine_functions: std::sync::OnceLock<HashMap<Arc<str>, Vec<FunctionId>>>,
     globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
     instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
     statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
@@ -476,6 +479,7 @@ impl ModuleImage {
                     .map(|symbol| (Arc::clone(&symbol.name), symbol.id)),
             ),
             symbols_by_last_part: std::sync::OnceLock::new(),
+            coroutine_functions: std::sync::OnceLock::new(),
             globals_by_selector: grouped_index(global_selectors(&metadata)),
             instances_by_function: grouped_index(
                 metadata
@@ -932,6 +936,28 @@ impl ModuleImage {
         ty: TypeId,
     ) -> Option<std::result::Result<&crate::CoroutineInfo, &Arc<str>>> {
         self.coroutines.get(&ty).map(std::result::Result::as_ref)
+    }
+
+    /// The functions that run the coroutine of type `ty`, or any type the
+    /// same as it.
+    #[must_use]
+    pub fn coroutine_functions(&self, ty: TypeId) -> Vec<&FunctionInfo> {
+        let key = |id| self.type_key(TypeReference { image: self.id, id });
+        let index = self.coroutine_functions.get_or_init(|| {
+            let mut index = HashMap::<Arc<str>, Vec<FunctionId>>::new();
+            for function in self.functions.iter() {
+                if let Some(key) = function.coroutine.and_then(key) {
+                    index.entry(Arc::clone(key)).or_default().push(function.id);
+                }
+            }
+            index
+        });
+        key(ty)
+            .and_then(|key| index.get(key))
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.function(*id))
+            .collect()
     }
 
     /// Where the code instance `instance`, which runs a coroutine, goes for
