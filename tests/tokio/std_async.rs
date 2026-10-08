@@ -4,7 +4,8 @@
 use std::process::Stdio;
 
 use uscope::{
-    BreakpointSpec, LaunchOptions, LineNumber, StopReason, VariableState, VariableUnavailableReason,
+    BreakpointSpec, LaunchOptions, LineNumber, StepKind, StopReason, VariableState,
+    VariableUnavailableReason,
 };
 
 use crate::stops::{backtrace, evaluated, frames_to, integer, line, locals, place};
@@ -112,7 +113,11 @@ async fn a_function_breakpoint_binds_an_async_body() {
 #[tokio::test]
 async fn await_lines_stop_on_arrival_only() {
     for fixture in BUILDS {
-        for (marker, arrivals) in [("// AWAIT: leaf", 2), ("// AWAIT: walk", 3)] {
+        for (marker, arrivals) in [
+            ("// AWAIT: leaf", 2),
+            ("// AWAIT: middle", 2),
+            ("// AWAIT: walk", 3),
+        ] {
             let mut scenario = Scenario::launch(fixture);
             let breakpoint = scenario.add_breakpoint_spec(at(marker)).await;
             assert_eq!(
@@ -285,5 +290,34 @@ fn check_variables(
             1,
             "{fixture} {function}: {listed:#?}"
         );
+    }
+}
+
+/// `step` on a line that awaits an async function's future stops at the
+/// function's first line in one step, through the future's construction,
+/// `IntoFuture`, `Pin`, and the dispatch on its state.
+#[tokio::test]
+async fn step_enters_an_awaited_async_function_at_its_first_line() {
+    for fixture in BUILDS {
+        for (marker, function, first) in [
+            ("// STEP: middle-ready", "ready", "// STEP: ready"),
+            ("// AWAIT: middle", "leaf", "// STEP: leaf"),
+        ] {
+            let mut scenario = stopped_at(fixture, at(marker)).await;
+            let reason = scenario.step_to_stop(StepKind::IntoSource).await;
+            assert_eq!(
+                reason,
+                StopReason::Step {
+                    kind: StepKind::IntoSource
+                },
+                "{fixture} {marker}"
+            );
+            assert_eq!(
+                place(&scenario).await,
+                (function.to_owned(), line(SOURCE, first)),
+                "{fixture} {marker}"
+            );
+            scenario.shutdown().await;
+        }
     }
 }

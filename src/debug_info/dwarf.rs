@@ -1334,6 +1334,12 @@ fn load_function_metadata(
             linkage_name.as_deref().unwrap_or(&name),
             origin.trampoline || builds_future(origin, &async_functions),
         );
+        let role = match (&origin.namespace, &origin.name) {
+            (Some(namespace), Some(own)) if origin.language == SourceLanguage::Rust => {
+                super::roles::rust_role(namespace, own).unwrap_or(role)
+            }
+            _ => role,
+        };
         trampolines.push(origin.trampoline);
 
         functions.push(FunctionInfo {
@@ -2168,6 +2174,20 @@ fn decode_resume_points(
             .collect::<Vec<_>>();
         let points = super::dispatch::decode(&image, &ranges, entry, coroutine.state, &states).map(
             |mut points| {
+                // The code a first poll can run. Resuming runs code of its
+                // own until it joins that, such as the rest of a line
+                // whose awaited call is inlined.
+                let arrival = points
+                    .points
+                    .iter()
+                    .find(|point| {
+                        coroutine
+                            .state(point.state)
+                            .is_some_and(|state| state.kind == crate::CoroutineStateKind::Unresumed)
+                    })
+                    .map(|point| super::dispatch::flood_all(&image, point.address, &in_function))
+                    .filter(|(_, complete)| *complete)
+                    .map(|(code, _)| code);
                 let mut moved = points.points.to_vec();
                 for point in &mut moved {
                     let Some(state) = coroutine.state(point.state) else {
@@ -2186,14 +2206,22 @@ fn decode_resume_points(
                         });
                         continue;
                     }
-                    // Resuming reaches the code of the state's own line, of
-                    // the function's header, and of no line.
+                    // Resuming runs the code of the state's own line, of the
+                    // function's header, and of no line, which includes the
+                    // loop polling the awaited future that arriving at the
+                    // await runs too, and so is not where the await's line
+                    // begins. It also runs code no first poll runs before
+                    // it joins one's path, such as the rest of a line whose
+                    // awaited body is inlined.
                     let own = state.location.as_ref().map(|location| location.line);
                     let within = |address: u64| {
                         in_function(address)
-                            && rows.line_at(ImageAddress::new(address)).is_none_or(|line| {
+                            && (rows.line_at(ImageAddress::new(address)).is_none_or(|line| {
                                 line.get() == 0 || Some(line) == own || Some(line) == header
-                            })
+                            }) || arrival.as_ref().is_some_and(|arrival| {
+                                let address = ImageAddress::new(address);
+                                !arrival.iter().any(|range| range.contains(address))
+                            }))
                     };
                     point.resumption = super::dispatch::flood(&image, point.address, &within);
                 }
