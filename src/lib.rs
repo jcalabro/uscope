@@ -63,34 +63,34 @@ pub use model::{
     Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArgumentOrigin,
     ArrayDimension, Backtrace, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding,
     BreakpointEntry, BreakpointLocation, ByteOrder, CBaseType, CallFrameUnavailableReason,
-    CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole, ColumnNumber, DebugFile,
-    DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue,
-    EmbeddedSymbolTable, EntryProvenance, EntryValueUnavailableReason, EnumerationOrigin,
-    Enumerator, ExecutionContext, ExecutionLocation, FloatValue, FrameKind, FunctionId,
-    FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
-    GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
-    GoKind, GoTypeAttributes, GotSlot, GotTarget, ImageAddress, ImageAddressDescription,
-    ImageLocation, InlineChain, InlineFrameLookup, InspectedValue, InspectionCompletion,
-    InspectionExhaustion, InspectionLimit, InspectionLimits, InspectionUsage, IntegerValue,
-    LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
-    LoadedModuleSnapshot, MapKey, MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason,
-    ModuleAddress, ModuleId, ModuleImage, ModuleImageId, NamedTypeRelationship, OptimizedOutReason,
-    PointerWidth, Presentation, PresentedCount, PresentedShape, RecordKind, RecordMember,
-    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, RuntimeId, ScalarValue, SectionId, SectionInfo,
-    SectionLocation, ShapeUnresolvedReason, SourceContext, SourceFile, SourceFileId,
-    SourceLanguage, SourceLine, SourceLocation, StackFrame, StackFrameId, StackSegment,
-    StatementFlags, StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId,
-    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TaskCursor,
-    TaskId, TaskLocation, TaskPage, TaskSnapshot, TaskState, TextCompletion, TextSummary,
-    ThreadActivity, ThreadId, ThreadLocal, TlsUnavailableReason, TypeArgument, TypeId,
-    TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
-    UnsupportedVariableFeature, UnwindTermination, ValueAccessUnavailableReason, ValueBitRange,
-    ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren, ValueChildrenReference,
-    Variable, VariableInvalidReason, VariableKind, VariableMalformedKind, VariableMalformedReason,
-    VariableSnapshot, VariableState, VariableUnavailableReason, VariableValue, VariableValueSource,
-    Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind, ViewName,
-    ViewProblem, VirtualAddress,
+    CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole, ColumnNumber, CoroutineInfo,
+    CoroutineKind, CoroutineState, CoroutineStateKind, DebugFile, DereferenceReference,
+    DereferenceState, DereferenceUnavailableReason, DereferencedValue, EmbeddedSymbolTable,
+    EntryProvenance, EntryValueUnavailableReason, EnumerationOrigin, Enumerator, ExecutionContext,
+    ExecutionLocation, FloatValue, FrameKind, FunctionId, FunctionInfo, GlobalVariableCandidate,
+    GlobalVariableId, GlobalVariableInfo, GlobalVariablePage, GlobalVariableReference,
+    GlobalVariableType, GlobalVariableVisibility, GoKind, GoTypeAttributes, GotSlot, GotTarget,
+    ImageAddress, ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup,
+    InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit, InspectionLimits,
+    InspectionUsage, IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo,
+    LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MapKey, MemoryRead,
+    MemoryReadCompletion, MemoryReadUnavailableReason, ModuleAddress, ModuleId, ModuleImage,
+    ModuleImageId, NamedTypeRelationship, OptimizedOutReason, PointerWidth, Presentation,
+    PresentedCount, PresentedShape, RecordKind, RecordMember, RecordMemberLayout, ReferenceKind,
+    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, ResumePoint,
+    ResumePoints, RuntimeId, ScalarValue, SectionId, SectionInfo, SectionLocation,
+    ShapeUnresolvedReason, SourceContext, SourceFile, SourceFileId, SourceLanguage, SourceLine,
+    SourceLocation, StackFrame, StackFrameId, StackSegment, StateMember, StatementFlags,
+    StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo,
+    SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TaskCursor, TaskId,
+    TaskLocation, TaskPage, TaskSnapshot, TaskState, TextCompletion, TextSummary, ThreadActivity,
+    ThreadId, ThreadLocal, TlsUnavailableReason, TypeArgument, TypeId, TypeIdentity, TypeInfo,
+    TypeKind, TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
+    ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
+    ValueChildRelationship, ValueChildren, ValueChildrenReference, Variable, VariableInvalidReason,
+    VariableKind, VariableMalformedKind, VariableMalformedReason, VariableSnapshot, VariableState,
+    VariableUnavailableReason, VariableValue, VariableValueSource, Variant, VariantDiscriminant,
+    VariantSelection, VariantSelector, VariantStorageKind, ViewName, ViewProblem, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, ConditionOwner,
@@ -245,6 +245,14 @@ pub fn fuzz_debug_register_plan(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_elf_symbols(data: &[u8]) {
     debug_info::fuzz_elf_symbols(data);
+}
+
+/// Exercises the decoding of a coroutine's dispatch on its state on
+/// hostile code for the fuzz harness.
+#[cfg(all(feature = "fuzzing", target_arch = "x86_64"))]
+#[doc(hidden)]
+pub fn fuzz_dispatch(data: &[u8]) {
+    debug_info::fuzz_dispatch(data);
 }
 
 /// Exercises Go function-table decoding on hostile bytes for the fuzz

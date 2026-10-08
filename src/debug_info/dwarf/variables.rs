@@ -33,7 +33,9 @@ use crate::{
     VariableMalformedKind, VariableMalformedReason, VariableQuery, VariableState,
 };
 
-use super::{DieKey, DwarfError, Reader, UnitCatalog, die_code_ranges, is_type_unit};
+use super::{
+    DieKey, DwarfError, Reader, UnitCatalog, die_code_ranges, die_reference, is_type_unit,
+};
 use die::{
     check_data_object_capacity, copy_name, data_object_scope_ranges, debug_info_offset,
     declaration_with_origins, is_type_scope, origin_chain, strict_flag, string_with_origins,
@@ -235,6 +237,9 @@ pub(super) struct LoadedVariables {
     pub vtables: Vec<(ImageAddress, TypeReference)>,
     /// Integer constants the units declare at their top level, by name.
     pub constants: BTreeMap<Arc<str>, crate::IntegerValue>,
+    /// The coroutine each code instance that runs one is passed, as the
+    /// body of an `async fn` is passed its future.
+    pub coroutine_bodies: BTreeMap<CodeInstanceId, TypeId>,
 }
 
 /// The producer a unit names.
@@ -390,6 +395,7 @@ pub(super) fn load_variable_info<'data>(
     let mut procedures = HashMap::new();
     let mut vtables = Vec::new();
     let mut go_function_entries = HashMap::new();
+    let mut unnamed_parameters = Vec::new();
     let mut order = 0_u64;
     let evaluation_units = load_evaluation_units(units)?;
     let mut types = TypeArenaBuilder::new(
@@ -445,12 +451,48 @@ pub(super) fn load_variable_info<'data>(
         };
         let mut entries = unit.entries();
         let mut scopes = Vec::<Option<Scope>>::new();
+        // The concrete instances of abstract functions open at this point
+        // of the walk, innermost last.
+        let mut concrete = Vec::<ConcreteRoutine>::new();
 
         while let Some(entry) = entries.next_dfs()? {
             let depth =
                 usize::try_from(entry.depth()).map_err(|_| DwarfError::InvalidEntryDepth)?;
             scopes.truncate(depth);
+            while concrete
+                .last()
+                .is_some_and(|routine| routine.depth >= depth)
+            {
+                let routine = concrete.pop().expect("an open routine");
+                add_abstract_only_variables(
+                    dwarf,
+                    units,
+                    &routine,
+                    &mut AbstractTargets {
+                        objects: &mut objects,
+                        functions: &mut functions,
+                        order: &mut order,
+                        types: &mut types,
+                        source_files,
+                        source_file_ids,
+                    },
+                )?;
+            }
             let parent = scopes.last().and_then(Clone::clone);
+            // A concrete DIE standing for an abstract one covers it.
+            if let Some(routine) = concrete.last_mut()
+                && matches!(
+                    entry.tag(),
+                    gimli::DW_TAG_variable | gimli::DW_TAG_formal_parameter
+                )
+                && let Some(origin) = die_reference(
+                    entry.attr_value(gimli::DW_AT_abstract_origin),
+                    unit_index,
+                    units,
+                )?
+            {
+                routine.covered.insert(origin);
+            }
 
             let scope = match entry.tag() {
                 gimli::DW_TAG_subprogram => {
@@ -643,6 +685,23 @@ pub(super) fn load_variable_info<'data>(
                 scope
             };
 
+            if matches!(
+                entry.tag(),
+                gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine
+            ) && let Some(routine) = scope.as_ref().filter(|scope| !scope.ranges.is_empty())
+                && let Some(origin) = die_reference(
+                    entry.attr_value(gimli::DW_AT_abstract_origin),
+                    unit_index,
+                    units,
+                )?
+            {
+                concrete.push(ConcreteRoutine {
+                    depth,
+                    origin,
+                    scope: routine.clone(),
+                    covered: std::collections::HashSet::new(),
+                });
+            }
             match entry.tag() {
                 gimli::DW_TAG_call_site | gimli::DW_TAG_GNU_call_site => {
                     if let Some(parent) = parent.as_ref().filter(|parent| parent.defined) {
@@ -846,6 +905,15 @@ pub(super) fn load_variable_info<'data>(
                     // Go starts the names of its own variables with
                     // characters no Go identifier can.
                     let hidden = go && name.starts_with(['.', '#']);
+                    // rustc passes the body of an `async fn` its future
+                    // as an unnamed parameter.
+                    if kind == VariableKind::Parameter
+                        && name_error.is_some()
+                        && let (Some(instance), TypeResolution::Resolved(ty)) =
+                            (scope.code_instance, &type_info)
+                    {
+                        unnamed_parameters.push((instance, *ty));
+                    }
                     check_data_object_capacity(objects.len())?;
                     functions[scope.function].objects.push(objects.len());
                     objects.push(CatalogDataObject {
@@ -874,6 +942,21 @@ pub(super) fn load_variable_info<'data>(
             }
 
             scopes.push(scope);
+        }
+        while let Some(routine) = concrete.pop() {
+            add_abstract_only_variables(
+                dwarf,
+                units,
+                &routine,
+                &mut AbstractTargets {
+                    objects: &mut objects,
+                    functions: &mut functions,
+                    order: &mut order,
+                    types: &mut types,
+                    source_files,
+                    source_file_ids,
+                },
+            )?;
         }
     }
 
@@ -938,7 +1021,17 @@ pub(super) fn load_variable_info<'data>(
             go_runtime_types.entry(offset).or_insert(info.reference.id);
         }
     }
+    let coroutine_bodies = unnamed_parameters
+        .into_iter()
+        .filter_map(|(instance, ty)| {
+            Some((
+                instance,
+                crate::debug_info::coroutines::pinned_coroutine(&finalized_types, ty)?,
+            ))
+        })
+        .collect();
     Ok(LoadedVariables {
+        coroutine_bodies,
         info: Arc::new(DwarfVariableInfo {
             objects: objects.into(),
             functions: functions.into(),
@@ -980,6 +1073,120 @@ pub(super) fn load_variable_info<'data>(
             })
             .collect(),
     })
+}
+
+/// A concrete instance of an abstract function, inlined or out of line,
+/// and the abstract variables its own DIEs stand for.
+struct ConcreteRoutine {
+    depth: usize,
+    origin: DieKey,
+    scope: Scope,
+    covered: std::collections::HashSet<DieKey>,
+}
+
+/// Where the variables an instance leaves out are added.
+struct AbstractTargets<'a, 'data, 'units> {
+    objects: &'a mut Vec<CatalogDataObject>,
+    functions: &'a mut Vec<CatalogFunction>,
+    order: &'a mut u64,
+    types: &'a mut TypeArenaBuilder<'units, 'data>,
+    source_files: &'a mut Vec<SourceFile>,
+    source_file_ids: &'a mut HashMap<PathBuf, SourceFileId>,
+}
+
+/// Adds the named variables and parameters of a concrete instance's
+/// abstract function that the instance has no DIE for: the compiler kept
+/// no trace of them there, so they exist in the instance's code without a
+/// location, as gdb shows them, rather than not at all.
+fn add_abstract_only_variables<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    units: &[gimli::Unit<Reader<'data>>],
+    routine: &ConcreteRoutine,
+    targets: &mut AbstractTargets<'_, 'data, '_>,
+) -> std::result::Result<(), DwarfError> {
+    let Some(unit) = units.get(routine.origin.unit) else {
+        return Ok(());
+    };
+    let mut tree = unit.entries_tree(Some(gimli::UnitOffset(routine.origin.offset)))?;
+    let mut pending = vec![(tree.root()?.entry().offset(), 0_u32)];
+    while let Some((offset, nesting)) = pending.pop() {
+        let mut tree = unit.entries_tree(Some(offset))?;
+        let mut children = tree.root()?.children();
+        while let Some(child) = children.next()? {
+            let entry = child.entry();
+            let key = DieKey {
+                unit: routine.origin.unit,
+                offset: entry.offset().0,
+            };
+            let kind = match entry.tag() {
+                gimli::DW_TAG_lexical_block => {
+                    pending.push((entry.offset(), nesting + 1));
+                    continue;
+                }
+                gimli::DW_TAG_variable => VariableKind::Local,
+                gimli::DW_TAG_formal_parameter => VariableKind::Parameter,
+                _ => continue,
+            };
+            if routine.covered.contains(&key) {
+                continue;
+            }
+            let Some(name) = string_attribute_of(dwarf, unit, entry)? else {
+                continue;
+            };
+            let declaration = declaration_with_origins(
+                dwarf,
+                units,
+                unit,
+                entry,
+                &[],
+                targets.source_files,
+                targets.source_file_ids,
+            )
+            .ok()
+            .flatten();
+            let type_info = targets
+                .types
+                .variable_type(routine.origin.unit, entry.attr_value(gimli::DW_AT_type));
+            *targets.order = targets
+                .order
+                .checked_add(1)
+                .expect("data-object DIE order overflow");
+            check_data_object_capacity(targets.objects.len())?;
+            targets.functions[routine.scope.function]
+                .objects
+                .push(targets.objects.len());
+            targets.objects.push(CatalogDataObject {
+                debug_info_offset: None,
+                kind,
+                name,
+                declaration,
+                ranges: Arc::clone(&routine.scope.ranges),
+                instance: routine.scope.instance,
+                lexical_depth: routine.scope.lexical_depth.saturating_add(nesting),
+                order: *targets.order,
+                type_info,
+                escaped: None,
+                hidden: false,
+                value: Metadata::Absent(MetadataAbsence::NoLocation),
+                frame_base: routine.scope.frame_base.clone(),
+                malformed: routine.scope.malformed.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn string_attribute_of<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    unit: &gimli::Unit<Reader<'data>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+) -> std::result::Result<Option<Arc<str>>, DwarfError> {
+    entry
+        .attr_value(gimli::DW_AT_name)
+        .map(|value| dwarf.attr_string(unit, value))
+        .transpose()
+        .map_err(DwarfError::from)
+        .map(|value| value.map(|value| Arc::<str>::from(value.to_string_lossy().as_ref())))
 }
 
 /// A Rust trait object's vtable, `<C as Trait>::{vtable}`: a variable at a

@@ -130,7 +130,7 @@ sim-seed SEED *ARGS: golden
     cargo build --profile sim --features sim --bin uscope-sim
     ./target/sim/uscope-sim replay "$1" "${@:2}"
 
-# Runs one fuzz target: expression-parse, dwarf-expression, core-dump,
+# Runs one fuzz target: expression-parse, dwarf-expression, core-dump, dispatch,
 # elf-symbols, gopclntab, disassembly, debug-register-plan, dap-transport,
 # dap-request, or views. Arguments go to libFuzzer.
 # iced-x86 builds its formatter tables once and never frees them, which
