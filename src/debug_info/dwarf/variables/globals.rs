@@ -259,6 +259,7 @@ pub(super) fn load_globals<'data>(
                 type_info: type_info.clone(),
                 escaped: None,
                 hidden: false,
+                coroutine: None,
                 value,
                 frame_base: Metadata::Absent(MetadataAbsence::NotApplicable),
                 malformed,

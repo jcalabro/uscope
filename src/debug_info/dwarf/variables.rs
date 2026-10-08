@@ -56,6 +56,7 @@ use types::{
 
 mod call_sites;
 mod codec;
+mod coroutine;
 mod die;
 mod evaluate;
 mod generic;
@@ -140,9 +141,51 @@ struct CatalogDataObject {
     /// Whether the compiler made it for itself, such as Go's `.dict` and
     /// `#yield1`: listings leave it out, but its name still reaches it.
     hidden: bool,
+    /// For `$future`, the future rustc passes the body of an async
+    /// function or block, as a pointer it leaves unnamed: its type.
+    coroutine: Option<TypeId>,
     value: Metadata<ValueDescription>,
     frame_base: Metadata<LocationDescription>,
     malformed: Option<Arc<str>>,
+}
+
+impl CatalogDataObject {
+    /// Whether one location describes the object wherever it is in scope,
+    /// rather than a list of locations by address.
+    fn single_location(&self) -> bool {
+        matches!(
+            &self.value,
+            Metadata::Value(ValueDescription::Location(location))
+                if matches!(location.entries.as_ref(), [entry] if entry.range.is_none())
+        )
+    }
+}
+
+/// What kind of Rust scope a scope is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RustScope {
+    /// The outermost scope of the body of an `async fn`, where rustc
+    /// declares the fields of its future that captured its arguments, which
+    /// the body moves into variables of its own.
+    AsyncCaptures,
+    Other,
+}
+
+impl RustScope {
+    /// The scope of a subprogram or inline instance of a Rust unit.
+    fn routine<'data>(
+        dwarf: &gimli::Dwarf<Reader<'data>>,
+        units: &[gimli::Unit<Reader<'data>>],
+        unit_index: usize,
+        unit: &gimli::Unit<Reader<'data>>,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    ) -> Self {
+        if async_fn_body(dwarf, units, unit_index, unit, entry) {
+            Self::AsyncCaptures
+        } else {
+            Self::Other
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -163,6 +206,13 @@ struct Scope {
     /// The file declaring a Go function, and so its variables, whose
     /// declarations give only their line.
     go_file: Option<SourceFileId>,
+    /// For a Rust scope, whose compiler names variables of its own, what
+    /// kind it is.
+    rust: Option<RustScope>,
+    /// The line of the await whose future this scope, or one enclosing it,
+    /// declares as `__awaitee`: rustc binds the value it gives as `result`
+    /// in a block within.
+    awaitee: Option<crate::LineNumber>,
     malformed: Option<Arc<str>>,
     /// Whether the scope is in a subprogram's definition, abstract or
     /// concrete, rather than in a declaration inside a type.
@@ -201,6 +251,8 @@ struct Capture {
 const DW_AT_GO_CLOSURE_OFFSET: gimli::DwAt = gimli::DwAt(0x2907);
 
 pub(super) struct DwarfVariableInfo {
+    /// The async bodies' futures, by type.
+    coroutines: BTreeMap<TypeId, crate::CoroutineInfo>,
     objects: Arc<[CatalogDataObject]>,
     functions: Arc<[CatalogFunction]>,
     address_index: BTreeMap<ImageAddress, Arc<[usize]>>,
@@ -240,6 +292,9 @@ pub(super) struct LoadedVariables {
     /// The coroutine each code instance that runs one is passed, as the
     /// body of an `async fn` is passed its future.
     pub coroutine_bodies: BTreeMap<CodeInstanceId, TypeId>,
+    /// Every type named as a coroutine, with what it is or why its layout
+    /// cannot be read as one.
+    pub coroutines: BTreeMap<TypeId, std::result::Result<crate::CoroutineInfo, Arc<str>>>,
 }
 
 /// The producer a unit names.
@@ -429,6 +484,7 @@ pub(super) fn load_variable_info<'data>(
             continue;
         }
         let go = evaluation_units[unit_index].language == Some(gimli::DW_LANG_Go);
+        let rust = evaluation_units[unit_index].language == Some(gimli::DW_LANG_Rust);
         // Go names the register ABI its x86-64 code calls with among the
         // flags of each unit's producer, as `go1.27.1; -N -l regabi`.
         let go_registers = go
@@ -597,6 +653,9 @@ pub(super) fn load_variable_info<'data>(
                         },
                         malformed: None,
                         defined,
+                        rust: rust
+                            .then(|| RustScope::routine(dwarf, units, unit_index, unit, entry)),
+                        awaitee: None,
                     })
                 }
                 gimli::DW_TAG_lexical_block => parent.as_ref().map(|parent| {
@@ -619,6 +678,12 @@ pub(super) fn load_variable_info<'data>(
                         instance: parent.instance,
                         code_instance: parent.code_instance,
                         go_file: parent.go_file,
+                        rust: parent.rust.map(|_| RustScope::Other),
+                        awaitee: if parent.rust.is_some() {
+                            origin_awaitee(dwarf, units, unit_index, entry).or(parent.awaitee)
+                        } else {
+                            None
+                        },
                         malformed: malformed.or_else(|| parent.malformed.clone()),
                         defined: parent.defined,
                     }
@@ -671,6 +736,10 @@ pub(super) fn load_variable_info<'data>(
                         } else {
                             None
                         },
+                        rust: parent
+                            .rust
+                            .map(|_| RustScope::routine(dwarf, units, unit_index, unit, entry)),
+                        awaitee: None,
                         malformed: malformed.or_else(|| parent.malformed.clone()),
                         defined: parent.defined,
                     }
@@ -696,7 +765,9 @@ pub(super) fn load_variable_info<'data>(
 
             if matches!(
                 entry.tag(),
-                gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine
+                gimli::DW_TAG_subprogram
+                    | gimli::DW_TAG_inlined_subroutine
+                    | gimli::DW_TAG_lexical_block
             ) && let Some(routine) = scope.as_ref().filter(|scope| !scope.ranges.is_empty())
                 && let Some(origin) = die_reference(
                     entry.attr_value(gimli::DW_AT_abstract_origin),
@@ -912,8 +983,33 @@ pub(super) fn load_variable_info<'data>(
                         _ => (name, type_info, None),
                     };
                     // Go starts the names of its own variables with
-                    // characters no Go identifier can.
-                    let hidden = go && name.starts_with(['.', '#']);
+                    // characters no Go identifier can. rustc's own are an
+                    // async body's temporaries and unnamed parameters, the
+                    // `result` an await binds, and, in an `async fn`'s
+                    // body, the fields of its future that captured its
+                    // arguments, which the body moves into variables of
+                    // its own.
+                    let rust_unnamed = scope.rust.is_some()
+                        && kind == VariableKind::Parameter
+                        && name_error.is_some();
+                    let declared_line = declaration
+                        .as_ref()
+                        .ok()
+                        .and_then(|declared| declared.as_ref().map(|declared| declared.line));
+                    let hidden = (go && name.starts_with(['.', '#']))
+                        || (scope.rust.is_some()
+                            && (rust_temporary(&name, rust_unnamed)
+                                || (scope.rust == Some(RustScope::AsyncCaptures)
+                                    && kind == VariableKind::Local)
+                                || (&*name == "result"
+                                    && declared_line.is_some()
+                                    && declared_line == scope.awaitee)));
+                    if scope.rust.is_some()
+                        && &*name == "__awaitee"
+                        && let Some(Some(enclosing)) = scopes.last_mut()
+                    {
+                        enclosing.awaitee = declared_line;
+                    }
                     // rustc passes the body of an `async fn` its future
                     // as an unnamed parameter.
                     if kind == VariableKind::Parameter
@@ -921,7 +1017,7 @@ pub(super) fn load_variable_info<'data>(
                         && let (Some(instance), TypeResolution::Resolved(ty)) =
                             (scope.code_instance, &type_info)
                     {
-                        unnamed_parameters.push((instance, *ty));
+                        unnamed_parameters.push((instance, *ty, objects.len()));
                     }
                     check_data_object_capacity(objects.len())?;
                     functions[scope.function].objects.push(objects.len());
@@ -937,6 +1033,7 @@ pub(super) fn load_variable_info<'data>(
                         type_info,
                         escaped,
                         hidden,
+                        coroutine: None,
                         value: copy_data_object_value(dwarf, unit_index, unit, entry),
                         frame_base: scope.frame_base.clone(),
                         malformed: declaration
@@ -945,7 +1042,7 @@ pub(super) fn load_variable_info<'data>(
                             .or(scope_error)
                             .or_else(|| scope.malformed.clone())
                             .or(chain_error)
-                            .or(name_error),
+                            .or_else(|| name_error.filter(|_| !rust_unnamed)),
                     });
                 }
             }
@@ -1030,18 +1127,30 @@ pub(super) fn load_variable_info<'data>(
             go_runtime_types.entry(offset).or_insert(info.reference.id);
         }
     }
-    let coroutine_bodies = unnamed_parameters
-        .into_iter()
-        .filter_map(|(instance, ty)| {
-            Some((
-                instance,
-                crate::debug_info::coroutines::pinned_coroutine(&finalized_types, ty)?,
-            ))
-        })
+    let coroutines = crate::debug_info::coroutines::normalize(&finalized_types);
+    let mut coroutine_bodies = BTreeMap::new();
+    for (instance, ty, object) in unnamed_parameters {
+        if let Some(coroutine) =
+            crate::debug_info::coroutines::pinned_coroutine(&finalized_types, ty)
+        {
+            coroutine_bodies.insert(instance, coroutine);
+            // The body's future is what the parameter points to.
+            let future = &mut objects[object];
+            future.name = "$future".into();
+            future.type_info = TypeResolution::Resolved(coroutine);
+            future.escaped = Some(ty);
+            future.coroutine = Some(coroutine);
+        }
+    }
+    let running = coroutines
+        .iter()
+        .filter_map(|(ty, coroutine)| Some((*ty, coroutine.as_ref().ok()?.clone())))
         .collect();
     Ok(LoadedVariables {
+        coroutines,
         coroutine_bodies,
         info: Arc::new(DwarfVariableInfo {
+            coroutines: running,
             objects: objects.into(),
             functions: functions.into(),
             address_index: address_index
@@ -1104,9 +1213,11 @@ struct AbstractTargets<'a, 'data, 'units> {
 }
 
 /// Adds the named variables and parameters of a concrete instance's
-/// abstract function that the instance has no DIE for: the compiler kept
-/// no trace of them there, so they exist in the instance's code without a
-/// location, as gdb shows them, rather than not at all.
+/// abstract function, or of a concrete block's abstract block, that it has
+/// no DIE for: the compiler kept no trace of them there, so they exist in
+/// its code without a location, as gdb shows them, rather than not at all.
+/// A nested abstract block is its own concrete block's to add; one with
+/// none has no code, so its variables are nowhere in scope.
 fn add_abstract_only_variables<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
     units: &[gimli::Unit<Reader<'data>>],
@@ -1117,72 +1228,142 @@ fn add_abstract_only_variables<'data>(
         return Ok(());
     };
     let mut tree = unit.entries_tree(Some(gimli::UnitOffset(routine.origin.offset)))?;
-    let mut pending = vec![(tree.root()?.entry().offset(), 0_u32)];
-    while let Some((offset, nesting)) = pending.pop() {
-        let mut tree = unit.entries_tree(Some(offset))?;
-        let mut children = tree.root()?.children();
-        while let Some(child) = children.next()? {
-            let entry = child.entry();
-            let key = DieKey {
-                unit: routine.origin.unit,
-                offset: entry.offset().0,
-            };
-            let kind = match entry.tag() {
-                gimli::DW_TAG_lexical_block => {
-                    pending.push((entry.offset(), nesting + 1));
-                    continue;
-                }
-                gimli::DW_TAG_variable => VariableKind::Local,
-                gimli::DW_TAG_formal_parameter => VariableKind::Parameter,
-                _ => continue,
-            };
-            if routine.covered.contains(&key) {
-                continue;
-            }
-            let Some(name) = string_attribute_of(dwarf, unit, entry)? else {
-                continue;
-            };
-            let declaration = declaration_with_origins(
-                dwarf,
-                units,
-                unit,
-                entry,
-                &[],
-                targets.source_files,
-                targets.source_file_ids,
-            )
-            .ok()
-            .flatten();
-            let type_info = targets
-                .types
-                .variable_type(routine.origin.unit, entry.attr_value(gimli::DW_AT_type));
-            *targets.order = targets
-                .order
-                .checked_add(1)
-                .expect("data-object DIE order overflow");
-            check_data_object_capacity(targets.objects.len())?;
-            targets.functions[routine.scope.function]
-                .objects
-                .push(targets.objects.len());
-            targets.objects.push(CatalogDataObject {
-                debug_info_offset: None,
-                kind,
-                name,
-                declaration,
-                ranges: Arc::clone(&routine.scope.ranges),
-                instance: routine.scope.instance,
-                lexical_depth: routine.scope.lexical_depth.saturating_add(nesting),
-                order: *targets.order,
-                type_info,
-                escaped: None,
-                hidden: false,
-                value: Metadata::Absent(MetadataAbsence::NoLocation),
-                frame_base: routine.scope.frame_base.clone(),
-                malformed: routine.scope.malformed.clone(),
-            });
+    let mut children = tree.root()?.children();
+    let mut awaitee = routine.scope.awaitee;
+    while let Some(child) = children.next()? {
+        let entry = child.entry();
+        let key = DieKey {
+            unit: routine.origin.unit,
+            offset: entry.offset().0,
+        };
+        let kind = match entry.tag() {
+            gimli::DW_TAG_variable => VariableKind::Local,
+            gimli::DW_TAG_formal_parameter => VariableKind::Parameter,
+            _ => continue,
+        };
+        if routine.covered.contains(&key) {
+            continue;
         }
+        let Some(name) = string_attribute_of(dwarf, unit, entry)? else {
+            continue;
+        };
+        let declaration = declaration_with_origins(
+            dwarf,
+            units,
+            unit,
+            entry,
+            &[],
+            targets.source_files,
+            targets.source_file_ids,
+        )
+        .ok()
+        .flatten();
+        let declared_line = declaration.as_ref().map(|declared| declared.line);
+        if &*name == "__awaitee" {
+            awaitee = declared_line;
+        }
+        let type_info = targets
+            .types
+            .variable_type(routine.origin.unit, entry.attr_value(gimli::DW_AT_type));
+        *targets.order = targets
+            .order
+            .checked_add(1)
+            .expect("data-object DIE order overflow");
+        let hidden = routine.scope.rust.is_some()
+            && (rust_temporary(&name, false)
+                || (routine.scope.rust == Some(RustScope::AsyncCaptures)
+                    && kind == VariableKind::Local)
+                || (&*name == "result" && declared_line.is_some() && declared_line == awaitee));
+        check_data_object_capacity(targets.objects.len())?;
+        targets.functions[routine.scope.function]
+            .objects
+            .push(targets.objects.len());
+        targets.objects.push(CatalogDataObject {
+            debug_info_offset: None,
+            kind,
+            name,
+            declaration,
+            ranges: Arc::clone(&routine.scope.ranges),
+            instance: routine.scope.instance,
+            lexical_depth: routine.scope.lexical_depth,
+            order: *targets.order,
+            type_info,
+            escaped: None,
+            hidden,
+            coroutine: None,
+            value: Metadata::Absent(MetadataAbsence::NoLocation),
+            frame_base: routine.scope.frame_base.clone(),
+            malformed: routine.scope.malformed.clone(),
+        });
     }
     Ok(())
+}
+
+/// The line of the await whose future an abstract block's origin declares
+/// as `__awaitee`, which a concrete copy of the block may leave out.
+fn origin_awaitee<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    units: &[gimli::Unit<Reader<'data>>],
+    unit_index: usize,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+) -> Option<crate::LineNumber> {
+    let origin = die_reference(
+        entry.attr_value(gimli::DW_AT_abstract_origin),
+        unit_index,
+        units,
+    )
+    .ok()??;
+    let unit = units.get(origin.unit)?;
+    let mut tree = unit
+        .entries_tree(Some(gimli::UnitOffset(origin.offset)))
+        .ok()?;
+    let mut children = tree.root().ok()?.children();
+    while let Ok(Some(child)) = children.next() {
+        let entry = child.entry();
+        if entry.tag() == gimli::DW_TAG_variable
+            && string_attribute_of(dwarf, unit, entry)
+                .ok()
+                .flatten()
+                .is_some_and(|name| &*name == "__awaitee")
+        {
+            return entry
+                .attr(gimli::DW_AT_decl_line)
+                .and_then(gimli::Attribute::udata_value)
+                .and_then(crate::LineNumber::new);
+        }
+    }
+    None
+}
+
+/// Whether a subprogram or inline instance is the body of a Rust `async
+/// fn`, by its name or its abstract origin's.
+fn async_fn_body<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    units: &[gimli::Unit<Reader<'data>>],
+    unit_index: usize,
+    unit: &gimli::Unit<Reader<'data>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+) -> bool {
+    origin_chain(units, unit_index, entry)
+        .ok()
+        .and_then(|chain| {
+            string_with_origins(dwarf, units, unit, entry, &chain, gimli::DW_AT_name)
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|name| crate::debug_info::coroutines::is_async_fn_body(&name))
+}
+
+/// Whether rustc made a variable for its own use: an async body's
+/// `_task_context`, an await's `__awaitee`, numbered temporaries, and
+/// the parameters it leaves unnamed.
+fn rust_temporary(name: &str, unnamed_parameter: bool) -> bool {
+    unnamed_parameter
+        || name == "_task_context"
+        || name == "__awaitee"
+        || name
+            .strip_prefix("__")
+            .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn string_attribute_of<'data>(
@@ -1266,19 +1447,33 @@ impl VariableInfo for DwarfVariableInfo {
             }
         };
         let mut frame_base = FrameBaseCache::Empty;
+        let resumption = self.function_at(address).and_then(|function| {
+            self.resumption(
+                function,
+                address,
+                selected,
+                runtime,
+                &mut frame_base,
+                budget,
+            )
+        });
         let mut variables = Vec::new();
         for object in objects {
             if budget.consume_variable_value().is_err() {
                 break;
             }
-            variables.push(self.inspect_data_object(
+            let mut variable = self.inspect_data_object(
                 object,
                 Some(address),
                 context,
                 runtime,
                 &mut frame_base,
                 budget,
-            )?);
+            )?;
+            if let Some(resumption) = &resumption {
+                resumption.check(object, &mut variable);
+            }
+            variables.push(variable);
         }
         Ok(variables)
     }

@@ -330,7 +330,7 @@ fn load_image(
         &mut function_metadata.code_instances,
     );
 
-    let variables = variables::load_variable_info(
+    let mut variables = variables::load_variable_info(
         &dwarf,
         &catalog,
         target,
@@ -343,7 +343,7 @@ fn load_image(
         &mut source_files,
         &mut source_file_ids,
     )?;
-    let coroutines = super::coroutines::normalize(&variables.types);
+    let coroutines = std::mem::take(&mut variables.coroutines);
     for (instance, ty) in &variables.coroutine_bodies {
         if let Some(Ok(_)) = coroutines.get(ty)
             && let Some(function) = function_metadata

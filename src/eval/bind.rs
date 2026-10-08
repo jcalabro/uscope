@@ -229,6 +229,22 @@ impl<'a, S: Scope> Binder<'a, S> {
         match self.tree().kind(id).clone() {
             NodeKind::Name(path) => self.name(&path, span),
             NodeKind::Register(name) if name == "task" => self.node(Op::Task, Ty::Exact, span),
+            // The frame names its future `$future`, which no source
+            // variable can be named.
+            NodeKind::Register(name) if name == "future" => {
+                match self
+                    .scope
+                    .lookup("$future", false)
+                    .map_err(|refusal| Self::refused(span, refusal))?
+                {
+                    Lookup::Object { object, ty } => self.object("$future", object, ty, span),
+                    _ => Err(Self::error(
+                        span,
+                        ErrorKind::UnknownName,
+                        "the selected frame runs no future",
+                    )),
+                }
+            }
             NodeKind::Register(name) => {
                 let register = self.scope.register(&name).ok_or_else(|| {
                     Self::error(

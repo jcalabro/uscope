@@ -1,6 +1,8 @@
 //! What a test reads at a stop of an async Rust program.
 
-use uscope::{Backtrace, Evaluation, Expression, ScalarValue, VariableState, VariableValue};
+use uscope::{
+    Backtrace, Evaluation, Expression, InspectedValue, ScalarValue, VariableState, VariableValue,
+};
 
 use crate::support::Scenario;
 
@@ -78,4 +80,42 @@ pub fn frames_to(trace: &Backtrace, last: &str) -> Vec<(String, u64)> {
         }
     }
     frames
+}
+
+/// The selected frame's listed variables: each name, with its integer
+/// value where it has one, and its state.
+pub async fn locals(scenario: &Scenario) -> Vec<(String, Option<i128>, VariableState)> {
+    let snapshot = scenario
+        .operation("variables", scenario.handle().variables())
+        .await;
+    snapshot
+        .variables
+        .iter()
+        .map(|variable| {
+            let number = match &variable.state {
+                VariableState::Available {
+                    value: VariableValue::Scalar(ScalarValue::Signed(value)),
+                    ..
+                } => Some(*value),
+                VariableState::Available {
+                    value: VariableValue::Scalar(ScalarValue::Unsigned(value)),
+                    ..
+                } => i128::try_from(*value).ok(),
+                _ => None,
+            };
+            (variable.name.to_string(), number, variable.state.clone())
+        })
+        .collect()
+}
+
+/// An expression's value at the stop.
+pub async fn evaluated(scenario: &Scenario, text: &str) -> InspectedValue {
+    let expression = Expression::parse(text).expect("an expression");
+    match scenario
+        .operation(text, scenario.handle().evaluate(&expression))
+        .await
+    {
+        Evaluation::Value { value, .. } => value,
+        other => panic!("{text}: {other:?}"),
+    }
 }
