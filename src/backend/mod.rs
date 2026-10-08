@@ -28,6 +28,7 @@ pub struct FileIdentity {
 }
 
 /// An executable's contents and identity, read once when a session starts.
+#[derive(Clone)]
 pub struct ExecutableSource {
     pub display_path: Arc<PathBuf>,
     pub data: Arc<[u8]>,
