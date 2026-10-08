@@ -20,6 +20,7 @@ mod languages;
 mod lifecycle;
 mod memory;
 mod output;
+mod panics;
 mod robustness;
 mod server;
 mod sources;
