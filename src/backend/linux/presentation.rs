@@ -643,7 +643,24 @@ impl<P: InspectionOps> Controller<P> {
         // A view that presents the value as another lends it that value's
         // children.
         let mut next = offset;
-        if let Some(inner) = &view.inner
+        if let (Some(inner), Some(picked)) = (&view.inner, &view.picked) {
+            // Elements picked from another value's children come a page of
+            // one each.
+            while exhausted.is_none() && next < end.min(view.elements) {
+                let position = usize::try_from(next).expect("a picked element is in memory");
+                let page = self.value_children_with_budget(
+                    inner,
+                    &crate::ValueChildQuery {
+                        offset: picked[position],
+                        limit: 1,
+                    },
+                    budget,
+                )?;
+                children.extend(page.children.iter().cloned());
+                exhausted = page.completion.exhaustion();
+                next += 1;
+            }
+        } else if let Some(inner) = &view.inner
             && next < view.elements
         {
             let count = end.min(view.elements) - next;
@@ -983,6 +1000,44 @@ fn member_name(child: &ValueChild) -> Option<&str> {
     }
 }
 
+/// A coroutine's summary: its state, then the variables it keeps.
+fn coroutine_summary(
+    image: &crate::ModuleImage,
+    state: &crate::CoroutineState,
+    shown: &[String],
+) -> String {
+    let mut summary = match state.kind {
+        crate::CoroutineStateKind::Unresumed => "unresumed".to_owned(),
+        crate::CoroutineStateKind::Returned => "returned".to_owned(),
+        crate::CoroutineStateKind::Panicked => "panicked".to_owned(),
+        crate::CoroutineStateKind::Suspended { .. } => {
+            let at = state.location.as_ref().map(|location| {
+                let file = image
+                    .source_file(location.file)
+                    .and_then(|file| file.path.file_name())
+                    .map_or_else(|| "?".into(), |name| name.to_string_lossy());
+                format!("{file}:{}", location.line)
+            });
+            format!("suspended at {}", at.as_deref().unwrap_or("an await"))
+        }
+    };
+    if !shown.is_empty() {
+        summary.push_str(" {");
+        for (index, part) in shown.iter().enumerate() {
+            if summary.chars().count() > crate::view::summary::MAX_CHARACTERS {
+                summary.push_str(", …");
+                break;
+            }
+            if index > 0 {
+                summary.push_str(", ");
+            }
+            summary.push_str(part);
+        }
+        summary.push('}');
+    }
+    summary
+}
+
 /// Children one value lends another, and how many.
 type Lent = (Arc<ValueChildrenReference>, u64);
 
@@ -1094,6 +1149,7 @@ fn presented_children(
         elements,
         fields,
         inner,
+        picked: None,
     });
     ValueChildren::Available(Arc::new(reference))
 }
@@ -1751,7 +1807,8 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
     /// compiler's own members, such as the awaited future and drop flags,
     /// are left out of the summary, and so are an async function's
     /// captures once it has started, which its body moved into variables
-    /// of its own; the state's members are its children.
+    /// of its own. The variables it shows are its children, and the rest
+    /// are under `[raw]`.
     fn coroutine(
         &mut self,
         value: &InspectedValue,
@@ -1806,10 +1863,14 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         } else {
             fields.len().saturating_sub(coroutine.captures.len())
         };
-        let shown = fields[..held]
+        let kept = fields[..held]
             .iter()
-            .filter(|field| member_name(field).is_some_and(|name| !name.starts_with("__")))
-            .map(|field| {
+            .enumerate()
+            .filter(|(_, field)| member_name(field).is_some_and(|name| !name.starts_with("__")))
+            .collect::<Vec<_>>();
+        let shown = kept
+            .iter()
+            .map(|(_, field)| {
                 format!(
                     "{}: {}",
                     member_name(field).unwrap_or("<anonymous>"),
@@ -1817,45 +1878,27 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 )
             })
             .collect::<Vec<_>>();
-        let mut summary = match state.kind {
-            crate::CoroutineStateKind::Unresumed => "unresumed".to_owned(),
-            crate::CoroutineStateKind::Returned => "returned".to_owned(),
-            crate::CoroutineStateKind::Panicked => "panicked".to_owned(),
-            crate::CoroutineStateKind::Suspended { .. } => {
-                let at = state.location.as_ref().map(|location| {
-                    let file = image
-                        .source_file(location.file)
-                        .and_then(|file| file.path.file_name())
-                        .map_or_else(|| "?".into(), |name| name.to_string_lossy());
-                    format!("{file}:{}", location.line)
-                });
-                format!("suspended at {}", at.as_deref().unwrap_or("an await"))
+        let summary = coroutine_summary(&image, state, &shown);
+        // Its children are the variables it keeps; the awaited future,
+        // drop flags, and moved captures are under `[raw]`.
+        let picked = kept
+            .iter()
+            .map(|(index, _)| u64::try_from(*index).expect("a member's index fits u64"))
+            .collect::<Arc<[u64]>>();
+        let mut presentation = built_in_presentation(
+            "Rust coroutines",
+            PresentedShape::Value,
+            summary,
+            &raw,
+            lent(&record.state).map(|(inner, _)| (inner, picked.len() as u64)),
+        );
+        if let ValueChildren::Available(reference) = &mut presentation.children {
+            let reference = Arc::make_mut(reference);
+            if let Some(view) = &mut reference.view {
+                view.picked = Some(picked);
             }
-        };
-        if !shown.is_empty() {
-            summary.push_str(" {");
-            for (index, part) in shown.iter().enumerate() {
-                if summary.chars().count() > crate::view::summary::MAX_CHARACTERS {
-                    summary.push_str(", …");
-                    break;
-                }
-                if index > 0 {
-                    summary.push_str(", ");
-                }
-                summary.push_str(part);
-            }
-            summary.push('}');
         }
-        Ok(Some(present_as(
-            value.clone(),
-            built_in_presentation(
-                "Rust coroutines",
-                PresentedShape::Value,
-                summary,
-                &raw,
-                lent(&record.state),
-            ),
-        )))
+        Ok(Some(present_as(value.clone(), presentation)))
     }
 
     /// A Rust tuple, `(1, "two")`, or tuple struct, `Meters(7)`, as Rust

@@ -1439,6 +1439,9 @@ pub struct ViewChildren {
     /// For a view presenting the value as another, that value's children,
     /// which are the elements.
     pub(crate) inner: Option<Arc<ValueChildrenReference>>,
+    /// Which of those children the elements are, by their positions, when
+    /// they are only some of them.
+    pub(crate) picked: Option<Arc<[u64]>>,
 }
 
 impl fmt::Debug for ViewChildren {
@@ -1462,6 +1465,7 @@ impl PartialEq for ViewChildren {
             && self.elements == other.elements
             && self.fields == other.fields
             && self.inner == other.inner
+            && self.picked == other.picked
     }
 }
 
