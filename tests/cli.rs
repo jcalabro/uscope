@@ -158,8 +158,10 @@ fn process_state(pid: u32) -> Option<char> {
     stat.rsplit_once(')')?.1.trim_start().chars().next()
 }
 
-/// The harness's deadline for anything a test waits to observe.
-const DEADLINE: Duration = Duration::from_secs(5);
+/// The harness's deadline for anything a test waits to observe. It bounds
+/// a hung session, never a wait a passing test makes: loading a large
+/// program, such as a tokio fixture, takes seconds on a loaded machine.
+const DEADLINE: Duration = Duration::from_secs(30);
 
 /// A uscope process whose output a test reads as it arrives. It is killed if
 /// the test ends first, which also kills an inferior it launched or attached
