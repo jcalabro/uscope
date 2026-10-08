@@ -321,3 +321,31 @@ async fn step_enters_an_awaited_async_function_at_its_first_line() {
         }
     }
 }
+
+/// A future prints as the state it holds: where it waits, with what it
+/// keeps there, never as the number that encodes the state. While its body
+/// runs, the state is still the await the poll resumed from.
+#[tokio::test]
+async fn a_future_prints_as_its_state() {
+    for fixture in BUILDS {
+        for (marker, expected) in [
+            (
+                "// STEP: leaf-after",
+                "suspended at main.rs:43 {id: 3, doubled: 6, label: \"leaf 3\"}",
+            ),
+            (
+                "// STEP: middle-after",
+                "suspended at main.rs:51 {first: 14}",
+            ),
+        ] {
+            let scenario = stopped_at(fixture, at(marker)).await;
+            let future = evaluated(&scenario, "$future").await;
+            assert_eq!(
+                uscope::value_summary(future.type_info.as_ref(), &future.state),
+                expected,
+                "{fixture} {marker}"
+            );
+            scenario.shutdown().await;
+        }
+    }
+}

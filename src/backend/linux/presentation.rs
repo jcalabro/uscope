@@ -1280,6 +1280,9 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if let Some(tuple) = self.rust_tuple(&value)? {
             return Ok(tuple);
         }
+        if let Some(future) = self.coroutine(&value)? {
+            return Ok(future);
+        }
         let (
             Some(type_info),
             VariableState::Available {
@@ -1681,6 +1684,120 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         Ok(self
             .record_summary(&pointee.state, 0)?
             .map(|fields| (format!("*{fields}"), lent(&pointee.state))))
+    }
+
+    /// A coroutine, such as an async function's future, as the state it
+    /// holds rather than the number encoding it: `suspended at main.rs:43
+    /// {id: 3, label: "leaf 3"}` with what it keeps across that await,
+    /// `unresumed` with what it captured, `returned`, or `panicked`. The
+    /// compiler's own members, such as the awaited future and drop flags,
+    /// are left out of the summary, and so are an async function's
+    /// captures once it has started, which its body moved into variables
+    /// of its own; the state's members are its children.
+    fn coroutine(
+        &mut self,
+        value: &InspectedValue,
+    ) -> std::result::Result<Option<InspectedValue>, Stop> {
+        let (
+            Some(type_info),
+            VariableState::Available {
+                value:
+                    crate::VariableValue::Variant {
+                        discriminant: Some(discriminant),
+                        active: Some(variant),
+                    },
+                children: ValueChildren::Available(raw),
+                presentation: None,
+                ..
+            },
+        ) = (&value.type_info, &value.state)
+        else {
+            return Ok(None);
+        };
+        let image = Arc::clone(&self.module(raw.module)?.image);
+        let Some(Ok(coroutine)) = image.coroutine(type_info.reference.id) else {
+            return Ok(None);
+        };
+        let number = match discriminant {
+            crate::IntegerValue::Unsigned(number) => u64::try_from(*number).ok(),
+            crate::IntegerValue::Signed(number) => u64::try_from(*number).ok(),
+        };
+        let Some(state) = number.and_then(|number| coroutine.state(number)) else {
+            return Ok(None);
+        };
+        let (variant, raw) = (Arc::clone(variant), Arc::clone(raw));
+        let children = self.children_of(&raw)?;
+        let [record] = &children[children.len().saturating_sub(variant.members.len())..] else {
+            return Ok(None);
+        };
+        let fields = match &record.state {
+            VariableState::Available {
+                children: ValueChildren::Available(reference),
+                ..
+            } => {
+                let reference = Arc::clone(reference);
+                self.children_of(&reference)?
+            }
+            _ => Vec::new(),
+        };
+        // Every state but `Unresumed` ends with the captures.
+        let held = if state.kind == crate::CoroutineStateKind::Unresumed
+            || coroutine.kind != crate::CoroutineKind::AsyncFunction
+        {
+            fields.len()
+        } else {
+            fields.len().saturating_sub(coroutine.captures.len())
+        };
+        let shown = fields[..held]
+            .iter()
+            .filter(|field| member_name(field).is_some_and(|name| !name.starts_with("__")))
+            .map(|field| {
+                format!(
+                    "{}: {}",
+                    member_name(field).unwrap_or("<anonymous>"),
+                    crate::view::summary::value(Some(&field.type_info), &field.state)
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut summary = match state.kind {
+            crate::CoroutineStateKind::Unresumed => "unresumed".to_owned(),
+            crate::CoroutineStateKind::Returned => "returned".to_owned(),
+            crate::CoroutineStateKind::Panicked => "panicked".to_owned(),
+            crate::CoroutineStateKind::Suspended { .. } => {
+                let at = state.location.as_ref().map(|location| {
+                    let file = image
+                        .source_file(location.file)
+                        .and_then(|file| file.path.file_name())
+                        .map_or_else(|| "?".into(), |name| name.to_string_lossy());
+                    format!("{file}:{}", location.line)
+                });
+                format!("suspended at {}", at.as_deref().unwrap_or("an await"))
+            }
+        };
+        if !shown.is_empty() {
+            summary.push_str(" {");
+            for (index, part) in shown.iter().enumerate() {
+                if summary.chars().count() > crate::view::summary::MAX_CHARACTERS {
+                    summary.push_str(", …");
+                    break;
+                }
+                if index > 0 {
+                    summary.push_str(", ");
+                }
+                summary.push_str(part);
+            }
+            summary.push('}');
+        }
+        Ok(Some(present_as(
+            value.clone(),
+            built_in_presentation(
+                "Rust coroutines",
+                PresentedShape::Value,
+                summary,
+                &raw,
+                lent(&record.state),
+            ),
+        )))
     }
 
     /// A Rust tuple, `(1, "two")`, or tuple struct, `Meters(7)`, as Rust
