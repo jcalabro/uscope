@@ -8,9 +8,7 @@ use std::sync::Arc;
 
 use object::{Object, ObjectSection};
 
-use super::super::{
-    ImageSymbol, Member, RuntimeImage, RuntimeModel, RuntimeStop, ThreadActivity, detect,
-};
+use super::super::{ImageSymbol, Member, RuntimeImage, RuntimeModel, RuntimeStop, ThreadActivity};
 use crate::{
     ImageAddress, IntegerValue, ModuleImage, StackSegment, TaskState, ThreadId, ThreadLocal,
     VirtualAddress,
@@ -286,7 +284,7 @@ impl<'a> World<'a> {
             hidden: self.image.hidden.clone(),
             tlsg: self.image.tlsg,
         };
-        detect(Arc::new(image))
+        super::detect(Arc::new(image))
             .expect("a Go runtime")
             .expect("the runtime binds")
     }
