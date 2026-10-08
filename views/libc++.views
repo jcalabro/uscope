@@ -250,3 +250,128 @@ view c++ std::tuple<A, B, C, D, E, F> {
         5 = ((L5)__base_).__value_,
     }
 }
+
+# std::vector<bool> packs its bools into words, from the first bit of the
+# first, and counts its capacity in words.
+view c++ std::vector<bool, _> {
+    let bits = sizeof(*__begin_) * 8
+    check __size_ <= __cap_ * bits
+    show sequence(__size_) for i in range(__size_) => (__begin_[i / bits] >> (i % bits) & 1) != 0
+    field capacity = __cap_ * bits
+}
+
+# A bitset is the positions of the bits it sets. Its words, one or an
+# array of them, are 64 bits on the targets uscope supports; each is read
+# once.
+view c++ std::bitset<N> {
+    let words = (u64*)&__first_
+    check sizeof(__first_) % 8 == 0
+    show sequence(_) for w in range((N + 63) / 64) let word = words[w]
+        for b in range(64) if (word >> b & 1) != 0 && w * 64 + b < N => w * 64 + b
+    field size = N
+}
+
+view c++ std::initializer_list<T> {
+    show sequence(__size_) for i in range(__size_) => __begin_[i]
+}
+
+# A flat map keeps its keys and its values in two vectors, in order.
+view c++ std::flat_map<K, V, _, _, _> {
+    let keys = __containers_.keys.__begin_
+    let values = __containers_.values.__begin_
+    let size = __containers_.keys.__end_ - keys
+    check __containers_.values.__end_ - values == size
+    show map(size) for i in range(size) => keys[i] : values[i]
+}
+
+view c++ std::flat_set<K, _, _> {
+    let keys = __keys_.__begin_
+    show sequence(__keys_.__end_ - keys) for i in range(__keys_.__end_ - keys) => keys[i]
+}
+
+# A duration is a count of its period, written as Go writes durations
+# where the period is one of seconds' that uscope writes. Durations of
+# other periods, and of floats, show as stored.
+view c++ std::chrono::duration<_, std::ratio<1, 1000000000>> {
+    show value(__rep_)
+    format self as duration(ns)
+}
+
+view c++ std::chrono::duration<_, std::ratio<1, 1000000>> {
+    show value(__rep_)
+    format self as duration(us)
+}
+
+view c++ std::chrono::duration<_, std::ratio<1, 1000>> {
+    show value(__rep_)
+    format self as duration(ms)
+}
+
+view c++ std::chrono::duration<_, std::ratio<1, 1>> {
+    show value(__rep_)
+    format self as duration(s)
+}
+
+view c++ std::chrono::duration<_, std::ratio<60, 1>> {
+    show value(__rep_ * 60)
+    format self as duration(s)
+}
+
+view c++ std::chrono::duration<_, std::ratio<3600, 1>> {
+    show value(__rep_ * 3600)
+    format self as duration(s)
+}
+
+# The system clock counts microseconds from the Unix epoch, shown as the
+# UTC time it is; another clock's time is how long after its own epoch it
+# is.
+view c++ std::chrono::time_point<std::chrono::system_clock, std::chrono::duration<_, std::ratio<1, 1000000>>> {
+    show value(__d_.__rep_)
+    format self as time(us)
+}
+
+view c++ std::chrono::time_point<_, _> {
+    show value(__d_)
+}
+
+view c++ std::atomic<T> {
+    show value(__a_.__a_value)
+}
+
+view c++ std::reference_wrapper<T> {
+    show value(*__f_)
+}
+
+view c++ std::expected<T, E> {
+    let held = __repr_.__v.__union_.__v
+    show if __repr_.__v.__has_val_ { value(held.__val_) } else { record { unexpected = held.__unex_ } }
+}
+
+view c++ std::filesystem::path {
+    show value(__pn_)
+}
+
+# A function with a target points to the object that calls it, which
+# shows as the class it dynamically is, whose name says what the target is.
+view c++ std::function<_> {
+    show if __f_.__f_ == null { empty("empty") } else { value(*__f_.__f_) }
+}
+
+# A mutex is the C library's, which glibc.views presents.
+view c++ std::mutex {
+    show value(__m_)
+}
+
+view c++ std::recursive_mutex {
+    show value(__m_)
+}
+
+# A thread id is the thread's pthread_t, or 0 for no thread.
+view c++ std::__thread_id {
+    show if __id_ == 0 { empty("no thread") } else { value(__id_) }
+}
+
+# An any with a value has a handler for its type, whose name says the type.
+view c++ std::any {
+    show if __h_ == null { empty("empty") } else { value(__h_) }
+}

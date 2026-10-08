@@ -174,7 +174,15 @@ fn argument_matches(
                     && matches_into(pattern, identity, types, captures, depth + 1)
             })
         }
-        // An argument the debugger could not resolve matches only `_`.
+        // An argument known only by how the type's name spells it, such
+        // as rustc's `str`, matches a pattern that spells it so.
+        (ArgumentPattern::Type(pattern), TypeArgument::Unknown(spelled)) => {
+            pattern.path.is_empty()
+                && pattern.arguments.is_none()
+                && pattern.base == spelled.as_ref()
+        }
+        // Any other argument the debugger could not resolve matches only
+        // `_`.
         _ => false,
     }
 }

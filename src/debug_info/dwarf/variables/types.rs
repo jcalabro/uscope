@@ -812,6 +812,19 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             gimli::DW_ATE_complex_float if byte_size % 2 == 0 => {
                 Some(BaseTypeEncoding::ComplexFloating)
             }
+            // `char8_t`, `char16_t`, `char32_t`, and Rust's `char` are code
+            // units of UTF-8, UTF-16, and UTF-32.
+            gimli::DW_ATE_UTF if matches!(byte_size, 1 | 2 | 4) => {
+                Some(BaseTypeEncoding::UnsignedCharacter)
+            }
+            // C++'s `wchar_t` is a type of its own, which compilers encode
+            // as an integer; on Linux it holds UTF-32.
+            gimli::DW_ATE_signed if name.as_ref() == "wchar_t" => {
+                Some(BaseTypeEncoding::SignedCharacter)
+            }
+            gimli::DW_ATE_unsigned if name.as_ref() == "wchar_t" => {
+                Some(BaseTypeEncoding::UnsignedCharacter)
+            }
             _ => integer_encoding(raw_encoding),
         };
         let Some(encoding) = encoding else {
@@ -982,6 +995,16 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let mut enumerators = Vec::new();
         for child in self.children(unit_index, entry.offset())? {
             let child = child?;
+            // rustc declares an enumeration's methods inside it, and its
+            // generic arguments, none of which change its values.
+            if matches!(
+                child.tag(),
+                gimli::DW_TAG_subprogram
+                    | gimli::DW_TAG_template_type_parameter
+                    | gimli::DW_TAG_template_value_parameter
+            ) {
+                continue;
+            }
             if child.tag() != gimli::DW_TAG_enumerator {
                 return Err(format!(
                     "enumeration contains unsupported direct child {:?}",
@@ -2505,6 +2528,21 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
     }
 
+    /// The size of a Zig packed struct that Zig's own backend describes by
+    /// the integer that backs it.
+    fn packed_size(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+    ) -> std::result::Result<Option<u64>, Arc<str>> {
+        if self.language(unit_index) != SourceLanguage::Zig {
+            return Ok(None);
+        }
+        Ok(self
+            .target(entry, unit_index)?
+            .and_then(|backing| self.byte_size_of(backing.id)))
+    }
+
     fn build_record_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -2519,6 +2557,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             RecordKind::Struct
         };
         let incomplete = strict_flag(entry, gimli::DW_AT_declaration)?;
+        let explicit_size = match explicit_size {
+            None if !incomplete => self.packed_size(entry, unit_index)?,
+            size => size,
+        };
         if !incomplete && explicit_size.is_none() {
             return Err("complete record type has no byte size".into());
         }
@@ -2807,6 +2849,31 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             return Err("bit-field has no bit offset".into());
         }
+        // A member placed by its first bit alone, as Zig's own backend
+        // places a packed struct's, spans its type's bits.
+        if let Some(bit_offset) = entry
+            .attr(gimli::DW_AT_data_bit_offset)
+            .and_then(gimli::Attribute::udata_value)
+        {
+            if bit_offset % 8 == 0 {
+                return Ok(RecordMemberLayout::ByteOffset(bit_offset / 8));
+            }
+            let bit_size = match self.entries.get(target.id.index()) {
+                Some(TypeEntry::Resolved(TypeInfo {
+                    kind: TypeKind::Base(base),
+                    ..
+                })) => base.bit_size.or_else(|| base.byte_size.checked_mul(8)),
+                _ => None,
+            }
+            .ok_or_else(|| Arc::from("member placed by bit has no bit width"))?;
+            bit_offset
+                .checked_add(bit_size)
+                .ok_or_else(|| Arc::from("record bit-field range overflows"))?;
+            return Ok(RecordMemberLayout::BitRange {
+                bit_offset,
+                bit_size,
+            });
+        }
         Ok(entry.attr(gimli::DW_AT_data_member_location).map_or_else(
             || {
                 absent_byte_offset
@@ -2905,7 +2972,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let unit = &self.units[unit_index];
         let address_size = u64::from(unit.encoding().address_size);
         let field_names = match layout {
-            SliceLayout::Rust => &["data_ptr", "length"][..],
+            SliceLayout::Rust | SliceLayout::RustBytes(_) => &["data_ptr", "length"][..],
             SliceLayout::Zig => &["ptr", "len"][..],
             SliceLayout::Go => &["array", "len", "cap"][..],
         };
@@ -2955,17 +3022,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 "unrecognized slice descriptor layout",
             ));
         }
-        let element = match self.entries.get(fields[0].2.id.index()) {
-            Some(TypeEntry::Resolved(TypeInfo {
-                kind:
-                    TypeKind::Pointer {
-                        target: Some(target),
-                        ..
-                    },
-                ..
-            })) => *target,
-            _ => return Err("slice data member is not a typed pointer".into()),
-        };
+        let element = self.slice_element(layout, fields[0].2)?;
         for (_, _, field_type) in &fields[1..] {
             let valid = self
                 .entries
@@ -3001,11 +3058,44 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     }
 }
 
+impl TypeArenaBuilder<'_, '_> {
+    /// A slice's element type: what its data member points to, or a string
+    /// type's bytes.
+    fn slice_element(
+        &mut self,
+        layout: SliceLayout,
+        data: TypeReference,
+    ) -> std::result::Result<TypeReference, Arc<str>> {
+        if let SliceLayout::RustBytes(bytes) = layout {
+            let array = self.units[bytes.unit]
+                .entry(gimli::UnitOffset(bytes.offset))
+                .map_err(malformed)?;
+            return self
+                .type_reference(bytes.unit, array.attr_value(gimli::DW_AT_type))?
+                .ok_or_else(|| "string type's bytes have no type".into());
+        }
+        match self.entries.get(data.id.index()) {
+            Some(TypeEntry::Resolved(TypeInfo {
+                kind:
+                    TypeKind::Pointer {
+                        target: Some(target),
+                        ..
+                    },
+                ..
+            })) => Ok(*target),
+            _ => Err("slice data member is not a typed pointer".into()),
+        }
+    }
+}
+
 /// Which language's slice descriptor a structure is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SliceLayout {
     /// `{data_ptr, length}`: a pointer to a slice or `str`.
     Rust,
+    /// `{data_ptr, length}`: a pointer to a string type, such as `Path`,
+    /// `OsStr`, or `CStr`, which wraps the unsized array of bytes it holds.
+    RustBytes(DieKey),
     /// `{ptr, len}`.
     Zig,
     /// `{array, len, cap}`.
@@ -3023,6 +3113,7 @@ impl SliceLayout {
                         .strip_prefix("alloc::boxed::Box<str")
                         .is_some_and(|rest| rest.starts_with([',', '>']))
             }
+            Self::RustBytes(_) => true,
             Self::Zig => matches!(name, "[]const u8" | "[:0]const u8" | "[:0]u8"),
             Self::Go => false,
         }
@@ -3037,7 +3128,8 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
     /// pointer and a length outside every module, whatever it names it:
     /// `&[T]`, `*const [T]` when optimizing, `&mut [T]`, `Box<[T]>`. A
     /// pointer to a type with an unsized tail, such as `&Path`, has the same
-    /// shape, but its length counts the tail, so it is not a slice. Go marks
+    /// shape, but its length counts the tail, so it is not a slice, unless
+    /// the tail is bytes that wrappers alone hold, as in `Path`. Go marks
     /// slices by kind, and Zig spells them `[]T` and `[:s]T`.
     fn slice_layout(
         &self,
@@ -3060,10 +3152,14 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 let [(first, data), (second, _)] = members.as_slice() else {
                     return None;
                 };
-                (first.as_ref() == "data_ptr"
-                    && second.as_ref() == "length"
-                    && !data.is_none_or(|data| self.points_to_unsized(data)))
-                .then_some(SliceLayout::Rust)
+                if first.as_ref() != "data_ptr" || second.as_ref() != "length" {
+                    return None;
+                }
+                let data = (*data)?;
+                if !self.points_to_unsized(data) {
+                    return Some(SliceLayout::Rust);
+                }
+                self.string_bytes(data).map(SliceLayout::RustBytes)
             }
             _ => None,
         }
@@ -3152,8 +3248,67 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         true
     }
 
+    /// The unsized array of bytes a pointer DIE's target holds, when that
+    /// target is records each of a single member at offset zero, ending in
+    /// the array, as `Path`, `OsStr`, and `CStr` are.
+    fn string_bytes(&self, pointer: DieKey) -> Option<DieKey> {
+        const MAX_DEPTH: usize = 16;
+        let entry = |key: DieKey| {
+            self.units
+                .get(key.unit)?
+                .entry(gimli::UnitOffset(key.offset))
+                .ok()
+        };
+        let target = |entry: &gimli::DebuggingInformationEntry<Reader<'data>>, unit| {
+            die_reference_with_signatures(
+                entry.attr_value(gimli::DW_AT_type),
+                unit,
+                self.units,
+                self.type_signatures,
+            )
+            .ok()
+            .flatten()
+        };
+        let pointer_entry = entry(pointer)?;
+        let mut current = target(&pointer_entry, pointer.unit)?;
+        let mut wrapped = false;
+        for _ in 0..MAX_DEPTH {
+            let current_entry = entry(current)?;
+            match current_entry.tag() {
+                gimli::DW_TAG_structure_type => {
+                    let mut members = self
+                        .children(current.unit, current_entry.offset())
+                        .ok()?
+                        .map_while(Result::ok)
+                        .filter(|child| child.tag() == gimli::DW_TAG_member);
+                    let member = members.next()?;
+                    let at_start = member
+                        .attr(gimli::DW_AT_data_member_location)
+                        .and_then(gimli::Attribute::udata_value)
+                        == Some(0);
+                    if members.next().is_some() || !at_start {
+                        return None;
+                    }
+                    current = target(&member, current.unit)?;
+                    wrapped = true;
+                }
+                gimli::DW_TAG_array_type if wrapped && self.array_is_unsized(current) => {
+                    let element = entry(target(&current_entry, current.unit)?)?;
+                    let byte = element.tag() == gimli::DW_TAG_base_type
+                        && element
+                            .attr(gimli::DW_AT_byte_size)
+                            .and_then(gimli::Attribute::udata_value)
+                            == Some(1);
+                    return byte.then_some(current);
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
     /// Whether an array type DIE has a dimension with no count.
-    fn array_is_unsized(&self, array: DieKey) -> bool {
+    pub(super) fn array_is_unsized(&self, array: DieKey) -> bool {
         let Ok(children) = self.children(array.unit, gimli::UnitOffset(array.offset)) else {
             return true;
         };

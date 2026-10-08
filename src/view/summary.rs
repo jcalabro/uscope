@@ -6,11 +6,11 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use rustc_apfloat::Float as _;
-use rustc_apfloat::ieee::X87DoubleExtended;
+use rustc_apfloat::ieee::{BFloat, Half, Quad, X87DoubleExtended};
 
 use crate::{
-    BaseTypeEncoding, FloatValue, IntegerValue, PresentedCount, PresentedShape, ScalarValue,
-    TextCompletion, TextSummary, TypeInfo, TypeKind, ValueChildren, VariableState,
+    BaseType, BaseTypeEncoding, FloatValue, IntegerValue, PresentedCount, PresentedShape,
+    ScalarValue, TextCompletion, TextSummary, TypeInfo, TypeKind, ValueChildren, VariableState,
     VariableUnavailableReason, VariableValue, VirtualAddress,
 };
 
@@ -80,21 +80,42 @@ pub fn integer(value: IntegerValue) -> String {
     }
 }
 
-/// A scalar, with the printable ASCII character a character type's value
-/// stands for.
+/// Which characters a scalar's numbers stand for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Characters {
+    /// None: the scalar is a number.
+    None,
+    /// Bytes of an encoding the type does not say, of which only ASCII
+    /// is known: C's `char`.
+    Bytes,
+    /// Unicode code points: UTF-16 and UTF-32 units, `wchar_t`, and
+    /// Rust's `char`.
+    Unicode,
+}
+
+/// A scalar, with the printable character a character type's value stands
+/// for: an ASCII one for bytes, and any but a control character for
+/// Unicode.
 #[must_use]
-pub fn scalar(value: &ScalarValue, character: bool) -> String {
-    let with_character = |number: String, code: Option<u8>| match code {
-        Some(code) if character && code.is_ascii_graphic() => {
-            format!("{number} '{}'", char::from(code).escape_default())
-        }
-        _ => number,
+pub fn scalar(value: &ScalarValue, characters: Characters) -> String {
+    let with_character = |number: String, code: Option<u32>| {
+        let shown = code
+            .and_then(char::from_u32)
+            .filter(|character| match characters {
+                Characters::None => false,
+                Characters::Bytes => character.is_ascii_graphic(),
+                Characters::Unicode => !character.is_control(),
+            });
+        shown.map_or_else(
+            || number.clone(),
+            |character| format!("{number} '{}'", character.escape_debug()),
+        )
     };
     match value {
         ScalarValue::Boolean(value) => value.to_string(),
-        ScalarValue::Signed(value) => with_character(value.to_string(), u8::try_from(*value).ok()),
+        ScalarValue::Signed(value) => with_character(value.to_string(), u32::try_from(*value).ok()),
         ScalarValue::Unsigned(value) => {
-            with_character(value.to_string(), u8::try_from(*value).ok())
+            with_character(value.to_string(), u32::try_from(*value).ok())
         }
         ScalarValue::Floating(value) => float(*value),
         ScalarValue::Complex { real, imaginary } => {
@@ -110,16 +131,99 @@ pub fn scalar(value: &ScalarValue, character: bool) -> String {
 #[must_use]
 pub fn float(value: FloatValue) -> String {
     match value {
+        FloatValue::Binary16(bits) => soft_shortest(Half::from_bits(u128::from(bits))),
+        FloatValue::BFloat16(bits) => soft_shortest(BFloat::from_bits(u128::from(bits))),
+        FloatValue::Binary128(bits) => soft_shortest(Quad::from_bits(bits)),
         FloatValue::Binary32(bits) => shortest(f32::from_bits(bits)),
         FloatValue::Binary64(bits) => shortest(f64::from_bits(bits)),
         FloatValue::X87Extended {
             significand,
             sign_exponent,
-        } => X87DoubleExtended::from_bits(
+        } => soft_shortest(X87DoubleExtended::from_bits(
             u128::from(significand) | (u128::from(sign_exponent) << 64),
-        )
-        .to_string(),
+        )),
     }
+}
+
+/// [`shortest`] for a float format Rust has no type for: the fewest
+/// significant digits that read back as the value, written as Rust writes
+/// an `f64`.
+fn soft_shortest<F: rustc_apfloat::Float + std::fmt::Display>(value: F) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_negative() { "-inf" } else { "inf" }.to_owned();
+    }
+    if value.is_zero() {
+        return if value.is_negative() { "-0" } else { "0" }.to_owned();
+    }
+    let natural = value.to_string();
+    let digits = (1..64)
+        .map(|precision| format!("{value:.precision$}"))
+        .find(|text| {
+            F::from_str_r(text, rustc_apfloat::Round::NearestTiesToEven)
+                .is_ok_and(|parsed| parsed.value.to_bits() == value.to_bits())
+        })
+        .unwrap_or(natural);
+    decimal(&digits).unwrap_or(digits)
+}
+
+/// A decimal number apfloat wrote, as `-1.25E+30` or `0.001`, written as
+/// [`shortest`] writes one: plain digits from 1e-6 to 1e21, and otherwise
+/// a significand and exponent, as `-1.25e30`.
+fn decimal(text: &str) -> Option<String> {
+    let (negative, text) = text
+        .strip_prefix('-')
+        .map_or((false, text), |rest| (true, rest));
+    let (significand, exponent) = match text.split_once(['E', 'e']) {
+        Some((significand, exponent)) => (significand, exponent.parse::<i32>().ok()?),
+        None => (text, 0),
+    };
+    let (whole, fraction) = significand.split_once('.').unwrap_or((significand, ""));
+    if !whole
+        .chars()
+        .chain(fraction.chars())
+        .all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    // The digits, and where the decimal point falls among them.
+    let all = format!("{whole}{fraction}");
+    let leading = all.len() - all.trim_start_matches('0').len();
+    let digits = all.trim_matches('0');
+    if digits.is_empty() {
+        return Some(if negative { "-0" } else { "0" }.to_owned());
+    }
+    let point = i32::try_from(whole.len()).ok()? + exponent - i32::try_from(leading).ok()?;
+    // The exponent of the first significant digit.
+    let scientific = point - 1;
+    let sign = if negative { "-" } else { "" };
+    let length = i32::try_from(digits.len()).ok()?;
+    Some(if (-6..21).contains(&scientific) {
+        if point <= 0 {
+            format!(
+                "{sign}0.{}{digits}",
+                "0".repeat(usize::try_from(-point).ok()?)
+            )
+        } else if point >= length {
+            format!(
+                "{sign}{digits}{}",
+                "0".repeat(usize::try_from(point - length).ok()?)
+            )
+        } else {
+            let (integer, rest) = digits.split_at(usize::try_from(point).ok()?);
+            format!("{sign}{integer}.{rest}")
+        }
+    } else {
+        let (first, rest) = digits.split_at(1);
+        let rest = if rest.is_empty() {
+            String::new()
+        } else {
+            format!(".{rest}")
+        };
+        format!("{sign}{first}{rest}e{scientific}")
+    })
 }
 
 /// A float's shortest round-trip digits, which take an exponent past 1e21
@@ -136,14 +240,24 @@ fn shortest<F: std::fmt::Display + std::fmt::LowerExp>(value: F) -> String {
     }
 }
 
-/// Whether one-byte integers of a type are characters.
+/// Which characters a type's integers stand for: a one-byte character
+/// type's are bytes, and a wider one's Unicode code points.
 #[must_use]
-pub const fn is_character(type_info: &TypeInfo) -> bool {
-    matches!(
-        &type_info.kind,
-        TypeKind::Base(base) if base.byte_size == 1
-            && matches!(base.encoding, BaseTypeEncoding::SignedCharacter | BaseTypeEncoding::UnsignedCharacter)
-    )
+pub const fn characters(type_info: &TypeInfo) -> Characters {
+    match &type_info.kind {
+        TypeKind::Base(BaseType {
+            encoding: BaseTypeEncoding::SignedCharacter | BaseTypeEncoding::UnsignedCharacter,
+            byte_size,
+            ..
+        }) => {
+            if *byte_size == 1 {
+                Characters::Bytes
+            } else {
+                Characters::Unicode
+            }
+        }
+        _ => Characters::None,
+    }
 }
 
 /// A value on one line: its presentation's summary when a view presents
@@ -170,10 +284,10 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
     if let (Some(text), false) = (text, matches!(value, VariableValue::Address(_))) {
         return quoted(text);
     }
-    let character = type_info.is_some_and(is_character);
+    let characters = type_info.map_or(Characters::None, characters);
     let partless = matches!(children, ValueChildren::Available(parts) if parts.total() == 0);
     let rendered = match value {
-        VariableValue::Scalar(value) => scalar(value, character),
+        VariableValue::Scalar(value) => scalar(value, characters),
         VariableValue::Enumeration { value, matches } => {
             symbol(*value, matches).unwrap_or_else(|| integer(*value))
         }

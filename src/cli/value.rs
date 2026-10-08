@@ -4,11 +4,11 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use uscope::{
-    BaseTypeEncoding, ByteOrder, DebuggerHandle, InspectionExhaustion, InspectionLimit,
-    InspectionLimits, IntegerValue, ModuleImage, Presentation, PresentedCount, PresentedShape,
-    ScalarValue, TypeInfo, TypeKind, ValueChildPage, ValueChildQuery, ValueChildRelationship,
-    ValueChildren, ValueChildrenReference, Variable, VariableKind, VariableSnapshot, VariableState,
-    VariableValue,
+    ArrayDimension, BaseTypeEncoding, ByteOrder, DebuggerHandle, InspectionExhaustion,
+    InspectionLimit, InspectionLimits, IntegerValue, ModuleImage, Presentation, PresentedCount,
+    PresentedShape, ScalarValue, TypeInfo, TypeKind, ValueChildPage, ValueChildQuery,
+    ValueChildRelationship, ValueChildren, ValueChildrenReference, Variable, VariableKind,
+    VariableSnapshot, VariableState, VariableValue,
 };
 
 use super::format::register_bytes;
@@ -328,7 +328,9 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
         _ => 0,
     };
     match value {
-        VariableValue::Scalar(value) => uscope::scalar_text(value, is_character(type_info)),
+        VariableValue::Scalar(value) => {
+            uscope::scalar_text(value, uscope::characters_of(type_info))
+        }
         VariableValue::Enumeration { value, matches } => {
             let raw = uscope::integer_text(*value);
             match matches.as_ref() {
@@ -733,7 +735,7 @@ pub async fn expanded(
             };
             output.open(format!("{length} {opening}"));
             work.push(Work::Close(closing.to_owned()));
-            schedule_children(&mut work, count, page.as_ref(), depth + 1, raw);
+            schedule_children(&mut work, count, page.as_ref(), depth + 1, raw, &[]);
             continue;
         }
         if let Some(presentation) = presentation {
@@ -796,9 +798,20 @@ pub async fn expanded(
             VariableValue::Union => ("{".to_owned(), "} <active member unknown>".to_owned()),
             _ => ("{".to_owned(), "}".to_owned()),
         };
+        let dimensions = match value {
+            VariableValue::Array { dimensions } => dimensions.as_ref(),
+            _ => &[],
+        };
         output.open(opening);
         work.push(Work::Close(closing));
-        schedule_children(&mut work, reference.total(), page.as_ref(), depth + 1, raw);
+        schedule_children(
+            &mut work,
+            reference.total(),
+            page.as_ref(),
+            depth + 1,
+            raw,
+            dimensions,
+        );
     }
     let docs = output.finish();
     let mut text = BoundedOutput::new(OUTPUT_LIMIT);
@@ -845,13 +858,15 @@ async fn first_children(
 }
 
 /// Schedules one aggregate's children, then any truncation markers, as
-/// separated items.
+/// separated items. The elements of an array of several `dimensions` are
+/// grouped in rows, a row of rows for each dimension after the first.
 fn schedule_children(
     work: &mut Vec<Work>,
     total: u64,
     page: Option<&ValueChildPage>,
     depth: u64,
     raw: bool,
+    dimensions: &[ArrayDimension],
 ) {
     let children = page.map_or(&[][..], |page| page.children.as_ref());
     let omitted = total.saturating_sub(children.len() as u64);
@@ -861,6 +876,7 @@ fn schedule_children(
             ValueChildRelationship::Member(member) if member.artificial
         ) && (!raw || !matches!(child.relationship, ValueChildRelationship::Raw))
     });
+    let mut open_rows = 0;
     let mut items = rendered
         .map(|child| {
             let label = match &child.relationship {
@@ -878,14 +894,30 @@ fn schedule_children(
                 ValueChildRelationship::Raw => "[raw] = ".to_owned(),
                 _ => "<child> = ".to_owned(),
             };
+            let (opened, closed) = match &child.relationship {
+                ValueChildRelationship::ArrayElement { indices, .. } => rows(dimensions, indices),
+                _ => (0, 0),
+            };
+            open_rows += opened;
+            open_rows -= closed.min(open_rows);
             vec![
-                Work::Text(label),
+                Work::Text(format!("{}{label}", "[".repeat(opened))),
                 Work::State(
                     Box::new((child.type_info.clone(), child.state.clone())),
                     depth,
                 ),
+                Work::Text("]".repeat(closed)),
             ]
         })
+        .collect::<Vec<_>>();
+    // Elements cut short inside a row leave it open.
+    if open_rows > 0
+        && let Some(last) = items.last_mut()
+    {
+        last.push(Work::Text("]".repeat(open_rows)));
+    }
+    let mut items = items
+        .into_iter()
         .chain(
             page.and_then(|page| page.completion.exhaustion())
                 .map(|marker| vec![Work::Text(exhaustion(marker))]),
@@ -900,13 +932,30 @@ fn schedule_children(
     }
 }
 
-/// Whether one-byte integers of this type are characters.
-const fn is_character(type_info: &TypeInfo) -> bool {
-    matches!(
-        &type_info.kind,
-        TypeKind::Base(base) if base.byte_size == 1
-            && matches!(base.encoding, BaseTypeEncoding::SignedCharacter | BaseTypeEncoding::UnsignedCharacter)
-    )
+/// How many rows an element of an array of several dimensions begins and
+/// ends: one for each dimension after the first, from the last, whose
+/// index is that dimension's first, and last.
+fn rows(dimensions: &[ArrayDimension], indices: &[i128]) -> (usize, usize) {
+    if dimensions.len() < 2 || indices.len() != dimensions.len() {
+        return (0, 0);
+    }
+    let edge = |last: bool| {
+        dimensions
+            .iter()
+            .zip(indices)
+            .skip(1)
+            .rev()
+            .take_while(|(dimension, index)| {
+                let offset = **index - dimension.lower_bound;
+                if last {
+                    offset + 1 == i128::from(dimension.count)
+                } else {
+                    offset == 0
+                }
+            })
+            .count()
+    };
+    (edge(false), edge(true))
 }
 
 /// How watched bytes are decoded.
@@ -1171,16 +1220,28 @@ mod tests {
 
     #[test]
     fn scalars_render_characters_and_special_floats() {
-        let character = |value: i128| uscope::scalar_text(&ScalarValue::Signed(value), true);
+        use uscope::Characters;
+        let character =
+            |value: i128| uscope::scalar_text(&ScalarValue::Signed(value), Characters::Bytes);
         assert_eq!(character(65), "65 'A'");
         assert_eq!(character(39), r"39 '\''");
         assert_eq!(character(92), r"92 '\\'");
         assert_eq!(character(-1), "-1");
+        // A byte above ASCII is part of a character in some encoding.
+        assert_eq!(character(233), "233");
         assert_eq!(
-            uscope::scalar_text(&ScalarValue::Unsigned(66), true),
+            uscope::scalar_text(&ScalarValue::Unsigned(66), Characters::Bytes),
             "66 'B'"
         );
-        assert_eq!(uscope::scalar_text(&ScalarValue::Unsigned(66), false), "66");
+        assert_eq!(
+            uscope::scalar_text(&ScalarValue::Unsigned(66), Characters::None),
+            "66"
+        );
+        let unicode =
+            |value: u128| uscope::scalar_text(&ScalarValue::Unsigned(value), Characters::Unicode);
+        assert_eq!(unicode(233), "233 'é'");
+        assert_eq!(unicode(10), "10");
+        assert_eq!(unicode(0xd800), "55296");
 
         let float = uscope::float_text;
         assert_eq!(
@@ -1214,13 +1275,42 @@ mod tests {
             float(uscope::FloatValue::Binary32(f32::MAX.to_bits())),
             "3.4028235e38"
         );
+        // Formats Rust has no type for take as few digits as read back.
+        let quad = |text: &str| {
+            use rustc_apfloat::Float as _;
+            let value = rustc_apfloat::ieee::Quad::from_str_r(
+                text,
+                rustc_apfloat::Round::NearestTiesToEven,
+            )
+            .expect("a number")
+            .value;
+            float(uscope::FloatValue::Binary128(value.to_bits()))
+        };
+        assert_eq!(quad("0.1"), "0.1");
+        assert_eq!(quad("123456"), "123456");
+        assert_eq!(quad("-1e30"), "-1e30");
+        assert_eq!(quad("1e-9"), "1e-9");
+        assert_eq!(quad("0.000001"), "0.000001");
+        assert_eq!(float(uscope::FloatValue::Binary16(0x3e00)), "1.5");
+        // The largest half is 65504, but 65500 reads back as it.
+        assert_eq!(float(uscope::FloatValue::Binary16(0x7bff)), "65500");
+        assert_eq!(float(uscope::FloatValue::Binary16(1)), "6e-8");
+        assert_eq!(float(uscope::FloatValue::Binary16(0x7c00)), "inf");
+        assert_eq!(float(uscope::FloatValue::BFloat16(0xc049)), "-3.14");
+        assert_eq!(
+            float(uscope::FloatValue::X87Extended {
+                significand: 0xcccc_cccc_cccc_cccd,
+                sign_exponent: 0x3ffb,
+            }),
+            "0.1"
+        );
         assert_eq!(
             uscope::scalar_text(
                 &ScalarValue::Complex {
                     real: uscope::FloatValue::Binary64(1.5_f64.to_bits()),
                     imaginary: uscope::FloatValue::Binary64((-2.0_f64).to_bits()),
                 },
-                false
+                Characters::None
             ),
             "(1.5-2i)"
         );

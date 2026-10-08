@@ -108,8 +108,9 @@ pub use protocol::{
 pub use runtime_model::TASK_NOUNS;
 pub use source_map::SourcePathMap;
 pub use view::summary::{
-    float as float_text, function as function_text, integer as integer_text, quoted as quoted_text,
-    scalar as scalar_text, symbol as symbol_text, value as value_summary,
+    Characters, characters as characters_of, float as float_text, function as function_text,
+    integer as integer_text, quoted as quoted_text, scalar as scalar_text, symbol as symbol_text,
+    value as value_summary,
 };
 pub use view::syntax::Error as ViewFileError;
 

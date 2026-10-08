@@ -366,6 +366,13 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         unit_index: usize,
     ) -> Option<TypeArgument> {
         Some(match entry.tag() {
+            // An unsized array is no type of its own: rustc describes both
+            // `str` and `[u8]` as one, so the name's spelling says which.
+            gimli::DW_TAG_template_type_parameter
+                if self.unsized_array_argument(entry, unit_index) =>
+            {
+                self.unknown_argument(entry, unit_index)
+            }
             gimli::DW_TAG_template_type_parameter => match self.target(entry, unit_index) {
                 Ok(Some(target)) => TypeArgument::Type(target),
                 // A type parameter without a type is `void`.
@@ -386,6 +393,27 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             }
             _ => return None,
         })
+    }
+
+    /// Whether a type parameter DIE's type is an array of unknown length.
+    fn unsized_array_argument(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+    ) -> bool {
+        let Ok(Some(target)) = die_reference_with_signatures(
+            entry.attr_value(gimli::DW_AT_type),
+            unit_index,
+            self.units,
+            self.type_signatures,
+        ) else {
+            return false;
+        };
+        self.units
+            .get(target.unit)
+            .and_then(|unit| unit.entry(gimli::UnitOffset(target.offset)).ok())
+            .is_some_and(|array| array.tag() == gimli::DW_TAG_array_type)
+            && self.array_is_unsized(target)
     }
 
     /// A value parameter's integer, decoded by its type.

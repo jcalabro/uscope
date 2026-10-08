@@ -317,10 +317,11 @@ pub(super) fn static_member_layout_is_valid(
 }
 
 /// An integer of an enumeration-like type: symbolic when it is one of the
-/// type's constants, or, for constants Go gave a named type, the bitwise
-/// OR of some of its single-bit constants, as Delve reads them; a
-/// language's enumeration stays symbolic with no name, and anything else
-/// is its number, so `time.Duration(1500000000)` names no constant.
+/// type's constants, or else the bitwise OR of some of its single-bit
+/// constants: for constants Go gave a named type, as Delve reads them, and
+/// for a language's enumeration of flags. A language's enumeration
+/// otherwise stays symbolic with no name, and anything else is its number,
+/// so `time.Duration(1500000000)` names no constant.
 fn symbolic(
     value: IntegerValue,
     enumerators: &[crate::Enumerator],
@@ -332,7 +333,8 @@ fn symbolic(
         .filter(|enumerator| enumerator.value == value)
         .cloned()
         .collect::<Vec<_>>();
-    if !exact.is_empty() || origin == crate::EnumerationOrigin::Language {
+    let language = origin == crate::EnumerationOrigin::Language;
+    if !exact.is_empty() || (language && !are_flags(enumerators)) {
         return VariableValue::Enumeration {
             value,
             matches: exact.into(),
@@ -363,10 +365,36 @@ fn symbolic(
             matches: flags.into(),
         };
     }
+    if language {
+        return VariableValue::Enumeration {
+            value,
+            matches: Arc::from([]),
+        };
+    }
     VariableValue::Scalar(match value {
         IntegerValue::Signed(value) => ScalarValue::Signed(value),
         IntegerValue::Unsigned(value) => ScalarValue::Unsigned(value),
     })
+}
+
+/// Whether a language's enumeration is one of flags, as `enum { READ = 1,
+/// WRITE = 2 }` is: every constant is zero or a single bit, at least two
+/// are bits, and they do not count 0, 1, 2 as a sequence of three does.
+fn are_flags(enumerators: &[crate::Enumerator]) -> bool {
+    let value = |enumerator: &crate::Enumerator| match enumerator.value {
+        IntegerValue::Signed(value) => u128::try_from(value).ok(),
+        IntegerValue::Unsigned(value) => Some(value),
+    };
+    let mut bits = 0_u128;
+    let mut zero = false;
+    for enumerator in enumerators {
+        match value(enumerator) {
+            Some(0) => zero = true,
+            Some(bit) if bit.is_power_of_two() => bits |= bit,
+            _ => return false,
+        }
+    }
+    bits.count_ones() >= 2 && !(zero && bits == 0b11)
 }
 
 impl DwarfVariableInfo {

@@ -1,11 +1,13 @@
 // Strings in the forms C programs keep them, for text summaries: pointers,
 // arrays with and without a terminator, escapes, text longer than a summary
-// holds, and text that runs into unreadable memory.
+// holds, text that runs into unreadable memory, and wide text.
 #define _DEFAULT_SOURCE
 
 #include <stddef.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <uchar.h>
+#include <wchar.h>
 
 const char *global_greeting = "global text";
 
@@ -16,9 +18,16 @@ __attribute__((noinline)) int strings_target(const char *greeting, const char *e
     const char *null_text = NULL;
     const char *invalid = (const char *)1;
     unsigned char bytes[3] = {0x41, 0xff, 0};
+    const wchar_t *wide = L"wide \u00e9";
+    const char16_t *sixteen = u"sixteen \u03bb \U0001F980";
+    const char32_t *thirty_two = U"thirty-two \U0001F980";
+    wchar_t wide_buffer[8] = L"buf";
+    // An unpaired surrogate is not a character.
+    char16_t lone[3] = {u'a', 0xd800, 0};
     __asm__ volatile("" : : "g"(greeting), "g"(escaped), "g"(long_text), "g"(edge),
                      "g"(buffer), "g"(unterminated), "g"(null_text), "g"(invalid),
-                     "g"(bytes) : "memory");
+                     "g"(bytes), "g"(wide), "g"(sixteen), "g"(thirty_two), "g"(wide_buffer),
+                     "g"(lone) : "memory");
     return (int)strlen(greeting) + buffer[0]; // strings stop here
 }
 

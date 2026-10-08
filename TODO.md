@@ -4,7 +4,6 @@
 
 ## Languages and platforms
 
-- Excellent visualizer support in all languages we support
 - First-class tokio support.
 - Other Linux architectures, then other operating systems.
 

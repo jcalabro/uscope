@@ -14,6 +14,15 @@ enum Fieldless {
     Positive = 7,
 }
 
+// A method puts its declaration inside the enumeration's debug
+// information, as std's `Ordering` has them.
+impl Fieldless {
+    #[inline(never)]
+    fn sign(self) -> i32 {
+        (self as i32).signum()
+    }
+}
+
 #[repr(u128)]
 #[derive(Clone, Copy)]
 enum Wide {
@@ -52,9 +61,11 @@ pub extern "C" fn main() -> i32 {
     let failed: Result<(), u32> = Err(5);
     core::hint::black_box(Payload::Unit);
     core::hint::black_box((Fieldless::Zero, Fieldless::Positive));
-    i32::from(!inspect_enum(
-        &value, &fieldless, &wide, &optional, &empty, &done, &failed,
-    ))
+    i32::from(
+        !inspect_enum(
+            &value, &fieldless, &wide, &optional, &empty, &done, &failed,
+        ) || core::hint::black_box(fieldless).sign() != -1,
+    )
 }
 
 #[panic_handler]

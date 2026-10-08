@@ -4,15 +4,21 @@
 //! for N of the character c, and `problem:` says the view must refuse the
 //! value, and why.
 
-use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::ffi::{CString, OsString};
+use std::cell::{Cell, OnceCell, RefCell};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt::Debug;
 use std::hint::black_box;
 use std::mem::ManuallyDrop;
-use std::path::PathBuf;
+use std::num::{NonZero, Saturating};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant, SystemTime};
 
 /// A sum type with a variant of named fields, which only the debugger reads.
 #[expect(dead_code, reason = "the debugger reads it")]
@@ -26,6 +32,18 @@ enum Shape {
 struct Point {
     x: i32,
     y: i32,
+}
+
+/// A tuple struct, which the debugger presents as Rust writes one.
+#[expect(dead_code, reason = "the debugger reads it")]
+struct Meters(u32);
+
+/// A monotonic clock reading's layout on Linux, to make an `Instant` the
+/// test can name.
+#[repr(C)]
+struct Reading {
+    seconds: i64,
+    nanoseconds: u32,
 }
 
 #[inline(never)]
@@ -125,6 +143,52 @@ fn main() {
     let shape = Shape::Square { side: 4 }; // VIEW: shape => Square {side: 4}
     let dynamic: Box<dyn Debug> = Box::new(Point { x: 1, y: 2 }); // VIEW: dynamic => Point {x: 1, y: 2}
 
+    // Tuples and tuple structs, as Rust writes them.
+    let pair = (1, "two", 3.5); // VIEW: pair => (1, "two", 3.5)
+    // VIEW: pair => children: __0 = 1, __1 = "two", __2 = 3.5, [raw]
+    let meters = Meters(7); // VIEW: meters => Meters(7)
+    let nested = ((1_u8, 2_u8), Meters(3)); // VIEW: nested => ((1, 2), Meters(3))
+    let mut pin_target = vec![1_u8];
+    let wrapping = std::num::Wrapping(5_u8); // VIEW: wrapping => Wrapping(5)
+    let saturating = Saturating(6_i8); // VIEW: saturating => Saturating(6)
+    let reversed = Reverse(3_u16); // VIEW: reversed => Reverse(3)
+    let elapsed = Duration::new(90, 500_000_000); // VIEW: elapsed => 1m30.5s
+    let tiny = Duration::from_nanos(42); // VIEW: tiny => 42ns
+    let no_time = Duration::ZERO; // VIEW: no_time => 0s
+    let instant = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000); // VIEW: instant => 2023-11-14 22:13:20 +0000 UTC
+    let before_epoch = SystemTime::UNIX_EPOCH - Duration::from_millis(1500); // VIEW: before_epoch => 1969-12-31 23:59:58.5 +0000 UTC
+    // SAFETY: an Instant is a monotonic reading of this layout on Linux.
+    let uptime: Instant = unsafe { std::mem::transmute(Reading { seconds: 5, nanoseconds: 0 }) }; // VIEW: uptime => 5s
+    let counter = AtomicU32::new(5); // VIEW: counter => 5
+    let signed_counter = AtomicI64::new(-9); // VIEW: signed_counter => -9
+    let ready = AtomicBool::new(true); // VIEW: ready => true
+    let slot: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut()); // VIEW: slot => 0x0
+    let nonzero = NonZero::new(7_u32).expect("nonzero"); // VIEW: nonzero => 7
+    let maybe_nonzero = NonZero::new(8_u64); // VIEW: maybe_nonzero => Some(8)
+    let non_null: NonNull<u64> = NonNull::dangling(); // VIEW: non_null => 0x8
+    let once = OnceCell::new(); // VIEW: once => Some(3)
+    once.set(3_i32).expect("unset");
+    let no_once: OnceCell<i32> = OnceCell::new(); // VIEW: no_once => None
+    let once_lock = OnceLock::new(); // VIEW: once_lock => "set"
+    once_lock.set(String::from("set")).expect("unset");
+    let no_once_lock: OnceLock<String> = OnceLock::new(); // VIEW: no_once_lock => uninitialized
+    let rw_lock = RwLock::new(4_u8); // VIEW: rw_lock => children: readers = 1, writer = false, poisoned = false, [raw]
+    let reading = rw_lock.read().expect("unpoisoned");
+    let written = RwLock::new(5_u8); // VIEW: written => children: readers = 0, writer = true, poisoned = false, [raw]
+    let writing = written.write().expect("unpoisoned");
+    let linked = LinkedList::from([1, 2, 3]); // VIEW: linked => len=3 [1, 2, 3]
+    let no_linked: LinkedList<u8> = LinkedList::new(); // VIEW: no_linked => len=0 []
+    let heap = BinaryHeap::from([1, 3, 2]); // VIEW: heap => len=3 [3, 1, 2]
+    let shared_text: Rc<str> = Rc::from("shared"); // VIEW: shared_text => "shared"
+    let atomic_text: Arc<str> = Arc::from("atomic"); // VIEW: atomic_text => "atomic"
+    let shared_slice: Rc<[i32]> = Rc::from([1, 2, 3]); // VIEW: shared_slice => stored
+    let path_ref = Path::new("/etc/hosts"); // VIEW: path_ref => "/etc/hosts"
+    let os_ref = OsStr::new("os"); // VIEW: os_ref => "os"
+    let c_ref = c"c ref"; // VIEW: c_ref => "c ref"
+    let c_ref_too: &CStr = c_text.as_c_str(); // VIEW: c_ref_too => "c text"
+    let pinned = Box::pin(11_i32); // VIEW: pinned => 11
+    let pinned_ref: Pin<&mut Vec<u8>> = Pin::new(&mut pin_target);
+
     black_box((
         &text,
         &empty_text,
@@ -177,6 +241,13 @@ fn main() {
         &shape,
         &dynamic,
     ));
+    black_box((&pair, &meters, &nested, &wrapping, &saturating, &reversed));
+    black_box((&elapsed, &tiny, &no_time, &instant, &before_epoch, &uptime));
+    black_box((&counter, &signed_counter, &ready, &slot, &nonzero, &maybe_nonzero));
+    black_box((&non_null, &once, &no_once, &once_lock, &no_once_lock, &rw_lock));
+    black_box((&reading, &linked, &no_linked, &heap, &shared_text, &atomic_text));
+    black_box((&shared_slice, &path_ref, &os_ref, &c_ref, &c_ref_too, &pinned));
+    black_box((&pinned_ref, &writing));
     barrier(std::ptr::from_ref(&text).cast());
     std::process::exit(i32::from(ints.len() + many.len() != 303));
 }
