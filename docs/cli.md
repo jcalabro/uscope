@@ -233,6 +233,22 @@ where that task's function begins, through the wrapper that passes it its
 arguments. The started task is then selected. A line that starts no task
 ends as `next` does.
 
+In an async function, a step follows the function's future across its
+awaits. `next` over an await that is not ready lets the task go on, waits
+for that future to be polled again, on whichever thread, and stops at the
+function's next line; other tasks running the same function meanwhile pass.
+`finish` and `advance` wait the same way, until the function returns to its
+awaiter, where `finish` shows what it returned. A step of a task no thread
+runs, selected with `task N`, waits for the task to resume. A breakpoint, a
+signal, or `pause` ends a waiting step as it ends any. When the future goes
+away meanwhile, the step says how: `stopped as task 7 was cancelled` as its
+runtime cancels the task, `stopped as task 7 finished` as the task's own
+future returns, and `whose future was dropped` on the next line of the code
+that dropped it, as `select!` and timeouts do. Where an optimized build
+inlines an async function into its awaiter and keeps no record of its
+future, `finish` from it goes on to the awaiter's next line, since its
+return and its waiting look alike there.
+
 `step` stops only in code the program's author wrote: it passes through
 the runtime's private machinery, compiler-generated wrappers, and stack
 switches to the code they call, and steps out of them where they call none.
