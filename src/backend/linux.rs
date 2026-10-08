@@ -60,6 +60,7 @@ use tls::{CLibrary, TlsModule};
 
 mod activation;
 mod async_frames;
+mod awaits;
 mod breakpoints;
 mod callers;
 mod classify;
@@ -526,6 +527,9 @@ struct StepStart {
     /// For a step into a new task, how far it has followed the task's
     /// start.
     new_task: Option<new_task::NewTask>,
+    /// For a step over or out of an async function's body, the future it
+    /// runs for, which the step follows across the polls of its awaits.
+    awaiting: Option<awaits::AwaitStep>,
 }
 
 /// Whether a step kind executes machine instructions rather than source

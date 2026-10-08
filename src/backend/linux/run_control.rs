@@ -108,6 +108,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             if requested == StepKind::IntoNewTask {
                 start.new_task = Some(NewTask::Watching(self.task_starters()));
             }
+            if frame.get() == 0 {
+                start.awaiting = self.await_step(pid, kind, &start);
+            }
             start.into_call = into_call;
             self.begin_execution(
                 process_id,
@@ -800,6 +803,9 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         // No user breakpoint stops at this hit: none owns the site, or each
         // declined it by its hit condition.
+        if self.reach_resumed_future(pid, address)? {
+            return Ok(());
+        }
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let step = inferior
             .active
@@ -820,47 +826,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.follow_step(pid);
         }
         if let Some((_, kind)) = planned {
-            // A step out may go on from its function's return address, so
-            // what the function returned is read as it arrives there.
-            self.note_returned_values(pid);
-            if self.is_advance_target(address) {
-                return self.reach_advance_target(pid, address);
-            }
-            if self.reach_waypoint(pid, address)? {
-                return Ok(());
-            }
-            match self.reach_loop(pid, address, kind)? {
-                LoopReach::Elsewhere => {}
-                LoopReach::Complete => {
-                    return self.begin_visible_stop(pid, StopReason::Step { kind });
-                }
-                LoopReach::Pass => return self.repair_when_alone(pid, address),
-                LoopReach::Restarted => {
-                    return self.go_on_without_plan(pid, address, Some(kind));
-                }
-            }
-            if self.begin_following(pid, kind)? || self.wait_for_loop(pid, kind)? {
-                // The step goes on by single steps, or by its new plan.
-                return self.go_on_without_plan(pid, address, Some(kind));
-            }
-            let mode = self.step_mode(kind);
-            if !steps_instructions(kind) {
-                self.begin_epilogue_traversal(pid)?;
-            }
-            self.note_returned_activation(pid, mode)?;
-            if self.source_step_returned_to_undescribed_code(pid, mode)? {
-                self.let_step_run_on()?;
-                return self.go_on_without_plan(pid, address, None);
-            }
-            if let Some(reason) = self.user_step_stop(pid, kind)? {
-                // The plan's sites, this one among them, are removed when
-                // the stop is published.
-                return self.begin_visible_stop(pid, reason);
-            }
-
-            self.mark_epilogue_return_for_retirement(address);
-            self.mark_return_guard_for_retirement(pid, address)?;
-            return self.repair_when_alone(pid, address);
+            return self.reach_plan_site(pid, address, kind);
         }
 
         // A declined user hit, or another thread at a stepping plan's site,
@@ -880,6 +846,55 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             self.repair_when_alone(pid, address)
         }
+    }
+
+    /// Goes on with the active step at a site of its plan, which its own
+    /// thread or task reached.
+    fn reach_plan_site(&mut self, pid: Pid, address: VirtualAddress, kind: StepKind) -> Result<()> {
+        // A step out may go on from its function's return address, so
+        // what the function returned is read as it arrives there.
+        self.note_returned_values(pid);
+        if self.is_advance_target(address) {
+            return self.reach_advance_target(pid, address);
+        }
+        if self.reach_waypoint(pid, address)? {
+            return Ok(());
+        }
+        match self.reach_loop(pid, address, kind)? {
+            LoopReach::Elsewhere => {}
+            LoopReach::Complete => {
+                return self.begin_visible_stop(pid, StopReason::Step { kind });
+            }
+            LoopReach::Pass => return self.repair_when_alone(pid, address),
+            LoopReach::Restarted => {
+                return self.go_on_without_plan(pid, address, Some(kind));
+            }
+        }
+        if self.await_pending_poll(pid)? {
+            return self.go_on_without_plan(pid, address, None);
+        }
+        if self.begin_following(pid, kind)? || self.wait_for_loop(pid, kind)? {
+            // The step goes on by single steps, or by its new plan.
+            return self.go_on_without_plan(pid, address, Some(kind));
+        }
+        let mode = self.step_mode(kind);
+        if !steps_instructions(kind) {
+            self.begin_epilogue_traversal(pid)?;
+        }
+        self.note_returned_activation(pid, mode)?;
+        if self.source_step_returned_to_undescribed_code(pid, mode)? {
+            self.let_step_run_on()?;
+            return self.go_on_without_plan(pid, address, None);
+        }
+        if let Some(reason) = self.user_step_stop(pid, kind)? {
+            // The plan's sites, this one among them, are removed when
+            // the stop is published.
+            return self.begin_visible_stop(pid, reason);
+        }
+
+        self.mark_epilogue_return_for_retirement(address);
+        self.mark_return_guard_for_retirement(pid, address)?;
+        self.repair_when_alone(pid, address)
     }
 
     /// Whether the active step's thread runs freely until it returns to a

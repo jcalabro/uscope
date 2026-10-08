@@ -524,7 +524,7 @@ fn async_frame(
 
 /// Where the one out-of-line function that runs a coroutine resumes in
 /// `state`, when the debugger decoded its dispatch.
-fn resume_address(
+pub(super) fn resume_address(
     image: &ModuleImage,
     functions: &[&crate::FunctionInfo],
     state: u64,

@@ -280,10 +280,16 @@ pub(super) struct DwarfVariableInfo {
     call_sites: call_sites::CallSiteCatalog,
     target: TargetDescription,
     endian: RunTimeEndian,
+    /// For a variable of an async body, by its entry's offset, and each
+    /// suspended state of the body's future: the code where the variable
+    /// still holds what it held before the state's await, which execution
+    /// reaches from where the state resumes without leaving the variable's
+    /// scope.
+    held: BTreeMap<(u64, u64), Arc<[crate::AddressRange<ImageAddress>]>>,
 }
 
 pub(super) struct LoadedVariables {
-    pub info: Arc<dyn VariableInfo>,
+    pub info: DwarfVariableInfo,
     pub globals: Vec<GlobalVariableInfo>,
     pub types: Arc<[crate::TypeNode]>,
     /// Rust trait objects' vtables, by address, with the concrete type each
@@ -1151,7 +1157,7 @@ pub(super) fn load_variable_info<'data>(
     Ok(LoadedVariables {
         coroutines,
         coroutine_bodies,
-        info: Arc::new(DwarfVariableInfo {
+        info: DwarfVariableInfo {
             coroutines: running,
             objects: objects.into(),
             functions: functions.into(),
@@ -1176,7 +1182,8 @@ pub(super) fn load_variable_info<'data>(
                 ByteOrder::Little => RunTimeEndian::Little,
                 ByteOrder::Big => RunTimeEndian::Big,
             },
-        }),
+            held: BTreeMap::new(),
+        },
         globals,
         types: finalized_types,
         constants,
@@ -1532,7 +1539,30 @@ impl VariableInfo for DwarfVariableInfo {
             generic::Generic::Plain => ty,
         };
         match self.located_data_object(variable, address, runtime, &mut frame_base, budget) {
-            Ok(storage) => Ok(Ok(Located { ty, storage })),
+            Ok(storage) => {
+                // A running async body's variable that the await it
+                // resumed from did not keep holds what another poll left.
+                let resumption = address.and_then(|address| {
+                    self.resumption(
+                        self.function_at(address)?,
+                        address,
+                        variable.instance,
+                        runtime,
+                        &mut frame_base,
+                        budget,
+                    )
+                });
+                let memory = match storage {
+                    crate::model::ValueStorage::Memory(address) => Some(address),
+                    _ => None,
+                };
+                if let Some(reason) =
+                    resumption.and_then(|resumption| resumption.stale(variable, memory))
+                {
+                    return Ok(Err(VariableState::Unavailable(reason)));
+                }
+                Ok(Ok(Located { ty, storage }))
+            }
             Err(error) => {
                 evaluate_error_state(error, VariableMalformedKind::InvalidExpression).map(Err)
             }

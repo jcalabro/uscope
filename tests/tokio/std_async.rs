@@ -5,7 +5,7 @@ use std::process::Stdio;
 
 use uscope::{
     BreakpointSpec, LaunchOptions, LineNumber, StepKind, StopReason, ValueChildQuery,
-    ValueChildRelationship, ValueChildren, VariableState, VariableUnavailableReason,
+    ValueChildRelationship, ValueChildren, VariableKind, VariableState, VariableUnavailableReason,
 };
 
 use crate::stops::{backtrace, evaluated, frames_to, integer, line, locals, place};
@@ -28,6 +28,25 @@ async fn stopped_at(fixture: &str, spec: BreakpointSpec) -> Scenario {
         matches!(reason, StopReason::Breakpoint { .. }),
         "{fixture}: {reason:?}"
     );
+    scenario
+}
+
+/// A fixture launched to its first stop at the breakpoint `spec`, which
+/// is then removed, so that only steps stop it.
+async fn stopped_once(fixture: &str, spec: BreakpointSpec) -> Scenario {
+    let mut scenario = Scenario::launch(fixture);
+    let breakpoint = scenario.add_breakpoint_spec(spec).await;
+    let reason = scenario
+        .run_with_to_stop(LaunchOptions {
+            stdout: Some(Stdio::null()),
+            ..LaunchOptions::default()
+        })
+        .await;
+    assert!(
+        matches!(reason, StopReason::Breakpoint { .. }),
+        "{fixture}: {reason:?}"
+    );
+    scenario.remove_breakpoint(breakpoint.id).await;
     scenario
 }
 
@@ -385,5 +404,109 @@ async fn a_future_prints_as_its_state() {
             assert_eq!(names, children, "{fixture} {marker}");
             scenario.shutdown().await;
         }
+    }
+}
+
+/// `next` over an await whose future is pending waits for its own future
+/// to be polled again, past the polls of the other task that runs the same
+/// function meanwhile, and ends at the line after the await.
+#[tokio::test]
+async fn next_over_a_pending_await_ends_after_it_in_its_own_future() {
+    for fixture in ["tokio-std-async-o0"] {
+        let mut scenario = stopped_once(fixture, at("// AWAIT: leaf")).await;
+        assert_eq!(integer(&scenario, "id").await, Some(3), "{fixture}");
+        let reason = scenario.step_to_stop(StepKind::OverSource).await;
+        assert_eq!(
+            reason,
+            StopReason::Step {
+                kind: StepKind::OverSource
+            },
+            "{fixture}"
+        );
+        assert_eq!(
+            place(&scenario).await,
+            ("leaf".to_owned(), line(SOURCE, "// STEP: leaf-after")),
+            "{fixture}"
+        );
+        assert_eq!(integer(&scenario, "doubled").await, Some(6), "{fixture}");
+        assert_eq!(integer(&scenario, "id").await, Some(3), "{fixture}");
+        assert_eq!(integer(&scenario, "resumed").await, Some(7), "{fixture}");
+        scenario.shutdown().await;
+    }
+}
+
+/// `next` over an await in a loop stops at each line its future reaches
+/// as the loop goes round, however often the await is pending.
+#[tokio::test]
+async fn next_over_an_await_in_a_loop_goes_round_the_loop() {
+    for fixture in ["tokio-std-async-o0"] {
+        let mut scenario = stopped_once(fixture, at("// AWAIT: walk")).await;
+        let mut lines = Vec::new();
+        while lines.len() < 8 {
+            let reason = scenario.step_to_stop(StepKind::OverSource).await;
+            assert_eq!(
+                reason,
+                StopReason::Step {
+                    kind: StepKind::OverSource
+                },
+                "{fixture}: {lines:?}"
+            );
+            let (function, line) = place(&scenario).await;
+            assert_eq!(function, "walk", "{fixture}: {lines:?}");
+            lines.push((line, integer(&scenario, "total").await));
+        }
+        let body = line(SOURCE, "// STEP: walk-body");
+        let wait = line(SOURCE, "// AWAIT: walk");
+        // Each pass adds the step to the total, then awaits again.
+        let passes = lines
+            .iter()
+            .filter(|(line, _)| *line == wait)
+            .map(|(_, total)| total.expect("the total is available"))
+            .collect::<Vec<_>>();
+        assert_eq!(passes, [1, 3], "{fixture}: {lines:?}");
+        assert!(
+            lines.iter().any(|(line, _)| *line == body),
+            "{fixture}: {lines:?}"
+        );
+        scenario.shutdown().await;
+    }
+}
+
+/// `finish` from an async function whose await is pending runs it to its
+/// return, through every poll, and stops in its own awaiter.
+#[tokio::test]
+async fn finish_from_an_async_function_returns_to_its_own_awaiter() {
+    for fixture in ["tokio-std-async-o0"] {
+        let mut scenario = stopped_once(fixture, at("// STEP: label")).await;
+        assert_eq!(integer(&scenario, "id").await, Some(3), "{fixture}");
+        let reason = scenario.step_to_stop(StepKind::Out).await;
+        assert_eq!(
+            reason,
+            StopReason::Step {
+                kind: StepKind::Out
+            },
+            "{fixture}"
+        );
+        assert_eq!(
+            place(&scenario).await,
+            ("middle".to_owned(), line(SOURCE, "// AWAIT: middle")),
+            "{fixture}"
+        );
+        // The awaiter is the one whose `ready(13)` returned 14.
+        assert_eq!(integer(&scenario, "first").await, Some(14), "{fixture}");
+        // Its last poll returned what the function did.
+        let returned = scenario
+            .operation("variables", scenario.handle().variables())
+            .await
+            .variables
+            .iter()
+            .filter(|variable| variable.kind == VariableKind::Returned)
+            .map(|variable| format!("{:?}", variable.state))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(&returned[..], [poll] if poll.contains("Ready") && !poll.contains("Pending")),
+            "{fixture}: {returned:#?}"
+        );
+        scenario.shutdown().await;
     }
 }
