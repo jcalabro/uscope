@@ -3556,7 +3556,9 @@ pub struct StackFrame {
     pub level: u32,
     /// How the frame was reconstructed.
     pub kind: FrameKind,
-    /// The loaded module containing the instruction, when known.
+    /// The loaded module containing the instruction, when known. The
+    /// future an [`FrameKind::Awaited`] frame names has no instruction:
+    /// its module is the one whose image describes the future's type.
     pub module: Option<ModuleId>,
     /// The exact instruction or resume address for the frame. A suspended
     /// task's async frame has the address its function resumes at, where
