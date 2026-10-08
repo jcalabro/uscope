@@ -1,8 +1,11 @@
-//! A suspended task's frames: the chain of awaits its future holds, from
-//! the future it waits on out to the async function it began in. No
-//! thread runs them, so they have no registers; each async function's
-//! variables are the members its state keeps.
+//! A suspended future's frames: the chain of awaits it holds, from the
+//! future it waits on out to the async function it began in, for a
+//! suspended task's whole stack, or spliced into a thread's stack before
+//! the frame that drives it. No thread runs them, so they have no
+//! registers; each async function's variables are the members its state
+//! keeps.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::debug_info::Located;
@@ -10,14 +13,18 @@ use crate::inspection::InspectionBudget;
 use crate::model::{FrameMetadata, ValueStorage};
 use crate::protocol::{PresentedFrame, StopId};
 use crate::runtime_model::futures::{self, AsyncFrameKind, ChainEnd};
+
 use crate::{
     Backtrace, CallFrameUnavailableReason, CodeInstanceKind, CodeRole, CoroutineInfo, Error,
     FrameKind, ImageAddress, LoadedModule, ModuleImage, RecordMemberLayout, Result, StackFrame,
-    StackFrameId, StackSegment, TypeReference, UnwindTermination, Variable, VariableKind,
-    VariableQuery, VariableUnavailableReason, VirtualAddress,
+    StackFrameId, StackSegment, TypeReference, UnfollowedFuture, UnwindTermination, Variable,
+    VariableKind, VariableQuery, VariableState, VariableUnavailableReason, VirtualAddress,
 };
 
-use super::frames::{FrameRegisters, FrameScope, ResolvedFrame, RootOrigin, StackRoot};
+use super::frames::{
+    Expanded, FrameOrigin, FrameRegisters, FrameScope, PhysicalStack, ResolvedFrame, RootOrigin,
+    StackRoot, UnwindModule,
+};
 use super::inspection::variable_context;
 use super::native::InspectionOps;
 use super::{Controller, Inferior, RuntimeModule};
@@ -70,19 +77,7 @@ impl<P: InspectionOps> Controller<P> {
                 async_frame(image, module, level, frame)
             })
             .collect();
-        let termination = match chain.end {
-            ChainEnd::Leaf | ChainEnd::Unresumed | ChainEnd::Finished => {
-                UnwindTermination::Complete
-            }
-            ChainEnd::NoAwaitee => UnwindTermination::BrokenAwaitChain {
-                reason: "the debug information does not say what the innermost async \
-                         function awaits"
-                    .into(),
-            },
-            ChainEnd::Broken(reason) => UnwindTermination::BrokenAwaitChain { reason },
-            ChainEnd::TooDeep => UnwindTermination::DepthLimit,
-            ChainEnd::Cycle => UnwindTermination::CycleDetected,
-        };
+        let termination = termination(chain.end.clone());
         Ok(Some(AsyncStack {
             frames,
             futures: chain.frames,
@@ -100,6 +95,7 @@ impl<P: InspectionOps> Controller<P> {
             context: root.context,
             frames: stack.frames.into(),
             termination: stack.termination,
+            unfollowed: Arc::from([]),
         }))
     }
 
@@ -121,7 +117,18 @@ impl<P: InspectionOps> Controller<P> {
                 frames: u32::try_from(stack.frames.len()).expect("frame count fits u32"),
             });
         };
-        let scope = match &stack.futures[level] {
+        Ok(Some(self.suspended_frame(id, frame, &stack.futures[level])))
+    }
+
+    /// The frame of a suspended future, which runs no code, and what
+    /// evaluates its variables.
+    pub(super) fn suspended_frame(
+        &self,
+        id: StackFrameId,
+        frame: StackFrame,
+        future: &futures::AsyncFrame,
+    ) -> ResolvedFrame {
+        let scope = match future {
             futures::AsyncFrame {
                 object,
                 ty,
@@ -131,7 +138,7 @@ impl<P: InspectionOps> Controller<P> {
                 ty: *ty,
                 state: *state,
             },
-            _ => FrameScope::Unavailable,
+            futures::AsyncFrame { .. } => FrameScope::Unavailable,
         };
         let code = frame
             .module
@@ -140,7 +147,7 @@ impl<P: InspectionOps> Controller<P> {
                 let module = self.modules.get(&id)?;
                 Some((id, module.loaded.image_address(address).ok()?))
             });
-        Ok(Some(ResolvedFrame {
+        ResolvedFrame {
             id,
             presented: PresentedFrame::Physical,
             frame: Some(frame),
@@ -153,7 +160,173 @@ impl<P: InspectionOps> Controller<P> {
             .into()),
             activation: 0,
             below_stack_pointer: None,
-        }))
+        }
+    }
+
+    /// A stack's frames with the chain of awaits of each future a runtime's
+    /// frame drives spliced in before that frame, all renumbered, and why
+    /// any such chain is shown in part or not at all. A future being
+    /// polled runs on the stack itself, so a driver below a frame that
+    /// runs a coroutine is left as it is.
+    pub(super) fn splice_driven(
+        &self,
+        inferior: &Inferior,
+        root: &StackRoot,
+        stack: &PhysicalStack,
+        modules: &[UnwindModule<'_>],
+        expanded: Expanded,
+    ) -> Expanded {
+        let runtimes = self.runtimes(inferior);
+        let variable_of = |frame: &StackFrame| {
+            let function = frame.function.as_ref()?;
+            runtimes
+                .iter()
+                .filter(|runtime| Some(runtime.module.id) == frame.module)
+                .find_map(|runtime| runtime.model.driven_future(function))
+        };
+        let mut polling = false;
+        let mut drivers = Vec::new();
+        for (index, frame) in expanded.trace.frames.iter().enumerate() {
+            if !polling && let Some(variable) = variable_of(frame) {
+                drivers.push((index, variable));
+            }
+            polling |= frame
+                .function
+                .as_ref()
+                .is_some_and(|function| function.coroutine.is_some());
+        }
+        if drivers.is_empty() {
+            return expanded;
+        }
+
+        let mut frames = Vec::with_capacity(expanded.trace.frames.len());
+        let mut origins = Vec::with_capacity(frames.capacity());
+        let mut futures = expanded.futures.clone();
+        let mut unfollowed = expanded.trace.unfollowed.to_vec();
+        let mut drivers = drivers.into_iter().peekable();
+        // Frames of one runtime may each drive the same future, as its
+        // scheduler's closure does within its `block_on`: the future shows
+        // once, before the innermost frame that reads it, and a frame that
+        // cannot read its future is noted only if no other frame shows one.
+        let mut shown = BTreeSet::new();
+        let mut unread = None;
+        for (index, frame) in expanded.trace.frames.iter().enumerate() {
+            let here = |frames: &Vec<StackFrame>| {
+                StackFrameId::new(u32::try_from(frames.len()).expect("frame count fits u32"))
+            };
+            if let Some((_, variable)) = drivers.next_if(|(driver, _)| *driver == index) {
+                let driver = StackFrameId::new(u32::try_from(index).expect("frame count fits u32"));
+                match self.driven_chain(inferior, root, stack, modules, &expanded, driver, variable)
+                {
+                    Ok((module, chain)) => {
+                        let outermost = chain.frames.last().map(|future| future.object);
+                        if outermost.is_none_or(|object| shown.insert(object)) {
+                            for future in chain.frames {
+                                let mut built =
+                                    async_frame(module.image.as_ref(), &module.loaded, 0, &future);
+                                built.segment = StackSegment::Future;
+                                frames.push(built);
+                                origins.push(FrameOrigin {
+                                    activation: expanded.origins[index].activation,
+                                    jump: None,
+                                    future: Some(futures.len()),
+                                });
+                                futures.push(future);
+                            }
+                            if let Some(reason) = end_reason(&chain.end) {
+                                unfollowed.push(UnfollowedFuture {
+                                    driver: here(&frames),
+                                    reason,
+                                });
+                            }
+                        }
+                    }
+                    Err(reason) => {
+                        unread.get_or_insert_with(|| UnfollowedFuture {
+                            driver: here(&frames),
+                            reason,
+                        });
+                    }
+                }
+            }
+            frames.push(frame.clone());
+            origins.push(expanded.origins[index]);
+        }
+        if shown.is_empty() {
+            unfollowed.extend(unread);
+        }
+        for (level, frame) in frames.iter_mut().enumerate() {
+            let level = u32::try_from(level).expect("frame count fits u32");
+            frame.level = level;
+            frame.id = StackFrameId::new(level);
+        }
+        Expanded {
+            trace: Backtrace {
+                frames: frames.into(),
+                unfollowed: unfollowed.into(),
+                ..expanded.trace
+            },
+            origins,
+            futures,
+        }
+    }
+
+    /// The chain of awaits of the future the frame `driver` drives through
+    /// its variable `variable`, and the module that describes it; or why
+    /// the future cannot be read.
+    #[expect(clippy::too_many_arguments, reason = "a stack's parts and the frame")]
+    fn driven_chain(
+        &self,
+        inferior: &Inferior,
+        root: &StackRoot,
+        stack: &PhysicalStack,
+        modules: &[UnwindModule<'_>],
+        expanded: &Expanded,
+        driver: StackFrameId,
+        variable: &str,
+    ) -> std::result::Result<(&RuntimeModule, futures::AwaitChain), Arc<str>> {
+        let unread = |why: &dyn std::fmt::Display| -> Arc<str> {
+            format!("`{variable}`, which holds the future, {why}").into()
+        };
+        let resolved = self
+            .resolved_in(inferior, root, stack, modules, expanded, driver)
+            .map_err(|error| unread(&format_args!("cannot be read: {error}")))?;
+        let (module, address, selected) = self
+            .frame_scope(&resolved)
+            .ok_or_else(|| unread(&"is in no scope the debug information describes"))?;
+        let key = module
+            .variables
+            .visible_object(address, selected, variable)
+            .map_err(|error| unread(&format_args!("cannot be found: {error}")))?;
+        let mut runtime = self.frame_runtime(inferior, root, &resolved, module);
+        let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
+        let located = match module
+            .variables
+            .locate(key, Some(address), &mut runtime, &mut budget)
+        {
+            Ok(Ok(located)) => located,
+            Ok(Err(VariableState::Unavailable(reason))) => {
+                return Err(unread(&format_args!("is unavailable: {reason}")));
+            }
+            Ok(Err(_)) => return Err(unread(&"is unreadable")),
+            Err(error) => return Err(unread(&format_args!("cannot be read: {error}"))),
+        };
+        let ValueStorage::Memory(object) = located.storage else {
+            return Err(unread(&"is not in memory"));
+        };
+        let ty = TypeReference {
+            image: module.loaded.image,
+            id: located.ty,
+        };
+        // The future a function was passed moves to be pinned, and where
+        // it was still reads as a future that never began.
+        if !futures::pinned(module.image.as_ref(), ty) {
+            return Err(unread(&"is not the pinned future here"));
+        }
+        let chain = self.with_module_stop(inferior, &module.loaded, root.reader(), |stop| {
+            futures::walk(module.image.as_ref(), stop, object, ty)
+        });
+        Ok((module, chain))
     }
 
     /// The variables a suspended async frame shows, each read from its
@@ -234,6 +407,29 @@ impl<P: InspectionOps> Controller<P> {
             .get(&module.id)
             .filter(|found| found.loaded.image == ty.image)
             .ok_or(Error::StaleModuleImage)
+    }
+}
+
+/// Why a chain of awaits ends, as a backtrace's termination.
+fn termination(end: ChainEnd) -> UnwindTermination {
+    match end {
+        ChainEnd::Leaf | ChainEnd::Unresumed | ChainEnd::Finished => UnwindTermination::Complete,
+        ChainEnd::NoAwaitee => UnwindTermination::BrokenAwaitChain {
+            reason: "the debug information does not say what the innermost async function \
+                     awaits"
+                .into(),
+        },
+        ChainEnd::Broken(reason) => UnwindTermination::BrokenAwaitChain { reason },
+        ChainEnd::TooDeep => UnwindTermination::DepthLimit,
+        ChainEnd::Cycle => UnwindTermination::CycleDetected,
+    }
+}
+
+/// Why a chain of awaits ends before its end, if it does.
+fn end_reason(end: &ChainEnd) -> Option<Arc<str>> {
+    match termination(end.clone()) {
+        UnwindTermination::Complete => None,
+        incomplete => Some(incomplete.to_string().into()),
     }
 }
 

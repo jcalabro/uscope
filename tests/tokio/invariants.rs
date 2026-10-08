@@ -16,10 +16,12 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use uscope::{
     Backtrace, CodeRole, DebuggerHandle, ExecutionContext, FrameKind, InferiorState, StackFrameId,
-    StopContext, TaskSnapshot, TaskState, ThreadActivity, ThreadId, UnwindTermination,
+    StackSegment, StopContext, TaskSnapshot, TaskState, ThreadActivity, ThreadId,
+    UnwindTermination,
 };
 
 use crate::support::Scenario;
@@ -168,6 +170,7 @@ fn check_stop(stop: &Stop) -> Result<(), String> {
             }
             ThreadActivity::Idle | ThreadActivity::Outside => {}
         }
+        check_driven(trace).map_err(|problem| format!("thread {thread}: {problem}: {trace:#?}"))?;
     }
     for task in stop.tasks.iter().filter(|task| !task.internal) {
         let Some(thread) = task.thread else {
@@ -213,6 +216,50 @@ fn check_awaits(trace: &Backtrace) -> Result<(), String> {
         }
         if frame.function.is_none() {
             return Err(format!("frame {} names no function", frame.level));
+        }
+    }
+    Ok(())
+}
+
+/// A thread's frames of a future it drives are a chain of awaits that
+/// names its functions, just before a frame of tokio's that drives it, and
+/// each future the trace does not show is noted at such a frame.
+fn check_driven(trace: &Backtrace) -> Result<(), String> {
+    let driver = |frame: Option<&uscope::StackFrame>| {
+        frame.is_some_and(|frame| {
+            frame.role == CodeRole::RuntimeInternal && frame.segment != StackSegment::Future
+        })
+    };
+    let mut objects = BTreeSet::new();
+    for (index, frame) in trace.frames.iter().enumerate() {
+        if frame.segment != StackSegment::Future {
+            continue;
+        }
+        match frame.kind {
+            FrameKind::Async { object } => {
+                if !objects.insert(object) {
+                    return Err(format!("frame {index} repeats the future at {object}"));
+                }
+                if frame.function.is_none() {
+                    return Err(format!("frame {index} names no function"));
+                }
+            }
+            FrameKind::Awaited { .. } => {}
+            kind => return Err(format!("frame {index} of a future is {kind:?}")),
+        }
+        let next = trace.frames.get(index + 1);
+        if next.is_none_or(|next| next.segment != StackSegment::Future) && !driver(next) {
+            return Err(format!(
+                "no frame of tokio's drives the future of frame {index}"
+            ));
+        }
+    }
+    for future in trace.unfollowed.iter() {
+        let at = usize::try_from(future.driver.get()).expect("a level fits usize");
+        if !driver(trace.frames.get(at)) {
+            return Err(format!(
+                "no frame of tokio's at {at} drives a future: {future:?}"
+            ));
         }
     }
     Ok(())
@@ -305,6 +352,53 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
         ("repeated", repeated),
         ("unnamed", unnamed),
     ] {
+        assert!(check_stop(&sabotaged).is_err(), "{fault}");
+    }
+    scenario.shutdown().await;
+}
+
+/// The checks fail on a thread's future with no frame of tokio's to
+/// drive it, and on a future noted at a frame that drives none.
+#[tokio::test]
+async fn the_checks_fail_on_a_future_nothing_drives() {
+    let mut scenario = checked("tokio-drivers-o0");
+    scenario.add_breakpoint("truth_reached").await;
+    scenario.run_to_stop().await;
+    let stop = read(scenario.handle())
+        .await
+        .expect("the stop")
+        .expect("stopped");
+    check_stop(&stop).expect("the stop holds");
+    // The thread that blocks on the runtime drives the future it was given.
+    let (driving, last) = stop
+        .threads
+        .iter()
+        .enumerate()
+        .find_map(|(index, (_, _, trace))| {
+            let last = trace
+                .frames
+                .iter()
+                .rposition(|frame| frame.segment == StackSegment::Future)?;
+            Some((index, last))
+        })
+        .expect("a thread drives a future");
+    let thread_sabotage = |change: &dyn Fn(&mut Backtrace)| {
+        let mut sabotaged = stop.clone();
+        change(&mut sabotaged.threads[driving].2);
+        sabotaged
+    };
+    let undriven = thread_sabotage(&|trace| {
+        let mut frames = trace.frames.to_vec();
+        frames[last + 1].role = CodeRole::Ordinary;
+        trace.frames = frames.into();
+    });
+    let misplaced = thread_sabotage(&|trace| {
+        trace.unfollowed = Arc::from([uscope::UnfollowedFuture {
+            driver: StackFrameId::INNERMOST,
+            reason: "unread".into(),
+        }]);
+    });
+    for (fault, sabotaged) in [("undriven", undriven), ("misplaced", misplaced)] {
         assert!(check_stop(&sabotaged).is_err(), "{fault}");
     }
     scenario.shutdown().await;

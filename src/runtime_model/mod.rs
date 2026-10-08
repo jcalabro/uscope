@@ -20,9 +20,9 @@ use std::sync::Arc;
 
 use crate::unwind::RegisterFile;
 use crate::{
-    CoroutineInfo, EntryProvenance, ExceptionFilter, ImageAddress, IntegerValue, ModuleImage,
-    RecordMemberLayout, StackSegment, TaskState, ThreadId, ThreadLocal, TypeInfo, TypeKind,
-    TypeNode, TypeReference, VirtualAddress,
+    CoroutineInfo, EntryProvenance, ExceptionFilter, FunctionInfo, ImageAddress, IntegerValue,
+    ModuleImage, RecordMemberLayout, StackSegment, TaskState, ThreadId, ThreadLocal, TypeInfo,
+    TypeKind, TypeNode, TypeReference, VirtualAddress,
 };
 
 /// A result with the reasons it may be incomplete, such as a task whose
@@ -439,6 +439,13 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     ) -> Result<RuntimeTask, Arc<str>>;
     /// What the runtime calls one of its tasks.
     fn task_noun(&self) -> &'static str;
+    /// The variable through which `function`, the runtime's, polls a
+    /// future that no task holds, as a runtime's `block_on` does; `None`
+    /// for any other function.
+    fn driven_future(&self, function: &FunctionInfo) -> Option<&'static str> {
+        let _ = function;
+        None
+    }
     /// Whether code from the source file at `path` is the runtime's own
     /// library, which raises its exceptions on the program's behalf: an
     /// exception blames the program's frame that called it.

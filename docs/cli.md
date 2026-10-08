@@ -583,6 +583,29 @@ the frame's future. A suspended frame has no registers and runs no code, so
 `registers` and `disassemble` there say so. A task spawned but never polled
 is its one async function, at its header. A chain the debugger cannot
 follow, as through memory it cannot read, ends where it can, saying why.
+
+A future that `block_on` drives belongs to no task: the thread that blocks
+on it holds it between polls. That thread's backtrace shows the future's
+chain of awaits just before tokio's frame that drives it, headed by a line
+saying so, with each async function's variables as a task's has them:
+
+```text
+    … #5–#13: 9 frames of the runtime; `bt -r` shows them
+    in the future the next frame drives:
+#14                    awaiting tokio::sync::oneshot::Receiver<u32>
+#15 0x00005555555d8135 in async waiting at src/main.rs:28
+#16 0x00005555555d7db5 in async driven at src/main.rs:36
+    on the thread's stack:
+#17 0x00005555555cb85f in {closure#0}<…> at …/current_thread/mod.rs:806
+```
+
+The future being polled runs on the thread's stack instead, and shows there
+as any code does. An optimized build may keep no trace of where the future
+is; the backtrace then says so at the frame that drives it:
+
+```text
+    the future #6 drives is not shown in full: `f`, which holds the future, is unavailable: the value is optimized out
+```
 The body of a Go `range` over a function is a function of its own, named
 like `main.counted-range1`, which the iterator calls; the iterator's frames
 between the body and its loop's function say so, as `(the iterator of #2's

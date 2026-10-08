@@ -23,7 +23,12 @@ export function Stack() {
   } else {
     body = (
       <ul className="rows" data-testid="stack">
-        {trace.frames.map((frame) => (
+        {trace.frames.map((frame) => [
+          frame.unfollowed && (
+            <li key={`${frame.index} unfollowed`} className="row dim" title={frame.unfollowed}>
+              the future the next frame drives is not shown in full: {frame.unfollowed}
+            </li>
+          ),
           <li key={frame.index}>
             <button
               type="button"
@@ -41,8 +46,8 @@ export function Stack() {
               </span>
               <span className="end">{where(frame)}</span>
             </button>
-          </li>
-        ))}
+          </li>,
+        ])}
         {trace.incomplete && (
           <li className="row dim" title={trace.incomplete}>
             the stack ends here: {trace.incomplete}

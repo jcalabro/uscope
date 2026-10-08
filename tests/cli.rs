@@ -833,6 +833,57 @@ fn a_runtimes_frames_fold_into_a_line() {
     assert!(selected.len() < raw.len(), "{stdout}");
 }
 
+/// The backtrace of a thread that blocks on a future shows the future's
+/// awaits before the frame that drives it, under a line saying so; where
+/// optimization lost the future, a line says why instead.
+#[test]
+fn a_thread_blocked_on_a_future_shows_its_awaits() {
+    let backtrace = |program: &str, mode: &str| {
+        let mut uscope = Uscope::spawn(
+            uscope_command()
+                .args([fixture(program).as_os_str(), "--".as_ref(), mode.as_ref()])
+                .current_dir(env!("CARGO_MANIFEST_DIR")),
+        );
+        uscope.send("break truth_reached\nrun\n");
+        let driver = uscope.line("the driving thread", |line| {
+            line.starts_with("TRUTH\tdriver\t")
+        });
+        let driver = driver.rsplit('\t').next().expect("a thread id").to_owned();
+        uscope.line("the checkpoint", |line| {
+            line.starts_with("stopped at breakpoint 1")
+        });
+        uscope.send(&format!("thread {driver}\nbt\nquit\n"));
+        uscope.close_stdin();
+        let stdout = assert_success(uscope.finish());
+        let (_, trace) = stdout
+            .split_once(&format!("selected thread {driver}"))
+            .unwrap_or_else(|| panic!("the driver's backtrace: {stdout}"));
+        trace.to_owned()
+    };
+    let source = "at tests/fixtures/rust/tokio/drivers/src/main.rs:";
+    let trace = backtrace("build/test-programs/tokio-drivers-o0", "current");
+    assert_in_order(
+        &trace,
+        &[
+            "\n    in the future the next frame drives:\n",
+            " awaiting tokio::sync::oneshot::Receiver<u32> from tokio-drivers-o0\n",
+            &format!(" in async waiting {source}28\n"),
+            &format!(" in async driven {source}36\n"),
+            "    on the thread's stack:\n#17 ",
+            " in {closure#0}<…> at ",
+            "\nunwind stopped",
+        ],
+    );
+    let trace = backtrace("build/test-programs/tokio-drivers-o3", "handle");
+    assert!(
+        trace.contains(
+            " drives is not shown in full: `f`, which holds the future, is unavailable: \
+             the value is optimized out\n"
+        ),
+        "{trace}"
+    );
+}
+
 #[test]
 fn library_breakpoints_resolve_at_runtime_and_frames_show_their_own_sources() {
     let stdout = batch(

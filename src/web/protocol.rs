@@ -856,6 +856,9 @@ pub struct Frame {
     /// The file name of the module the code is in.
     pub module: Option<String>,
     pub source: Option<SourceLine>,
+    /// For a frame that drives a future whose awaits the stack does not
+    /// show in full, why.
+    pub unfollowed: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
