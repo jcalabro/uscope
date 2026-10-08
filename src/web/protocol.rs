@@ -125,6 +125,15 @@ pub enum Request {
     Modules,
     /// Functions whose names hold the query, best matches first.
     Functions(FunctionQuery),
+    /// The tasks of the program's runtimes at a stop.
+    Tasks(StopAt),
+}
+
+/// A stop, which must be current.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct StopAt {
+    pub stop: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +216,10 @@ pub struct Step {
     /// The stop being stepped from, which must still be current.
     pub stop: u64,
     pub thread: u64,
+    /// The task stepped, which runs on the thread.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub task: Option<TaskKey>,
     /// The frame a step out leaves; every other step starts from the
     /// innermost frame.
     #[serde(default)]
@@ -227,6 +240,9 @@ pub struct Jump {
     /// The stop the thread is moved at, which must still be current.
     pub stop: u64,
     pub thread: u64,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub task: Option<TaskKey>,
     /// `FILE:LINE`, or another location a breakpoint takes.
     pub location: String,
 }
@@ -264,20 +280,65 @@ pub struct Focus {
     pub label: String,
 }
 
+/// A task of one of the program's runtimes, as the debugger numbers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct TaskKey {
+    pub runtime: u32,
+    pub number: u64,
+}
+
+impl TaskKey {
+    pub const fn id(self) -> uscope::TaskId {
+        uscope::TaskId {
+            runtime: uscope::RuntimeId::new(self.runtime),
+            number: self.number,
+        }
+    }
+}
+
+/// What runs code: a task when one is named, else the thread.
+pub const fn execution(thread: u64, task: Option<TaskKey>) -> uscope::ExecutionContext {
+    match task {
+        Some(task) => uscope::ExecutionContext::Task(task.id()),
+        None => uscope::ExecutionContext::Thread(uscope::ThreadId::new(thread)),
+    }
+}
+
+/// A thread at a stop, or a task, when one is named, whose stack is shown
+/// instead.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ThreadAt {
     pub stop: u64,
     pub thread: u64,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub task: Option<TaskKey>,
 }
 
-/// A frame of a thread at a stop, counting from the innermost.
+/// A frame of a thread or task at a stop, counting from the innermost.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct FrameAt {
     pub stop: u64,
     pub thread: u64,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub task: Option<TaskKey>,
     pub frame: u32,
+}
+
+impl ThreadAt {
+    pub const fn execution(self) -> uscope::ExecutionContext {
+        execution(self.thread, self.task)
+    }
+}
+
+impl FrameAt {
+    pub const fn execution(self) -> uscope::ExecutionContext {
+        execution(self.thread, self.task)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -323,6 +384,9 @@ pub struct Complete {
     pub thread: Option<u64>,
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
+    pub task: Option<TaskKey>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub frame: Option<u32>,
 }
 
@@ -337,6 +401,9 @@ pub struct ConsoleLine {
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub thread: Option<u64>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub task: Option<TaskKey>,
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub frame: Option<u32>,
@@ -399,6 +466,9 @@ pub struct AddWatchpoint {
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub thread: Option<u64>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub task: Option<TaskKey>,
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub frame: Option<u32>,
@@ -1127,6 +1197,50 @@ pub struct StepCall {
     pub target: Option<String>,
 }
 
+/// The tasks of the program's runtimes at a stop.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct TaskList {
+    /// What the runtimes call a task, such as `task` or `goroutine`.
+    pub noun: Option<String>,
+    pub tasks: Vec<Task>,
+    /// Whether there are more tasks than those listed, which the list
+    /// leaves out to stay small.
+    pub more: bool,
+    /// Why the list may be missing tasks, or describe some wrongly.
+    pub gaps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Task {
+    pub key: TaskKey,
+    pub state: TaskState,
+    /// The code the program wrote that it is in, as the CLI says it.
+    pub place: String,
+    /// The frame of that code in the task's stack, which choosing the task
+    /// shows; absent for a task that runs only its runtime's code.
+    pub frame: Option<Frame>,
+    /// The runtime's own words for what it does or waits for.
+    pub detail: Option<String>,
+    /// Labels the program or runtime gave it, such as `{runtime: "local
+    /// set 3"}`.
+    pub labels: Option<String>,
+    /// The thread running it.
+    pub thread: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum TaskState {
+    Running,
+    Runnable,
+    Blocked,
+    Exited,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Registers {
@@ -1285,6 +1399,11 @@ mod tests {
         Signals::decl,
         Modules::decl,
         Module::decl,
+        StopAt::decl,
+        TaskKey::decl,
+        TaskList::decl,
+        Task::decl,
+        TaskState::decl,
     ];
 
     /// Writes every message type as TypeScript.

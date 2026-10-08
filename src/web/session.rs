@@ -344,6 +344,7 @@ impl Session {
                 | Request::Signals
                 | Request::Modules
                 | Request::Functions(_)
+                | Request::Tasks(_)
         );
         if !reads && role != Role::Control {
             return Err(Failure::new(
@@ -411,6 +412,10 @@ impl Session {
                 let (handle, images) = self.current_images().await?;
                 Ok(to_value(&inspect::backtrace(&handle, &images, at).await?))
             }
+            Request::Tasks(at) => {
+                let (handle, images) = self.current_images().await?;
+                Ok(to_value(&inspect::tasks(&handle, &images, at).await?))
+            }
             Request::Sources => {
                 let (_, images) = self.current_images().await?;
                 Ok(to_value(&inspect::sources(&images).await))
@@ -435,7 +440,12 @@ impl Session {
                     .await?,
             )),
             Request::Complete(complete) => {
-                let at = frame_at(complete.stop, complete.thread, complete.frame);
+                let at = frame_at(
+                    complete.stop,
+                    complete.thread,
+                    complete.task,
+                    complete.frame,
+                );
                 Ok(to_value(
                     &self
                         .reader(connection)
@@ -456,7 +466,7 @@ impl Session {
             )),
             Request::StepTargets(at) => {
                 let handle = self.current_handle().await?;
-                let context = inspect::context(&handle, at.stop, at.thread, 0).await?;
+                let context = inspect::context(&handle, at.stop, at.execution(), 0).await?;
                 let targets = handle.at(context).step_targets().await?;
                 let hex = |address: uscope::VirtualAddress| format!("{:#x}", address.get());
                 Ok(to_value(&protocol::StepTargets {
@@ -682,7 +692,13 @@ impl Session {
         } else {
             0
         };
-        let context = inspect::context(&handle, step.stop, step.thread, frame).await?;
+        let context = inspect::context(
+            &handle,
+            step.stop,
+            protocol::execution(step.thread, step.task),
+            frame,
+        )
+        .await?;
         let scope = ResumeScope::Process(process_id);
         if let Some(call) = step.call.as_deref().filter(|_| step.kind == StepKind::Into) {
             let call = lowlevel::address(call)?;
@@ -724,7 +740,13 @@ impl Session {
                     "a thread moves to FILE:LINE, FILE:FUNCTION, or 0xADDRESS",
                 )
             })?;
-        let context = inspect::context(&handle, jump.stop, jump.thread, 0).await?;
+        let context = inspect::context(
+            &handle,
+            jump.stop,
+            protocol::execution(jump.thread, jump.task),
+            0,
+        )
+        .await?;
         let action = format!("moved thread {} to {location}", jump.thread);
         self.caused(connection, &action);
         handle
@@ -993,7 +1015,7 @@ impl Session {
         line: protocol::ConsoleLine,
     ) -> Result<ConsoleResult, Failure> {
         let text = line.line.trim();
-        let at = frame_at(line.stop, line.thread, line.frame);
+        let at = frame_at(line.stop, line.thread, line.task, line.frame);
         let command = crate::cli::commands::line_command(text);
         let expression = match (Expression::parse(text), command) {
             (Ok(expression), _) => expression,
@@ -1022,7 +1044,7 @@ impl Session {
             ));
         }
         let reader = self.reader(connection).await?;
-        let context = inspect::context(&reader.handle, at.stop, at.thread, at.frame).await?;
+        let context = inspect::context(&reader.handle, at.stop, at.execution(), at.frame).await?;
         let mode = if role == Role::Control {
             EvaluationMode::Assign
         } else {
@@ -1083,7 +1105,7 @@ impl Session {
             .ok_or_else(|| Failure::new(ErrorKind::Invalid, "nothing is being debugged"))?;
         let console = console.lock().await;
         if let Some(at) = at {
-            let context = inspect::context(&handle, at.stop, at.thread, at.frame).await?;
+            let context = inspect::context(&handle, at.stop, at.execution(), at.frame).await?;
             handle.select_context(context.execution).await?;
             handle.select_frame(context.frame).await?;
         }
@@ -1615,10 +1637,16 @@ fn escape_query(text: &str) -> String {
 }
 
 /// A frame named by a request's optional parts, when all are there.
-fn frame_at(stop: Option<u64>, thread: Option<u64>, frame: Option<u32>) -> Option<FrameAt> {
+fn frame_at(
+    stop: Option<u64>,
+    thread: Option<u64>,
+    task: Option<protocol::TaskKey>,
+    frame: Option<u32>,
+) -> Option<FrameAt> {
     Some(FrameAt {
         stop: stop?,
         thread: thread?,
+        task,
         frame: frame.unwrap_or(0),
     })
 }

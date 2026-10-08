@@ -60,11 +60,18 @@ const stopRoute = createRoute({
   component: Workspace,
 });
 
+/** A task's stack at a stop, which no thread may be running. */
+const taskRoute = createRoute({
+  getParentRoute: () => sessionRoute,
+  path: "/stop/$stop/task/$task/f/$frame",
+  component: Workspace,
+});
+
 const routeTree = rootRoute.addChildren([
   homeRoute,
   joinRoute,
   pickRoute,
-  sessionRoute.addChildren([sessionIndexRoute, liveRoute, stopRoute]),
+  sessionRoute.addChildren([sessionIndexRoute, liveRoute, stopRoute, taskRoute]),
 ]);
 
 export function createAppRouter(history?: RouterHistory) {

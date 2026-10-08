@@ -55,7 +55,7 @@ pub async fn disassemble(
     request: &protocol::Disassemble,
 ) -> Result<Disassembled, Failure> {
     let at = request.at;
-    let context = inspect::context(handle, at.stop, at.thread, at.frame).await?;
+    let context = inspect::context(handle, at.stop, at.execution(), at.frame).await?;
     let view = handle.at(context);
     let trace = view.backtrace().await?;
     let index = trace
@@ -332,7 +332,7 @@ pub async fn write_memory(
 }
 
 pub async fn registers(handle: &DebuggerHandle, at: FrameAt) -> Result<Vec<Register>, Failure> {
-    let context = inspect::context(handle, at.stop, at.thread, at.frame).await?;
+    let context = inspect::context(handle, at.stop, at.execution(), at.frame).await?;
     let snapshot = handle.at(context).registers().await?;
     Ok(snapshot
         .registers
@@ -377,7 +377,13 @@ pub async fn add_watchpoint(
             ));
         };
         let expression = Expression::parse(target).map_err(super::values::expression_failure)?;
-        let context = inspect::context(handle, stop, thread, request.frame.unwrap_or(0)).await?;
+        let context = inspect::context(
+            handle,
+            stop,
+            protocol::execution(thread, request.task),
+            request.frame.unwrap_or(0),
+        )
+        .await?;
         WatchpointSpec::Target(Box::new(
             handle.at(context).resolve_watch_target(&expression).await?,
         ))

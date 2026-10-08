@@ -54,6 +54,7 @@ export interface Results {
   setSignal: null;
   modules: P.Modules;
   functions: P.Functions;
+  tasks: P.TaskList;
 }
 
 // Fails to compile when a method has no entry in Results, or Results names
