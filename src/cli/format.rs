@@ -2188,8 +2188,14 @@ pub fn stack_frame(
         uscope::FrameKind::Async { .. } => " in async",
         _ => " in",
     };
+    // An awaited future says what it waits for.
+    let awaiting = frame
+        .awaiting
+        .as_ref()
+        .map(|awaiting| format!(" — {awaiting}"))
+        .unwrap_or_default();
     format!(
-        "{} {}{what} {}{tail}{iterator}{place}",
+        "{} {}{what} {}{tail}{iterator}{place}{awaiting}",
         renderer.paint(
             if selected {
                 Role::Current
@@ -2212,14 +2218,15 @@ pub fn stack_frame(
             },
             {
                 let name = frame_code(frame, images);
-                // A Rust function's arguments can run to hundreds of
-                // characters; a backtrace keeps its path and its name.
-                if raw
+                // A Rust function's or future's arguments can run to
+                // hundreds of characters; a backtrace keeps its path and its
+                // name.
+                let rust = matches!(frame.kind, uscope::FrameKind::Awaited { .. })
                     || frame
                         .function
                         .as_ref()
-                        .is_none_or(|function| function.language != uscope::SourceLanguage::Rust)
-                {
+                        .is_some_and(|function| function.language == uscope::SourceLanguage::Rust);
+                if raw || !rust {
                     name
                 } else {
                     elide_arguments(&name)
@@ -2293,6 +2300,20 @@ pub fn awaited(image: Option<&ModuleImage>, ty: uscope::TypeReference) -> String
         .and_then(|image| image.type_info(ty))
         .map_or_else(|| "a future".to_owned(), super::value::qualified_name);
     format!("awaiting {name}")
+}
+
+/// The frame of a future a suspended task awaits, named with what it
+/// waits for where a client shows no place beside the name:
+/// `awaiting tokio::time::sleep::Sleep — sleeping until +1s`.
+pub fn awaited_frame(image: Option<&ModuleImage>, frame: &StackFrame) -> Option<String> {
+    let uscope::FrameKind::Awaited { ty, .. } = frame.kind else {
+        return None;
+    };
+    let name = awaited(image, ty);
+    Some(match &frame.awaiting {
+        Some(awaiting) => format!("{name} — {awaiting}"),
+        None => name,
+    })
 }
 
 /// A frame's source file and line, from its module's image.

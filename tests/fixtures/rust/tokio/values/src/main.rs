@@ -303,7 +303,7 @@ fn main() {
     view("shut", "children: closed = true, waiters = len=0 [], [raw]");
 
     view("quiet", "empty");
-    view("notified", "empty");
+    view("notified", "not yet waiting");
     view("stored", "notified");
     view("awaited", format!("len=1 [{}]", task(&notifiee)));
 

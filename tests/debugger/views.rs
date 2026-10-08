@@ -858,10 +858,10 @@ async fn go_library_values_present_as_go_shows_them() {
 }
 
 /// tokio's values present as the program says, in each state each view
-/// tells apart, and every one of tokio's views binds. Two present values no
-/// expression reaches: a task's cell, which a join handle presents as the
-/// type its task's code says, and a future waiting for permits, which the
-/// workers tests check where tasks wait on one.
+/// tells apart, and every one of tokio's views binds. Some present values
+/// no expression reaches: a task's cell, which a join handle presents as
+/// the type its task's code says, and the futures tasks wait on for
+/// permits and messages, which the workers tests check.
 #[tokio::test]
 async fn tokio_values_present_as_their_views_say() {
     let mut seen =
@@ -873,6 +873,7 @@ async fn tokio_values_present_as_their_views_say() {
                 [
                     "rust tokio::runtime::task::core::Cell<_, _>",
                     "rust tokio::sync::batch_semaphore::Acquire",
+                    "rust core::future::poll_fn::PollFn<tokio::sync::mpsc::**::recv::`{async_fn#0}`::`{closure_env#0}`<_>>",
                 ]
                 .contains(&&*view.header)
             })

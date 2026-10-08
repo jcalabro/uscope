@@ -28,6 +28,7 @@ const DYN_BOX: u32 = 8;
 const PIN_DYN: u32 = 9;
 const OUTER_BOX: u32 = 10;
 const PIN_OUTER: u32 = 11;
+const WRAPPER: u32 = 12;
 
 /// Where the awaited future lies in each coroutine.
 const AWAITEE: u64 = 8;
@@ -164,6 +165,7 @@ impl Types {
             pin(PIN_DYN, DYN_BOX),
             pointer(OUTER_BOX, "Box<outer>", Some(OUTER)),
             pin(PIN_OUTER, OUTER_BOX),
+            record(WRAPPER, "Coop<inner>", vec![member("fut", INNER, 0)]),
         ];
         let outer = coroutine(vec![
             state(0, CoroutineStateKind::Unresumed, 10, None),
@@ -174,6 +176,7 @@ impl Types {
             state(5, suspended(2), 14, Some(PIN_DYN)),
             state(6, suspended(3), 15, None),
             state(7, suspended(4), 16, Some(PIN_OUTER)),
+            state(8, suspended(5), 17, Some(WRAPPER)),
         ]);
         let inner = coroutine(vec![
             state(0, CoroutineStateKind::Unresumed, 20, None),
@@ -324,8 +327,8 @@ fn walk_from(memory: &Memory, object: u64, ty: u32) -> AwaitChain {
 }
 
 /// A chain is read innermost first, to the leaf it waits on, whether a
-/// coroutine holds the future it awaits, a pinned box points to it, or a
-/// trait object does.
+/// coroutine holds the future it awaits, a pinned box points to it, a
+/// trait object does, or a record holds it as its only member.
 #[test]
 fn a_chain_reaches_its_leaf_through_every_kind_of_future() {
     let outer = 0x1000;
@@ -371,7 +374,21 @@ fn a_chain_reaches_its_leaf_through_every_kind_of_future() {
     );
     assert_eq!(dynamic.end, ChainEnd::Leaf);
 
+    memory.byte(outer, 8);
+    memory.byte(outer + AWAITEE, 3);
+    let wrapped = walk_from(&memory, outer, OUTER);
+    assert_eq!(
+        wrapped.frames,
+        [
+            leaf(outer + 2 * AWAITEE, SLEEP),
+            coroutine_frame(outer + AWAITEE, INNER, 3, suspended(0), 21),
+            coroutine_frame(outer, OUTER, 8, suspended(5), 17),
+        ]
+    );
+
     // A trait object of a vtable no type names ends the chain, saying so.
+    memory.byte(outer, 5);
+    memory.word(outer + AWAITEE, boxed);
     memory.word(outer + AWAITEE + 8, VTABLE + 8);
     let unknown = walk_from(&memory, outer, OUTER);
     assert!(

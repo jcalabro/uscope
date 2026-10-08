@@ -735,7 +735,8 @@ fn threads_say_when_what_they_run_is_unknown() {
 
 /// tokio's tasks are listed by number, whatever order its lists keep
 /// them in, each saying what it does and the thread it is on, and where
-/// a suspended one waits in the program's own code, past tokio's.
+/// a suspended one waits in the program's own code, past tokio's, and for
+/// what: the first task spawned waits for a message, the second sleeps.
 #[test]
 fn tokio_tasks_are_listed_by_number() {
     let stdout = batch(
@@ -757,12 +758,14 @@ fn tokio_tasks_are_listed_by_number() {
     assert_eq!(numbers, (3..=12).collect::<Vec<_>>(), "{stdout}");
     for (number, rest) in &tasks {
         let expected = match number {
+            3 => " — receiving; senders: 1",
+            4 => " — sleeping until +",
             11 => " — running a blocking closure (thread ",
             12 => " — queued in the blocking pool",
-            _ => " — suspended",
+            _ => " — ",
         };
         assert!(rest.contains(expected), "{stdout}");
-        if expected == " — suspended" {
+        if *number < 11 {
             assert!(
                 rest.starts_with(" leaf at tests/fixtures/rust/tokio/workers/src/main.rs:"),
                 "{stdout}"
@@ -977,7 +980,7 @@ fn a_thread_blocked_on_a_future_shows_its_awaits() {
         &trace,
         &[
             "\n    in the future the next frame drives:\n",
-            " awaiting tokio::sync::oneshot::Receiver<u32> from tokio-drivers-o0\n",
+            " awaiting tokio::sync::oneshot::Receiver<u32> from tokio-drivers-o0 — empty\n",
             &format!(" in async waiting {source}28\n"),
             &format!(" in async driven {source}36\n"),
             "    on the thread's stack:\n#17 ",

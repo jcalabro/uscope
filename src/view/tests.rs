@@ -295,6 +295,23 @@ fn patterns_capture_arguments_and_anchor_at_the_root() {
         "uscope-views 1\nview c++ app::detail::Pair<T> {\n    show empty(\"one\")\n}\nview c++ app::detail::Pair {\n    show empty(\"any\")\n}\n",
     )]);
     assert_eq!(summary(&mut world, &views, "p"), "any");
+
+    // Segments rustc writes in braces, as it names closures, are quoted.
+    let closure = world.record("{closure_env#0}", 4, &[("x", int, 0)]);
+    world.identify(
+        closure,
+        SourceLanguage::Rust,
+        &["app", "run", "{async_fn#0}"],
+        "{closure_env#0}",
+        Vec::new(),
+    );
+    world.variable("f", closure, &ints([7]));
+    let views = ViewSet::new([(
+        "test.views",
+        "uscope-views 1\nview rust app::**::`{async_fn#0}`::`{closure_env#0}` {\n    show value(x)\n}\n",
+    )]);
+    assert!(views.errors().is_empty(), "{:?}", views.errors());
+    assert_eq!(summary(&mut world, &views, "f"), "7");
 }
 
 #[test]

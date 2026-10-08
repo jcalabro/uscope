@@ -152,6 +152,9 @@ struct Truth {
     main: Option<ThreadId>,
 }
 
+/// How a suspended task is described when it says what it waits for.
+const WAITS_FOR: &str = "what it waits for";
+
 impl Truth {
     fn parse(text: &str) -> Self {
         let mut truth = Self::default();
@@ -208,6 +211,37 @@ impl Truth {
         awaits
     }
 
+    /// Whether `described` is what task `id` waits for, as the future it
+    /// awaits is presented: the channel, the sleep's deadline an hour on by
+    /// the runtime's clock, the lock's or semaphore's permit, the task it
+    /// joins, or its notification, which the barrier's channel waits for
+    /// too.
+    fn waits_for(&self, id: u64, described: Option<&str>) -> bool {
+        let tag = self.tasks.get(&id).and_then(|tags| tags.first());
+        let joined = self
+            .tasks
+            .iter()
+            .find(|(_, tags)| tags.first().is_some_and(|tag| tag == "channel"))
+            .map(|(id, _)| *id);
+        let Some(described) = described else {
+            return false;
+        };
+        match tag.map(String::as_str) {
+            Some("channel") => described == "receiving; senders: 1",
+            Some("sleep") => ["sleeping until +59m", "sleeping until +1h0m"]
+                .iter()
+                .any(|prefix| described.starts_with(prefix)),
+            Some("lock" | "permit") => described == "waiting for 1 of 1 permits",
+            Some("join") => {
+                joined.is_some_and(|joined| described == format!("task {joined} pending"))
+            }
+            Some("notify") if self.woken == Some(id) => described == "notified",
+            Some("notify" | "barrier") => described == "waiting for a notification",
+            Some("oneshot") => described == "empty",
+            _ => false,
+        }
+    }
+
     /// The line that spawned each task, as the fixture marks it with the
     /// task's tag: an async task's innermost await's. A running blocking
     /// closure's task is known only by its number, from its thread, so
@@ -227,11 +261,12 @@ impl Truth {
     }
 
     /// Each task the program has, with the state, description, and thread
-    /// the debugger must list it with.
+    /// the debugger must list it with. A suspended task is described by
+    /// what it waits for, which [`Self::waits_for`] says.
     fn expected(&self) -> BTreeMap<u64, (TaskState, String, Option<ThreadId>)> {
         let mut expected = BTreeMap::new();
         for &id in self.tasks.keys() {
-            expected.insert(id, (TaskState::Blocked, "suspended".into(), None));
+            expected.insert(id, (TaskState::Blocked, WAITS_FOR.into(), None));
         }
         for id in self.woken.iter().chain(&self.spawned) {
             expected.insert(*id, (TaskState::Runnable, "runnable".into(), None));
@@ -252,9 +287,14 @@ impl Truth {
     fn check_tasks(&self, tasks: &[TaskSnapshot]) -> Result<(), String> {
         let mut listed = BTreeMap::new();
         for task in tasks {
+            let detail = task.detail.as_deref();
             let entry = (
                 task.state.clone(),
-                task.detail.as_deref().unwrap_or_default().to_owned(),
+                if task.state == TaskState::Blocked && self.waits_for(task.id.number, detail) {
+                    WAITS_FOR.to_owned()
+                } else {
+                    detail.unwrap_or_default().to_owned()
+                },
                 task.thread,
             );
             if listed.insert(task.id.number, entry).is_some() {
@@ -626,6 +666,15 @@ async fn check_awaits(
             (Some(*id) == truth.spawned) != matches!(first.kind, FrameKind::Awaited { .. }),
             "{context}: {first:#?}"
         );
+        // The future it awaits says what for, as does the list of tasks of
+        // one waiting.
+        if let FrameKind::Awaited { .. } = first.kind {
+            let described = first.awaiting.as_deref();
+            assert!(truth.waits_for(*id, described), "{context}: {described:?}");
+            if task.state == TaskState::Blocked {
+                assert_eq!(task.detail.as_deref(), described, "{context}");
+            }
+        }
         // A suspended frame runs no code, and has no registers.
         let refused = handle.at(view(first.id)).registers().await;
         assert!(

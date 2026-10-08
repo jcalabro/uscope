@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::debug_info::Located;
+use crate::eval::target::Machine;
 use crate::inspection::InspectionBudget;
 use crate::model::{FrameMetadata, ValueStorage};
 use crate::protocol::{PresentedFrame, StopId};
@@ -16,11 +17,13 @@ use crate::runtime_model::futures::{self, AsyncFrameKind, ChainEnd};
 
 use crate::{
     Backtrace, CallFrameUnavailableReason, CodeInstanceKind, CodeRole, CoroutineInfo, Error,
-    FrameKind, ImageAddress, LoadedModule, ModuleImage, RecordMemberLayout, Result, StackFrame,
-    StackFrameId, StackSegment, TypeReference, UnfollowedFuture, UnwindTermination, Variable,
-    VariableKind, VariableQuery, VariableState, VariableUnavailableReason, VirtualAddress,
+    FrameKind, ImageAddress, InspectionLimits, LoadedModule, ModuleImage, PresentedShape,
+    RecordMemberLayout, Result, StackFrame, StackFrameId, StackSegment, TypeReference,
+    UnfollowedFuture, UnwindTermination, Variable, VariableKind, VariableQuery, VariableState,
+    VariableUnavailableReason, VirtualAddress,
 };
 
+use super::evaluation::{StopMachine, StopPlace};
 use super::frames::{
     Expanded, FrameOrigin, FrameRegisters, FrameScope, PhysicalStack, ResolvedFrame, RootOrigin,
     StackRoot, UnwindModule,
@@ -118,6 +121,73 @@ impl<P: InspectionOps> Controller<P> {
             });
         };
         Ok(Some(self.suspended_frame(id, frame, &stack.futures[level])))
+    }
+
+    /// Each frame of a future a chain awaits with what it waits for: the
+    /// summary of the view that presents the future.
+    pub(super) fn describe_awaited(
+        &self,
+        inferior: &Inferior,
+        stop_id: StopId,
+        root: &StackRoot,
+        frames: &mut [StackFrame],
+    ) {
+        for frame in frames {
+            frame.awaiting = self.awaited_summary(inferior, stop_id, root, frame);
+        }
+    }
+
+    /// What a suspended task waits for: what its chain of awaits ends at,
+    /// as the view that presents that future summarizes it.
+    pub(super) fn task_awaiting(
+        &self,
+        inferior: &Inferior,
+        stop_id: StopId,
+        task: crate::TaskId,
+        reader: nix::unistd::Pid,
+    ) -> Option<Arc<str>> {
+        let root = self.task_root(inferior, task, reader).ok()??;
+        let stack = self.async_stack(inferior, &root).ok()??;
+        self.awaited_summary(inferior, stop_id, &root, stack.frames.first()?)
+    }
+
+    fn awaited_summary(
+        &self,
+        inferior: &Inferior,
+        stop_id: StopId,
+        root: &StackRoot,
+        frame: &StackFrame,
+    ) -> Option<Arc<str>> {
+        let FrameKind::Awaited { object, ty } = frame.kind else {
+            return None;
+        };
+        let module = self.module_of(ty)?;
+        let leaf = futures::AsyncFrame {
+            object,
+            ty,
+            kind: AsyncFrameKind::Leaf,
+        };
+        let resolved = self.suspended_frame(frame.id, frame.clone(), &leaf);
+        let scope = self.frame_for(inferior, stop_id, root, &resolved);
+        let mut budget = InspectionBudget::new(InspectionLimits::default());
+        // The backtrace is itself the request run control waits behind.
+        let mut machine = StopMachine::new(&scope, &mut budget, false);
+        let place = StopPlace {
+            module: module.loaded.id,
+            located: Located {
+                ty: ty.id,
+                storage: ValueStorage::Memory(object),
+            },
+        };
+        match machine.present(&place).ok()?.state {
+            VariableState::Available {
+                presentation: Some(presentation),
+                ..
+            } if presentation.problem.is_none() && presentation.shape != PresentedShape::Raw => {
+                Some(Arc::clone(&presentation.summary))
+            }
+            _ => None,
+        }
     }
 
     /// The frame of a suspended future, which runs no code, and what

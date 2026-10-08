@@ -125,6 +125,9 @@ namespaces such as libc++'s `std::__1` may be spelled or left out.
 
 - `**` in a path matches any run of segments, so `alloc::**::Box<T>` keeps
   matching when the standard library moves a type between modules.
+- A segment in backticks is taken as written, as Rust's compiler names
+  closures and the futures of async functions:
+  ``app::**::`{closure_env#0}` ``.
 - `_` matches any argument, and trailing arguments may be left out.
 - A capitalized name captures an argument: a type, which the view's
   expressions may name, or a value, which they may use as a number.

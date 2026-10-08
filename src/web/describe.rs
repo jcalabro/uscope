@@ -113,8 +113,8 @@ fn symbol_name(image: &ModuleImage, address: ImageAddress) -> Option<String> {
 
 /// A frame's name: its function or symbol, or else its address and module.
 pub fn frame_name(frame: &StackFrame, image: Option<&ModuleImage>) -> String {
-    if let uscope::FrameKind::Awaited { ty, .. } = frame.kind {
-        return format::awaited(image, ty);
+    if let Some(awaited) = format::awaited_frame(image, frame) {
+        return awaited;
     }
     if frame.function.is_some() || frame.symbol.is_some() {
         return format::code_name(frame.function.as_ref(), frame.symbol.as_ref());

@@ -737,7 +737,10 @@ impl<'a> Parser<'a> {
         self.position += language_word.len();
         self.skip_inline();
         let pattern_start = self.position;
-        let pattern_end = self.rest().find('{').map(|end| self.position + end);
+        // A pattern's segments in backticks may hold braces.
+        let pattern_end = outside_backticks(self.rest())
+            .find(|(_, character)| *character == '{')
+            .map(|(end, _)| self.position + end);
         let Some(pattern_end) =
             pattern_end.filter(|end| !self.text[pattern_start..*end].contains('\n'))
         else {
