@@ -45,10 +45,16 @@ const CANCELLED: u64 = 0b10_0000;
 /// without end.
 const MAX_SHARDS: u64 = 1 << 16;
 const MAX_TASKS: u64 = 1 << 24;
-/// The function each task's vtable polls it through.
-const POLL: &str = "tokio::runtime::task::raw::poll::<";
-/// The closure a multi-thread runtime's workers run in the blocking pool.
-const LAUNCH: &str = "multi_thread::worker::Launch>::launch";
+/// The function each task's vtable polls it through, which a symbol
+/// mangled in v0 names with its generic arguments and a legacy one
+/// without them.
+const POLL: &str = "tokio::runtime::task::raw::poll";
+/// The closure a multi-thread runtime's workers run in the blocking pool,
+/// as a v0 symbol names it and as debug information does.
+const LAUNCH: [&str; 2] = [
+    "multi_thread::worker::Launch>::launch::{closure",
+    "multi_thread::worker::{impl#0}::launch::{closure_env",
+];
 
 /// tokio, in an image that has its thread-local context.
 pub fn detect(
@@ -329,7 +335,13 @@ impl TokioRuntime {
             .or_insert_with(|| {
                 let name = self.image.symbol_at(ImageAddress::new(image));
                 match name {
-                    Some(name) if name.starts_with(POLL) => None,
+                    Some(name)
+                        if name
+                            .strip_prefix(POLL)
+                            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::<")) =>
+                    {
+                        None
+                    }
                     _ => Some(format!("the vtable at {vtable:#x} polls no task").into()),
                 }
             })
@@ -342,12 +354,16 @@ impl TokioRuntime {
         let Ok(tasks) = self.task_layout() else {
             return false;
         };
-        records::word(stop, vtable.wrapping_add(tasks.poll))
-            .and_then(|poll| {
-                self.image
-                    .symbol_at(ImageAddress::new(poll.wrapping_sub(stop.load_bias())))
-            })
-            .is_some_and(|name| name.contains(LAUNCH))
+        let Some(poll) = records::word(stop, vtable.wrapping_add(tasks.poll)) else {
+            return false;
+        };
+        let poll = ImageAddress::new(poll.wrapping_sub(stop.load_bias()));
+        // A legacy symbol names no generic arguments, while the debug
+        // information names them under either mangling.
+        [self.image.symbol_at(poll), self.image.function_name(poll)]
+            .into_iter()
+            .flatten()
+            .any(|name| LAUNCH.iter().any(|launch| name.contains(launch)))
     }
 }
 
@@ -403,7 +419,9 @@ impl RuntimeModel for TokioRuntime {
     fn thread_activity(&self, stop: &dyn RuntimeStop, thread: ThreadId) -> ThreadActivity {
         match self.activity(stop, thread) {
             Ok(activity) => activity,
-            Err(reason) => ThreadActivity::Unknown(reason),
+            Err(reason) => ThreadActivity::Unknown(
+                format!("what the thread does for tokio cannot be read: {reason}").into(),
+            ),
         }
     }
 

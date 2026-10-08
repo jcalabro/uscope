@@ -49,12 +49,16 @@ fn module() -> Arc<ModuleImage> {
 }
 
 /// The fixture's image, with some of tokio's names hidden, as a program
-/// that lacks them would be.
+/// that lacks them would be, and tokio's sources where `source` says.
 #[derive(Debug)]
 struct Image {
     module: Arc<ModuleImage>,
     hidden: Vec<&'static str>,
+    source: Option<&'static str>,
 }
+
+/// Where the release the model was verified against keeps its sources.
+const VERIFIED_SOURCE: &str = "/crates/tokio-1.52.3/src/runtime/task/raw.rs";
 
 impl RuntimeImage for Image {
     fn producers(&self) -> &[Arc<str>] {
@@ -121,7 +125,9 @@ impl RuntimeImage for Image {
     }
 
     fn source_path_ending(&self, suffix: &str) -> Option<std::path::PathBuf> {
-        RuntimeImage::source_path_ending(self.module.as_ref(), suffix)
+        self.source
+            .filter(|source| source.ends_with(suffix))
+            .map(std::path::PathBuf::from)
     }
 }
 
@@ -196,14 +202,21 @@ struct World {
 
 impl World {
     fn new(hidden: &[&'static str]) -> Self {
+        Self::with_source(hidden, Some(VERIFIED_SOURCE))
+    }
+
+    /// The model of an image whose tokio sources are at `source`.
+    fn with_source(hidden: &[&'static str], source: Option<&'static str>) -> Self {
         let module = module();
         let polls = module
             .symbols()
             .iter()
             .filter_map(|symbol| {
                 let name = crate::demangle::demangle(&symbol.name)?;
-                name.starts_with(POLL)
-                    .then(|| (name.contains(super::LAUNCH), symbol.address.get()))
+                name.starts_with(POLL).then(|| {
+                    let launch = super::LAUNCH.iter().any(|launch| name.contains(launch));
+                    (launch, symbol.address.get())
+                })
             })
             .collect::<Vec<_>>();
         let find = |launch: bool| {
@@ -217,6 +230,7 @@ impl World {
         let image = Image {
             module,
             hidden: hidden.to_vec(),
+            source,
         };
         Self {
             model: TokioRuntime::bind(Arc::new(image)),
@@ -524,10 +538,7 @@ fn each_state_is_read_as_tokio_defines_it() {
         world.thread(tid, Some(&runtime), true, Some(*id));
     }
     let (listed, gaps) = world.tasks(4096, true);
-    assert!(
-        gaps.iter().all(|gap| gap.contains("tokio's version")),
-        "{gaps:?}"
-    );
+    assert!(gaps.is_empty(), "{gaps:?}");
     assert_eq!(listed.len(), tasks.len());
     for (task, &(id, bits)) in listed.iter().zip(&tasks) {
         assert_eq!(task.number, id);
@@ -646,10 +657,7 @@ fn the_blocking_pool_lists_its_queue_in_order() {
     );
     world.thread(1, Some(&runtime), true, None);
     let (all, gaps) = world.tasks(2, false);
-    assert!(
-        gaps.iter().all(|gap| gap.contains("tokio's version")),
-        "{gaps:?}"
-    );
+    assert!(gaps.is_empty(), "{gaps:?}");
     let numbers = all.iter().map(|task| task.number).collect::<Vec<_>>();
     assert_eq!(numbers, [1, 20, 21, 22]);
     assert!(all[1].internal && !all[2].internal);
@@ -661,6 +669,34 @@ fn the_blocking_pool_lists_its_queue_in_order() {
     let (program, _) = world.tasks(1, true);
     let numbers = program.iter().map(|task| task.number).collect::<Vec<_>>();
     assert_eq!(numbers, [1, 21, 22]);
+}
+
+/// A release other than the one verified is read wherever its layout
+/// binds, and every page says it is unverified; sources whose path names
+/// no release say the version is unknown. Neither is taken for granted.
+#[test]
+fn every_page_says_when_the_version_is_unverified_or_unknown() {
+    let unknown = "tokio's version is unknown; its runtime is read as tokio 1.52's";
+    for (source, gap) in [
+        (
+            Some("/crates/tokio-1.53.0/src/runtime/task/raw.rs"),
+            "tokio 1.53.0 is unverified; its runtime is read as tokio 1.52's",
+        ),
+        (Some("/vendor/tokio/src/runtime/task/raw.rs"), unknown),
+        (None, unknown),
+    ] {
+        let mut world = World::with_source(&[], source);
+        let runtime = world.runtime(
+            Flavor::MultiThread,
+            4,
+            &[vec![(2, 0), (4, 0)], vec![(1, 0)]],
+        );
+        world.thread(1, Some(&runtime), true, None);
+        let (tasks, gaps) = world.tasks(1, true);
+        let numbers = tasks.iter().map(|task| task.number).collect::<Vec<_>>();
+        assert_eq!(numbers, [2, 4, 1], "{source:?}");
+        assert_eq!(gaps, vec![gap.to_owned(); 3], "{source:?}");
+    }
 }
 
 /// A name the program lacks makes only what reads it unavailable, and
@@ -676,6 +712,7 @@ fn a_missing_name_makes_only_what_needs_it_unavailable() {
     let without_pool = TokioRuntime::bind(Arc::new(Image {
         module: module(),
         hidden: vec![pool],
+        source: Some(VERIFIED_SOURCE),
     }));
     let page = without_pool.tasks(&memory, 0, 64, true);
     let numbers = page
@@ -695,6 +732,7 @@ fn a_missing_name_makes_only_what_needs_it_unavailable() {
     let without_header = TokioRuntime::bind(Arc::new(Image {
         module: module(),
         hidden: vec![header],
+        source: Some(VERIFIED_SOURCE),
     }));
     let page = without_header.tasks(&memory, 0, 64, true);
     assert!(page.value.tasks.is_empty());
@@ -714,6 +752,7 @@ fn a_missing_name_makes_only_what_needs_it_unavailable() {
     let without_context = TokioRuntime::bind(Arc::new(Image {
         module: module(),
         hidden: vec![storage],
+        source: Some(VERIFIED_SOURCE),
     }));
     let page = without_context.tasks(&memory, 0, 64, true);
     assert!(
@@ -849,7 +888,7 @@ proptest! {
         prop_assert_eq!(&listed, &expected);
         let unique = listed.iter().collect::<BTreeSet<_>>();
         prop_assert_eq!(unique.len(), listed.len());
-        let reported = gaps.iter().filter(|gap| !gap.contains("tokio's version")).collect::<Vec<_>>();
+        let reported = gaps;
         match damaged {
             None => prop_assert!(reported.is_empty(), "{:?}", reported),
             Some((Damage::WrongCount, ..)) => {

@@ -146,6 +146,16 @@ async fn a_formatted_message_stops_where_it_panicked() {
     stops_where_the_program_panicked("format", "formatted 7 times", "joined").await;
 }
 
+/// A legacy symbol names no generic arguments and ends in a hash, yet
+/// the panic hook is found and the panic read as in a v0 build.
+#[tokio::test]
+async fn a_panic_stops_where_it_panicked_under_legacy_mangling() {
+    let message = "formatted 7 times";
+    let launched = launched("tokio-panics-legacy", "format", None).await;
+    check_panic(&launched, "legacy", message, "// PANIC: format").await;
+    launched.scenario.shutdown().await;
+}
+
 /// `unwrap` and `expect` are `#[track_caller]`: the frame selected is the
 /// program's that called them, not the standard library's.
 #[tokio::test]

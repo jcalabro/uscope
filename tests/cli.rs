@@ -705,6 +705,32 @@ fn every_co_hit_prints_a_line_of_its_own() {
     assert!(co_hits > 0, "{stdout}");
 }
 
+/// A thread whose runtime cannot be read says so, and why, rather than
+/// looking like one that runs nothing.
+#[test]
+fn threads_say_when_what_they_run_is_unknown() {
+    let stdout = batch(
+        &["build/test-programs/tokio-workers-lines"],
+        &["break truth_reached", "run", "threads"],
+    );
+    let threads = stdout
+        .lines()
+        .filter(|line| line.contains(" stopped"))
+        .filter(|line| line.starts_with("  ") || line.starts_with("* "))
+        .collect::<Vec<_>>();
+    assert_eq!(threads.len(), 5, "{stdout}");
+    for thread in threads {
+        assert!(
+            thread.ends_with(
+                " — unknown: what the thread does for tokio cannot be read: the program \
+                 describes no type \
+                 std::sys::thread_local::native::eager::Storage<tokio::runtime::context::Context>"
+            ),
+            "{stdout}"
+        );
+    }
+}
+
 #[test]
 fn library_breakpoints_resolve_at_runtime_and_frames_show_their_own_sources() {
     let stdout = batch(
