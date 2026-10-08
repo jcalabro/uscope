@@ -360,9 +360,22 @@ impl World {
         }
     }
 
-    /// A thread whose `CONTEXT` entered `runtime`, as a worker or not,
-    /// polling `task`.
+    /// A thread whose `CONTEXT` names `runtime`, as a worker or not,
+    /// polling `task`; a worker entered its runtime.
     fn thread(&mut self, tid: u64, runtime: Option<&Written>, worker: bool, task: Option<u64>) {
+        self.entered_thread(tid, runtime, worker, worker, task);
+    }
+
+    /// A thread whose `CONTEXT` names `runtime`, as a worker or not, which
+    /// entered it or not, polling `task`.
+    fn entered_thread(
+        &mut self,
+        tid: u64,
+        runtime: Option<&Written>,
+        worker: bool,
+        entered: bool,
+        task: Option<u64>,
+    ) {
         let context = self.context();
         let ThreadLocal::Offset(offset) = context.tls else {
             panic!("an executable's thread-local storage is at an offset");
@@ -373,6 +386,10 @@ impl World {
         let (task_at, task_some) = (context.task.offset, context.task_some);
         let handle_tag = context.handle_option.tag_for(if runtime.is_some() { "Some" } else { "None" });
         let task_tag = context.task_option.tag_for(if task.is_some() { "Some" } else { "None" });
+        let entered_at = context.entered.offset;
+        let entered_tag = context
+            .entered_state
+            .tag_for(if entered { "Entered" } else { "NotEntered" });
         let flavor_tags = [Flavor::MultiThread, Flavor::CurrentThread].map(|flavor| {
             let name = self
                 .context()
@@ -400,6 +417,8 @@ impl World {
             self.memory.word(handle + arc_at, runtime.arc);
         }
         self.memory.word(base + scheduler_at, if worker { 0x1234_5000 } else { 0 });
+        let (at, size, value) = entered_tag;
+        self.memory.write(base + entered_at + at, value, size);
         let (at, size, value) = task_tag;
         self.memory.write(base + task_at + at, value, size);
         if let Some(task) = task {
@@ -487,19 +506,23 @@ fn each_state_is_read_as_tokio_defines_it() {
 }
 
 /// A worker runs the task it polls only when the task is its runtime's,
-/// as an idle worker polls its own launch; a pool thread runs its
-/// closure's task; and a thread that never made its context, or entered
-/// no runtime, runs none.
+/// and is idle as it polls its own launch; a pool thread runs its
+/// closure's task, and waits for one idle. A thread that never made its
+/// context, names no runtime, or blocks on one is the program's own.
 #[test]
 fn a_thread_runs_the_task_its_context_names() {
     let mut world = World::new(&[]);
     let runtime = world.runtime(Flavor::MultiThread, 3, &[vec![(10, RUNNING)], vec![(11, 0)]]);
+    let current = world.runtime(Flavor::CurrentThread, 4, &[vec![(30, 0)]]);
     world.thread(1, Some(&runtime), true, Some(10));
     world.thread(2, Some(&runtime), true, Some(2));
     world.thread(3, Some(&runtime), false, Some(12));
     world.thread(4, Some(&runtime), false, None);
     world.thread(5, None, false, None);
     world.thread(6, Some(&runtime), true, Some(11));
+    world.entered_thread(8, Some(&runtime), false, true, None);
+    world.thread(9, Some(&current), true, None);
+    world.thread(10, Some(&current), true, Some(30));
     // A thread that never touched its context.
     world.thread(7, Some(&runtime), true, Some(10));
     let state = world.context().state;
@@ -517,11 +540,14 @@ fn a_thread_runs_the_task_its_context_names() {
     assert_eq!(world.activity(2), ThreadActivity::Idle);
     assert_eq!(world.activity(3), task(12));
     assert_eq!(world.activity(4), ThreadActivity::Idle);
-    assert_eq!(world.activity(5), ThreadActivity::Idle);
+    assert_eq!(world.activity(5), ThreadActivity::Outside);
     // A worker polling a suspended task is on it, though the task says
     // otherwise, as when a poll is about to begin.
     assert_eq!(world.activity(6), task(11));
-    assert_eq!(world.activity(7), ThreadActivity::Idle);
+    assert_eq!(world.activity(7), ThreadActivity::Outside);
+    assert_eq!(world.activity(8), ThreadActivity::Outside);
+    assert_eq!(world.activity(9), ThreadActivity::Outside);
+    assert_eq!(world.activity(10), task(30));
 
     // The pool thread's task is listed as running there; its frames, and
     // the worker's task's, begin on their threads.

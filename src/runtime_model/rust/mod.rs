@@ -240,7 +240,7 @@ impl RuntimeModel for RustRuntime {
     }
 
     fn thread_activity(&self, _stop: &dyn RuntimeStop, _thread: ThreadId) -> ThreadActivity {
-        ThreadActivity::Idle
+        ThreadActivity::Outside
     }
 
     fn task_context(

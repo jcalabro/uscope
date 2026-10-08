@@ -114,6 +114,7 @@ async fn check_threads(session: &mut GoSession, tasks: &[TaskSnapshot], main: u6
                 }
                 ThreadActivity::Idle => {}
                 ThreadActivity::Unknown(reason) => panic!("{context}: {reason}"),
+                ThreadActivity::Outside => panic!("{context}: outside the runtime"),
             }
         }
         let on_threads = tasks

@@ -1044,9 +1044,9 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             .thread_activity(frame.inferior, frame.root.reader())
         {
             Some(crate::ThreadActivity::Task { task, .. }) => Ok(task.number),
-            Some(crate::ThreadActivity::Idle) => Err(Stop::missing(VariableState::Unavailable(
-                VariableUnavailableReason::NoTask,
-            ))),
+            Some(crate::ThreadActivity::Idle | crate::ThreadActivity::Outside) => Err(
+                Stop::missing(VariableState::Unavailable(VariableUnavailableReason::NoTask)),
+            ),
             Some(crate::ThreadActivity::Unknown(reason)) => Err(refused(&reason)),
             None => Err(refused("the program has no tasks")),
         }

@@ -86,6 +86,10 @@ pub struct Context {
     pub runtimes: Vec<(Flavor, Arc<str>, Runtime)>,
     /// The scheduler's context pointer, null outside a worker.
     pub scheduler: u64,
+    /// Whether the thread entered its runtime, as a worker or a thread
+    /// blocking on it does, and a pool thread does not.
+    pub entered: Field,
+    pub entered_state: Sum,
     /// `Option<task::Id>`, and the id within its `Some`.
     pub task: Field,
     pub task_option: Sum,
@@ -152,6 +156,10 @@ impl Context {
             .collect::<Result<Vec<_>, Missing>>()?;
         let scheduler = field(&["scheduler", "inner", "value", "value"])?;
         pointer_sized(image, scheduler.ty, "Context.scheduler")?;
+        let entered = field(&["runtime", "value", "value"])?;
+        let entered_state = records::sum(image, entered.ty)?;
+        entered_state.variant("Entered")?;
+        entered_state.variant("NotEntered")?;
         let task = field(&["current_task_id", "value", "value"])?;
         let task_option = records::sum(image, task.ty)?;
         let task_some = task_option.variant("Some")?.payload;
@@ -167,6 +175,8 @@ impl Context {
             flavors,
             runtimes,
             scheduler: scheduler.offset,
+            entered,
+            entered_state,
             task,
             task_option,
             task_some: task_some.offset + id.offset,

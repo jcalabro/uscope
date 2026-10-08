@@ -194,6 +194,9 @@ pub enum ThreadActivity {
     /// Running the runtime's scheduler with no task, or code the runtime
     /// does not know, such as a thread C created.
     Idle,
+    /// Running the program's own code on a thread the runtime schedules no
+    /// task on.
+    Outside,
     /// The runtime's state for the thread could not be read.
     Unknown(Arc<str>),
 }

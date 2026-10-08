@@ -187,6 +187,8 @@ async fn check_every_thread(scenario: &mut Scenario, fixture: &str) {
             // An idle thread runs the scheduler on its system stack.
             ThreadActivity::Idle => StackSegment::System,
             ThreadActivity::Unknown(reason) => panic!("{context}: {reason}"),
+            // Every thread of a Go program runs the runtime's scheduler.
+            ThreadActivity::Outside => panic!("{context}: outside the runtime"),
         };
         assert_eq!(stacks.last(), Some(&last), "{context}");
         if last != StackSegment::Thread {
