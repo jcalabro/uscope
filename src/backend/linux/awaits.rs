@@ -630,6 +630,47 @@ impl<P: LinuxTraceOps> Controller<P> {
         module.loaded.virtual_address(address).ok()
     }
 
+    /// Where a step waits for its future once a poll of it returned:
+    /// nowhere when the future returned, or why the step ends here when
+    /// the future's state leaves it nowhere it can tell.
+    fn waits_at(
+        &self,
+        pid: Pid,
+        kind: StepKind,
+        awaiting: &AwaitStep,
+    ) -> std::result::Result<BTreeSet<VirtualAddress>, StopReason> {
+        let future = awaiting.future;
+        let incomplete = |description: &str| StopReason::StepIncomplete {
+            kind,
+            description: description.into(),
+        };
+        // Only a future known to have returned lets the step go on as any
+        // other does; one whose state is unknown leaves it nowhere to wait.
+        let state = self.future_state(pid, future).map(|(_, state)| state);
+        match (state, &awaiting.inlined) {
+            (Some(CoroutineStateKind::Returned), _) => Ok(BTreeSet::new()),
+            (Some(CoroutineStateKind::Suspended { .. }), None) => self
+                .resume_point(pid, future)
+                .map(|resumes| BTreeSet::from([resumes]))
+                .ok_or_else(|| incomplete(UNKNOWN_RESUMPTION)),
+            (Some(CoroutineStateKind::Suspended { .. }), Some(inlined)) => {
+                if !inlined.own && self.awaits_twice(pid, future, inlined.function) {
+                    return Err(incomplete(TWICE));
+                }
+                Ok(inlined.statements.clone())
+            }
+            (Some(CoroutineStateKind::Unresumed), _) => Err(incomplete(
+                "the future the step follows is unresumed after its poll returned",
+            )),
+            (Some(CoroutineStateKind::Panicked), _) => {
+                Err(incomplete("the future the step follows panicked"))
+            }
+            (None, _) => Err(incomplete(
+                "the state of the future the step follows is unreadable",
+            )),
+        }
+    }
+
     /// Follows the active step's future once the poll that ran its body
     /// has just returned: when it returned `Pending`, the step waits for the
     /// future to be polled again where it resumes, in place of the rest of
@@ -661,27 +702,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !activation.has_returned(self.stack_position(pid, &registers)) {
             return Ok(None);
         }
-        let waiting = match &awaiting.inlined {
-            None => self.resume_point(pid, future).into_iter().collect(),
-            Some(inlined) => match self.future_state(pid, future) {
-                Some((_, CoroutineStateKind::Suspended { .. })) => {
-                    if !inlined.own && self.awaits_twice(pid, future, inlined.function) {
-                        return Ok(Some(Followed::Ended(StopReason::StepIncomplete {
-                            kind,
-                            description: TWICE.into(),
-                        })));
-                    }
-                    inlined.statements.clone()
-                }
-                _ => BTreeSet::new(),
-            },
+        let waiting = match self.waits_at(pid, kind, &awaiting) {
+            Ok(waiting) => waiting,
+            Err(reason) => return Ok(Some(Followed::Ended(reason))),
         };
         if waiting.is_empty() {
-            let ended = task.filter(|_| {
-                self.future_state(pid, future)
-                    .is_some_and(|(_, state)| state == CoroutineStateKind::Returned)
-                    && self.returned_to_runtime(pid, &registers)
-            });
+            let ended = task.filter(|_| self.returned_to_runtime(pid, &registers));
             return Ok(ended.map(|task| {
                 record!("the step's task {task} finished");
                 Followed::Ended(StopReason::TaskEnded {
@@ -703,9 +729,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         let task_entries = task.and_then(|task| self.task_entries(pid, task));
         // The poll that returned `Pending` runs within the runtime's, which
-        // may yet end the task before it returns.
+        // may yet end the task before it returns: its state is read there
+        // only where what frees the task would have stopped a thread first.
         let task_return = task_entries
             .as_ref()
+            .filter(|(_, entries)| !entries.frees.is_empty())
             .and_then(|_| self.dispatch_return(pid));
         let start = self
             .active_step_mut()
@@ -716,23 +744,20 @@ impl<P: LinuxTraceOps> Controller<P> {
         awaiting.inlined_drops = inlined_drops;
         awaiting.task_entries = task_entries;
         awaiting.task_return = task_return;
-        // An advance's targets end it wherever its task reaches them.
-        let targets = std::mem::take(&mut start.targets);
-        let plan = awaiting
-            .watched()
-            .chain(targets.iter().copied())
-            .collect::<BTreeSet<_>>();
-        self.cleanup_plan_breakpoints(execution)?;
-        self.install_additional_plan_breakpoints(execution, &plan)?;
-        let start = self
-            .active_step_mut()
-            .expect("the step remained active while its future was pending");
-        *start = StepStart {
-            plan_addresses: plan,
+        // An advance's targets end it wherever its task reaches them, and
+        // a step into a new task still watches for one.
+        let waits = StepStart {
+            plan_addresses: awaiting.watched().collect(),
             awaiting: Some(awaiting),
-            targets,
+            targets: std::mem::take(&mut start.targets),
+            new_task: start.new_task.take(),
             ..StepStart::default()
         };
+        self.cleanup_plan_breakpoints(execution)?;
+        self.install_additional_plan_breakpoints(execution, &waits.plan_sites())?;
+        *self
+            .active_step_mut()
+            .expect("the step remained active while its future was pending") = waits;
         Ok(Some(Followed::Waits))
     }
 
@@ -817,10 +842,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     Some(StopReason::TaskEnded {
                         kind,
                         task,
-                        ending: match end {
-                            TaskEnd::Finished => TaskEnding::Finished,
-                            TaskEnd::Cancelled => TaskEnding::Cancelled,
-                        },
+                        ending: ending(end),
                     })
                 }
                 Ok(None) if returned => None,
@@ -839,7 +861,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 return self.begin_visible_stop(pid, reason);
             }
         }
-        if entered && entries.runs.contains(&address) {
+        if entered && entries.runs.contains(&address) && !entries.frees.is_empty() {
             // Entered, the return address is the word the stack pointer
             // points at, which the return pops.
             let returns = self.ptrace.read_word(pid, registers.rsp)?;
@@ -958,13 +980,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     ) -> Result<()> {
         record!("thread {pid} drops the future the step waits for");
         self.follow_step(pid);
-        let task =
-            self.inferior
-                .as_ref()
-                .and_then(|inferior| match &inferior.active.as_ref()?.kind {
-                    ActiveKind::Step { owner, .. } => owner.task,
-                    _ => None,
-                });
+        let entries = self
+            .active_step()
+            .and_then(|start| start.awaiting.as_ref()?.task_entries.clone());
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let stack =
             self.physical_stack(inferior, &StackRoot::of_thread(pid), DEFAULT_MAX_FRAMES)?;
@@ -984,17 +1002,27 @@ impl<P: LinuxTraceOps> Controller<P> {
                 physical(level).is_some_and(|function| function.role == crate::CodeRole::Ordinary)
             });
         let Some(dropper) = dropper else {
-            let reason = task.map_or_else(
-                || StopReason::StepIncomplete {
-                    kind,
-                    description: "the future the step waited for was dropped".into(),
-                },
-                |task| StopReason::TaskEnded {
+            // No code of the program's drops it: its task was cancelled,
+            // when the runtime says so, or code the step cannot follow
+            // dropped it.
+            let ended = entries.and_then(|(task, entries)| {
+                let end = self
+                    .with_task_runtime(pid, task, |runtime, stop| runtime.task_end(stop, &entries));
+                Some((task, end.ok()??))
+            });
+            let reason = match ended {
+                Some((task, end)) => StopReason::TaskEnded {
                     kind,
                     task,
-                    ending: TaskEnding::Cancelled,
+                    ending: ending(end),
                 },
-            );
+                None => StopReason::StepIncomplete {
+                    kind,
+                    description: "the future the step waited for was dropped by code the step \
+                                  cannot follow"
+                        .into(),
+                },
+            };
             return self.begin_visible_stop(pid, reason);
         };
         #[cfg(debug_assertions)]
@@ -1237,22 +1265,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             waiting: BTreeSet::new(),
             ..awaiting
         });
-        resumed.targets = self
-            .active_step_mut()
-            .map(|start| std::mem::take(&mut start.targets))
-            .unwrap_or_default();
+        if let Some(waited) = self.active_step_mut() {
+            resumed.targets = std::mem::take(&mut waited.targets);
+            resumed.new_task = waited.new_task.take();
+        }
         let execution = self.active_execution()?;
         self.cleanup_plan_breakpoints(execution)?;
-        self.install_additional_plan_breakpoints(
-            execution,
-            &resumed
-                .plan_addresses
-                .iter()
-                .chain(&resumed.panic_guards)
-                .chain(&resumed.targets)
-                .copied()
-                .collect(),
-        )?;
+        self.install_additional_plan_breakpoints(execution, &resumed.plan_sites())?;
         *self
             .active_step_mut()
             .expect("the step remained active as its future resumed") = resumed;
@@ -1364,10 +1383,20 @@ impl<P: LinuxTraceOps> Controller<P> {
 }
 
 /// Why a step in an inlined body cannot follow its future.
+const UNKNOWN_RESUMPTION: &str = "where the future the step follows resumes is unknown";
+
 const TWICE: &str = "the async function the step is in is awaited twice in its task, and \
                      inlined, so the step cannot tell which is its own";
 
 /// Whether a function is one rustc makes to drop a value of some type.
+/// How a step reports how its runtime ended its task.
+const fn ending(end: TaskEnd) -> TaskEnding {
+    match end {
+        TaskEnd::Finished => TaskEnding::Finished,
+        TaskEnd::Cancelled => TaskEnding::Cancelled,
+    }
+}
+
 fn is_drop_glue(name: &str) -> bool {
     name.starts_with("drop_glue<") || name.starts_with("drop_in_place<")
 }

@@ -535,6 +535,25 @@ struct StepStart {
     dropped: Option<awaits::RunningFuture>,
 }
 
+impl StepStart {
+    /// Where the step's plan stops threads: its plan's own sites, its panic
+    /// guards, an advance's targets, and the code that starts tasks while a
+    /// step into a new task watches for one.
+    fn plan_sites(&self) -> BTreeSet<VirtualAddress> {
+        let starters = match &self.new_task {
+            Some(new_task::NewTask::Watching(starters)) => starters.keys().copied().collect(),
+            _ => Vec::new(),
+        };
+        self.plan_addresses
+            .iter()
+            .chain(&self.panic_guards)
+            .chain(&self.targets)
+            .chain(&starters)
+            .copied()
+            .collect()
+    }
+}
+
 /// Whether a step kind executes machine instructions rather than source
 /// lines.
 const fn steps_instructions(kind: StepKind) -> bool {

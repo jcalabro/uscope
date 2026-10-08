@@ -632,15 +632,24 @@ impl RuntimeModel for TokioRuntime {
     ) -> Result<Option<TaskEnd>, Arc<str>> {
         let tasks = self.task_layout()?;
         let header = task.task.locator.ok_or("the task is not located")?;
-        let state = records::word(stop, header.wrapping_add(tasks.state))
-            .ok_or_else(|| format!("task {} is unreadable", task.task.number))?;
-        Ok(
-            (state & COMPLETE != 0).then_some(if state & CANCELLED == 0 {
-                TaskEnd::Finished
-            } else {
-                TaskEnd::Cancelled
-            }),
-        )
+        let unreadable = || Arc::<str>::from(format!("task {} is unreadable", task.task.number));
+        let word = |address: u64| records::word(stop, address).ok_or_else(unreadable);
+        // A freed task's place may hold another task, or nothing.
+        let vtable = word(header.wrapping_add(tasks.vtable))?;
+        let id = word(header.wrapping_add(word(vtable.wrapping_add(tasks.id_offset))?))?;
+        if task.runs.first().map(|poll| poll.get()) != Some(word(vtable.wrapping_add(tasks.poll))?)
+            || id != task.task.number
+        {
+            return Err(format!("task {} is no longer where it was", task.task.number).into());
+        }
+        let state = word(header.wrapping_add(tasks.state))?;
+        // tokio never takes back a cancellation, nor cancels a task that
+        // completed.
+        Ok(if state & CANCELLED != 0 {
+            Some(TaskEnd::Cancelled)
+        } else {
+            (state & COMPLETE != 0).then_some(TaskEnd::Finished)
+        })
     }
 
     fn driven_future(&self, function: &crate::FunctionInfo) -> Option<&'static str> {
