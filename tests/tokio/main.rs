@@ -5,6 +5,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod coroutines;
 mod resume_points;
 mod std_async;
 mod stops;

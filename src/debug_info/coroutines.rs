@@ -43,8 +43,9 @@ pub fn coroutine_kind(name: &str) -> Option<CoroutineKind> {
     }
 }
 
-/// Every type its name says is a coroutine, with what it is or why its
-/// layout cannot be read as one.
+/// Every record its name says is a coroutine, with what it is or why its
+/// layout cannot be read as one. A pointer to one, whose name ends as the
+/// coroutine's does, is not one.
 pub fn normalize(types: &[TypeNode]) -> BTreeMap<TypeId, Result<CoroutineInfo, Arc<str>>> {
     let by_id = |id: TypeId| match types.get(id.index()) {
         Some(TypeNode::Resolved(info)) => Some(info),
@@ -53,11 +54,16 @@ pub fn normalize(types: &[TypeNode]) -> BTreeMap<TypeId, Result<CoroutineInfo, A
     types
         .iter()
         .filter_map(|node| match node {
-            TypeNode::Resolved(info) => {
+            TypeNode::Resolved(info)
+                if matches!(
+                    info.kind,
+                    TypeKind::Record { .. } | TypeKind::Variant { .. }
+                ) =>
+            {
                 let kind = coroutine_kind(&info.name)?;
                 Some((info.reference.id, coroutine(info, kind, &by_id)))
             }
-            TypeNode::Malformed { .. } => None,
+            TypeNode::Resolved(_) | TypeNode::Malformed { .. } => None,
         })
         .collect()
 }
