@@ -711,15 +711,15 @@ generate_core() {
 suite_signature() {
     local -a paths=()
     local tool path
-    for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc go zig objdump gdb \
-        setarch; do
+    for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc cargo go zig objdump \
+        gdb setarch; do
         if path=$(type -P "$tool"); then
             paths+=("$path")
         fi
     done
     # Statically linked glibc fixtures link from a store path of their own.
-    printf 'suite-v1\nGOOS=%s GOARCH=%s\nGLIBC_STATIC_LIBRARIES=%s\n' \
-        "${GOOS-}" "${GOARCH-}" "$GLIBC_STATIC_LIBRARIES"
+    printf 'suite-v1\nGOOS=%s GOARCH=%s\nGLIBC_STATIC_LIBRARIES=%s\nUSCOPE_FIXTURE_CRATES=%s\n' \
+        "${GOOS-}" "${GOARCH-}" "$GLIBC_STATIC_LIBRARIES" "${USCOPE_FIXTURE_CRATES-}"
     stat -L --format='%n %Y' "${paths[@]}"
 }
 
@@ -1922,6 +1922,55 @@ generate_function_type_oracle() {
 for compiler in gcc clang; do
     generate_function_type_oracle "$output_dir/function-types-${compiler}-o0"
 done
+
+# The tokio fixtures: one cargo workspace whose crates come only from its
+# lockfile, which flake.nix vendors, so building fetches nothing. Each
+# variant has a target directory of its own, and cargo rebuilds only what
+# changed; a binary is copied out only when cargo rewrote it.
+readonly tokio_fixtures_dir="${rust_fixtures_dir}/tokio"
+readonly tokio_target_dir="build/tokio-target"
+if [[ -z "${USCOPE_FIXTURE_CRATES-}" ]]; then
+    printf 'error: USCOPE_FIXTURE_CRATES is unset; build inside the Nix shell\n' >&2
+    exit 1
+fi
+
+# Builds the workspace's PACKAGES with PROFILE and extra RUSTFLAGS, and
+# copies each binary to tokio-NAME-VARIANT.
+build_tokio_variant() {
+    local variant="$1"
+    local profile="$2"
+    local flags="$3"
+    shift 3
+    local -a packages=()
+    local package
+    for package in "$@"; do
+        packages+=(--package "$package")
+    done
+    local target="$tokio_target_dir/$variant"
+    printf '[cargo]  tokio fixtures (%s)\n' "$variant"
+    CARGO_TARGET_DIR="$target" RUSTFLAGS="${RUSTFLAGS-} -D warnings ${flags}" \
+        NIX_HARDENING_ENABLE= cargo build --quiet --offline --locked \
+        --manifest-path "$tokio_fixtures_dir/Cargo.toml" --profile "$profile" \
+        --config "source.crates-io.replace-with='vendored'" \
+        --config "source.vendored.directory='${USCOPE_FIXTURE_CRATES}'" "${packages[@]}"
+    local directory="$profile"
+    [[ "$profile" == dev ]] && directory=debug
+    for package in "$@"; do
+        local built="$target/$directory/$package"
+        local output="$output_dir/tokio-${package}-${variant}"
+        if [[ -x "$output" ]] && ! [[ "$built" -nt "$output" ]]; then
+            rebuilt_outputs["$output"]=false
+            continue
+        fi
+        cp -p "$built" "$output"
+        rebuilt_outputs["$output"]=true
+    done
+}
+
+# Every fixture, unoptimized and optimized.
+readonly tokio_fixtures=(std-async)
+build_tokio_variant o0 dev "" "${tokio_fixtures[@]}"
+build_tokio_variant o3 release "" "${tokio_fixtures[@]}"
 
 # Go's own reading of the function tables of images the Go linker linked,
 # which a test compares uscope's reader with.
