@@ -657,6 +657,38 @@ fn a_thread_runs_the_task_its_context_names() {
     );
 }
 
+/// A thread's own context says which task it polls, read without the
+/// runtime's list: at a breakpoint's hit, before the other threads stop,
+/// one of them may be changing the list, and the thread still runs its
+/// task.
+#[test]
+fn a_threads_current_task_is_its_contexts_whatever_its_list_says() {
+    let mut world = World::new(&[]);
+    let runtime = world.runtime(
+        Flavor::MultiThread,
+        3,
+        &[vec![(10, RUNNING)], vec![(11, 0)]],
+    );
+    world.thread(1, Some(&runtime), true, Some(10));
+    world.thread(2, Some(&runtime), true, None);
+    world.thread(3, None, false, None);
+    // Another thread was binding a task to the first shard, whose head it
+    // has written and the task's header not yet.
+    let head = world.runtime_layout(Flavor::MultiThread).owned.head;
+    world.memory.word(runtime.shards + head, 0x10);
+    assert!(matches!(world.activity(1), ThreadActivity::Unknown(_)));
+
+    let current = |tid| {
+        world
+            .model
+            .current_task(&world.memory, ThreadId::new(tid))
+            .expect("the context reads")
+    };
+    assert_eq!(current(1), Some(10));
+    assert_eq!(current(2), None);
+    assert_eq!(current(3), None);
+}
+
 /// The blocking pool's queue is listed in its order, around the end of its
 /// ring; a worker's launch is the runtime's own.
 #[test]

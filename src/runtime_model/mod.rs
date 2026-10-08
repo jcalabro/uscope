@@ -387,6 +387,23 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     ) -> Partial<TaskPage>;
     /// What a stopped thread is doing for the runtime.
     fn thread_activity(&self, stop: &dyn RuntimeStop, thread: ThreadId) -> ThreadActivity;
+    /// The task a stopped thread runs, as the thread's own state names it,
+    /// read without the runtime's shared state, which threads still running
+    /// may be changing while run control decides, at a breakpoint's hit,
+    /// whether the thread runs a step's or a condition's task. It may name
+    /// a task the runtime runs for its own work, which the thread's
+    /// activity leaves out.
+    fn current_task(
+        &self,
+        stop: &dyn RuntimeStop,
+        thread: ThreadId,
+    ) -> Result<Option<u64>, Arc<str>> {
+        match self.thread_activity(stop, thread) {
+            ThreadActivity::Task { number, .. } => Ok(Some(number)),
+            ThreadActivity::Unknown(reason) => Err(reason),
+            ThreadActivity::Idle | ThreadActivity::Outside => Ok(None),
+        }
+    }
     /// Where the frames of a task begin, or `None` when the runtime has no
     /// such task.
     fn task_context(

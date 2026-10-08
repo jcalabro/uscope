@@ -581,6 +581,42 @@ impl<P: InspectionOps> Controller<P> {
         activity
     }
 
+    /// The task a stopped thread runs, as its runtime reads it from the
+    /// thread's own state, without the runtime's shared state: what run
+    /// control asks at a hit, before the threads still running, which may
+    /// be changing that state, have stopped. `None` without a runtime.
+    pub(super) fn current_task(
+        &self,
+        inferior: &Inferior,
+        pid: Pid,
+    ) -> Option<std::result::Result<Option<TaskId>, Arc<str>>> {
+        let runtimes = self.runtimes(inferior);
+        let mut found = self
+            .unbound_runtimes(inferior)
+            .into_iter()
+            .next()
+            .map_or_else(
+                || (!runtimes.is_empty()).then_some(Ok(None)),
+                |reason| Some(Err(reason)),
+            );
+        for runtime in &runtimes {
+            let current = self.with_runtime_stop(inferior, runtime, pid, |stop| {
+                runtime.model.current_task(stop, debug_thread_id(pid))
+            });
+            match current {
+                Ok(Some(number)) => {
+                    return Some(Ok(Some(TaskId {
+                        runtime: runtime.id,
+                        number,
+                    })));
+                }
+                Ok(None) => {}
+                Err(reason) => found = Some(Err(reason)),
+            }
+        }
+        found
+    }
+
     fn read_thread_activity(&self, inferior: &Inferior, pid: Pid) -> Option<ThreadActivity> {
         let runtimes = self.runtimes(inferior);
         // A thread may run the tasks of a runtime that cannot be read. One

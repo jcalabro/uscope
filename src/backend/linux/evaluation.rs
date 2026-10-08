@@ -1132,6 +1132,21 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         if let crate::ExecutionContext::Task(task) = frame.root.context {
             return Ok(task.number);
         }
+        // A condition at a hit, before the other threads stop, reads the
+        // task from the thread's own state alone, which they cannot change.
+        if frame.inferior.public_stop.is_none() {
+            return match frame
+                .controller
+                .current_task(frame.inferior, frame.root.reader())
+            {
+                Some(Ok(Some(task))) => Ok(task.number),
+                Some(Ok(None)) => Err(Stop::missing(VariableState::Unavailable(
+                    VariableUnavailableReason::NoTask,
+                ))),
+                Some(Err(reason)) => Err(refused(&reason)),
+                None => Err(refused("the program has no tasks")),
+            };
+        }
         match frame
             .controller
             .thread_activity(frame.inferior, frame.root.reader())

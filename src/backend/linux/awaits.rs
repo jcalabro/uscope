@@ -691,8 +691,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             .as_ref()
             .and_then(|inferior| inferior.active.as_ref())
             .and_then(|active| match &active.kind {
-                ActiveKind::Step { owner, start, .. } if self.runs_step(*owner, pid) => {
+                ActiveKind::Step { owner, start, .. } => {
                     let awaiting = start.awaiting.as_ref().filter(|step| !step.waits())?;
+                    if !self.runs_step(*owner, pid) {
+                        record!(
+                            "thread {pid} runs no task of the step that follows a future, \
+                             {owner:?}: {:?}",
+                            self.inferior
+                                .as_ref()
+                                .and_then(|inferior| self.thread_activity(inferior, pid))
+                        );
+                        return None;
+                    }
                     Some((active.id, owner.task, awaiting.clone(), start.activation?))
                 }
                 _ => None,
@@ -703,6 +713,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let future = awaiting.future;
         let registers = self.ptrace.registers(pid)?;
         if !activation.has_returned(self.stack_position(pid, &registers)) {
+            record!("the poll of the future at {} runs on", future.object);
             return Ok(None);
         }
         let waiting = match self.waits_at(pid, kind, &awaiting) {
