@@ -172,7 +172,7 @@ or `$VISUAL` or `$EDITOR` with `+line path`.
 | `run`, `r` | Launch the program. |
 | `continue`, `c` | Resume every thread. |
 | `step`, `s` / `next`, `n` | Step into / over calls, by source line. |
-| `step task` | Step into the task the line starts, such as a goroutine. |
+| `step task` | Step into the task the line starts, such as a goroutine or a tokio task. |
 | `step` *function* \| `*`*0xaddress* | Step into one call of the line: the first that calls *function*, or the call instruction at an address. |
 | `info calls` | List the calls of the selected thread's line that `step` can go into. |
 | `stepi`, `si` / `nexti`, `ni` | Step one instruction, into / over calls. |
@@ -227,10 +227,12 @@ whichever thread the runtime resumes it on, other tasks that run the same
 code meanwhile never end it, and its frames are followed when the runtime
 moves the task's stack. `step task`, or the runtime's own name for a task
 such as `step goroutine`, steps over the line, unless its task starts
-another task meanwhile, as a `go` statement does, even in a function the
-line calls: the step then belongs to the first task started, and stops
-where that task's function begins, through the wrapper that passes it its
-arguments. The started task is then selected. A line that starts no task
+another task meanwhile, as a `go` statement or tokio's `spawn` and
+`spawn_local` do, even in a function the line calls: the step then belongs
+to the first task started, and stops where that task's function begins,
+through the wrapper that passes it its arguments, or at the first line of
+the async function or block a tokio task polls, on whichever thread first
+polls it. The started task is then selected. A line that starts no task
 ends as `next` does.
 
 In an async function, a step follows the function's future across its

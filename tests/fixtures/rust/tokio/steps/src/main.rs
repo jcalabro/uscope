@@ -6,7 +6,9 @@
 //!
 //! With no argument the tasks run on a multi-thread runtime's two
 //! workers; with `current`, on a current-thread runtime; with `local`, in
-//! a `LocalSet` the main thread runs on a current-thread runtime.
+//! a `LocalSet` the main thread runs on a current-thread runtime. With
+//! `nested`, one task on a multi-thread runtime spawns another and awaits
+//! it.
 
 use std::hint::black_box;
 
@@ -38,15 +40,41 @@ async fn rounds(me: u64) -> u64 {
 }
 
 async fn task(gate: oneshot::Receiver<u64>) -> u64 {
-    let me = truth::start();
+    let me = truth::start(); // FIRST: task
     let got = outer(me, gate).await; // STEP: task
     let more = rounds(me).await; // AWAIT: rounds
     truth::end(me);
     got + more // STEP: task-last
 }
 
+async fn child(parent: u64) -> u64 {
+    let me = truth::start(); // FIRST: child
+    truth::end(me);
+    parent + me
+}
+
+async fn parent() -> u64 {
+    let me = truth::start();
+    let spawned = black_box(me); // BEFORE: nested
+    let child = tokio::spawn(child(spawned)); // SPAWN: nested
+    let sum = child.await.expect("the child ends");
+    truth::end(me);
+    sum
+}
+
 fn main() {
     let mode = std::env::args().nth(1);
+    if mode.as_deref() == Some("nested") {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .expect("a runtime");
+        let sum = runtime
+            .block_on(runtime.spawn(parent()))
+            .expect("the parent ends");
+        truth::line(&[&"sum", &sum]);
+        return;
+    }
     let runtime = match mode.as_deref() {
         None => tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -60,18 +88,19 @@ fn main() {
     let mut handles = Vec::new();
     for _ in 0..TASKS {
         let (open, gate) = oneshot::channel();
-        gates.push(open);
-        handles.push(match &local {
-            Some(local) => local.spawn_local(task(gate)),
-            None => runtime.spawn(task(gate)),
-        });
+        gates.push(open); // SPAWNS: none
+        let handle = match &local {
+            Some(local) => local.spawn_local(task(gate)), // SPAWN: local
+            None => runtime.spawn(task(gate)),            // SPAWN: runtime
+        };
+        handles.push(handle);
     }
     let opener = std::thread::spawn(move || {
         while truth::parked_at("gate") != TASKS {
             std::thread::yield_now();
         }
         for (value, open) in (0..).zip(gates) {
-            open.send(value).expect("the task waits");
+            open.send(value).expect("the task waits"); // WAKES: gate
         }
     });
     let joined = async {

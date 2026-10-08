@@ -286,7 +286,10 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// The statements of an async function's body inlined into another's,
     /// less those on its header's line: entering the body there dispatches
     /// on its state, which resuming it does too.
-    fn body_statements(&self, instance: CodeInstanceId) -> Result<BTreeSet<VirtualAddress>> {
+    pub(super) fn body_statements(
+        &self,
+        instance: CodeInstanceId,
+    ) -> Result<BTreeSet<VirtualAddress>> {
         let header = self
             .module_image
             .code_instance(instance)
@@ -297,7 +300,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// Statements less those that only resuming a coroutine runs, such as
     /// its dispatch on its state.
-    fn without_resume_code(
+    pub(super) fn without_resume_code(
         &self,
         statements: BTreeSet<VirtualAddress>,
     ) -> BTreeSet<VirtualAddress> {

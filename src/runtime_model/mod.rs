@@ -164,6 +164,24 @@ pub struct CodeAddress {
     pub after_call: bool,
 }
 
+/// A runtime function that starts tasks, and where the task it starts is
+/// known: as it begins, from its arguments, or once it returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskStarter {
+    pub entry: ImageAddress,
+    pub names_at_entry: bool,
+}
+
+/// A task a runtime's starter starts, and the coroutine it begins in, for
+/// a runtime whose tasks are futures: where the coroutine's code is
+/// inlined, and so has no entry, the task begins at the first of the
+/// coroutine's statements it runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedTask {
+    pub task: RuntimeTask,
+    pub coroutine: Option<crate::TypeReference>,
+}
+
 /// One task of a runtime at a stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeTask {
@@ -443,16 +461,18 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         entry: ImageAddress,
         registers: &RegisterFile,
     ) -> Option<Result<VirtualAddress, Arc<str>>>;
-    /// The runtime function that starts a task, which it has once the
-    /// function returns.
-    fn task_starter(&self) -> Option<ImageAddress>;
-    /// The task a stopped thread just started, as it returns from the task
-    /// starter, given its registers at the return address.
+    /// The runtime functions that start tasks.
+    fn task_starters(&self) -> Vec<TaskStarter>;
+    /// The task a stopped thread starts in the starter at `starter`, given
+    /// its registers where the starter names the task: at its entry or at
+    /// its return address. `None` when this call starts no task, as one
+    /// that also schedules a woken task may not.
     fn started_task(
         &self,
         stop: &dyn RuntimeStop,
+        starter: ImageAddress,
         registers: &RegisterFile,
-    ) -> Result<RuntimeTask, Arc<str>>;
+    ) -> Result<Option<StartedTask>, Arc<str>>;
     /// What the runtime calls one of its tasks.
     fn task_noun(&self) -> &'static str;
     /// Where the runtime keeps the set of tasks that the future at

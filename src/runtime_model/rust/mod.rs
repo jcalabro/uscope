@@ -26,7 +26,8 @@ use std::sync::Arc;
 
 use super::{
     Crossing, Partial, RuntimeException, RuntimeHook, RuntimeImage, RuntimeModel, RuntimeSignals,
-    RuntimeStop, RuntimeTask, StoredValue, TaskContext, TaskPage, TaskRef, ThreadActivity,
+    RuntimeStop, StartedTask, StoredValue, TaskContext, TaskPage, TaskRef, TaskStarter,
+    ThreadActivity,
 };
 use crate::unwind::RegisterFile;
 use crate::{
@@ -338,15 +339,16 @@ impl RuntimeModel for RustRuntime {
         None
     }
 
-    fn task_starter(&self) -> Option<ImageAddress> {
-        None
+    fn task_starters(&self) -> Vec<TaskStarter> {
+        Vec::new()
     }
 
     fn started_task(
         &self,
         _stop: &dyn RuntimeStop,
+        _starter: ImageAddress,
         _registers: &RegisterFile,
-    ) -> Result<RuntimeTask, Arc<str>> {
+    ) -> Result<Option<StartedTask>, Arc<str>> {
         Err("Rust's standard library starts no task".into())
     }
 
