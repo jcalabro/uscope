@@ -73,7 +73,8 @@ pub fn function_role(name: &str, trampoline: bool) -> CodeRole {
 /// an ordinary function. The library's code that only hands a future on,
 /// which every `.await` runs between the awaiting function and the awaited
 /// one, wraps: `IntoFuture`, the rest of `core::future` and `core::pin`,
-/// the `poll` that `Box` forwards, and `AssertUnwindSafe`. So does the drop
+/// the `poll` that `Box` forwards and the `deref_mut` through which a
+/// `Pin<Box<_>>` reaches its future, and `AssertUnwindSafe`. So does the drop
 /// glue rustc generates, which calls the `Drop` impls the program wrote and
 /// carries the lines of what it drops, such as an await's. std's and core's
 /// code that raises a panic is the panic machinery.
@@ -121,7 +122,7 @@ pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
     (within("core::future")
         || within("core::pin")
         || within("core::panic::unwind_safe")
-        || (within("alloc::boxed") && named("poll"))
+        || (within("alloc::boxed") && (named("poll") || named("deref_mut")))
         || (within("core::ptr") && (named("drop_glue") || named("drop_in_place"))))
     .then_some(CodeRole::Wrapper)
 }

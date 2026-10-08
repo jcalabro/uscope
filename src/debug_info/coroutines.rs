@@ -258,7 +258,8 @@ fn state_kind(name: &str) -> Option<CoroutineStateKind> {
 /// `{async_closure#N}` within the namespace of the function that wrote it:
 /// an `async fn`'s body is that function, and a block or closure is
 /// numbered within it. `namespace` is the enclosing names, outermost
-/// first.
+/// first, and a block within another coroutine's body is named within
+/// that body's name.
 pub fn body_name(name: &str, namespace: &[Arc<str>]) -> Option<Arc<str>> {
     let name = without_arguments(name)?;
     let numbered = |prefix: &str| {
@@ -266,9 +267,10 @@ pub fn body_name(name: &str, namespace: &[Arc<str>]) -> Option<Arc<str>> {
             .and_then(|rest| rest.strip_suffix('}'))
             .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
     };
-    let enclosing = namespace.last()?;
+    let (last, outer) = namespace.split_last()?;
+    let enclosing = body_name(last, outer).unwrap_or_else(|| Arc::clone(last));
     if numbered("{async_fn#").is_some() {
-        Some(Arc::clone(enclosing))
+        Some(enclosing)
     } else if let Some(number) = numbered("{async_block#") {
         Some(format!("{enclosing}::{{async block#{number}}}").into())
     } else {
@@ -280,7 +282,7 @@ pub fn body_name(name: &str, namespace: &[Arc<str>]) -> Option<Arc<str>> {
 /// A name without the generic arguments that end it, as rustc names an
 /// instance of a generic function or its coroutine, `{async_fn#0}<u32>`;
 /// `None` when the arguments are unbalanced.
-fn without_arguments(name: &str) -> Option<&str> {
+pub fn without_arguments(name: &str) -> Option<&str> {
     if !name.ends_with('>') {
         return Some(name);
     }
@@ -328,6 +330,23 @@ mod tests {
         assert_eq!(
             body_name("{async_closure#0}", &namespace).as_deref(),
             Some("leaf::{async closure#0}")
+        );
+        // A block in an async function's body, or in another block, is
+        // named within the function that wrote it.
+        let within = ["steps".into(), "leaf".into(), "{async_fn#0}".into()];
+        assert_eq!(
+            body_name("{async_block#1}", &within).as_deref(),
+            Some("leaf::{async block#1}")
+        );
+        let within = [
+            "steps".into(),
+            "leaf".into(),
+            "{async_fn#0}".into(),
+            "{async_block#1}".into(),
+        ];
+        assert_eq!(
+            body_name("{async_block#0}", &within).as_deref(),
+            Some("leaf::{async block#1}::{async block#0}")
         );
         assert_eq!(body_name("{closure#0}", &namespace), None);
         assert_eq!(body_name("{async_fn#}", &namespace), None);
