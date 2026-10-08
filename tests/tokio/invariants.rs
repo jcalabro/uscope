@@ -159,12 +159,21 @@ fn check_stop(stop: &Stop) -> Result<(), String> {
                         task.number, stop.gaps
                     ));
                 }
-                // Its frames reach tokio's dispatch, unless they stop
-                // before it where no unwind information goes on: glibc's
-                // clone3, which the task's thread is in while it starts
-                // another, ends its unwind information before the syscall.
-                let short = matches!(trace.termination, UnwindTermination::NoUnwindInfo { .. });
-                if !short
+                // Its frames reach tokio's dispatch, unless the thread is in
+                // glibc's clone3, starting another, which ends its unwind
+                // information before the syscall.
+                let in_clone3 = match trace.termination {
+                    UnwindTermination::NoUnwindInfo { address } => {
+                        trace.frames.last().is_some_and(|frame| {
+                            frame.instruction == Some(address)
+                                && frame.symbol.as_ref().is_some_and(|symbol| {
+                                    ["clone3", "__clone3", "__GI___clone3"].contains(&&*symbol.name)
+                                })
+                        })
+                    }
+                    _ => false,
+                };
+                if !in_clone3
                     && !trace
                         .frames
                         .iter()
