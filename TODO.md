@@ -2,6 +2,8 @@
 
 ## Debugger
 
+- Loading binaries and debug info performance improvements
+
 ## Languages and platforms
 
 - First-class tokio support.
