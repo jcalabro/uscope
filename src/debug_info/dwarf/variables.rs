@@ -272,11 +272,20 @@ fn system_v_returns<'data>(
         .ok()
         .flatten()
         .unwrap_or_else(|| Arc::from("returned"));
+    let rewritten = std::iter::once(entry)
+        .chain(chain.iter().map(|(_, origin)| origin))
+        .any(|entry| {
+            entry.attr_value(gimli::DW_AT_calling_convention)
+                == Some(gimli::AttributeValue::CallingConvention(
+                    gimli::DW_CC_nocall,
+                ))
+        });
     Some(returns::ReturnConvention::SystemV(Box::new(
         returns::SystemV {
             name,
             ty: types.variable_type(type_unit, Some(type_value)),
             language,
+            rewritten,
         },
     )))
 }
