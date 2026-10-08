@@ -1994,12 +1994,16 @@ generate_coroutine_oracle() {
 }
 
 # Every fixture, unoptimized and optimized.
-readonly tokio_fixtures=(std-async panics workers server drivers steps cancel shapes values runtimes)
+readonly tokio_fixtures=(std-async panics workers server drivers steps cancel shapes values runtimes
+    blocking migrate deadlock)
 build_tokio_variant o0 dev "" "${tokio_fixtures[@]}"
 build_tokio_variant o3 release "" "${tokio_fixtures[@]}"
 # A hundred thousand tasks, which bound what listing them costs; the build
 # changes nothing of that.
 build_tokio_variant o0 dev "" scale
+# A task list the program damages, whose reading the build changes nothing
+# of.
+build_tokio_variant o0 dev "" corrupt
 # Panics that abort rather than unwind.
 build_tokio_variant abort abort "" panics
 # Builds that describe less than tokio's types, where the debugger says

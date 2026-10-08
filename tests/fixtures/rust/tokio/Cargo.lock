@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "blocking"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+ "truth",
+]
+
+[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10,6 +18,22 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cancel"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+ "truth",
+]
+
+[[package]]
+name = "corrupt"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+ "truth",
+]
+
+[[package]]
+name = "deadlock"
 version = "0.0.0"
 dependencies = [
  "tokio",
@@ -29,6 +53,14 @@ name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+
+[[package]]
+name = "migrate"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+ "truth",
+]
 
 [[package]]
 name = "mio"
