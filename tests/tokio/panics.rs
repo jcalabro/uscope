@@ -202,6 +202,13 @@ async fn a_local_task_panic_stops_where_it_panicked() {
     stops_where_the_program_panicked("local", "local", "joined").await;
 }
 
+/// A current-thread runtime polls its tasks on the thread that blocks on
+/// it, which runs the task as it panics.
+#[tokio::test]
+async fn a_current_thread_task_panic_stops_where_it_panicked() {
+    stops_where_the_program_panicked("current", "current", "joined").await;
+}
+
 #[tokio::test]
 async fn a_panic_the_program_catches_stops_before_it_is_caught() {
     stops_where_the_program_panicked("caught", "caught here", "recovered").await;

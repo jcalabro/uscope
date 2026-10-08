@@ -100,6 +100,15 @@ fn main() {
             });
             truth::line(&[&"joined", &joined.is_err()]);
         }
+        "current" => {
+            let current = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("a runtime");
+            let joined = current.block_on(current.spawn(async {
+                panic!("current"); // PANIC: current
+            }));
+            truth::line(&[&"joined", &joined.is_err()]);
+        }
         task => {
             let task = task.to_owned();
             let joined = runtime.block_on(runtime.spawn(async move { in_task(&task).await }));

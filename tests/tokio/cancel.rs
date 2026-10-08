@@ -54,11 +54,12 @@ async fn waiting_with(
 
 /// A step that waits for a future whose task is aborted, or whose runtime
 /// shuts down, ends as the runtime drops the future, saying the task was
-/// cancelled.
+/// cancelled: a multi-thread runtime's, or a current-thread runtime's,
+/// which drops its tasks on the thread that drops it.
 #[tokio::test]
 async fn a_step_whose_task_is_cancelled_says_so() {
     for fixture in BUILDS {
-        for mode in ["abort", "shutdown"] {
+        for mode in ["abort", "shutdown", "current-shutdown"] {
             for kind in [StepKind::OverSource, StepKind::Out] {
                 let context = format!("{fixture} {mode} {kind:?}");
                 let (mut scenario, task) = waiting(fixture, mode).await;
