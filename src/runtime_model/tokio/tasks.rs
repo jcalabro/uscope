@@ -8,8 +8,11 @@ use super::{
     CANCELLED, COMPLETE, Census, Cursor, Instance, List, MAX_TASKS, NOTIFIED, RUNNING, Tasks,
     TokioRuntime,
 };
+use crate::runtime_model::futures::{self, AsyncFrameKind, ChainEnd};
 use crate::runtime_model::records;
-use crate::runtime_model::{Partial, RuntimeStop, RuntimeTask, TaskPage, TaskRef, ThreadActivity};
+use crate::runtime_model::{
+    Partial, RuntimeStop, RuntimeTask, StartedTask, TaskPage, TaskRef, ThreadActivity,
+};
 use crate::{RecordedPlace, StackSegment, TaskState, ThreadId, VirtualAddress};
 
 /// One task of a list, checked: it belongs to the list, its vtable is a
@@ -601,6 +604,45 @@ impl TokioRuntime {
             )?)
             .ok()?,
         })
+    }
+}
+
+impl TokioRuntime {
+    /// The task at `header` that a starter is starting, where it begins;
+    /// `None` for a task a starter that also schedules woken tasks has
+    /// polled before, which it is not starting.
+    pub(super) fn started(
+        &self,
+        stop: &dyn RuntimeStop,
+        header: u64,
+        schedules: bool,
+    ) -> Result<Option<StartedTask>, Arc<str>> {
+        let tasks = self.task_layout()?;
+        let unreadable = || Arc::<str>::from(format!("the task at {header:#x} is unreadable"));
+        let (vtable, _) = self.trailer(stop, tasks, header)?;
+        let id_offset =
+            records::word(stop, vtable.wrapping_add(tasks.id_offset)).ok_or_else(unreadable)?;
+        let number = records::word(stop, header.wrapping_add(id_offset)).ok_or_else(unreadable)?;
+        let (future, ty) = self.future(stop, header)?;
+        let chain = futures::walk(self.image.as_ref(), stop, future, ty);
+        // A task that has not begun has a root coroutine that has not
+        // either; a woken one has run.
+        if schedules && chain.end != ChainEnd::Unresumed {
+            return Ok(None);
+        }
+        let coroutine = chain.frames.last().and_then(|root| match root.kind {
+            AsyncFrameKind::Coroutine { .. } => Some(root.ty),
+            AsyncFrameKind::Leaf => None,
+        });
+        Ok(Some(StartedTask {
+            task: RuntimeTask {
+                state: TaskState::Runnable,
+                detail: Some("being spawned".into()),
+                entry: self.entry(stop, header),
+                ..task(number, header)
+            },
+            coroutine,
+        }))
     }
 }
 

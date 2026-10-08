@@ -4345,14 +4345,15 @@ impl crate::runtime_model::RuntimeModel for ScriptedRuntime {
     ) -> Option<std::result::Result<VirtualAddress, Arc<str>>> {
         None
     }
-    fn task_starter(&self) -> Option<ImageAddress> {
-        None
+    fn task_starters(&self) -> Vec<crate::runtime_model::TaskStarter> {
+        Vec::new()
     }
     fn started_task(
         &self,
         _stop: &dyn crate::runtime_model::RuntimeStop,
+        _starter: ImageAddress,
         _registers: &RegisterFile,
-    ) -> std::result::Result<crate::runtime_model::RuntimeTask, Arc<str>> {
+    ) -> std::result::Result<Option<crate::runtime_model::StartedTask>, Arc<str>> {
         Err("the script starts no tasks".into())
     }
     fn task_noun(&self) -> &'static str {

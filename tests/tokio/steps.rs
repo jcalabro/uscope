@@ -12,6 +12,7 @@ use uscope::{
 use crate::invariants::checked;
 use crate::stops::{integer, line, place};
 use crate::support::Scenario;
+use crate::workers::tasks;
 
 const BUILDS: [&str; 2] = ["tokio-steps-o0", "tokio-steps-o3"];
 const SOURCE: &str = "steps/src/main.rs";
@@ -461,5 +462,114 @@ async fn instruction_steps_and_advance_in_an_async_function() {
             }
             scenario.shutdown().await;
         }
+    }
+}
+
+/// `step task` on a line that spawns a task stops at the first line of
+/// the task it spawned, in that task, on whichever thread runs it: the
+/// first of the program's tasks, which says it is the task the step
+/// stopped in. The tasks spawned after it run the same code meanwhile.
+#[tokio::test]
+async fn step_task_on_a_spawn_line_stops_at_the_new_tasks_first_line() {
+    for fixture in BUILDS {
+        for mode in modes(fixture) {
+            let context = format!("{fixture} {mode:?}");
+            let spawn = if mode == Some("local") {
+                "// SPAWN: local"
+            } else {
+                "// SPAWN: runtime"
+            };
+            // An optimized build keeps no breakpoint on the spawn's own
+            // line, which a step from the line before still reaches.
+            let mut scenario = stopped_once(fixture, mode, "let handle = match").await;
+            assert_eq!(
+                step(&mut scenario, StepKind::OverSource).await,
+                ("main".to_owned(), line(SOURCE, spawn)),
+                "{context}"
+            );
+            assert_eq!(
+                step(&mut scenario, StepKind::IntoNewTask).await,
+                ("task".to_owned(), line(SOURCE, "// FIRST: task")),
+                "{context}"
+            );
+            let task = stopped_task(&mut scenario).await;
+            let (listed, _) = tasks(&scenario, 64).await;
+            assert!(
+                listed
+                    .iter()
+                    .filter(|listed| !listed.internal)
+                    .all(|listed| listed.id.number >= task),
+                "{context}: task {task} of {listed:#?}"
+            );
+            assert_eq!(
+                step(&mut scenario, StepKind::OverSource).await,
+                ("task".to_owned(), line(SOURCE, "// STEP: task")),
+                "{context}"
+            );
+            assert_eq!(stopped_task(&mut scenario).await, task, "{context}");
+            let me = integer(&scenario, "me").await;
+            assert!(
+                me == Some(i128::from(task)) || me.is_none() && optimized(fixture),
+                "{context}: {me:?}"
+            );
+            scenario.shutdown().await;
+        }
+    }
+}
+
+/// `step task` on a line that spawns no task ends where `next` does, as
+/// on a line that wakes a task the runtime schedules as it would a new
+/// one.
+#[tokio::test]
+async fn step_task_on_a_line_that_spawns_none_ends_as_next_does() {
+    let fixture = BUILDS[0];
+    for mode in modes(fixture) {
+        for marker in ["// SPAWNS: none", "// WAKES: gate"] {
+            let mut ends = Vec::new();
+            for kind in [StepKind::OverSource, StepKind::IntoNewTask] {
+                let mut scenario = stopped_once(fixture, mode, marker).await;
+                ends.push(step(&mut scenario, kind).await);
+                scenario.shutdown().await;
+            }
+            assert_eq!(ends[0], ends[1], "{mode:?} {marker}");
+            assert_ne!(ends[0].1, line(SOURCE, marker), "{mode:?} {marker}");
+        }
+    }
+}
+
+/// `step task` on a line of a task that spawns another stops at the first
+/// line of the task it spawned, wherever the runtime runs it, and the step
+/// belongs to the new task from then on.
+#[tokio::test]
+async fn step_task_from_a_task_follows_the_task_it_spawns() {
+    for fixture in BUILDS {
+        let context = fixture;
+        let mut scenario = stopped_once(fixture, Some("nested"), "// BEFORE: nested").await;
+        let parent = stopped_task(&mut scenario).await;
+        // The step from the line before ends on the spawn's line, which an
+        // optimized build runs as part of the line before.
+        let mut place = step(&mut scenario, StepKind::IntoNewTask).await;
+        if place == ("parent".to_owned(), line(SOURCE, "// SPAWN: nested")) {
+            place = step(&mut scenario, StepKind::IntoNewTask).await;
+        }
+        assert_eq!(
+            place,
+            ("child".to_owned(), line(SOURCE, "// FIRST: child")),
+            "{context}"
+        );
+        let child = stopped_task(&mut scenario).await;
+        assert_ne!(child, parent, "{context}");
+        assert_eq!(
+            step(&mut scenario, StepKind::OverSource).await.0,
+            "child",
+            "{context}"
+        );
+        assert_eq!(stopped_task(&mut scenario).await, child, "{context}");
+        let me = integer(&scenario, "me").await;
+        assert!(
+            me == Some(i128::from(child)) || me.is_none() && optimized(fixture),
+            "{context}: {me:?}"
+        );
+        scenario.shutdown().await;
     }
 }

@@ -14,8 +14,8 @@ use layout::{Goroutines, Labels, Layout, Missing, Threads};
 
 use super::{
     CodeAddress, Crossing, DynamicValue, Partial, RuntimeException, RuntimeHook, RuntimeImage,
-    RuntimeModel, RuntimeSignals, RuntimeStop, RuntimeTask, StoredValue, TaskContext, TaskLabels,
-    TaskPage, TaskRef, ThreadActivity,
+    RuntimeModel, RuntimeSignals, RuntimeStop, RuntimeTask, StartedTask, StoredValue, TaskContext,
+    TaskLabels, TaskPage, TaskRef, TaskStarter, ThreadActivity,
 };
 use crate::unwind::RegisterFile;
 use crate::{
@@ -521,8 +521,14 @@ impl RuntimeModel for GoRuntime {
             .ok_or_else(|| format!("copystack moves {g:#x}, which runs no goroutine").into())
     }
 
-    fn task_starter(&self) -> Option<ImageAddress> {
+    fn task_starters(&self) -> Vec<TaskStarter> {
         self.newproc1
+            .map(|entry| TaskStarter {
+                entry,
+                names_at_entry: false,
+            })
+            .into_iter()
+            .collect()
     }
 
     /// `newproc1` returns the new goroutine in rax, runnable or parked,
@@ -530,8 +536,9 @@ impl RuntimeModel for GoRuntime {
     fn started_task(
         &self,
         stop: &dyn RuntimeStop,
+        _starter: ImageAddress,
         registers: &RegisterFile,
-    ) -> Result<RuntimeTask, Arc<str>> {
+    ) -> Result<Option<StartedTask>, Arc<str>> {
         let g = registers
             .get(RAX)
             .ok_or("the goroutine newproc1 returns is unavailable")?;
@@ -540,6 +547,12 @@ impl RuntimeModel for GoRuntime {
         }
         let names = self.names(stop);
         self.goroutine(stop, names, g)?
+            .map(|task| {
+                Some(StartedTask {
+                    task,
+                    coroutine: None,
+                })
+            })
             .ok_or_else(|| format!("newproc1 returns {g:#x}, which is dead").into())
     }
 

@@ -24,8 +24,8 @@ use layout::{Context, Flavor, Layout, Locals, Owned, Tasks};
 use super::records::{self, Missing};
 use super::{
     Crossing, DynamicValue, Partial, RuntimeException, RuntimeHook, RuntimeImage, RuntimeModel,
-    RuntimeSignals, RuntimeStop, RuntimeTask, StoredValue, TaskContext, TaskEnd, TaskEntries,
-    TaskPage, TaskRef, ThreadActivity,
+    RuntimeSignals, RuntimeStop, StartedTask, StoredValue, TaskContext, TaskEnd, TaskEntries,
+    TaskPage, TaskRef, TaskStarter, ThreadActivity,
 };
 use crate::unwind::RegisterFile;
 use crate::{ImageAddress, StackSegment, TaskState, ThreadId, ThreadLocal, VirtualAddress};
@@ -41,8 +41,9 @@ const VERSIONED_SOURCE: &str = "src/runtime/task/raw.rs";
 /// The task state's bits (`runtime/task/state.rs`), which tokio keeps in
 /// constants its debug information does not describe.
 const RUNNING: u64 = 0b1;
-/// The register a function's first argument is passed in.
+/// The registers a function's first and second arguments are passed in.
 const RDI: u16 = 5;
+const RSI: u16 = 4;
 const COMPLETE: u64 = 0b10;
 const NOTIFIED: u64 = 0b100;
 const CANCELLED: u64 = 0b10_0000;
@@ -60,6 +61,28 @@ const POLL: &str = "tokio::runtime::task::raw::poll";
 const LAUNCH: [&str; 2] = [
     "multi_thread::worker::Launch>::launch::{closure",
     "multi_thread::worker::{impl#0}::launch::{closure_env",
+];
+/// The functions that start tasks, by the name debug information gives
+/// them and the start of their symbol's, and whether each also schedules
+/// woken tasks. A runtime binds each task it spawns to its list in
+/// `OwnedTasks::bind_inner`, the part of `bind` that is the same for every
+/// type of future; a `LocalSet` binds its tasks in a generic function, and
+/// schedules each one it spawns, as each it wakes, in `Shared::schedule`.
+/// Each takes the task as its second argument.
+const STARTERS: [(&str, &str, bool); 3] = [
+    (
+        "bind_inner<alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle, \
+         alloc::alloc::Global>>",
+        "tokio::runtime::task::list::OwnedTasks<",
+        false,
+    ),
+    (
+        "bind_inner<alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle, \
+         alloc::alloc::Global>>",
+        "tokio::runtime::task::list::OwnedTasks<",
+        false,
+    ),
+    ("schedule", "tokio::task::local::Shared", true),
 ];
 
 /// tokio, in an image that has its thread-local context.
@@ -106,6 +129,9 @@ struct TokioRuntime {
     futures: Mutex<BTreeMap<ImageAddress, Result<future::FutureLayout, Arc<str>>>>,
     /// Where the function that runs each coroutine type begins.
     bodies: Mutex<BTreeMap<crate::TypeReference, Option<ImageAddress>>>,
+    /// Where each function that starts tasks begins, and whether it also
+    /// schedules woken tasks.
+    starters: Vec<(ImageAddress, bool)>,
 }
 
 /// One runtime the stop's threads entered, or a `LocalSet` one runs or
@@ -200,8 +226,24 @@ impl TokioRuntime {
                 VERIFIED.0, VERIFIED.1
             )),
         };
+        let starters = STARTERS
+            .iter()
+            .flat_map(|&(name, symbol, schedules)| {
+                image
+                    .function_entries(name)
+                    .into_iter()
+                    .filter(|entry| {
+                        image
+                            .symbol_at(*entry)
+                            .is_some_and(|found| found.trim_start_matches('<').starts_with(symbol))
+                    })
+                    .map(move |entry| (entry, schedules))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         Self {
             layout: Layout::bind(image.as_ref()),
+            starters,
             image,
             caveat: caveat.map(Arc::from),
             vtables: Mutex::new(BTreeMap::new()),
@@ -626,16 +668,31 @@ impl RuntimeModel for TokioRuntime {
         None
     }
 
-    fn task_starter(&self) -> Option<ImageAddress> {
-        None
+    fn task_starters(&self) -> Vec<TaskStarter> {
+        self.starters
+            .iter()
+            .map(|&(entry, _)| TaskStarter {
+                entry,
+                names_at_entry: true,
+            })
+            .collect()
     }
 
     fn started_task(
         &self,
-        _stop: &dyn RuntimeStop,
-        _registers: &RegisterFile,
-    ) -> Result<RuntimeTask, Arc<str>> {
-        Err("tokio's tasks are not watched as they start".into())
+        stop: &dyn RuntimeStop,
+        starter: ImageAddress,
+        registers: &RegisterFile,
+    ) -> Result<Option<StartedTask>, Arc<str>> {
+        let &(_, schedules) = self
+            .starters
+            .iter()
+            .find(|(entry, _)| *entry == starter)
+            .ok_or("tokio starts no task there")?;
+        let header = registers
+            .get(RSI)
+            .ok_or("the task being started is unavailable")?;
+        self.started(stop, header, schedules)
     }
 
     fn task_noun(&self) -> &'static str {
