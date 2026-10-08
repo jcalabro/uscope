@@ -159,10 +159,16 @@ fn check_stop(stop: &Stop) -> Result<(), String> {
                         task.number, stop.gaps
                     ));
                 }
-                if !trace
-                    .frames
-                    .iter()
-                    .any(|frame| frame.role == CodeRole::Dispatch)
+                // Its frames reach tokio's dispatch, unless they stop
+                // before it where no unwind information goes on: glibc's
+                // clone3, which the task's thread is in while it starts
+                // another, ends its unwind information before the syscall.
+                let short = matches!(trace.termination, UnwindTermination::NoUnwindInfo { .. });
+                if !short
+                    && !trace
+                        .frames
+                        .iter()
+                        .any(|frame| frame.role == CodeRole::Dispatch)
                 {
                     return Err(format!(
                         "thread {thread} runs task {} without tokio's dispatch: {trace:#?}",
