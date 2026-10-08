@@ -471,6 +471,7 @@ pub(super) fn load_variable_info<'data>(
     let mut vtables = Vec::new();
     let mut go_function_entries = HashMap::new();
     let mut unnamed_parameters = Vec::new();
+    let mut abstract_bodies = Vec::new();
     let mut function_generics = BTreeMap::new();
     let mut order = 0_u64;
     let evaluation_units = load_evaluation_units(units)?;
@@ -552,6 +553,7 @@ pub(super) fn load_variable_info<'data>(
                         types: &mut types,
                         source_files,
                         source_file_ids,
+                        bodies: &mut abstract_bodies,
                     },
                 )?;
             }
@@ -1087,6 +1089,7 @@ pub(super) fn load_variable_info<'data>(
                     types: &mut types,
                     source_files,
                     source_file_ids,
+                    bodies: &mut abstract_bodies,
                 },
             )?;
         }
@@ -1168,6 +1171,13 @@ pub(super) fn load_variable_info<'data>(
             future.coroutine = Some(coroutine);
         }
     }
+    for (instance, ty) in abstract_bodies {
+        if let Some(coroutine) =
+            crate::debug_info::coroutines::pinned_coroutine(&finalized_types, ty)
+        {
+            coroutine_bodies.entry(instance).or_insert(coroutine);
+        }
+    }
     let running = coroutines
         .iter()
         .filter_map(|(ty, coroutine)| Some((*ty, coroutine.as_ref().ok()?.clone())))
@@ -1238,6 +1248,9 @@ struct AbstractTargets<'a, 'data, 'units> {
     types: &'a mut TypeArenaBuilder<'units, 'data>,
     source_files: &'a mut Vec<SourceFile>,
     source_file_ids: &'a mut HashMap<PathBuf, SourceFileId>,
+    /// The instances whose abstract function takes an unnamed parameter,
+    /// as an `async fn`'s body takes its future, and its type.
+    bodies: &'a mut Vec<(CodeInstanceId, TypeId)>,
 }
 
 /// Adds the named variables and parameters of a concrete instance's
@@ -1273,6 +1286,17 @@ fn add_abstract_only_variables<'data>(
             continue;
         }
         let Some(name) = string_attribute_of(dwarf, unit, entry)? else {
+            // An inlined `async fn` body may keep no DIE for the future
+            // its abstract function takes, which still says what it runs.
+            if kind == VariableKind::Parameter
+                && routine.scope.rust.is_some()
+                && let Some(instance) = routine.scope.code_instance
+                && let TypeResolution::Resolved(ty) = targets
+                    .types
+                    .variable_type(routine.origin.unit, entry.attr_value(gimli::DW_AT_type))
+            {
+                targets.bodies.push((instance, ty));
+            }
             continue;
         };
         let declaration = declaration_with_origins(
