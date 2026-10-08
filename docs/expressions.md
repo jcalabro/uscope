@@ -581,6 +581,21 @@ light == RED           => false : bool
 light == Light::AMBER  => true : bool
 ```
 
+A tagged union, such as a Rust enum, equals the bare name of the variant it
+holds, and a member of a variant it does not hold is unavailable.
+
+```uscope-example
+world: memory
+maybe == Some          => true : bool
+maybe != None          => true : bool
+nothing == Some        => false : bool
+None == nothing        => true : bool
+maybe.Some.0           => 5 : int
+nothing.Some.0         => unavailable at `nothing.Some`
+maybe == Other         => error unknown-name at `Other`
+maybe == 1             => error type at `maybe == 1`
+```
+
 ## Text
 
 A string literal compares with the program's text: a `char*`, a character
