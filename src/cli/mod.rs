@@ -229,6 +229,8 @@ pub struct Cli {
     /// them, or 0.
     columns: std::sync::atomic::AtomicUsize,
     rows: std::sync::atomic::AtomicUsize,
+    /// The exceptions that stop, as `catch` last chose them.
+    exceptions: std::sync::Mutex<uscope::ExceptionStops>,
     /// The expressions every stop prints.
     displays: std::sync::Mutex<stops::Displays>,
     /// The values the last stops showed, which a stop marks changes from.
@@ -276,6 +278,7 @@ impl Cli {
             kept: std::sync::OnceLock::new(),
             columns: std::sync::atomic::AtomicUsize::new(0),
             rows: std::sync::atomic::AtomicUsize::new(0),
+            exceptions: std::sync::Mutex::default(),
             displays: std::sync::Mutex::default(),
             changes: std::sync::Mutex::default(),
             highlights: std::sync::Mutex::default(),
@@ -448,6 +451,9 @@ impl Cli {
         self.announce(args)?;
         self.load_views(&self.settings.root, &args.views).await;
         self.apply_signal_settings().await?;
+        if self.settings.config.step.runtime == config::StepRuntime::Enter {
+            self.debugger.set_step_into_runtime(true).await?;
+        }
         // Scripts behave the same in every checkout, so only a session at
         // a terminal keeps its breakpoints.
         if !args.batch

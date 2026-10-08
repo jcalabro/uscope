@@ -657,7 +657,20 @@ async fn cpp_returned_values_agree_with_their_program() {
 
 #[tokio::test]
 async fn rust_returned_values_agree_with_their_program() {
-    for (fixture, optimized) in [("returns-rust-o0", false), ("returns-rust-o2", true)] {
+    for (fixture, optimized, unknown) in [
+        (
+            "returns-rust-o0",
+            false,
+            &["returned-triple:r_triple.a"][..],
+        ),
+        // Optimization stops returning the payload of `r_pending`, which
+        // nothing reads, and says the convention no longer holds.
+        (
+            "returns-rust-o2",
+            true,
+            &["returned-triple:r_triple.a", "returned-pending:r_pending"][..],
+        ),
+    ] {
         check_gallery(&Gallery {
             fixture,
             breakpoints: &["reached"],
@@ -667,15 +680,21 @@ async fn rust_returned_values_agree_with_their_program() {
                 "returned-u128",
                 "returned-f64",
                 "returned-f32",
-                "returned-level",
                 "returned-pair",
+                "returned-level",
+                "returned-poll",
+                "returned-pending",
+                "returned-floats",
+                "returned-option",
+                "returned-triple",
                 "returned-unit",
             ],
             optimized,
             required: &[],
             go: false,
-            // Rust's own convention is unspecified for aggregates.
-            unknown: &["returned-pair:r_pair.first"],
+            // Rust's own convention is unspecified for aggregates of more
+            // than two scalars.
+            unknown,
         })
         .await;
     }

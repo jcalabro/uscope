@@ -62,14 +62,22 @@ impl Session {
             None => None,
         };
         let mut threads = Vec::new();
-        for thread in snapshot.iter().flat_map(|snapshot| snapshot.threads.iter()) {
-            threads.push(json!({
-                "id": self.thread_ids.id(ExecutionContext::Thread(thread.id))?,
-                "name": thread.name.as_deref().map_or_else(
-                    || format!("Thread {}", thread.id),
-                    |name| format!("{name} ({})", thread.id)
-                ),
-            }));
+        if let Some(snapshot) = &snapshot {
+            for thread in snapshot.threads.iter() {
+                // A thread the stop found stopped for a reason of its own,
+                // such as a breakpoint it hit too, says what stopped it.
+                let stopped = match &thread.state {
+                    uscope::ThreadState::Stopped {
+                        reason: Some(reason),
+                    } if self.stop.is_some() => Some(self.stopped_detail(reason)),
+                    _ => None,
+                };
+                let context = ExecutionContext::Thread(thread.id);
+                threads.push(json!({
+                    "id": self.thread_ids.id(context)?,
+                    "name": thread_name(snapshot, context, stopped),
+                }));
+            }
         }
         if !threads.is_empty() {
             return Ok(json!({"threads": threads}));
@@ -92,10 +100,10 @@ impl Session {
     /// program has none or the client's threads are the system's.
     ///
     /// DAP cannot page threads, so the list is ordered by what a user looks
-    /// for first: the task that stopped, the tasks on threads and any
-    /// thread that stopped running none, then the program's tasks, and
-    /// with `runtimeTasks` the runtime's. It is cut at `maxTasks`, and a
-    /// last entry counts the rest.
+    /// for first: the task that stopped, the tasks on threads, any thread
+    /// that stopped running none, and the program's own threads, then the
+    /// program's tasks, and with `runtimeTasks` the runtime's. It is cut
+    /// at `maxTasks`, and a last entry counts the rest.
     async fn task_threads(&mut self, stop: &Stop) -> Result<Option<Vec<Value>>, ErrorBody> {
         let Some(listing) = self.thread_listing().filter(|listing| listing.tasks) else {
             return Ok(None);
@@ -153,10 +161,12 @@ impl Session {
             })
             .collect::<Vec<_>>();
         // A thread that stopped for a reason of its own but runs no task is
-        // there too, so its stop can be inspected.
+        // there too, so its stop can be inspected, and so is every thread
+        // of the program's own; only a runtime's idle threads are not.
         for thread in snapshot.threads.iter() {
             let runs_task = matches!(thread.activity, Some(uscope::ThreadActivity::Task { .. }));
-            if !runs_task && stopped(thread.id).is_some() {
+            let own = matches!(thread.activity, Some(uscope::ThreadActivity::Outside));
+            if !runs_task && (own || stopped(thread.id).is_some()) {
                 let context = ExecutionContext::Thread(thread.id);
                 entries.push((rank(context, true, false), None, context));
             }
@@ -254,9 +264,18 @@ impl Session {
         for (frame, iterates) in trace.frames.iter().zip(iterators) {
             if switches && segment != Some(frame.segment) {
                 segment = Some(frame.segment);
+                entries.push(Err(
+                    crate::cli::format::stack_label(frame.segment).to_owned()
+                ));
+            }
+            for future in trace
+                .unfollowed
+                .iter()
+                .filter(|future| future.driver == frame.id)
+            {
                 entries.push(Err(format!(
-                    "on {}",
-                    crate::cli::format::stack_owner(frame.segment)
+                    "<the future the next frame drives is not shown in full: {}>",
+                    future.reason
                 )));
             }
             entries.push(Ok((frame, iterates)));
@@ -330,7 +349,13 @@ impl Session {
             execution,
             frame: frame.id,
         })?;
-        let mut name = if frame.function.is_none() && frame.symbol.is_none() {
+        let mut name = if let uscope::FrameKind::Awaited { .. } = frame.kind {
+            let image = match frame.module {
+                Some(module) => self.image(module).await,
+                None => None,
+            };
+            crate::cli::format::awaited_frame(image.as_deref(), frame).unwrap_or_default()
+        } else if frame.function.is_none() && frame.symbol.is_none() {
             // Code without a name is named by its address and module.
             let module = match frame.module {
                 Some(module) => self.image(module).await.and_then(|image| {
@@ -341,10 +366,10 @@ impl Session {
                 }),
                 None => None,
             };
-            format!(
-                "{:#x}{}",
-                frame.instruction.get(),
-                module.unwrap_or_default()
+            let module = module.unwrap_or_default();
+            frame.instruction.map_or_else(
+                || format!("a suspended frame{module}"),
+                |address| format!("{address:#x}{module}"),
             )
         } else {
             crate::cli::format::code_name(frame.function.as_ref(), frame.symbol.as_ref())
@@ -352,15 +377,20 @@ impl Session {
         match frame.kind {
             uscope::FrameKind::Inline => name.push_str(" [inlined]"),
             uscope::FrameKind::TailCall => name.push_str(" [tail call]"),
-            uscope::FrameKind::Physical | uscope::FrameKind::Signal => {}
+            uscope::FrameKind::Async { .. } => name.insert_str(0, "async "),
+            uscope::FrameKind::Physical
+            | uscope::FrameKind::Signal
+            | uscope::FrameKind::Awaited { .. } => {}
         }
         let mut body = json!({
             "id": id,
             "name": name,
             "line": 0,
             "column": 0,
-            "instructionPointerReference": format!("{:#x}", frame.instruction.get()),
         });
+        if let Some(address) = frame.instruction {
+            body["instructionPointerReference"] = format!("{address:#x}").into();
+        }
         if let Some(module) = frame.module {
             body["moduleId"] = module.get().to_string().into();
         }
@@ -501,7 +531,11 @@ impl Session {
                 "expensive": false,
             })),
         }
-        if let Some((module, file)) = self.frame_file(context).await {
+        let frame = self.frame_of(context).await;
+        if let Some((module, file)) = frame
+            .as_ref()
+            .and_then(|frame| Some((frame.module?, frame.source.as_ref()?.file)))
+        {
             let reference = self.references.variables(Variables::Statics {
                 context,
                 module,
@@ -513,15 +547,18 @@ impl Session {
                 "expensive": true,
             }));
         }
-        let reference = self
-            .references
-            .variables(Variables::Registers { context })?;
-        scopes.push(json!({
-            "name": "Registers",
-            "presentationHint": "registers",
-            "variablesReference": reference,
-            "expensive": true,
-        }));
+        // A suspended task's frame has no registers.
+        if !frame.is_some_and(|frame| frame.kind.is_suspended()) {
+            let reference = self
+                .references
+                .variables(Variables::Registers { context })?;
+            scopes.push(json!({
+                "name": "Registers",
+                "presentationHint": "registers",
+                "variablesReference": reference,
+                "expensive": true,
+            }));
+        }
         Ok(json!({"scopes": scopes}))
     }
 
@@ -659,7 +696,11 @@ impl Session {
         options: Options,
     ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
         let snapshot = self.frame_variables(context).await?;
-        let module = self.frame_file(context).await.map(|(module, _)| module);
+        let module = self
+            .frame_of(context)
+            .await
+            .filter(|frame| frame.source.is_some())
+            .and_then(|frame| frame.module);
         let handle = self.target_handle()?;
         let code = self.code();
         let listed = presenter(&handle, &code, options)
@@ -669,17 +710,14 @@ impl Session {
     }
 
     /// The module and source file of a frame's location, when it has one.
-    async fn frame_file(
-        &mut self,
-        context: StopContext,
-    ) -> Option<(uscope::ModuleId, uscope::SourceFileId)> {
+    async fn frame_of(&mut self, context: StopContext) -> Option<StackFrame> {
         let stop = self.current_stop().ok()?;
         let trace = self.backtrace(&stop, context.execution).await.ok()?;
-        let frame = trace
+        trace
             .frames
             .iter()
-            .find(|frame| frame.id == context.frame)?;
-        Some((frame.module?, frame.source.as_ref()?.file))
+            .find(|frame| frame.id == context.frame)
+            .cloned()
     }
 
     /// Presents what the shared presenter listed as the client's variables.

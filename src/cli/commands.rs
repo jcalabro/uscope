@@ -35,6 +35,7 @@ const DISASSEMBLY_CONTEXT_AFTER: u32 = 16;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Handle,
+    Catch,
     Views,
     Break,
     Tbreak,
@@ -207,6 +208,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Show or change how a signal is handled: stop|nostop, print|noprint, pass|nopass"
     ),
     command!(
+        Catch,
+        "catch",
+        [],
+        "catch [exception] [on|off]",
+        "Show or choose which exceptions language runtimes report stop, such as rust-panic"
+    ),
+    command!(
         Delete,
         "delete",
         ["del", "d"],
@@ -339,7 +347,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         "set",
         [],
         "set [var] <assignment...>",
-        "Change a number, truth value, enumeration, or pointer, such as set var x = y + 1; set views on|off shows values as their views present them or as stored"
+        "Change a number, truth value, enumeration, or pointer, such as set var x = y + 1; set views on|off shows values as their views present them or as stored; set step-runtime on|off makes steps stop in a language runtime's own code or pass over it"
     ),
     command!(
         Views,
@@ -464,8 +472,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Backtrace,
         "backtrace",
         ["bt"],
-        "backtrace",
-        "Show the selected thread's or task's stack"
+        "backtrace [-r]",
+        "Show the selected thread's or task's stack; -r shows the runtime frames it folds"
     ),
     command!(
         Frame,
@@ -544,7 +552,8 @@ pub fn command_named(name: &str) -> Option<&'static CommandSpec> {
 }
 
 /// A command's other names, with each runtime's own name for its tasks for
-/// the commands about tasks: `goroutines` for `tasks` in Go.
+/// the commands about tasks: `goroutines` for `tasks` in Go. A runtime that
+/// calls its tasks tasks adds none.
 pub fn aliases(command: &CommandSpec) -> impl Iterator<Item = &'static str> {
     let nouns = uscope::TASK_NOUNS.iter();
     let runtime = match command.command {
@@ -552,7 +561,11 @@ pub fn aliases(command: &CommandSpec) -> impl Iterator<Item = &'static str> {
         Command::Task => nouns.map(|(singular, _)| *singular).collect(),
         _ => Vec::new(),
     };
-    command.aliases.iter().copied().chain(runtime)
+    command
+        .aliases
+        .iter()
+        .copied()
+        .chain(runtime.into_iter().filter(|noun| *noun != command.name))
 }
 
 /// Whether `word` names a task: `task`, or a runtime's own name for one,
@@ -647,6 +660,7 @@ impl Cli {
             Command::Breakpoints => self.list_breakpoints().await?,
             Command::Info => self.info(&arguments, rest, spec).await?,
             Command::Handle => self.handle_signal(&arguments).await?,
+            Command::Catch => self.catch(&arguments, spec).await?,
             Command::Delete => self.delete(&arguments, false, spec).await?,
             Command::Enable => self.set_enabled(&arguments, true, spec).await?,
             Command::Disable => self.set_enabled(&arguments, false, spec).await?,
@@ -706,7 +720,11 @@ impl Cli {
             }
             Command::Context => self.context().await?,
             Command::Edit => self.edit().await?,
-            Command::Backtrace => self.backtrace(None).await?,
+            Command::Backtrace => match arguments.as_slice() {
+                [] => self.backtrace(None, false).await?,
+                ["-r"] => self.backtrace(None, true).await?,
+                _ => return Err(spec.usage_error()),
+            },
             Command::Frame | Command::Up | Command::Down => {
                 self.frame(parse_frame_target(spec, first)?).await?
             }
@@ -716,16 +734,22 @@ impl Cli {
             Command::Tasks => self.tasks(line, &arguments, spec).await?,
             Command::Task => self.task(line, &arguments).await?,
             Command::Clear => return Ok(Control::ClearScreen),
-            Command::Help => match first {
-                Some(name) => format::command_help(
-                    command_named(name).ok_or_else(|| anyhow!("unknown command '{name}'"))?,
-                    renderer,
-                ),
-                None => format::help(&self.settings.config.aliases, renderer),
-            },
+            Command::Help => self.help(first)?,
             Command::Quit => return Ok(Control::Quit),
         };
         Ok(Control::Continue(output))
+    }
+
+    /// Help on one command, or on every one.
+    fn help(&self, command: Option<&str>) -> Result<String> {
+        let renderer = self.renderers.stdout;
+        Ok(match command {
+            Some(name) => format::command_help(
+                command_named(name).ok_or_else(|| anyhow!("unknown command '{name}'"))?,
+                renderer,
+            ),
+            None => format::help(&self.settings.config.aliases, renderer),
+        })
     }
 
     /// Runs until the selected thread reaches `location` or its frame
@@ -1458,11 +1482,14 @@ impl Cli {
         let traces = self.task_traces().await?;
         let noun = traces.tasks.first().map_or("task", |(task, _)| task.noun);
         let renderer = self.renderers.stdout;
-        let shown = traces
+        // A runtime's lists keep its tasks in an order of their own, so
+        // they are shown by number.
+        let mut shown = traces
             .tasks
             .iter()
             .filter(|(task, _)| all || !task.internal)
             .collect::<Vec<_>>();
+        shown.sort_by_key(|(task, _)| task.id);
         if traces.tasks.is_empty() {
             match traces.gaps.as_slice() {
                 [] => bail!("the program has no {name}"),
@@ -1495,9 +1522,15 @@ impl Cli {
                 ));
                 if stacks {
                     let stack = match trace {
-                        Ok(trace) => {
-                            format::backtrace(trace, u32::MAX, None, None, &traces.images, renderer)
-                        }
+                        Ok(trace) => format::backtrace(
+                            trace,
+                            u32::MAX,
+                            None,
+                            None,
+                            &traces.images,
+                            false,
+                            renderer,
+                        ),
                         Err(error) => error.to_string(),
                     };
                     lines.extend(stack.lines().map(|line| format!("    {line}")));
@@ -1540,7 +1573,13 @@ impl Cli {
             let traces = self.traced(vec![task], Vec::new()).await?;
             let (task, trace) = &traces.tasks[0];
             let place = format::task_place(task, trace, &traces.images, renderer);
-            return Ok(format::task(task, &place, true, renderer));
+            let line = format::task(task, &place, true, renderer);
+            return Ok(
+                match format::task_creation(task, &traces.images, renderer) {
+                    Some(creation) => format!("{line}\n    {creation}"),
+                    None => line,
+                },
+            );
         };
         let number = argument
             .parse::<u64>()
@@ -1598,8 +1637,11 @@ impl Cli {
         &self,
         frames: impl Iterator<Item = &StackFrame>,
     ) -> Result<BTreeMap<ModuleId, Arc<ModuleImage>>> {
+        // An awaited future is named by its type, which its image holds.
         let modules = frames
-            .filter(|frame| frame.source.is_some())
+            .filter(|frame| {
+                frame.source.is_some() || matches!(frame.kind, uscope::FrameKind::Awaited { .. })
+            })
             .filter_map(|frame| frame.module)
             .collect::<std::collections::BTreeSet<_>>();
         let mut images = BTreeMap::new();
@@ -1972,6 +2014,14 @@ impl Cli {
                 }
             ));
         }
+        if let Some(setting @ ("on" | "off")) = text.strip_prefix("step-runtime ").map(str::trim) {
+            self.debugger.set_step_into_runtime(setting == "on").await?;
+            return Ok(if setting == "on" {
+                "steps stop in runtime code".to_owned()
+            } else {
+                "steps pass over runtime code".to_owned()
+            });
+        }
         let text = text.strip_prefix("var ").map_or(text, str::trim);
         let expression = parse_expression(text)?;
         let Some(target) = expression.assignment_target() else {
@@ -2226,8 +2276,9 @@ impl Cli {
                 .frames
                 .iter()
                 .find(|frame| frame.level == level)
-                .map(|frame| frame.instruction)
-                .ok_or_else(|| anyhow!("the selected frame {level} no longer exists"));
+                .ok_or_else(|| anyhow!("the selected frame {level} no longer exists"))?
+                .instruction
+                .ok_or_else(|| anyhow!("frame {level} is suspended, and runs no code"));
         }
         let registers = self.debugger.registers().await?;
         registers
@@ -2288,12 +2339,16 @@ impl Cli {
 
         let renderer = self.renderers.stdout;
         let modules = self.debugger.loaded_modules().await?;
-        let mut images = BTreeMap::new();
-        if let (Some(module), Some(_)) = (frame.module, &frame.source) {
-            images.insert(module, self.debugger.loaded_module_image(module).await?);
-        }
-        let mut output =
-            format::stack_frame(&frame, iterates, Some(&modules), &images, true, renderer);
+        let images = self.source_images(std::iter::once(&frame)).await?;
+        let mut output = format::stack_frame(
+            &frame,
+            iterates,
+            Some(&modules),
+            &images,
+            true,
+            false,
+            renderer,
+        );
         if frame.source.is_some() {
             output.push('\n');
             match self.source_context().await {
@@ -2334,6 +2389,16 @@ impl Cli {
             }
             Err(error) => return Err(error.into()),
         };
+        self.describe(&location, with_address).await
+    }
+
+    /// Where a location is: its function, then its line or address.
+    pub(super) async fn describe(
+        &self,
+        location: &uscope::ExecutionLocation,
+        with_address: bool,
+    ) -> Result<String> {
+        let renderer = self.renderers.stdout;
         let name = format::code_name(
             location.image.function.as_ref(),
             location.image.symbol.as_ref(),
@@ -2394,7 +2459,7 @@ impl Cli {
     }
 
     /// The selected thread's backtrace, of at most `limit` frames.
-    pub(super) async fn backtrace(&self, limit: Option<usize>) -> Result<String> {
+    pub(super) async fn backtrace(&self, limit: Option<usize>, raw: bool) -> Result<String> {
         let selected = self.selected_level().await?;
         let trace = self.debugger.backtrace().await?;
         let modules = if trace
@@ -2414,6 +2479,7 @@ impl Cli {
             limit,
             modules.as_ref(),
             &images,
+            raw,
             self.renderers.stdout,
         ))
     }
@@ -2968,6 +3034,66 @@ impl Cli {
             &[(code, policy)],
             self.renderers.stdout,
         ))
+    }
+}
+
+impl Cli {
+    /// Lists the exceptions runtimes report and whether each stops, or
+    /// shows one, or chooses whether it does.
+    async fn catch(&self, arguments: &[&str], spec: &CommandSpec) -> Result<String> {
+        let current = *self
+            .exceptions
+            .lock()
+            .expect("the exception stops are whole");
+        let filters = uscope::ExceptionStops::filters();
+        let (shown, stops) = match arguments {
+            [] => (filters.iter().collect::<Vec<_>>(), current),
+            [name, choice @ ..] => {
+                let filter = filters
+                    .iter()
+                    .find(|filter| filter.id == *name)
+                    .ok_or_else(|| {
+                        let names = filters.iter().map(|filter| filter.id).collect::<Vec<_>>();
+                        anyhow!(
+                            "unknown exception '{name}'; runtimes report {}",
+                            names.join(", ")
+                        )
+                    })?;
+                let stops = match choice {
+                    [] => current,
+                    ["on" | "off"] => {
+                        let chosen = current
+                            .with(filter.id, choice[0] == "on")
+                            .expect("a listed filter");
+                        self.debugger.set_exception_stops(chosen).await?;
+                        *self
+                            .exceptions
+                            .lock()
+                            .expect("the exception stops are whole") = chosen;
+                        chosen
+                    }
+                    _ => return Err(spec.usage_error()),
+                };
+                (vec![filter], stops)
+            }
+        };
+        let width = shown
+            .iter()
+            .map(|filter| filter.id.len())
+            .max()
+            .unwrap_or(0);
+        Ok(shown
+            .iter()
+            .map(|filter| {
+                format!(
+                    "{:width$}  {:3}  {}",
+                    filter.id,
+                    if stops.stops(filter.id) { "on" } else { "off" },
+                    filter.label,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 }
 

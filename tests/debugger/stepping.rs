@@ -470,7 +470,8 @@ async fn steps_from_marked_epilogues_complete_in_the_caller() {
                 .filter(|frame| frame.kind != uscope::FrameKind::Inline)
                 .nth(1)
                 .expect("the return line's caller")
-                .instruction;
+                .instruction
+                .expect("a thread's frame has an instruction");
 
             assert_eq!(
                 scenario.step_to_stop(kind).await,
@@ -1407,7 +1408,9 @@ async fn a_user_breakpoint_interrupts_finish_at_a_shared_site() {
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
         .await;
-    let return_address = trace.frames[1].instruction;
+    let return_address = trace.frames[1]
+        .instruction
+        .expect("a thread's frame has an instruction");
     let breakpoint = scenario
         .operation(
             "add breakpoint at return address",

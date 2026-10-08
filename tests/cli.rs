@@ -1,5 +1,6 @@
 mod support;
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -157,8 +158,10 @@ fn process_state(pid: u32) -> Option<char> {
     stat.rsplit_once(')')?.1.trim_start().chars().next()
 }
 
-/// The harness's deadline for anything a test waits to observe.
-const DEADLINE: Duration = Duration::from_secs(5);
+/// The harness's deadline for anything a test waits to observe. It bounds
+/// a hung session, never a wait a passing test makes: loading a large
+/// program, such as a tokio fixture, takes seconds on a loaded machine.
+const DEADLINE: Duration = Duration::from_secs(30);
 
 /// A uscope process whose output a test reads as it arrives. It is killed if
 /// the test ends first, which also kills an inferior it launched or attached
@@ -656,6 +659,345 @@ fn batch_mode_prints_every_location_of_an_inline_breakpoint() {
     assert_eq!(stdout.matches("  0x").count(), 6, "{stdout}");
 }
 
+/// Each other thread a stop finds at a breakpoint gets a line of its own
+/// after the stop's, naming its hit and place, as the threads list has it.
+#[test]
+fn every_co_hit_prints_a_line_of_its_own() {
+    let mut commands = vec!["break contended", "run", "threads"];
+    for _ in 0..10 {
+        commands.extend(["continue", "threads"]);
+    }
+    let stdout = batch(&["build/test-programs/hit-count-threads"], &commands);
+    let place = " in contended at tests/fixtures/c/hit-count-threads.c:16";
+    let mut co_hits = 0;
+    for stop in stdout.split("\nstopped at breakpoint 1 ").skip(1) {
+        let stopped = stop
+            .split_once("[thread ")
+            .and_then(|(_, rest)| rest.split_once(' '))
+            .map(|(thread, _)| thread)
+            .expect("the stop names its thread");
+        let mut listed = BTreeSet::new();
+        let mut reported = BTreeSet::new();
+        for line in stop.lines() {
+            if let Some(rest) = line.strip_prefix("thread ") {
+                let (thread, rest) = rest.split_once(' ').expect("a co-hit names its thread");
+                let hit = rest
+                    .strip_prefix("also stopped at breakpoint 1 (hit ")
+                    .and_then(|rest| rest.strip_suffix(&format!("){place}")))
+                    .unwrap_or_else(|| panic!("{line:?}"));
+                reported.insert((thread.to_owned(), hit.to_owned()));
+            } else if let Some((thread, hit)) = line
+                .strip_prefix("  ")
+                .and_then(|rest| rest.split_once(' '))
+                .and_then(|(thread, rest)| {
+                    let (_, hit) = rest.split_once(": stopped at breakpoint 1 (hit ")?;
+                    Some((thread, hit.strip_suffix(')')?))
+                })
+            {
+                listed.insert((thread.to_owned(), hit.to_owned()));
+            } else if let Some(selected) = line.strip_prefix("* ") {
+                assert!(selected.starts_with(&format!("{stopped} ")), "{stop}");
+            }
+        }
+        assert_eq!(reported, listed, "{stop}");
+        co_hits += reported.len();
+    }
+    // The workers call `contended` together, so many of their hits come
+    // at the same stop.
+    assert!(co_hits > 0, "{stdout}");
+}
+
+/// A thread whose runtime cannot be read says so, and why, rather than
+/// looking like one that runs nothing.
+#[test]
+fn threads_say_when_what_they_run_is_unknown() {
+    let stdout = batch(
+        &["build/test-programs/tokio-workers-lines"],
+        &["break truth_reached", "run", "threads"],
+    );
+    let threads = stdout
+        .lines()
+        .filter(|line| line.contains(" stopped"))
+        .filter(|line| line.starts_with("  ") || line.starts_with("* "))
+        .collect::<Vec<_>>();
+    assert_eq!(threads.len(), 5, "{stdout}");
+    for thread in threads {
+        assert!(
+            thread.ends_with(
+                " — unknown: what the thread does for tokio cannot be read: the program \
+                 describes no type \
+                 std::sys::thread_local::native::eager::Storage<tokio::runtime::context::Context>"
+            ),
+            "{stdout}"
+        );
+    }
+}
+
+/// tokio's tasks are listed by number, whatever order its lists keep
+/// them in, each saying what it does and the thread it is on, and where
+/// a suspended one waits in the program's own code, past tokio's, and for
+/// what: the first task spawned waits for a message, the second sleeps.
+#[test]
+fn tokio_tasks_are_listed_by_number() {
+    let stdout = batch(
+        &["build/test-programs/tokio-workers-o0"],
+        &["break truth_reached", "run", "tasks"],
+    );
+    let tasks = stdout
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("  [")
+                .or_else(|| line.strip_prefix("* ["))
+        })
+        .map(|line| {
+            let (number, rest) = line.split_once(']').expect("a task number");
+            (number.parse::<u64>().expect("a number"), rest)
+        })
+        .collect::<Vec<_>>();
+    let numbers = tasks.iter().map(|(number, _)| *number).collect::<Vec<_>>();
+    assert_eq!(numbers, (3..=12).collect::<Vec<_>>(), "{stdout}");
+    for (number, rest) in &tasks {
+        let expected = match number {
+            3 => " — receiving; senders: 1",
+            4 => " — sleeping until +",
+            11 => " — running a blocking closure (thread ",
+            12 => " — queued in the blocking pool",
+            _ => " — ",
+        };
+        assert!(rest.contains(expected), "{stdout}");
+        if *number < 11 {
+            assert!(
+                rest.starts_with(" leaf at tests/fixtures/rust/tokio/workers/src/main.rs:"),
+                "{stdout}"
+            );
+        }
+    }
+}
+
+/// `task` alone shows the selected task and where it was created: the
+/// call that created a goroutine, and the line tokio recorded spawning a
+/// task from, in a build with `tokio_unstable`.
+#[test]
+fn a_task_says_where_it_was_created() {
+    let created = |program: &str, commands: &[&str], source: &str| {
+        let stdout = batch(&[program], commands);
+        let line = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("    created "))
+            .unwrap_or_else(|| panic!("a creation: {stdout}"))
+            .to_owned();
+        let (place, number) = line
+            .rsplit_once(':')
+            .unwrap_or_else(|| panic!("a line: {line}"));
+        let number = number.parse::<usize>().expect("a line number");
+        let text = std::fs::read_to_string(fixture(source)).expect("the fixture's source");
+        let creating = text.lines().nth(number - 1).expect("the line").to_owned();
+        (place.to_owned(), creating)
+    };
+    let source = "tests/fixtures/rust/tokio/workers/src/main.rs";
+    let (place, creating) = created(
+        "build/test-programs/tokio-workers-unstable",
+        &["break truth_reached", "run", "task 4", "task"],
+        source,
+    );
+    assert_eq!(place, format!("at {source}"));
+    assert!(creating.contains("tokio::spawn("), "{creating}");
+    let source = "tests/fixtures/go/workers/main.go";
+    let (place, creating) = created(
+        "build/test-programs/workers-go-o0",
+        &["break main.worker", "run", "goroutine"],
+        source,
+    );
+    assert_eq!(place, format!("by main.main at {source}"));
+    assert!(creating.trim_start().starts_with("go "), "{creating}");
+}
+
+/// A task's panic stop says where it panicked, on which thread, and in
+/// which task, then the message, and shows the source there.
+#[test]
+fn a_task_panic_says_where_and_in_which_task() {
+    let stdout = batch(
+        &["build/test-programs/tokio-panics-o0", "--", "format"],
+        &["run", "threads"],
+    );
+    let (header, rest) = stdout
+        .split_once(":\npanicked: formatted 7 times\n")
+        .unwrap_or_else(|| panic!("a panic stop: {stdout}"));
+    let header = header.lines().last().expect("the stop's header");
+    let source = "tests/fixtures/rust/tokio/panics/src/main.rs";
+    let line = support::source_line(source, "// PANIC: format");
+    assert!(
+        header.starts_with(&format!(
+            "stopped as an exception was raised in formatted at {source}:{line} [thread "
+        )),
+        "{stdout}"
+    );
+    // The task is the one the thread list puts on the thread.
+    let (thread, task) = header
+        .rsplit_once("[thread ")
+        .and_then(|(_, rest)| rest.split_once(" of "))
+        .and_then(|(thread, rest)| Some((thread, rest.split_once("] ")?.1)))
+        .unwrap_or_else(|| panic!("a thread and task: {header}"));
+    assert!(task.starts_with('[') && task.ends_with(']'), "{header}");
+    assert!(
+        rest.lines()
+            .any(|line| line.starts_with(&format!("* {thread} "))
+                && line.ends_with(&format!(" — {task}"))),
+        "{stdout}"
+    );
+    assert!(
+        rest.contains(&format!(
+            "=> {line} |     panic!(\"formatted {{count}} times\");"
+        )),
+        "{stdout}"
+    );
+}
+
+/// `finish` from a task's own async function says the task finished, and
+/// what the function's last poll returned, named for the function.
+#[test]
+fn finishing_a_tasks_function_says_the_task_finished() {
+    let source = "tests/fixtures/rust/tokio/steps/src/main.rs";
+    let line = support::source_line(source, "// STEP: task-last");
+    let stdout = batch(
+        &["build/test-programs/tokio-steps-o0"],
+        &[
+            &format!("break main.rs:{line}"),
+            "run",
+            "delete 1",
+            "finish",
+        ],
+    );
+    let (_, finished) = stdout
+        .split_once("deleted breakpoint 1\n")
+        .unwrap_or_else(|| panic!("a finish: {stdout}"));
+    let header = finished.lines().next().expect("the stop's header");
+    let task = header
+        .strip_prefix("stopped as task ")
+        .and_then(|rest| rest.split_once(" finished, after frame return in "))
+        .map_or_else(|| panic!("the task finished: {stdout}"), |(task, _)| task);
+    assert!(header.ends_with(&format!(" [{task}]")), "{stdout}");
+    assert!(
+        finished.contains("returned (Poll<u64>) task = Ready("),
+        "{stdout}"
+    );
+}
+
+/// A backtrace folds each run of a runtime's frames into a line that says
+/// which frames it holds, and everything past the dispatch that polls the
+/// task; `bt -r` shows every frame, with its whole name. Frame numbers
+/// count every frame either way, and the selected frame is always shown.
+#[test]
+fn a_runtimes_frames_fold_into_a_line() {
+    let stdout = batch(
+        &["build/test-programs/tokio-workers-o0"],
+        &["break task_reached", "run", "bt", "bt -r", "frame 20", "bt"],
+    );
+    // Each backtrace ends saying where unwinding stopped.
+    let [folded, raw, selected, _] = stdout.split("\nunwind stopped").collect::<Vec<_>>()[..]
+    else {
+        panic!("three backtraces: {stdout}");
+    };
+    // `frame` shows the frame it selects before its source.
+    let selected = selected
+        .split_once("=> ")
+        .and_then(|(_, rest)| rest.split_once('\n'))
+        .map_or(selected, |(_, rest)| rest);
+    let frames = |text: &str| {
+        text.lines()
+            .filter(|line| line.starts_with('#') || line.starts_with("    … #"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let (folded, raw, selected) = (frames(folded), frames(raw), frames(selected));
+    let last = raw.len() - 1;
+    assert!(raw.iter().all(|line| line.starts_with('#')), "{stdout}");
+    assert!(
+        raw.iter()
+            .any(|line| line.contains(" in run<alloc::sync::Arc<")),
+        "{stdout}"
+    );
+    assert_in_order(
+        &folded.join("\n"),
+        &[
+            "#0 ",
+            " in task_reached at ",
+            "#1 ",
+            " in leaf at ",
+            "#2 ",
+            " in middle at ",
+            "#3 ",
+            " in top at ",
+            &format!(
+                "\n    … #4–#{last}: {} frames of the runtime; `bt -r` shows them",
+                last - 3
+            ),
+        ],
+    );
+    assert_eq!(folded.len(), 5, "{stdout}");
+    // The selected frame stands alone, with its neighbours folded around it.
+    assert!(
+        selected.iter().any(|line| line.starts_with("#20 ")),
+        "{stdout}"
+    );
+    assert!(
+        selected.iter().any(|line| line.starts_with("    … #4–#")),
+        "{stdout}"
+    );
+    assert!(selected.len() < raw.len(), "{stdout}");
+}
+
+/// The backtrace of a thread that blocks on a future shows the future's
+/// awaits before the frame that drives it, under a line saying so; where
+/// optimization lost the future, a line says why instead.
+#[test]
+fn a_thread_blocked_on_a_future_shows_its_awaits() {
+    let backtrace = |program: &str, mode: &str| {
+        let mut uscope = Uscope::spawn(
+            uscope_command()
+                .args([fixture(program).as_os_str(), "--".as_ref(), mode.as_ref()])
+                .current_dir(env!("CARGO_MANIFEST_DIR")),
+        );
+        uscope.send("break truth_reached\nrun\n");
+        let driver = uscope.line("the driving thread", |line| {
+            line.starts_with("TRUTH\tdriver\t")
+        });
+        let driver = driver.rsplit('\t').next().expect("a thread id").to_owned();
+        uscope.line("the checkpoint", |line| {
+            line.starts_with("stopped at breakpoint 1")
+        });
+        uscope.send(&format!("thread {driver}\nbt\nquit\n"));
+        uscope.close_stdin();
+        let stdout = assert_success(uscope.finish());
+        let (_, trace) = stdout
+            .split_once(&format!("selected thread {driver}"))
+            .unwrap_or_else(|| panic!("the driver's backtrace: {stdout}"));
+        trace.to_owned()
+    };
+    let source = "at tests/fixtures/rust/tokio/drivers/src/main.rs:";
+    let trace = backtrace("build/test-programs/tokio-drivers-o0", "current");
+    assert_in_order(
+        &trace,
+        &[
+            "\n    in the future the next frame drives:\n",
+            " awaiting tokio::sync::oneshot::Receiver<u32> from tokio-drivers-o0 — empty\n",
+            &format!(" in async waiting {source}28\n"),
+            &format!(" in async driven {source}36\n"),
+            "    on the thread's stack:\n#17 ",
+            " in {closure#0}<…> at ",
+            "\nunwind stopped",
+        ],
+    );
+    let trace = backtrace("build/test-programs/tokio-drivers-o3", "handle");
+    assert!(
+        trace.contains(
+            " drives is not shown in full: `f`, which holds the future, is unavailable: \
+             the value is optimized out\n"
+        ),
+        "{trace}"
+    );
+}
+
 #[test]
 fn library_breakpoints_resolve_at_runtime_and_frames_show_their_own_sources() {
     let stdout = batch(
@@ -1127,6 +1469,75 @@ fn pp_lays_values_out_to_the_width_and_print_formats_combine() {
             "(inner_record) record->inner = {\n  signed_value = 0xfffffff9,\n  unsigned_value = 0x9,\n}\n",
             "(inner_record) record->inner = {signed_value = 0xfffffff9, unsigned_value = 0x9}\n",
             "(int32_t[2]) record->values = [20, 22]\n",
+        ],
+    );
+}
+
+/// `catch` lists the exceptions runtimes report and whether each stops,
+/// and chooses whether one does: a Go panic the program recovers from
+/// stops once `catch raised on` asks it to.
+#[test]
+fn catch_chooses_which_exceptions_stop() {
+    let (stdout, stderr) = piped(
+        &["build/test-programs/failing-go-o0", "--", "recovered"],
+        &[
+            "catch",
+            "catch raised on",
+            "run",
+            "catch nope",
+            "catch raised maybe",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "unhandled      on   Unhandled Go panics\n",
+            "runtime-fatal  on   Fatal Go runtime errors\n",
+            "raised         off  Every Go panic\n",
+            "raised  on   Every Go panic\n",
+            "as an exception was raised",
+            "panic: runtime error: invalid memory address or nil pointer dereference",
+        ],
+    );
+    assert_in_order(
+        &stderr,
+        &[
+            "unknown exception 'nope'; runtimes report unhandled, runtime-fatal, raised",
+            "usage: catch [exception] [on|off]",
+        ],
+    );
+}
+
+/// `print/x` writes a number a view presents in hexadecimal, as it would
+/// the number stored, and leaves a value presented as anything else as its
+/// view presents it.
+#[test]
+fn print_x_writes_numbers_views_present_in_hexadecimal() {
+    let stdout = batch(
+        &["build/test-programs/containers-rust-o0"],
+        &[
+            "break barrier",
+            "run",
+            "up",
+            "print/x counter",
+            "print/x signed_counter",
+            "print/x boxed",
+            "print/x *rc",
+            "print/x arc",
+            "print counter",
+            "print len(*arc)",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "(Atomic<u32>) counter = 0x5\n",
+            "(Atomic<i64>) signed_counter = 0xfffffffffffffff7\n",
+            "boxed = 0x2a\n",
+            "(u64) *rc = 0x7\n",
+            "arc = \"shared\"\n",
+            "(Atomic<u32>) counter = 5\n",
+            "(integer) len(*arc) = 6\n",
         ],
     );
 }
@@ -2743,13 +3154,17 @@ fn a_goroutine_is_selected_or_inspected_by_its_id() {
         "goroutine 1",
         "goroutine",
     ]);
-    // Each goroutine's frames follow it, the runtime's own among them.
+    // Each goroutine's frames follow it, the runtime's own folded but
+    // where it parked.
     assert_in_order(
         &stdout,
         &[
             "main.worker at ",
             "\n    #0 ",
             "in runtime.gopark",
+            "\n        … #1–#2: 2 frames of the runtime",
+            "\n    #3 ",
+            "in main.worker at ",
             "unwind stopped",
         ],
     );

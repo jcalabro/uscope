@@ -150,6 +150,8 @@ impl Builder<'_, '_> {
             language,
             role,
             enclosing: None,
+            coroutine: None,
+            generics: std::sync::Arc::from([]),
         });
         Ok(id)
     }

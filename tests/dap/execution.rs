@@ -62,7 +62,8 @@ fn another_threads_breakpoint_ends_a_step_where_it_hit() {
     );
     let (name, ..) = top(&mut dap, interrupted.thread);
     assert_eq!(name, "worker_reached");
-    // Threads are named as they named themselves by the stop.
+    // Threads are named as they named themselves by the stop, and say
+    // what stopped them.
     let threads = dap.request("threads", Value::Null);
     let worker = threads["threads"]
         .as_array()
@@ -73,7 +74,10 @@ fn another_threads_breakpoint_ends_a_step_where_it_hit() {
         .clone();
     assert_eq!(
         worker["name"],
-        format!("gated-worker ({})", interrupted.thread)
+        format!(
+            "gated-worker ({}) — at breakpoint {worker_breakpoint}",
+            interrupted.thread
+        )
     );
     // The abandoned step leaves nothing behind: the program now runs out.
     let resumed = dap.send("continue", json!({"threadId": interrupted.thread}));
@@ -82,6 +86,63 @@ fn another_threads_breakpoint_ends_a_step_where_it_hit() {
         dap.event(resumed.mark, "exited", |_| true),
         json!({"exitCode": 0})
     );
+    dap.finish();
+}
+
+/// One `stopped` event names the stop's thread, and every other thread
+/// the stop found at a breakpoint is named as stopped by it.
+#[test]
+fn every_co_hit_thread_is_named_by_its_breakpoint() {
+    let mut dap = Dap::start("co-hits");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("hit-count-threads"),
+        json!({}),
+        &Configuration {
+            functions: vec!["contended".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    let mut mark = started.mark;
+    let mut co_hits = 0;
+    for round in 0..10 {
+        let stop = dap.stopped(mark);
+        assert_eq!(stop.body["allThreadsStopped"], true, "{stop:?}");
+        let threads = dap.request("threads", Value::Null)["threads"]
+            .as_array()
+            .expect("threads")
+            .clone();
+        // The adapter sends every event of a stop before it answers the
+        // next request.
+        let events = dap
+            .messages_since(mark)
+            .into_iter()
+            .filter(|message| message["type"] == "event" && message["event"] == "stopped")
+            .count();
+        assert_eq!(events, 1, "{threads:?}");
+        let at_breakpoint = threads
+            .iter()
+            .filter(|thread| {
+                thread["name"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with(" — at breakpoint 1"))
+            })
+            .map(|thread| thread["id"].as_i64().expect("an id"))
+            .collect::<Vec<_>>();
+        assert!(at_breakpoint.contains(&stop.thread), "{threads:?}");
+        co_hits += at_breakpoint.len() - 1;
+        // The program stays at the last stop, which nothing would wait
+        // for after it.
+        if round == 9 {
+            break;
+        }
+        let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+        dap.success(resumed);
+        mark = resumed.mark;
+    }
+    // The workers call `contended` together, so many of their hits come
+    // at the same stop.
+    assert!(co_hits > 0);
     dap.finish();
 }
 

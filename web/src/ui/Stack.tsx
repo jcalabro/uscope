@@ -3,7 +3,8 @@ import { useGo } from "./navigation";
 import { fileName } from "./paths";
 import { useFocus } from "./Workspace";
 
-/** The call stack of the thread shown; choosing a frame moves every pane. */
+/** The call stack of the thread or task shown; choosing a frame moves
+ * every pane. */
 export function Stack() {
   const { state, at, trace, stale } = useFocus();
   const go = useGo();
@@ -23,13 +24,18 @@ export function Stack() {
   } else {
     body = (
       <ul className="rows" data-testid="stack">
-        {trace.frames.map((frame) => (
+        {trace.frames.map((frame) => [
+          frame.unfollowed && (
+            <li key={`${frame.index} unfollowed`} className="row dim" title={frame.unfollowed}>
+              the future the next frame drives is not shown in full: {frame.unfollowed}
+            </li>
+          ),
           <li key={frame.index}>
             <button
               type="button"
               className={`row button-row ${frame.index === at.frame ? "selected" : ""}`}
               aria-current={frame.index === at.frame ? "true" : undefined}
-              title={`${frame.name} at ${frame.address}`}
+              title={frame.address ? `${frame.name} at ${frame.address}` : frame.name}
               onClick={() => go({ ...at, frame: frame.index })}
             >
               <span className="dim index">{frame.index}</span>
@@ -37,11 +43,12 @@ export function Stack() {
                 {frame.name}
                 {frame.kind === "inline" && <span className="dim"> inlined</span>}
                 {frame.kind === "tailCall" && <span className="dim"> tail call</span>}
+                {frame.kind === "async" && <span className="dim"> async</span>}
               </span>
               <span className="end">{where(frame)}</span>
             </button>
-          </li>
-        ))}
+          </li>,
+        ])}
         {trace.incomplete && (
           <li className="row dim" title={trace.incomplete}>
             the stack ends here: {trace.incomplete}
@@ -54,7 +61,11 @@ export function Stack() {
     <section className="pane grow" aria-label="Call stack" data-pane="2" tabIndex={-1}>
       <div className="pane-head">
         Call stack
-        {thread && <span className="count">{thread.name ?? thread.id}</span>}
+        {at?.task ? (
+          <span className="count">task {at.task.number}</span>
+        ) : (
+          thread && <span className="count">{thread.name ?? thread.id}</span>
+        )}
         <span className="end">Alt+2</span>
       </div>
       <div className={`pane-body ${stale && stale !== "passed" ? "stale" : ""}`}>{body}</div>
@@ -62,9 +73,10 @@ export function Stack() {
   );
 }
 
-function where(frame: Frame): string {
+/** Where a frame's code is: its file and line, or its module or address. */
+export function where(frame: Frame): string {
   if (frame.source) {
     return `${fileName(frame.source.path)}:${frame.source.line}`;
   }
-  return frame.module ?? frame.address;
+  return frame.module ?? frame.address ?? "";
 }

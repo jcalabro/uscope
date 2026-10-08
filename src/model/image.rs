@@ -17,8 +17,8 @@ use super::{
     ImageAddress, ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup,
     LineEntry, LineNumber, ModuleImageId, SectionId, SectionInfo, SectionLocation, SourceFile,
     SourceFileId, SourceLanguage, SourceLocation, StatementRow, SymbolExtentProvenance, SymbolId,
-    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TypeInfo,
-    TypeNode, TypeReference,
+    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TypeId,
+    TypeInfo, TypeNode, TypeReference,
 };
 
 #[derive(Default)]
@@ -38,6 +38,12 @@ pub struct ModuleMetadata {
     /// Rust trait objects' vtables, by address, with the concrete type each
     /// is for.
     pub vtables: Vec<(ImageAddress, TypeReference)>,
+    /// The coroutines among the types, by type, each with what it is or why
+    /// its layout cannot be read as one.
+    pub coroutines: BTreeMap<TypeId, std::result::Result<crate::CoroutineInfo, Arc<str>>>,
+    /// Where each out-of-line code instance that runs a coroutine goes for
+    /// each state, or why its dispatch could not be decoded.
+    pub resume_points: BTreeMap<CodeInstanceId, std::result::Result<crate::ResumePoints, Arc<str>>>,
     /// Whether each thread gets its own copy of a block of the module's
     /// storage.
     pub thread_local_storage: bool,
@@ -201,9 +207,17 @@ fn recommended_entries(
         .code_instances
         .iter()
         .filter_map(|instance| {
-            let entries = match prologue_ends.remove(&instance.id) {
-                Some(entries) => entries,
-                None => vec![instance.breakpoint_entry?],
+            // A coroutine's body begins past its dispatch, wherever its
+            // prologue ends.
+            let entries = match (
+                prologue_ends.remove(&instance.id),
+                instance.breakpoint_entry,
+            ) {
+                (_, Some(entry)) if entry.provenance == EntryProvenance::CoroutineBody => {
+                    vec![entry]
+                }
+                (Some(entries), _) => entries,
+                (None, entry) => vec![entry?],
             };
             Some((instance.id, entries.into()))
         })
@@ -326,6 +340,9 @@ pub struct ModuleImage {
     /// Symbols by the last part of each name they answer to, built on the
     /// first search for one, since it demangles every symbol.
     symbols_by_last_part: std::sync::OnceLock<HashMap<Box<str>, Vec<SymbolId>>>,
+    /// The functions that run each coroutine type, by the type's identity,
+    /// built on the first search for one.
+    coroutine_functions: std::sync::OnceLock<HashMap<Arc<str>, Vec<FunctionId>>>,
     globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
     instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
     statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
@@ -343,6 +360,11 @@ pub struct ModuleImage {
     type_index: crate::type_identity::TypeIndex,
     /// Rust trait objects' vtables, with the concrete type each is for.
     vtables: std::collections::BTreeMap<ImageAddress, TypeReference>,
+    coroutines: BTreeMap<TypeId, std::result::Result<crate::CoroutineInfo, Arc<str>>>,
+    resume_points: BTreeMap<CodeInstanceId, std::result::Result<crate::ResumePoints, Arc<str>>>,
+    /// The dispatches and leads of every decoded coroutine, which no
+    /// breakpoint or step stops in.
+    resume_code: RangeIndex<CodeInstanceId>,
     constants: BTreeMap<Arc<str>, crate::IntegerValue>,
     producers: Arc<[Arc<str>]>,
     thread_locals: BTreeMap<Arc<str>, std::result::Result<ThreadLocal, Arc<str>>>,
@@ -457,6 +479,7 @@ impl ModuleImage {
                     .map(|symbol| (Arc::clone(&symbol.name), symbol.id)),
             ),
             symbols_by_last_part: std::sync::OnceLock::new(),
+            coroutine_functions: std::sync::OnceLock::new(),
             globals_by_selector: grouped_index(global_selectors(&metadata)),
             instances_by_function: grouped_index(
                 metadata
@@ -509,6 +532,26 @@ impl ModuleImage {
             instruction_starts,
             type_index,
             vtables: metadata.vtables.iter().copied().collect(),
+            coroutines: std::mem::take(&mut metadata.coroutines),
+            resume_code: RangeIndex::new(metadata.resume_points.iter().flat_map(
+                |(instance, points)| {
+                    points.iter().flat_map(move |points| {
+                        points
+                            .dispatch
+                            .iter()
+                            .copied()
+                            .chain(
+                                points
+                                    .points
+                                    .iter()
+                                    .flat_map(|point| point.resumption.iter().copied()),
+                            )
+                            .filter(|range| range.start < range.end)
+                            .map(move |range| (range, *instance))
+                    })
+                },
+            )),
+            resume_points: std::mem::take(&mut metadata.resume_points),
             constants: std::mem::take(&mut metadata.constants),
             producers: std::mem::take(&mut metadata.producers).into(),
             thread_locals: std::mem::take(&mut metadata.thread_locals),
@@ -791,6 +834,35 @@ impl ModuleImage {
         self.thread_locals.get(name).cloned()
     }
 
+    /// Where each thread's copy is of the one thread-local variable whose
+    /// demangled name lies within `scope` and ends in `name`, as the
+    /// storage std's `thread_local!` makes is named within the variable's
+    /// own scope; `None` when the image defines none.
+    #[must_use]
+    pub fn thread_local_within(
+        &self,
+        scope: &str,
+        name: &str,
+    ) -> Option<std::result::Result<ThreadLocal, Arc<str>>> {
+        let mut found = self.thread_locals.iter().filter(|(symbol, _)| {
+            symbol.contains(name)
+                && crate::demangle::demangle(symbol).is_some_and(|demangled| {
+                    demangled
+                        .strip_prefix(scope)
+                        .is_some_and(|rest| rest.starts_with("::"))
+                        && demangled
+                            .strip_suffix(name)
+                            .is_some_and(|rest| rest.ends_with("::"))
+                })
+        });
+        let (_, place) = found.next()?;
+        Some(if found.next().is_some() {
+            Err(format!("several thread-local variables are named {name} within {scope}").into())
+        } else {
+            place.clone()
+        })
+    }
+
     /// Returns every global catalog entry in deterministic source order.
     #[must_use]
     pub fn globals(&self) -> &[GlobalVariableInfo] {
@@ -854,6 +926,59 @@ impl ModuleImage {
     #[must_use]
     pub fn producers(&self) -> &[Arc<str>] {
         &self.producers
+    }
+
+    /// What the coroutine of type `ty` is, or why its layout cannot be read
+    /// as one; `None` for a type that is no coroutine.
+    #[must_use]
+    pub fn coroutine(
+        &self,
+        ty: TypeId,
+    ) -> Option<std::result::Result<&crate::CoroutineInfo, &Arc<str>>> {
+        self.coroutines.get(&ty).map(std::result::Result::as_ref)
+    }
+
+    /// The functions that run the coroutine of type `ty`, or any type the
+    /// same as it.
+    #[must_use]
+    pub fn coroutine_functions(&self, ty: TypeId) -> Vec<&FunctionInfo> {
+        let key = |id| self.type_key(TypeReference { image: self.id, id });
+        let index = self.coroutine_functions.get_or_init(|| {
+            let mut index = HashMap::<Arc<str>, Vec<FunctionId>>::new();
+            for function in self.functions.iter() {
+                if let Some(key) = function.coroutine.and_then(key) {
+                    index.entry(Arc::clone(key)).or_default().push(function.id);
+                }
+            }
+            index
+        });
+        key(ty)
+            .and_then(|key| index.get(key))
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.function(*id))
+            .collect()
+    }
+
+    /// Where the code instance `instance`, which runs a coroutine, goes for
+    /// each state, or why that is unknown; `None` for an instance that runs
+    /// none or is inlined.
+    #[must_use]
+    pub fn resume_points(
+        &self,
+        instance: CodeInstanceId,
+    ) -> Option<std::result::Result<&crate::ResumePoints, &Arc<str>>> {
+        self.resume_points
+            .get(&instance)
+            .map(std::result::Result::as_ref)
+    }
+
+    /// Whether `address` is in a coroutine's dispatch on its state, or in
+    /// the code leading from it into a state: code that runs on every
+    /// resumption and is no statement of the program's.
+    #[must_use]
+    pub fn is_resume_code(&self, address: ImageAddress) -> bool {
+        self.resume_code.containing(address).next().is_some()
     }
 
     /// The concrete type a Rust trait object's vtable at `address` is for.
@@ -1457,6 +1582,8 @@ mod tests {
                 language: crate::SourceLanguage::C,
                 role: CodeRole::Ordinary,
                 enclosing: None,
+                coroutine: None,
+                generics: std::sync::Arc::from([]),
             })
             .collect()
     }

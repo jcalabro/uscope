@@ -3,15 +3,16 @@
 //! matrix, and every built-in view binds in some build.
 //!
 //! A marker reads `VIEW: <expression> => <summary>`, where `{c*N}` stands
-//! for N of the character c and a trailing `(any order)` lets a hash
-//! table's entries come in any order, `VIEW: <expression> => problem:
+//! for N of the character c, `{duration A..B}` for a duration from A to B
+//! as Go writes them, and a trailing `(any order)` lets a hash table's
+//! entries come in any order, `VIEW: <expression> => problem:
 //! <words>` when the view must refuse the value, or `VIEW: <expression> =>
 //! stored` when no view presents it. Each expression is evaluated in the
 //! frame that calls `barrier`.
 
 use uscope::{
-    Evaluation, Expression, InspectedValue, PresentedCount, PresentedShape, StackFrameId,
-    ValueChildQuery, ValueChildRelationship, ValueChildren,
+    Evaluation, ExceptionStops, Expression, InspectedValue, PresentedCount, PresentedShape,
+    StackFrameId, ValueChildQuery, ValueChildRelationship, ValueChildren,
 };
 
 use super::*;
@@ -114,6 +115,51 @@ async fn evaluate(scenario: &Scenario, text: &str) -> InspectedValue {
         Evaluation::Value { value, .. } => value,
         other => panic!("`{text}` is not a value: {other:?}"),
     }
+}
+
+/// A duration as Go writes one, such as `1h2m3.5s` or `250ms`, in
+/// nanoseconds.
+fn go_duration(text: &str) -> Option<f64> {
+    let mut total = 0.0;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let digits = rest.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+        let number = rest[..digits].parse::<f64>().ok()?;
+        rest = &rest[digits..];
+        let (scale, unit) = [
+            (1e6, "ms"),
+            (1e3, "µs"),
+            (1.0, "ns"),
+            (3.6e12, "h"),
+            (6e10, "m"),
+            (1e9, "s"),
+        ]
+        .into_iter()
+        .find(|(_, unit)| rest.starts_with(unit))?;
+        total = number.mul_add(scale, total);
+        rest = &rest[unit.len()..];
+    }
+    (!text.is_empty()).then_some(total)
+}
+
+/// Whether a summary is what a marker expects, each `{duration A..B}` in
+/// it any duration from A to B.
+fn summary_matches(expected: &str, actual: &str) -> bool {
+    let Some((head, tail)) = expected.split_once("{duration ") else {
+        return expected == actual;
+    };
+    let Some(rest) = actual.strip_prefix(head) else {
+        return false;
+    };
+    let (range, tail) = tail.split_once('}').expect("a closed duration");
+    let (low, high) = range.split_once("..").expect("a duration range");
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != 'µ')
+        .unwrap_or(rest.len());
+    let bounds = (go_duration(low), go_duration(high));
+    go_duration(&rest[..end]).is_some_and(|duration| {
+        bounds.0.is_some_and(|low| low <= duration) && bounds.1.is_some_and(|high| duration <= high)
+    }) && summary_matches(tail, &rest[end..])
 }
 
 /// A summary with its items sorted, so that items in any order compare
@@ -356,12 +402,13 @@ async fn check_name(
 }
 
 /// Checks every child of a presented value, as a `children:` marker lists
-/// them.
+/// them, noting the views that presented them.
 async fn check_listed_children(
     scenario: &Scenario,
     marker: &Marker,
     presentation: &uscope::Presentation,
     expected: &str,
+    seen: &mut BTreeSet<String>,
     failures: &mut Vec<String>,
 ) {
     let ValueChildren::Available(reference) = &presentation.children else {
@@ -373,6 +420,13 @@ async fn check_listed_children(
     else {
         return;
     };
+    seen.extend(children.iter().filter_map(|child| match &child.state {
+        VariableState::Available {
+            presentation: Some(presentation),
+            ..
+        } => Some(presentation.view.to_string()),
+        _ => None,
+    }));
     let rendered = children
         .iter()
         .map(|child| {
@@ -469,7 +523,7 @@ async fn check_marker(
         )),
         (Expected::Stored, _) => unreachable!("checked above"),
         (Expected::Children(expected), _) => {
-            check_listed_children(scenario, marker, presentation, expected, failures).await;
+            check_listed_children(scenario, marker, presentation, expected, seen, failures).await;
         }
         (Expected::Count(expected), _) => {
             if presentation.count != Some(PresentedCount::Exact(*expected)) {
@@ -485,7 +539,7 @@ async fn check_marker(
             if matches!(marker.expected, Expected::Unordered(_)) {
                 actual = sorted_items(&actual);
             }
-            if &actual != expected {
+            if !summary_matches(expected, &actual) {
                 failures.push(format!(
                     "line {}: `{}`\n    expected {expected}\n    actual   {actual}",
                     marker.line, marker.expression
@@ -499,6 +553,17 @@ async fn check_marker(
             }
         }
     }
+}
+
+/// Selects the frame that called the one stopped in.
+async fn select_caller(scenario: &Scenario) {
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let caller: StackFrameId = trace.frames[1].id;
+    scenario
+        .operation("select caller", scenario.handle().select_frame(caller))
+        .await;
 }
 
 /// Stops a containers build at `barrier`, checks every marker in its
@@ -528,13 +593,7 @@ async fn check_containers_but(
         matches!(reason, StopReason::Breakpoint { .. }),
         "{fixture}: {reason:?}"
     );
-    let trace = scenario
-        .operation("backtrace", scenario.handle().backtrace())
-        .await;
-    let caller: StackFrameId = trace.frames[1].id;
-    scenario
-        .operation("select caller", scenario.handle().select_frame(caller))
-        .await;
+    select_caller(&scenario).await;
 
     let markers = markers(source)
         .into_iter()
@@ -596,14 +655,35 @@ async fn check_markers(
     }
 }
 
+/// Where a fixture's markers are evaluated.
+#[derive(Clone, Copy)]
+enum MarkedFrame {
+    /// In the frame of `barrier`, which the fixture passes its values.
+    Barrier,
+    /// In the frame that calls `barrier`, whose locals they are.
+    Caller,
+}
+
 /// Runs a fixture that prints its markers before each call to `barrier`,
 /// and checks the markers printed before each stop there, at that stop.
-/// Returns the views that presented values.
-async fn check_printed_markers(fixture: &str, barrier: &str, optimized: bool) -> BTreeSet<String> {
+/// The fixture's exceptions do not stop it. Returns the views that
+/// presented values.
+async fn check_printed_markers(
+    fixture: &str,
+    barrier: &str,
+    frame: MarkedFrame,
+    optimized: bool,
+) -> BTreeSet<String> {
     let scratch = crate::support::ScratchDir::new("views");
     let output_path = scratch.path().join("stdout");
     let output = fs::File::create(&output_path).expect("create the fixture's output");
     let mut scenario = Scenario::launch(fixture);
+    scenario
+        .operation(
+            "exception stops",
+            scenario.handle().set_exception_stops(ExceptionStops::NONE),
+        )
+        .await;
     scenario.add_breakpoint(barrier).await;
     let mut reason = scenario
         .run_with_to_stop(LaunchOptions {
@@ -625,6 +705,9 @@ async fn check_printed_markers(fixture: &str, barrier: &str, optimized: bool) ->
             !markers.is_empty(),
             "{fixture} printed markers before stop {stops}"
         );
+        if matches!(frame, MarkedFrame::Caller) {
+            select_caller(&scenario).await;
+        }
         let before = failures.len();
         check_markers(&scenario, &markers, optimized, &mut seen, &mut failures).await;
         for failure in &mut failures[before..] {
@@ -759,7 +842,9 @@ async fn go_containers_present_as_their_views_say() {
 async fn go_library_values_present_as_go_shows_them() {
     let mut seen = BTreeSet::new();
     for (fixture, optimized) in [("stdlib-go-o0", false), ("stdlib-go-o2", true)] {
-        seen.extend(check_printed_markers(fixture, "main.barrier", optimized).await);
+        seen.extend(
+            check_printed_markers(fixture, "main.barrier", MarkedFrame::Barrier, optimized).await,
+        );
     }
     for library in [
         "go-time.views",
@@ -769,6 +854,76 @@ async fn go_library_values_present_as_go_shows_them() {
         "go-containers.views",
     ] {
         assert_every_view_binds(library, &seen);
+    }
+}
+
+/// tokio's values present as the program says, in each state each view
+/// tells apart, and every one of tokio's views binds. Some present values
+/// no expression reaches: a task's cell, which a join handle presents as
+/// the type its task's code says, and the futures tasks wait on for
+/// permits and messages, which the workers tests check, and for lines and
+/// sockets, which the attach tests check.
+#[tokio::test]
+async fn tokio_values_present_as_their_views_say() {
+    let mut seen =
+        check_printed_markers("tokio-values-o0", "barrier", MarkedFrame::Caller, false).await;
+    seen.extend(
+        uscope::built_in_views()
+            .into_iter()
+            .filter(|view| {
+                [
+                    "rust tokio::runtime::task::core::Cell<_, _>",
+                    "rust tokio::sync::batch_semaphore::Acquire",
+                    "rust core::future::poll_fn::PollFn<tokio::sync::mpsc::**::recv::`{async_fn#0}`::`{closure_env#0}`<_>>",
+                    "rust core::future::poll_fn::PollFn<tokio::io::util::lines::**::next_line::`{async_fn#0}`::`{closure_env#0}`<_>>",
+                    "rust tokio::runtime::io::scheduled_io::Readiness",
+                ]
+                .contains(&&*view.header)
+            })
+            .map(|view| view.to_string()),
+    );
+    assert_every_view_binds("tokio.views", &seen);
+}
+
+#[tokio::test]
+async fn optimized_tokio_values_present_as_their_views_say() {
+    check_printed_markers("tokio-values-o3", "barrier", MarkedFrame::Caller, true).await;
+}
+
+/// A core of the program's first stop presents its values as the program
+/// said before it, which the core's log keeps.
+#[tokio::test]
+async fn tokio_values_in_a_core_present_as_their_views_say() {
+    for (variant, optimized) in [("o0", false), ("o3", true)] {
+        let core = format!("tokio-values-{variant}.core");
+        let log =
+            fs::read_to_string(Scenario::fixture(&format!("{core}.log"))).expect("the core's log");
+        let scenario = Scenario::open_core(
+            &core,
+            &uscope::CoreDumpOptions::new(Scenario::fixture(&core)),
+        );
+        let trace = scenario
+            .operation("backtrace", scenario.handle().backtrace())
+            .await;
+        let main = trace
+            .frames
+            .iter()
+            .find(|frame| {
+                frame
+                    .function
+                    .as_ref()
+                    .is_some_and(|function| &*function.name == "main")
+            })
+            .unwrap_or_else(|| panic!("{core}: no frame of main"));
+        scenario
+            .operation("select main", scenario.handle().select_frame(main.id))
+            .await;
+        let markers = markers_in(&log);
+        assert!(markers.len() >= 50, "{core} keeps its markers");
+        let (mut seen, mut failures) = (BTreeSet::new(), Vec::new());
+        check_markers(&scenario, &markers, optimized, &mut seen, &mut failures).await;
+        assert!(failures.is_empty(), "{core}:\n{}", failures.join("\n"));
+        scenario.shutdown().await;
     }
 }
 

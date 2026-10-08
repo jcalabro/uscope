@@ -33,6 +33,10 @@ world of C types:
   holds the argument `index` chooses in `storage`, as `number` holding the
   int 7, `pointer` holding the pointer 0x90000, and `neither` whose index
   is 5;
+- the C++ `app::Erased`, `{void *object; void *manage}`, which holds an
+  object only the function at `manage`, an `app::manage<int>`, knows the
+  type of, as `erased` holding 5, and `stray` whose `manage` is no
+  function's;
 - `entry`, `{int mode; int color; long elapsed; unsigned short label[4];
   int letter}`, as `item`, with the enumerations `Access` (`NONE`, `READ`,
   `WRITE`, `EXEC`) and `Color` (`RED`, `GREEN`, `BLUE`);
@@ -121,6 +125,9 @@ namespaces such as libc++'s `std::__1` may be spelled or left out.
 
 - `**` in a path matches any run of segments, so `alloc::**::Box<T>` keeps
   matching when the standard library moves a type between modules.
+- A segment in backticks is taken as written, as Rust's compiler names
+  closures and the futures of async functions:
+  ``app::**::`{closure_env#0}` ``.
 - `_` matches any argument, and trailing arguments may be left out.
 - A capitalized name captures an argument: a type, which the view's
   expressions may name, or a value, which they may use as a number.
@@ -235,7 +242,8 @@ the next line unless that line begins another statement or ends the view.
   is one check for each.
 - `field NAME = EXPR` adds a named child.
 - `summary "TEXT {EXPR} TEXT"` overrides the summary; `{EXPR}` is replaced
-  by its value's summary, and `\{` and `\}` are braces.
+  by its value's summary, `{EXPR as FORMAT}` by its value written in one of
+  `format`'s formats, and `\{` and `\}` are braces.
 - `show SHAPE` says what the value is. A view shows at most once; one
   that does not presents a record's members, with its bases as members
   named by their types, or any other value as itself.
@@ -344,7 +352,8 @@ something => unbound: line 7: `format kind`: the format writes an array of 16-bi
   character shows as U+FFFD, and a length the summary gives is in bytes.
 - `value(EXPR)` presents the value as another value, as a box presents what
   it holds.
-- `empty("TEXT")` is a value that holds nothing, summarized as `TEXT`.
+- `empty("TEXT")` is a value that holds nothing, summarized as `TEXT`, in
+  which each `{EXPR}` is its value's summary, as in a `summary`.
 - `sequence(COUNT) GENERATORS => ELEMENT` is a sequence of `COUNT`
   elements, one for each value the generators make. `COUNT` may be `_` to
   leave the count to the generators.
@@ -357,6 +366,14 @@ something => unbound: line 7: `format kind`: the format writes an array of 16-bi
   presented as any value of that type is. `TYPE` may be `arg(TYPE, EXPR)`,
   the type's argument at a position the program's data holds, as a
   `std::variant`'s index does; a position that names no type is a problem.
+- `dynamic(PTR, TYPE of CODE)` is what `PTR` points to, as a type found
+  when the value is presented: `CODE` is the address of a function's code,
+  and `TYPE` names that function's type arguments by its parameters' names.
+  Code that erases a value's type keeps it only in the functions that
+  handle the value: a tokio task's cell is a `Cell<T, S>` whose `T` and
+  `S` are those its vtable's `poll::<T, S>` was instantiated with. A code
+  address no function's debug information describes, or arguments that
+  make no one type, is a problem.
 - `if COND { SHAPE } else { SHAPE }` chooses a shape.
 - `match EXPR { VALUE => SHAPE, … _ => SHAPE }` chooses the shape of the
   first arm whose value `EXPR` equals, or of `_`; a value no arm names is a
@@ -396,6 +413,25 @@ something => tagged 1: 7
 ```uscope-view-example
 uscope-views 1
 view c tagged {
+    show if kind == 0 { empty("None") } else { empty("kind {kind} holding {value}") }
+}
+---
+nothing => None
+something => kind 1 holding 7
+```
+
+```uscope-view-example
+uscope-views 1
+view c entry {
+    summary "{elapsed as duration(ms)} since {mode as flags(Access)}, {mode}"
+}
+---
+item => 1.5s since READ | WRITE, 3
+```
+
+```uscope-view-example
+uscope-views 1
+view c tagged {
     show match kind {
         0 => empty("None")
         1 => value(value)
@@ -430,6 +466,16 @@ view c++ app::Either<_, _> {
 number => 7
 pointer => 0x90000
 neither => problem: the type has no type argument 5
+```
+
+```uscope-view-example
+uscope-views 1
+view c++ app::Erased {
+    show dynamic(object, T of manage)
+}
+---
+erased => 5
+stray => problem: no function the debug information describes has its code at 0x50000
 ```
 
 ## Generators
@@ -740,6 +786,26 @@ The built-in views cover:
   `Instant` as durations, and `SystemTime` as the UTC time it is. `&str`,
   `Box<str>`, `&Path`, `&OsStr`, and `&CStr` are text, and slices
   elements, without a view. `Rc<[T]>` and `Arc<[T]>` show as stored.
+- Rust, in tokio 1.52: a `JoinHandle` as its task's output, or as `task N
+  pending`, `panicked`, `was cancelled`, or `'s output taken`, and a
+  `JoinError` as tokio writes it; a task's `Id`; a `Waker` of a tokio task
+  as the task; `Mutex`, `RwLock`, and `Semaphore` as what they hold, with
+  whether they are locked, the readers and writer, and the tasks waiting,
+  and their guards as what they guard; `mpsc` channels' senders and
+  receivers as the messages queued, with the capacity, whether the channel
+  is closed, and the senders; `oneshot` ends as the value sent, `empty`,
+  `closed`, or `received`; `watch` ends as the value, with its version and
+  whether a receiver has seen it; a `broadcast` sender as the messages sent
+  and a receiver as those it has yet to receive; `Notify` as `empty`,
+  `notified`, or the tasks waiting; `Sleep` as `elapsed` or the time until
+  its deadline, by the runtime's clock, which reads late after the runtime
+  has been idle, and `Interval` as its period and next tick; `Instant` as a
+  duration; a `JoinSet` as its tasks' join handles; TCP, UDP, and Unix
+  sockets, their halves, `BufReader`, `BufWriter`, and `Lines` as the file
+  descriptor they read or write, with the bytes a buffer holds; and the
+  futures of `read`, `read_exact`, `write_all`, `next_line`, and of waiting
+  for a socket to be ready as what they wait for, such as `reading a line
+  from fd 7` or `waiting until readable`.
 - Go: maps and channels, including nil ones, which show as `nil`;
   `time.Duration` as `Duration.String` writes it; `time.Time` as its wall
   clock reading in UTC, its location, and its monotonic reading when it has

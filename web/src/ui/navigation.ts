@@ -4,13 +4,13 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import { useRequest } from "../data";
-import { type At, followedLook, type Look, linkPath, recordedPath } from "../focus";
+import { type At, followedLook, type Look, linkPath, recordedPath, taskSegment } from "../focus";
 import { useModel } from "../store";
 import { useFocus } from "./Workspace";
 
 export type Go = (at: At | null, look?: Look, options?: { replace?: boolean }) => void;
 
-/** Goes to a stop, thread, and frame, or to the session itself. */
+/** Goes to a stop, thread or task, and frame, or to the session itself. */
 export function useGo(): Go {
   const navigate = useNavigate();
   const { session, look: current } = useFocus();
@@ -21,6 +21,20 @@ export function useGo(): Go {
       const replace = options?.replace ?? false;
       if (at === null) {
         void navigate({ to: "/s/$session", params: { session }, search, replace });
+        return;
+      }
+      if (at.task) {
+        void navigate({
+          to: "/s/$session/stop/$stop/task/$task/f/$frame",
+          params: {
+            session,
+            stop: String(at.stop),
+            task: taskSegment(at.task),
+            frame: String(at.frame),
+          },
+          search,
+          replace,
+        });
         return;
       }
       void navigate({

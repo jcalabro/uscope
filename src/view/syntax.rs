@@ -199,7 +199,11 @@ pub enum TypeExpr {
 #[derive(Debug, Clone)]
 pub enum Piece {
     Literal(String),
-    Hole(Expr),
+    /// `{EXPR}`, or `{EXPR as FORMAT}`.
+    Hole {
+        value: Expr,
+        format: Option<Format>,
+    },
 }
 
 /// A statement of a view's body.
@@ -353,7 +357,9 @@ pub enum Shape {
     /// `value(EXPR)`: present the value as another.
     Value(Expr),
     /// `empty("TEXT")`.
-    Empty(String),
+    /// `empty("TEXT {EXPR} TEXT")`: a value that holds nothing, summarized
+    /// as its text, with each hole's value's summary in its place.
+    Empty(Vec<Piece>),
     /// `sequence(COUNT) CLAUSES => ELEMENT`.
     Sequence {
         count: Count,
@@ -392,6 +398,9 @@ pub enum DynamicType {
     /// `arg(TYPE, EXPR)`: the argument of a type at a position the
     /// program's data holds, as a `std::variant`'s index does.
     Argument { of: TypeExpr, index: Expr },
+    /// `TYPE of CODE`: a type that names the type arguments of the
+    /// function whose code `CODE` addresses by its parameters' names.
+    Function { ty: TypeExpr, code: Expr },
 }
 
 /// A path segment of a pattern.
@@ -728,7 +737,10 @@ impl<'a> Parser<'a> {
         self.position += language_word.len();
         self.skip_inline();
         let pattern_start = self.position;
-        let pattern_end = self.rest().find('{').map(|end| self.position + end);
+        // A pattern's segments in backticks may hold braces.
+        let pattern_end = outside_backticks(self.rest())
+            .find(|(_, character)| *character == '{')
+            .map(|(end, _)| self.position + end);
         let Some(pattern_end) =
             pattern_end.filter(|end| !self.text[pattern_start..*end].contains('\n'))
         else {
@@ -891,6 +903,24 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Where the expression of the hole between `start` and `end` ends,
+    /// and the format it is written in when it ends `as FORMAT`; a cast to
+    /// a type, as `{x as u64}`, is the expression's own.
+    fn hole_format(&mut self, start: usize, end: usize) -> (usize, Option<Format>) {
+        let hole = &self.text[start..end];
+        let Some(at) = hole.rfind(" as ") else {
+            return (end, None);
+        };
+        let saved = self.position;
+        self.position = start + at + " as ".len();
+        let format = self.format().ok().filter(|_| {
+            self.skip_inline();
+            self.position == end
+        });
+        self.position = saved;
+        format.map_or((end, None), |format| (start + at, Some(format)))
+    }
+
     /// What follows `format NAME as`: `hex`, `char`, `bytes`, `utf8`,
     /// `utf16`, `flags(TYPE)`, `enum(TYPE)`, `duration(UNIT)`, or
     /// `time(UNIT)`.
@@ -981,7 +1011,7 @@ impl<'a> Parser<'a> {
                 self.position += word.len();
                 self.open_call("empty")?;
                 self.skip_blank();
-                let text = self.string()?;
+                let text = self.template()?;
                 self.close_call("empty")?;
                 Ok(Shape::Empty(text))
             }
@@ -1055,7 +1085,15 @@ impl<'a> Parser<'a> {
                     self.close_call("arg")?;
                     DynamicType::Argument { of, index }
                 } else {
-                    DynamicType::Fixed(self.type_expr(0)?)
+                    let ty = self.type_expr(0)?;
+                    if self.eat_word_after_blank("of") {
+                        DynamicType::Function {
+                            ty,
+                            code: self.expression()?,
+                        }
+                    } else {
+                        DynamicType::Fixed(ty)
+                    }
                 };
                 self.close_call("dynamic")?;
                 Ok(Shape::Dynamic { pointer, ty })
@@ -1422,9 +1460,11 @@ impl<'a> Parser<'a> {
                     if hole.contains(['"', '\n']) {
                         return Err(self.error("a summary's `{…}` holds one expression"));
                     }
-                    pieces.push(Piece::Hole(
-                        self.expression_text(hole_start, hole_start + end)?,
-                    ));
+                    let (value_end, format) = self.hole_format(hole_start, hole_start + end);
+                    pieces.push(Piece::Hole {
+                        value: self.expression_text(hole_start, value_end)?,
+                        format,
+                    });
                     self.position = hole_start + end + 1;
                 }
                 '}' => return Err(self.error("write `\\}` for a `}` in a summary")),
@@ -1525,7 +1565,8 @@ impl<'a> Parser<'a> {
                 byte if depth == 0
                     && is_word_start(byte)
                     && (index == 0 || !is_word_continue(bytes[index - 1]))
-                    && self.text[index..].starts_with("or")
+                    && (self.text[index..].starts_with("or")
+                        || self.text[index..].starts_with("of"))
                     && !bytes.get(index + 2).copied().is_some_and(is_word_continue) =>
                 {
                     return index;

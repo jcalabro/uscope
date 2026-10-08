@@ -298,6 +298,27 @@ fn element_type<P: InspectionOps>(
     }
 }
 
+/// The program type of the value a view presents a value as, when every
+/// branch that presents one agrees and it is a place; a branch that
+/// presents the value as empty, as a null pointer is, presents none.
+fn presented_type(shape: &BoundShape<StopStep>) -> Option<TypeReference> {
+    match shape {
+        BoundShape::Value(program) => match program.result() {
+            Ty::Program(reference) if program.is_place() => Some(*reference),
+            _ => None,
+        },
+        BoundShape::If {
+            then, otherwise, ..
+        } => match (presented_type(then), presented_type(otherwise)) {
+            (Some(left), Some(right)) if left == right => Some(left),
+            (Some(found), None) if matches!(**otherwise, BoundShape::Empty(_)) => Some(found),
+            (None, Some(found)) if matches!(**then, BoundShape::Empty(_)) => Some(found),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The program type of a map's values, when every branch that presents
 /// one agrees and its values are places.
 fn entry_type(shape: &BoundShape<StopStep>) -> Option<TypeReference> {
@@ -562,6 +583,21 @@ impl<P: InspectionOps> Controller<P> {
         })
     }
 
+    /// The step from a value of `from` to the value its view presents it
+    /// as, for `*x`.
+    pub(super) fn view_deref(&self, from: TypeReference) -> Option<Planned<StopStep>> {
+        if !self.views.enabled {
+            return None;
+        }
+        let bound = self.view_choice(from).bound.clone()?;
+        let presented = presented_type(&bound.shape)?;
+        Some(Planned {
+            step: StopStep::Presented(bound),
+            result: Some(presented),
+            consumed: 0,
+        })
+    }
+
     /// The step from a value of `from` to the value its view presents as a
     /// map holds for a key, for `m[key]`.
     pub(super) fn view_entry(&self, from: TypeReference) -> Option<Planned<StopStep>> {
@@ -607,7 +643,24 @@ impl<P: InspectionOps> Controller<P> {
         // A view that presents the value as another lends it that value's
         // children.
         let mut next = offset;
-        if let Some(inner) = &view.inner
+        if let (Some(inner), Some(picked)) = (&view.inner, &view.picked) {
+            // Elements picked from another value's children come a page of
+            // one each.
+            while exhausted.is_none() && next < end.min(view.elements) {
+                let position = usize::try_from(next).expect("a picked element is in memory");
+                let page = self.value_children_with_budget(
+                    inner,
+                    &crate::ValueChildQuery {
+                        offset: picked[position],
+                        limit: 1,
+                    },
+                    budget,
+                )?;
+                children.extend(page.children.iter().cloned());
+                exhausted = page.completion.exhaustion();
+                next += 1;
+            }
+        } else if let Some(inner) = &view.inner
             && next < view.elements
         {
             let count = end.min(view.elements) - next;
@@ -947,6 +1000,44 @@ fn member_name(child: &ValueChild) -> Option<&str> {
     }
 }
 
+/// A coroutine's summary: its state, then the variables it keeps.
+fn coroutine_summary(
+    image: &crate::ModuleImage,
+    state: &crate::CoroutineState,
+    shown: &[String],
+) -> String {
+    let mut summary = match state.kind {
+        crate::CoroutineStateKind::Unresumed => "unresumed".to_owned(),
+        crate::CoroutineStateKind::Returned => "returned".to_owned(),
+        crate::CoroutineStateKind::Panicked => "panicked".to_owned(),
+        crate::CoroutineStateKind::Suspended { .. } => {
+            let at = state.location.as_ref().map(|location| {
+                let file = image
+                    .source_file(location.file)
+                    .and_then(|file| file.path.file_name())
+                    .map_or_else(|| "?".into(), |name| name.to_string_lossy());
+                format!("{file}:{}", location.line)
+            });
+            format!("suspended at {}", at.as_deref().unwrap_or("an await"))
+        }
+    };
+    if !shown.is_empty() {
+        summary.push_str(" {");
+        for (index, part) in shown.iter().enumerate() {
+            if summary.chars().count() > crate::view::summary::MAX_CHARACTERS {
+                summary.push_str(", …");
+                break;
+            }
+            if index > 0 {
+                summary.push_str(", ");
+            }
+            summary.push_str(part);
+        }
+        summary.push('}');
+    }
+    summary
+}
+
 /// Children one value lends another, and how many.
 type Lent = (Arc<ValueChildrenReference>, u64);
 
@@ -1058,6 +1149,7 @@ fn presented_children(
         elements,
         fields,
         inner,
+        picked: None,
     });
     ValueChildren::Available(Arc::new(reference))
 }
@@ -1084,6 +1176,26 @@ fn built_in_presentation(
         summary: summary.into(),
         children: presented_children(raw, None, inner, elements, 0),
         problem: None,
+        number: None,
+    }
+}
+
+/// The integer `value` is, or a view presents it as.
+fn number(value: &InspectedValue) -> Option<Arc<InspectedValue>> {
+    match &value.state {
+        VariableState::Available {
+            presentation: Some(presentation),
+            ..
+        } => presentation.number.clone(),
+        VariableState::Available {
+            value:
+                crate::VariableValue::Scalar(
+                    crate::ScalarValue::Signed(_) | crate::ScalarValue::Unsigned(_),
+                )
+                | crate::VariableValue::Enumeration { .. },
+            ..
+        } => Some(Arc::new(value.clone())),
+        _ => None,
     }
 }
 
@@ -1108,6 +1220,7 @@ fn failed(view: Arc<crate::ViewName>, problem: ViewProblem) -> Presentation {
         summary: problem.to_string().into(),
         children: ValueChildren::NotApplicable,
         problem: Some(problem),
+        number: None,
     }
 }
 
@@ -1230,6 +1343,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             summary: presented.summary.into(),
             children: presented_children(&raw, Some(bound), inner, elements, presented.named),
             problem: presented.partial,
+            number: presented.inner.as_ref().and_then(number),
         };
         let mut value = present_as(value, presentation);
         if let Some(text) = presented.text
@@ -1279,6 +1393,9 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         }
         if let Some(tuple) = self.rust_tuple(&value)? {
             return Ok(tuple);
+        }
+        if let Some(future) = self.coroutine(&value)? {
+            return Ok(future);
         }
         let (
             Some(type_info),
@@ -1683,6 +1800,107 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             .map(|fields| (format!("*{fields}"), lent(&pointee.state))))
     }
 
+    /// A coroutine, such as an async function's future, as the state it
+    /// holds rather than the number encoding it: `suspended at main.rs:43
+    /// {id: 3, label: "leaf 3"}` with what it keeps across that await,
+    /// `unresumed` with what it captured, `returned`, or `panicked`. The
+    /// compiler's own members, such as the awaited future and drop flags,
+    /// are left out of the summary, and so are an async function's
+    /// captures once it has started, which its body moved into variables
+    /// of its own. The variables it shows are its children, and the rest
+    /// are under `[raw]`.
+    fn coroutine(
+        &mut self,
+        value: &InspectedValue,
+    ) -> std::result::Result<Option<InspectedValue>, Stop> {
+        let (
+            Some(type_info),
+            VariableState::Available {
+                value:
+                    crate::VariableValue::Variant {
+                        discriminant: Some(discriminant),
+                        active: Some(variant),
+                    },
+                children: ValueChildren::Available(raw),
+                presentation: None,
+                ..
+            },
+        ) = (&value.type_info, &value.state)
+        else {
+            return Ok(None);
+        };
+        let image = Arc::clone(&self.module(raw.module)?.image);
+        let Some(Ok(coroutine)) = image.coroutine(type_info.reference.id) else {
+            return Ok(None);
+        };
+        let number = match discriminant {
+            crate::IntegerValue::Unsigned(number) => u64::try_from(*number).ok(),
+            crate::IntegerValue::Signed(number) => u64::try_from(*number).ok(),
+        };
+        let Some(state) = number.and_then(|number| coroutine.state(number)) else {
+            return Ok(None);
+        };
+        let (variant, raw) = (Arc::clone(variant), Arc::clone(raw));
+        let children = self.children_of(&raw)?;
+        let [record] = &children[children.len().saturating_sub(variant.members.len())..] else {
+            return Ok(None);
+        };
+        let fields = match &record.state {
+            VariableState::Available {
+                children: ValueChildren::Available(reference),
+                ..
+            } => {
+                let reference = Arc::clone(reference);
+                self.children_of(&reference)?
+            }
+            _ => Vec::new(),
+        };
+        // Every state but `Unresumed` ends with the captures.
+        let held = if state.kind == crate::CoroutineStateKind::Unresumed
+            || coroutine.kind != crate::CoroutineKind::AsyncFunction
+        {
+            fields.len()
+        } else {
+            fields.len().saturating_sub(coroutine.captures.len())
+        };
+        let kept = fields[..held]
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| member_name(field).is_some_and(|name| !name.starts_with("__")))
+            .collect::<Vec<_>>();
+        let shown = kept
+            .iter()
+            .map(|(_, field)| {
+                format!(
+                    "{}: {}",
+                    member_name(field).unwrap_or("<anonymous>"),
+                    crate::view::summary::value(Some(&field.type_info), &field.state)
+                )
+            })
+            .collect::<Vec<_>>();
+        let summary = coroutine_summary(&image, state, &shown);
+        // Its children are the variables it keeps; the awaited future,
+        // drop flags, and moved captures are under `[raw]`.
+        let picked = kept
+            .iter()
+            .map(|(index, _)| u64::try_from(*index).expect("a member's index fits u64"))
+            .collect::<Arc<[u64]>>();
+        let mut presentation = built_in_presentation(
+            "Rust coroutines",
+            PresentedShape::Value,
+            summary,
+            &raw,
+            lent(&record.state).map(|(inner, _)| (inner, picked.len() as u64)),
+        );
+        if let ValueChildren::Available(reference) = &mut presentation.children {
+            let reference = Arc::make_mut(reference);
+            if let Some(view) = &mut reference.view {
+                view.picked = Some(picked);
+            }
+        }
+        Ok(Some(present_as(value.clone(), presentation)))
+    }
+
     /// A Rust tuple, `(1, "two")`, or tuple struct, `Meters(7)`, as Rust
     /// writes one: a record whose members are `__0`, `__1`, and on.
     fn rust_tuple(
@@ -1965,6 +2183,18 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 )
             })
             .map_err(|failure| view_stop(failure, bound, ErrorKind::Unsupported))
+    }
+
+    /// The place of the value the view presents the value at `from` as,
+    /// for `*x`.
+    pub(super) fn view_presented(
+        &mut self,
+        bound: &Arc<ViewBound>,
+        from: &StopPlace,
+    ) -> std::result::Result<StopPlace, Stop> {
+        let mut machine = self.nested(self.depth);
+        crate::view::run::presented_place(bound, &mut machine, from.clone())
+            .map_err(|failure| view_stop(failure, bound, ErrorKind::Type))
     }
 
     /// The place of the value the map at `from` holds for `key`, as a view

@@ -15,8 +15,8 @@ use uscope::{
     LineNumber, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity,
     ModuleImage, RegisterSnapshot, SourceContext, SourceLine, StackFrame, StackSegment,
     StateSnapshot, StepKind, StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary,
-    TaskSnapshot, ThreadActivity, ThreadState, VirtualAddress, WatchScope, Watchpoint,
-    WatchpointHit, WatchpointInvalidation,
+    TaskSnapshot, ThreadActivity, ThreadState, UnfollowedFuture, VirtualAddress, WatchScope,
+    Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
 
 use super::commands::{COMMANDS, CommandSpec, aliases};
@@ -45,6 +45,14 @@ pub fn expression_error(text: &str, error: &uscope::ExpressionError) -> String {
         let _ = write!(output, "\nhint: {hint}");
     }
     output
+}
+
+/// How a task ended, as a stop says it: `task 7 finished`.
+pub const fn task_ending(ending: uscope::TaskEnding) -> &'static str {
+    match ending {
+        uscope::TaskEnding::Finished => "finished",
+        uscope::TaskEnding::Cancelled => "was cancelled",
+    }
 }
 
 /// Returns `count noun`, adding an `s` unless the count is one.
@@ -715,19 +723,64 @@ fn numbered_hits(
     format!("{noun}{plural} {hits}")
 }
 
-/// A runtime's exception, followed by its message as the runtime prints
-/// it, which may take several lines.
-fn language_exception(raised: &LanguageException, renderer: Renderer) -> String {
+/// A runtime's exception stop, with `place` saying where it is, followed
+/// by the exception's message as the runtime prints it, which may take
+/// several lines.
+pub fn language_exception(raised: &LanguageException, place: &str, renderer: Renderer) -> String {
     format!(
-        "{} {}:\n{}",
+        "{} {}{place}:\n{}",
         renderer.paint(Role::Error, "stopped"),
-        match raised.kind {
-            LanguageExceptionKind::Raised => "as an exception was raised",
-            LanguageExceptionKind::Unhandled => "by an unhandled exception",
-            LanguageExceptionKind::Fatal => "by a fatal runtime error",
-        },
+        exception_kind(raised.kind),
         renderer.paint(Role::Error, &raised.message)
     )
+}
+
+/// A runtime's exception stop on one line, with its message's first.
+fn exception_summary(raised: &LanguageException, renderer: Renderer) -> String {
+    format!(
+        "{} {}: {}",
+        renderer.paint(Role::Error, "stopped"),
+        exception_kind(raised.kind),
+        renderer.paint(
+            Role::Error,
+            raised.message.lines().next().unwrap_or_default()
+        )
+    )
+}
+
+const fn exception_kind(kind: LanguageExceptionKind) -> &'static str {
+    match kind {
+        LanguageExceptionKind::Raised => "as an exception was raised",
+        LanguageExceptionKind::Unhandled => "by an unhandled exception",
+        LanguageExceptionKind::Fatal => "by a fatal runtime error",
+    }
+}
+
+/// How a stop that ends a step says why it stopped.
+fn step_stop(reason: &StopReason, renderer: Renderer) -> String {
+    let stopped = |role| renderer.paint(role, "stopped");
+    match reason {
+        StopReason::Step { kind } => {
+            format!("{} after {}", stopped(Role::Current), step_name(*kind))
+        }
+        StopReason::StepIncomplete { kind, description } => format!(
+            "{} before the {} completed: {description}",
+            stopped(Role::Warning),
+            step_name(*kind)
+        ),
+        StopReason::TaskEnded { kind, task, ending } => format!(
+            "{} as task {task} {}, after {}",
+            stopped(Role::Current),
+            task_ending(*ending),
+            step_name(*kind)
+        ),
+        StopReason::FutureDropped { kind } => format!(
+            "{} after {}, whose future was dropped,",
+            stopped(Role::Current),
+            step_name(*kind)
+        ),
+        _ => unreachable!("{reason:?} ends no step"),
+    }
 }
 
 /// Summarizes a stop on one line, without watched values or source.
@@ -765,14 +818,10 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             stopped(Role::Error),
             renderer.paint(Role::Metadata, thread_id)
         ),
-        StopReason::Step { kind } => {
-            format!("{} after {}", stopped(Role::Current), step_name(*kind))
-        }
-        StopReason::StepIncomplete { kind, description } => format!(
-            "{} before the {} completed: {description}",
-            stopped(Role::Warning),
-            step_name(*kind)
-        ),
+        StopReason::Step { .. }
+        | StopReason::StepIncomplete { .. }
+        | StopReason::TaskEnded { .. }
+        | StopReason::FutureDropped { .. } => step_stop(reason, renderer),
         StopReason::Pause => format!("inferior {}", renderer.paint(Role::Current, "paused")),
         StopReason::Jump => format!(
             "{} where the thread was moved to resume",
@@ -783,7 +832,7 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             stopped(Role::Error),
             exception(&info.description, info.code, renderer)
         ),
-        StopReason::LanguageException(raised) => language_exception(raised, renderer),
+        StopReason::LanguageException(raised) => exception_summary(raised, renderer),
         StopReason::ProgramBreakpoint { address } => format!(
             "{} by the program's breakpoint instruction at {}",
             stopped(Role::Current),
@@ -897,7 +946,11 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
                     )
                 }
                 Some(ThreadActivity::Idle) => " — idle".to_owned(),
-                _ => String::new(),
+                Some(ThreadActivity::Unknown(reason)) => format!(
+                    " — {}",
+                    renderer.paint(Role::Warning, format_args!("unknown: {reason}"))
+                ),
+                Some(ThreadActivity::Outside) | None => String::new(),
             };
             format!(
                 "{marker} {}{name} {state}{activity}",
@@ -932,6 +985,42 @@ pub fn task(task: &TaskSnapshot, place: &str, selected: bool, renderer: Renderer
         "{marker} {} {place}{detail}{labels}{thread}",
         renderer.paint(Role::Metadata, format_args!("[{}]", task.id.number))
     )
+}
+
+/// Where a task was created, as its runtime knows: `created by main.main
+/// at main.go:40` for the call that created it, or `created at
+/// src/main.rs:12` for a place its runtime recorded only by its source.
+pub fn task_creation(
+    task: &TaskSnapshot,
+    images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    renderer: Renderer,
+) -> Option<String> {
+    let creation = task.creation.as_ref()?;
+    let source = creation
+        .source
+        .as_ref()
+        .and_then(|source| {
+            let file = images.get(&creation.module?)?.source_file(source.file)?;
+            Some(renderer.location(&file.path, source.line))
+        })
+        .or_else(|| {
+            creation
+                .recorded
+                .as_ref()
+                .map(|place| renderer.location(std::path::Path::new(&*place.path), place.line))
+        });
+    let by = creation
+        .function
+        .as_ref()
+        .map(|function| format!(" by {}", renderer.paint(Role::Name, function)));
+    let at = source.map(|source| format!(" at {}", renderer.paint(Role::Metadata, source)));
+    (by.is_some() || at.is_some()).then(|| {
+        format!(
+            "created{}{}",
+            by.unwrap_or_default(),
+            at.unwrap_or_default()
+        )
+    })
 }
 
 /// A task's labels as Go's tracebacks show them, `{job: resize, user: "a
@@ -1868,6 +1957,7 @@ pub fn backtrace(
     limit: Option<usize>,
     modules: Option<&LoadedModuleSnapshot>,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    raw: bool,
     renderer: Renderer,
 ) -> String {
     let shown = limit.unwrap_or(usize::MAX).min(trace.frames.len());
@@ -1880,24 +1970,66 @@ pub fn backtrace(
         .any(|pair| pair[0].segment != pair[1].segment);
     let mut segment = None;
     let iterators = trace.loop_iterators();
-    for (frame, iterates) in trace.frames[..shown].iter().zip(iterators) {
+    let folded = if raw {
+        Vec::new()
+    } else {
+        runtime_runs(trace, shown, selected)
+    };
+    let note = |lines: &mut Vec<String>, frames: std::ops::Range<usize>| {
+        for future in trace.unfollowed.iter().filter(|future| {
+            usize::try_from(future.driver.get()).is_ok_and(|level| frames.contains(&level))
+        }) {
+            lines.push(
+                renderer
+                    .paint(Role::Warning, format_args!("    {}", unfollowed(future)))
+                    .to_string(),
+            );
+        }
+    };
+    let mut label = |lines: &mut Vec<String>, frame: &StackFrame| {
         if switches && segment != Some(frame.segment) {
             segment = Some(frame.segment);
             lines.push(
                 renderer
                     .paint(
                         Role::Metadata,
-                        format_args!("    on {}:", stack_owner(frame.segment)),
+                        format_args!("    {}:", stack_label(frame.segment)),
                     )
                     .to_string(),
             );
         }
+    };
+    for (index, (frame, iterates)) in trace.frames[..shown].iter().zip(iterators).enumerate() {
+        if let Some(run) = folded.iter().find(|run| run.contains(&index)) {
+            if run.start == index {
+                label(&mut lines, frame);
+                note(&mut lines, run.clone());
+                let (first, last) = (&trace.frames[run.start], &trace.frames[run.end - 1]);
+                lines.push(
+                    renderer
+                        .paint(
+                            Role::Muted,
+                            format_args!(
+                                "    … #{}–#{}: {} of the runtime; `bt -r` shows them",
+                                first.level,
+                                last.level,
+                                plural(run.len() as u64, "frame")
+                            ),
+                        )
+                        .to_string(),
+                );
+            }
+            continue;
+        }
+        label(&mut lines, frame);
+        note(&mut lines, index..index + 1);
         lines.push(stack_frame(
             frame,
             iterates,
             modules,
             images,
             frame.level == selected,
+            raw,
             renderer,
         ));
     }
@@ -1922,14 +2054,91 @@ pub fn backtrace(
     lines.join("\n")
 }
 
-/// Whose stack a run of frames is on.
-pub const fn stack_owner(segment: StackSegment) -> &'static str {
-    match segment {
-        StackSegment::Thread => "the thread's stack",
-        StackSegment::Task => "the task's stack",
-        StackSegment::System => "the runtime's stack",
-        StackSegment::Signal => "the signal stack",
+/// The runs of a runtime's frames a backtrace folds into a line each,
+/// by index: two or more frames in a row on one stack of its machinery,
+/// its dispatch, and the wrappers between them, at least one the
+/// runtime's own; and every frame past the innermost dispatch, which runs
+/// the runtime's code for the thread rather than the task's. Where the
+/// stack stopped, and the selected frame, are always shown.
+fn runtime_runs(trace: &Backtrace, shown: usize, selected: u32) -> Vec<std::ops::Range<usize>> {
+    let frames = &trace.frames[..shown];
+    // A frame that drives a future is shown with it, or with why it is not.
+    let mut kept = trace
+        .frames
+        .windows(2)
+        .filter(|pair| {
+            pair[0].segment == StackSegment::Future && pair[1].segment != StackSegment::Future
+        })
+        .map(|pair| pair[1].level)
+        .chain(trace.unfollowed.iter().map(|future| future.driver.get()))
+        .collect::<BTreeSet<_>>();
+    kept.insert(selected);
+    let dispatch = frames
+        .iter()
+        .position(|frame| frame.role == CodeRole::Dispatch)
+        .filter(|at| frames[*at].level >= selected);
+    let Some(dispatch) = dispatch else {
+        return machinery_runs(frames, &kept);
+    };
+    let mut runs = machinery_runs(&frames[..=dispatch], &kept);
+    let below = dispatch + 1..frames.len();
+    if below.len() >= 2 {
+        // The dispatch frame joins the run that ends at it.
+        match runs.last_mut() {
+            Some(run) if run.end == below.start => run.end = below.end,
+            _ => runs.push(below),
+        }
     }
+    runs
+}
+
+/// The runs [`runtime_runs`] folds by role alone.
+fn machinery_runs(frames: &[StackFrame], kept: &BTreeSet<u32>) -> Vec<std::ops::Range<usize>> {
+    let runtime =
+        |frame: &StackFrame| matches!(frame.role, CodeRole::RuntimeInternal | CodeRole::Dispatch);
+    let folds = |frame: &StackFrame| {
+        frame.level != 0
+            && !kept.contains(&frame.level)
+            && (runtime(frame) || frame.role == CodeRole::Wrapper)
+    };
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < frames.len() {
+        let mut end = start;
+        while end < frames.len()
+            && folds(&frames[end])
+            && frames[end].segment == frames[start].segment
+        {
+            end += 1;
+        }
+        if end - start >= 2 && frames[start..end].iter().any(runtime) {
+            runs.push(start..end);
+        }
+        start = end.max(start + 1);
+    }
+    runs
+}
+
+/// Where a run of frames is: whose stack it is on, or the future the frame
+/// after it drives.
+pub const fn stack_label(segment: StackSegment) -> &'static str {
+    match segment {
+        StackSegment::Thread => "on the thread's stack",
+        StackSegment::Task => "on the task's stack",
+        StackSegment::System => "on the runtime's stack",
+        StackSegment::Signal => "on the signal stack",
+        StackSegment::Future => "in the future the next frame drives",
+    }
+}
+
+/// The line that says why the chain of awaits of the future the frame
+/// `driver` drives is shown in part or not at all.
+pub fn unfollowed(future: &UnfollowedFuture) -> String {
+    format!(
+        "the future #{} drives is not shown in full: {}",
+        future.driver.get(),
+        future.reason
+    )
 }
 
 /// Renders one backtrace frame: its level, instruction, code, the level of
@@ -1940,6 +2149,7 @@ pub fn stack_frame(
     modules: Option<&LoadedModuleSnapshot>,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
     selected: bool,
+    raw: bool,
     renderer: Renderer,
 ) -> String {
     let place = frame_source(frame, images, renderer).map_or_else(
@@ -1968,8 +2178,24 @@ pub fn stack_frame(
     } else {
         String::new()
     };
+    // A suspended task's frames run nowhere until it resumes, and the
+    // future it awaits runs no code of its own.
+    let address = frame
+        .instruction
+        .map_or_else(|| " ".repeat(18), |address| format!("{address:#018x}"));
+    let what = match frame.kind {
+        uscope::FrameKind::Awaited { .. } => "",
+        uscope::FrameKind::Async { .. } => " in async",
+        _ => " in",
+    };
+    // An awaited future says what it waits for.
+    let awaiting = frame
+        .awaiting
+        .as_ref()
+        .map(|awaiting| format!(" — {awaiting}"))
+        .unwrap_or_default();
     format!(
-        "{} {} in {}{tail}{iterator}{place}",
+        "{} {}{what} {}{tail}{iterator}{place}{awaiting}",
         renderer.paint(
             if selected {
                 Role::Current
@@ -1978,7 +2204,7 @@ pub fn stack_frame(
             },
             format_args!("#{:<2}", frame.level)
         ),
-        renderer.paint(Role::Metadata, format_args!("{:#018x}", frame.instruction)),
+        renderer.paint(Role::Metadata, address),
         renderer.paint(
             // A runtime's machinery and compiler wrappers recede.
             if frame
@@ -1990,9 +2216,104 @@ pub fn stack_frame(
             } else {
                 Role::Metadata
             },
-            code_name(frame.function.as_ref(), frame.symbol.as_ref())
+            {
+                let name = frame_code(frame, images);
+                // A Rust function's or future's arguments can run to
+                // hundreds of characters; a backtrace keeps its path and its
+                // name.
+                let rust = matches!(frame.kind, uscope::FrameKind::Awaited { .. })
+                    || frame
+                        .function
+                        .as_ref()
+                        .is_some_and(|function| function.language == uscope::SourceLanguage::Rust);
+                if raw || !rust {
+                    name
+                } else {
+                    elide_arguments(&name)
+                }
+            }
         ),
     )
+}
+
+/// The longest generic argument list a backtrace shows whole.
+const MAX_ARGUMENTS: usize = 24;
+
+/// A name with each outermost generic argument list longer than
+/// [`MAX_ARGUMENTS`] written `<…>`, as `run<…>`.
+pub fn elide_arguments(name: &str) -> String {
+    let mut elided = String::with_capacity(name.len());
+    let mut depth = 0_usize;
+    let mut opened = 0;
+    for (at, character) in name.char_indices() {
+        match character {
+            // An arrow closes nothing.
+            '>' if name[..at].ends_with('-') => {}
+            '<' => {
+                if depth == 0 {
+                    opened = at;
+                }
+                depth += 1;
+                continue;
+            }
+            '>' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    let list = &name[opened..=at];
+                    if list.chars().count() - 2 > MAX_ARGUMENTS {
+                        elided.push_str("<…>");
+                    } else {
+                        elided.push_str(list);
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            elided.push(character);
+        }
+    }
+    // An unbalanced list is left as it was written.
+    if depth > 0 {
+        return name.to_owned();
+    }
+    elided
+}
+
+/// What a frame runs, as a backtrace names it: its function or symbol, or,
+/// for the future a suspended task awaits, `awaiting` and that future's
+/// type.
+pub fn frame_code(frame: &StackFrame, images: &BTreeMap<ModuleId, Arc<ModuleImage>>) -> String {
+    if let uscope::FrameKind::Awaited { ty, .. } = frame.kind {
+        let image = images.values().find(|image| image.id() == ty.image);
+        return awaited(image.map(AsRef::as_ref), ty);
+    }
+    code_name(frame.function.as_ref(), frame.symbol.as_ref())
+}
+
+/// The future of type `ty` a suspended task awaits, as its frame is named:
+/// `awaiting tokio::time::sleep::Sleep`.
+pub fn awaited(image: Option<&ModuleImage>, ty: uscope::TypeReference) -> String {
+    let name = image
+        .filter(|image| image.id() == ty.image)
+        .and_then(|image| image.type_info(ty))
+        .map_or_else(|| "a future".to_owned(), super::value::qualified_name);
+    format!("awaiting {name}")
+}
+
+/// The frame of a future a suspended task awaits, named with what it
+/// waits for where a client shows no place beside the name:
+/// `awaiting tokio::time::sleep::Sleep — sleeping until +1s`.
+pub fn awaited_frame(image: Option<&ModuleImage>, frame: &StackFrame) -> Option<String> {
+    let uscope::FrameKind::Awaited { ty, .. } = frame.kind else {
+        return None;
+    };
+    let name = awaited(image, ty);
+    Some(match &frame.awaiting {
+        Some(awaiting) => format!("{name} — {awaiting}"),
+        None => name,
+    })
 }
 
 /// A frame's source file and line, from its module's image.
@@ -2260,6 +2581,31 @@ pub fn signal_received(
 
 #[cfg(test)]
 mod tests {
+    use super::elide_arguments;
+
+    #[test]
+    fn long_generic_arguments_are_elided() {
+        for (name, shown) in [
+            ("poll", "poll"),
+            ("new<u32>", "new<u32>"),
+            (
+                "run<alloc::sync::Arc<tokio::runtime::Handle, alloc::alloc::Global>>",
+                "run<…>",
+            ),
+            (
+                "{closure#0}<tokio::runtime::blocking::task::BlockingTask<F>, S>",
+                "{closure#0}<…>",
+            ),
+            ("call<fn(u32) -> u32>", "call<fn(u32) -> u32>"),
+            (
+                "unbalanced<a::b::c::d::e::f::g::h::i",
+                "unbalanced<a::b::c::d::e::f::g::h::i",
+            ),
+        ] {
+            assert_eq!(elide_arguments(name), shown, "{name}");
+        }
+    }
+
     use super::*;
     use uscope::PointerWidth;
 

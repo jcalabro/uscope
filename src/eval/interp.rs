@@ -253,6 +253,24 @@ impl<M: Machine> Interpreter<'_, M> {
                 let base = self.place(base)?;
                 Value::Place(Self::at(span, self.machine.step(&base, step, &values))?)
             }
+            Op::Holds { base, step, negate } => {
+                let base = self.place(base)?;
+                let holds = match self.machine.step(&base, step, &[]) {
+                    Ok(_) => true,
+                    Err(Stop::Missing(state))
+                        if matches!(
+                            *state,
+                            VariableState::Unavailable(VariableUnavailableReason::ValueAccess(
+                                ValueAccessUnavailableReason::InactiveVariant(_)
+                            ))
+                        ) =>
+                    {
+                        false
+                    }
+                    Err(stop) => return Self::at(span, Err(stop)),
+                };
+                Value::Bool(holds != *negate)
+            }
             Op::Entry { base, step, key } => {
                 let key = self.key(key)?;
                 let map = self.place(base)?;

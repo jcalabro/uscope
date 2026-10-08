@@ -167,6 +167,11 @@
                 "default": 1000,
                 "description": "The most tasks listed as threads; a last entry says how many more there are."
               },
+              "stepIntoRuntime": {
+                "type": "boolean",
+                "default": false,
+                "description": "Let steps stop in a language runtime's own code, such as Go's or tokio's, rather than pass over it."
+              },
               "signals": {
                 "type": "object",
                 "additionalProperties": {
@@ -262,6 +267,11 @@
                 "minimum": 1,
                 "default": 1000,
                 "description": "The most tasks listed as threads; a last entry says how many more there are."
+              },
+              "stepIntoRuntime": {
+                "type": "boolean",
+                "default": false,
+                "description": "Let steps stop in a language runtime's own code, such as Go's or tokio's, rather than pass over it."
               },
               "signals": {
                 "type": "object",

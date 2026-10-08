@@ -179,6 +179,11 @@ view rust alloc::sync::Weak<T, _> {
     field weak = dangling ? 0 : inner(shared->weak) - (strong > 0 ? 1 : 0)
 }
 
+# An UnsafeCell is what it holds; every other cell and lock wraps one.
+view rust core::cell::UnsafeCell<T> {
+    show value(value)
+}
+
 view rust core::cell::Cell<T> {
     show value(value.value)
 }

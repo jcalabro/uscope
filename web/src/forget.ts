@@ -46,7 +46,14 @@ export function forget(before: Marks, after: Marks, answers: Cache, values: Reca
   // What a stop holds changes when someone writes a value or memory, and
   // value handles belong to one connection.
   if (before.writes !== after.writes || before.connection !== after.connection) {
-    for (const method of ["scopes ", "children ", "evaluate ", "readMemory ", "registers "]) {
+    for (const method of [
+      "scopes ",
+      "children ",
+      "evaluate ",
+      "readMemory ",
+      "registers ",
+      "tasks ",
+    ]) {
       answers.forget(method);
     }
   }

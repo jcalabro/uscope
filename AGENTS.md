@@ -63,7 +63,7 @@ The deterministic simulator (`src/sim`, `plans/simulator.md`) runs the real cont
 - Formatting lives in `src/present` and is shared with the CLI. Do not copy it into the page.
 - `web/src/protocol.gen.ts` is generated from `src/web/protocol.rs` with ts-rs. A test fails when it is stale; regenerate it with `USCOPE_UPDATE_PROTOCOL=1`.
 - Debug builds read the built page from `build/web` at run time, so `just web` is enough after a page change. Release builds embed it.
-- The page's address bar holds the tab's whole view (stop, thread, frame, source, view, memory). A shared link opens the same view.
+- The page's address bar holds the tab's whole view (stop, thread or task, frame, source, view, memory). A shared link opens the same view.
 - `just web-test` runs tsc, biome, and Vitest in seconds. `just web-e2e` runs Playwright against real servers in Chromium and Firefox; pass `--project=chromium -g NAME` for a single test. Rerecord the replay transcripts with `just web-transcripts`.
 - To see the page yourself, run `just web-probe PROGRAM STEPS…`. It saves a screenshot after each step and prints the console. Steps are listed in `web/e2e/probe.ts`. `just web-dev` serves the page with live reload.
 - Use the tools in `web/node_modules/.bin` or the Nix shell's `biome`. Never use `npx`, which downloads an unrelated package when a name is missing.

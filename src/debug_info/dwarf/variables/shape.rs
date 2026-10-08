@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::model::ArrayDimension;
 use crate::{
     BaseClass, BaseType, EnumerationOrigin, Enumerator, RecordMember, TypeId, TypeInfo, TypeKind,
-    TypeModifier, TypeReference, Variant, VariantDiscriminant,
+    TypeModifier, TypeReference, Variant, VariantDiscriminant, VariantSelection,
 };
 
 use super::codec::integer_bit_width;
@@ -174,6 +174,86 @@ pub(super) fn indirection_byte_size(
     }
 }
 
+/// The variant the sum `aggregate`, which stores no tag, holds: its one
+/// variant, or the one variant that can hold a value at all, since every
+/// other holds a value of a type with none, such as `Infallible`. Choosing
+/// among several would be a guess, and a sum with no values holds none.
+pub(super) fn tagless_variant<T: TypeMetadataEntry>(
+    types: &[T],
+    aggregate: TypeId,
+) -> Option<usize> {
+    let Ok((
+        _,
+        TypeInfo {
+            kind:
+                TypeKind::Variant {
+                    common_members,
+                    variants,
+                    ..
+                },
+            ..
+        },
+    )) = transparent_type_from(types, aggregate)
+    else {
+        return None;
+    };
+    if common_members
+        .iter()
+        .any(|member| uninhabited(types, member.type_ref.id, 0))
+    {
+        return None;
+    }
+    if is_single_default_variant(variants) {
+        return Some(0);
+    }
+    let mut possible = variants.iter().enumerate().filter(|(_, variant)| {
+        matches!(variant.selection, VariantSelection::Default)
+            && !variant
+                .members
+                .iter()
+                .any(|member| uninhabited(types, member.type_ref.id, 0))
+    });
+    match (possible.next(), possible.next()) {
+        (Some((index, _)), None) => Some(index),
+        _ => None,
+    }
+}
+
+/// Whether no value of a type can exist: a sum that stores no tag and none
+/// of whose variants can hold a value, or a record with a member of such a
+/// type. Anything not known to be so is taken to have values.
+fn uninhabited<T: TypeMetadataEntry>(types: &[T], id: TypeId, depth: usize) -> bool {
+    if depth >= MAX_TYPE_RESOLUTION_DEPTH {
+        return false;
+    }
+    let Ok((_, info)) = transparent_type_from(types, id) else {
+        return false;
+    };
+    match &info.kind {
+        TypeKind::Variant {
+            discriminant,
+            common_members,
+            variants,
+            ..
+        } => {
+            matches!(discriminant.as_ref(), VariantDiscriminant::Absent)
+                && (common_members
+                    .iter()
+                    .any(|member| uninhabited(types, member.type_ref.id, depth + 1))
+                    || variants.iter().all(|variant| {
+                        variant
+                            .members
+                            .iter()
+                            .any(|member| uninhabited(types, member.type_ref.id, depth + 1))
+                    }))
+        }
+        TypeKind::Record { members, .. } => members
+            .iter()
+            .any(|member| uninhabited(types, member.type_ref.id, depth + 1)),
+        _ => false,
+    }
+}
+
 pub(super) fn value_shape_from<T: TypeMetadataEntry>(
     types: &[T],
     id: TypeId,
@@ -338,8 +418,8 @@ fn nested_value_shape<T: TypeMetadataEntry>(
                     "incomplete variant values are unsupported".into(),
                 ));
             }
-            if matches!(discriminant.as_ref(), VariantDiscriminant::TagType(_))
-                && !is_single_default_variant(variants)
+            if !matches!(discriminant.as_ref(), VariantDiscriminant::Stored(_))
+                && tagless_variant(types, current).is_none()
             {
                 return Err(ValueShapeError::Unsupported(
                     "tagless variant selection is unsupported".into(),

@@ -164,6 +164,8 @@ pub enum Error {
     UnknownTask(crate::TaskId),
     #[error("task {0} is parked, not running on a thread")]
     TaskParked(crate::TaskId),
+    #[error("the frame is a suspended task's: it has no registers and runs no code")]
+    FrameSuspended,
     #[error("the frames of task {task} are unavailable: {reason}")]
     TaskUnavailable {
         task: crate::TaskId,

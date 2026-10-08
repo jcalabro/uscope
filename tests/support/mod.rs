@@ -15,7 +15,9 @@ use std::future::Future;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::{Child, ChildStdin, Command, ExitStatus as ProcessExitStatus, Stdio};
+use std::process::{
+    Child, ChildStdin, ChildStdout, Command, ExitStatus as ProcessExitStatus, Stdio,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -36,6 +38,10 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a scenario's check of a stop may take, all its requests
 /// together.
 const STOP_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long an attach may take. It reads the executable's debug
+/// information, which a launched scenario reads before any deadline, and
+/// which takes several times as long under `just stress` as idle.
+const ATTACH_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Checks what must hold at every stop of a scenario, through the handle;
 /// an error says what does not, and fails the scenario.
@@ -159,9 +165,9 @@ impl ExternalProcess {
         ProcessId::new(u64::from(self.child.as_ref().expect("live child").id()))
     }
 
-    /// Attaches a debugger to the process within the event deadline.
+    /// Attaches a debugger to the process within the attach deadline.
     pub async fn attach(&self) -> Debugger {
-        timeout(EVENT_TIMEOUT, Debugger::attach(self.process_id()))
+        timeout(ATTACH_TIMEOUT, Debugger::attach(self.process_id()))
             .await
             .expect("attach timed out")
             .expect("attach debugger")
@@ -185,6 +191,15 @@ impl ExternalProcess {
             .as_mut()
             .and_then(|child| child.stdin.take())
             .expect("fixture stdin")
+    }
+
+    /// Takes the standard output the process writes past its readiness
+    /// line.
+    pub fn take_stdout(&mut self) -> ChildStdout {
+        self.child
+            .as_mut()
+            .and_then(|child| child.stdout.take())
+            .expect("fixture stdout")
     }
 
     /// Gives up a process that a debugger traced to its exit, and so reaped:
@@ -530,6 +545,23 @@ impl Scenario {
         let task = self.run_task(true);
         self.wait_for(|event| matches!(event, DebuggerEvent::InferiorLaunched { .. }))
             .await;
+        task
+    }
+
+    /// Starts a step of the selected thread or task, and returns once it
+    /// runs, with what ends it.
+    pub async fn start_stepping(&mut self, kind: StepKind) -> JoinHandle<Result<StopReason>> {
+        let mut task = self.spawn_request(&format!("step {kind:?}"), move |handle| async move {
+            handle.step(kind).await
+        });
+        // A step refused never continues the inferior.
+        let refused = tokio::select! {
+            _ = self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. })) => None,
+            ended = &mut task => Some(ended),
+        };
+        if let Some(ended) = refused {
+            self.fail(&format!("step {kind:?} ended unstarted: {ended:?}"));
+        }
         task
     }
 

@@ -59,6 +59,8 @@ use registers::Fxsave;
 use tls::{CLibrary, TlsModule};
 
 mod activation;
+mod async_frames;
+mod awaits;
 mod breakpoints;
 mod callers;
 mod classify;
@@ -497,9 +499,9 @@ struct StepStart {
     /// For a step over a call instruction, the return address and the stack
     /// pointer the call returns with.
     call_return: Option<(VirtualAddress, StackPosition)>,
-    /// Whether the step began in a language runtime's own code, where it
-    /// may then stop, as it may not when it began elsewhere.
-    began_in_runtime: bool,
+    /// Whether the step may stop in a language runtime's own code: it began
+    /// there, or the session's steps enter the runtime.
+    enters_runtime: bool,
     /// Where a step over or out traps a panic its task begins: the entries
     /// of the runtime's code that starts one.
     panic_guards: BTreeSet<VirtualAddress>,
@@ -525,6 +527,31 @@ struct StepStart {
     /// For a step into a new task, how far it has followed the task's
     /// start.
     new_task: Option<new_task::NewTask>,
+    /// For a step over or out of an async function's body, the future it
+    /// runs for, which the step follows across the polls of its awaits.
+    awaiting: Option<awaits::AwaitStep>,
+    /// The future the step waited for, once it was dropped and the step
+    /// went on in the code that dropped it.
+    dropped: Option<awaits::RunningFuture>,
+}
+
+impl StepStart {
+    /// Where the step's plan stops threads: its plan's own sites, its panic
+    /// guards, an advance's targets, and the code that starts tasks while a
+    /// step into a new task watches for one.
+    fn plan_sites(&self) -> BTreeSet<VirtualAddress> {
+        let starters = match &self.new_task {
+            Some(new_task::NewTask::Watching(starters)) => starters.keys().copied().collect(),
+            _ => Vec::new(),
+        };
+        self.plan_addresses
+            .iter()
+            .chain(&self.panic_guards)
+            .chain(&self.targets)
+            .chain(&starters)
+            .copied()
+            .collect()
+    }
 }
 
 /// Whether a step kind executes machine instructions rather than source
@@ -714,6 +741,10 @@ struct PublicStop {
     /// Where each runtime said it keeps the tasks it listed at this stop,
     /// forgotten once the debugger writes memory.
     task_locators: RefCell<BTreeMap<crate::TaskId, u64>>,
+    /// The sets of tasks the futures threads drive run, found once asked
+    /// for, and why some may be missing; forgotten once the debugger
+    /// writes memory.
+    task_sets: RefCell<Option<runtimes::TaskSets>>,
     /// What the function a step out finished returned.
     returned: Option<returns::Returned>,
 }
@@ -1034,15 +1065,6 @@ impl Waiter {
             .join()
             .map_err(|_| Error::BackendThreadPanicked)
     }
-
-    fn join(self) -> Result<()> {
-        self.thread.map_or(Ok(()), |thread| {
-            thread
-                .handle
-                .join()
-                .map_err(|_| Error::BackendThreadPanicked)
-        })
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1191,6 +1213,8 @@ struct Controller<P: InspectionOps> {
     signals: SignalPolicies,
     /// Which exceptions that runtimes report stop the program.
     exception_stops: crate::ExceptionStops,
+    /// Whether steps stop in a language runtime's own code.
+    step_into_runtime: bool,
     /// The language runtime each image carries, bound on first need.
     runtime_models: runtimes::RuntimeCache,
     revision: u64,
@@ -1302,6 +1326,7 @@ impl<P: InspectionOps> Controller<P> {
             deferred_start: None,
             signals: SignalPolicies::default(),
             exception_stops: crate::ExceptionStops::default(),
+            step_into_runtime: false,
             runtime_models: RefCell::default(),
             revision: 0,
         }
@@ -1527,6 +1552,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                     exception,
                     reply,
                 ),
+                Err(Error::TaskParked(task)) if call.is_none() => {
+                    let result = self.step_suspended(
+                        (process_id, stop_id),
+                        task,
+                        frame,
+                        kind,
+                        scope,
+                        exception,
+                    );
+                    self.reply_execution(result, scope, reply);
+                }
                 Err(error) => {
                     let _ = reply.send(Err(error));
                 }
@@ -1828,6 +1864,9 @@ impl<P: InspectionOps> Controller<P> {
             Request::EnableViews { enabled, reply } => {
                 self.views.enabled = enabled;
                 let _ = reply.send(Ok(()));
+            }
+            Request::SetStepIntoRuntime { enter, reply } => {
+                let _ = reply.send(Ok(std::mem::replace(&mut self.step_into_runtime, enter)));
             }
             Request::ExplainType { name, reply } => {
                 let _ = reply.send(Ok(self.explain_type(&name)));
@@ -2270,6 +2309,7 @@ impl PublicStop {
             selected_frames: BTreeMap::new(),
             activities: RefCell::default(),
             task_locators: RefCell::default(),
+            task_sets: RefCell::default(),
             returned: None,
         }
     }

@@ -78,7 +78,11 @@ pub enum BoundFormat {
 #[derive(Debug, Clone)]
 pub enum BoundPiece<St> {
     Literal(String),
-    Hole(ViewProgram<St>),
+    /// A value's summary, or the value written in `format`.
+    Hole {
+        program: ViewProgram<St>,
+        format: Option<BoundFormat>,
+    },
 }
 
 /// Where a `text` shape's characters are, and how many bytes wide each
@@ -192,7 +196,7 @@ pub enum BoundShape<St> {
         length: Option<ViewProgram<St>>,
     },
     Value(ViewProgram<St>),
-    Empty(Arc<str>),
+    Empty(Vec<BoundPiece<St>>),
     Sequence {
         scan: BoundScan<St>,
         element: ViewProgram<St>,
@@ -231,6 +235,18 @@ pub enum BoundDynamic<St> {
     Argument {
         types: Arc<[Option<TypeReference>]>,
         index: ViewProgram<St>,
+    },
+    /// The one type among `candidates` that `pattern` names when its
+    /// captures `known` does not name are the type arguments of the
+    /// function whose code `code` addresses.
+    Function {
+        code: ViewProgram<St>,
+        name: Arc<str>,
+        /// Whether `name` is a parameter's, which names its argument.
+        argument: bool,
+        pattern: Arc<Pattern>,
+        known: Captures,
+        candidates: Arc<[TypeReference]>,
     },
 }
 
@@ -576,16 +592,7 @@ pub fn bind<S: Scope>(
                 name: name.as_str().into(),
                 program: bind_part(value, &scope, Mode::Read)?,
             }),
-            Statement::Summary(pieces) => {
-                let mut bound = Vec::new();
-                for piece in pieces {
-                    bound.push(match piece {
-                        Piece::Literal(text) => BoundPiece::Literal(text.clone()),
-                        Piece::Hole(expr) => BoundPiece::Hole(bind_part(expr, &scope, Mode::Read)?),
-                    });
-                }
-                summary = Some(bound);
-            }
+            Statement::Summary(pieces) => summary = Some(bind_pieces(pieces, &scope)?),
             Statement::Show(shown) => shape = Some(bind_shape(shown, &mut scope)?),
             Statement::Hide { names, line } => {
                 hidden.extend(
@@ -1043,7 +1050,7 @@ fn bind_shape<S: Scope>(
                 .transpose()?,
         },
         Shape::Value(value) => BoundShape::Value(bind_part(value, scope, Mode::Read)?),
-        Shape::Empty(text) => BoundShape::Empty(text.as_str().into()),
+        Shape::Empty(pieces) => BoundShape::Empty(bind_pieces(pieces, scope)?),
         Shape::Sequence {
             count,
             clauses,
@@ -1139,6 +1146,38 @@ fn bind_dynamic_type<S: Scope>(
             Ok(BoundDynamic::Argument {
                 types,
                 index: bind_integer(index, scope)?,
+            })
+        }
+        DynamicType::Function { ty, code } => {
+            let TypeExpr::Named { name, pointers: 0 } = ty else {
+                return Err(rejected(
+                    "a type a function's arguments complete is named with its arguments".to_owned(),
+                ));
+            };
+            let pattern = super::syntax::type_pattern(name)
+                .map_err(|reason| rejected(format!("`{name}`: {reason}")))?;
+            // A parameter's name alone is the argument itself.
+            let argument = is_capture_name(name);
+            let candidates = if argument {
+                Vec::new()
+            } else {
+                candidates(&pattern, scope)
+            };
+            if candidates.is_empty() && !argument {
+                return Err(rejected(format!("no type is `{name}`")));
+            }
+            Ok(BoundDynamic::Function {
+                code: bind_category(
+                    code,
+                    scope,
+                    |category| matches!(category, Category::Pointer(_) | Category::Integer { .. }),
+                    "is not the address of code",
+                )?,
+                name: name.as_str().into(),
+                argument,
+                pattern: Arc::new(pattern),
+                known: known_types(scope),
+                candidates: candidates.into(),
             })
         }
     }
@@ -1434,31 +1473,18 @@ fn resolve_type<S: Scope>(
 fn construct<S: Scope>(name: &str, scope: &ViewScope<'_, S>) -> Result<TypeReference, String> {
     let pattern =
         super::syntax::type_pattern(name).map_err(|reason| format!("`{name}`: {reason}"))?;
-    let mut known = scope.captures.clone();
-    for (type_name, reference) in &scope.types {
-        known.retain(|(captured, _)| captured != type_name);
-        known.push((type_name.clone(), Captured::Type(*reference)));
-    }
+    let known = known_types(scope);
     if let Some(unknown) = unknown_capture(&pattern, &known) {
         return Err(format!(
             "`{name}`: `{unknown}` is neither an argument the pattern captured nor a type the view names"
         ));
     }
-    let language = scope
-        .type_info(scope.self_type)
-        .and_then(|info| info.identity.map(|identity| identity.language));
     let mut found = Vec::<TypeReference>::new();
-    for candidate in scope.types_with_base(&pattern.base) {
-        let Some(info) = scope.type_info(candidate) else {
+    for candidate in candidates(&pattern, scope) {
+        let Some(identity) = scope.type_info(candidate).and_then(|info| info.identity) else {
             continue;
         };
-        let Some(identity) = info.identity.as_deref() else {
-            continue;
-        };
-        if language.is_some_and(|language| identity.language != language) {
-            continue;
-        }
-        if super::pattern::matches_with(&pattern, identity, scope, known.clone()).is_some()
+        if super::pattern::matches_with(&pattern, &identity, scope, known.clone()).is_some()
             && !found.iter().any(|other| scope.same_type(*other, candidate))
         {
             found.push(candidate);
@@ -1477,6 +1503,67 @@ fn construct<S: Scope>(name: &str, scope: &ViewScope<'_, S>) -> Result<TypeRefer
                 .join(", ")
         )),
     }
+}
+
+/// The types a view knows by name: the arguments its pattern captured and
+/// the types its `type` statements name, which shadow them.
+fn known_types<S: Scope>(scope: &ViewScope<'_, S>) -> Captures {
+    let mut known = scope.captures.clone();
+    for (type_name, reference) in &scope.types {
+        known.retain(|(captured, _)| captured != type_name);
+        known.push((type_name.clone(), Captured::Type(*reference)));
+    }
+    known
+}
+
+/// The program's types a pattern may name: those of its base name, in the
+/// language of the type the view presents.
+fn candidates<S: Scope>(pattern: &Pattern, scope: &ViewScope<'_, S>) -> Vec<TypeReference> {
+    let language = scope
+        .type_info(scope.self_type)
+        .and_then(|info| info.identity.map(|identity| identity.language));
+    scope
+        .types_with_base(&pattern.base)
+        .into_iter()
+        .filter(|candidate| {
+            scope
+                .type_info(*candidate)
+                .and_then(|info| info.identity)
+                .is_some_and(|identity| {
+                    language.is_none_or(|language| identity.language == language)
+                })
+        })
+        .collect()
+}
+
+/// A summary's text and holes, bound.
+fn bind_pieces<S: Scope>(
+    pieces: &[Piece],
+    scope: &ViewScope<'_, S>,
+) -> Result<Vec<BoundPiece<S::Step>>, Rejection> {
+    pieces
+        .iter()
+        .map(|piece| {
+            Ok(match piece {
+                Piece::Literal(text) => BoundPiece::Literal(text.clone()),
+                Piece::Hole { value, format } => BoundPiece::Hole {
+                    program: bind_part(value, scope, Mode::Read)?,
+                    format: format
+                        .as_ref()
+                        .map(|format| bind_format(format, value.line, scope))
+                        .transpose()?,
+                },
+            })
+        })
+        .collect()
+}
+
+/// Whether a type's name is a capture's: one capitalized word.
+fn is_capture_name(name: &str) -> bool {
+    name.chars().next().is_some_and(char::is_uppercase)
+        && name
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
 }
 
 /// A capitalized name in a pattern that nothing the view knows names.

@@ -114,6 +114,7 @@ async fn check_threads(session: &mut GoSession, tasks: &[TaskSnapshot], main: u6
                 }
                 ThreadActivity::Idle => {}
                 ThreadActivity::Unknown(reason) => panic!("{context}: {reason}"),
+                ThreadActivity::Outside => panic!("{context}: outside the runtime"),
             }
         }
         let on_threads = tasks
@@ -444,7 +445,12 @@ async fn check_saved_registers(session: &GoSession, view: StopContext, trace: &B
     };
     assert_eq!(
         register("rip"),
-        Some(trace.frames[0].instruction.get()),
+        Some(
+            trace.frames[0]
+                .instruction
+                .expect("a thread's frame has an instruction")
+                .get()
+        ),
         "{fixture}: {registers:#?}"
     );
     assert!(register("rsp").is_some(), "{fixture}: {registers:#?}");

@@ -19,7 +19,13 @@
 //! C++ class its producer says calls pass by reference, is in memory the
 //! caller provides, whose address the function returns in rax. Rust and Zig
 //! leave their own conventions unspecified, so only their scalars, which
-//! LLVM and Zig return as C does, are known.
+//! LLVM and Zig return as C does, are known, and Rust's values of two
+//! scalars, which rustc returns as LLVM returns a pair: each scalar in the
+//! next register of its class.
+//!
+//! LLVM may change how a function no other module calls returns, such as
+//! dropping a part no caller reads, and then marks it `DW_CC_nocall`: what
+//! such a function returned is unknown.
 
 use std::sync::Arc;
 
@@ -74,6 +80,9 @@ pub(super) struct SystemV {
     /// The function's language, which says whether the convention is
     /// known for aggregates and how C++ passes a class.
     pub(super) language: SourceLanguage,
+    /// Whether the producer says optimization changed how the function
+    /// returns, so the convention no longer says where its value is.
+    pub(super) rewritten: bool,
 }
 
 /// Where one part of a value is.
@@ -372,8 +381,12 @@ impl DwarfVariableInfo {
         if self.size(ty).is_ok_and(|size| size == 0) {
             return Ok(None);
         }
-        let captured = self
-            .system_v_parts(ty, returned.language)
+        let parts = if returned.rewritten {
+            Err(Unassigned::Unspecified)
+        } else {
+            self.system_v_parts(ty, returned.language)
+        };
+        let captured = parts
             .map_err(placed)
             .and_then(|parts| self.capture(ty, &parts, runtime, budget));
         let value = match captured {
@@ -410,6 +423,11 @@ impl DwarfVariableInfo {
             | TypeKind::Pointer { .. }
             | TypeKind::Reference { .. }
             | TypeKind::Function => false,
+            TypeKind::Record { .. } | TypeKind::Variant { .. }
+                if language == SourceLanguage::Rust =>
+            {
+                return self.rust_pair_parts(ty);
+            }
             TypeKind::Record { .. } | TypeKind::Union { .. } => match language {
                 SourceLanguage::C => true,
                 SourceLanguage::Cpp => match self.passed_by_value.get(&id) {
@@ -486,6 +504,95 @@ impl DwarfVariableInfo {
             start = end;
         }
         Ok(parts)
+    }
+
+    /// Where rustc returns a Rust record or enum: in registers when it
+    /// holds one scalar, or two, which rustc lays out as a scalar pair, and
+    /// returns as LLVM does a pair, each scalar in the next register of its
+    /// class. An enum's tag is one of its scalars, and each variant's
+    /// payload, at the same place in every variant, the other. rustc
+    /// returns any other aggregate as it sees fit.
+    fn rust_pair_parts(&self, ty: TypeId) -> std::result::Result<Vec<Part>, Unassigned> {
+        let mut leaves = Vec::new();
+        self.rust_leaves(ty, 0, &mut leaves)?;
+        leaves.sort_by_key(|leaf| (leaf.offset, leaf.size));
+        leaves.dedup_by(|leaf, kept| {
+            leaf.offset == kept.offset && leaf.size == kept.size && leaf.class == kept.class
+        });
+        if leaves.is_empty()
+            || leaves.len() > 2
+            || leaves
+                .windows(2)
+                .any(|pair| pair[0].offset + pair[0].size > pair[1].offset)
+        {
+            return Err(Unassigned::Unspecified);
+        }
+        let (mut integers, mut floats) = (SYSTEM_V_INTEGER.iter(), SYSTEM_V_FLOATING.iter());
+        leaves
+            .iter()
+            .map(|leaf| {
+                let register = match leaf.class {
+                    Class::Integer => integers.next(),
+                    Class::Floating => floats.next(),
+                    Class::X87 => None,
+                }
+                .ok_or(Unassigned::Unspecified)?;
+                Ok(Part {
+                    offset: leaf.offset,
+                    size: leaf.size,
+                    source: Source::Register(*register),
+                })
+            })
+            .collect()
+    }
+
+    /// Adds the scalars of a Rust value of type `ty` at `offset` to
+    /// `leaves`: an enum's tag and every variant's payload. rustc lays out
+    /// arrays and unions as aggregates, never scalars.
+    fn rust_leaves(
+        &self,
+        ty: TypeId,
+        offset: u64,
+        leaves: &mut Vec<Leaf>,
+    ) -> std::result::Result<(), Unassigned> {
+        let members = |members: &[crate::RecordMember], leaves: &mut Vec<Leaf>| {
+            members.iter().try_for_each(|member| match member.layout {
+                RecordMemberLayout::ByteOffset(at) => {
+                    self.rust_leaves(member.type_ref.id, offset + at, leaves)
+                }
+                _ => Err(Unassigned::Unspecified),
+            })
+        };
+        match &self.underlying(ty)?.kind {
+            TypeKind::Record {
+                members: fields,
+                bases,
+                incomplete: false,
+                ..
+            } if bases.is_empty() => members(fields, leaves),
+            TypeKind::Variant {
+                common_members,
+                bases,
+                discriminant,
+                variants,
+                incomplete: false,
+                ..
+            } if bases.is_empty() => {
+                members(common_members, leaves)?;
+                if let crate::VariantDiscriminant::Stored(tag) = discriminant.as_ref() {
+                    members(std::slice::from_ref(tag), leaves)?;
+                }
+                variants
+                    .iter()
+                    .try_for_each(|variant| members(&variant.members, leaves))
+            }
+            TypeKind::Base(_)
+            | TypeKind::Enumeration { .. }
+            | TypeKind::Pointer { .. }
+            | TypeKind::Reference { .. }
+            | TypeKind::Function => self.leaves(ty, offset, leaves),
+            _ => Err(Unassigned::Unspecified),
+        }
     }
 
     /// Adds the scalars of a value of type `ty` at `offset` to `leaves`.

@@ -66,6 +66,58 @@ pub fn last_part(name: &str) -> &str {
     written.rsplit("::").next().unwrap_or(written)
 }
 
+/// A demangled Rust function's path, with no generic arguments and an
+/// inherent method's type unwrapped: v0's
+/// `<tokio::runtime::park::CachedParkThread>::block_on::<F>` and legacy's
+/// `tokio::runtime::park::CachedParkThread::block_on` are both the path
+/// `tokio::runtime::park::CachedParkThread::block_on`. `None` for a trait
+/// implementation's method, which a path does not name, or unbalanced
+/// brackets.
+pub fn rust_path(demangled: &str) -> Option<String> {
+    let unwrapped;
+    let mut name = demangled;
+    if let Some(inner) = name.strip_prefix('<') {
+        let close = closing(inner)?;
+        if inner[..close].contains(" as ") {
+            return None;
+        }
+        unwrapped = format!("{}{}", &inner[..close], &inner[close + 1..]);
+        name = &unwrapped;
+    }
+    let mut path = String::with_capacity(name.len());
+    let mut depth = 0_usize;
+    for (at, character) in name.char_indices() {
+        match character {
+            // A function type's arrow closes nothing.
+            '>' if name[..at].ends_with('-') => {}
+            '<' => depth += 1,
+            '>' => depth = depth.checked_sub(1)?,
+            _ if depth == 0 => path.push(character),
+            _ => {}
+        }
+    }
+    (depth == 0).then(|| path.replace("::::", "::").trim_end_matches("::").to_owned())
+}
+
+/// Where the `>` closing a `<` just before `text` is in it.
+fn closing(text: &str) -> Option<usize> {
+    let mut depth = 1_usize;
+    for (at, character) in text.char_indices() {
+        match character {
+            '>' if text[..at].ends_with('-') => {}
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// A function's name and its parameter list, which begins at the first
 /// parenthesis outside template arguments.
 fn split_parameters(name: &str) -> (&str, &str) {
@@ -83,7 +135,40 @@ fn split_parameters(name: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{demangle, spells};
+    use super::{demangle, rust_path, spells};
+
+    #[test]
+    fn rust_paths_leave_out_generic_arguments_and_inherent_impls_brackets() {
+        let path = |mangled: &str| rust_path(&demangle(mangled).expect("a Rust name"));
+        let block_on = "tokio::runtime::park::CachedParkThread::block_on";
+        for (mangled, expected) in [
+            (
+                "_RINvMs2_NtNtCshWOCllL2uKN_5tokio7runtime4parkNtB6_16CachedParkThread\
+                 8block_onNCNvCsiiWaAJDmxH2_7workers3run0EB1h_",
+                Some(block_on.to_owned()),
+            ),
+            (
+                "_RNCINvMs2_NtNtCshWOCllL2uKN_5tokio7runtime4parkNtB8_16CachedParkThread\
+                 8block_onNCNvCsiiWaAJDmxH2_7workers3run0E0B1j_",
+                Some(format!("{block_on}::{{closure#0}}")),
+            ),
+            (
+                "_ZN5tokio7runtime4park16CachedParkThread8block_on17h0123456789abcdefE",
+                Some(block_on.to_owned()),
+            ),
+        ] {
+            assert_eq!(path(mangled), expected, "{mangled}");
+        }
+        assert_eq!(
+            rust_path("<alloc::boxed::Box<F> as core::future::Future>::poll"),
+            None
+        );
+        assert_eq!(
+            rust_path("core::ops::function::FnOnce<fn() -> u8>::call"),
+            Some("core::ops::function::FnOnce::call".into())
+        );
+        assert_eq!(rust_path("a::b<c"), None);
+    }
 
     #[test]
     fn written_names_spell_mangled_ones_with_or_without_scopes_and_parameters() {

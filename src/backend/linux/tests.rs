@@ -638,6 +638,8 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
                     language: crate::SourceLanguage::C,
                     role: crate::CodeRole::Ordinary,
                     enclosing: None,
+                    coroutine: None,
+                    generics: std::sync::Arc::from([]),
                 })
                 .collect(),
             code_instances: instances
@@ -670,6 +672,8 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
             lines: Vec::new(),
             sections: Vec::new(),
             vtables: Vec::new(),
+            coroutines: std::collections::BTreeMap::new(),
+            resume_points: std::collections::BTreeMap::new(),
             thread_local_storage: false,
             constants: std::collections::BTreeMap::new(),
             producers: Vec::new(),
@@ -4341,14 +4345,15 @@ impl crate::runtime_model::RuntimeModel for ScriptedRuntime {
     ) -> Option<std::result::Result<VirtualAddress, Arc<str>>> {
         None
     }
-    fn task_starter(&self) -> Option<ImageAddress> {
-        None
+    fn task_starters(&self) -> Vec<crate::runtime_model::TaskStarter> {
+        Vec::new()
     }
     fn started_task(
         &self,
         _stop: &dyn crate::runtime_model::RuntimeStop,
+        _starter: ImageAddress,
         _registers: &RegisterFile,
-    ) -> std::result::Result<crate::runtime_model::RuntimeTask, Arc<str>> {
+    ) -> std::result::Result<Option<crate::runtime_model::StartedTask>, Arc<str>> {
         Err("the script starts no tasks".into())
     }
     fn task_noun(&self) -> &'static str {
@@ -4425,9 +4430,9 @@ fn a_step_follows_its_task_to_another_thread_and_passes_the_others() {
         .controller
         .runtime_models
         .borrow_mut()
-        .insert(image.id(), Some(Ok(Arc::clone(&runtime) as _)));
+        .insert(image.id(), vec![Ok(Arc::clone(&runtime) as _)]);
     let task = crate::TaskId {
-        runtime: crate::RuntimeId::new(harness.inferior().loaded_module.id.get()),
+        runtime: crate::RuntimeId::new(harness.inferior().loaded_module.id.get() * 4),
         number: 1,
     };
     runtime.runs(first, 1);

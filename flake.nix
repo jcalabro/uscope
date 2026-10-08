@@ -46,6 +46,11 @@
       muslClang = pkgs.writeShellScriptBin "musl-clang" ''
         exec ${musl64.buildPackages.clang}/bin/x86_64-unknown-linux-musl-clang "$@"
       '';
+      # The crates the tokio fixtures depend on, exactly as their lockfile
+      # names them, so that building them fetches nothing.
+      tokioFixtureCrates = pkgs.rustPlatform.importCargoLock {
+        lockFile = ./tests/fixtures/rust/tokio/Cargo.lock;
+      };
     in {
       devShells.${system}.default = pkgs.mkShell {
         NIX_HARDENING_ENABLE = "";
@@ -53,6 +58,9 @@
         # against: on the default search path they would shadow the shared C
         # library for every program.
         GLIBC_STATIC_LIBRARIES = "${pkgs.glibc.static}/lib";
+        # The vendored crates scripts/build-test-programs.sh builds the tokio
+        # fixtures against, offline.
+        USCOPE_FIXTURE_CRATES = "${tokioFixtureCrates}";
         # The web UI's end-to-end tests drive the browsers nixpkgs builds,
         # which must match the pinned @playwright/test exactly.
         PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
