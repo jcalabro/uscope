@@ -27,3 +27,12 @@ debug = 2
 inherits = "dev"
 panic = "abort"
 
+# Lines and nothing else: no types, so no tasks.
+[profile.lines]
+inherits = "dev"
+debug = "line-tables-only"
+
+# Symbols and nothing else.
+[profile.stripped]
+inherits = "dev"
+strip = "debuginfo"

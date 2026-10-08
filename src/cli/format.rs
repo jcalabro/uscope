@@ -897,7 +897,11 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
                     )
                 }
                 Some(ThreadActivity::Idle) => " — idle".to_owned(),
-                _ => String::new(),
+                Some(ThreadActivity::Unknown(reason)) => format!(
+                    " — {}",
+                    renderer.paint(Role::Warning, format_args!("unknown: {reason}"))
+                ),
+                Some(ThreadActivity::Outside) | None => String::new(),
             };
             format!(
                 "{marker} {}{name} {state}{activity}",

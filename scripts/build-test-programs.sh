@@ -1966,6 +1966,8 @@ build_tokio_variant() {
         cp -p "$built" "$output"
         rebuilt_outputs["$output"]=true
     done
+    # Coroutines are compared only in the plain builds.
+    [[ "$variant" == o0 || "$variant" == o3 ]] || return 0
     for package in "$@"; do
         generate_coroutine_oracle "$output_dir/tokio-${package}-${variant}"
     done
@@ -1997,6 +1999,15 @@ build_tokio_variant o0 dev "" "${tokio_fixtures[@]}"
 build_tokio_variant o3 release "" "${tokio_fixtures[@]}"
 # Panics that abort rather than unwind.
 build_tokio_variant abort abort "" panics
+# Builds that describe less than tokio's types, where the debugger says
+# what it cannot read: lines only, symbols only, and tokio's sources moved
+# where its version cannot be read from their path.
+build_tokio_variant lines lines "" workers
+build_tokio_variant stripped stripped "" workers
+build_tokio_variant remapped dev \
+    "--remap-path-prefix=${USCOPE_FIXTURE_CRATES}/tokio-1.52.3=/vendor/tokio" workers
+# Symbols mangled as rustc did before v0, which name no generic arguments.
+build_tokio_variant legacy dev "-Z unstable-options -C symbol-mangling-version=legacy" panics workers
 
 # Go's own reading of the function tables of images the Go linker linked,
 # which a test compares uscope's reader with.

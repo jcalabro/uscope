@@ -17,6 +17,10 @@ use crate::stops::{backtrace, integer};
 use crate::support::{Scenario, ScratchDir};
 
 const BUILDS: [&str; 2] = ["tokio-workers-o0", "tokio-workers-o3"];
+/// A build whose symbols are mangled as rustc did before v0, naming no
+/// generic arguments, where tokio's functions are told apart by their
+/// debug information.
+const LEGACY: &str = "tokio-workers-legacy";
 
 /// One build of the fixture, stopped at its first stop, with what it
 /// printed going to a file.
@@ -199,7 +203,7 @@ impl Truth {
 /// Every task of either runtime flavor is listed once, in its state, with
 /// nothing missing, across pages of any size.
 async fn tasks_are_listed_exactly(current: bool) {
-    for fixture in BUILDS {
+    for fixture in BUILDS.into_iter().chain([LEGACY]) {
         let mut workers = Workers::parked(fixture, current).await;
         let truth = workers.truth();
         assert_eq!(truth.tasks.len(), 8, "{fixture}: {truth:?}");
@@ -285,8 +289,15 @@ async fn a_task_at_a_breakpoint_runs_on_its_thread(current: bool) {
         else {
             panic!("{fixture}: not stopped");
         };
+        // The program spawns tasks and blocking closures while its tasks
+        // run, so a list or the pool may be changing at the stop, which
+        // the list says, and nothing else.
         let (tasks, gaps) = workers.tasks(4096).await;
-        assert!(gaps.is_empty(), "{fixture}: {gaps:?}");
+        assert!(
+            gaps.iter()
+                .all(|gap| gap.contains("was being changed at the stop")),
+            "{fixture}: {gaps:?}"
+        );
         let task = tasks
             .iter()
             .find(|task| task.id.number == me)
@@ -388,6 +399,83 @@ async fn before_any_runtime_there_are_no_tasks() {
         );
         workers.scenario.shutdown().await;
     }
+}
+
+/// A build that describes no types, with lines only or symbols only, has
+/// no tasks to list: they are refused naming the type they need, never
+/// read from an offset the debugger guessed, and no thread is said to run
+/// a task or wait for one. Its breakpoints and frames still work, by its
+/// lines or its symbols.
+#[tokio::test]
+async fn a_build_without_types_refuses_tasks_and_says_why() {
+    let context =
+        "std::sys::thread_local::native::eager::Storage<tokio::runtime::context::Context>";
+    for (fixture, lines) in [
+        ("tokio-workers-lines", true),
+        ("tokio-workers-stripped", false),
+    ] {
+        let mut workers = Workers::parked(fixture, false).await;
+        let (tasks, gaps) = workers.tasks(64).await;
+        assert!(tasks.is_empty(), "{fixture}: {tasks:#?}");
+        let error = gaps.join("; ");
+        assert!(
+            error.contains(&format!("the program describes no type {context}")),
+            "{fixture}: {error}"
+        );
+        // A stripped build keeps no source paths to read tokio's version
+        // from either.
+        assert_eq!(
+            error.contains("tokio's version is unknown"),
+            !lines,
+            "{fixture}: {error}"
+        );
+        for (id, activity) in workers.activities().await {
+            assert!(
+                matches!(&activity, ThreadActivity::Unknown(reason) if reason.contains(context)),
+                "{fixture}: thread {id}: {activity:?}"
+            );
+        }
+        let trace = backtrace(&workers.scenario).await;
+        let names = trace
+            .frames
+            .iter()
+            .take(2)
+            .map(|frame| match (&frame.function, &frame.symbol) {
+                (Some(function), _) => function.name.to_string(),
+                (None, Some(symbol)) => symbol.name.to_string(),
+                (None, None) => panic!("{fixture}: {frame:#?}"),
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            names[0].contains("truth_reached") && names[1].contains("checkpoint"),
+            "{fixture}: {names:?}"
+        );
+        let source = trace.frames[0].source.is_some();
+        assert_eq!(source, lines, "{fixture}");
+        workers.scenario.shutdown().await;
+    }
+}
+
+/// tokio's sources moved out of the path its version is read from: the
+/// tasks are listed as tokio 1.52 lays them out, each page saying that
+/// the version is unknown rather than taking it for granted.
+#[tokio::test]
+async fn an_unknown_version_is_read_as_the_supported_one_and_says_so() {
+    let fixture = "tokio-workers-remapped";
+    let mut workers = Workers::parked(fixture, false).await;
+    let truth = workers.truth();
+    let (tasks, gaps) = workers.tasks(3).await;
+    truth
+        .check_tasks(&tasks)
+        .unwrap_or_else(|problem| panic!("{fixture}: {problem}"));
+    let pages = tasks.len().div_ceil(3);
+    assert_eq!(
+        gaps,
+        vec!["tokio's version is unknown; its runtime is read as tokio 1.52's".to_owned(); pages],
+        "{fixture}"
+    );
+    check_threads(&mut workers, false, &truth, &tasks).await;
+    workers.scenario.shutdown().await;
 }
 
 /// rustc describes each type once in every unit that uses it, so a large
