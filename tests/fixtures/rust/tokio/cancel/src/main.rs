@@ -8,8 +8,10 @@
 //! - `shutdown`: the runtime shuts down.
 //!
 //! With `hold`, the gate opens instead, once a line arrives on standard
-//! input, and the task finishes. Before reading, the program says `held`
-//! once its worker has nothing to run, so that no thread runs the task.
+//! input, and the task finishes; or, when the line is `exit`, the program
+//! exits with status 3 while the task still waits. Before reading, the
+//! program says `held` once its worker has nothing to run, so that no
+//! thread runs the task.
 
 use std::hint::black_box;
 use std::io::BufRead as _;
@@ -98,6 +100,9 @@ fn main() {
             truth::line(&[&"held"]);
             let mut input = String::new();
             std::io::stdin().lock().read_line(&mut input).expect("a line");
+            if input.trim_end() == "exit" {
+                std::process::exit(3);
+            }
             open.send(7).expect("the task waits");
             return truth::line(&[&"result", &runtime.block_on(task).expect("the task ends")]);
         }

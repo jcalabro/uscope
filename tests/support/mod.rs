@@ -15,7 +15,9 @@ use std::future::Future;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::{Child, ChildStdin, Command, ExitStatus as ProcessExitStatus, Stdio};
+use std::process::{
+    Child, ChildStdin, ChildStdout, Command, ExitStatus as ProcessExitStatus, Stdio,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -185,6 +187,15 @@ impl ExternalProcess {
             .as_mut()
             .and_then(|child| child.stdin.take())
             .expect("fixture stdin")
+    }
+
+    /// Takes the standard output the process writes past its readiness
+    /// line.
+    pub fn take_stdout(&mut self) -> ChildStdout {
+        self.child
+            .as_mut()
+            .and_then(|child| child.stdout.take())
+            .expect("fixture stdout")
     }
 
     /// Gives up a process that a debugger traced to its exit, and so reaped:
