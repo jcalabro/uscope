@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
-use uscope::{ExceptionStops, LanguageExceptionKind};
+use uscope::ExceptionStops;
 
 use super::protocol::SetExceptionBreakpointsArguments;
 
@@ -70,38 +70,6 @@ const FILTERS: [Filter; 4] = [
     },
 ];
 
-/// A filter for one kind of exception that language runtimes report.
-struct ExceptionFilter {
-    id: &'static str,
-    label: &'static str,
-    description: &'static str,
-    kind: LanguageExceptionKind,
-}
-
-const EXCEPTION_FILTERS: [ExceptionFilter; 3] = [
-    ExceptionFilter {
-        id: "unhandled",
-        label: "Unhandled exceptions",
-        description: "Stop where an exception nothing handled ends the program, such as a panic \
-                      nothing recovered, with the frame that raised it selected",
-        kind: LanguageExceptionKind::Unhandled,
-    },
-    ExceptionFilter {
-        id: "runtime-fatal",
-        label: "Fatal runtime errors",
-        description: "Stop where the language runtime ends the program with a fatal error, such \
-                      as a deadlock",
-        kind: LanguageExceptionKind::Fatal,
-    },
-    ExceptionFilter {
-        id: "raised",
-        label: "Raised exceptions",
-        description: "Stop wherever an exception is raised, such as every panic, whether or not \
-                      the program then recovers from it",
-        kind: LanguageExceptionKind::Raised,
-    },
-];
-
 /// The filters `initialize` advertises.
 pub fn filters() -> Value {
     let signals = FILTERS.iter().map(|filter| {
@@ -114,12 +82,12 @@ pub fn filters() -> Value {
             "conditionDescription": "Comma-separated signals to stop on instead, such as SIGUSR1,SIGUSR2",
         })
     });
-    let exceptions = EXCEPTION_FILTERS.iter().map(|filter| {
+    let exceptions = ExceptionStops::filters().iter().map(|filter| {
         json!({
             "filter": filter.id,
             "label": filter.label,
             "description": filter.description,
-            "default": ExceptionStops::default().stops(filter.kind),
+            "default": filter.default,
         })
     });
     signals.chain(exceptions).collect()
@@ -161,11 +129,7 @@ impl Selection {
     /// and one breakpoint per filter and filter option, in request order.
     pub fn parse(arguments: &SetExceptionBreakpointsArguments) -> (Self, Vec<Value>) {
         let mut enabled = BTreeMap::new();
-        let mut exceptions = ExceptionStops {
-            raised: false,
-            unhandled: false,
-            fatal: false,
-        };
+        let mut exceptions = ExceptionStops::NONE;
         let mut breakpoints = Vec::new();
         let options = arguments.filter_options.iter().flatten().map(|option| {
             (
@@ -182,18 +146,14 @@ impl Selection {
             .map(|id| (id.as_str(), None))
             .chain(options)
         {
-            if let Some(filter) = EXCEPTION_FILTERS.iter().find(|filter| filter.id == id) {
+            if let Some(chosen) = exceptions.with(id, true) {
                 if condition.is_some() {
                     breakpoints.push(unverified(&format!(
                         "exception filter '{id}' takes no condition"
                     )));
                     continue;
                 }
-                match filter.kind {
-                    LanguageExceptionKind::Raised => exceptions.raised = true,
-                    LanguageExceptionKind::Unhandled => exceptions.unhandled = true,
-                    LanguageExceptionKind::Fatal => exceptions.fatal = true,
-                }
+                exceptions = chosen;
                 breakpoints.push(json!({"verified": true}));
                 continue;
             }
@@ -313,14 +273,7 @@ mod tests {
             ]),
         });
         assert!(selection.stops(code("SIGSEGV")));
-        assert_eq!(
-            selection.exceptions(),
-            ExceptionStops {
-                raised: false,
-                unhandled: false,
-                fatal: false,
-            }
-        );
+        assert_eq!(selection.exceptions(), ExceptionStops::NONE);
         assert!(selection.stops(code("SIGUSR1")) && selection.stops(code("SIGUSR2")));
         assert!(!selection.stops(code("SIGTERM")) && !selection.stops(code("SIGINT")));
         assert!(!selection.stops(code("SIGALRM")));

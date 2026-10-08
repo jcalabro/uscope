@@ -16,9 +16,8 @@ use std::sync::Arc;
 
 use crate::unwind::RegisterFile;
 use crate::{
-    EntryProvenance, ImageAddress, IntegerValue, LanguageExceptionKind, ModuleImage,
-    RecordMemberLayout, StackSegment, TaskState, ThreadId, ThreadLocal, TypeInfo, TypeKind,
-    TypeNode, VirtualAddress,
+    EntryProvenance, ExceptionFilter, ImageAddress, IntegerValue, ModuleImage, RecordMemberLayout,
+    StackSegment, TaskState, ThreadId, ThreadLocal, TypeInfo, TypeKind, TypeNode, VirtualAddress,
 };
 
 /// A result with the reasons it may be incomplete, such as a task whose
@@ -192,6 +191,10 @@ pub enum Crossing {
 /// so that clients can speak of them as the runtime's users do.
 pub const TASK_NOUNS: [(&str, &str); 1] = [go::TASK_NOUN];
 
+/// The exceptions each runtime a model knows reports, which clients may
+/// choose to stop at before they know which runtimes a program has.
+pub const EXCEPTION_FILTERS: [ExceptionFilter; 3] = go::EXCEPTION_FILTERS;
+
 /// How a runtime uses the process's signals, by Linux signal number.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeSignals {
@@ -210,7 +213,8 @@ pub struct RuntimeSignals {
 /// A runtime function that reports an exception as it is entered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeHook {
-    pub kind: LanguageExceptionKind,
+    /// The kind of exception it reports, which stops when its filter does.
+    pub filter: &'static ExceptionFilter,
     pub address: ImageAddress,
 }
 

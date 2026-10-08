@@ -55,7 +55,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .model
                     .hooks()
                     .iter()
-                    .filter(|hook| stops.stops(hook.kind))
+                    .filter(|hook| stops.stops(hook.filter.id))
                     .filter_map(|hook| {
                         let address = runtime.module.virtual_address(hook.address).ok()?;
                         Some((
@@ -110,8 +110,8 @@ impl<P: LinuxTraceOps> Controller<P> {
     ) -> Option<StopReason> {
         let inferior = self.inferior.as_ref()?;
         let site = *inferior.runtime_hooks.get(&address)?;
-        let kind = site.hook.kind;
-        if !self.exception_stops.stops(kind) {
+        let kind = site.hook.filter.kind;
+        if !self.exception_stops.stops(site.hook.filter.id) {
             return None;
         }
         let report = (|| {

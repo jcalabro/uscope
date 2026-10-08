@@ -1073,41 +1073,97 @@ impl Drop for HeldChild {
     }
 }
 
-/// Which exceptions a language runtime reports stop the inferior. By
-/// default one nothing handled and a fatal error stop, and one the program
-/// may yet handle does not.
+/// One kind of exception a language runtime reports, which may stop the
+/// inferior.
+///
+/// Each runtime declares its own; [`ExceptionStops::filters`] lists every
+/// runtime's, whether or not the program has that runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExceptionStops {
-    /// Every exception as it is raised, such as each Go panic, whether or
-    /// not the program then recovers from it.
-    pub raised: bool,
-    /// An exception nothing handled, such as a Go panic no deferred call
-    /// recovered, as it ends the program.
-    pub unhandled: bool,
-    /// A fatal error the runtime ends the program with, such as Go's
-    /// report that every goroutine is asleep.
-    pub fatal: bool,
+pub struct ExceptionFilter {
+    /// The name clients choose the filter by, such as `go-panic`.
+    pub id: &'static str,
+    /// The language whose runtime reports it.
+    pub language: &'static str,
+    pub kind: LanguageExceptionKind,
+    /// A few words naming what stops.
+    pub label: &'static str,
+    /// A sentence saying where the program stops.
+    pub description: &'static str,
+    /// Whether it stops unless a client chooses otherwise.
+    pub default: bool,
 }
+
+/// Which exceptions language runtimes report stop the inferior, chosen by
+/// [`ExceptionFilter`]. By default each filter stops as its runtime
+/// declares.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ExceptionStops {
+    /// One bit per filter, by its place among every runtime's.
+    stopping: u64,
+}
+
+const _: () = assert!(crate::runtime_model::EXCEPTION_FILTERS.len() <= 64);
 
 impl Default for ExceptionStops {
     fn default() -> Self {
-        Self {
-            raised: false,
-            unhandled: true,
-            fatal: true,
-        }
+        Self::filters()
+            .iter()
+            .filter(|filter| filter.default)
+            .fold(Self::NONE, |stops, filter| {
+                stops.with(filter.id, true).expect("a listed filter")
+            })
+    }
+}
+
+impl fmt::Debug for ExceptionStops {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_set()
+            .entries(
+                Self::filters()
+                    .iter()
+                    .filter(|filter| self.stops(filter.id))
+                    .map(|filter| filter.id),
+            )
+            .finish()
     }
 }
 
 impl ExceptionStops {
-    /// Whether an exception of `kind` stops.
+    /// No exception stops.
+    pub const NONE: Self = Self { stopping: 0 };
+
+    /// Every runtime's exception filters.
     #[must_use]
-    pub const fn stops(self, kind: LanguageExceptionKind) -> bool {
-        match kind {
-            LanguageExceptionKind::Raised => self.raised,
-            LanguageExceptionKind::Unhandled => self.unhandled,
-            LanguageExceptionKind::Fatal => self.fatal,
-        }
+    pub const fn filters() -> &'static [ExceptionFilter] {
+        &crate::runtime_model::EXCEPTION_FILTERS
+    }
+
+    fn bit(filter: &str) -> Option<u64> {
+        Self::filters()
+            .iter()
+            .position(|known| known.id == filter)
+            .map(|index| 1 << index)
+    }
+
+    /// Whether exceptions the filter named `filter` passes stop.
+    #[must_use]
+    pub fn stops(self, filter: &str) -> bool {
+        Self::bit(filter).is_some_and(|bit| self.stopping & bit != 0)
+    }
+
+    /// These stops, with the filter named `filter` stopping or not; `None`
+    /// when no runtime declares such a filter.
+    #[must_use]
+    pub fn with(self, filter: &str, stops: bool) -> Option<Self> {
+        let bit = Self::bit(filter)?;
+        Some(Self {
+            stopping: if stops {
+                self.stopping | bit
+            } else {
+                self.stopping & !bit
+            },
+        })
     }
 }
 

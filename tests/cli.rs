@@ -1131,6 +1131,41 @@ fn pp_lays_values_out_to_the_width_and_print_formats_combine() {
     );
 }
 
+/// `catch` lists the exceptions runtimes report and whether each stops,
+/// and chooses whether one does: a Go panic the program recovers from
+/// stops once `catch raised on` asks it to.
+#[test]
+fn catch_chooses_which_exceptions_stop() {
+    let (stdout, stderr) = piped(
+        &["build/test-programs/failing-go-o0", "--", "recovered"],
+        &[
+            "catch",
+            "catch raised on",
+            "run",
+            "catch nope",
+            "catch raised maybe",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "unhandled      on   Unhandled Go panics\n",
+            "runtime-fatal  on   Fatal Go runtime errors\n",
+            "raised         off  Every Go panic\n",
+            "raised  on   Every Go panic\n",
+            "as an exception was raised",
+            "panic: runtime error: invalid memory address or nil pointer dereference",
+        ],
+    );
+    assert_in_order(
+        &stderr,
+        &[
+            "unknown exception 'nope'; runtimes report unhandled, runtime-fatal, raised",
+            "usage: catch [exception] [on|off]",
+        ],
+    );
+}
+
 /// `print/x` writes a number a view presents in hexadecimal, as it would
 /// the number stored, and leaves a value presented as anything else as its
 /// view presents it.

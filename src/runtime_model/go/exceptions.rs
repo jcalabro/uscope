@@ -12,7 +12,41 @@ use super::types::TypeTables;
 use super::{read_unsigned, word};
 use crate::runtime_model::{RuntimeException, RuntimeHook, RuntimeImage, RuntimeStop};
 use crate::unwind::RegisterFile;
-use crate::{ImageAddress, LanguageExceptionKind, VirtualAddress};
+use crate::{ExceptionFilter, ImageAddress, LanguageExceptionKind, VirtualAddress};
+
+/// What Go's runtime reports: a panic nothing recovered and a fatal error
+/// stop unless chosen otherwise, and every panic as it begins does not.
+pub const EXCEPTION_FILTERS: [ExceptionFilter; 3] = [UNHANDLED, FATAL, PANIC];
+
+const UNHANDLED: ExceptionFilter = ExceptionFilter {
+    id: "unhandled",
+    language: "Go",
+    kind: LanguageExceptionKind::Unhandled,
+    label: "Unhandled Go panics",
+    description: "Stop where a panic nothing recovered ends the program, with the frame that \
+                  panicked selected",
+    default: true,
+};
+
+const FATAL: ExceptionFilter = ExceptionFilter {
+    id: "runtime-fatal",
+    language: "Go",
+    kind: LanguageExceptionKind::Fatal,
+    label: "Fatal Go runtime errors",
+    description: "Stop where Go's runtime ends the program with a fatal error, such as a \
+                  deadlock",
+    default: true,
+};
+
+const PANIC: ExceptionFilter = ExceptionFilter {
+    id: "raised",
+    language: "Go",
+    kind: LanguageExceptionKind::Raised,
+    label: "Every Go panic",
+    description: "Stop wherever a panic begins, whether or not the program then recovers from \
+                  it",
+    default: false,
+};
 
 /// x86-64's DWARF numbers for the first two integer argument registers of
 /// Go's register ABI.
@@ -57,18 +91,12 @@ impl Hooks {
             .filter_map(entry)
             .collect::<Vec<_>>();
         let fatal_signal = entry("runtime.fatalsignal");
-        let hook = |kind| move |address| RuntimeHook { kind, address };
+        let hook = |filter| move |address| RuntimeHook { filter, address };
         let all = panic
-            .map(hook(LanguageExceptionKind::Raised))
+            .map(hook(&PANIC))
             .into_iter()
-            .chain(fatal_panic.map(hook(LanguageExceptionKind::Unhandled)))
-            .chain(
-                throws
-                    .iter()
-                    .copied()
-                    .chain(fatal_signal)
-                    .map(hook(LanguageExceptionKind::Fatal)),
-            )
+            .chain(fatal_panic.map(hook(&UNHANDLED)))
+            .chain(throws.iter().copied().chain(fatal_signal).map(hook(&FATAL)))
             .collect();
         Self {
             panic,

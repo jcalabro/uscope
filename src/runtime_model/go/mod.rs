@@ -36,6 +36,7 @@ const R12: u16 = 12;
 const RIP: u16 = 16;
 /// What Go calls its tasks.
 pub(super) const TASK_NOUN: (&str, &str) = ("goroutine", "goroutines");
+pub(super) use exceptions::EXCEPTION_FILTERS;
 /// Linux's signal for urgent socket data, which the runtime preempts with.
 const SIGURG: i32 = 23;
 /// Linux's signals for faults, which the runtime turns into panics.
