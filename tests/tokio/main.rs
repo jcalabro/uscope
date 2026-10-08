@@ -5,6 +5,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod attach;
 mod cancel;
 mod coroutines;
 mod drivers;
