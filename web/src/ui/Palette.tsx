@@ -184,7 +184,7 @@ function useGroups(mode: Mode, query: string): Group[] {
   ).data;
   const calls = useRequest(
     "stepTargets",
-    mode === "calls" && at ? { stop: at.stop, thread: at.thread } : null,
+    mode === "calls" && at ? { stop: at.stop, thread: at.thread, task: at.task ?? null } : null,
   ).data;
 
   const showSource = (path: string, line: number) =>
@@ -228,7 +228,13 @@ function useGroups(mode: Mode, query: string): Group[] {
       detail: call.call,
       run: () =>
         void connection
-          .request("step", { stop: at.stop, thread: at.thread, kind: "into", call: call.call })
+          .request("step", {
+            stop: at.stop,
+            thread: at.thread,
+            task: at.task ?? null,
+            kind: "into",
+            call: call.call,
+          })
           .catch((failure: Error) => flash(failure.message)),
     }));
     const group = ranked("Calls", items, query, 50);

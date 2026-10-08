@@ -204,7 +204,12 @@ function jump(model: Model, connection: Connection) {
   }
   const { path, line } = current.cursor;
   connection
-    .request("jump", { stop: at.stop, thread: at.thread, location: `${path}:${line}` })
+    .request("jump", {
+      stop: at.stop,
+      thread: at.thread,
+      task: at.task ?? null,
+      location: `${path}:${line}`,
+    })
     .catch((failure: Error) => flash(failure.message));
 }
 

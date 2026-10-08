@@ -69,11 +69,12 @@ export function action(name: ActionName, model: Model, at: At | null = null): Ac
       return unavailable(`this tab shows stop #${at.stop}; go to stop #${inferior.stop} to step`);
     }
     const thread = at?.thread ?? inferior.thread;
+    const task = at?.task ?? null;
     const frame = kind === "out" ? (at?.frame ?? 0) : 0;
     const stop = inferior.stop;
     return {
       enabled: true,
-      run: (connection) => connection.request("step", { stop, thread, frame, kind }),
+      run: (connection) => connection.request("step", { stop, thread, task, frame, kind }),
     };
   }
   switch (name) {

@@ -1,9 +1,12 @@
 //! Requests that read the program: stacks at a stop and source files.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use uscope::{DebuggerHandle, FrameKind, LineNumber, StackFrameId, StopContext, UnwindTermination};
+use uscope::{
+    DebuggerHandle, ExecutionContext, FrameKind, LineNumber, StackFrameId, StopContext,
+    UnwindTermination,
+};
 
 use super::describe::{Images, frame_name, hex};
 use super::protocol::{
@@ -11,25 +14,35 @@ use super::protocol::{
     SourceLine, SourceText,
 };
 use super::session::Failure;
+use crate::cli::format;
+use crate::cli::terminal::Renderer;
 
-/// The context of a thread's innermost frame at a stop.
-pub const fn innermost(stop: u64, thread: u64) -> StopContext {
+/// A thread or task as a message names it.
+pub fn executes(execution: ExecutionContext) -> String {
+    match execution {
+        ExecutionContext::Thread(thread) => format!("thread {thread}"),
+        ExecutionContext::Task(task) => format!("task {}", task.number),
+    }
+}
+
+/// The context of a thread's or task's innermost frame at a stop.
+pub const fn innermost(stop: u64, execution: ExecutionContext) -> StopContext {
     StopContext {
         stop: uscope::StopId::new(stop),
-        execution: uscope::ExecutionContext::Thread(uscope::ThreadId::new(thread)),
+        execution,
         frame: StackFrameId::INNERMOST,
     }
 }
 
-/// The context of a thread's frame numbered `frame`, counting from the
-/// innermost, at a stop.
+/// The context of a thread's or task's frame numbered `frame`, counting
+/// from the innermost, at a stop.
 pub async fn context(
     handle: &DebuggerHandle,
     stop: u64,
-    thread: u64,
+    execution: ExecutionContext,
     frame: u32,
 ) -> Result<StopContext, Failure> {
-    let mut context = innermost(stop, thread);
+    let mut context = innermost(stop, execution);
     if frame == 0 {
         return Ok(context);
     }
@@ -42,7 +55,10 @@ pub async fn context(
         .ok_or_else(|| {
             Failure::new(
                 ErrorKind::Invalid,
-                format!("thread {thread} has no frame {frame} at stop {stop}"),
+                format!(
+                    "{} has no frame {frame} at stop {stop}",
+                    executes(execution)
+                ),
             )
         })?;
     Ok(context)
@@ -53,50 +69,58 @@ pub async fn backtrace(
     images: &Images,
     at: protocol::ThreadAt,
 ) -> Result<Backtrace, Failure> {
-    let trace = handle.at(innermost(at.stop, at.thread)).backtrace().await?;
+    let trace = handle
+        .at(innermost(at.stop, at.execution()))
+        .backtrace()
+        .await?;
     let mut frames = Vec::with_capacity(trace.frames.len());
     for frame in trace.frames.iter() {
-        let image = match frame.module {
-            Some(module) => images.get(module).await,
-            None => None,
-        };
-        let source = frame.source.as_ref().and_then(|location| {
-            let file = image.as_ref()?.source_file(location.file)?;
-            Some(SourceLine {
-                path: file.path.display().to_string(),
-                line: location.line.get(),
-                column: location.column.map(uscope::ColumnNumber::get),
-            })
-        });
-        frames.push(Frame {
-            index: frame.id.get(),
-            name: frame_name(frame, image.as_deref()),
-            kind: match frame.kind {
-                FrameKind::Physical => protocol::FrameKind::Physical,
-                FrameKind::Inline => protocol::FrameKind::Inline,
-                FrameKind::Signal => protocol::FrameKind::Signal,
-                FrameKind::TailCall => protocol::FrameKind::TailCall,
-                FrameKind::Async { .. } => protocol::FrameKind::Async,
-                FrameKind::Awaited { .. } => protocol::FrameKind::Awaited,
-            },
-            address: frame.instruction.map(|address| hex(address.get())),
-            module: image
-                .as_ref()
-                .and_then(|image| image.path().file_name())
-                .map(|name| name.to_string_lossy().into_owned()),
-            source,
-            unfollowed: trace
-                .unfollowed
-                .iter()
-                .find(|future| future.driver == frame.id)
-                .map(|future| future.reason.to_string()),
-        });
+        frames.push(frame_of(images, &trace, frame).await);
     }
     Ok(Backtrace {
         frames,
         incomplete: (trace.termination != UnwindTermination::Complete)
             .then(|| trace.termination.to_string()),
     })
+}
+
+/// One frame of a stack, as the page shows it.
+async fn frame_of(images: &Images, trace: &uscope::Backtrace, frame: &uscope::StackFrame) -> Frame {
+    let image = match frame.module {
+        Some(module) => images.get(module).await,
+        None => None,
+    };
+    let source = frame.source.as_ref().and_then(|location| {
+        let file = image.as_ref()?.source_file(location.file)?;
+        Some(SourceLine {
+            path: file.path.display().to_string(),
+            line: location.line.get(),
+            column: location.column.map(uscope::ColumnNumber::get),
+        })
+    });
+    Frame {
+        index: frame.id.get(),
+        name: frame_name(frame, image.as_deref()),
+        kind: match frame.kind {
+            FrameKind::Physical => protocol::FrameKind::Physical,
+            FrameKind::Inline => protocol::FrameKind::Inline,
+            FrameKind::Signal => protocol::FrameKind::Signal,
+            FrameKind::TailCall => protocol::FrameKind::TailCall,
+            FrameKind::Async { .. } => protocol::FrameKind::Async,
+            FrameKind::Awaited { .. } => protocol::FrameKind::Awaited,
+        },
+        address: frame.instruction.map(|address| hex(address.get())),
+        module: image
+            .as_ref()
+            .and_then(|image| image.path().file_name())
+            .map(|name| name.to_string_lossy().into_owned()),
+        source,
+        unfollowed: trace
+            .unfollowed
+            .iter()
+            .find(|future| future.driver == frame.id)
+            .map(|future| future.reason.to_string()),
+    }
 }
 
 pub async fn sources(images: &Images) -> SourceFiles {
@@ -242,5 +266,69 @@ pub async fn source(
         read: read.display().to_string(),
         text,
         breakable: breakable.into_iter().map(LineNumber::get).collect(),
+    })
+}
+
+/// The most tasks a list holds, each of which costs a backtrace.
+const TASK_LIMIT: usize = 512;
+
+/// The program's tasks at a stop, each where the code the program wrote
+/// has it, as the CLI's `tasks` says.
+pub async fn tasks(
+    handle: &DebuggerHandle,
+    images: &Images,
+    at: protocol::StopAt,
+) -> Result<protocol::TaskList, Failure> {
+    let stop = uscope::StopId::new(at.stop);
+    let page = handle.program_tasks_at(stop, None, TASK_LIMIT).await?;
+    let mut tasks = Vec::with_capacity(page.tasks.len());
+    for task in page.tasks.iter() {
+        let trace = handle
+            .at(innermost(at.stop, ExecutionContext::Task(task.id)))
+            .backtrace()
+            .await;
+        let mut known = BTreeMap::new();
+        if let Ok(trace) = &trace {
+            for module in trace.frames.iter().filter_map(|frame| frame.module) {
+                if let Some(image) = images.get(module).await {
+                    known.insert(module, image);
+                }
+            }
+        }
+        let plain = Renderer::new(false);
+        let frame = match &trace {
+            Ok(trace) => match trace.user_frame() {
+                Some(frame) => Some(frame_of(images, trace, frame).await),
+                None => None,
+            },
+            Err(_) => None,
+        };
+        tasks.push(protocol::Task {
+            frame,
+            key: protocol::TaskKey {
+                runtime: task.id.runtime.get(),
+                number: task.id.number,
+            },
+            state: match task.state {
+                uscope::TaskState::Running => protocol::TaskState::Running,
+                uscope::TaskState::Runnable => protocol::TaskState::Runnable,
+                uscope::TaskState::Blocked => protocol::TaskState::Blocked,
+                uscope::TaskState::Exited => protocol::TaskState::Exited,
+                uscope::TaskState::Unknown(_) => protocol::TaskState::Unknown,
+            },
+            place: format::task_place(task, &trace, &known, plain),
+            detail: match &task.state {
+                uscope::TaskState::Unknown(reason) => Some(reason.to_string()),
+                _ => task.detail.as_deref().map(str::to_owned),
+            },
+            labels: format::task_labels(task),
+            thread: task.thread.map(uscope::ThreadId::get),
+        });
+    }
+    Ok(protocol::TaskList {
+        noun: page.tasks.first().map(|task| task.noun.to_owned()),
+        tasks,
+        more: page.next.is_some(),
+        gaps: page.gaps.iter().map(ToString::to_string).collect(),
     })
 }

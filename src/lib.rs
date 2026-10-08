@@ -1465,6 +1465,24 @@ impl DebuggerHandle {
         self.task_page(from, limit, true).await
     }
 
+    /// One page of the program's tasks, as [`Self::program_tasks`] gives,
+    /// at `stop`, which must still be the current stop.
+    pub async fn program_tasks_at(
+        &self,
+        stop: StopId,
+        from: Option<TaskCursor>,
+        limit: usize,
+    ) -> Result<TaskPage> {
+        self.request(|reply| Request::Tasks {
+            stop_id: stop,
+            from,
+            limit,
+            program_only: true,
+            reply,
+        })
+        .await
+    }
+
     async fn task_page(
         &self,
         from: Option<TaskCursor>,

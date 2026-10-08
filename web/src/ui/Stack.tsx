@@ -3,7 +3,8 @@ import { useGo } from "./navigation";
 import { fileName } from "./paths";
 import { useFocus } from "./Workspace";
 
-/** The call stack of the thread shown; choosing a frame moves every pane. */
+/** The call stack of the thread or task shown; choosing a frame moves
+ * every pane. */
 export function Stack() {
   const { state, at, trace, stale } = useFocus();
   const go = useGo();
@@ -60,7 +61,11 @@ export function Stack() {
     <section className="pane grow" aria-label="Call stack" data-pane="2" tabIndex={-1}>
       <div className="pane-head">
         Call stack
-        {thread && <span className="count">{thread.name ?? thread.id}</span>}
+        {at?.task ? (
+          <span className="count">task {at.task.number}</span>
+        ) : (
+          thread && <span className="count">{thread.name ?? thread.id}</span>
+        )}
         <span className="end">Alt+2</span>
       </div>
       <div className={`pane-body ${stale && stale !== "passed" ? "stale" : ""}`}>{body}</div>
@@ -68,7 +73,8 @@ export function Stack() {
   );
 }
 
-function where(frame: Frame): string {
+/** Where a frame's code is: its file and line, or its module or address. */
+export function where(frame: Frame): string {
   if (frame.source) {
     return `${fileName(frame.source.path)}:${frame.source.line}`;
   }

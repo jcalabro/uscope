@@ -1,7 +1,9 @@
 // The URL is the focus. The path names the debugger state: session, stop,
-// thread, frame. The query names how a tab looks at it: the file and lines
+// thread or task, frame. The query names how a tab looks at it: the file and lines
 // shown, the view, watches, and the expanded rows of the variable tree.
 // Every function here is pure, so links round-trip exactly.
+
+import type { TaskKey } from "./protocol";
 
 /** What a tab looks at, beyond the stop: everything in the query. */
 export interface Look {
@@ -182,24 +184,49 @@ export function isPagePath(text: string | undefined): text is string {
   return text !== undefined && /^\/(?![/\\])/.test(text) && ![...text].some(control);
 }
 
-/** The part of the path after the session: the stop, thread, and frame. */
+/**
+ * The part of the path after the session: the stop, the thread or task,
+ * and the frame. A task's focus names no thread, and says 0.
+ */
 export interface At {
   stop: number;
   thread: number;
+  task?: TaskKey | null;
   frame: number;
 }
 
+/** A task as its path segment names it: `RUNTIME.NUMBER`. */
+export function taskSegment(task: TaskKey): string {
+  return `${task.runtime}.${task.number}`;
+}
+
 export function stopPath(session: string, at: At): string {
-  return `/s/${session}/stop/${at.stop}/t/${at.thread}/f/${at.frame}`;
+  const who = at.task ? `task/${taskSegment(at.task)}` : `t/${at.thread}`;
+  return `/s/${session}/stop/${at.stop}/${who}/f/${at.frame}`;
 }
 
 /** Parses a route's path parameters, or null when they are not numbers. */
-export function parseAt(params: { stop: string; thread: string; frame: string }): At | null {
-  const numbers = [params.stop, params.thread, params.frame].map((text) =>
-    /^\d+$/.test(text) ? Number(text) : Number.NaN,
-  );
-  const [stop, thread, frame] = numbers as [number, number, number];
-  if (numbers.some(Number.isNaN)) {
+export function parseAt(params: {
+  stop: string;
+  thread?: string | undefined;
+  task?: string | undefined;
+  frame: string;
+}): At | null {
+  const number = (text: string) => (/^\d+$/.test(text) ? Number(text) : Number.NaN);
+  const [stop, frame] = [number(params.stop), number(params.frame)];
+  if (Number.isNaN(stop) || Number.isNaN(frame)) {
+    return null;
+  }
+  if (params.task !== undefined) {
+    const parts = params.task.split(".").map(number);
+    const [runtime, task] = parts as [number, number];
+    if (parts.length !== 2 || parts.some(Number.isNaN)) {
+      return null;
+    }
+    return { stop, thread: 0, task: { runtime, number: task }, frame };
+  }
+  const thread = params.thread === undefined ? Number.NaN : number(params.thread);
+  if (Number.isNaN(thread)) {
     return null;
   }
   return { stop, thread, frame };
