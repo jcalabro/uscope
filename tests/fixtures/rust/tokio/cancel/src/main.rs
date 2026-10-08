@@ -33,11 +33,14 @@ async fn alone(gate: oneshot::Receiver<u64>) -> u64 {
 
 async fn selecting(gate: oneshot::Receiver<u64>, other: oneshot::Receiver<()>) -> u64 {
     let me = truth::start();
+    // Biased, the branches are polled in order, whose code an optimized
+    // build then has one copy of.
     let picked = tokio::select! {
+        biased;
         got = waiting(me, gate) => got, // AWAIT: select
         _ = other => 0, // STEP: select-other
     };
-    truth::end(me);
+    truth::end(me); // STEP: select-end
     black_box(picked)
 }
 

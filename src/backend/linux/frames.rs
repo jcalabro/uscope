@@ -1251,7 +1251,7 @@ impl PhysicalStack {
 }
 
 /// x86-64's DWARF numbers for the stack and instruction pointers.
-const X86_64_RSP: u16 = 7;
+pub(super) const X86_64_RSP: u16 = 7;
 const X86_64_RIP: u16 = 16;
 
 /// Where a stack's frames begin, and the context a request named it by.

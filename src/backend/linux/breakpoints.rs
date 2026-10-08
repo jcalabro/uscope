@@ -1009,21 +1009,17 @@ fn resolve_in_image(
             // A coroutine's dispatch and the code leading from it into a
             // state run as it resumes, not as execution arrives at the
             // line; code a compiler generated, such as the glue dropping a
-            // future, never shows as the program's line.
+            // future, never shows as the program's line, though the
+            // program's code may be inlined into a wrapper's.
             let arrivals = addresses
                 .iter()
                 .copied()
                 .filter(|address| {
                     !image.is_resume_code(*address)
-                        && !image
-                            .code_instances()
-                            .iter()
-                            .filter(|instance| instance.contains(*address))
-                            .any(|instance| {
-                                image.function(instance.function).is_some_and(|function| {
-                                    function.role == crate::CodeRole::Wrapper
-                                })
-                            })
+                        && image
+                            .locate(*address)
+                            .function
+                            .is_none_or(|function| function.role != crate::CodeRole::Wrapper)
                 })
                 .collect::<Vec<_>>();
             if !arrivals.is_empty() {

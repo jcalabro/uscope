@@ -240,7 +240,7 @@ impl<P: InspectionOps> Controller<P> {
 
     /// How to ask a runtime about `task`: by its number, and where the
     /// runtime said it keeps it when it listed it at this stop.
-    fn task_ref(inferior: &Inferior, task: TaskId) -> TaskRef {
+    pub(super) fn task_ref(inferior: &Inferior, task: TaskId) -> TaskRef {
         TaskRef {
             number: task.number,
             locator: inferior
