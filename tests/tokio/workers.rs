@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use uscope::{
-    BreakpointSpec, CodeRole, InferiorState, LaunchOptions, StopReason, TaskPage, TaskSnapshot,
-    TaskState, ThreadActivity, ThreadId,
+    BreakpointSpec, CodeRole, CoreDumpOptions, InferiorState, LaunchOptions, StopReason, TaskPage,
+    TaskSnapshot, TaskState, ThreadActivity, ThreadId,
 };
 
 use crate::stops::{backtrace, integer};
@@ -71,47 +71,53 @@ impl Workers {
         Truth::parse(&text)
     }
 
-    /// Every task, read `page` at a time, and why the list may be
-    /// incomplete.
     async fn tasks(&self, page: usize) -> (Vec<TaskSnapshot>, Vec<String>) {
-        let mut tasks = Vec::new();
-        let mut gaps = Vec::new();
-        let mut from = None;
-        loop {
-            let TaskPage {
-                tasks: found,
-                next,
-                gaps: missing,
-                ..
-            } = self
-                .scenario
-                .operation("tasks", self.scenario.handle().tasks(from, page))
-                .await;
-            assert!(found.len() <= page);
-            tasks.extend(found.iter().cloned());
-            gaps.extend(missing.iter().map(ToString::to_string));
-            match next {
-                Some(next) => from = Some(next),
-                None => return (tasks, gaps),
-            }
-        }
+        tasks(&self.scenario, page).await
     }
 
-    /// What each thread does for the runtime.
     async fn activities(&mut self) -> BTreeMap<ThreadId, ThreadActivity> {
-        let snapshot = self.scenario.snapshot().await;
-        snapshot
-            .threads
-            .iter()
-            .map(|thread| {
-                let activity = thread
-                    .activity
-                    .clone()
-                    .unwrap_or_else(|| panic!("thread {} has no activity", thread.id));
-                (thread.id, activity)
-            })
-            .collect()
+        activities(&mut self.scenario).await
     }
+}
+
+/// Every task, read `page` at a time, and why the list may be incomplete.
+async fn tasks(scenario: &Scenario, page: usize) -> (Vec<TaskSnapshot>, Vec<String>) {
+    let mut tasks = Vec::new();
+    let mut gaps = Vec::new();
+    let mut from = None;
+    loop {
+        let TaskPage {
+            tasks: found,
+            next,
+            gaps: missing,
+            ..
+        } = scenario
+            .operation("tasks", scenario.handle().tasks(from, page))
+            .await;
+        assert!(found.len() <= page);
+        tasks.extend(found.iter().cloned());
+        gaps.extend(missing.iter().map(ToString::to_string));
+        match next {
+            Some(next) => from = Some(next),
+            None => return (tasks, gaps),
+        }
+    }
+}
+
+/// What each thread does for the runtime.
+async fn activities(scenario: &mut Scenario) -> BTreeMap<ThreadId, ThreadActivity> {
+    let snapshot = scenario.snapshot().await;
+    snapshot
+        .threads
+        .iter()
+        .map(|thread| {
+            let activity = thread
+                .activity
+                .clone()
+                .unwrap_or_else(|| panic!("thread {} has no activity", thread.id));
+            (thread.id, activity)
+        })
+        .collect()
 }
 
 /// What the fixture reports at its checkpoint.
@@ -224,7 +230,7 @@ async fn tasks_are_listed_exactly(current: bool) {
         sabotaged[0].detail = Some("running".into());
         assert!(truth.check_tasks(&sabotaged).is_err(), "{fixture}");
 
-        check_threads(&mut workers, current, &truth, &tasks).await;
+        check_threads(&mut workers.scenario, current, &truth, &tasks).await;
         workers.scenario.shutdown().await;
     }
 }
@@ -234,12 +240,12 @@ async fn tasks_are_listed_exactly(current: bool) {
 /// runtime's idle threads, and the thread at the checkpoint, which blocks
 /// on the runtime, is the program's own, as is every other.
 async fn check_threads(
-    workers: &mut Workers,
+    scenario: &mut Scenario,
     current: bool,
     truth: &Truth,
     tasks: &[TaskSnapshot],
 ) {
-    let activities = workers.activities().await;
+    let activities = activities(scenario).await;
     let (blocking, thread) = truth.running.expect("a blocking closure runs");
     let mut idle = 0;
     for (id, activity) in &activities {
@@ -474,8 +480,37 @@ async fn an_unknown_version_is_read_as_the_supported_one_and_says_so() {
         vec!["tokio's version is unknown; its runtime is read as tokio 1.52's".to_owned(); pages],
         "{fixture}"
     );
-    check_threads(&mut workers, false, &truth, &tasks).await;
+    check_threads(&mut workers.scenario, false, &truth, &tasks).await;
     workers.scenario.shutdown().await;
+}
+
+/// A core gdb dumped at the checkpoint lists the tasks the program
+/// reported there, and each thread does what it did, as live.
+#[tokio::test]
+async fn a_cores_tasks_are_those_the_program_reported() {
+    for fixture in BUILDS {
+        for current in [false, true] {
+            let core = if current {
+                format!("{fixture}-current.core")
+            } else {
+                format!("{fixture}.core")
+            };
+            let log = Scenario::fixture(&format!("{core}.log"));
+            let log = std::fs::read_to_string(&log)
+                .unwrap_or_else(|error| panic!("read {}: {error}", log.display()));
+            let truth = Truth::parse(&log);
+            assert_eq!(truth.tasks.len(), 8, "{core}: {truth:?}");
+            let mut scenario =
+                Scenario::open_core(&core, &CoreDumpOptions::new(Scenario::fixture(&core)));
+            let (tasks, gaps) = tasks(&scenario, 3).await;
+            assert!(gaps.is_empty(), "{core}: {gaps:?}");
+            truth
+                .check_tasks(&tasks)
+                .unwrap_or_else(|problem| panic!("{core}: {problem}"));
+            check_threads(&mut scenario, current, &truth, &tasks).await;
+            scenario.shutdown().await;
+        }
+    }
 }
 
 /// rustc describes each type once in every unit that uses it, so a large

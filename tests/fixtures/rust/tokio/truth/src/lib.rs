@@ -134,7 +134,8 @@ pub fn workers_parked(handle: &tokio::runtime::Handle) -> bool {
 }
 
 /// Prints a checkpoint's lines and stops there under a debugger. The
-/// caller has waited until nothing moves.
+/// caller has waited until nothing moves. With `TRUTH_CORE` set, the
+/// program then traps, for the debugger that runs it to dump its core.
 pub fn checkpoint(name: &str, handle: Option<&tokio::runtime::Handle>) {
     line(&[&"checkpoint", &name]);
     if let Some(handle) = handle {
@@ -157,6 +158,39 @@ pub fn checkpoint(name: &str, handle: Option<&tokio::runtime::Handle>) {
     }
     line(&[&"main", &gettid()]);
     truth_reached();
+    if std::env::var_os("TRUTH_CORE").is_some() {
+        remove_stack_guards();
+        // SAFETY: raising a signal has no preconditions.
+        unsafe { libc::raise(libc::SIGTRAP) };
+    }
+}
+
+/// Takes the guards out of every writable mapping. glibc 2.42 guards each
+/// thread's stack with `MADV_GUARD_INSTALL` inside the stack's mapping,
+/// which gdb's `gcore` cannot read, and so saves the whole stack as zeros;
+/// a mapping with no guard is left as it was.
+fn remove_stack_guards() {
+    const MADV_GUARD_REMOVE: libc::c_int = 103;
+    let maps = std::fs::read_to_string("/proc/self/maps").expect("the program's mappings");
+    for mapping in maps.lines() {
+        let mut fields = mapping.split_whitespace();
+        let (Some(range), Some(permissions)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let Some((start, end)) = range.split_once('-') else {
+            continue;
+        };
+        let (Ok(start), Ok(end)) = (
+            usize::from_str_radix(start, 16),
+            usize::from_str_radix(end, 16),
+        ) else {
+            continue;
+        };
+        if permissions.starts_with("rw") {
+            // SAFETY: removing guards changes no mapped memory.
+            unsafe { libc::madvise(start as *mut libc::c_void, end - start, MADV_GUARD_REMOVE) };
+        }
+    }
 }
 
 /// Where a debugger stops at each checkpoint.
