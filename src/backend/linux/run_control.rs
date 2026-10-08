@@ -186,6 +186,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|targets| {
                 let mut start = self.step_start(pid, StepKind::Out, frame)?;
                 start.targets = targets;
+                // An async function's frame returns once its future is
+                // ready, not each time its poll returns `Pending`.
+                if frame.get() == 0 {
+                    start.awaiting = self.await_step(pid, StepKind::Out, &start);
+                }
                 // Reaching a location stops as an advance; the frame
                 // returning first, as the step out it runs as.
                 self.begin_execution(
@@ -923,7 +928,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// Ends an advance whose thread reached one of its targets, unless it
     /// arrived where it stood when the advance began, and so goes on.
-    fn reach_advance_target(&mut self, pid: Pid, address: VirtualAddress) -> Result<()> {
+    pub(super) fn reach_advance_target(&mut self, pid: Pid, address: VirtualAddress) -> Result<()> {
         if !self.take_standing_arrival(address) {
             return self.begin_visible_stop(
                 pid,
