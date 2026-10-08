@@ -452,8 +452,11 @@ impl TokioRuntime {
             number,
             stack: StackSegment::Task,
         };
+        // A pool thread runs its closure's task, as the blocking tasks list
+        // it. One that entered the runtime blocks on it, or is a worker
+        // whose launch has not yet set its scheduler.
         if !found.worker {
-            return Ok(running);
+            return Ok(if found.entered { between } else { running });
         }
         Ok(
             match self.listed(stop, self.task_layout()?, runtime, number, None)? {
