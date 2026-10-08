@@ -106,10 +106,18 @@ fn languages_stay_at_their_seams() {
     // Each row names a runtime in the way only its model, and the
     // debug-information provider's code roles, should.
     const RUNTIMES: [(&str, &[&str]); 3] = [
-        ("runtime_model/go", &["\"runtime.", "allgs", "goroutine", "goid"]),
+        (
+            "runtime_model/go",
+            &["\"runtime.", "allgs", "goroutine", "goid"],
+        ),
         (
             "runtime_model/tokio",
-            &["ownedtasks", "\"tokio::runtime", "current_task_id", "context::context"],
+            &[
+                "ownedtasks",
+                "\"tokio::runtime",
+                "current_task_id",
+                "context::context",
+            ],
         ),
         ("runtime_model/rust", &["rust_panic", "rust_begin_unwind"]),
     ];

@@ -55,9 +55,14 @@ pub fn detect(
     image: &Arc<dyn RuntimeImage + Send + Sync>,
 ) -> Option<Result<Arc<dyn RuntimeModel>, Arc<str>>> {
     // A program stripped of its symbols shows no sign of tokio.
-    let tls = image.thread_local_within("tokio::runtime::context::CONTEXT", "__RUST_STD_INTERNAL_VAL")?;
+    let tls = image.thread_local_within(
+        "tokio::runtime::context::CONTEXT",
+        "__RUST_STD_INTERNAL_VAL",
+    )?;
     if let Err(reason) = tls {
-        return Some(Err(format!("tokio's context cannot be found: {reason}").into()));
+        return Some(Err(
+            format!("tokio's context cannot be found: {reason}").into()
+        ));
     }
     Some(Ok(Arc::new(TokioRuntime::bind(Arc::clone(image)))))
 }
@@ -159,7 +164,11 @@ impl Cursor {
 
 impl TokioRuntime {
     fn bind(image: Arc<dyn RuntimeImage + Send + Sync>) -> Self {
-        let caveat = match image.source_path_ending(VERSIONED_SOURCE).as_deref().map(version) {
+        let caveat = match image
+            .source_path_ending(VERSIONED_SOURCE)
+            .as_deref()
+            .map(version)
+        {
             Some(Some((major, minor, _))) if (major, minor) == VERIFIED => None,
             Some(Some((.., release))) => Some(format!(
                 "tokio {release} is unverified; its runtime is read as tokio {}.{}'s",
@@ -248,8 +257,11 @@ impl TokioRuntime {
             None
         };
         let worker = records::word(stop, base + context.scheduler).ok_or_else(unreadable)? != 0;
-        let entered =
-            &*context.entered_state.active(stop, base + context.entered.offset)?.name == "Entered";
+        let entered = &*context
+            .entered_state
+            .active(stop, base + context.entered.offset)?
+            .name
+            == "Entered";
         let option = base + context.task.offset;
         let task = if &*context.task_option.active(stop, option)?.name == "Some" {
             Some(records::word(stop, option + context.task_some).ok_or_else(unreadable)?)
@@ -373,7 +385,14 @@ impl RuntimeModel for TokioRuntime {
             next: None,
         });
         match self.census(stop) {
-            Ok(census) => self.page(stop, &census, Cursor::decode(start), limit, program_only, &mut page),
+            Ok(census) => self.page(
+                stop,
+                &census,
+                Cursor::decode(start),
+                limit,
+                program_only,
+                &mut page,
+            ),
             Err(reason) => page
                 .gaps
                 .push(format!("tokio's tasks cannot be read: {reason}").into()),

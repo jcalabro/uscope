@@ -7,8 +7,8 @@
 
 use std::sync::Arc;
 
-use super::super::records::{self, Field, Missing, Sum};
 use super::super::RuntimeImage;
+use super::super::records::{self, Field, Missing, Sum};
 use crate::{ThreadLocal, TypeReference};
 
 /// Where the thread-local `CONTEXT` is, by its scope and the name std's
@@ -151,7 +151,11 @@ impl Context {
         let runtimes = FLAVORS
             .iter()
             .map(|&(flavor, variant, handle)| {
-                Ok((flavor, Arc::from(variant), Runtime::bind(image, &flavors, variant, handle)?))
+                Ok((
+                    flavor,
+                    Arc::from(variant),
+                    Runtime::bind(image, &flavors, variant, handle)?,
+                ))
             })
             .collect::<Result<Vec<_>, Missing>>()?;
         let scheduler = field(&["scheduler", "inner", "value", "value"])?;
@@ -254,7 +258,8 @@ impl Tasks {
         let trailer = records::named(image, "tokio::runtime::task::core::Trailer")?;
         let header_field = |path: &[&str]| records::sized(image, header, path, 8);
         let vtable_field = |name: &str| records::sized(image, vtable, &[name], 8);
-        let link = |name: &str| records::sized(image, trailer, &["owned", "inner", "value", name], 8);
+        let link =
+            |name: &str| records::sized(image, trailer, &["owned", "inner", "value", name], 8);
         Ok(Self {
             state: header_field(&["state"])?,
             vtable: header_field(&["vtable"])?,

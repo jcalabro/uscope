@@ -276,7 +276,8 @@ impl World {
         let head_at = owned.head;
         let tasks = self.model.layout.tasks.as_ref().expect("Header binds");
         let (prev, next) = (tasks.prev, tasks.next);
-        self.memory.word(shard + head_at, headers.first().copied().unwrap_or(0));
+        self.memory
+            .word(shard + head_at, headers.first().copied().unwrap_or(0));
         for (index, header) in headers.iter().enumerate() {
             let before = index.checked_sub(1).map_or(0, |before| headers[before]);
             let after = headers.get(index + 1).copied().unwrap_or(0);
@@ -290,7 +291,8 @@ impl World {
         let runtime = self.runtime_layout(flavor);
         let (data, owned_at) = (runtime.data, runtime.owned.at);
         let owned = &runtime.owned;
-        let (id_at, shards_at, count_at, mask_at) = (owned.id, owned.shards, owned.count, owned.mask);
+        let (id_at, shards_at, count_at, mask_at) =
+            (owned.id, owned.shards, owned.count, owned.mask);
         let (shard_size, lock_at) = (owned.shard_size, owned.shard_lock);
         let arc = self.allocate(4096);
         let handle = arc + data;
@@ -301,7 +303,8 @@ impl World {
         self.memory.word(at + shards_at, array);
         self.memory.word(at + shards_at + 8, length);
         let count = shards.iter().map(Vec::len).sum::<usize>();
-        self.memory.word(at + count_at, u64::try_from(count).expect("a count"));
+        self.memory
+            .word(at + count_at, u64::try_from(count).expect("a count"));
         self.memory.word(at + mask_at, length - 1);
         let vtable = self.vtable(self.poll);
         let mut headers = Vec::new();
@@ -349,7 +352,8 @@ impl World {
         let first = room - 1;
         self.memory.write(inner + lock, 0, 4);
         self.memory.word(inner + head, first);
-        self.memory.word(inner + len, u64::try_from(queued.len()).expect("a few"));
+        self.memory
+            .word(inner + len, u64::try_from(queued.len()).expect("a few"));
         self.memory.word(inner + buffer, ring);
         self.memory.word(inner + capacity, room);
         for (index, &(id, launch)) in (0..).zip(queued) {
@@ -381,15 +385,24 @@ impl World {
             panic!("an executable's thread-local storage is at an offset");
         };
         let (state, alive) = (context.state, context.alive);
-        let (handle_at, some_at, scheduler_at) =
-            (context.handle.offset, context.handle_some, context.scheduler);
+        let (handle_at, some_at, scheduler_at) = (
+            context.handle.offset,
+            context.handle_some,
+            context.scheduler,
+        );
         let (task_at, task_some) = (context.task.offset, context.task_some);
-        let handle_tag = context.handle_option.tag_for(if runtime.is_some() { "Some" } else { "None" });
-        let task_tag = context.task_option.tag_for(if task.is_some() { "Some" } else { "None" });
+        let handle_tag =
+            context
+                .handle_option
+                .tag_for(if runtime.is_some() { "Some" } else { "None" });
+        let task_tag = context
+            .task_option
+            .tag_for(if task.is_some() { "Some" } else { "None" });
         let entered_at = context.entered.offset;
-        let entered_tag = context
-            .entered_state
-            .tag_for(if entered { "Entered" } else { "NotEntered" });
+        let entered_tag =
+            context
+                .entered_state
+                .tag_for(if entered { "Entered" } else { "NotEntered" });
         let flavor_tags = [Flavor::MultiThread, Flavor::CurrentThread].map(|flavor| {
             let name = self
                 .context()
@@ -416,7 +429,8 @@ impl World {
             let arc_at = self.runtime_layout(runtime.flavor).arc;
             self.memory.word(handle + arc_at, runtime.arc);
         }
-        self.memory.word(base + scheduler_at, if worker { 0x1234_5000 } else { 0 });
+        self.memory
+            .word(base + scheduler_at, if worker { 0x1234_5000 } else { 0 });
         let (at, size, value) = entered_tag;
         self.memory.write(base + entered_at + at, value, size);
         let (at, size, value) = task_tag;
@@ -452,8 +466,17 @@ impl World {
 /// What the convention says a task's state bits mean, given whether a
 /// worker polls it: a state, and its description.
 fn convention(bits: u64, polled: bool) -> (TaskState, String) {
-    let cancelled = if bits & CANCELLED == 0 { "" } else { ", cancelled" };
-    match (bits & COMPLETE != 0, bits & RUNNING != 0, bits & NOTIFIED != 0, polled) {
+    let cancelled = if bits & CANCELLED == 0 {
+        ""
+    } else {
+        ", cancelled"
+    };
+    match (
+        bits & COMPLETE != 0,
+        bits & RUNNING != 0,
+        bits & NOTIFIED != 0,
+        polled,
+    ) {
         (true, ..) if cancelled.is_empty() => (TaskState::Exited, "completed".into()),
         (true, ..) => (TaskState::Exited, "cancelled".into()),
         (false, true, _, true) => (TaskState::Running, format!("running{cancelled}")),
@@ -474,11 +497,18 @@ fn each_state_is_read_as_tokio_defines_it() {
     let mut world = World::new(&[]);
     let mut tasks = Vec::new();
     for flags in 0..64_u64 {
-        let bits = [RUNNING, COMPLETE, NOTIFIED, JOIN_INTEREST, JOIN_WAKER, CANCELLED]
-            .into_iter()
-            .enumerate()
-            .filter(|(index, _)| flags & (1 << index) != 0)
-            .fold(0, |bits, (_, bit)| bits | bit);
+        let bits = [
+            RUNNING,
+            COMPLETE,
+            NOTIFIED,
+            JOIN_INTEREST,
+            JOIN_WAKER,
+            CANCELLED,
+        ]
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| flags & (1 << index) != 0)
+        .fold(0, |bits, (_, bit)| bits | bit);
         for references in 1..=3 {
             tasks.push((flags * 4 + references, bits | (references * REF_ONE)));
         }
@@ -494,13 +524,24 @@ fn each_state_is_read_as_tokio_defines_it() {
         world.thread(tid, Some(&runtime), true, Some(*id));
     }
     let (listed, gaps) = world.tasks(4096, true);
-    assert!(gaps.iter().all(|gap| gap.contains("tokio's version")), "{gaps:?}");
+    assert!(
+        gaps.iter().all(|gap| gap.contains("tokio's version")),
+        "{gaps:?}"
+    );
     assert_eq!(listed.len(), tasks.len());
     for (task, &(id, bits)) in listed.iter().zip(&tasks) {
         assert_eq!(task.number, id);
         let (state, detail) = convention(bits, polled.contains(&id));
-        assert_eq!((&task.state, task.detail.as_deref()), (&state, Some(&*detail)), "{bits:#b}");
-        assert_eq!(task.thread.is_some(), state == TaskState::Running, "{bits:#b}");
+        assert_eq!(
+            (&task.state, task.detail.as_deref()),
+            (&state, Some(&*detail)),
+            "{bits:#b}"
+        );
+        assert_eq!(
+            task.thread.is_some(),
+            state == TaskState::Running,
+            "{bits:#b}"
+        );
         assert!(!task.internal);
     }
 }
@@ -512,7 +553,11 @@ fn each_state_is_read_as_tokio_defines_it() {
 #[test]
 fn a_thread_runs_the_task_its_context_names() {
     let mut world = World::new(&[]);
-    let runtime = world.runtime(Flavor::MultiThread, 3, &[vec![(10, RUNNING)], vec![(11, 0)]]);
+    let runtime = world.runtime(
+        Flavor::MultiThread,
+        3,
+        &[vec![(10, RUNNING)], vec![(11, 0)]],
+    );
     let current = world.runtime(Flavor::CurrentThread, 4, &[vec![(30, 0)]]);
     world.thread(1, Some(&runtime), true, Some(10));
     world.thread(2, Some(&runtime), true, Some(2));
@@ -530,7 +575,9 @@ fn a_thread_runs_the_task_its_context_names() {
     let ThreadLocal::Offset(offset) = world.context().tls else {
         panic!("an offset");
     };
-    world.memory.write(pointer.wrapping_add_signed(offset) + state, 1, 1);
+    world
+        .memory
+        .write(pointer.wrapping_add_signed(offset) + state, 1, 1);
 
     let task = |number| ThreadActivity::Task {
         number,
@@ -552,23 +599,38 @@ fn a_thread_runs_the_task_its_context_names() {
     // The pool thread's task is listed as running there; its frames, and
     // the worker's task's, begin on their threads.
     let (listed, _) = world.tasks(4096, true);
-    let blocking = listed.iter().find(|task| task.number == 12).expect("listed");
+    let blocking = listed
+        .iter()
+        .find(|task| task.number == 12)
+        .expect("listed");
     assert_eq!(blocking.thread, Some(ThreadId::new(3)));
     for (number, thread) in [(10, 1), (12, 3)] {
         let context = world
             .model
-            .task_context(&world.memory, TaskRef { number, locator: None })
+            .task_context(
+                &world.memory,
+                TaskRef {
+                    number,
+                    locator: None,
+                },
+            )
             .expect("found")
             .expect("a task");
-        assert!(
-            matches!(context, super::TaskContext::OnThread(on) if on == ThreadId::new(thread))
-        );
+        assert!(matches!(context, super::TaskContext::OnThread(on) if on == ThreadId::new(thread)));
     }
-    assert!(world
-        .model
-        .task_context(&world.memory, TaskRef { number: 99, locator: None })
-        .expect("read")
-        .is_none());
+    assert!(
+        world
+            .model
+            .task_context(
+                &world.memory,
+                TaskRef {
+                    number: 99,
+                    locator: None
+                }
+            )
+            .expect("read")
+            .is_none()
+    );
 }
 
 /// The blocking pool's queue is listed in its order, around the end of its
@@ -577,14 +639,24 @@ fn a_thread_runs_the_task_its_context_names() {
 fn the_blocking_pool_lists_its_queue_in_order() {
     let mut world = World::new(&[]);
     let runtime = world.runtime(Flavor::CurrentThread, 4, &[vec![(1, 0)]]);
-    world.pool(runtime.flavor, runtime.handle, &[(20, true), (21, false), (22, false)]);
+    world.pool(
+        runtime.flavor,
+        runtime.handle,
+        &[(20, true), (21, false), (22, false)],
+    );
     world.thread(1, Some(&runtime), true, None);
     let (all, gaps) = world.tasks(2, false);
-    assert!(gaps.iter().all(|gap| gap.contains("tokio's version")), "{gaps:?}");
+    assert!(
+        gaps.iter().all(|gap| gap.contains("tokio's version")),
+        "{gaps:?}"
+    );
     let numbers = all.iter().map(|task| task.number).collect::<Vec<_>>();
     assert_eq!(numbers, [1, 20, 21, 22]);
     assert!(all[1].internal && !all[2].internal);
-    assert_eq!(all[2].detail.as_deref(), Some("queued in the blocking pool"));
+    assert_eq!(
+        all[2].detail.as_deref(),
+        Some("queued in the blocking pool")
+    );
     assert_eq!(all[2].state, TaskState::Runnable);
     let (program, _) = world.tasks(1, true);
     let numbers = program.iter().map(|task| task.number).collect::<Vec<_>>();
@@ -606,9 +678,18 @@ fn a_missing_name_makes_only_what_needs_it_unavailable() {
         hidden: vec![pool],
     }));
     let page = without_pool.tasks(&memory, 0, 64, true);
-    let numbers = page.value.tasks.iter().map(|task| task.number).collect::<Vec<_>>();
+    let numbers = page
+        .value
+        .tasks
+        .iter()
+        .map(|task| task.number)
+        .collect::<Vec<_>>();
     assert_eq!(numbers, [10, 12]);
-    assert!(page.gaps.iter().any(|gap| gap.contains(pool)), "{:?}", page.gaps);
+    assert!(
+        page.gaps.iter().any(|gap| gap.contains(pool)),
+        "{:?}",
+        page.gaps
+    );
 
     let header = "tokio::runtime::task::core::Header";
     let without_header = TokioRuntime::bind(Arc::new(Image {
@@ -617,20 +698,29 @@ fn a_missing_name_makes_only_what_needs_it_unavailable() {
     }));
     let page = without_header.tasks(&memory, 0, 64, true);
     assert!(page.value.tasks.is_empty());
-    assert!(page.gaps.iter().any(|gap| gap.contains(header)), "{:?}", page.gaps);
+    assert!(
+        page.gaps.iter().any(|gap| gap.contains(header)),
+        "{:?}",
+        page.gaps
+    );
     // A pool thread's task is still known: it needs no task's header.
     assert!(matches!(
         without_header.thread_activity(&memory, ThreadId::new(1)),
         ThreadActivity::Task { number: 12, .. }
     ));
 
-    let storage = "std::sys::thread_local::native::eager::Storage<tokio::runtime::context::Context>";
+    let storage =
+        "std::sys::thread_local::native::eager::Storage<tokio::runtime::context::Context>";
     let without_context = TokioRuntime::bind(Arc::new(Image {
         module: module(),
         hidden: vec![storage],
     }));
     let page = without_context.tasks(&memory, 0, 64, true);
-    assert!(page.gaps.iter().any(|gap| gap.contains(storage)), "{:?}", page.gaps);
+    assert!(
+        page.gaps.iter().any(|gap| gap.contains(storage)),
+        "{:?}",
+        page.gaps
+    );
     assert!(matches!(
         without_context.thread_activity(&memory, ThreadId::new(1)),
         ThreadActivity::Unknown(reason) if reason.contains(storage)

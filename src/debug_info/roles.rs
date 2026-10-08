@@ -107,9 +107,16 @@ pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
     if namespace == "tokio::runtime::task::harness" && name.starts_with("poll<") {
         return Some(CodeRole::Dispatch);
     }
-    if ["tokio::runtime", "tokio::task", "tokio::loom", "tokio::util", "tokio::macros", "mio"]
-        .into_iter()
-        .any(within)
+    if [
+        "tokio::runtime",
+        "tokio::task",
+        "tokio::loom",
+        "tokio::util",
+        "tokio::macros",
+        "mio",
+    ]
+    .into_iter()
+    .any(within)
     {
         return Some(CodeRole::RuntimeInternal);
     }

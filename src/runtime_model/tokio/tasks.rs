@@ -70,7 +70,10 @@ impl TokioRuntime {
             Cursor::Start | Cursor::Node(_) => 0,
         };
         let blocking = self.blocking(stop, census, tasks, &mut page.gaps);
-        for (index, task) in (0..).zip(blocking).skip(usize::try_from(start).unwrap_or(usize::MAX)) {
+        for (index, task) in (0..)
+            .zip(blocking)
+            .skip(usize::try_from(start).unwrap_or(usize::MAX))
+        {
             if program_only && task.internal {
                 continue;
             }
@@ -152,7 +155,9 @@ impl TokioRuntime {
                         return true;
                     }
                     Ok(found) => {
-                        page.value.tasks.push(owned_task(census, runtime, at, &found));
+                        page.value
+                            .tasks
+                            .push(owned_task(census, runtime, at, &found));
                         (previous, at) = (at, found.next);
                         walked += 1;
                         total += 1;
@@ -178,7 +183,8 @@ impl TokioRuntime {
         } else {
             self.count(stop, tasks, runtime, &list).ok()
         };
-        if whole && let Some(total) = total
+        if whole
+            && let Some(total) = total
             && total != list.count
         {
             page.gaps.push(
@@ -229,7 +235,9 @@ impl TokioRuntime {
         index: u64,
     ) -> Result<(u64, bool), Arc<str>> {
         let owned = self.owned(runtime.flavor)?;
-        let at = list.shards.wrapping_add(index.wrapping_mul(owned.shard_size));
+        let at = list
+            .shards
+            .wrapping_add(index.wrapping_mul(owned.shard_size));
         let unreadable = || Arc::<str>::from(format!("the shard at {at:#x} is unreadable"));
         let lock = records::read(stop, at + owned.shard_lock, 4).ok_or_else(unreadable)?;
         let head = records::word(stop, at + owned.head).ok_or_else(unreadable)?;
@@ -425,9 +433,7 @@ impl TokioRuntime {
     ) -> Result<ThreadActivity, Arc<str>> {
         let context = self.context()?;
         let found = Self::thread_context(stop, context, thread)?;
-        let Some((found, runtime)) =
-            found.and_then(|found| Some((found, found.runtime?)))
-        else {
+        let Some((found, runtime)) = found.and_then(|found| Some((found, found.runtime?))) else {
             return Ok(ThreadActivity::Outside);
         };
         let between = match (found.worker, runtime.flavor, found.entered) {
@@ -515,7 +521,8 @@ impl TokioRuntime {
         let unreadable = || Arc::<str>::from("the blocking pool is unreadable");
         let word = |address: u64| records::word(stop, address).ok_or_else(unreadable);
         let inner = word(runtime.handle.wrapping_add(spawner))?.wrapping_add(pool.data);
-        let locked = records::read(stop, inner.wrapping_add(pool.lock), 4).ok_or_else(unreadable)?;
+        let locked =
+            records::read(stop, inner.wrapping_add(pool.lock), 4).ok_or_else(unreadable)?;
         let head = word(inner.wrapping_add(pool.head))?;
         let length = word(inner.wrapping_add(pool.len))?;
         let buffer = word(inner.wrapping_add(pool.buffer))?;

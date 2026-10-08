@@ -73,11 +73,7 @@ fn representation(image: &dyn RuntimeImage, mut ty: TypeReference) -> Option<&Ty
 /// The member a path of names reaches within `ty`, through nested records
 /// and the payloads of a sum type's variants, which a path names by the
 /// variant's name.
-pub fn field(
-    image: &dyn RuntimeImage,
-    ty: TypeReference,
-    path: &[&str],
-) -> Result<Field, Missing> {
+pub fn field(image: &dyn RuntimeImage, ty: TypeReference, path: &[&str]) -> Result<Field, Missing> {
     let mut found = Field { offset: 0, ty };
     for name in path {
         let container = representation(image, found.ty)
@@ -212,8 +208,8 @@ pub struct SumVariant {
 
 /// How the sum type `ty` selects its variants.
 pub fn sum(image: &dyn RuntimeImage, ty: TypeReference) -> Result<Sum, Missing> {
-    let info = representation(image, ty)
-        .ok_or_else(|| format!("{} has no layout", name_of(image, ty)))?;
+    let info =
+        representation(image, ty).ok_or_else(|| format!("{} has no layout", name_of(image, ty)))?;
     let TypeKind::Variant {
         discriminant,
         variants,
@@ -331,7 +327,9 @@ impl Sum {
                 Some(VariantSelector::Value(value)) => unsigned(*value).expect("an unsigned tag"),
                 other => panic!("{name}: {other:?}"),
             },
-            _ => (1..=u64::from(u8::MAX)).find(|tag| !claimed(*tag)).expect("a free tag"),
+            _ => (1..=u64::from(u8::MAX))
+                .find(|tag| !claimed(*tag))
+                .expect("a free tag"),
         };
         (offset, size, value)
     }

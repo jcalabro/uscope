@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use uscope::{
-    BreakpointSpec, CodeRole, InferiorState, LaunchOptions, StopReason, TaskPage, TaskSnapshot, TaskState,
-    ThreadActivity, ThreadId,
+    BreakpointSpec, CodeRole, InferiorState, LaunchOptions, StopReason, TaskPage, TaskSnapshot,
+    TaskState, ThreadActivity, ThreadId,
 };
 
 use crate::stops::{backtrace, integer};
@@ -251,7 +251,11 @@ async fn check_threads(
         }
     }
     let main = truth.main.expect("the checkpoint's thread");
-    assert_eq!(activities.get(&main), Some(&ThreadActivity::Outside), "{activities:#?}");
+    assert_eq!(
+        activities.get(&main),
+        Some(&ThreadActivity::Outside),
+        "{activities:#?}"
+    );
     assert_eq!(idle, if current { 0 } else { 2 }, "{activities:#?}");
 }
 
@@ -276,8 +280,7 @@ async fn a_task_at_a_breakpoint_runs_on_its_thread(current: bool) {
             .and_then(|me| u64::try_from(me).ok())
             .unwrap_or_else(|| panic!("{fixture}: `me` is unavailable"));
         let InferiorState::Stopped {
-            thread_id: stopped,
-            ..
+            thread_id: stopped, ..
         } = workers.scenario.snapshot().await.inferior
         else {
             panic!("{fixture}: not stopped");
@@ -352,7 +355,10 @@ async fn tokios_machinery_is_marked(current: bool) {
                     .as_ref()
                     .is_some_and(|function| &*function.name == name)
             });
-            assert!(at.is_some_and(|at| at < dispatch), "{fixture}: {name} {at:?} {dispatch}");
+            assert!(
+                at.is_some_and(|at| at < dispatch),
+                "{fixture}: {name} {at:?} {dispatch}"
+            );
         }
         workers.scenario.shutdown().await;
     }
@@ -376,7 +382,10 @@ async fn before_any_runtime_there_are_no_tasks() {
         let workers =
             Workers::stopped_at(fixture, false, BreakpointSpec::Function("main".into())).await;
         let (tasks, gaps) = workers.tasks(4096).await;
-        assert!(tasks.is_empty() && gaps.is_empty(), "{fixture}: {tasks:#?} {gaps:?}");
+        assert!(
+            tasks.is_empty() && gaps.is_empty(),
+            "{fixture}: {tasks:#?} {gaps:?}"
+        );
         workers.scenario.shutdown().await;
     }
 }
@@ -389,7 +398,10 @@ async fn every_type_of_a_large_program_is_read_and_named_once() {
     for fixture in BUILDS {
         let workers = Workers::parked(fixture, false).await;
         for (name, size) in [
-            ("tokio::runtime::scheduler::multi_thread::worker::Shared", 296),
+            (
+                "tokio::runtime::scheduler::multi_thread::worker::Shared",
+                296,
+            ),
             ("tokio::runtime::scheduler::Handle", 16),
             ("tokio::runtime::task::core::Header", 32),
         ] {
