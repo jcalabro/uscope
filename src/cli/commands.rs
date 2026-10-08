@@ -2354,6 +2354,16 @@ impl Cli {
             }
             Err(error) => return Err(error.into()),
         };
+        self.describe(&location, with_address).await
+    }
+
+    /// Where a location is: its function, then its line or address.
+    pub(super) async fn describe(
+        &self,
+        location: &uscope::ExecutionLocation,
+        with_address: bool,
+    ) -> Result<String> {
+        let renderer = self.renderers.stdout;
         let name = format::code_name(
             location.image.function.as_ref(),
             location.image.symbol.as_ref(),

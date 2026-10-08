@@ -7,7 +7,10 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use anyhow::Result;
-use uscope::{ExecutionContext, StopId, StopReason, VirtualAddress};
+use uscope::{
+    ExecutionContext, InferiorState, StackFrameId, StateSnapshot, StopContext, StopId, StopReason,
+    ThreadActivity, ThreadState, VirtualAddress,
+};
 
 use super::commands::Command;
 use super::config::Section;
@@ -187,6 +190,14 @@ impl Cli {
             ),
             _ => format!("{}{suffix}", format::stop(reason, renderer)),
         };
+        if let Some(snapshot) = &snapshot
+            && in_code(reason)
+        {
+            for line in self.co_hits(snapshot).await {
+                output.push('\n');
+                output.push_str(&line);
+            }
+        }
         if let (StopReason::Breakpoint { hits, .. }, Some(snapshot)) = (reason, &snapshot)
             && let Some(deleted) = self.deleted_temporaries(hits, snapshot)
         {
@@ -201,6 +212,54 @@ impl Cli {
             }
         }
         output
+    }
+
+    /// A line for each thread besides the stop's that the stop found at a
+    /// breakpoint or watchpoint of its own, with the task it runs.
+    async fn co_hits(&self, snapshot: &StateSnapshot) -> Vec<String> {
+        let renderer = self.renderers.stdout;
+        let (InferiorState::Stopped { thread_id, .. }, Some(stop)) =
+            (&snapshot.inferior, snapshot.stop_id)
+        else {
+            return Vec::new();
+        };
+        let mut lines = Vec::new();
+        for thread in snapshot
+            .threads
+            .iter()
+            .filter(|thread| thread.id != *thread_id)
+        {
+            let ThreadState::Stopped {
+                reason:
+                    Some(reason @ (StopReason::Breakpoint { .. } | StopReason::Watchpoint { .. })),
+            } = &thread.state
+            else {
+                continue;
+            };
+            let mut line = format!("thread {}", renderer.paint(Role::Metadata, thread.id));
+            if let Some(ThreadActivity::Task { task, .. }) = &thread.activity {
+                write!(
+                    line,
+                    " {}",
+                    renderer.paint(Role::Metadata, format_args!("[{}]", task.number))
+                )
+                .expect("writing to a String cannot fail");
+            }
+            write!(line, " also {}", format::stop(reason, renderer))
+                .expect("writing to a String cannot fail");
+            let context = StopContext {
+                stop,
+                execution: ExecutionContext::Thread(thread.id),
+                frame: StackFrameId::INNERMOST,
+            };
+            if let Ok(location) = self.debugger.at(context).location().await
+                && let Ok(place) = self.describe(&location, false).await
+            {
+                write!(line, " in {place}").expect("writing to a String cannot fail");
+            }
+            lines.push(line);
+        }
+        lines
     }
 
     /// The sections `[stop] show` names, in order, each of which that
