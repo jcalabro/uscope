@@ -88,7 +88,9 @@ async fn read(handle: &DebuggerHandle) -> Result<Option<Stop>, String> {
         gaps.extend(page.gaps.iter().map(ToString::to_string));
         match page.next {
             Some(_) if tasks.len() >= MAX_TASKS => {
-                return Err(format!("the program has more than {MAX_TASKS} tasks to check"));
+                return Err(format!(
+                    "the program has more than {MAX_TASKS} tasks to check"
+                ));
             }
             Some(next) => from = Some(next),
             None => break,
