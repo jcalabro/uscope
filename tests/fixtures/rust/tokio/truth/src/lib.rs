@@ -165,3 +165,10 @@ pub fn checkpoint(name: &str, handle: Option<&tokio::runtime::Handle>) {
 pub extern "C" fn truth_reached() {
     std::hint::black_box(());
 }
+
+/// Where a debugger stops in a task, which passes its own id.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn task_reached(me: u64) {
+    std::hint::black_box(me);
+}

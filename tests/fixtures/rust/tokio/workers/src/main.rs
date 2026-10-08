@@ -5,6 +5,11 @@
 //! checkpoint `parked`; then it releases every task and joins them.
 //! Each local a test reads is saved across the await, and each task keeps
 //! its own id in `me`.
+//!
+//! Beside them, the blocking pool runs one closure, which waits, and has
+//! another queued behind it. On the current-thread runtime, the main
+//! future also wakes the notified task and spawns one more, and neither
+//! has been polled at the checkpoint.
 
 use std::hint::black_box;
 use std::sync::Arc;
@@ -43,6 +48,7 @@ impl Wait {
 async fn leaf(me: u64, wait: Wait) -> u32 {
     let leaf_local = black_box(me * 100 + 3);
     truth::value(me, "leaf_local", leaf_local);
+    truth::task_reached(me);
     let tag = wait.tag();
     let _at = truth::at(me, tag);
     let got = match wait {
@@ -113,6 +119,17 @@ async fn run(handle: Option<tokio::runtime::Handle>) {
         tokio::spawn(top(Wait::Permit(semaphore.clone()))),
     ];
 
+    // The pool's one thread for the program runs the first closure until
+    // it is released, so the second waits in the pool's queue.
+    let (started_sender, started) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let blocking = tokio::task::spawn_blocking(move || {
+        started_sender.send(truth::gettid()).expect("the program waits");
+        released.recv().expect("the program releases the closure");
+    });
+    let blocking_thread = started.recv().expect("the closure starts");
+    let queued = tokio::task::spawn_blocking(|| ());
+
     while !truth::all_parked(8) || handle.as_ref().is_some_and(|handle| !truth::workers_parked(handle)) {
         if handle.is_some() {
             std::thread::yield_now();
@@ -120,13 +137,30 @@ async fn run(handle: Option<tokio::runtime::Handle>) {
             tokio::task::yield_now().await;
         }
     }
+    truth::line(&[&"blocking", &blocking.id(), &"running", &blocking_thread]);
+    truth::line(&[&"blocking", &queued.id(), &"queued"]);
+    // Without yielding, the current-thread runtime polls neither of these.
+    let fresh = handle.is_none().then(|| {
+        notify.notify_one();
+        truth::line(&[&"woken", &tasks[3].id()]);
+        let fresh = tokio::spawn(top(Wait::Sleep));
+        truth::line(&[&"spawned", &fresh.id()]);
+        fresh
+    });
     truth::checkpoint("parked", handle.as_ref());
 
-    // The sleeper waits an hour; the rest are released.
+    // The sleepers wait an hour; the rest are released.
     tasks.remove(0).abort();
+    if let Some(fresh) = fresh {
+        fresh.abort();
+    } else {
+        notify.notify_one();
+    }
+    release.send(()).expect("the closure waits");
+    blocking.await.expect("the closure ends");
+    queued.await.expect("the queued closure ends");
     sender.send(1).await.expect("the channel's task waits");
     drop(guard);
-    notify.notify_one();
     oneshot_sender.send(5).expect("the oneshot's task waits");
     barrier.wait().await;
     semaphore.add_permits(1);
@@ -140,6 +174,7 @@ fn main() {
     let current = std::env::args().nth(1).as_deref() == Some("current");
     if current {
         let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
             .enable_time()
             .build()
             .expect("a runtime");
@@ -147,6 +182,7 @@ fn main() {
     } else {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
+            .max_blocking_threads(1)
             .enable_time()
             .build()
             .expect("a runtime");

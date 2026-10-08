@@ -74,6 +74,8 @@ struct ProcessStop<'a, P> {
     bias: u64,
     /// Where the reads made are counted, when they are.
     usage: Option<&'a Cell<InspectionUsage>>,
+    /// The process's threads, in the order of their ids.
+    threads: Vec<ThreadId>,
 }
 
 impl<P: InspectionOps> RuntimeStop for ProcessStop<'_, P> {
@@ -117,6 +119,10 @@ impl<P: InspectionOps> RuntimeStop for ProcessStop<'_, P> {
 
     fn load_bias(&self) -> u64 {
         self.bias
+    }
+
+    fn threads(&self) -> Vec<ThreadId> {
+        self.threads.clone()
     }
 }
 
@@ -201,6 +207,11 @@ impl<P: InspectionOps> Controller<P> {
             breakpoints: &inferior.breakpoints,
             bias: runtime.module.load_bias,
             usage,
+            threads: inferior
+                .threads
+                .keys()
+                .map(|pid| debug_thread_id(*pid))
+                .collect(),
         })
     }
 

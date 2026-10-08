@@ -257,6 +257,8 @@ pub enum TaskState {
     Runnable,
     /// Waiting for an event, such as a channel or a lock.
     Blocked,
+    /// Finished, and not yet released by its runtime.
+    Exited,
     /// The runtime's state for the task could not be read, for this reason.
     Unknown(Arc<str>),
 }

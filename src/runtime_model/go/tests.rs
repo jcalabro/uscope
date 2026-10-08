@@ -183,6 +183,10 @@ impl RuntimeStop for Memory {
     fn load_bias(&self) -> u64 {
         0
     }
+
+    fn threads(&self) -> Vec<ThreadId> {
+        self.threads.keys().copied().collect()
+    }
 }
 
 /// What a test writes of a goroutine.
