@@ -1,11 +1,13 @@
 //! A task whose await never finishes, because its future goes away while
 //! it waits at a gate that never opens. Once the task waits there, a plain
-//! thread ends the wait in one of four ways, the program's argument:
+//! thread ends the wait in one of five ways, the program's argument:
 //!
 //! - `abort`: the task's `JoinHandle::abort`;
 //! - `select`: another branch of the `select!` that awaits it finishes;
 //! - `timeout`: the timeout around it elapses;
-//! - `shutdown`: the runtime shuts down.
+//! - `shutdown`: the runtime shuts down;
+//! - `current-shutdown`: a current-thread runtime, which the main thread
+//!   runs until the task waits, shuts down.
 //!
 //! With `hold`, the gate opens instead, once a line arrives on standard
 //! input, and the task finishes; or, when the line is `exit`, the program
@@ -89,6 +91,19 @@ fn main() {
             drop(runtime.spawn(alone(gate)));
             parked();
             drop(runtime);
+            0
+        }
+        "current-shutdown" => {
+            let current = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("a runtime");
+            current.block_on(async {
+                drop(tokio::spawn(alone(gate)));
+                while truth::parked_at("gate") != 1 {
+                    tokio::task::yield_now().await;
+                }
+            });
+            drop(current);
             0
         }
         "hold" => {
