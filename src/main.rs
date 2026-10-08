@@ -10,6 +10,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
+
+// Reading debug information allocates millions of small blocks, which
+// mimalloc serves far faster than the C library's allocator.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use uscope::Debugger;
 

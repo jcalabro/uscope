@@ -3,13 +3,17 @@
 //! memory. Past the cap an allocation fails, which aborts the process after
 //! this module names the cap. It also counts what each thread allocates, so
 //! a test can measure the work of something that runs on its own thread.
+//! Blocks come from mimalloc, as they do in uscope itself, which reads debug
+//! information far faster with it than with the C library's allocator.
 
 #![allow(unsafe_code, reason = "a global allocator is an unsafe trait")]
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use mimalloc::MiMalloc;
 
 /// The most live heap one test process may hold, several times the heaviest
 /// test's.
@@ -78,17 +82,17 @@ impl CappedAllocator {
     }
 }
 
-// SAFETY: every method forwards to `System` with the caller's arguments, so
-// `System` upholds the allocator contract; the cap only refuses some requests
-// by returning null, which the contract allows, and counts only blocks
-// `System` actually returned or released.
+// SAFETY: every method forwards to `MiMalloc` with the caller's arguments, so
+// `MiMalloc` upholds the allocator contract; the cap only refuses some
+// requests by returning null, which the contract allows, and counts only
+// blocks `MiMalloc` actually returned or released.
 unsafe impl GlobalAlloc for CappedAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if !self.reserve(layout.size()) {
             return std::ptr::null_mut();
         }
         // SAFETY: the caller's layout satisfies `alloc`'s requirements.
-        let block = unsafe { System.alloc(layout) };
+        let block = unsafe { MiMalloc.alloc(layout) };
         if block.is_null() {
             self.release(layout.size());
         } else {
@@ -102,7 +106,7 @@ unsafe impl GlobalAlloc for CappedAllocator {
             return std::ptr::null_mut();
         }
         // SAFETY: the caller's layout satisfies `alloc_zeroed`'s requirements.
-        let block = unsafe { System.alloc_zeroed(layout) };
+        let block = unsafe { MiMalloc.alloc_zeroed(layout) };
         if block.is_null() {
             self.release(layout.size());
         } else {
@@ -113,8 +117,8 @@ unsafe impl GlobalAlloc for CappedAllocator {
 
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
         // SAFETY: the caller passes a block this allocator returned, with its
-        // layout, and every such block came from `System`.
-        unsafe { System.dealloc(block, layout) };
+        // layout, and every such block came from `MiMalloc`.
+        unsafe { MiMalloc.dealloc(block, layout) };
         self.release(layout.size());
     }
 
@@ -123,9 +127,9 @@ unsafe impl GlobalAlloc for CappedAllocator {
         if !self.reserve(growth) {
             return std::ptr::null_mut();
         }
-        // SAFETY: the caller passes a block `System` returned, its layout,
+        // SAFETY: the caller passes a block `MiMalloc` returned, its layout,
         // and a valid new size.
-        let moved = unsafe { System.realloc(block, layout, new_size) };
+        let moved = unsafe { MiMalloc.realloc(block, layout, new_size) };
         if moved.is_null() {
             self.release(growth);
         } else {
