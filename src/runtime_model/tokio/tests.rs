@@ -140,7 +140,10 @@ struct Memory {
 
 impl Memory {
     fn write(&mut self, address: u64, value: u64, size: usize) {
-        for (at, byte) in (address..).zip(&value.to_le_bytes()[..size]) {
+        for (index, byte) in (0..).zip(&value.to_le_bytes()[..size]) {
+            let at = address
+                .checked_add(index)
+                .expect("within the address space");
             self.bytes.insert(at, *byte);
         }
     }
@@ -152,8 +155,12 @@ impl Memory {
 
 impl RuntimeStop for Memory {
     fn read(&self, address: VirtualAddress, bytes: &mut [u8]) -> bool {
-        for (at, byte) in (address.get()..).zip(bytes.iter_mut()) {
-            let Some(read) = self.bytes.get(&at) else {
+        for (index, byte) in (0..).zip(bytes.iter_mut()) {
+            let Some(read) = address
+                .get()
+                .checked_add(index)
+                .and_then(|at| self.bytes.get(&at))
+            else {
                 return false;
             };
             *byte = *read;
@@ -344,8 +351,9 @@ impl World {
     }
 
     /// The runtime's blocking pool, holding these tasks in a ring buffer
-    /// of twice their number, the first of them at its end.
-    fn pool(&mut self, flavor: Flavor, handle: u64, queued: &[(u64, bool)]) {
+    /// of twice their number, the first of them at its end; where the
+    /// pool's shared state is.
+    fn pool(&mut self, flavor: Flavor, handle: u64, queued: &[(u64, bool)]) -> u64 {
         let spawner = self.runtime_layout(flavor).spawner;
         let pool = self.model.layout.pool.as_ref().expect("the pool binds");
         let (data, lock, head, len, buffer, capacity, size, task) = (
@@ -376,6 +384,7 @@ impl World {
             let slot = (first + index) % room;
             self.memory.word(ring + slot * size + task, cell);
         }
+        inner
     }
 
     /// A thread whose `CONTEXT` names `runtime`, as a worker or not,
@@ -669,6 +678,46 @@ fn the_blocking_pool_lists_its_queue_in_order() {
     let (program, _) = world.tasks(1, true);
     let numbers = program.iter().map(|task| task.number).collect::<Vec<_>>();
     assert_eq!(numbers, [1, 21, 22]);
+}
+
+/// Addresses read from the program's memory may be anything: a context
+/// at the top of the address space, or a queue's head past its end, is
+/// reported, never followed past the end of the address space.
+#[test]
+fn addresses_at_the_end_of_memory_are_reported_not_followed() {
+    let mut world = World::new(&[]);
+    let runtime = world.runtime(Flavor::MultiThread, 4, &[vec![(1, 0)]]);
+    world.thread(1, Some(&runtime), true, None);
+    let inner = world.pool(runtime.flavor, runtime.handle, &[(20, false), (21, false)]);
+    let ThreadLocal::Offset(offset) = world.context().tls else {
+        panic!("an executable's thread-local storage is at an offset");
+    };
+    let (state, alive) = (world.context().state, world.context().alive);
+    for below in 0..512 {
+        let base = u64::MAX - below;
+        let tid = 1000 + below;
+        world.memory.threads.insert(
+            ThreadId::new(tid),
+            base.wrapping_add_signed(offset.wrapping_neg()),
+        );
+        world.memory.write(base.wrapping_add(state), alive, 1);
+        assert!(
+            !matches!(world.activity(tid), ThreadActivity::Task { .. }),
+            "{below}"
+        );
+        world.memory.threads.remove(&ThreadId::new(tid));
+    }
+    let head = world
+        .model
+        .layout
+        .pool
+        .as_ref()
+        .expect("the pool binds")
+        .head;
+    world.memory.word(inner + head, u64::MAX);
+    let (tasks, gaps) = world.tasks(64, false);
+    assert!(tasks.iter().all(|task| task.number < 20), "{tasks:#?}");
+    assert!(gaps.iter().any(|gap| gap.contains("queue")), "{gaps:?}");
 }
 
 /// A release other than the one verified is read wherever its layout

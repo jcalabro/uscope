@@ -138,9 +138,11 @@ impl Context {
         }
         let context = records::field(image, storage, &["val", "value"])?;
         let field = |path: &[&str]| {
-            records::field(image, context.ty, path).map(|found| Field {
-                offset: context.offset + found.offset,
-                ty: found.ty,
+            records::field(image, context.ty, path).and_then(|found| {
+                Ok(Field {
+                    offset: records::within(context.offset, found.offset)?,
+                    ty: found.ty,
+                })
             })
         };
         let handle = field(&["current", "handle", "value", "value"])?;
@@ -175,7 +177,7 @@ impl Context {
             alive,
             handle,
             handle_option,
-            handle_some: some.offset + inner.offset,
+            handle_some: records::within(some.offset, inner.offset)?,
             flavors,
             runtimes,
             scheduler: scheduler.offset,
@@ -183,7 +185,7 @@ impl Context {
             entered_state,
             task,
             task_option,
-            task_some: task_some.offset + id.offset,
+            task_some: records::within(task_some.offset, id.offset)?,
         })
     }
 }
@@ -205,7 +207,7 @@ impl Runtime {
         }
         let spawner = records::field(image, ty, &["blocking_spawner", "inner", "ptr", "pointer"])?;
         Ok(Self {
-            arc: payload.offset + arc.offset,
+            arc: records::within(payload.offset, arc.offset)?,
             data: data.offset,
             owned: Owned::bind(image, records::field(image, ty, &["shared", "owned"])?)?,
             spawner: spawner.offset,
@@ -299,7 +301,8 @@ impl Pool {
         }
         let queue = records::field(image, inner, &["shared", "__0", "data", "value", "queue"])?;
         let sized = |path: &[&str]| {
-            records::sized(image, queue.ty, path, 8).map(|offset| queue.offset + offset)
+            records::sized(image, queue.ty, path, 8)
+                .and_then(|offset| records::within(queue.offset, offset))
         };
         let task = records::named(image, "tokio::runtime::blocking::pool::Task")?;
         let spawner = records::named(image, "tokio::runtime::blocking::pool::Spawner")?;
