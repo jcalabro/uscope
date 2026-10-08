@@ -354,6 +354,14 @@ view rust tokio::net::tcp::split::WriteHalf {
     show value(*self.0)
 }
 
+view rust tokio::net::unix::split::ReadHalf {
+    show value(*self.0)
+}
+
+view rust tokio::net::unix::split::WriteHalf {
+    show value(*self.0)
+}
+
 view rust tokio::net::tcp::split_owned::OwnedReadHalf {
     show value(inner(inner.ptr)->data)
 }

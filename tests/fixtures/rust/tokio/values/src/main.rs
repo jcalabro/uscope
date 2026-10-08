@@ -290,7 +290,9 @@ fn main() {
         .expect("a port");
     let (mut unix, unix_peer) = UnixStream::pair().expect("a pair of sockets");
     let unix_fd = unix.as_raw_fd();
-    let (unix_left, _unix_right) = UnixStream::pair().expect("a pair of sockets");
+    let (unix_left, mut unix_right) = UnixStream::pair().expect("a pair of sockets");
+    let unix_right_fd = unix_right.as_raw_fd();
+    let (unix_borrowed_read, unix_borrowed_write) = unix_right.split();
     let unix_left_fd = unix_left.as_raw_fd();
     let (unix_read, unix_write) = unix_left.into_split();
     let mut exact = [0_u8; 8];
@@ -404,6 +406,8 @@ fn main() {
     view("unix_peer", format!("fd {}", unix_peer.as_raw_fd()));
     view("unix_read", format!("fd {unix_left_fd}"));
     view("unix_write", format!("fd {unix_left_fd}"));
+    view("unix_borrowed_read", format!("fd {unix_right_fd}"));
+    view("unix_borrowed_write", format!("fd {unix_right_fd}"));
     view("read_exact", format!("reading 8 more bytes from fd {unix_fd}"));
     view("unix_listener", format!("fd {}", unix_listener.as_raw_fd()));
     barrier();
@@ -440,6 +444,7 @@ fn main() {
     black_box((&current_sleep, &set, &mixed));
     black_box((&listener, &lines, &buffered, &read, &write_all, &udp));
     black_box((&unix_peer, &unix_read, &unix_write, &read_exact, &unix_listener));
+    black_box((&unix_borrowed_read, &unix_borrowed_write));
 
     drop(write_guard);
     drop(shared_guard);
