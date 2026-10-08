@@ -13,6 +13,7 @@ mod invariants;
 mod panics;
 mod resume_points;
 mod runtimes;
+mod scale;
 mod shapes;
 mod soak;
 mod std_async;

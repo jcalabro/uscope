@@ -932,7 +932,8 @@ proptest! {
 
     /// On a list of any shape, every task is listed once, whatever the page
     /// size; damage is reported with its shard, never listed past, and
-    /// leaves every other shard listed.
+    /// leaves every other shard listed; a wrong count is reported when one
+    /// page reads the whole list.
     #[test]
     fn pages_list_every_task_once_and_report_damage(
         shard_bits in 0_u32..4,
@@ -1018,6 +1019,11 @@ proptest! {
         let reported = gaps;
         match damaged {
             None => prop_assert!(reported.is_empty(), "{:?}", reported),
+            // Only a list one page reads whole is counted: counting one
+            // read over several pages would read it all again.
+            Some((Damage::WrongCount, ..)) if total > page => {
+                prop_assert!(reported.is_empty(), "{:?}", reported);
+            }
             Some((Damage::WrongCount, ..)) => {
                 prop_assert!(reported.iter().any(|gap| gap.contains("counts")), "{:?}", reported);
             }
