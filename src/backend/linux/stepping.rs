@@ -406,7 +406,8 @@ impl<P: LinuxTraceOps> Controller<P> {
                     start.returned_to.or(start.activation),
                     start
                         .code_instance
-                        .filter(|instance| start.physical_instance != Some(*instance)),
+                        .filter(|instance| start.physical_instance != Some(*instance))
+                        .zip(start.physical_instance),
                 )),
                 _ => None,
             })
@@ -425,8 +426,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             .code_role(VirtualAddress::new(registers.rip))
             .unwrap_or_default();
         let returned = frame.is_some_and(|frame| frame.has_returned(position));
-        let left_inlined =
-            inlined.is_some_and(|instance| !code_instance_is_active(&location, instance));
+        // Left for the code it is inlined into, not for a function it
+        // calls.
+        let left_inlined = inlined.is_some_and(|(instance, physical)| {
+            location.physical_instance == Some(physical)
+                && !code_instance_is_active(&location, instance)
+        });
         let enters = match role {
             CodeRole::Panic => true,
             CodeRole::Wrapper => returned || left_inlined,
@@ -1207,9 +1212,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                     // tail-called replacement, not the caller. Keep stepping
                     // when its return address could not be independently
                     // proven for accelerated traversal.
-                    if location.physical_instance != start.physical_instance
-                        && !activation.has_returned(self.stack_position(pid, &registers))
-                    {
+                    let returned = activation.has_returned(self.stack_position(pid, &registers));
+                    if location.physical_instance != start.physical_instance && !returned {
+                        return Ok(false);
+                    }
+                    if !returned && self.left_inlined_body_pending(pid, start, instruction) {
                         return Ok(false);
                     }
                     return Ok(source_step_destination(&self.module_image, &location, kind));
@@ -1612,6 +1619,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         instance_id: crate::CodeInstanceId,
         source: &SourceLocation,
     ) -> Result<BTreeSet<VirtualAddress>> {
+        self.statements_of(instance_id, Some(source))
+    }
+
+    /// The statements of the code instance `instance_id`, on any line but
+    /// `except`'s.
+    pub(super) fn statements_of(
+        &self,
+        instance_id: crate::CodeInstanceId,
+        except: Option<&SourceLocation>,
+    ) -> Result<BTreeSet<VirtualAddress>> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let Some(instance) = self.module_image.code_instance(instance_id) else {
             return Ok(BTreeSet::new());
@@ -1622,9 +1639,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 continue;
             }
             let location = self.module_image.locate(line.range.start);
-            if source_for_code_instance(&self.module_image, &location, instance_id)
-                .is_some_and(|candidate| source_line_changed(Some(source), Some(&candidate)))
-            {
+            if source_for_code_instance(&self.module_image, &location, instance_id).is_some_and(
+                |candidate| {
+                    except.is_none_or(|source| source_line_changed(Some(source), Some(&candidate)))
+                },
+            ) {
                 statements.insert(inferior.loaded_module.virtual_address(line.range.start)?);
             }
         }

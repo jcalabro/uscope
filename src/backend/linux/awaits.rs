@@ -10,6 +10,15 @@
 //! next, whichever thread polls it; another future of the same function
 //! that resumes there is not the step's.
 //!
+//! An optimized build may inline one async function's body into another's,
+//! where it has no resume points of its own and may not name its future.
+//! The step then follows the future of the function it is inlined into,
+//! whose poll runs both, and once that poll returns `Pending`, waits for
+//! the future to come back to the inlined body's statements, or to those
+//! on another line of the code it is inlined into. A future names its
+//! task, so where even that future's address is unavailable, the task
+//! does.
+//!
 //! A step may also begin in a task no thread runs, at one of the async
 //! functions it awaits in: it begins waiting for that function's future,
 //! as if a poll of it had just returned `Pending`.
@@ -21,6 +30,8 @@
 //! and the step ends there; dropped by the program's code, the step goes on
 //! in that code to its next line.
 
+use std::collections::BTreeSet;
+
 use nix::unistd::Pid;
 
 use crate::protocol::{
@@ -30,8 +41,8 @@ use crate::protocol::{
 use crate::runtime_model::futures::{self, AsyncFrameKind};
 use crate::unwind::DEFAULT_MAX_FRAMES;
 use crate::{
-    CodeInstanceId, CoroutineStateKind, Error, ExecutionContext, Result, SourceLocation,
-    StackFrameId, TypeReference, VirtualAddress,
+    CodeInstanceId, CodeInstanceKind, CoroutineStateKind, Error, ExecutionContext, FunctionId,
+    InlineFrameLookup, Result, SourceLocation, StackFrameId, TypeReference, VirtualAddress,
 };
 
 use super::frames::{FrameScope, ResolvedFrame, StackRoot};
@@ -43,22 +54,42 @@ use crate::PresentedFrame;
 /// polls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AwaitStep {
+    /// The future whose poll runs the step's body: the body's own, or the
+    /// future of the function the body is inlined into.
     future: RunningFuture,
+    /// For a body inlined into another's, where the step goes on.
+    inlined: Option<Inlined>,
     /// The line the step began on, which it goes on past once the future
     /// resumes.
     source: Option<SourceLocation>,
     /// Where the future resumes, once a poll of it returned `Pending` and
     /// the step waits for the next.
-    waiting: Option<VirtualAddress>,
+    waiting: BTreeSet<VirtualAddress>,
     /// Where the code that drops the future begins, which the step watches
     /// while it waits, when one function drops every future of its type.
     drop_glue: Option<VirtualAddress>,
 }
 
+/// An async function's body inlined into another's, which a step runs in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Inlined {
+    /// The future whose poll runs the body.
+    poll: RunningFuture,
+    /// The body's function, which the future must await once only when the
+    /// body names no future of its own.
+    function: FunctionId,
+    /// The body's code.
+    instances: BTreeSet<CodeInstanceId>,
+    /// Where the step goes on once its future is polled again: the body's
+    /// statements, and those on another line of the code the body is
+    /// inlined into, but none that only resuming runs.
+    statements: BTreeSet<VirtualAddress>,
+}
+
 impl AwaitStep {
     /// Whether the step waits for its future to be polled again.
-    pub(super) const fn waits(&self) -> bool {
-        self.waiting.is_some()
+    pub(super) fn waits(&self) -> bool {
+        !self.waiting.is_empty()
     }
 }
 
@@ -81,12 +112,155 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !matches!(kind, StepKind::OverSource | StepKind::Out) {
             return None;
         }
+        let inline = start
+            .code_instance
+            .and_then(|instance| self.module_image.code_instance(instance))
+            .is_some_and(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }));
+        let (future, inlined) = if inline {
+            self.inlined_body(pid, start)?
+        } else {
+            (self.running_future(pid, start.code_instance)?, None)
+        };
         Some(AwaitStep {
-            future: self.running_future(pid, start.code_instance)?,
+            future,
+            inlined,
             source: start.source.clone(),
-            waiting: None,
+            waiting: BTreeSet::new(),
             drop_glue: None,
         })
+    }
+
+    /// For a step in an async function's body inlined into another's, the
+    /// body's future, or where it names none, that of the function it is
+    /// inlined into, and where the step goes on once the future is polled
+    /// again.
+    fn inlined_body(
+        &self,
+        pid: Pid,
+        start: &StepStart,
+    ) -> Option<(RunningFuture, Option<Inlined>)> {
+        let instance = start.code_instance?;
+        let info = self.module_image.code_instance(instance)?;
+        let function = info.function;
+        if !matches!(info.kind, CodeInstanceKind::Inline { .. })
+            || self.module_image.function(function)?.coroutine.is_none()
+        {
+            return None;
+        }
+        let poll = self.running_future(pid, None)?;
+        let future = self.running_future(pid, Some(instance)).unwrap_or(poll);
+        let registers = self.ptrace.registers(pid).ok()?;
+        let location = self.image_location(VirtualAddress::new(registers.rip))?;
+        let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
+            return None;
+        };
+        let depth = chain.instances.iter().position(|id| *id == instance)?;
+        // The body's own statements, and those on another line of each
+        // function it is inlined into, out to the one that runs.
+        let mut statements = self.body_statements(instance).ok()?;
+        for outer in chain.instances[..depth]
+            .iter()
+            .copied()
+            .chain(location.physical_instance)
+        {
+            let line =
+                super::frames::source_for_code_instance(&self.module_image, &location, outer)?;
+            statements.extend(self.other_lines(outer, &line).ok()?);
+        }
+        Some((
+            future,
+            Some(Inlined {
+                poll,
+                function,
+                instances: BTreeSet::from([instance]),
+                statements: self.without_resume_code(statements),
+            }),
+        ))
+    }
+
+    /// Whether a step in an inlined async body that has left the body for
+    /// the code at `address`, which is not where the step goes on, must
+    /// go on: the code the body is inlined into awaits it there, which the
+    /// step follows while the body may be pending. A body that names its
+    /// future says whether it is; one that does not may be.
+    pub(super) fn left_inlined_body_pending(
+        &self,
+        pid: Pid,
+        start: &StepStart,
+        address: VirtualAddress,
+    ) -> bool {
+        let Some((awaiting, inlined)) = start
+            .awaiting
+            .as_ref()
+            .and_then(|awaiting| Some((awaiting, awaiting.inlined.as_ref()?)))
+        else {
+            return false;
+        };
+        !inlined.statements.contains(&address)
+            && (awaiting.future == inlined.poll
+                || matches!(
+                    self.future_state(pid, awaiting.future),
+                    Some((_, CoroutineStateKind::Suspended { .. }))
+                ))
+    }
+
+    /// The statements of an async function's body inlined into another's,
+    /// less those on its header's line: entering the body there dispatches
+    /// on its state, which resuming it does too.
+    fn body_statements(&self, instance: CodeInstanceId) -> Result<BTreeSet<VirtualAddress>> {
+        let header = self
+            .module_image
+            .code_instance(instance)
+            .and_then(|instance| self.module_image.function(instance.function))
+            .and_then(|function| function.declaration.clone());
+        self.statements_of(instance, header.as_ref())
+    }
+
+    /// Statements less those that only resuming a coroutine runs, such as
+    /// its dispatch on its state.
+    fn without_resume_code(
+        &self,
+        statements: BTreeSet<VirtualAddress>,
+    ) -> BTreeSet<VirtualAddress> {
+        let Some(inferior) = self.inferior.as_ref() else {
+            return statements;
+        };
+        statements
+            .into_iter()
+            .filter(|address| {
+                inferior
+                    .loaded_module
+                    .image_address(*address)
+                    .is_ok_and(|address| !self.module_image.is_resume_code(address))
+            })
+            .collect()
+    }
+
+    /// Whether the awaits of `future` hold more than one future of
+    /// `function`, which a step in its inlined body cannot tell apart.
+    fn awaits_twice(&self, pid: Pid, future: RunningFuture, function: FunctionId) -> bool {
+        let Some(inferior) = self.inferior.as_ref() else {
+            return false;
+        };
+        let Some(module) = self.module_of(future.ty) else {
+            return false;
+        };
+        let chain = self.with_module_stop(inferior, &module.loaded, pid, |stop| {
+            futures::walk(module.image.as_ref(), stop, future.object, future.ty)
+        });
+        chain
+            .frames
+            .iter()
+            .filter(|frame| matches!(frame.kind, AsyncFrameKind::Coroutine { .. }))
+            .filter(|frame| {
+                module
+                    .image
+                    .coroutine_functions(frame.ty.id)
+                    .iter()
+                    .any(|candidate| candidate.id == function)
+            })
+            .count()
+            > 1
     }
 
     /// Begins a step of `kind` in a task no thread runs, from the async
@@ -118,44 +292,24 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         let stack = self.async_stack(inferior, &root)?.ok_or_else(parked)?;
         let level = usize::try_from(frame.get()).expect("u32 fits usize");
-        let (await_frame, future) = stack
-            .frames
-            .iter()
-            .zip(&stack.futures)
-            .skip(level)
-            .find(|(_, future)| matches!(future.kind, AsyncFrameKind::Coroutine { .. }))
+        let selected = (level..stack.futures.len())
+            .find(|&index| matches!(stack.futures[index].kind, AsyncFrameKind::Coroutine { .. }))
             .ok_or_else(|| {
                 Error::FrameStepUnsupported("the task's frames hold no async function".into())
             })?;
-        if future.ty.image != inferior.loaded_module.image {
+        if stack.futures[selected].ty.image != inferior.loaded_module.image {
             return Err(Error::FrameStepUnsupported(
                 "the async function is in a library, whose awaits steps do not follow".into(),
             ));
         }
-        // The type its awaiter holds it as is a description of its own; the
-        // future is named by the type its body names, as the body's polls
-        // find it.
-        let ty = self
-            .module_image
-            .coroutine_functions(future.ty.id)
-            .first()
-            .and_then(|function| function.coroutine)
-            .map_or(future.ty, |id| TypeReference {
-                image: future.ty.image,
-                id,
-            });
-        let future = RunningFuture {
-            object: future.object,
-            ty,
+        let own = self.named_by_body(&stack.futures[selected]);
+        let (future, inlined, waiting) = match self.resume_point(reader, own) {
+            Some(resumes) => (own, None, BTreeSet::from([resumes])),
+            None => self.suspended_inline_body(&stack, selected)?,
         };
-        let resumes = self.resume_point(reader, future).ok_or_else(|| {
-            Error::FrameStepUnsupported(
-                "the async function waits at no await whose resumption is known".into(),
-            )
-        })?;
         let drop_glue = self.drop_glue(future.ty);
         record!(
-            "a step of task {task} waits for the future at {} at {resumes}",
+            "a step of task {task} waits for the future at {} at {waiting:?}",
             future.object
         );
         let requested = kind;
@@ -164,11 +318,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             kind => kind,
         };
         let start = StepStart {
-            plan_addresses: std::iter::once(resumes).chain(drop_glue).collect(),
+            plan_addresses: waiting.iter().copied().chain(drop_glue).collect(),
             awaiting: Some(AwaitStep {
                 future,
-                source: await_frame.source.clone(),
-                waiting: Some(resumes),
+                inlined,
+                source: stack.frames[selected].source.clone(),
+                waiting,
                 drop_glue,
             }),
             ..StepStart::default()
@@ -189,6 +344,107 @@ impl<P: LinuxTraceOps> Controller<P> {
             },
             exception,
         )
+    }
+
+    /// A suspended future as its body names it: the type its awaiter holds
+    /// it as is a description of its own, while the body's polls find it
+    /// as the type the body names.
+    fn named_by_body(&self, future: &futures::AsyncFrame) -> RunningFuture {
+        let ty = self
+            .module_image
+            .coroutine_functions(future.ty.id)
+            .first()
+            .and_then(|function| function.coroutine)
+            .map_or(future.ty, |id| TypeReference {
+                image: future.ty.image,
+                id,
+            });
+        RunningFuture {
+            object: future.object,
+            ty,
+        }
+    }
+
+    /// For a step of a suspended task from frame `selected` of its awaits,
+    /// whose async function's body is inlined into another's, the future
+    /// whose poll runs it, that of the function it is inlined into, and
+    /// where the step goes on once that future is polled again: the body's
+    /// statements, and those on another line of each function it is
+    /// inlined into.
+    fn suspended_inline_body(
+        &self,
+        stack: &super::async_frames::AsyncStack,
+        selected: usize,
+    ) -> Result<(RunningFuture, Option<Inlined>, BTreeSet<VirtualAddress>)> {
+        let unknown = || {
+            Error::FrameStepUnsupported(
+                "the async function waits at no await whose resumption is known".into(),
+            )
+        };
+        let function_of = |index: usize| {
+            self.module_image
+                .coroutine_functions(stack.futures[index].ty.id)
+                .first()
+                .map(|function| function.id)
+        };
+        let out_of_line = |function: FunctionId| {
+            self.module_image
+                .instances_for_function(function)
+                .find(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+        };
+        // The innermost future out from the selected one whose function
+        // runs out of line, which the inlined bodies run in.
+        let (running, physical) = (selected + 1..stack.futures.len())
+            .filter(|&index| matches!(stack.futures[index].kind, AsyncFrameKind::Coroutine { .. }))
+            .find_map(|index| Some((index, out_of_line(function_of(index)?)?)))
+            .ok_or_else(unknown)?;
+        let inlined_in = |function: FunctionId| {
+            self.module_image
+                .instances_for_function(function)
+                .filter(|instance| {
+                    matches!(instance.kind, CodeInstanceKind::Inline { .. })
+                        && instance
+                            .ranges
+                            .first()
+                            .is_some_and(|range| physical.contains(range.start))
+                })
+                .map(|instance| instance.id)
+                .collect::<BTreeSet<_>>()
+        };
+        let function = function_of(selected).ok_or_else(unknown)?;
+        let instances = inlined_in(function);
+        let mut statements = BTreeSet::new();
+        for instance in &instances {
+            statements.extend(self.body_statements(*instance)?);
+        }
+        for index in selected + 1..=running {
+            let (Some(outer), Some(line)) = (function_of(index), &stack.frames[index].source)
+            else {
+                continue;
+            };
+            let outers = if index == running {
+                BTreeSet::from([physical.id])
+            } else {
+                inlined_in(outer)
+            };
+            for instance in outers {
+                statements.extend(self.other_lines(instance, line)?);
+            }
+        }
+        let statements = self.without_resume_code(statements);
+        if instances.is_empty() || statements.is_empty() {
+            return Err(unknown());
+        }
+        Ok((
+            self.named_by_body(&stack.futures[selected]),
+            Some(Inlined {
+                poll: self.named_by_body(&stack.futures[running]),
+                function,
+                instances,
+                statements: statements.clone(),
+            }),
+            statements,
+        ))
     }
 
     /// The future whose body a stopped thread's innermost activation runs
@@ -293,25 +549,41 @@ impl<P: LinuxTraceOps> Controller<P> {
         pid: Pid,
         kind: StepKind,
     ) -> Result<Option<Followed>> {
-        let Some((execution, task, future, activation)) = self
+        let Some((execution, task, awaiting, activation)) = self
             .inferior
             .as_ref()
             .and_then(|inferior| inferior.active.as_ref())
             .and_then(|active| match &active.kind {
                 ActiveKind::Step { owner, start, .. } if self.runs_step(*owner, pid) => {
                     let awaiting = start.awaiting.as_ref().filter(|step| !step.waits())?;
-                    Some((active.id, owner.task, awaiting.future, start.activation?))
+                    Some((active.id, owner.task, awaiting.clone(), start.activation?))
                 }
                 _ => None,
             })
         else {
             return Ok(None);
         };
+        let future = awaiting.future;
         let registers = self.ptrace.registers(pid)?;
         if !activation.has_returned(self.stack_position(pid, &registers)) {
             return Ok(None);
         }
-        let Some(resumes) = self.resume_point(pid, future) else {
+        let waiting = match &awaiting.inlined {
+            None => self.resume_point(pid, future).into_iter().collect(),
+            Some(inlined) => match self.future_state(pid, future) {
+                Some((_, CoroutineStateKind::Suspended { .. })) => {
+                    if future == inlined.poll && self.awaits_twice(pid, future, inlined.function) {
+                        return Ok(Some(Followed::Ended(StopReason::StepIncomplete {
+                            kind,
+                            description: TWICE.into(),
+                        })));
+                    }
+                    inlined.statements.clone()
+                }
+                _ => BTreeSet::new(),
+            },
+        };
+        if waiting.is_empty() {
             let ended = task.filter(|_| {
                 self.future_state(pid, future)
                     .is_some_and(|(_, state)| state == CoroutineStateKind::Returned)
@@ -325,20 +597,20 @@ impl<P: LinuxTraceOps> Controller<P> {
                     ending: TaskEnding::Finished,
                 })
             }));
-        };
+        }
         record!(
-            "the poll of the future at {} returned pending; the step waits at {resumes}",
+            "the poll of the future at {} returned pending; the step waits at {waiting:?}",
             future.object
         );
         let drop_glue = self.drop_glue(future.ty);
-        let plan = std::iter::once(resumes).chain(drop_glue).collect();
+        let plan = waiting.iter().copied().chain(drop_glue).collect();
         self.cleanup_plan_breakpoints(execution)?;
         self.install_additional_plan_breakpoints(execution, &plan)?;
         let start = self
             .active_step_mut()
             .expect("the step remained active while its future was pending");
         let mut awaiting = start.awaiting.take().expect("the step follows a future");
-        awaiting.waiting = Some(resumes);
+        awaiting.waiting = waiting;
         awaiting.drop_glue = drop_glue;
         *start = StepStart {
             plan_addresses: plan,
@@ -588,20 +860,22 @@ impl<P: LinuxTraceOps> Controller<P> {
         pid: Pid,
         address: VirtualAddress,
     ) -> Result<bool> {
-        let Some((kind, awaiting)) = self
+        let Some((kind, owner, awaiting)) = self
             .inferior
             .as_ref()
             .and_then(|inferior| inferior.active.as_ref())
             .and_then(|active| match &active.kind {
-                ActiveKind::Step { kind, start, .. } => start
+                ActiveKind::Step {
+                    kind, owner, start, ..
+                } => start
                     .awaiting
                     .clone()
                     .filter(|awaiting| {
                         awaiting.waits()
-                            && (awaiting.waiting == Some(address)
+                            && (awaiting.waiting.contains(&address)
                                 || awaiting.drop_glue == Some(address))
                     })
-                    .map(|awaiting| (*kind, awaiting)),
+                    .map(|awaiting| (*kind, *owner, awaiting)),
                 _ => None,
             })
         else {
@@ -618,7 +892,19 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             return Ok(true);
         }
-        if self.running_future(pid, None) != Some(awaiting.future) {
+        // An inlined body's code may hold its future nowhere; the future
+        // names its task, which then names the future.
+        let polled = awaiting
+            .inlined
+            .as_ref()
+            .map_or(awaiting.future, |inlined| inlined.poll);
+        let ours = match self.running_future(pid, None) {
+            Some(running) => running == polled,
+            None => {
+                awaiting.inlined.is_some() && owner.task.is_some() && self.runs_step(owner, pid)
+            }
+        };
+        if !ours {
             if self.barrier_active() {
                 self.finish_barrier_if_ready()?;
             } else {
@@ -631,15 +917,29 @@ impl<P: LinuxTraceOps> Controller<P> {
             awaiting.future.object
         );
         self.follow_step(pid);
-        let mut resumed =
-            self.innermost_step_start(pid, kind, || self.presentation_for_thread(pid, None))?;
+        let presentation = match &awaiting.inlined {
+            None => self.presentation_for_thread(pid, None)?,
+            Some(inlined) => match self.reentered(address, inlined, awaiting.source.as_ref()) {
+                Reentry::Body(presentation) if kind == StepKind::Out || !presentation.1 => {
+                    presentation.0
+                }
+                // A statement on another line than the step's of the body
+                // or of the code it is inlined into is where the step
+                // ends.
+                Reentry::Body(_) | Reentry::Outside => {
+                    self.begin_visible_stop(pid, StopReason::Step { kind })?;
+                    return Ok(true);
+                }
+            },
+        };
+        let mut resumed = self.innermost_step_start(pid, kind, || Ok(presentation))?;
         // The step goes on past the line it began on, which the await is
         // on, or past the frame it began in.
         if kind == StepKind::OverSource {
             resumed.source.clone_from(&awaiting.source);
         }
         resumed.awaiting = Some(AwaitStep {
-            waiting: None,
+            waiting: BTreeSet::new(),
             ..awaiting
         });
         let execution = self.active_execution()?;
@@ -659,6 +959,57 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(true)
     }
 }
+
+/// Where a future whose step is in an inlined body comes back to.
+enum Reentry {
+    /// The body, presented as the step's frame, and whether on another line
+    /// than the step's.
+    Body((crate::FramePresentation, bool)),
+    /// The code the body is inlined into, having returned meanwhile.
+    Outside,
+}
+
+impl<P: LinuxTraceOps> Controller<P> {
+    /// Where the future of a step in the inlined body `inlined` has come
+    /// back to at `address`, which began on line `source`.
+    fn reentered(
+        &self,
+        address: VirtualAddress,
+        inlined: &Inlined,
+        source: Option<&SourceLocation>,
+    ) -> Reentry {
+        let Some(location) = self.image_location(address) else {
+            return Reentry::Outside;
+        };
+        let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
+            return Reentry::Outside;
+        };
+        let Some(depth) = chain
+            .instances
+            .iter()
+            .position(|instance| inlined.instances.contains(instance))
+        else {
+            return Reentry::Outside;
+        };
+        let instance = chain.instances[depth];
+        let moved =
+            super::frames::source_for_code_instance(&self.module_image, &location, instance)
+                .is_some_and(|line| super::frames::source_line_changed(source, Some(&line)));
+        Reentry::Body((
+            crate::FramePresentation {
+                instruction: address,
+                frame: PresentedFrame::Inline(instance),
+                hidden_inline_frames: u32::try_from(chain.instances.len() - depth - 1)
+                    .unwrap_or(u32::MAX),
+            },
+            moved,
+        ))
+    }
+}
+
+/// Why a step in an inlined body cannot follow its future.
+const TWICE: &str = "the async function the step is in is awaited twice in its task, and \
+                     inlined, so the step cannot tell which is its own";
 
 /// Whether a function is one rustc makes to drop a value of some type.
 fn is_drop_glue(name: &str) -> bool {
