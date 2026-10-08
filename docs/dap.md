@@ -80,7 +80,8 @@ A launch configuration:
   "followForks": false,          // debug forked processes in sessions of their own
   "threads": "tasks",            // a runtime's tasks, such as Go's goroutines, as threads; or "system"
   "runtimeTasks": false,         // list the tasks a runtime runs for its own work too
-  "maxTasks": 1000               // the most tasks listed
+  "maxTasks": 1000,              // the most tasks listed
+  "stepIntoRuntime": false       // let steps stop in a language runtime's own code, such as tokio's
 }
 ```
 

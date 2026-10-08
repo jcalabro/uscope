@@ -76,6 +76,8 @@ pub struct Configuration {
     pub threads: ThreadListing,
     /// Where modules' separate debug files are found.
     pub debug_files: DebugFileOptions,
+    /// Whether steps stop in a language runtime's own code.
+    pub step_into_runtime: bool,
 }
 
 /// What the client's threads are.
@@ -112,7 +114,7 @@ enum Threads {
 /// the session presents and handles a program, which a fork does not
 /// change, and the adapter's `type`, by which a client such as nvim-dap
 /// finds the adapter to start for the child.
-const INHERITED: [&str; 12] = [
+const INHERITED: [&str; 13] = [
     "type",
     "debugDirectories",
     "debuginfod",
@@ -124,6 +126,7 @@ const INHERITED: [&str; 12] = [
     "threads",
     "runtimeTasks",
     "maxTasks",
+    "stepIntoRuntime",
     "cwd",
 ];
 
@@ -166,6 +169,8 @@ struct Arguments {
     #[serde(default)]
     runtime_tasks: bool,
     max_tasks: Option<u32>,
+    #[serde(default)]
+    step_into_runtime: bool,
 }
 
 /// A process another session held for this one, which only that session
@@ -346,6 +351,7 @@ fn common(
         view_files: parsed.view_files,
         working_directory: parsed.cwd,
         follow_forks: parsed.follow_forks,
+        step_into_runtime: parsed.step_into_runtime,
         inherited,
         source_paths,
         syntax: match parsed.disassembly_syntax {
@@ -422,6 +428,7 @@ mod tests {
             "signals": {"SIGUSR1": "nostop", "alrm": ["stop", "nopass"]},
             "console": "internalConsole",
             "threads": "system", "runtimeTasks": true, "maxTasks": 5,
+            "stepIntoRuntime": true,
         }))
         .expect("valid configuration");
         let Start::Launch(launch) = &configuration.start else {
@@ -451,6 +458,7 @@ mod tests {
                 max_tasks: 5,
             }
         );
+        assert!(configuration.step_into_runtime);
     }
 
     #[test]

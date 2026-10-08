@@ -162,3 +162,41 @@ fn a_blocked_threads_stack_holds_the_future_it_drives() {
     assert_eq!(local["result"], "7", "{local}");
     dap.finish();
 }
+
+/// `"stepIntoRuntime": true` lets `stepIn` stop in tokio's own code, as in
+/// its `recv` on stepping into `rx.recv().await`, whose frame the client
+/// shows subdued.
+#[test]
+fn step_into_runtime_stops_in_tokios_code() {
+    let source = "tests/fixtures/rust/tokio/shapes/src/main.rs";
+    let mut dap = Dap::start("tokio step into runtime");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("tokio-shapes-o0"),
+        json!({"stepIntoRuntime": true}),
+        &Configuration {
+            sources: vec![(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(source),
+                vec![crate::support::source_line(source, "// INTO: recv")],
+            )],
+            ..Configuration::default()
+        },
+    );
+    let stop = dap.stopped(started.mark);
+    assert_eq!(stop.reason, "breakpoint", "{stop:?}");
+    let sent = dap.send("stepIn", json!({"threadId": stop.thread}));
+    dap.success(sent);
+    let stepped = dap.stopped(sent.mark);
+    assert_eq!(stepped.reason, "step", "{stepped:?}");
+    let trace = dap.request("stackTrace", json!({"threadId": stepped.thread}));
+    let top = &trace["stackFrames"][0];
+    assert_eq!(top["name"], "recv", "{trace}");
+    assert_eq!(top["presentationHint"], "subtle", "{trace}");
+    assert!(
+        top["source"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("sync/mpsc/bounded.rs")),
+        "{trace}"
+    );
+    dap.finish();
+}
