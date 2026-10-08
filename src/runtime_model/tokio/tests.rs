@@ -569,7 +569,8 @@ fn each_state_is_read_as_tokio_defines_it() {
 /// A worker runs the task it polls only when the task is its runtime's,
 /// and is idle as it polls its own launch; a pool thread runs its
 /// closure's task, and waits for one idle. A thread that never made its
-/// context, names no runtime, or blocks on one is the program's own.
+/// context, names no runtime, or blocks on one is the program's own, as is
+/// a worker still starting.
 #[test]
 fn a_thread_runs_the_task_its_context_names() {
     let mut world = World::new(&[]);
@@ -586,6 +587,8 @@ fn a_thread_runs_the_task_its_context_names() {
     world.thread(5, None, false, None);
     world.thread(6, Some(&runtime), true, Some(11));
     world.entered_thread(8, Some(&runtime), false, true, None);
+    // A worker starting, its launch entered before its scheduler is set.
+    world.entered_thread(11, Some(&runtime), false, true, Some(2));
     world.thread(9, Some(&current), true, None);
     world.thread(10, Some(&current), true, Some(30));
     // A thread that never touched its context.
@@ -613,6 +616,7 @@ fn a_thread_runs_the_task_its_context_names() {
     assert_eq!(world.activity(6), task(11));
     assert_eq!(world.activity(7), ThreadActivity::Outside);
     assert_eq!(world.activity(8), ThreadActivity::Outside);
+    assert_eq!(world.activity(11), ThreadActivity::Outside);
     assert_eq!(world.activity(9), ThreadActivity::Outside);
     assert_eq!(world.activity(10), task(30));
 

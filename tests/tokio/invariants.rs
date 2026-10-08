@@ -155,8 +155,8 @@ fn check_stop(stop: &Stop) -> Result<(), String> {
                 if listed.and_then(|listed| listed.thread) != Some(*thread) {
                     return Err(format!(
                         "thread {thread} runs task {}, which the list does not put on it: \
-                         {listed:#?}",
-                        task.number
+                         {listed:#?}; gaps {:?}; {trace:#?}",
+                        task.number, stop.gaps
                     ));
                 }
                 if !trace
