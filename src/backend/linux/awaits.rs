@@ -716,7 +716,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         awaiting.inlined_drops = inlined_drops;
         awaiting.task_entries = task_entries;
         awaiting.task_return = task_return;
-        let plan = awaiting.watched().collect::<BTreeSet<_>>();
+        // An advance's targets end it wherever its task reaches them.
+        let targets = std::mem::take(&mut start.targets);
+        let plan = awaiting
+            .watched()
+            .chain(targets.iter().copied())
+            .collect::<BTreeSet<_>>();
         self.cleanup_plan_breakpoints(execution)?;
         self.install_additional_plan_breakpoints(execution, &plan)?;
         let start = self
@@ -725,6 +730,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         *start = StepStart {
             plan_addresses: plan,
             awaiting: Some(awaiting),
+            targets,
             ..StepStart::default()
         };
         Ok(Some(Followed::Waits))
@@ -842,6 +848,12 @@ impl<P: LinuxTraceOps> Controller<P> {
                 stack_pointer: registers.rsp + 8,
             })?;
         }
+        self.pass_by(pid, address)
+    }
+
+    /// Lets thread `pid` go on past the site at `address`, which it
+    /// reached for no step of its own.
+    fn pass_by(&mut self, pid: Pid, address: VirtualAddress) -> Result<()> {
         if self.barrier_active() {
             self.finish_barrier_if_ready()
         } else {
@@ -1181,20 +1193,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             };
             if ours {
                 self.future_dropped(pid, address, kind, awaiting.future)?;
-            } else if self.barrier_active() {
-                self.finish_barrier_if_ready()?;
             } else {
-                self.repair_when_alone(pid, address)?;
+                self.pass_by(pid, address)?;
             }
             return Ok(true);
         }
         let ours = self.resumes_step(pid, address, owner, &awaiting);
         if !ours {
-            if self.barrier_active() {
-                self.finish_barrier_if_ready()?;
-            } else {
-                self.repair_when_alone(pid, address)?;
-            }
+            self.pass_by(pid, address)?;
             return Ok(true);
         }
         record!(
@@ -1202,6 +1208,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             awaiting.future.object
         );
         self.follow_step(pid);
+        if self.is_advance_target(address) {
+            self.reach_advance_target(pid, address)?;
+            return Ok(true);
+        }
         let presentation = match &awaiting.inlined {
             None => self.presentation_for_thread(pid, None)?,
             Some(inlined) => match self.reentered(address, inlined, awaiting.source.as_ref()) {
@@ -1227,13 +1237,19 @@ impl<P: LinuxTraceOps> Controller<P> {
             waiting: BTreeSet::new(),
             ..awaiting
         });
+        resumed.targets = self
+            .active_step_mut()
+            .map(|start| std::mem::take(&mut start.targets))
+            .unwrap_or_default();
         let execution = self.active_execution()?;
         self.cleanup_plan_breakpoints(execution)?;
         self.install_additional_plan_breakpoints(
             execution,
             &resumed
                 .plan_addresses
-                .union(&resumed.panic_guards)
+                .iter()
+                .chain(&resumed.panic_guards)
+                .chain(&resumed.targets)
                 .copied()
                 .collect(),
         )?;

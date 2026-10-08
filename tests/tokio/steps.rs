@@ -407,3 +407,52 @@ async fn another_tasks_breakpoint_ends_a_waiting_step() {
         scenario.shutdown().await;
     }
 }
+
+/// `stepi` and `nexti` in an async function's body execute one instruction
+/// there, as in any function, and `advance` to a line past the awaits of
+/// a loop runs across each poll that returns `Pending` to that line, in
+/// the same task, as `finish` does to the function's return.
+#[tokio::test]
+async fn instruction_steps_and_advance_in_an_async_function() {
+    for fixture in BUILDS {
+        for mode in MODES {
+            let context = format!("{fixture} {mode:?}");
+            let mut scenario = stopped_once(fixture, mode, "// STEP: round").await;
+            let task = stopped_task(&mut scenario).await;
+            for kind in [StepKind::Instruction, StepKind::OverInstruction] {
+                assert_eq!(
+                    scenario.step_to_stop(kind).await,
+                    StopReason::Step { kind },
+                    "{context}"
+                );
+                assert_eq!(place(&scenario).await.0, "rounds", "{context} {kind:?}");
+                assert_eq!(stopped_task(&mut scenario).await, task, "{context}");
+            }
+            let after = line(SOURCE, "// STEP: rounds-after");
+            assert_eq!(
+                scenario
+                    .advance_to_stop(BreakpointSpec::Source {
+                        path: SOURCE.into(),
+                        line: LineNumber::new(after).expect("one-based"),
+                    })
+                    .await,
+                StopReason::Step {
+                    kind: StepKind::Advance
+                },
+                "{context}"
+            );
+            assert_eq!(
+                place(&scenario).await,
+                ("rounds".to_owned(), after),
+                "{context}"
+            );
+            assert_eq!(stopped_task(&mut scenario).await, task, "{context}");
+            // Both rounds ran, each after a `Pending` poll; optimized, the
+            // sum is kept nowhere the debugger can name.
+            if !optimized(fixture) {
+                assert_eq!(integer(&scenario, "total").await, Some(3), "{context}");
+            }
+            scenario.shutdown().await;
+        }
+    }
+}
