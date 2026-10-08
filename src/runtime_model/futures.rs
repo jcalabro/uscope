@@ -139,7 +139,12 @@ fn follow(
             let RecordMemberLayout::ByteOffset(offset) = awaitee.layout else {
                 return ChainEnd::Broken("an awaited future is not at a byte offset".into());
             };
-            (object, ty) = (object.wrapping_add(offset), awaitee.type_ref);
+            let Some(inner) = object.checked_add(offset) else {
+                return ChainEnd::Broken(
+                    format!("the future at {object:#x} awaits no address").into(),
+                );
+            };
+            (object, ty) = (inner, awaitee.type_ref);
             continue;
         }
         match kind {

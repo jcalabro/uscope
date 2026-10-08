@@ -446,13 +446,15 @@ fn saved<'a>(
             let RecordMemberLayout::ByteOffset(offset) = member.layout else {
                 return None;
             };
+            // A member past the end of memory is no variable to read.
+            let address = VirtualAddress::new(object.get().checked_add(offset)?);
             Some(SavedVariable {
                 name: member.name.as_ref()?,
                 ty: TypeReference {
                     image: ty.image,
                     id: member.type_ref.id,
                 },
-                address: VirtualAddress::new(object.get().wrapping_add(offset)),
+                address,
                 // An async function's captures are its arguments.
                 kind: if capture && coroutine.kind == crate::CoroutineKind::AsyncFunction {
                     VariableKind::Parameter
