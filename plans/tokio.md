@@ -1094,6 +1094,52 @@ fail (see Testing).
    - `step task`.
    - `docs/tokio.md`, and the README's Rust row.
    - Remove the TODO line.
+   - *As built:*
+     - A `LocalSet` is found where a thread's `CURRENT` names it while it
+       runs, and where a thread's driven future holds one: a `LocalSet`, a
+       `RunUntil`'s `local_set`, or a reference to either through a box or
+       pin, as `may_hold_set` reads from the type alone. An optimized
+       build can drop that future's description; the list then names the
+       thread that drives a future that may run a set it cannot list,
+       rather than leave the set out silently. The walker does not go
+       through a `RunUntil` to the future it runs.
+     - Pages resume from a task's node, not an index, so a page reads a
+       bounded number of bytes a task wherever it begins: `scale` lists a
+       hundred thousand tasks in pages of 1,024 under 256 bytes a task and
+       16 KiB a page. The cost is the count check, made only when one page
+       reads a whole list, since checking it across pages would read the
+       list again.
+     - Loading `tokio-runtimes-o0` took 19.8s in a debug build, because
+       every async env type parses as a type name and resolving a type
+       argument compared thousands of candidates. Resolutions are kept for
+       the load by spelling and language: 7.4s, against 11.3s on `next`.
+     - A worker enters its runtime before it sets its scheduler, so its
+       launch's blocking task once read as a task the worker ran. A thread
+       in a runtime without a scheduler is now the program's, `block_on`'s
+       or a starting worker's, and runs no listed task.
+     - `step task` asks the runtime model for its task starters:
+       `OwnedTasks::bind_inner`, one instance a scheduler flavor, matched by
+       DWARF name and symbol prefix since identical code folding can merge
+       them, and a local set's `Shared::schedule`, which also schedules
+       woken tasks and so starts a task only when its root coroutine is
+       `Unresumed`. The header is the second argument at entry. The step
+       waits where the new task's root coroutine begins, or at the
+       statements of every inlined copy of its body.
+     - Run control asks which task a thread runs at a hit, before the other
+       threads stop, through `RuntimeModel::current_task`: tokio's reads the
+       thread's `CONTEXT` and nothing shared. Reading the list there raced
+       with threads spawning and once ended a `next` in tokio's poll
+       closure, about one run in four on `migrate`.
+     - Fixtures `blocking`, `migrate`, `deadlock`, and `corrupt` replace the
+       catalog's homes for those behaviors, and the web page's tasks panel
+       lists tokio tasks and Go goroutines alike.
+     - tokio's views gained sockets, their halves and buffers, and the I/O
+       futures, since the server walkthrough found every connection's task
+       listed only as suspended.
+     - Not built: a forked child's runtime, since uscope cannot attach to a
+       stopped child; `corrupt`'s out-of-range `__state`, which needs a
+       program to damage a live future; `step task` in DAP and the web
+       page.
 
 Later, only if a need appears:
 
