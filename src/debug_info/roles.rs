@@ -68,6 +68,32 @@ pub fn function_role(name: &str, trampoline: bool) -> CodeRole {
     symbol_role(name)
 }
 
+/// The role of a Rust function, by the path of namespaces rustc nests it
+/// in, outermost first and joined by `::`, and its own name, or `None` for
+/// an ordinary function. The library's code that only hands a future on,
+/// which every `.await` runs between the awaiting function and the awaited
+/// one, wraps: `IntoFuture`, the rest of `core::future` and `core::pin`,
+/// the `poll` that `Box` forwards, and `AssertUnwindSafe`. So does the drop
+/// glue rustc generates, which calls the `Drop` impls the program wrote and
+/// carries the lines of what it drops, such as an await's.
+pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
+    let within = |path: &str| {
+        namespace
+            .strip_prefix(path)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+    };
+    let named = |function: &str| {
+        name.strip_prefix(function)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('<'))
+    };
+    (within("core::future")
+        || within("core::pin")
+        || within("core::panic::unwind_safe")
+        || (within("alloc::boxed") && named("poll"))
+        || (within("core::ptr") && (named("drop_glue") || named("drop_in_place"))))
+    .then_some(CodeRole::Wrapper)
+}
+
 /// Which functions are Go's ABI wrappers, which carry no trampoline mark:
 /// each shares its function's name, and is declared in Go's generated file
 /// while the function is not.

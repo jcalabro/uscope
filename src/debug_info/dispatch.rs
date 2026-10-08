@@ -96,21 +96,40 @@ pub fn flood(
     start: ImageAddress,
     within: &dyn Fn(u64) -> bool,
 ) -> Arc<[AddressRange<ImageAddress>]> {
+    flood_all(image, start, within).0
+}
+
+/// [`flood`]'s code, and whether it is all the code reachable: a path an
+/// indirect branch, an undecodable instruction, or the bound on work ends
+/// may reach more.
+pub fn flood_all(
+    image: &dyn DispatchImage,
+    start: ImageAddress,
+    within: &dyn Fn(u64) -> bool,
+) -> (Arc<[AddressRange<ImageAddress>]>, bool) {
     let mut visited = BTreeSet::new();
     let mut extents = BTreeSet::new();
     let mut pending = vec![start.get()];
+    let mut complete = true;
     while let Some(ip) = pending.pop() {
-        if visited.len() >= MAX_FLOOD || !within(ip) || !visited.insert(ip) {
+        if !within(ip) || visited.contains(&ip) {
             continue;
         }
+        if visited.len() >= MAX_FLOOD {
+            complete = false;
+            continue;
+        }
+        visited.insert(ip);
         let Some(bytes) = image
             .code(ip, MAX_INSTRUCTION)
             .filter(|bytes| !bytes.is_empty())
         else {
+            complete = false;
             continue;
         };
         let instruction = Decoder::with_ip(64, bytes, ip, DecoderOptions::NONE).decode();
         if instruction.code() == Code::INVALID {
+            complete = false;
             continue;
         }
         extents.insert((ip, instruction.next_ip()));
@@ -118,19 +137,18 @@ pub fn flood(
             FlowControl::Next | FlowControl::Call | FlowControl::IndirectCall => {
                 pending.push(instruction.next_ip());
             }
-            FlowControl::UnconditionalBranch => {
-                if instruction.op0_kind() == OpKind::NearBranch64 {
-                    pending.push(instruction.near_branch_target());
-                }
+            FlowControl::UnconditionalBranch if instruction.op0_kind() == OpKind::NearBranch64 => {
+                pending.push(instruction.near_branch_target());
             }
             FlowControl::ConditionalBranch => {
                 pending.push(instruction.next_ip());
                 pending.push(instruction.near_branch_target());
             }
+            FlowControl::UnconditionalBranch | FlowControl::IndirectBranch => complete = false,
             _ => {}
         }
     }
-    ranges_of(extents)
+    (ranges_of(extents), complete)
 }
 
 /// The first instruction `within` does not admit that execution from

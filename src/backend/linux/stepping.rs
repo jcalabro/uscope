@@ -1334,6 +1334,19 @@ impl<P: LinuxTraceOps> Controller<P> {
                 source_for_code_instance(&self.module_image, location, instance)
             })
         });
+        // What leads into an async body, its dispatch and the moves of its
+        // arguments, carries the body's header line; the step goes on into
+        // the body.
+        let leads_into_body = current_instance
+            .and_then(|instance| self.module_image.code_instance(instance))
+            .and_then(|instance| self.module_image.function(instance.function))
+            .filter(|function| function.coroutine.is_some())
+            .and_then(|function| function.declaration.as_ref())
+            .zip(source.as_ref())
+            .is_some_and(|(header, at)| header.file == at.file && header.line == at.line);
+        if leads_into_body {
+            return Ok(false);
+        }
         // As when it starts, stepping in never requires the activation: code
         // without unwind information is judged by its location alone.
         let activation = self.top_activation(pid, registers).ok();
