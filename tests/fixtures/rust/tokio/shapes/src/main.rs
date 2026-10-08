@@ -1,9 +1,10 @@
 //! The shapes a future a task awaits takes: an async function, an async
-//! block, a boxed trait object, a generic async function, a trait's async
-//! method, and tokio's own future, a channel's receive. A test steps into
+//! block, a boxed trait object, a generic async function, a trait's and a
+//! type's async methods, and tokio's own future, a channel's receive. A test steps into
 //! each await from its line, marked `INTO`, to the line the future's code
 //! begins on, marked `STEP`. Each await is alone on its line, so that
-//! nothing else there is a call to step into.
+//! nothing else there is a call to step into. The channel receives twice,
+//! for a test that steps into tokio once and then turns that off.
 
 use std::future::Future;
 use std::hint::black_box;
@@ -29,6 +30,12 @@ impl Shape for Square {
     }
 }
 
+impl Square {
+    async fn inherent(&self, value: u64) -> u64 {
+        black_box(value + 6) // STEP: inherent
+    }
+}
+
 async fn shapes(me: u64) -> u64 {
     let a = plain(me).await; // INTO: plain
     let block = async move {
@@ -42,10 +49,13 @@ async fn shapes(me: u64) -> u64 {
     let small = u32::try_from(me).unwrap_or(0);
     let d = generic(small).await; // INTO: generic
     let e = Square.method(me).await; // INTO: method
+    let h = Square.inherent(me).await; // INTO: inherent
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
     sender.send(me).await.unwrap_or(());
     let f = receiver.recv().await; // INTO: recv
-    a + b + c + d + e + f.unwrap_or(0) // STEP: recv-after
+    sender.send(me).await.unwrap_or(()); // STEP: recv-after
+    let g = receiver.recv().await; // INTO: recv-again
+    a + b + c + d + e + h + f.unwrap_or(0) + g.unwrap_or(0) // STEP: recv-again-after
 }
 
 fn main() {
