@@ -800,7 +800,12 @@ The built-in views cover:
   `notified`, or the tasks waiting; `Sleep` as `elapsed` or the time until
   its deadline, by the runtime's clock, which reads late after the runtime
   has been idle, and `Interval` as its period and next tick; `Instant` as a
-  duration; and a `JoinSet` as its tasks' join handles.
+  duration; a `JoinSet` as its tasks' join handles; TCP, UDP, and Unix
+  sockets, their halves, `BufReader`, `BufWriter`, and `Lines` as the file
+  descriptor they read or write, with the bytes a buffer holds; and the
+  futures of `read`, `read_exact`, `write_all`, `next_line`, and of waiting
+  for a socket to be ready as what they wait for, such as `reading a line
+  from fd 7` or `waiting until readable`.
 - Go: maps and channels, including nil ones, which show as `nil`;
   `time.Duration` as `Duration.String` writes it; `time.Time` as its wall
   clock reading in UTC, its location, and its monotonic reading when it has
