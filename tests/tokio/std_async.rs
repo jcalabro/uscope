@@ -4,8 +4,8 @@
 use std::process::Stdio;
 
 use uscope::{
-    BreakpointSpec, LaunchOptions, LineNumber, StepKind, StopReason, VariableState,
-    VariableUnavailableReason,
+    BreakpointSpec, LaunchOptions, LineNumber, StepKind, StopReason, ValueChildQuery,
+    ValueChildRelationship, ValueChildren, VariableState, VariableUnavailableReason,
 };
 
 use crate::stops::{backtrace, evaluated, frames_to, integer, line, locals, place};
@@ -324,18 +324,22 @@ async fn step_enters_an_awaited_async_function_at_its_first_line() {
 
 /// A future prints as the state it holds: where it waits, with what it
 /// keeps there, never as the number that encodes the state. While its body
-/// runs, the state is still the await the poll resumed from.
+/// runs, the state is still the await the poll resumed from. Its children
+/// are the variables it keeps, then the value as stored; the awaited
+/// future, drop flags, and captures the body moved are only under `[raw]`.
 #[tokio::test]
 async fn a_future_prints_as_its_state() {
     for fixture in BUILDS {
-        for (marker, expected) in [
+        for (marker, expected, children) in [
             (
                 "// STEP: leaf-after",
                 "suspended at main.rs:43 {id: 3, doubled: 6, label: \"leaf 3\"}",
+                &["id", "doubled", "label", "[raw]"][..],
             ),
             (
                 "// STEP: middle-after",
                 "suspended at main.rs:51 {first: 14}",
+                &["first", "[raw]"],
             ),
         ] {
             let scenario = stopped_at(fixture, at(marker)).await;
@@ -345,6 +349,40 @@ async fn a_future_prints_as_its_state() {
                 expected,
                 "{fixture} {marker}"
             );
+            let VariableState::Available {
+                presentation: Some(presentation),
+                ..
+            } = &future.state
+            else {
+                panic!("{fixture} {marker}: {future:?}");
+            };
+            let ValueChildren::Available(reference) = &presentation.children else {
+                panic!("{fixture} {marker}: {presentation:?}");
+            };
+            let page = scenario
+                .operation(
+                    "children",
+                    scenario.handle().value_children(
+                        std::sync::Arc::clone(reference),
+                        ValueChildQuery {
+                            offset: 0,
+                            limit: 64,
+                        },
+                    ),
+                )
+                .await;
+            let names = page
+                .children
+                .iter()
+                .map(|child| match &child.relationship {
+                    ValueChildRelationship::Member(member) => {
+                        member.name.as_deref().unwrap_or("<anonymous>").to_owned()
+                    }
+                    ValueChildRelationship::Raw => "[raw]".to_owned(),
+                    other => panic!("{fixture} {marker}: {other:?}"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(names, children, "{fixture} {marker}");
             scenario.shutdown().await;
         }
     }
