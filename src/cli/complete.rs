@@ -257,6 +257,9 @@ fn exception_words(argument: usize) -> Vec<String> {
     }
 }
 
+/// The settings `set` turns on or off.
+const TOGGLES: [&str; 2] = ["views", "step-runtime"];
+
 pub fn complete(
     line: &str,
     position: usize,
@@ -339,9 +342,7 @@ pub fn complete(
             candidates.extend(context.names.iter().cloned());
             candidates
         }
-        Command::Set if matches!(words.get(1), Some(&("views" | "step-runtime"))) => {
-            words_of(&["on", "off"])
-        }
+        Command::Set if TOGGLES.contains(words.get(1).unwrap_or(&"")) => words_of(&["on", "off"]),
         Command::Condition | Command::Ignore | Command::Hits => {
             return expression(before, context, fields, &[]);
         }
