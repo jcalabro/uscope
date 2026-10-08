@@ -1591,7 +1591,7 @@ impl DwarfVariableInfo {
         let VariantDiscriminant::Stored(member) = discriminant else {
             // Without stored discriminator bytes, only a variant known to be
             // the only one that can hold a value is active.
-            return tagless_variant(&self.types, variants)
+            return tagless_variant(&self.types, aggregate)
                 .map(|index| (None, Some(index)))
                 .ok_or_else(|| {
                     EvaluateError::Unavailable(

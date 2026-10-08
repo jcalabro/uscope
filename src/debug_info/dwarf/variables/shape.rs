@@ -174,14 +174,35 @@ pub(super) fn indirection_byte_size(
     }
 }
 
-/// The variant a sum that stores no tag holds: its one variant, or the one
-/// variant that can hold a value at all, since every other holds a value of
-/// a type with none, such as `Infallible`. Choosing among several would be
-/// a guess.
+/// The variant the sum `aggregate`, which stores no tag, holds: its one
+/// variant, or the one variant that can hold a value at all, since every
+/// other holds a value of a type with none, such as `Infallible`. Choosing
+/// among several would be a guess, and a sum with no values holds none.
 pub(super) fn tagless_variant<T: TypeMetadataEntry>(
     types: &[T],
-    variants: &[Variant],
+    aggregate: TypeId,
 ) -> Option<usize> {
+    let Ok((
+        _,
+        TypeInfo {
+            kind:
+                TypeKind::Variant {
+                    common_members,
+                    variants,
+                    ..
+                },
+            ..
+        },
+    )) = transparent_type_from(types, aggregate)
+    else {
+        return None;
+    };
+    if common_members
+        .iter()
+        .any(|member| uninhabited(types, member.type_ref.id, 0))
+    {
+        return None;
+    }
     if is_single_default_variant(variants) {
         return Some(0);
     }
@@ -211,16 +232,20 @@ fn uninhabited<T: TypeMetadataEntry>(types: &[T], id: TypeId, depth: usize) -> b
     match &info.kind {
         TypeKind::Variant {
             discriminant,
+            common_members,
             variants,
             ..
         } => {
             matches!(discriminant.as_ref(), VariantDiscriminant::Absent)
-                && variants.iter().all(|variant| {
-                    variant
-                        .members
-                        .iter()
-                        .any(|member| uninhabited(types, member.type_ref.id, depth + 1))
-                })
+                && (common_members
+                    .iter()
+                    .any(|member| uninhabited(types, member.type_ref.id, depth + 1))
+                    || variants.iter().all(|variant| {
+                        variant
+                            .members
+                            .iter()
+                            .any(|member| uninhabited(types, member.type_ref.id, depth + 1))
+                    }))
         }
         TypeKind::Record { members, .. } => members
             .iter()
@@ -394,7 +419,7 @@ fn nested_value_shape<T: TypeMetadataEntry>(
                 ));
             }
             if !matches!(discriminant.as_ref(), VariantDiscriminant::Stored(_))
-                && tagless_variant(types, variants).is_none()
+                && tagless_variant(types, current).is_none()
             {
                 return Err(ValueShapeError::Unsupported(
                     "tagless variant selection is unsupported".into(),
