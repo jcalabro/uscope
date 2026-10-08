@@ -6,10 +6,14 @@
 mod support;
 
 mod attach;
+mod blocking;
 mod cancel;
 mod coroutines;
+mod corrupt;
+mod deadlock;
 mod drivers;
 mod invariants;
+mod migrate;
 mod panics;
 mod resume_points;
 mod runtimes;
