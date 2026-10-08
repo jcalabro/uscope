@@ -1549,12 +1549,18 @@ async fn c_enums_and_raw_unions_preserve_values_names_aliases_and_interpretation
                 uscope::IntegerValue::Signed(0),
                 &["SIGNED_ZERO", "SIGNED_ZERO_ALIAS"][..],
             ),
-            ("flags", uscope::IntegerValue::Unsigned(3), &[][..]),
+            // Single bits are flags, and a value is the ones it sets.
+            (
+                "flags",
+                uscope::IntegerValue::Unsigned(3),
+                &["FLAG_READ", "FLAG_WRITE"][..],
+            ),
             (
                 "byte_value",
                 uscope::IntegerValue::Unsigned(255),
                 &["BYTE_MAX"][..],
             ),
+            ("sequence", uscope::IntegerValue::Unsigned(3), &[][..]),
         ] {
             let inspected = dereference_named(&scenario, name, 1).await;
             let uscope::VariableValue::Enumeration { value, matches } =
@@ -2517,6 +2523,16 @@ async fn c_strings_read_up_to_their_terminator_limit_or_unreadable_memory() {
             ("null_text", None),
             ("invalid", Some(text(b"", unreadable))),
             ("bytes", Some(text(b"A\xff", Complete))),
+            // Wide text is decoded from its units: UTF-32 for `wchar_t`
+            // and `char32_t`, UTF-16 for `char16_t`.
+            ("wide", Some(text("wide é".as_bytes(), Complete))),
+            ("sixteen", Some(text("sixteen λ 🦀".as_bytes(), Complete))),
+            (
+                "thirty_two",
+                Some(text("thirty-two 🦀".as_bytes(), Complete)),
+            ),
+            ("wide_buffer", Some(text(b"buf", Complete))),
+            ("lone", Some(text("a\u{fffd}".as_bytes(), Complete))),
         ],
     )
     .await;

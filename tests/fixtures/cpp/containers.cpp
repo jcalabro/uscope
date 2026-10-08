@@ -4,23 +4,38 @@
 // of the character c, `problem:` says the view must refuse the value, and
 // why, and `(any order)` that a hash table's entries may come in any order.
 
+#include <any>
 #include <array>
+#include <atomic>
+#include <bitset>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <expected>
+#include <filesystem>
+#include <flat_map>
+#include <flat_set>
 #include <forward_list>
+#include <functional>
+#include <initializer_list>
 #include <list>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <optional>
+#include <queue>
 #include <set>
 #include <span>
+#include <stack>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <tuple>
 #include <unordered_set>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -95,6 +110,15 @@ int main() {
     std::string long_text(300, 'y');              // VIEW: long_text => "{y*256}"... (300 bytes)
     std::string with_nul("a\0b", 3);             // VIEW: with_nul => "a\u{0}b"
     std::string_view view = "a view";             // VIEW: view => "a view"
+    // Wider characters, decoded from UTF-32 and UTF-16 units; a length is
+    // in bytes.
+    std::wstring wide = L"wide \u00e9";            // VIEW: wide => "wide é"
+    std::wstring long_wide(300, L'w');            // VIEW: long_wide => "{w*256}"... (1200 bytes)
+    std::u16string short16 = u"ab";               // VIEW: short16 => "ab"
+    std::u16string sixteen = u"\u03bb sixteen \U0001F980"; // VIEW: sixteen => "λ sixteen 🦀"
+    std::u32string thirty_two = U"\U0001F980 32";  // VIEW: thirty_two => "🦀 32"
+    std::u8string eight = u8"\u00e9ight";          // VIEW: eight => "éight"
+    std::wstring_view wide_view = L"wide view";   // VIEW: wide_view => "wide view"
     std::vector<int> ints = {1, 2, 3};            // VIEW: ints => len=3 [1, 2, 3]
     std::vector<int> no_ints;                     // VIEW: no_ints => len=0 []
     std::vector<std::string> words = {"one", "two"}; // VIEW: words => len=2 ["one", "two"]
@@ -185,6 +209,63 @@ int main() {
     std::unique_ptr<Shape> shape = std::make_unique<Square>(); // VIEW: shape => Square {id: 7, side: 3}
     Tile tile;
     Shape *inner_shape = &tile;                   // VIEW: *inner_shape => Tile {tag: 2, id: 7, side: 3, row: 9}
+    std::pair<int, std::string> pair{1, "one"};  // VIEW: pair => {first: 1, second: "one"}
+
+    // Bits, as the bools they hold, and as the positions set.
+    std::vector<bool> bits = {true, false, true}; // VIEW: bits => len=3 [true, false, true]
+    std::vector<bool> many_bits(130, false);      // VIEW: many_bits => count: 130
+    many_bits[129] = true;
+    std::vector<bool> no_bits;                    // VIEW: no_bits => len=0 []
+    std::bitset<10> flags(0b1010000011);          // VIEW: flags => len=4 [0, 1, 7, 9]
+    std::bitset<100> wide_flags;                  // VIEW: wide_flags => len=2 [3, 99]
+    wide_flags.set(3);
+    wide_flags.set(99);
+    // Adaptors present the containers they adapt.
+    std::stack<int> stack;                        // VIEW: stack => len=2 [1, 2]
+    stack.push(1);
+    stack.push(2);
+    std::queue<int> fifo;                         // VIEW: fifo => len=2 [3, 4]
+    fifo.push(3);
+    fifo.push(4);
+    std::priority_queue<int> heap;                // VIEW: heap => len=3 [9, 5, 1]
+    heap.push(5);
+    heap.push(9);
+    heap.push(1);
+    std::initializer_list<int> listed = {1, 2, 3}; // VIEW: listed => len=3 [1, 2, 3]
+    std::flat_map<int, int> flat{{2, 20}, {1, 10}}; // VIEW: flat => len=2 {1: 10, 2: 20}
+    std::flat_set<int> flat_keys{3, 1};           // VIEW: flat_keys => len=2 [1, 3]
+    // Durations as Go writes them, and the system clock's time as a date.
+    std::chrono::nanoseconds nanos(42);           // VIEW: nanos => 42ns
+    std::chrono::microseconds micros(1500);       // VIEW: micros => 1.5ms
+    std::chrono::milliseconds millis(1500);       // VIEW: millis => 1.5s
+    std::chrono::seconds secs(90);                // VIEW: secs => 1m30s
+    std::chrono::minutes mins(3);                 // VIEW: mins => 3m0s
+    std::chrono::hours hrs(26);                   // VIEW: hrs => 26h0m0s
+    std::chrono::system_clock::time_point instant{std::chrono::seconds(1700000000)}; // VIEW: instant => 2023-11-14 22:13:20 +0000 UTC
+    std::chrono::steady_clock::time_point uptime{std::chrono::seconds(5)}; // VIEW: uptime => 5s
+    // Atomics, references, and outcomes are what they hold.
+    std::atomic<int> counter{5};                  // VIEW: counter => 5
+    std::atomic<bool> ready{true};                // VIEW: ready => true
+    std::atomic<long *> slot{nullptr};            // VIEW: slot => 0x0
+    std::atomic<double> level{2.5};               // VIEW: level => 2.5
+    int target = 3;
+    std::reference_wrapper<int> reference = std::ref(target); // VIEW: reference => 3
+    std::expected<int, std::string> expected = 5; // VIEW: expected => 5
+    std::expected<int, std::string> unexpected = std::unexpected(std::string("bad")); // VIEW: unexpected => {unexpected: "bad"}
+    std::filesystem::path where = "/tmp/uscope"; // VIEW: where => "/tmp/uscope"
+    std::function<int(int)> no_callable;          // VIEW: no_callable => empty
+    std::function<int(int)> callable = [&target](int x) { return x + target; };
+    // Mutexes say whether they are held; the owner is a field.
+    std::mutex unlocked_mutex;                    // VIEW: unlocked_mutex => unlocked
+    std::mutex locked_mutex;                      // VIEW: locked_mutex => locked
+    locked_mutex.lock();
+    std::recursive_mutex reentered;               // VIEW: reentered => locked
+    std::thread::id no_thread;                    // VIEW: no_thread => no thread
+    std::thread::id this_thread = std::this_thread::get_id();
+    std::any no_any;                              // VIEW: no_any => empty
+    std::any held_any = 7;
+    reentered.lock();
+    reentered.lock();
 
     // A list whose last node leads back to its second: walking it would
     // show the second and third elements again.
@@ -202,6 +283,8 @@ int main() {
 #endif
 
     keep(text), keep(empty_text), keep(long_text), keep(with_nul), keep(view);
+    keep(wide), keep(long_wide), keep(short16), keep(sixteen), keep(thirty_two), keep(eight);
+    keep(wide_view);
     keep(ints), keep(no_ints), keep(words), keep(many), keep(four), keep(none);
     keep(dynamic_span), keep(fixed_span), keep(past_capacity), keep(dangling), keep(ragged);
     keep(ordered), keep(named), keep(no_entries), keep(repeated_keys), keep(distinct);
@@ -213,8 +296,17 @@ int main() {
     keep(expired), keep(no_shared), keep(some), keep(nothing), keep(some_text), keep(alternative);
     keep(first_alternative), keep(valueless), keep(bad_index), keep(no_elements), keep(single);
     keep(couple), keep(triple), keep(quadruple), keep(quintuple), keep(sextuple), keep(septuple);
-    keep(shape), keep(tile), keep(inner_shape);
+    keep(shape), keep(tile), keep(inner_shape), keep(pair);
+    keep(bits), keep(many_bits), keep(no_bits), keep(flags), keep(wide_flags), keep(stack);
+    keep(fifo), keep(heap), keep(listed), keep(flat), keep(flat_keys), keep(nanos), keep(micros);
+    keep(millis), keep(secs), keep(mins), keep(hrs), keep(instant), keep(uptime), keep(counter);
+    keep(ready), keep(slot), keep(level), keep(reference), keep(expected), keep(unexpected);
+    keep(where), keep(no_callable), keep(callable), keep(unlocked_mutex), keep(locked_mutex);
+    keep(reentered), keep(no_thread), keep(this_thread), keep(no_any), keep(held_any);
     barrier(&text);
+    locked_mutex.unlock();
+    reentered.unlock();
+    reentered.unlock();
     // The corrupted variant holds its int again, for its destructor.
     reinterpret_cast<unsigned char *>(&bad_index)[sizeof(std::string)] = 0;
     // The corrupted lists are never destroyed.

@@ -29,8 +29,14 @@ unsafe impl core::alloc::GlobalAlloc for Malloc {
 static ALLOCATOR: Malloc = Malloc;
 
 #[inline(never)]
-fn strings_target(borrowed: &str, owned: &String, empty: &String, long: &String) -> usize {
-    core::hint::black_box((borrowed, owned, empty, long));
+fn strings_target(
+    borrowed: &str,
+    owned: &String,
+    empty: &String,
+    long: &String,
+    letter: char,
+) -> usize {
+    core::hint::black_box((borrowed, owned, empty, long, letter));
     borrowed.len() + owned.len() // strings stop here
 }
 
@@ -42,7 +48,13 @@ pub extern "C" fn main() -> i32 {
     for _ in 0..300 {
         long.push('z');
     }
-    i32::from(strings_target(core::hint::black_box("héllo"), &owned, &empty, &long) != 16)
+    i32::from(strings_target(
+        core::hint::black_box("héllo"),
+        &owned,
+        &empty,
+        &long,
+        'λ',
+    ) != 16)
 }
 
 #[panic_handler]

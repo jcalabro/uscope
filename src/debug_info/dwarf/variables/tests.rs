@@ -1666,16 +1666,35 @@ fn boolean_and_float_decoding_preserve_exact_representations() {
             sign_exponent: 0x4000,
         })
     );
-    // IEEE binary128 shares the size but not the representation.
+    // IEEE binary128 shares the size but not the representation, and a
+    // size two formats share is not a format without a name that says.
     for name in ["__float128", "_Float128", "f128"] {
-        assert!(
-            matches!(
-                decode_scalar(&sixteen_bytes(name), &extended, little),
-                Err(ScalarDecodeError::Unavailable(_))
-            ),
+        assert_eq!(
+            decode_scalar(&sixteen_bytes(name), &extended, little).expect("binary128"),
+            ScalarValue::Floating(FloatValue::Binary128(u128::from_le_bytes(extended))),
             "{name}"
         );
     }
+    assert!(matches!(
+        decode_scalar(&sixteen_bytes("float"), &extended, little),
+        Err(ScalarDecodeError::Unavailable(_))
+    ));
+    let two_bytes = |name: &str| BaseType {
+        base_name: name.into(),
+        ..scalar_type(BaseTypeEncoding::Floating, 2)
+    };
+    assert_eq!(
+        decode_scalar(&two_bytes("_Float16"), &[0x00, 0x3e], little).expect("binary16"),
+        ScalarValue::Floating(FloatValue::Binary16(0x3e00))
+    );
+    assert_eq!(
+        decode_scalar(&two_bytes("__bf16"), &[0x49, 0xc0], little).expect("bfloat16"),
+        ScalarValue::Floating(FloatValue::BFloat16(0xc049))
+    );
+    assert!(matches!(
+        decode_scalar(&two_bytes("short float"), &[0, 0], little),
+        Err(ScalarDecodeError::Unavailable(_))
+    ));
 }
 
 #[test]

@@ -216,16 +216,14 @@ fn base_category(base: &BaseType) -> Category {
         BaseTypeEncoding::Boolean => Category::Bool,
         BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter => int(true),
         BaseTypeEncoding::Unsigned | BaseTypeEncoding::UnsignedCharacter => int(false),
-        BaseTypeEncoding::Floating => match (base.byte_size, base.base_name.as_ref()) {
-            (4, _) => Category::Float(FloatFormat::Binary32),
-            (8, _) => Category::Float(FloatFormat::Binary64),
-            (10 | 12 | 16, "long double" | "__float80" | "_Float64x" | "f80" | "c_longdouble") => {
-                Category::Float(FloatFormat::X87Extended)
-            }
-            _ => Category::Opaque(
-                format!("`{}` is not a float format uscope computes with", base.name).into(),
-            ),
-        },
+        BaseTypeEncoding::Floating => base.float_layout().map_or_else(
+            || {
+                Category::Opaque(
+                    format!("`{}` is not a float format uscope computes with", base.name).into(),
+                )
+            },
+            |layout| Category::Float(FloatFormat::of(layout)),
+        ),
         BaseTypeEncoding::ComplexFloating => Category::Opaque(
             format!(
                 "`{}` is a complex number, which uscope does not compute with",
@@ -271,9 +269,7 @@ pub fn size_of(types: &dyn TypeSource, ty: &Ty) -> Option<u64> {
     match ty {
         Ty::Program(reference) => types.type_info(*reference)?.byte_size,
         Ty::Int(int) => Some(u64::from(int.width()).div_ceil(8)),
-        Ty::Float(FloatFormat::Binary32) => Some(4),
-        Ty::Float(FloatFormat::Binary64) => Some(8),
-        Ty::Float(FloatFormat::X87Extended) => Some(16),
+        Ty::Float(format) => Some(format.size()),
         Ty::C(c) => types.c_base_type(*c).map(|base| base.byte_size),
         Ty::Bool => Some(1),
         Ty::Pointer(_) => Some(u64::from(types.pointer_size())),
@@ -289,9 +285,7 @@ pub fn type_name(types: &dyn TypeSource, ty: &Ty) -> String {
             .map_or_else(|| "<malformed>".to_owned(), |info| info.name.to_string()),
         Ty::Exact => "integer".to_owned(),
         Ty::Int(int) => int_name(*int),
-        Ty::Float(FloatFormat::Binary32) => "f32".to_owned(),
-        Ty::Float(FloatFormat::Binary64) => "f64".to_owned(),
-        Ty::Float(FloatFormat::X87Extended) => "f80".to_owned(),
+        Ty::Float(format) => format.name().to_owned(),
         Ty::C(c) => c.name().to_owned(),
         Ty::Bool => "bool".to_owned(),
         Ty::Pointer(pointee) => pointer_name(&type_name(types, pointee)),
@@ -341,6 +335,9 @@ fn language_type_id(ty: &Ty) -> u32 {
         Ty::Float(FloatFormat::Binary32) => 5,
         Ty::Float(FloatFormat::Binary64) => 6,
         Ty::Float(FloatFormat::X87Extended) => 7,
+        Ty::Float(FloatFormat::Binary16) => 8,
+        Ty::Float(FloatFormat::BFloat16) => 9,
+        Ty::Float(FloatFormat::Binary128) => 10,
         Ty::Int(int) => 16 + u32::from(int.width()) * 2 + u32::from(int.is_signed()),
         Ty::C(c) => 512 + *c as u32,
         Ty::Pointer(pointee) => (1_u32 << 20).wrapping_add(language_type_id(pointee)),

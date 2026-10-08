@@ -459,6 +459,41 @@ pub enum BaseTypeEncoding {
     ComplexFloating,
 }
 
+/// The format of a float type's values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatLayout {
+    Binary16,
+    BFloat16,
+    Binary32,
+    Binary64,
+    X87Extended,
+    Binary128,
+}
+
+impl BaseType {
+    /// The format a float type's values are in: by its size, and by its
+    /// name where formats share a size, so that a format the name does not
+    /// say is never guessed.
+    #[must_use]
+    pub fn float_layout(&self) -> Option<FloatLayout> {
+        if self.encoding != BaseTypeEncoding::Floating {
+            return None;
+        }
+        let name = self.base_name.as_ref();
+        Some(match (self.byte_size, name) {
+            (2, "_Float16" | "__fp16" | "f16") => FloatLayout::Binary16,
+            (2, "__bf16") => FloatLayout::BFloat16,
+            (4, _) => FloatLayout::Binary32,
+            (8, _) => FloatLayout::Binary64,
+            (10 | 12 | 16, "long double" | "__float80" | "_Float64x" | "f80" | "c_longdouble") => {
+                FloatLayout::X87Extended
+            }
+            (16, "_Float128" | "__float128" | "f128") => FloatLayout::Binary128,
+            _ => return None,
+        })
+    }
+}
+
 /// A resolved scalar type independent of its debug-information encoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseType {
@@ -1011,10 +1046,16 @@ impl TypeNode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FloatValue {
+    /// IEEE binary16 bits: C's `_Float16`, and Rust's and Zig's `f16`.
+    Binary16(u16),
+    /// bfloat16 bits: binary32's top half, as C's `__bf16`.
+    BFloat16(u16),
     /// IEEE binary32 bits.
     Binary32(u32),
     /// IEEE binary64 bits.
     Binary64(u64),
+    /// IEEE binary128 bits: C's `__float128`, and Rust's and Zig's `f128`.
+    Binary128(u128),
     /// The meaningful 80 bits of an x87 extended value.
     X87Extended {
         /// The explicit integer bit and fraction.
@@ -2025,6 +2066,58 @@ pub struct TextSummary {
 impl TextSummary {
     /// The most bytes of text read for one value.
     pub const MAX_BYTES: usize = 256;
+
+    /// Text of code units wider than a byte, UTF-16 for two bytes and
+    /// UTF-32 for four, as at most [`Self::MAX_BYTES`] of UTF-8. A unit
+    /// that is no character, such as an unpaired surrogate, is U+FFFD, and
+    /// a partial unit at the end is left out. `completion` says whether
+    /// the units are all of the text, which they no longer are when their
+    /// UTF-8 does not fit.
+    #[must_use]
+    pub fn from_units(
+        raw: &[u8],
+        width: usize,
+        byte_order: ByteOrder,
+        completion: TextCompletion,
+    ) -> Self {
+        let units = raw.chunks_exact(width).map(|unit| {
+            let mut word = [0_u8; 4];
+            match byte_order {
+                ByteOrder::Little => {
+                    word[..unit.len()].copy_from_slice(unit);
+                    u32::from_le_bytes(word)
+                }
+                ByteOrder::Big => {
+                    word[4 - unit.len()..].copy_from_slice(unit);
+                    u32::from_be_bytes(word)
+                }
+            }
+        });
+        let characters: Box<dyn Iterator<Item = char>> = if width == 2 {
+            Box::new(
+                char::decode_utf16(units.map(|unit| u16::try_from(unit).unwrap_or(0xfffd)))
+                    .map(|character| character.unwrap_or(char::REPLACEMENT_CHARACTER)),
+            )
+        } else {
+            Box::new(units.map(|unit| char::from_u32(unit).unwrap_or(char::REPLACEMENT_CHARACTER)))
+        };
+        let mut text = String::new();
+        let mut cut = false;
+        for character in characters {
+            if text.len() + character.len_utf8() > Self::MAX_BYTES {
+                cut = true;
+                break;
+            }
+            text.push(character);
+        }
+        Self {
+            bytes: Arc::from(text.into_bytes()),
+            completion: match completion {
+                TextCompletion::Complete if cut => TextCompletion::Truncated { length: None },
+                completion => completion,
+            },
+        }
+    }
 }
 
 /// Whether a text summary holds all of its text.

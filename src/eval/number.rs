@@ -10,7 +10,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use rustc_apfloat::ieee::{Double, Single, X87DoubleExtended};
+use rustc_apfloat::ieee::{BFloat, Double, Half, Quad, Single, X87DoubleExtended};
 use rustc_apfloat::{Float as _, FloatConvert as _, Round};
 
 use crate::FloatValue;
@@ -549,17 +549,70 @@ impl Integer {
 /// An IEEE binary floating-point format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FloatFormat {
+    Binary16,
+    BFloat16,
     Binary32,
     Binary64,
     X87Extended,
+    Binary128,
+}
+
+impl FloatFormat {
+    /// The format of a float type's values, when uscope computes with it.
+    pub(crate) const fn of(layout: crate::model::FloatLayout) -> Self {
+        use crate::model::FloatLayout;
+        match layout {
+            FloatLayout::Binary16 => Self::Binary16,
+            FloatLayout::BFloat16 => Self::BFloat16,
+            FloatLayout::Binary32 => Self::Binary32,
+            FloatLayout::Binary64 => Self::Binary64,
+            FloatLayout::X87Extended => Self::X87Extended,
+            FloatLayout::Binary128 => Self::Binary128,
+        }
+    }
+
+    /// How many bytes a value of the format takes in memory.
+    pub const fn size(self) -> u64 {
+        match self {
+            Self::Binary16 | Self::BFloat16 => 2,
+            Self::Binary32 => 4,
+            Self::Binary64 => 8,
+            Self::X87Extended | Self::Binary128 => 16,
+        }
+    }
+
+    /// The format's name in uscope's expressions.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Binary16 => "f16",
+            Self::BFloat16 => "bf16",
+            Self::Binary32 => "f32",
+            Self::Binary64 => "f64",
+            Self::X87Extended => "f80",
+            Self::Binary128 => "f128",
+        }
+    }
 }
 
 /// A floating-point value in its own format.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Float {
+    Binary16(Half),
+    BFloat16(BFloat),
     Binary32(Single),
     Binary64(Double),
     X87Extended(X87DoubleExtended),
+    Binary128(Quad),
+}
+
+/// The format two floats' operations are done in: the wider, and binary32
+/// for binary16 with bfloat16, neither of which holds the other's values.
+fn wider(left: FloatFormat, right: FloatFormat) -> FloatFormat {
+    match (left, right) {
+        (FloatFormat::Binary16, FloatFormat::BFloat16)
+        | (FloatFormat::BFloat16, FloatFormat::Binary16) => FloatFormat::Binary32,
+        _ => left.max(right),
+    }
 }
 
 /// A floating-point operator.
@@ -578,9 +631,12 @@ pub enum FloatOperator {
 macro_rules! each_format {
     ($float:expr, $value:ident => $body:expr) => {
         match $float {
+            Float::Binary16($value) => $body,
+            Float::BFloat16($value) => $body,
             Float::Binary32($value) => $body,
             Float::Binary64($value) => $body,
             Float::X87Extended($value) => $body,
+            Float::Binary128($value) => $body,
         }
     };
 }
@@ -588,6 +644,9 @@ macro_rules! each_format {
 impl Float {
     pub fn from_value(value: FloatValue) -> Self {
         match value {
+            FloatValue::Binary16(bits) => Self::Binary16(Half::from_bits(u128::from(bits))),
+            FloatValue::BFloat16(bits) => Self::BFloat16(BFloat::from_bits(u128::from(bits))),
+            FloatValue::Binary128(bits) => Self::Binary128(Quad::from_bits(bits)),
             FloatValue::Binary32(bits) => Self::Binary32(Single::from_bits(u128::from(bits))),
             FloatValue::Binary64(bits) => Self::Binary64(Double::from_bits(u128::from(bits))),
             FloatValue::X87Extended {
@@ -602,6 +661,11 @@ impl Float {
     pub fn to_value(self) -> FloatValue {
         match self {
             // The bit patterns are exactly as wide as the narrowing casts.
+            #[allow(clippy::cast_possible_truncation, reason = "binary16 has 16 bits")]
+            Self::Binary16(value) => FloatValue::Binary16(value.to_bits() as u16),
+            #[allow(clippy::cast_possible_truncation, reason = "bfloat16 has 16 bits")]
+            Self::BFloat16(value) => FloatValue::BFloat16(value.to_bits() as u16),
+            Self::Binary128(value) => FloatValue::Binary128(value.to_bits()),
             #[allow(clippy::cast_possible_truncation, reason = "binary32 has 32 bits")]
             Self::Binary32(value) => FloatValue::Binary32(value.to_bits() as u32),
             #[allow(clippy::cast_possible_truncation, reason = "binary64 has 64 bits")]
@@ -627,9 +691,12 @@ impl Float {
 
     pub const fn format(self) -> FloatFormat {
         match self {
+            Self::Binary16(_) => FloatFormat::Binary16,
+            Self::BFloat16(_) => FloatFormat::BFloat16,
             Self::Binary32(_) => FloatFormat::Binary32,
             Self::Binary64(_) => FloatFormat::Binary64,
             Self::X87Extended(_) => FloatFormat::X87Extended,
+            Self::Binary128(_) => FloatFormat::Binary128,
         }
     }
 
@@ -637,6 +704,9 @@ impl Float {
     pub fn convert(self, format: FloatFormat) -> Self {
         let mut loses_info = false;
         each_format!(self, value => match format {
+            FloatFormat::Binary16 => Self::Binary16(value.convert(&mut loses_info).value),
+            FloatFormat::BFloat16 => Self::BFloat16(value.convert(&mut loses_info).value),
+            FloatFormat::Binary128 => Self::Binary128(value.convert(&mut loses_info).value),
             FloatFormat::Binary32 => Self::Binary32(value.convert(&mut loses_info).value),
             FloatFormat::Binary64 => Self::Binary64(value.convert(&mut loses_info).value),
             FloatFormat::X87Extended => {
@@ -656,9 +726,12 @@ impl Float {
             }
         }
         match format {
+            FloatFormat::Binary16 => Self::Binary16(convert(value)),
+            FloatFormat::BFloat16 => Self::BFloat16(convert(value)),
             FloatFormat::Binary32 => Self::Binary32(convert(value)),
             FloatFormat::Binary64 => Self::Binary64(convert(value)),
             FloatFormat::X87Extended => Self::X87Extended(convert(value)),
+            FloatFormat::Binary128 => Self::Binary128(convert(value)),
         }
     }
 
@@ -674,8 +747,17 @@ impl Float {
                 FloatOperator::Rem => left.c_fmod(right).value,
             }
         }
-        let format = left.format().max(right.format());
+        let format = wider(left.format(), right.format());
         match (left.convert(format), right.convert(format)) {
+            (Self::Binary16(left), Self::Binary16(right)) => {
+                Self::Binary16(apply(operator, left, right))
+            }
+            (Self::BFloat16(left), Self::BFloat16(right)) => {
+                Self::BFloat16(apply(operator, left, right))
+            }
+            (Self::Binary128(left), Self::Binary128(right)) => {
+                Self::Binary128(apply(operator, left, right))
+            }
             (Self::Binary32(left), Self::Binary32(right)) => {
                 Self::Binary32(apply(operator, left, right))
             }
@@ -692,9 +774,12 @@ impl Float {
     #[must_use]
     pub fn neg(self) -> Self {
         match self {
+            Self::Binary16(value) => Self::Binary16(-value),
+            Self::BFloat16(value) => Self::BFloat16(-value),
             Self::Binary32(value) => Self::Binary32(-value),
             Self::Binary64(value) => Self::Binary64(-value),
             Self::X87Extended(value) => Self::X87Extended(-value),
+            Self::Binary128(value) => Self::Binary128(-value),
         }
     }
 
@@ -708,8 +793,11 @@ impl Float {
 
     /// The IEEE order of two floats, in the wider format; `None` for NaN.
     pub fn compare(self, other: Self) -> Option<Ordering> {
-        let format = self.format().max(other.format());
+        let format = wider(self.format(), other.format());
         match (self.convert(format), other.convert(format)) {
+            (Self::Binary16(left), Self::Binary16(right)) => left.partial_cmp(&right),
+            (Self::BFloat16(left), Self::BFloat16(right)) => left.partial_cmp(&right),
+            (Self::Binary128(left), Self::Binary128(right)) => left.partial_cmp(&right),
             (Self::Binary32(left), Self::Binary32(right)) => left.partial_cmp(&right),
             (Self::Binary64(left), Self::Binary64(right)) => left.partial_cmp(&right),
             (Self::X87Extended(left), Self::X87Extended(right)) => left.partial_cmp(&right),

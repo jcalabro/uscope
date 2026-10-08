@@ -11,6 +11,13 @@ enum Flags {
     FLAG_WRITE = 2U,
 };
 
+// Counts 0, 1, 2 as a sequence does, so it holds no flags.
+enum Sequence {
+    SEQUENCE_FIRST,
+    SEQUENCE_SECOND,
+    SEQUENCE_THIRD,
+};
+
 enum __attribute__((packed)) Byte {
     BYTE_ZERO = 0,
     BYTE_MAX = UINT8_MAX,
@@ -27,19 +34,22 @@ static int inspect_enums(
     const enum Signed *zero_alias,
     const enum Flags *flags,
     const enum Byte *byte_value,
-    const union Raw *raw
+    const union Raw *raw,
+    const enum Sequence *sequence
 ) {
     __asm__ volatile(
         ""
         :
-        : "r"(signed_value), "r"(zero_alias), "r"(flags), "r"(byte_value), "r"(raw)
+        : "r"(signed_value), "r"(zero_alias), "r"(flags), "r"(byte_value), "r"(raw),
+          "r"(sequence)
         : "memory"
     );
     return *signed_value == SIGNED_NEGATIVE
         && *zero_alias == SIGNED_ZERO
         && *flags == (enum Flags)(FLAG_READ | FLAG_WRITE)
         && *byte_value == BYTE_MAX
-        && raw->integer == 42;
+        && raw->integer == 42
+        && *sequence == (enum Sequence)3;
 }
 
 int main(void) {
@@ -48,5 +58,6 @@ int main(void) {
     enum Flags flags = (enum Flags)(FLAG_READ | FLAG_WRITE);
     enum Byte byte_value = BYTE_MAX;
     union Raw raw = {.integer = 42};
-    return !inspect_enums(&signed_value, &zero_alias, &flags, &byte_value, &raw);
+    enum Sequence sequence = (enum Sequence)3;
+    return !inspect_enums(&signed_value, &zero_alias, &flags, &byte_value, &raw, &sequence);
 }

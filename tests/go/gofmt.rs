@@ -118,7 +118,7 @@ async fn check_parsed(scenario: &Scenario, fixture: &str) {
     for (index, keyword) in ["import", "type", "var"].into_iter().enumerate() {
         let declaration = written(&evaluate(scenario, &format!("src.Decls[{index}]")).await);
         let shown = format!(
-            "*go/ast.GenDecl *{{Doc: 0x0, TokPos: {}, Tok: go/token.{},",
+            "*go/ast.GenDecl *{{Doc: nil, TokPos: {}, Tok: go/token.{},",
             position(keyword),
             keyword.to_uppercase()
         );
@@ -126,7 +126,7 @@ async fn check_parsed(scenario: &Scenario, fixture: &str) {
     }
     let function = written(&evaluate(scenario, "src.Decls[3]").await);
     assert!(
-        function.starts_with("*go/ast.FuncDecl *{Doc: 0x0, Recv: 0x0,"),
+        function.starts_with("*go/ast.FuncDecl *{Doc: nil, Recv: nil,"),
         "{fixture}: {function}"
     );
 }

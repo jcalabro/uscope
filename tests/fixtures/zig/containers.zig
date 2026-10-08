@@ -13,6 +13,11 @@ noinline fn barrier(fixture: *const anyopaque) void {
 const Shape = union(enum) { circle: u32, square: struct { side: u16 }, none };
 const Failure = error{ Oops, Bad };
 
+fn lessThan(context: void, a: u32, b: u32) std.math.Order {
+    _ = context;
+    return std.math.order(a, b);
+}
+
 noinline fn fallible(fail: bool) Failure!u32 {
     if (fail) return Failure.Bad;
     return 7;
@@ -24,7 +29,7 @@ pub fn main() !void {
     defer ints.deinit(allocator);
     try ints.appendSlice(allocator, &.{ 1, 2, 3 });
     var no_ints: std.ArrayList(u64) = .empty; // VIEW: no_ints => len=0 []
-    var bytes = std.array_list.Managed(u8).init(allocator); // VIEW: bytes => len=2 [104, 105]
+    var bytes = std.array_list.Managed(u8).init(allocator); // VIEW: bytes => "hi"
     defer bytes.deinit();
     try bytes.appendSlice("hi");
     var many: std.ArrayList(u32) = .empty; // VIEW: many => len=300 [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, …]
@@ -62,6 +67,52 @@ pub fn main() !void {
     past_capacity.items = @constCast(storage[0..4]);
     past_capacity.capacity = 2;
 
+    // Bytes are text when they are valid UTF-8 without control characters.
+    var text: std.ArrayList(u8) = .empty; // VIEW: text => "hello"
+    defer text.deinit(allocator);
+    try text.appendSlice(allocator, "hello");
+    var binary: std.ArrayList(u8) = .empty; // VIEW: binary => len=2 [255, 0]
+    defer binary.deinit(allocator);
+    try binary.appendSlice(allocator, &.{ 255, 0 });
+    var managed_ints = std.array_list.Managed(i16).init(allocator); // VIEW: managed_ints => len=2 [7, 8]
+    defer managed_ints.deinit();
+    try managed_ints.appendSlice(&.{ 7, 8 });
+    var buffer = [_]u8{ 'o', 'k' };
+    var byte_slice: []u8 = &buffer; // VIEW: byte_slice => "ok"
+    var unmanaged_bits: std.DynamicBitSetUnmanaged = .{}; // VIEW: unmanaged_bits => len=0 []
+    var deque: std.Deque(i32) = .empty; // VIEW: deque => len=3 [0, 1, 2]
+    defer deque.deinit(allocator);
+    try deque.pushBack(allocator, 1);
+    try deque.pushBack(allocator, 2);
+    try deque.pushFront(allocator, 0);
+    var queue: std.PriorityQueue(u32, void, lessThan) = .empty; // VIEW: queue => len=3 [1, 5, 3]
+    defer queue.deinit(allocator);
+    try queue.push(allocator, 5);
+    try queue.push(allocator, 3);
+    try queue.push(allocator, 1);
+    var set = std.BufSet.init(allocator); // VIEW: set => len=1 ["one"]
+    defer set.deinit();
+    try set.insert("one");
+    var keys: std.AutoHashMapUnmanaged(u16, void) = .empty; // VIEW: keys => len=2 [4, 9] (any order)
+    defer keys.deinit(allocator);
+    try keys.put(allocator, 4, {});
+    try keys.put(allocator, 9, {});
+    var bits = std.StaticBitSet(10).initEmpty(); // VIEW: bits => len=2 [1, 8]
+    bits.set(1);
+    bits.set(8);
+    var wide_bits = std.StaticBitSet(100).initEmpty(); // VIEW: wide_bits => len=2 [3, 99]
+    wide_bits.set(3);
+    wide_bits.set(99);
+    var dynamic_bits: std.DynamicBitSet = undefined; // VIEW: dynamic_bits => len=2 [0, 69]
+    dynamic_bits = try std.DynamicBitSet.initEmpty(allocator, 70);
+    defer dynamic_bits.deinit();
+    dynamic_bits.set(0);
+    dynamic_bits.set(69);
+    var counter = std.atomic.Value(u32).init(5); // VIEW: counter => 5
+    var written: std.Io.Writer.Allocating = .init(allocator); // VIEW: written => "out"
+    defer written.deinit();
+    try written.writer.writeAll("out");
+
     // Optionals, error unions, and tagged unions, which the debugger
     // presents as the variant each holds.
     var some: ?u32 = 5; // VIEW: some => 5
@@ -89,6 +140,20 @@ pub fn main() !void {
     std.mem.doNotOptimizeAway(&ordered);
     std.mem.doNotOptimizeAway(&strings);
     std.mem.doNotOptimizeAway(&no_ordered);
+    std.mem.doNotOptimizeAway(&text);
+    std.mem.doNotOptimizeAway(&binary);
+    std.mem.doNotOptimizeAway(&managed_ints);
+    std.mem.doNotOptimizeAway(&byte_slice);
+    std.mem.doNotOptimizeAway(&unmanaged_bits);
+    std.mem.doNotOptimizeAway(&deque);
+    std.mem.doNotOptimizeAway(&queue);
+    std.mem.doNotOptimizeAway(&set);
+    std.mem.doNotOptimizeAway(&keys);
+    std.mem.doNotOptimizeAway(&bits);
+    std.mem.doNotOptimizeAway(&wide_bits);
+    std.mem.doNotOptimizeAway(&dynamic_bits);
+    std.mem.doNotOptimizeAway(&counter);
+    std.mem.doNotOptimizeAway(&written);
     std.mem.doNotOptimizeAway(&some);
     std.mem.doNotOptimizeAway(&none);
     std.mem.doNotOptimizeAway(&some_pointer);

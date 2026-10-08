@@ -762,6 +762,12 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
 fn batch_with_settings(settings: &str, arguments: &[&str], commands: &[&str]) -> String {
     let directory = support::ScratchDir::new("cli-settings");
     let path = directory.path().join("config.toml");
+    // How long a run took depends on the machine's load, as the settings
+    // every other test uses say.
+    let settings = match settings.split_once("[stop]\n") {
+        Some((before, after)) => format!("{before}[stop]\nelapsed = false\n{after}"),
+        None => format!("{settings}\n[stop]\nelapsed = false\n"),
+    };
     std::fs::write(&path, settings).expect("write the settings");
     let mut all = vec!["--batch"];
     for command in commands {
@@ -1761,6 +1767,48 @@ fn strings_print_as_quoted_escaped_text() {
     );
 }
 
+/// Characters wider than a byte print as their numbers and what they are,
+/// and pointers to text of them as the text.
+#[test]
+fn wide_characters_print_as_their_numbers_and_characters() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cpp/strings.cpp");
+    let line = std::fs::read_to_string(&path)
+        .expect("source")
+        .lines()
+        .position(|line| line.contains("strings stop here"))
+        .expect("marker")
+        + 1;
+    let stdout = batch(
+        &[
+            "--color",
+            "never",
+            "build/test-programs/strings-cpp-clang-o0",
+        ],
+        &[&format!("break strings.cpp:{line}"), "run", "print"],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "(wchar_t) wide = 233 'é'\n",
+            "(char8_t) eight = 97 'a'\n",
+            "(char16_t) sixteen = 955 'λ'\n",
+            "(char32_t) thirty_two = 129408 '🦀'\n",
+            // A surrogate is a code unit, not a character.
+            "(char16_t) surrogate = 55296\n",
+            "(const char16_t *) sixteen_text = 0x",
+            " \"λx\"\n",
+            "(const char8_t *) eight_text = 0x",
+            " \"éight\"\n",
+        ],
+    );
+    let stdout = batch(
+        &["--color", "never", "build/test-programs/strings-rust-o0"],
+        &["break strings_target", "run", "print letter"],
+    );
+    assert!(stdout.contains("(char) letter = 955 'λ'\n"), "{stdout}");
+}
+
 /// `print` shows a value as its view presents it, with its elements up to
 /// the inspection's budget; `print/r` and `set views off` show it as
 /// stored; and `info view` says which view presents it, or why none does.
@@ -2258,6 +2306,56 @@ fn print_and_p_render_scalars_and_print_lists_every_variable() {
     ] {
         assert!(stdout.contains(expected), "{expected:?} in:\n{stdout}");
     }
+}
+
+/// An array of several dimensions prints as rows of rows, as its program
+/// writes it, and a row the elements shown end inside of is closed.
+#[test]
+fn arrays_of_several_dimensions_print_as_nested_rows() {
+    let arguments = ["--color", "never", "build/test-programs/records-c-gcc-o0"];
+    let commands = ["break main", "run", "print matrix"];
+    assert!(
+        batch(&arguments, &commands).contains("(int32_t[2][3]) matrix = [[1, 2, 3], [4, 5, 6]]\n")
+    );
+    let stdout = batch_with_settings("[print]\nmax-elements = 4\n", &arguments, &commands);
+    assert!(
+        stdout.contains("(int32_t[2][3]) matrix = [[1, 2, 3], [4], <2 omitted>]\n"),
+        "{stdout}"
+    );
+}
+
+/// Floats print in every format their programs hold them in, each with
+/// its own precision: a quad precision tenth is a tenth.
+#[test]
+fn floats_of_every_format_print_exactly() {
+    for fixture in ["floats-c-gcc", "floats-c-clang"] {
+        let stdout = batch(
+            &[&format!("build/test-programs/{fixture}")],
+            &["break floats_target", "run", "up", "print"],
+        );
+        assert_in_order(
+            &stdout,
+            &[
+                "(_Float16) half = 1.5\n",
+                "(__bf16) brain = -3.14\n",
+                "(float) single = 0.25\n",
+                "(double) precision = 2.5\n",
+                "(long double) extended = 3.125\n",
+                // GCC names `__float128` `_Float128`.
+                "128) quad = 0.1\n",
+            ],
+        );
+    }
+    let stdout = batch(
+        &["build/test-programs/floats-rust"],
+        &["break floats_target", "run", "print half", "print quad"],
+    );
+    assert_in_order(&stdout, &["(f16) half = 1.5\n", "(f128) quad = 0.1\n"]);
+    let stdout = batch(
+        &["build/test-programs/floats-zig"],
+        &["break floats.zig:8", "run", "print half", "print quad"],
+    );
+    assert_in_order(&stdout, &["(f16) half = 1.5\n", "(f128) quad = 0.1\n"]);
 }
 
 #[test]

@@ -286,3 +286,154 @@ view c++ std::tuple<A, B, C, D, E, F> {
         5 = ((H5)self)._M_head_impl,
     }
 }
+
+# A pair's two members, without the empty base libstdc++ gives it. The
+# standard names a pair's members, so this view presents libc++'s too.
+view c++ std::pair<A, B> {
+    show record { first = first, second = second }
+}
+
+# The adaptors present the containers they adapt, whose member the
+# standard names c, in either library: a stack from its bottom, a queue
+# from its front, and a priority queue in its heap's order, largest first.
+view c++ std::stack<T, _> {
+    show value(c)
+}
+
+view c++ std::queue<T, _> {
+    show value(c)
+}
+
+view c++ std::priority_queue<T, _, _> {
+    show value(c)
+}
+
+# std::vector<bool> packs its bools into words: an iterator is a word and
+# a bit in it, and the vector runs from _M_start to _M_finish.
+view c++ std::vector<bool, _> {
+    let words = _M_impl._M_start._M_p
+    let bits = sizeof(*words) * 8
+    let first = _M_impl._M_start._M_offset
+    let size = (_M_impl._M_finish._M_p - words) * bits + _M_impl._M_finish._M_offset - first
+    check words <= _M_impl._M_finish._M_p && _M_impl._M_finish._M_p <= _M_impl._M_end_of_storage
+    show sequence(size) for i in range(size) let at = first + i
+        => (words[at / bits] >> (at % bits) & 1) != 0
+    field capacity = (_M_impl._M_end_of_storage - words) * bits
+}
+
+# A bitset is the positions of the bits it sets. Its words, one or an
+# array of them, are 64 bits on the targets uscope supports; each is read
+# once.
+view c++ std::bitset<N> {
+    let words = (u64*)&_M_w
+    check sizeof(_M_w) % 8 == 0
+    show sequence(_) for w in range((N + 63) / 64) let word = words[w]
+        for b in range(64) if (word >> b & 1) != 0 && w * 64 + b < N => w * 64 + b
+    field size = N
+}
+
+view c++ std::initializer_list<T> {
+    show sequence(_M_len) for i in range(_M_len) => _M_array[i]
+}
+
+# A flat map keeps its keys and its values in two vectors, in order.
+view c++ std::flat_map<K, V, _, _, _> {
+    let keys = _M_cont.keys._M_impl._M_start
+    let values = _M_cont.values._M_impl._M_start
+    let size = _M_cont.keys._M_impl._M_finish - keys
+    check _M_cont.values._M_impl._M_finish - values == size
+    show map(size) for i in range(size) => keys[i] : values[i]
+}
+
+view c++ std::flat_set<K, _, _> {
+    let keys = _M_cont._M_impl._M_start
+    show sequence(_M_cont._M_impl._M_finish - keys) for i in range(_M_cont._M_impl._M_finish - keys) => keys[i]
+}
+
+# A duration is a count of its period, written as Go writes durations
+# where the period is one of seconds' that uscope writes. Durations of
+# other periods, and of floats, show as stored.
+view c++ std::chrono::duration<_, std::ratio<1, 1000000000>> {
+    show value(__r)
+    format self as duration(ns)
+}
+
+view c++ std::chrono::duration<_, std::ratio<1, 1000000>> {
+    show value(__r)
+    format self as duration(us)
+}
+
+view c++ std::chrono::duration<_, std::ratio<1, 1000>> {
+    show value(__r)
+    format self as duration(ms)
+}
+
+view c++ std::chrono::duration<_, std::ratio<1, 1>> {
+    show value(__r)
+    format self as duration(s)
+}
+
+view c++ std::chrono::duration<_, std::ratio<60, 1>> {
+    show value(__r * 60)
+    format self as duration(s)
+}
+
+view c++ std::chrono::duration<_, std::ratio<3600, 1>> {
+    show value(__r * 3600)
+    format self as duration(s)
+}
+
+# The system clock counts nanoseconds from the Unix epoch, shown as the UTC
+# time it is; another clock's time is how long after its own epoch it is.
+view c++ std::chrono::time_point<std::chrono::system_clock, std::chrono::duration<_, std::ratio<1, 1000000000>>> {
+    show value(__d.__r)
+    format self as time(ns)
+}
+
+view c++ std::chrono::time_point<_, _> {
+    show value(__d)
+}
+
+# An atomic is the value it holds: an integer's in its base, a bool's and
+# a pointer's in a member, and a float's in a base of its own.
+view c++ std::atomic<T> {
+    let held = _M_i or _M_base._M_i or _M_b._M_p or _M_fp
+    show value(held)
+}
+
+view c++ std::reference_wrapper<T> {
+    show value(*_M_data)
+}
+
+view c++ std::expected<T, E> {
+    show if _M_has_value { value(_M_val) } else { record { unexpected = _M_unex } }
+}
+
+view c++ std::filesystem::path {
+    show value(_M_pathname)
+}
+
+# A function with a target is the function that calls it, whose name says
+# what the target is.
+view c++ std::function<_> {
+    show if _M_manager == null { empty("empty") } else { value(_M_invoker) }
+}
+
+# A mutex is the C library's, which glibc.views presents.
+view c++ std::mutex {
+    show value(_M_mutex)
+}
+
+view c++ std::recursive_mutex {
+    show value(_M_mutex)
+}
+
+# A thread id is the thread's pthread_t, or 0 for no thread.
+view c++ std::thread::id {
+    show if _M_thread == 0 { empty("no thread") } else { value(_M_thread) }
+}
+
+# An any with a value has a manager for its type, whose name says the type.
+view c++ std::any {
+    show if _M_manager == null { empty("empty") } else { value(_M_manager) }
+}
