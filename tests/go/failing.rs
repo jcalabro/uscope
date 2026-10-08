@@ -169,10 +169,12 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                     // fatal, and nothing marks the program panicking until
                     // fatal runs on, so another thread going idle meanwhile
                     // may report the same deadlock; each report stops.
+                    let checkdead = matches!(case, "deadlock" | "goexit");
                     let mut next = scenario.resume_to_stop().await;
-                    while matches!(&next, StopReason::LanguageException(again)
-                        if again.kind == LanguageExceptionKind::Fatal
-                            && again.message == exception.message)
+                    while checkdead
+                        && matches!(&next, StopReason::LanguageException(again)
+                            if again.kind == LanguageExceptionKind::Fatal
+                                && again.message == exception.message)
                     {
                         next = scenario.resume_to_stop().await;
                     }
