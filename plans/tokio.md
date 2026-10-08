@@ -1024,6 +1024,38 @@ fail (see Testing).
    - `step` into `.await`.
    - The step setting.
    - `$task` conditions.
+   - *As built:*
+     - A waiting step plants plan breakpoints where its future resumes,
+       and takes a hit for its own when the body there names the same
+       future, by address and an equivalent type, since each codegen unit
+       describes a coroutine's type and functions anew. The task's
+       committed chain is read only to begin a step of a task no thread
+       runs, which waits as if a poll had just returned `Pending`.
+     - At O3 an async body is often inlined into its awaiter's, or into a
+       combinator's, such as `select!`'s closure within `PollFn::poll`.
+       The step then follows the body's own `$future` where it names one,
+       otherwise the future whose poll runs it, or its task. It waits at
+       the body's statements and at other lines of the async functions
+       around it, less its state dispatch. Leaving the body is not its end
+       while it may be pending: a body that names its future has returned
+       once the future says so.
+     - Where `inner` names no future, `finish` from it cannot tell its
+       return from its pending await, and goes on to the awaiter's next
+       line rather than stopping on the await's.
+     - Endings: the step watches every copy of its future's drop glue,
+       out of line or inlined, and the code that takes up its task again,
+       as the runtime model names it: tokio's vtable `poll` and
+       `shutdown`, the dispatch's return, and the glue for the task's
+       `Box<Cell<T, S>>`, which frees it first. A task cancelled within
+       the very poll the step waits after is still seen.
+     - `pause` while a step waits ends it as `StopReason::Pause`, as it
+       ends every step, not as an incomplete step. A new step of the task
+       waits again.
+     - `$task` conditions needed nothing new; `stepi` and `nexti` behave
+       as in any function, and `advance` follows the frame's awaits as
+       `finish` does, keeping its targets.
+     - The step setting is `[step] runtime = "skip"|"enter"`, `set
+       step-runtime on|off`, and DAP's `stepIntoRuntime`.
 6. **Views.** `views/tokio.views`, each type verified by `VIEW:` markers
    against the pin.
    - Leaf descriptions through views, with `JoinHandle` links.
