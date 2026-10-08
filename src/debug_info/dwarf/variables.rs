@@ -77,7 +77,9 @@ const MAX_SCALAR_BYTES: u64 = 16;
 const MAX_EVALUATION_ITERATIONS: u32 = 10_000;
 const MAX_EVALUATION_MEMORY_BYTES: usize = 1_024;
 const MAX_LOCATION_PIECES: usize = 64;
-const MAX_TYPES: usize = 65_536;
+/// rustc describes a type again in every unit that uses it, so a program
+/// built with tokio has some 70,000.
+const MAX_TYPES: usize = 1 << 20;
 const MAX_TYPE_RESOLUTION_DEPTH: usize = 256;
 const MAX_RECORD_CHILDREN: usize = 4_096;
 const MAX_VARIANT_METADATA: usize = 4_096;

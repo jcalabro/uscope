@@ -10,3 +10,4 @@ mod panics;
 mod resume_points;
 mod std_async;
 mod stops;
+mod workers;
