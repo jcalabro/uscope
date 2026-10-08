@@ -8,10 +8,11 @@
 pub mod functions;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
+
+use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 
 use crate::eval::types::c_type_key_of_name;
 use crate::{
@@ -184,8 +185,9 @@ fn split_arguments(
         return Some((text, None));
     };
     let inner = text[start + open.len_utf8()..].strip_suffix(close)?;
-    // The list must close only at the very end.
-    if top_level_position(inner, close, syntax).is_some() || balance(inner, syntax).is_none() {
+    // The list must close only at the very end, and be balanced, which
+    // splitting it checks.
+    if top_level_position(inner, close, syntax).is_some() {
         return None;
     }
     let arguments = if inner.trim().is_empty() {
@@ -205,9 +207,10 @@ fn split_top_level<'a>(text: &'a str, separator: &str, syntax: NameSyntax) -> Op
     let mut stack = Vec::new();
     let mut start = 0;
     let mut previous = None;
+    let first = separator.chars().next();
     let mut characters = text.char_indices().peekable();
     while let Some((index, character)) = characters.next() {
-        if stack.is_empty() && text[index..].starts_with(separator) {
+        if stack.is_empty() && Some(character) == first && text[index..].starts_with(separator) {
             parts.push(&text[start..index]);
             start = index + separator.len();
             // Skip the rest of the separator.
@@ -238,16 +241,6 @@ fn top_level_position(text: &str, target: char, syntax: NameSyntax) -> Option<us
         previous = Some(character);
     }
     None
-}
-
-fn balance(text: &str, syntax: NameSyntax) -> Option<()> {
-    let mut stack = Vec::new();
-    let mut previous = None;
-    for character in text.chars() {
-        step(&mut stack, character, previous, syntax)?;
-        previous = Some(character);
-    }
-    stack.is_empty().then_some(())
 }
 
 /// Tracks one character's effect on the open brackets. Angle brackets

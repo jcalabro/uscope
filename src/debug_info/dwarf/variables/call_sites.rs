@@ -2,9 +2,10 @@
 //! values a function's parameters held on entry from the call that entered
 //! it, and the tail calls that may have entered it since.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use gimli::{Location, Value};
 
 use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, die_reference};
@@ -479,7 +480,7 @@ impl CallSiteCatalog {
         // Every function a chain from `from` may reach must describe its
         // tail calls, each of which must stay within this module.
         let mut reached = vec![from];
-        let mut seen = HashSet::from([from]);
+        let mut seen = HashSet::from_iter([from]);
         let mut next = 0;
         while let Some(&function) = reached.get(next) {
             next += 1;
@@ -511,7 +512,7 @@ impl CallSiteCatalog {
                 callers.entry(enters).or_default().push(function);
             }
         }
-        let mut leads = HashSet::from([to]);
+        let mut leads = HashSet::from_iter([to]);
         let mut pending = vec![to];
         while let Some(function) = pending.pop() {
             for &caller in callers.get(&function).into_iter().flatten() {

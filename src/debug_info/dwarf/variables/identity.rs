@@ -6,8 +6,9 @@
 //! const generic parameters, and Go and Zig emit none. A parsed argument
 //! names a type only when exactly one type matches it.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+use foldhash::{HashMap, HashMapExt, HashSet};
 
 use crate::debug_info::dwarf::{DieKey, Reader, die_reference_with_signatures, string_attribute};
 use crate::type_identity::{

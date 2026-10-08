@@ -1,8 +1,8 @@
 //! Evaluating DWARF location expressions against a stopped thread.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use foldhash::HashMap;
 use gimli::{EvaluationResult, Location, RunTimeEndian, Value};
 
 use crate::debug_info::dwarf::Reader;

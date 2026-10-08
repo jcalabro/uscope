@@ -1,7 +1,8 @@
 //! Value shapes: how a type's bytes are decoded and which children it has.
 
-use std::collections::HashSet;
 use std::sync::Arc;
+
+use foldhash::{HashSet, HashSetExt};
 
 use crate::model::ArrayDimension;
 use crate::{

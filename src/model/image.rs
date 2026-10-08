@@ -1,7 +1,7 @@
 //! A module image's static metadata and the indexes that answer lookups
 //! in it.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -135,14 +135,21 @@ impl<T: Copy + Ord> RangeIndex<T> {
 fn grouped_index<K: Ord, V: Ord>(
     entries: impl IntoIterator<Item = (K, V)>,
 ) -> BTreeMap<K, Arc<[V]>> {
-    let mut grouped = BTreeMap::<K, BTreeSet<V>>::new();
-    for (key, value) in entries {
-        grouped.entry(key).or_default().insert(value);
+    // Sorting once and taking each key's run is far cheaper than inserting
+    // every entry into a tree of trees.
+    let mut entries = entries.into_iter().collect::<Vec<_>>();
+    entries.sort_unstable();
+    entries.dedup_by(|later, earlier| (*later).cmp(earlier).is_eq());
+    let mut grouped = Vec::new();
+    let mut entries = entries.into_iter().peekable();
+    while let Some((key, value)) = entries.next() {
+        let mut values = vec![value];
+        while let Some((_, value)) = entries.next_if(|(next, _)| next.cmp(&key).is_eq()) {
+            values.push(value);
+        }
+        grouped.push((key, Arc::from(values)));
     }
-    grouped
-        .into_iter()
-        .map(|(key, values)| (key, values.into_iter().collect()))
-        .collect()
+    grouped.into_iter().collect()
 }
 
 /// Every selector naming a global: its name, qualified name, and linkage

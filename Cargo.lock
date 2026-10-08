@@ -1865,6 +1865,7 @@ dependencies = [
  "clap",
  "cpp_demangle",
  "expectrl",
+ "foldhash 0.2.0",
  "futures-util",
  "gimli",
  "iced-x86",
