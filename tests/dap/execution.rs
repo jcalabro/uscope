@@ -105,7 +105,7 @@ fn every_co_hit_thread_is_named_by_its_breakpoint() {
     );
     let mut mark = started.mark;
     let mut co_hits = 0;
-    for _ in 0..10 {
+    for round in 0..10 {
         let stop = dap.stopped(mark);
         assert_eq!(stop.body["allThreadsStopped"], true, "{stop:?}");
         let threads = dap.request("threads", Value::Null)["threads"]
@@ -131,6 +131,11 @@ fn every_co_hit_thread_is_named_by_its_breakpoint() {
             .collect::<Vec<_>>();
         assert!(at_breakpoint.contains(&stop.thread), "{threads:?}");
         co_hits += at_breakpoint.len() - 1;
+        // The program stays at the last stop, which nothing would wait
+        // for after it.
+        if round == 9 {
+            break;
+        }
         let resumed = dap.send("continue", json!({"threadId": stop.thread}));
         dap.success(resumed);
         mark = resumed.mark;
