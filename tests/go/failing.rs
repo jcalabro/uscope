@@ -165,7 +165,18 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                         assert_eq!(exception.kind, LanguageExceptionKind::Fatal);
                     }
                     check_case(&scenario, case, &context).await;
-                    scenario.resume_to_stop().await
+                    // Go's checkdead unlocks the scheduler before it calls
+                    // fatal, and nothing marks the program panicking until
+                    // fatal runs on, so another thread going idle meanwhile
+                    // may report the same deadlock; each report stops.
+                    let mut next = scenario.resume_to_stop().await;
+                    while matches!(&next, StopReason::LanguageException(again)
+                        if again.kind == LanguageExceptionKind::Fatal
+                            && again.message == exception.message)
+                    {
+                        next = scenario.resume_to_stop().await;
+                    }
+                    next
                 }
             };
             let StopReason::Exited(ExitStatus::Code(code)) = reason else {
