@@ -1143,9 +1143,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// Whether a thread whose future just returned is in its runtime's
-    /// code, polling no future of the program's: it returned from its
-    /// task's own future, not to an awaiter, nor to a future of the
-    /// runtime's that the program awaits, such as a timeout.
+    /// code, polling no future of the program's within the dispatch that
+    /// runs its task: it returned from its task's own future, not to an
+    /// awaiter, nor to a future of the runtime's that the program awaits,
+    /// such as a timeout. Futures that poll the dispatch itself, as a
+    /// `LocalSet`'s `run_until` does, are not the task's.
     fn returned_to_runtime(&self, pid: Pid, registers: &nix::libc::user_regs_struct) -> bool {
         if !self
             .code_role(VirtualAddress::new(registers.rip))
@@ -1161,7 +1163,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return false;
         };
-        stack.frames.iter().all(|frame| {
+        let dispatch = (0..stack.frames.len())
+            .find(|&level| {
+                stack
+                    .lookup_address(level)
+                    .and_then(|address| self.code_role(address))
+                    == Some(crate::CodeRole::Dispatch)
+            })
+            .unwrap_or(stack.frames.len());
+        stack.frames[..dispatch].iter().all(|frame| {
             self.image_location(frame.context.instruction)
                 .and_then(|location| location.physical_instance)
                 .and_then(|instance| self.module_image.code_instance(instance))
