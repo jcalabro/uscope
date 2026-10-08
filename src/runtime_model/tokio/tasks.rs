@@ -155,9 +155,10 @@ impl TokioRuntime {
                         return true;
                     }
                     Ok(found) => {
-                        page.value
-                            .tasks
-                            .push(owned_task(census, runtime, at, &found));
+                        page.value.tasks.push(RuntimeTask {
+                            entry: self.entry(stop, at),
+                            ..owned_task(census, runtime, at, &found)
+                        });
                         (previous, at) = (at, found.next);
                         walked += 1;
                         total += 1;
@@ -400,7 +401,10 @@ impl TokioRuntime {
         for &runtime in &census.runtimes {
             match self.listed(stop, tasks, runtime, task.number, task.locator) {
                 Ok(Some((header, node))) => {
-                    return Ok(Some(owned_task(census, runtime, header, &node)));
+                    return Ok(Some(RuntimeTask {
+                        entry: self.entry(stop, header),
+                        ..owned_task(census, runtime, header, &node)
+                    }));
                 }
                 Ok(None) => {}
                 Err(reason) => unreadable = unreadable.or(Some(reason)),

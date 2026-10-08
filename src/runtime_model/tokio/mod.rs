@@ -9,6 +9,7 @@
 //! closures no thread runs yet. Every node is checked before it is read,
 //! so a corrupted list is reported, never followed.
 
+mod future;
 mod layout;
 mod tasks;
 
@@ -96,6 +97,10 @@ struct TokioRuntime {
     caveat: Option<Arc<str>>,
     /// Whether each vtable, by image address, is a task's.
     vtables: Mutex<BTreeMap<u64, Option<Arc<str>>>>,
+    /// Where the future is in the cells of each poll function.
+    futures: Mutex<BTreeMap<ImageAddress, Result<future::FutureLayout, Arc<str>>>>,
+    /// Where the function that runs each coroutine type begins.
+    bodies: Mutex<BTreeMap<crate::TypeReference, Option<ImageAddress>>>,
 }
 
 /// One runtime the stop's threads entered: its flavor, and its handle's
@@ -190,6 +195,8 @@ impl TokioRuntime {
             image,
             caveat: caveat.map(Arc::from),
             vtables: Mutex::new(BTreeMap::new()),
+            futures: Mutex::new(BTreeMap::new()),
+            bodies: Mutex::new(BTreeMap::new()),
         }
     }
 

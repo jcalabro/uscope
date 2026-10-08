@@ -10,6 +10,7 @@
 //! process control, debug-information parsing, I/O, clocks, and threads out
 //! of it, and keeps every language's runtime in a module of its own.
 
+mod futures;
 mod go;
 mod records;
 mod rust;
@@ -19,9 +20,9 @@ use std::sync::Arc;
 
 use crate::unwind::RegisterFile;
 use crate::{
-    EntryProvenance, ExceptionFilter, ImageAddress, IntegerValue, ModuleImage, RecordMemberLayout,
-    StackSegment, TaskState, ThreadId, ThreadLocal, TypeInfo, TypeKind, TypeNode, TypeReference,
-    VirtualAddress,
+    CoroutineInfo, EntryProvenance, ExceptionFilter, ImageAddress, IntegerValue, ModuleImage,
+    RecordMemberLayout, StackSegment, TaskState, ThreadId, ThreadLocal, TypeInfo, TypeKind,
+    TypeNode, TypeReference, VirtualAddress,
 };
 
 /// A result with the reasons it may be incomplete, such as a task whose
@@ -106,6 +107,23 @@ pub trait RuntimeImage: std::fmt::Debug {
     /// ends with `suffix`, such as `src/runtime/task/raw.rs`.
     fn source_path_ending(&self, suffix: &str) -> Option<std::path::PathBuf> {
         let _ = suffix;
+        None
+    }
+    /// What the coroutine of type `ty` is, or why its layout cannot be read
+    /// as one; `None` for a type that is no coroutine.
+    fn coroutine(&self, ty: TypeReference) -> Option<Result<&CoroutineInfo, &Arc<str>>> {
+        let _ = ty;
+        None
+    }
+    /// The concrete type a trait object's vtable at `address` is for.
+    fn trait_object_type(&self, address: ImageAddress) -> Option<TypeReference> {
+        let _ = address;
+        None
+    }
+    /// Where the one function that runs the coroutine of type `ty` begins,
+    /// when its code is out of line and no other body runs it.
+    fn coroutine_body(&self, ty: TypeReference) -> Option<ImageAddress> {
+        let _ = ty;
         None
     }
 }
@@ -570,6 +588,34 @@ impl RuntimeImage for ModuleImage {
             .iter()
             .find(|file| file.path.ends_with(suffix))
             .map(|file| file.path.to_path_buf())
+    }
+
+    fn coroutine(&self, ty: TypeReference) -> Option<Result<&CoroutineInfo, &Arc<str>>> {
+        Self::coroutine(self, ty.id)
+    }
+
+    fn trait_object_type(&self, address: ImageAddress) -> Option<TypeReference> {
+        Self::trait_object_type(self, address)
+    }
+
+    fn coroutine_body(&self, ty: TypeReference) -> Option<ImageAddress> {
+        let mut starts = self
+            .functions()
+            .iter()
+            .filter(|function| {
+                function.coroutine.is_some_and(|runs| {
+                    let runs = TypeReference {
+                        image: ty.image,
+                        id: runs,
+                    };
+                    RuntimeImage::same_type(self, runs, ty)
+                })
+            })
+            .flat_map(|function| self.instances_for_function(function.id))
+            .filter(|instance| matches!(instance.kind, crate::CodeInstanceKind::OutOfLine))
+            .filter_map(|instance| instance.ranges.iter().map(|range| range.start).min());
+        let first = starts.next()?;
+        starts.all(|start| start == first).then_some(first)
     }
 
     fn function_name(&self, address: ImageAddress) -> Option<Arc<str>> {

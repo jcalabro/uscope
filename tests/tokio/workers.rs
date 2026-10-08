@@ -14,7 +14,7 @@ use uscope::{
 };
 
 use crate::invariants::checked;
-use crate::stops::{backtrace, integer};
+use crate::stops::{backtrace, integer, line};
 use crate::support::{Scenario, ScratchDir};
 
 const BUILDS: [&str; 2] = ["tokio-workers-o0", "tokio-workers-o3"];
@@ -413,6 +413,38 @@ async fn before_any_runtime_there_are_no_tasks() {
             "{fixture}: {tasks:#?} {gaps:?}"
         );
         workers.scenario.shutdown().await;
+    }
+}
+
+/// Each of the program's async tasks began in the async function it
+/// spawned, `top`, at the line that declares it.
+#[tokio::test]
+async fn each_task_began_in_the_function_it_spawned() {
+    let header = line("workers/src/main.rs", "async fn top(");
+    for fixture in BUILDS {
+        for current in [false, true] {
+            let workers = Workers::parked(fixture, current).await;
+            let truth = workers.truth();
+            let (tasks, _) = workers.tasks(4096).await;
+            for id in truth.tasks.keys() {
+                let task = tasks
+                    .iter()
+                    .find(|task| task.id.number == *id)
+                    .unwrap_or_else(|| panic!("{fixture}: task {id} is not listed"));
+                let entry = task.entry.as_ref();
+                assert_eq!(
+                    (
+                        entry.and_then(|entry| entry.function.as_deref()),
+                        entry
+                            .and_then(|entry| entry.source.as_ref())
+                            .map(|source| source.line.get()),
+                    ),
+                    (Some("top"), Some(header)),
+                    "{fixture} {current}: {task:#?}"
+                );
+            }
+            workers.scenario.shutdown().await;
+        }
     }
 }
 

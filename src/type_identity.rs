@@ -81,13 +81,18 @@ fn parse_angle(name: &str) -> Option<TypeName<'_>> {
     let last = segments.pop()?;
     let (base, arguments) = split_arguments(last, '<', '>', NameSyntax::Angle)?;
     let base = base.trim_end();
-    (is_identifier(base) && segments.iter().all(|segment| is_angle_segment(segment))).then_some(
-        TypeName {
-            path: segments,
-            base,
-            arguments,
-        },
-    )
+    let named = is_identifier(base) || is_braced_scope(base) && arguments.is_none();
+    (named && segments.iter().all(|segment| is_angle_segment(segment))).then_some(TypeName {
+        path: segments,
+        base,
+        arguments,
+    })
+}
+
+/// One of Rust's braced scopes, such as `{impl#0}` or a closure's
+/// `{closure_env#0}`, which names a type too.
+fn is_braced_scope(text: &str) -> bool {
+    text.starts_with('{') && text.ends_with('}')
 }
 
 fn parse_go(name: &str) -> Option<TypeName<'_>> {
@@ -159,7 +164,7 @@ fn is_identifier(text: &str) -> bool {
 /// namespace, or one of Rust's braced scopes such as `{impl#0}`.
 fn is_angle_segment(segment: &str) -> bool {
     segment == ANONYMOUS_NAMESPACE
-        || segment.starts_with('{') && segment.ends_with('}')
+        || is_braced_scope(segment)
         || split_arguments(segment, '<', '>', NameSyntax::Angle)
             .is_some_and(|(base, _)| is_identifier(base.trim_end()))
 }
@@ -766,6 +771,10 @@ mod tests {
         assert_eq!(
             parts("Outer<int>::Inner", Angle),
             (vec!["Outer<int>"], "Inner", None)
+        );
+        assert_eq!(
+            parts("workers::top::{async_fn_env#0}", Angle),
+            (vec!["workers", "top"], "{async_fn_env#0}", None)
         );
         assert_eq!(
             parts("main.Pair[string,main.Point]", Go),
