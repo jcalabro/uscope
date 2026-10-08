@@ -239,8 +239,9 @@ impl TokioRuntime {
             .shards
             .wrapping_add(index.wrapping_mul(owned.shard_size));
         let unreadable = || Arc::<str>::from(format!("the shard at {at:#x} is unreadable"));
-        let lock = records::read(stop, at + owned.shard_lock, 4).ok_or_else(unreadable)?;
-        let head = records::word(stop, at + owned.head).ok_or_else(unreadable)?;
+        let lock =
+            records::read(stop, at.wrapping_add(owned.shard_lock), 4).ok_or_else(unreadable)?;
+        let head = records::word(stop, at.wrapping_add(owned.head)).ok_or_else(unreadable)?;
         Ok((head, lock != 0))
     }
 
@@ -527,13 +528,13 @@ impl TokioRuntime {
         let length = word(inner.wrapping_add(pool.len))?;
         let buffer = word(inner.wrapping_add(pool.buffer))?;
         let capacity = word(inner.wrapping_add(pool.capacity))?;
-        if length > capacity || capacity > MAX_TASKS {
-            return Err(format!("its queue holds {length} of {capacity}").into());
+        if length > capacity || capacity > MAX_TASKS || (capacity > 0 && head >= capacity) {
+            return Err(format!("its queue holds {length} of {capacity} from slot {head}").into());
         }
         let mut queued = Vec::new();
         for index in 0..length {
             let slot = (head + index) % capacity;
-            let at = buffer.wrapping_add(slot * pool.task_size);
+            let at = buffer.wrapping_add(slot.wrapping_mul(pool.task_size));
             let header = word(at.wrapping_add(pool.task))?;
             let (vtable, _) = self.trailer(stop, tasks, header)?;
             let id_offset = word(vtable.wrapping_add(tasks.id_offset))?;

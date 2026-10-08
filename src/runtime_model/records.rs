@@ -85,10 +85,7 @@ pub fn field(image: &dyn RuntimeImage, ty: TypeReference, path: &[&str]) -> Resu
             return Err(format!("{}.{name} is not at a byte offset", container.name).into());
         };
         found = Field {
-            offset: found
-                .offset
-                .checked_add(offset)
-                .ok_or("a member's offset overflows")?,
+            offset: within(found.offset, offset)?,
             ty: member.type_ref,
         };
     }
@@ -112,6 +109,13 @@ fn members(kind: &TypeKind) -> Box<dyn Iterator<Item = &RecordMember> + '_> {
         ),
         _ => Box::new(std::iter::empty()),
     }
+}
+
+/// The offset of a member at `inner` within a member at `outer`.
+pub fn within(outer: u64, inner: u64) -> Result<u64, Missing> {
+    outer
+        .checked_add(inner)
+        .ok_or_else(|| "a member's offset overflows".into())
 }
 
 /// A type's size in bytes.

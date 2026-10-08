@@ -241,20 +241,22 @@ impl TokioRuntime {
     ) -> Result<Option<ThreadContext>, Arc<str>> {
         let base = thread_local(stop, &context.tls, thread)?;
         let unreadable = || Arc::<str>::from(format!("the context at {base:#x} is unreadable"));
-        let state = records::read(stop, base + context.state, 1).ok_or_else(unreadable)?;
+        let state =
+            records::read(stop, base.wrapping_add(context.state), 1).ok_or_else(unreadable)?;
         if state != context.alive {
             return Ok(None);
         }
-        let option = base + context.handle.offset;
+        let option = base.wrapping_add(context.handle.offset);
         let runtime = if &*context.handle_option.active(stop, option)?.name == "Some" {
-            let handle = option + context.handle_some;
+            let handle = option.wrapping_add(context.handle_some);
             let flavor = context.flavors.active(stop, handle)?;
             let (flavor, _, layout) = context
                 .runtimes
                 .iter()
                 .find(|(_, name, _)| *name == flavor.name)
                 .ok_or_else(|| format!("the runtime's flavor {} is unknown", flavor.name))?;
-            let arc = records::word(stop, handle + layout.arc).ok_or_else(unreadable)?;
+            let arc =
+                records::word(stop, handle.wrapping_add(layout.arc)).ok_or_else(unreadable)?;
             Some(Instance {
                 flavor: *flavor,
                 handle: arc.wrapping_add(layout.data),
@@ -262,15 +264,19 @@ impl TokioRuntime {
         } else {
             None
         };
-        let worker = records::word(stop, base + context.scheduler).ok_or_else(unreadable)? != 0;
+        let worker =
+            records::word(stop, base.wrapping_add(context.scheduler)).ok_or_else(unreadable)? != 0;
         let entered = &*context
             .entered_state
-            .active(stop, base + context.entered.offset)?
+            .active(stop, base.wrapping_add(context.entered.offset))?
             .name
             == "Entered";
-        let option = base + context.task.offset;
+        let option = base.wrapping_add(context.task.offset);
         let task = if &*context.task_option.active(stop, option)?.name == "Some" {
-            Some(records::word(stop, option + context.task_some).ok_or_else(unreadable)?)
+            Some(
+                records::word(stop, option.wrapping_add(context.task_some))
+                    .ok_or_else(unreadable)?,
+            )
         } else {
             None
         };
@@ -295,9 +301,10 @@ impl TokioRuntime {
     /// A runtime's task list.
     fn list(&self, stop: &dyn RuntimeStop, runtime: Instance) -> Result<List, Arc<str>> {
         let owned = self.owned(runtime.flavor)?;
-        let at = runtime.handle + owned.at;
+        let at = runtime.handle.wrapping_add(owned.at);
         let unreadable = || Arc::<str>::from(format!("the task list at {at:#x} is unreadable"));
-        let word = |offset: u64| records::word(stop, at + offset).ok_or_else(unreadable);
+        let word =
+            |offset: u64| records::word(stop, at.wrapping_add(offset)).ok_or_else(unreadable);
         let list = List {
             id: word(owned.id)?,
             shards: word(owned.shards)?,
