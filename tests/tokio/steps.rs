@@ -134,35 +134,42 @@ async fn next_goes_round_a_loop_of_awaits() {
     }
 }
 
-/// `finish` from an async function whose await is pending runs it through
-/// every poll to its return, and stops in its awaiter in the same task,
-/// with what its last poll returned.
+/// `finish` from an async function runs it through every poll to its
+/// return, after none, one, or many polls that return `Pending`, and
+/// stops in its awaiter in the same task, with what its last poll
+/// returned.
 #[tokio::test]
 async fn finish_returns_to_the_awaiter_in_the_same_task() {
     for fixture in BUILDS {
         for mode in MODES {
-            let context = format!("{fixture} {mode:?}");
-            let mut scenario = stopped_once(fixture, mode, "// STEP: inner").await;
-            let task = stopped_task(&mut scenario).await;
-            assert_eq!(
-                step(&mut scenario, StepKind::Out).await,
-                ("outer".to_owned(), line(SOURCE, "// AWAIT: outer")),
-                "{context}"
-            );
-            assert_eq!(stopped_task(&mut scenario).await, task, "{context}");
-            let returned = scenario
-                .operation("variables", scenario.handle().variables())
-                .await
-                .variables
-                .iter()
-                .filter(|variable| variable.kind == VariableKind::Returned)
-                .map(|variable| format!("{:?}", variable.state))
-                .collect::<Vec<_>>();
-            assert!(
-                matches!(&returned[..], [poll] if poll.contains("Ready") && !poll.contains("Pending")),
-                "{context}: {returned:#?}"
-            );
-            scenario.shutdown().await;
+            for (from, awaiter, after) in [
+                ("// STEP: outer-after", "task", "// STEP: task"),
+                ("// STEP: inner", "outer", "// AWAIT: outer"),
+                ("// STEP: round", "task", "// AWAIT: rounds"),
+            ] {
+                let context = format!("{fixture} {mode:?} {from}");
+                let mut scenario = stopped_once(fixture, mode, from).await;
+                let task = stopped_task(&mut scenario).await;
+                assert_eq!(
+                    step(&mut scenario, StepKind::Out).await,
+                    (awaiter.to_owned(), line(SOURCE, after)),
+                    "{context}"
+                );
+                assert_eq!(stopped_task(&mut scenario).await, task, "{context}");
+                let returned = scenario
+                    .operation("variables", scenario.handle().variables())
+                    .await
+                    .variables
+                    .iter()
+                    .filter(|variable| variable.kind == VariableKind::Returned)
+                    .map(|variable| format!("{:?}", variable.state))
+                    .collect::<Vec<_>>();
+                assert!(
+                    matches!(&returned[..], [poll] if poll.contains("Ready") && !poll.contains("Pending")),
+                    "{context}: {returned:#?}"
+                );
+                scenario.shutdown().await;
+            }
         }
     }
 }
@@ -330,5 +337,48 @@ async fn a_step_of_a_suspended_task_waits_for_it_to_resume() {
                 scenario.shutdown().await;
             }
         }
+    }
+}
+
+/// While a step waits for its task to resume, another task's breakpoint
+/// ends it there, as a breakpoint ends any step, and the step does not
+/// come back later. On the current-thread runtime the first task to reach
+/// its gate runs alone until it waits there, so the others are certain to
+/// reach the breakpoint before it.
+#[tokio::test]
+async fn another_tasks_breakpoint_ends_a_waiting_step() {
+    for fixture in BUILDS {
+        let mode = Some("current");
+        let mut scenario = stopped_once(fixture, mode, "// AWAIT: inner").await;
+        let task = stopped_task(&mut scenario).await;
+        scenario.add_breakpoint_spec(at("// STEP: inner")).await;
+        let reason = scenario.step_to_stop(StepKind::OverSource).await;
+        assert!(
+            matches!(reason, StopReason::Breakpoint { .. }),
+            "{fixture}: {reason:?}"
+        );
+        assert_eq!(
+            place(&scenario).await,
+            ("inner".to_owned(), line(SOURCE, "// STEP: inner")),
+            "{fixture}"
+        );
+        let other = stopped_task(&mut scenario).await;
+        assert_ne!(other, task, "{fixture}");
+        // The third task stops there too, and then the program ends.
+        let reason = scenario.resume_to_stop().await;
+        assert!(
+            matches!(reason, StopReason::Breakpoint { .. }),
+            "{fixture}: {reason:?}"
+        );
+        assert!(
+            ![task, other].contains(&stopped_task(&mut scenario).await),
+            "{fixture}"
+        );
+        let reason = scenario.resume_to_stop().await;
+        assert!(
+            matches!(reason, StopReason::Exited(_)),
+            "{fixture}: {reason:?}"
+        );
+        scenario.shutdown().await;
     }
 }
