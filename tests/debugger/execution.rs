@@ -558,6 +558,28 @@ async fn repeated_debug_sessions_leave_no_inferiors_behind() {
     }
 }
 
+/// A process the debugger's own process started outside the session, as a
+/// shell starts the reader of a `2> >(…)` redirection before it runs the
+/// debugger, outlives the inferior without holding up its end.
+#[tokio::test]
+async fn a_child_from_outside_the_session_never_delays_its_end() {
+    let _outsider = support::ExternalProcess::spawn(&Scenario::fixture("attach"));
+    let mut scenario = Scenario::new("outsider", Scenario::fixture("basic"));
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    ));
+    scenario.shutdown().await;
+
+    let mut stopped = Scenario::new("outsider at a stop", Scenario::fixture("basic"));
+    stopped.add_breakpoint("breakpoint_target").await;
+    assert!(matches!(
+        stopped.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    stopped.shutdown().await;
+}
+
 #[tokio::test]
 async fn linux_wait_ownership_allows_only_one_session_per_host_process() {
     let fixture = Scenario::fixture("basic");
