@@ -33,6 +33,10 @@ world of C types:
   holds the argument `index` chooses in `storage`, as `number` holding the
   int 7, `pointer` holding the pointer 0x90000, and `neither` whose index
   is 5;
+- the C++ `app::Erased`, `{void *object; void *manage}`, which holds an
+  object only the function at `manage`, an `app::manage<int>`, knows the
+  type of, as `erased` holding 5, and `stray` whose `manage` is no
+  function's;
 - `entry`, `{int mode; int color; long elapsed; unsigned short label[4];
   int letter}`, as `item`, with the enumerations `Access` (`NONE`, `READ`,
   `WRITE`, `EXEC`) and `Color` (`RED`, `GREEN`, `BLUE`);
@@ -235,7 +239,8 @@ the next line unless that line begins another statement or ends the view.
   is one check for each.
 - `field NAME = EXPR` adds a named child.
 - `summary "TEXT {EXPR} TEXT"` overrides the summary; `{EXPR}` is replaced
-  by its value's summary, and `\{` and `\}` are braces.
+  by its value's summary, `{EXPR as FORMAT}` by its value written in one of
+  `format`'s formats, and `\{` and `\}` are braces.
 - `show SHAPE` says what the value is. A view shows at most once; one
   that does not presents a record's members, with its bases as members
   named by their types, or any other value as itself.
@@ -344,7 +349,8 @@ something => unbound: line 7: `format kind`: the format writes an array of 16-bi
   character shows as U+FFFD, and a length the summary gives is in bytes.
 - `value(EXPR)` presents the value as another value, as a box presents what
   it holds.
-- `empty("TEXT")` is a value that holds nothing, summarized as `TEXT`.
+- `empty("TEXT")` is a value that holds nothing, summarized as `TEXT`, in
+  which each `{EXPR}` is its value's summary, as in a `summary`.
 - `sequence(COUNT) GENERATORS => ELEMENT` is a sequence of `COUNT`
   elements, one for each value the generators make. `COUNT` may be `_` to
   leave the count to the generators.
@@ -357,6 +363,14 @@ something => unbound: line 7: `format kind`: the format writes an array of 16-bi
   presented as any value of that type is. `TYPE` may be `arg(TYPE, EXPR)`,
   the type's argument at a position the program's data holds, as a
   `std::variant`'s index does; a position that names no type is a problem.
+- `dynamic(PTR, TYPE of CODE)` is what `PTR` points to, as a type found
+  when the value is presented: `CODE` is the address of a function's code,
+  and `TYPE` names that function's type arguments by its parameters' names.
+  Code that erases a value's type keeps it only in the functions that
+  handle the value: a tokio task's cell is a `Cell<T, S>` whose `T` and
+  `S` are those its vtable's `poll::<T, S>` was instantiated with. A code
+  address no function's debug information describes, or arguments that
+  make no one type, is a problem.
 - `if COND { SHAPE } else { SHAPE }` chooses a shape.
 - `match EXPR { VALUE => SHAPE, … _ => SHAPE }` chooses the shape of the
   first arm whose value `EXPR` equals, or of `_`; a value no arm names is a
@@ -396,6 +410,25 @@ something => tagged 1: 7
 ```uscope-view-example
 uscope-views 1
 view c tagged {
+    show if kind == 0 { empty("None") } else { empty("kind {kind} holding {value}") }
+}
+---
+nothing => None
+something => kind 1 holding 7
+```
+
+```uscope-view-example
+uscope-views 1
+view c entry {
+    summary "{elapsed as duration(ms)} since {mode as flags(Access)}, {mode}"
+}
+---
+item => 1.5s since READ | WRITE, 3
+```
+
+```uscope-view-example
+uscope-views 1
+view c tagged {
     show match kind {
         0 => empty("None")
         1 => value(value)
@@ -430,6 +463,16 @@ view c++ app::Either<_, _> {
 number => 7
 pointer => 0x90000
 neither => problem: the type has no type argument 5
+```
+
+```uscope-view-example
+uscope-views 1
+view c++ app::Erased {
+    show dynamic(object, T of manage)
+}
+---
+erased => 5
+stray => problem: no function the debug information describes has its code at 0x50000
 ```
 
 ## Generators

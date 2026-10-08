@@ -1583,6 +1583,7 @@ mod tests {
                 role: CodeRole::Ordinary,
                 enclosing: None,
                 coroutine: None,
+                generics: std::sync::Arc::from([]),
             })
             .collect()
     }

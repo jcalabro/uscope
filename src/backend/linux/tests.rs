@@ -639,6 +639,7 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
                     role: crate::CodeRole::Ordinary,
                     enclosing: None,
                     coroutine: None,
+                    generics: std::sync::Arc::from([]),
                 })
                 .collect(),
             code_instances: instances

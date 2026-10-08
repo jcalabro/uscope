@@ -18,8 +18,10 @@ use super::bind::{
     BoundDynamic, BoundField, BoundFormat, BoundScan, BoundShape, BoundView, TextSource,
     ViewObject, ViewProgram,
 };
+use super::pattern::{Captured, Captures};
 use super::scan::{Checkpoints, Scanner, Var};
 use super::summary;
+use super::syntax::Pattern;
 
 /// The size of the pages text is read in, which a read never crosses, so
 /// an unmapped page ends the text rather than failing what came before.
@@ -287,6 +289,10 @@ impl<M: Machine> Machine for ViewMachine<'_, M> {
         key: &Key,
     ) -> Result<Option<Self::Place>, Stop> {
         self.base.entry(from, step, key)
+    }
+
+    fn function_generics(&mut self, address: u64) -> Result<Vec<(Arc<str>, TypeReference)>, Stop> {
+        self.base.function_generics(address)
     }
 
     fn task(&mut self) -> Result<u64, Stop> {
@@ -584,6 +590,20 @@ fn dynamic_place<M: Machine>(
     };
     let ty = match ty {
         BoundDynamic::Fixed(ty) => *ty,
+        BoundDynamic::Function {
+            code,
+            name,
+            argument,
+            pattern,
+            known,
+            candidates,
+        } => {
+            if *argument {
+                function_argument(code, name, machine)?
+            } else {
+                function_type(code, name, pattern, known, candidates, machine)?
+            }
+        }
         BoundDynamic::Argument { types, index } => {
             let index = count(index, machine, "type argument's position")?;
             usize::try_from(index)
@@ -598,6 +618,78 @@ fn dynamic_place<M: Machine>(
         )));
     }
     Ok(machine.place_at(address, ty)?)
+}
+
+/// The address of the code a program's value addresses.
+fn code_address<M: Machine>(
+    code: &ViewProgram<M::Step>,
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<u64, Failure> {
+    match interp::value(code, machine)? {
+        Value::Pointer(address) => Ok(address),
+        Value::Int(_) => count(code, machine, "code's address"),
+        _ => Err(internal("a function's code is not an address")),
+    }
+}
+
+/// The type argument of the function whose code `code` addresses that its
+/// parameter `name` names.
+fn function_argument<M: Machine>(
+    code: &ViewProgram<M::Step>,
+    name: &str,
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<TypeReference, Failure> {
+    let address = code_address(code, machine)?;
+    machine
+        .function_generics(address)?
+        .into_iter()
+        .find_map(|(parameter, ty)| (*parameter == *name).then_some(ty))
+        .ok_or_else(|| {
+            refused(format!(
+                "the function at {address:#x} has no type parameter `{name}`"
+            ))
+        })
+}
+
+/// The one type among `candidates` that `pattern` names, the captures
+/// `known` does not name being the type arguments of the function whose
+/// code `code` addresses, which come before the view's own.
+fn function_type<M: Machine>(
+    code: &ViewProgram<M::Step>,
+    name: &str,
+    pattern: &Pattern,
+    known: &Captures,
+    candidates: &[TypeReference],
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<TypeReference, Failure> {
+    let address = code_address(code, machine)?;
+    let mut captures = known.clone();
+    for (parameter, ty) in machine.function_generics(address)? {
+        captures.retain(|(captured, _)| **captured != *parameter);
+        captures.push((parameter.to_string(), Captured::Type(ty)));
+    }
+    let mut found = Vec::<TypeReference>::new();
+    for candidate in candidates {
+        let Some(identity) = machine.type_info(*candidate).and_then(|info| info.identity) else {
+            continue;
+        };
+        if super::pattern::matches_with(pattern, &identity, machine, captures.clone()).is_some()
+            && !found
+                .iter()
+                .any(|other| machine.same_type(*other, *candidate))
+        {
+            found.push(*candidate);
+        }
+    }
+    match found.as_slice() {
+        [ty] => Ok(*ty),
+        [] => Err(refused(format!(
+            "no type is `{name}` of the function at {address:#x}"
+        ))),
+        _ => Err(refused(format!(
+            "`{name}` of the function at {address:#x} names several types"
+        ))),
+    }
 }
 
 /// An element, key, or value, with the generators' variables in the
@@ -727,7 +819,9 @@ pub fn present<M: Machine>(
             let inner = run_value(program, &mut machine)?;
             Presented::value(formatted(bound, "self", inner, &mut machine)?)
         }
-        BoundShape::Empty(text) => Presented::new(PresentedShape::Empty, text.to_string()),
+        BoundShape::Empty(pieces) => {
+            Presented::new(PresentedShape::Empty, rendered(pieces, &mut machine)?)
+        }
         BoundShape::Sequence { scan, .. } | BoundShape::Map { scan, .. } => {
             preview(shape, scan, &mut machine, checkpoints)?
         }
@@ -774,19 +868,34 @@ pub fn present<M: Machine>(
         presented.text = Some(text);
     }
     if let Some(pieces) = &bound.summary {
-        let mut text = String::new();
-        for piece in pieces {
-            match piece {
-                super::bind::BoundPiece::Literal(literal) => text.push_str(literal),
-                super::bind::BoundPiece::Hole(program) => {
-                    let value = run_value(program, &mut machine)?;
-                    text.push_str(&summary::value(value.type_info.as_ref(), &value.state));
-                }
-            }
-        }
-        presented.summary = text;
+        presented.summary = rendered(pieces, &mut machine)?;
     }
     Ok(presented)
+}
+
+/// A summary's text, with each hole's value's summary in its place.
+fn rendered<M: Machine>(
+    pieces: &[super::bind::BoundPiece<M::Step>],
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<String, Failure> {
+    let mut text = String::new();
+    for piece in pieces {
+        match piece {
+            super::bind::BoundPiece::Literal(literal) => text.push_str(literal),
+            super::bind::BoundPiece::Hole { program, format } => {
+                let value = run_value(program, machine)?;
+                let written = match format {
+                    Some(format) => super::format::write(*format, &value, machine)?,
+                    None => None,
+                };
+                text.push_str(
+                    &written
+                        .unwrap_or_else(|| summary::value(value.type_info.as_ref(), &value.state)),
+                );
+            }
+        }
+    }
+    Ok(text)
 }
 
 /// The text of `self`, when the view, or the last `extend` of it that
@@ -1109,8 +1218,9 @@ pub fn presented_place<M: Machine>(
             Value::Place(place) => Ok(place),
             _ => Err(refused("the view computes the value it presents")),
         },
-        BoundShape::Empty(text) => Err(refused(format!(
-            "the value is `{text}`, which holds no value"
+        BoundShape::Empty(pieces) => Err(refused(format!(
+            "the value is `{}`, which holds no value",
+            rendered(pieces, &mut machine)?
         ))),
         _ => Err(refused("the view presents no value it stands for")),
     }

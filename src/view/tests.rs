@@ -460,7 +460,7 @@ view c++ app::Thing<T, _> {   # a comment
         panic!("a summary");
     };
     assert!(
-        matches!(&pieces[..], [syntax::Piece::Hole(_), syntax::Piece::Literal(text)] if text == " {braces}")
+        matches!(&pieces[..], [syntax::Piece::Hole { .. }, syntax::Piece::Literal(text)] if text == " {braces}")
     );
 }
 
@@ -646,6 +646,14 @@ fn add_others(world: &mut World) {
         "Either",
         vec![TypeArgument::Type(int), TypeArgument::Type(characters)],
     );
+    // `app::Erased` holds an object only the function at `manage` knows
+    // the type of.
+    let erased = world.record("Erased", 16, &[("object", void, 0), ("manage", void, 8)]);
+    world.identify(erased, SourceLanguage::Cpp, &["app"], "Erased", Vec::new());
+    world.function(0x4_0000, &[("T", int)]);
+    let held = world.allocate(&ints([5]));
+    world.variable("erased", erased, &bytes(&[held, 0x4_0000]));
+    world.variable("stray", erased, &bytes(&[held, 0x5_0000]));
     world.variable("number", either, &bytes(&[7, 0]));
     world.variable("pointer", either, &bytes(&[0x9_0000, 1]));
     world.variable("neither", either, &bytes(&[0, 5]));
@@ -1245,6 +1253,70 @@ fn types_are_constructed_from_arguments_and_layouts_named() {
             rejection.to_string().contains(reason),
             "`{body}`: {rejection}"
         );
+    }
+}
+
+/// A type a function's arguments complete is found as the program runs,
+/// the function's parameters' names coming before the view's own.
+#[test]
+fn types_are_constructed_from_the_arguments_of_a_function_at_run_time() {
+    let mut world = World::new();
+    let int = world.base("int", E::Signed, 4);
+    let long = world.base("long int", E::Signed, 8);
+    for (element, name, size) in [(int, "node_of<int>", 12), (long, "node_of<long int>", 16)] {
+        let node = world.record(name, size, &[("next", element, 0), ("value", element, 8)]);
+        world.identify(
+            node,
+            SourceLanguage::Cpp,
+            &["lib"],
+            "node_of",
+            vec![TypeArgument::Type(element)],
+        );
+    }
+    let holder = world.record("holder<int>", 8, &[("first", int, 0), ("second", int, 4)]);
+    world.identify(
+        holder,
+        SourceLanguage::Cpp,
+        &["lib"],
+        "holder",
+        vec![TypeArgument::Type(int)],
+    );
+    world.variable("h", holder, &ints([3, 4]));
+    world.function(0x7000, &[("T", long)]);
+    world.function(0x7100, &[("T", holder)]);
+    let found = |world: &mut World, code: &str| {
+        let views = ViewSet::new([(
+            "test.views",
+            format!(
+                "uscope-views 1\nview c++ lib::holder<T> {{\n    show dynamic(&first, lib::node_of<T> of {code})\n}}\n"
+            )
+            .as_str(),
+        )]);
+        assert!(views.errors().is_empty(), "{:?}", views.errors());
+        presented(world, &views, "h").map(|presented| {
+            presented
+                .inner
+                .and_then(|inner| inner.type_info)
+                .map(|info| info.name.to_string())
+                .unwrap_or_default()
+        })
+    };
+    assert_eq!(
+        found(&mut world, "0x7000"),
+        Ok("node_of<long int>".to_owned())
+    );
+    for (code, problem) in [
+        (
+            "0x7100",
+            "no type is `lib::node_of<T>` of the function at 0x7100",
+        ),
+        (
+            "0x7200",
+            "no function the debug information describes has its code at 0x7200",
+        ),
+    ] {
+        let failure = found(&mut world, code).expect_err(code);
+        assert!(failure.contains(problem), "{code}: {failure}");
     }
 }
 

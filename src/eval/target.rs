@@ -2,6 +2,7 @@
 //! while binding, and a [`Machine`] reads one stop while running.
 
 use std::fmt;
+use std::sync::Arc;
 
 use super::error::ErrorKind;
 use super::interp::Value;
@@ -424,6 +425,16 @@ pub trait Machine: TypeSource {
         Err(Stop::Refused(Refusal::new(
             ErrorKind::Unsupported,
             "this machine indexes no maps",
+        )))
+    }
+
+    /// The type arguments of the generic function whose code is at
+    /// `address`, each with its parameter's name; refused when no
+    /// function's debug information describes the code there.
+    fn function_generics(&mut self, address: u64) -> Result<Vec<(Arc<str>, TypeReference)>, Stop> {
+        Err(Stop::Refused(Refusal::new(
+            ErrorKind::Unsupported,
+            format!("no function the debug information describes has its code at {address:#x}"),
         )))
     }
 

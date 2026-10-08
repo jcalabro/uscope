@@ -123,6 +123,9 @@ pub struct World {
     /// The id of the task the stopped thread runs, when the program has
     /// tasks.
     pub task: Option<u64>,
+    /// Generic functions, by the address their code begins at, with their
+    /// type arguments by their parameters' names.
+    functions: BTreeMap<u64, Vec<(Arc<str>, TypeReference)>>,
 }
 
 impl World {
@@ -257,6 +260,18 @@ impl World {
             panic!("only records have members");
         };
         *existing = members.into();
+    }
+
+    /// A generic function whose code is at `address`, instantiated with
+    /// `generics`, each by its parameter's name.
+    pub fn function(&mut self, address: u64, generics: &[(&str, TypeReference)]) {
+        self.functions.insert(
+            address,
+            generics
+                .iter()
+                .map(|(name, ty)| (Arc::from(*name), *ty))
+                .collect(),
+        );
     }
 
     /// A tagged union, as a Rust enum is, whose tag is the byte at its
@@ -1482,6 +1497,15 @@ impl Machine for World {
             }
         }
         Ok(None)
+    }
+
+    fn function_generics(&mut self, address: u64) -> Result<Vec<(Arc<str>, TypeReference)>, Stop> {
+        self.functions.get(&address).cloned().ok_or_else(|| {
+            Stop::Refused(Refusal::new(
+                ErrorKind::Unsupported,
+                format!("no function the debug information describes has its code at {address:#x}"),
+            ))
+        })
     }
 
     fn task(&mut self) -> Result<u64, Stop> {

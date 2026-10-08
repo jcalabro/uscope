@@ -343,6 +343,15 @@ fn load_image(
         &mut source_files,
         &mut source_file_ids,
     )?;
+    for (instance, generics) in std::mem::take(&mut variables.function_generics) {
+        if let Some(function) = function_metadata
+            .code_instances
+            .get(instance.index())
+            .map(|instance| instance.function)
+        {
+            function_metadata.functions[function.index()].generics = generics;
+        }
+    }
     let coroutines = std::mem::take(&mut variables.coroutines);
     for (instance, ty) in &variables.coroutine_bodies {
         if let Some(Ok(_)) = coroutines.get(ty)
@@ -1337,20 +1346,7 @@ fn load_function_metadata(
         let id = FunctionId::new(
             u32::try_from(functions.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
         );
-        let role = super::roles::function_role(
-            linkage_name.as_deref().unwrap_or(&name),
-            origin.trampoline || builds_future(origin, &futures),
-        );
-        // What builds a future only wraps, even a runtime's: a step that
-        // enters the runtime goes on into the future's body.
-        let role = match (&origin.namespace, &origin.name) {
-            (Some(namespace), Some(own))
-                if origin.language == SourceLanguage::Rust && role != crate::CodeRole::Wrapper =>
-            {
-                super::roles::rust_role(namespace, own).unwrap_or(role)
-            }
-            _ => role,
-        };
+        let role = origin_role(origin, &name, &futures);
         trampolines.push(origin.trampoline);
 
         functions.push(FunctionInfo {
@@ -1362,6 +1358,7 @@ fn load_function_metadata(
             role,
             enclosing: None,
             coroutine: None,
+            generics: Arc::from([]),
         });
         function_ids.insert(definition, id);
     }
@@ -1413,6 +1410,24 @@ fn load_function_metadata(
         code_instances,
         instance_ids,
     })
+}
+
+/// What a function is to unwinding and stepping.
+fn origin_role(origin: &RawFunction, name: &str, futures: &Futures) -> crate::CodeRole {
+    let role = super::roles::function_role(
+        origin.linkage_name.as_deref().unwrap_or(name),
+        origin.trampoline || builds_future(origin, futures),
+    );
+    // What builds a future only wraps, even a runtime's: a step that
+    // enters the runtime goes on into the future's body.
+    match (&origin.namespace, &origin.name) {
+        (Some(namespace), Some(own))
+            if origin.language == SourceLanguage::Rust && role != crate::CodeRole::Wrapper =>
+        {
+            super::roles::rust_role(namespace, own).unwrap_or(role)
+        }
+        _ => role,
+    }
 }
 
 /// The name a function shows. Clang names the thunks a multiply inherited
