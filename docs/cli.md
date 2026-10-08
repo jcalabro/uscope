@@ -478,10 +478,18 @@ detaching.
 | `undisplay` *ids* | Remove displays: numbers, ranges such as `1-3`, or `all`. |
 
 A stop's first line says why and where, in words, and names its thread when
-the process has more than one; a resume that ran over a second says how long:
+the process has more than one, and the task the thread runs, if any; a
+resume that ran over a second says how long:
 
 ```text
 stopped at breakpoint 1 (hit 3) in parse_header at src/parse.c:41 [thread 41672 of 4] (ran 1.42s)
+```
+
+A runtime's exception says the same, then its message:
+
+```text
+stopped as an exception was raised in formatted at src/main.rs:34 [thread 41690 of 3] [3]:
+panicked: formatted 7 times
 ```
 
 Every other thread the stop found at a breakpoint or watchpoint gets a line
@@ -491,14 +499,14 @@ of its own after it, with the task it runs:
 thread 41673 [7] also stopped at breakpoint 1 (hit 4) in parse_header at src/parse.c:41
 ```
 
-Breakpoint, step, watchpoint, signal, and pause stops then print the sections
-`[stop] show` lists, in order: `source`, the lines around the stop as `list`
-shows them; `locals`, as `print` alone; `displays`; `registers`;
-`disassembly`, `[stop] disassembly-instructions` around the instruction;
-`backtrace`, its first `[stop] backtrace-frames` frames; and `threads`. The
-default is `["source"]`. Displays print after the sections when the list
-leaves them out. A section that fails prints its error and the others still
-print; a stop where no source line is known prints no source, since the
+Breakpoint, step, watchpoint, signal, exception, and pause stops then print
+the sections `[stop] show` lists, in order: `source`, the lines around the
+stop as `list` shows them; `locals`, as `print` alone; `displays`;
+`registers`; `disassembly`, `[stop] disassembly-instructions` around the
+instruction; `backtrace`, its first `[stop] backtrace-frames` frames; and
+`threads`. The default is `["source"]`. Displays print after the sections when
+the list leaves them out. A section that fails prints its error and the others
+still print; a stop where no source line is known prints no source, since the
 header has given its address.
 
 A display prints as `print` would, after its number, in the selected frame. One

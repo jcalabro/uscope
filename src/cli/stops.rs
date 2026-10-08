@@ -125,6 +125,7 @@ const fn in_code(reason: &StopReason) -> bool {
             | StopReason::StepIncomplete { .. }
             | StopReason::Watchpoint { .. }
             | StopReason::Exception(_)
+            | StopReason::LanguageException(_)
             | StopReason::Pause
             | StopReason::Jump
     )
@@ -166,6 +167,22 @@ impl Cli {
                 )
                 .expect("writing to a String cannot fail");
             }
+            // The task the stopped thread runs, as the thread list shows it.
+            if let Some(snapshot) = &snapshot
+                && let Some(ExecutionContext::Thread(thread)) = snapshot.selected
+                && let Some(ThreadActivity::Task { task, .. }) = snapshot
+                    .threads
+                    .iter()
+                    .find(|listed| listed.id == thread)
+                    .and_then(|listed| listed.activity.as_ref())
+            {
+                write!(
+                    suffix,
+                    " {}",
+                    renderer.paint(Role::Metadata, format_args!("[{}]", task.number))
+                )
+                .expect("writing to a String cannot fail");
+            }
         }
         if self.settings.config.stop.elapsed && elapsed >= Duration::from_secs(1) {
             write!(
@@ -188,6 +205,9 @@ impl Cli {
                 &suffix,
                 renderer,
             ),
+            StopReason::LanguageException(raised) => {
+                format::language_exception(raised, &suffix, renderer)
+            }
             _ => format!("{}{suffix}", format::stop(reason, renderer)),
         };
         if let Some(snapshot) = &snapshot

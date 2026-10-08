@@ -769,6 +769,47 @@ fn tokio_tasks_are_listed_by_number() {
     }
 }
 
+/// A task's panic stop says where it panicked, on which thread, and in
+/// which task, then the message, and shows the source there.
+#[test]
+fn a_task_panic_says_where_and_in_which_task() {
+    let stdout = batch(
+        &["build/test-programs/tokio-panics-o0", "--", "format"],
+        &["run", "threads"],
+    );
+    let (header, rest) = stdout
+        .split_once(":\npanicked: formatted 7 times\n")
+        .unwrap_or_else(|| panic!("a panic stop: {stdout}"));
+    let header = header.lines().last().expect("the stop's header");
+    let source = "tests/fixtures/rust/tokio/panics/src/main.rs";
+    let line = support::source_line(source, "// PANIC: format");
+    assert!(
+        header.starts_with(&format!(
+            "stopped as an exception was raised in formatted at {source}:{line} [thread "
+        )),
+        "{stdout}"
+    );
+    // The task is the one the thread list puts on the thread.
+    let (thread, task) = header
+        .rsplit_once("[thread ")
+        .and_then(|(_, rest)| rest.split_once(" of "))
+        .and_then(|(thread, rest)| Some((thread, rest.split_once("] ")?.1)))
+        .unwrap_or_else(|| panic!("a thread and task: {header}"));
+    assert!(task.starts_with('[') && task.ends_with(']'), "{header}");
+    assert!(
+        rest.lines()
+            .any(|line| line.starts_with(&format!("* {thread} "))
+                && line.ends_with(&format!(" — {task}"))),
+        "{stdout}"
+    );
+    assert!(
+        rest.contains(&format!(
+            "=> {line} |     panic!(\"formatted {{count}} times\");"
+        )),
+        "{stdout}"
+    );
+}
+
 /// A backtrace folds each run of a runtime's frames into a line that says
 /// which frames it holds, and everything past the dispatch that polls the
 /// task; `bt -r` shows every frame, with its whole name. Frame numbers

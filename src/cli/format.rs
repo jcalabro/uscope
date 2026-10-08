@@ -715,19 +715,37 @@ fn numbered_hits(
     format!("{noun}{plural} {hits}")
 }
 
-/// A runtime's exception, followed by its message as the runtime prints
-/// it, which may take several lines.
-fn language_exception(raised: &LanguageException, renderer: Renderer) -> String {
+/// A runtime's exception stop, with `place` saying where it is, followed
+/// by the exception's message as the runtime prints it, which may take
+/// several lines.
+pub fn language_exception(raised: &LanguageException, place: &str, renderer: Renderer) -> String {
     format!(
-        "{} {}:\n{}",
+        "{} {}{place}:\n{}",
         renderer.paint(Role::Error, "stopped"),
-        match raised.kind {
-            LanguageExceptionKind::Raised => "as an exception was raised",
-            LanguageExceptionKind::Unhandled => "by an unhandled exception",
-            LanguageExceptionKind::Fatal => "by a fatal runtime error",
-        },
+        exception_kind(raised.kind),
         renderer.paint(Role::Error, &raised.message)
     )
+}
+
+/// A runtime's exception stop on one line, with its message's first.
+fn exception_summary(raised: &LanguageException, renderer: Renderer) -> String {
+    format!(
+        "{} {}: {}",
+        renderer.paint(Role::Error, "stopped"),
+        exception_kind(raised.kind),
+        renderer.paint(
+            Role::Error,
+            raised.message.lines().next().unwrap_or_default()
+        )
+    )
+}
+
+const fn exception_kind(kind: LanguageExceptionKind) -> &'static str {
+    match kind {
+        LanguageExceptionKind::Raised => "as an exception was raised",
+        LanguageExceptionKind::Unhandled => "by an unhandled exception",
+        LanguageExceptionKind::Fatal => "by a fatal runtime error",
+    }
 }
 
 /// Summarizes a stop on one line, without watched values or source.
@@ -783,7 +801,7 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             stopped(Role::Error),
             exception(&info.description, info.code, renderer)
         ),
-        StopReason::LanguageException(raised) => language_exception(raised, renderer),
+        StopReason::LanguageException(raised) => exception_summary(raised, renderer),
         StopReason::ProgramBreakpoint { address } => format!(
             "{} by the program's breakpoint instruction at {}",
             stopped(Role::Current),

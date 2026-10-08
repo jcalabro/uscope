@@ -15,7 +15,9 @@ fn install_hook() {
         let (file, line) = info
             .location()
             .map_or(("-", 0), |location| (location.file(), location.line()));
-        truth::line(&[&"panic", &message, &file, &line]);
+        // The task that panicked, as tokio numbers it, if a task did.
+        let task = tokio::task::try_id().map_or_else(|| "-".to_owned(), |id| id.to_string());
+        truth::line(&[&"panic", &message, &file, &line, &task]);
         default(info);
     }));
 }
