@@ -186,3 +186,134 @@ async fn a_pause_ends_a_waiting_step_and_a_new_one_waits_again() {
         scenario.shutdown().await;
     }
 }
+
+/// The lines a program prints, read as they arrive.
+struct Printed(tokio::sync::mpsc::UnboundedReceiver<String>);
+
+impl Printed {
+    fn read(output: impl std::io::Read + Send + 'static) -> Self {
+        let (send, receive) = tokio::sync::mpsc::unbounded_channel();
+        tokio::task::spawn_blocking(move || {
+            for line in std::io::BufRead::lines(std::io::BufReader::new(output)) {
+                let Ok(line) = line else { break };
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self(receive)
+    }
+
+    /// The lines up to and including `wanted`, which must arrive.
+    async fn until(&mut self, wanted: &str) -> Vec<String> {
+        let mut lines = Vec::new();
+        loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(30), self.0.recv())
+                .await
+                .unwrap_or_else(|_| panic!("no {wanted:?} after {lines:?}"))
+                .unwrap_or_else(|| panic!("the program ended without {wanted:?}: {lines:?}"));
+            let done = line == wanted;
+            lines.push(line);
+            if done {
+                return lines;
+            }
+        }
+    }
+
+    /// Every line still to come, until the program closes its output.
+    async fn rest(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        while let Some(line) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), self.0.recv())
+                .await
+                .expect("the program closes its output")
+        {
+            lines.push(line);
+        }
+        lines
+    }
+}
+
+/// The session ends cleanly while a step waits for its task: killed, the
+/// program is gone; exiting, the program ends the step with its status;
+/// detached, it runs on as it would have without the debugger, its step's
+/// breakpoints gone.
+#[tokio::test]
+async fn a_waiting_step_ends_with_its_session() {
+    for fixture in BUILDS {
+        for exits in [false, true] {
+            let (input, mut answer) = std::io::pipe().expect("a pipe");
+            let (output, printed) = std::io::pipe().expect("a pipe");
+            let (mut scenario, _) = waiting_with(
+                fixture,
+                "hold",
+                Some(Stdio::from(input)),
+                Stdio::from(printed),
+            )
+            .await;
+            let stepping = scenario.start_stepping(StepKind::OverSource).await;
+            Printed::read(output).until("TRUTH\theld").await;
+            if exits {
+                std::io::Write::write_all(&mut answer, b"exit\n").expect("the program reads");
+                let ended = stepping.await.expect("the step's task").expect("the step");
+                assert_eq!(
+                    ended,
+                    StopReason::Exited(uscope::ExitStatus::Code(3)),
+                    "{fixture}"
+                );
+            } else {
+                scenario.operation("kill", scenario.handle().kill()).await;
+                let ended = stepping.await.expect("the step's task");
+                assert!(
+                    !matches!(ended, Ok(StopReason::Step { .. })),
+                    "{fixture}: {ended:?}"
+                );
+                assert!(
+                    matches!(
+                        scenario.snapshot().await.inferior,
+                        uscope::InferiorState::NotRunning
+                    ),
+                    "{fixture}"
+                );
+            }
+            scenario.shutdown().await;
+        }
+
+        // Natively, and detached while a step waits.
+        let program = Scenario::fixture(fixture);
+        let mut runs = Vec::new();
+        for attaches in [false, true] {
+            let mut process = crate::support::ExternalProcess::exec_gate(&program, &["hold"]);
+            let mut printed = Printed::read(process.take_stdout());
+            let mut answer = process.take_stdin();
+            std::io::Write::write_all(&mut answer, b"\n").expect("the launcher reads");
+            let mut lines = printed.until("TRUTH\theld").await;
+            if attaches {
+                let mut scenario =
+                    Scenario::attached(format!("{fixture} attached"), process.attach().await);
+                let task = scenario
+                    .operation("tasks", scenario.handle().tasks(None, 16))
+                    .await
+                    .tasks
+                    .iter()
+                    .find(|task| task.thread.is_none())
+                    .unwrap_or_else(|| panic!("{fixture}: a task no thread runs"))
+                    .id;
+                scenario
+                    .operation("select task", scenario.handle().select_context(task))
+                    .await;
+                let _stepping = scenario.start_stepping(StepKind::OverSource).await;
+                scenario.shutdown().await;
+            }
+            std::io::Write::write_all(&mut answer, b"open\n").expect("the program reads");
+            lines.extend(printed.rest().await);
+            let status = process.wait();
+            assert!(
+                status.success(),
+                "{fixture} attached {attaches}: {status:?}"
+            );
+            runs.push(lines);
+        }
+        assert_eq!(runs[0], runs[1], "{fixture}");
+    }
+}
