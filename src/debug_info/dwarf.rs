@@ -1446,17 +1446,21 @@ fn async_function_paths(raw: &[RawFunction]) -> HashSet<Arc<str>> {
 }
 
 /// Whether a function is an `async fn` as rustc compiles it apart from its
-/// body: code that only builds the future, whose path is the namespace of
-/// the body.
+/// body: code that only builds the future, whose path, less a generic
+/// function's arguments, is the namespace of the body.
 fn builds_future(function: &RawFunction, async_functions: &HashSet<Arc<str>>) -> bool {
     function.language == SourceLanguage::Rust
-        && function.name.as_deref().is_some_and(|own| {
-            let path = function
-                .namespace
-                .as_ref()
-                .map_or_else(|| own.to_owned(), |namespace| format!("{namespace}::{own}"));
-            async_functions.contains(path.as_str())
-        })
+        && function
+            .name
+            .as_deref()
+            .and_then(super::coroutines::without_arguments)
+            .is_some_and(|own| {
+                let path = function
+                    .namespace
+                    .as_ref()
+                    .map_or_else(|| own.to_owned(), |namespace| format!("{namespace}::{own}"));
+                async_functions.contains(path.as_str())
+            })
 }
 
 /// Where a breakpoint on a code instance goes: the entry its DIE names,

@@ -11,6 +11,7 @@ mod drivers;
 mod invariants;
 mod panics;
 mod resume_points;
+mod shapes;
 mod soak;
 mod std_async;
 mod steps;
