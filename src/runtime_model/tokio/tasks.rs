@@ -179,17 +179,10 @@ impl TokioRuntime {
             }
             shard += 1;
         }
-        // A page that began within the list counts it whole once it ends.
-        let total = if shard_start == (0, false) {
-            Some(total)
-        } else {
-            self.count(stop, tasks, runtime, &list).ok()
-        };
-        if whole
-            && list.counted
-            && let Some(total) = total
-            && total != list.count
-        {
+        // A list one page reads whole holds its count. One that pages read
+        // in parts is not counted, which would read it all again, so that
+        // a page costs what its own tasks do.
+        if whole && list.counted && shard_start == (0, false) && total != list.count {
             page.gaps.push(
                 format!(
                     "the {flavor} runtime counts {} tasks, but its list holds {total}",
@@ -199,34 +192,6 @@ impl TokioRuntime {
             );
         }
         false
-    }
-
-    /// How many tasks a runtime's list holds, or why that is not known: a
-    /// shard is damaged or was being changed.
-    fn count(
-        &self,
-        stop: &dyn RuntimeStop,
-        tasks: &Tasks,
-        runtime: Instance,
-        list: &List,
-    ) -> Result<u64, Arc<str>> {
-        let mut total = 0;
-        for shard in 0..list.length {
-            let (mut at, locked) = self.shard(stop, runtime, list, shard)?;
-            if locked {
-                return Err("a shard was being changed".into());
-            }
-            let mut previous = 0;
-            while at != 0 {
-                if total >= list.count {
-                    return Err("the list holds more than its count".into());
-                }
-                let found = self.node(stop, tasks, list, at, previous)?;
-                (previous, at) = (at, found.next);
-                total += 1;
-            }
-        }
-        Ok(total)
     }
 
     /// A shard's head, and whether its lock was held at the stop.
