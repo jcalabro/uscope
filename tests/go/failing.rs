@@ -255,10 +255,9 @@ fn exception(reason: &StopReason, context: &str) -> (LanguageExceptionKind, Stri
 
 #[tokio::test]
 async fn exceptions_stop_as_chosen() {
-    let raised = ExceptionStops {
-        raised: true,
-        ..ExceptionStops::default()
-    };
+    let raised = ExceptionStops::default()
+        .with("raised", true)
+        .expect("Go declares its panics");
     for fixture in BUILDS {
         // Each panic stops as it is raised, in the frame that raised it,
         // the one the program recovers from too. The runtime's own errors
@@ -298,11 +297,7 @@ async fn exceptions_stop_as_chosen() {
 
         // With none chosen, a fault the runtime turns into a panic neither
         // stops for its signal nor for the panic.
-        let none = ExceptionStops {
-            raised: false,
-            unhandled: false,
-            fatal: false,
-        };
+        let none = ExceptionStops::NONE;
         let (scenario, reason) = launched(fixture, "nil-dereference", none).await;
         assert_eq!(reason, StopReason::Exited(ExitStatus::Code(2)), "{fixture}");
         scenario.shutdown().await;
@@ -316,10 +311,9 @@ async fn exceptions_stop_as_chosen() {
 /// is still one panic, which stops once.
 #[tokio::test]
 async fn a_panic_preempted_as_it_begins_stops_once() {
-    let raised = ExceptionStops {
-        raised: true,
-        ..ExceptionStops::default()
-    };
+    let raised = ExceptionStops::default()
+        .with("raised", true)
+        .expect("Go declares its panics");
     for fixture in BUILDS {
         let (mut scenario, reason) = launched(fixture, "recovered", raised).await;
         let (kind, _) = exception(&reason, fixture);

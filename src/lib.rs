@@ -95,7 +95,7 @@ pub use model::{
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, ConditionOwner,
     CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, DebugFileOptions, DebuggerEvent,
-    ExceptionDisposition, ExceptionInfo, ExceptionStops, ExecutionId, ExitStatus,
+    ExceptionDisposition, ExceptionFilter, ExceptionInfo, ExceptionStops, ExecutionId, ExitStatus,
     FramePresentation, GlobalVariableQuery, HeldChild, HeldProcess, HitComparison, HitCondition,
     InferiorState, InvalidatedWatchpoint, KernelSource, LanguageException, LanguageExceptionKind,
     LaunchOptions, LogPart, ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation,

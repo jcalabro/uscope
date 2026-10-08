@@ -633,6 +633,7 @@ nearest preceding symbol.
 | `task` [*id* [*command*]] | Show the selected task, select one, or run an inspecting command in one. |
 | `handle` *signal* [`stop`\|`nostop`] [`print`\|`noprint`] [`pass`\|`nopass`] | Change how a signal is handled. `stop` implies `print`, and `noprint` implies `nostop`. |
 | `info signals` | List every signal's policy. |
+| `catch` [*exception*] [`on`\|`off`] | Show or choose which exceptions language runtimes report stop: `unhandled`, `runtime-fatal`, and `raised`. |
 
 Each runtime's own name for its tasks names these commands too:
 `goroutines` and `goroutine` in Go. A goroutine is listed where the code the
@@ -668,9 +669,12 @@ A language runtime that handles signals itself changes their defaults:
 whose runtime turns a fault into a panic. A `handle` command still applies
 over that. What the runtime then reports stops instead:
 
-- a panic nothing recovered, as it ends the program;
+- a panic nothing recovered, as it ends the program (`unhandled`);
 - a fatal error, such as `all goroutines are asleep - deadlock!`, or a
-  fault the runtime cannot turn into a panic, as one in C is.
+  fault the runtime cannot turn into a panic, as one in C is (`runtime-fatal`).
+
+`catch raised on` stops at every panic as it begins too, whether or not
+the program recovers from it.
 
 The stop prints the message the runtime prints, chained panics and all, and
 selects the frame that panicked or faulted, below the runtime's own. A

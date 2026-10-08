@@ -244,6 +244,19 @@ const SIGNAL_ACTIONS: &[&str] = &["stop", "nostop", "print", "noprint", "pass", 
 /// Where the word at `position` in `line` starts, and the words that
 /// could replace it. `fields` gives the members of the value an expression
 /// names, or of what it points to.
+/// What `catch`'s argument at `argument` may be: an exception filter, then
+/// whether it stops.
+fn exception_words(argument: usize) -> Vec<String> {
+    if argument == 0 {
+        uscope::ExceptionStops::filters()
+            .iter()
+            .map(|filter| filter.id.to_owned())
+            .collect()
+    } else {
+        words_of(&["on", "off"])
+    }
+}
+
 pub fn complete(
     line: &str,
     position: usize,
@@ -317,6 +330,7 @@ pub fn complete(
             .filter_map(uscope::signal_name)
             .collect(),
         Command::Handle => words_of(SIGNAL_ACTIONS),
+        Command::Catch => exception_words(argument),
         Command::Help if argument == 0 => {
             COMMANDS.iter().map(|spec| spec.name.to_owned()).collect()
         }

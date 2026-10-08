@@ -35,6 +35,7 @@ const DISASSEMBLY_CONTEXT_AFTER: u32 = 16;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Handle,
+    Catch,
     Views,
     Break,
     Tbreak,
@@ -205,6 +206,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         [],
         "handle <signal> [action] [action] [action]",
         "Show or change how a signal is handled: stop|nostop, print|noprint, pass|nopass"
+    ),
+    command!(
+        Catch,
+        "catch",
+        [],
+        "catch [exception] [on|off]",
+        "Show or choose which exceptions language runtimes report stop, such as rust-panic"
     ),
     command!(
         Delete,
@@ -647,6 +655,7 @@ impl Cli {
             Command::Breakpoints => self.list_breakpoints().await?,
             Command::Info => self.info(&arguments, rest, spec).await?,
             Command::Handle => self.handle_signal(&arguments).await?,
+            Command::Catch => self.catch(&arguments, spec).await?,
             Command::Delete => self.delete(&arguments, false, spec).await?,
             Command::Enable => self.set_enabled(&arguments, true, spec).await?,
             Command::Disable => self.set_enabled(&arguments, false, spec).await?,
@@ -716,16 +725,22 @@ impl Cli {
             Command::Tasks => self.tasks(line, &arguments, spec).await?,
             Command::Task => self.task(line, &arguments).await?,
             Command::Clear => return Ok(Control::ClearScreen),
-            Command::Help => match first {
-                Some(name) => format::command_help(
-                    command_named(name).ok_or_else(|| anyhow!("unknown command '{name}'"))?,
-                    renderer,
-                ),
-                None => format::help(&self.settings.config.aliases, renderer),
-            },
+            Command::Help => self.help(first)?,
             Command::Quit => return Ok(Control::Quit),
         };
         Ok(Control::Continue(output))
+    }
+
+    /// Help on one command, or on every one.
+    fn help(&self, command: Option<&str>) -> Result<String> {
+        let renderer = self.renderers.stdout;
+        Ok(match command {
+            Some(name) => format::command_help(
+                command_named(name).ok_or_else(|| anyhow!("unknown command '{name}'"))?,
+                renderer,
+            ),
+            None => format::help(&self.settings.config.aliases, renderer),
+        })
     }
 
     /// Runs until the selected thread reaches `location` or its frame
@@ -2968,6 +2983,66 @@ impl Cli {
             &[(code, policy)],
             self.renderers.stdout,
         ))
+    }
+}
+
+impl Cli {
+    /// Lists the exceptions runtimes report and whether each stops, or
+    /// shows one, or chooses whether it does.
+    async fn catch(&self, arguments: &[&str], spec: &CommandSpec) -> Result<String> {
+        let current = *self
+            .exceptions
+            .lock()
+            .expect("the exception stops are whole");
+        let filters = uscope::ExceptionStops::filters();
+        let (shown, stops) = match arguments {
+            [] => (filters.iter().collect::<Vec<_>>(), current),
+            [name, choice @ ..] => {
+                let filter = filters
+                    .iter()
+                    .find(|filter| filter.id == *name)
+                    .ok_or_else(|| {
+                        let names = filters.iter().map(|filter| filter.id).collect::<Vec<_>>();
+                        anyhow!(
+                            "unknown exception '{name}'; runtimes report {}",
+                            names.join(", ")
+                        )
+                    })?;
+                let stops = match choice {
+                    [] => current,
+                    ["on" | "off"] => {
+                        let chosen = current
+                            .with(filter.id, choice[0] == "on")
+                            .expect("a listed filter");
+                        self.debugger.set_exception_stops(chosen).await?;
+                        *self
+                            .exceptions
+                            .lock()
+                            .expect("the exception stops are whole") = chosen;
+                        chosen
+                    }
+                    _ => return Err(spec.usage_error()),
+                };
+                (vec![filter], stops)
+            }
+        };
+        let width = shown
+            .iter()
+            .map(|filter| filter.id.len())
+            .max()
+            .unwrap_or(0);
+        Ok(shown
+            .iter()
+            .map(|filter| {
+                format!(
+                    "{:width$}  {:3}  {}",
+                    filter.id,
+                    if stops.stops(filter.id) { "on" } else { "off" },
+                    filter.label,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 }
 
