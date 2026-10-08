@@ -86,6 +86,7 @@ config check` checks every file, for a project's CI.
 | `[stop]` | `show`, the sections a stop prints, and their sizes |
 | `[print]` | `style` (`compact` or `pretty`), `radix`, `width`, `indent`, `max-depth`, `max-elements` |
 | `[disassembly]` | `syntax`, `show-bytes` |
+| `[step]` | `runtime`: `skip` passes over a language runtime's own code, `enter` stops in it, as `set step-runtime` chooses |
 | `[breakpoints]` | `save` |
 | `[debug-info]` | `directories`, searched for separate debug files after `--debug-directory`'s and relative to the project root, and `debuginfod` |
 | `[history]` | `size` |
@@ -175,6 +176,7 @@ or `$VISUAL` or `$EDITOR` with `+line path`.
 | `step` *function* \| `*`*0xaddress* | Step into one call of the line: the first that calls *function*, or the call instruction at an address. |
 | `info calls` | List the calls of the selected thread's line that `step` can go into. |
 | `stepi`, `si` / `nexti`, `ni` | Step one instruction, into / over calls. |
+| `set step-runtime on`\|`off` | Let steps stop in a language runtime's own code, or pass over it. |
 | `finish`, `fin` | Run until the selected frame returns. |
 | `advance`, `adv` *location* | Run until the selected thread reaches a location, or the selected frame returns. |
 | `jump`, `j` *location* | Move the selected thread, without running it, to resume at a location in its function. |
@@ -234,7 +236,10 @@ ends as `next` does.
 `step` stops only in code the program's author wrote: it passes through
 the runtime's private machinery, compiler-generated wrappers, and stack
 switches to the code they call, and steps out of them where they call none.
-A step begun in the runtime may stop there. `step` at a `return` enters the
+A step begun in the runtime may stop there, and `set step-runtime on`, or
+`runtime = "enter"` in `[step]`, lets every step stop there, as in tokio's
+`recv` on `step` into `rx.recv().await`; `set step-runtime off` restores
+the default. Backtraces fold the runtime's frames either way. `step` at a `return` enters the
 deferred calls it runs; `next` and `finish` run them, but stop in a deferred
 call that a panic runs. The body of a loop over an iterator function is a
 function the iterator calls, which steps treat as the loop's own code:

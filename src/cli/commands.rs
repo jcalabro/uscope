@@ -347,7 +347,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         "set",
         [],
         "set [var] <assignment...>",
-        "Change a number, truth value, enumeration, or pointer, such as set var x = y + 1; set views on|off shows values as their views present them or as stored"
+        "Change a number, truth value, enumeration, or pointer, such as set var x = y + 1; set views on|off shows values as their views present them or as stored; set step-runtime on|off makes steps stop in a language runtime's own code or pass over it"
     ),
     command!(
         Views,
@@ -2013,6 +2013,14 @@ impl Cli {
                     "as stored"
                 }
             ));
+        }
+        if let Some(setting @ ("on" | "off")) = text.strip_prefix("step-runtime ").map(str::trim) {
+            self.debugger.set_step_into_runtime(setting == "on").await?;
+            return Ok(if setting == "on" {
+                "steps stop in runtime code".to_owned()
+            } else {
+                "steps pass over runtime code".to_owned()
+            });
         }
         let text = text.strip_prefix("var ").map_or(text, str::trim);
         let expression = parse_expression(text)?;

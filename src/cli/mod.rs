@@ -451,6 +451,9 @@ impl Cli {
         self.announce(args)?;
         self.load_views(&self.settings.root, &args.views).await;
         self.apply_signal_settings().await?;
+        if self.settings.config.step.runtime == config::StepRuntime::Enter {
+            self.debugger.set_step_into_runtime(true).await?;
+        }
         // Scripts behave the same in every checkout, so only a session at
         // a terminal keeps its breakpoints.
         if !args.batch

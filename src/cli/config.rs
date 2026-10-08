@@ -38,6 +38,7 @@ pub struct Config {
     pub stop: Stop,
     pub print: Print,
     pub disassembly: Disassembly,
+    pub step: Stepping,
     pub breakpoints: Breakpoints,
     pub debug_info: DebugInfo,
     pub history: History,
@@ -219,6 +220,23 @@ impl Default for Disassembly {
             show_bytes: true,
         }
     }
+}
+
+/// How steps treat a language runtime's own code.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Stepping {
+    pub runtime: StepRuntime,
+}
+
+/// Whether steps pass over a runtime's code to the program's code it
+/// calls, or stop in it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StepRuntime {
+    #[default]
+    Skip,
+    Enter,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
