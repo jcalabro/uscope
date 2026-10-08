@@ -333,15 +333,16 @@ index: number,
  */
 name: string, kind: FrameKind, 
 /**
- * The instruction or return address, in hexadecimal.
+ * The instruction or return address, in hexadecimal; for a suspended
+ * task's frame, where it resumes, if that is known.
  */
-address: string, 
+address: string | null, 
 /**
  * The file name of the module the code is in.
  */
 module: string | null, source: SourceLine | null, };
 
-export type FrameKind = "physical" | "inline" | "signal" | "tailCall";
+export type FrameKind = "physical" | "inline" | "signal" | "tailCall" | "async" | "awaited";
 
 export type SourceLine = { path: string, line: number, column: number | null, };
 

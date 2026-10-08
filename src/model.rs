@@ -1712,6 +1712,9 @@ pub enum CallFrameUnavailableReason {
     /// The frame's function left by a tail call, which gave its place on
     /// the stack to the function it jumped to.
     TailCall,
+    /// The frame is a suspended task's: its future holds its state, and it
+    /// has no place on any stack.
+    Suspended,
 }
 
 /// Why the value a parameter held on entry cannot be recovered from the
@@ -1936,6 +1939,9 @@ impl fmt::Display for VariableUnavailableReason {
             }
             Self::CallFrameUnavailable(CallFrameUnavailableReason::TailCall) => {
                 formatter.write_str("a tail call discarded the frame")
+            }
+            Self::CallFrameUnavailable(CallFrameUnavailableReason::Suspended) => {
+                formatter.write_str("the frame is suspended, and is on no stack")
             }
             Self::EntryValue(reason) => {
                 write!(formatter, "the entry value is unavailable: {reason}")
@@ -3465,6 +3471,25 @@ pub enum FrameKind {
     /// of tail calls between a call and the frame it entered shows it, and
     /// its state is gone but for what was passed to it.
     TailCall,
+    /// An async function or block of a suspended task, whose state is the
+    /// future at `object`: no thread runs it, so it has no registers, and
+    /// its variables are those its state keeps.
+    Async { object: VirtualAddress },
+    /// The future at `object`, of type `ty`, that a suspended task's
+    /// innermost async frame awaits, which is no async function's.
+    Awaited {
+        object: VirtualAddress,
+        ty: TypeReference,
+    },
+}
+
+impl FrameKind {
+    /// Whether the frame is a suspended task's, read from its future: an
+    /// async frame or the future it awaits.
+    #[must_use]
+    pub const fn is_suspended(self) -> bool {
+        matches!(self, Self::Async { .. } | Self::Awaited { .. })
+    }
 }
 
 /// A platform-independent stack frame.
@@ -3478,8 +3503,10 @@ pub struct StackFrame {
     pub kind: FrameKind,
     /// The loaded module containing the instruction, when known.
     pub module: Option<ModuleId>,
-    /// The exact instruction or resume address for the frame.
-    pub instruction: VirtualAddress,
+    /// The exact instruction or resume address for the frame. A suspended
+    /// task's async frame has the address its function resumes at, where
+    /// that is known, and the future it awaits has none.
+    pub instruction: Option<VirtualAddress>,
     /// Whose stack the frame is on. A backtrace changes segment where a
     /// runtime switched stacks.
     pub segment: StackSegment,
@@ -3517,7 +3544,7 @@ impl StackFrame {
             level,
             kind,
             module,
-            instruction,
+            Some(instruction),
             FrameMetadata {
                 code_instance: None,
                 function: None,
@@ -3532,7 +3559,7 @@ impl StackFrame {
         level: u32,
         kind: FrameKind,
         module: Option<ModuleId>,
-        instruction: VirtualAddress,
+        instruction: Option<VirtualAddress>,
         metadata: FrameMetadata,
     ) -> Self {
         Self {
@@ -3573,6 +3600,9 @@ pub enum UnwindTermination {
     /// A runtime switched stacks at the frame, and where the stack it
     /// switched from continues could not be found.
     UnresolvedStackSwitch { reason: Arc<str> },
+    /// A suspended task's chain of awaits could not be followed past its
+    /// last frame, for this reason.
+    BrokenAwaitChain { reason: Arc<str> },
     /// A previously visited frame state was encountered again.
     CycleDetected,
     /// The configured maximum frame count was reached.
@@ -3609,6 +3639,9 @@ impl fmt::Display for UnwindTermination {
                     formatter,
                     "the stack continues where its runtime switched stacks: {reason}"
                 )
+            }
+            Self::BrokenAwaitChain { reason } => {
+                write!(formatter, "the chain of awaits ends early: {reason}")
             }
             Self::CycleDetected => formatter.write_str("unwind metadata produced a frame cycle"),
             Self::DepthLimit => formatter.write_str("unwind depth limit reached"),

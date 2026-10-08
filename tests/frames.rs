@@ -251,7 +251,7 @@ async fn check_frame_truth(scenario: &mut Scenario, variant: &str, argc: i128) {
         let location = scenario
             .operation("location", scenario.handle().current_location())
             .await;
-        assert_eq!(location.address, frame.instruction, "{context}");
+        assert_eq!(Some(location.address), frame.instruction, "{context}");
         assert_eq!(location.image.function, frame.function, "{context}");
         assert_eq!(location.image.source, frame.source, "{context}");
         if let Some(line) = call_line(function, recursion) {
@@ -309,7 +309,13 @@ async fn check_unsaved_register(scenario: &mut Scenario) {
     assert_eq!(register("orig_rax"), None);
     assert_eq!(
         register("rip").as_deref(),
-        Some(&frames[inlined].instruction.get().to_le_bytes()[..])
+        Some(
+            &frames[inlined]
+                .instruction
+                .expect("a thread's frame has an instruction")
+                .get()
+                .to_le_bytes()[..]
+        )
     );
     assert!(register("rsp").is_some() && register("fs_base").is_some());
     // The innermost frame still reads the live register.
@@ -805,7 +811,14 @@ async fn frame_selection_lasts_until_the_next_stop() {
             .iter()
             .find(|register| &*register.register.name == "rip")
             .and_then(|register| register.bytes.clone()),
-        Some(frames[recursion].instruction.get().to_le_bytes().into())
+        Some(
+            frames[recursion]
+                .instruction
+                .expect("a thread's frame has an instruction")
+                .get()
+                .to_le_bytes()
+                .into()
+        )
     );
 
     let outermost = frames.last().expect("frames").id;
@@ -879,7 +892,13 @@ async fn explicit_contexts_inspect_any_frame_without_selecting_it() {
     assert!(registers.registers.iter().any(|register| {
         &*register.register.name == "rip"
             && register.bytes.as_deref()
-                == Some(&frames[recursion].instruction.get().to_le_bytes()[..])
+                == Some(
+                    &frames[recursion]
+                        .instruction
+                        .expect("a thread's frame has an instruction")
+                        .get()
+                        .to_le_bytes()[..],
+                )
     }));
     assert_eq!(
         scenario

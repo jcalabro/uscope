@@ -1969,7 +1969,9 @@ async fn vdso_images_the_dump_lost_are_missing_rather_than_guessed() {
     let reference = open_core(FIXTURE);
     let start = vdso(&core_info(&reference)).start.get();
     let (trace, _) = named_frames(&reference).await;
-    let fault = trace.frames[0].instruction;
+    let fault = trace.frames[0]
+        .instruction
+        .expect("a thread's frame has an instruction");
     reference.shutdown().await;
 
     let edits: [(&str, SegmentEdit); 3] = [
@@ -2012,7 +2014,7 @@ async fn vdso_images_the_dump_lost_are_missing_rather_than_guessed() {
         );
         let (trace, frames) = named_frames(&scenario).await;
         assert!(
-            trace.frames.len() == 1 && trace.frames[0].instruction == fault,
+            trace.frames.len() == 1 && trace.frames[0].instruction == Some(fault),
             "{name}: {trace:#?}"
         );
         assert_eq!(frames[0].0, "?", "{name}");

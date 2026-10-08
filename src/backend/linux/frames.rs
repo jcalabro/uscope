@@ -474,17 +474,25 @@ impl<P: InspectionOps> Controller<P> {
                     .code_instance
                     .expect("inline frames name their code instance"),
             ),
-            FrameKind::Physical | FrameKind::Signal | FrameKind::TailCall => {
-                PresentedFrame::Physical
-            }
+            // A thread's stack has no suspended frames.
+            FrameKind::Physical
+            | FrameKind::Signal
+            | FrameKind::TailCall
+            | FrameKind::Async { .. }
+            | FrameKind::Awaited { .. } => PresentedFrame::Physical,
         };
         // Only code a function describes has a source scope.
         let scope = match (selected.kind, selected.code_instance) {
             (_, None) => FrameScope::Unavailable,
             (FrameKind::Inline, Some(instance)) => FrameScope::Inline(instance),
-            (FrameKind::Physical | FrameKind::Signal | FrameKind::TailCall, Some(_)) => {
-                FrameScope::Function
-            }
+            (
+                FrameKind::Physical
+                | FrameKind::Signal
+                | FrameKind::TailCall
+                | FrameKind::Async { .. }
+                | FrameKind::Awaited { .. },
+                Some(_),
+            ) => FrameScope::Function,
         };
         // The jump discarded the frame's registers and its stack's place:
         // only entry values recover what was passed to it.
@@ -590,6 +598,9 @@ impl<P: InspectionOps> Controller<P> {
             .modules
             .get(&module)
             .ok_or(Error::ModuleNotLoaded(module))?;
+        // A suspended frame whose resume address is unknown has no code to
+        // locate.
+        let instruction = selected.instruction.ok_or(Error::LocationUnavailable)?;
         let mut location = module.image.locate(address);
         location.function = selected.function;
         location.source = selected.source;
@@ -597,12 +608,12 @@ impl<P: InspectionOps> Controller<P> {
         // symbol offset describes the frame's own instruction.
         let lookup = module.loaded.virtual_address(address)?;
         if let Some(symbol) = &mut location.symbol {
-            symbol.offset += selected.instruction.get() - lookup.get();
+            symbol.offset += instruction.get() - lookup.get();
         }
 
         Ok(ExecutionLocation {
             module: module.loaded.id,
-            address: selected.instruction,
+            address: instruction,
             image: location,
         })
     }
@@ -1106,7 +1117,7 @@ fn push_code_frames(
                 level,
                 FrameKind::Inline,
                 module,
-                instruction,
+                Some(instruction),
                 FrameMetadata {
                     code_instance: Some(instance.id),
                     function,
@@ -1134,7 +1145,7 @@ fn push_code_frames(
         level,
         kind,
         module,
-        instruction,
+        Some(instruction),
         FrameMetadata {
             code_instance: physical_instance.map(|instance| instance.id),
             function,

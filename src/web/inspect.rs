@@ -76,8 +76,10 @@ pub async fn backtrace(
                 FrameKind::Inline => protocol::FrameKind::Inline,
                 FrameKind::Signal => protocol::FrameKind::Signal,
                 FrameKind::TailCall => protocol::FrameKind::TailCall,
+                FrameKind::Async { .. } => protocol::FrameKind::Async,
+                FrameKind::Awaited { .. } => protocol::FrameKind::Awaited,
             },
-            address: hex(frame.instruction.get()),
+            address: frame.instruction.map(|address| hex(address.get())),
             module: image
                 .as_ref()
                 .and_then(|image| image.path().file_name())

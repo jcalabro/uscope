@@ -22,6 +22,7 @@ use super::marks::Mark;
 use crate::{
     Backtrace, ExecutionContext, FrameKind, PresentedFrame, ScalarValue, StepKind, StopReason,
     UnwindTermination, VariableSnapshot, VariableState, VariableValue, VariableValueSource,
+    VirtualAddress,
 };
 
 /// What a backtrace showed of its thread's stack.
@@ -76,7 +77,12 @@ pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwoun
         .filter(|frame| !matches!(frame.kind, FrameKind::Inline | FrameKind::TailCall))
         .collect::<Vec<_>>();
     for (level, frame) in physical.iter().enumerate() {
-        let address = frame.instruction.get();
+        let Some(address) = frame.instruction.map(VirtualAddress::get) else {
+            return Err(format!(
+                "thread {}'s frame {level} has no instruction",
+                thread.tid
+            ));
+        };
         if level == 0 {
             if address != thread.registers.rip {
                 return Err(format!(
@@ -173,6 +179,12 @@ pub fn tail_frames(
         .filter(|frame| frame.kind != FrameKind::Inline)
         .peekable();
     while let Some(frame) = frames.next() {
+        let Some(instruction) = frame.instruction else {
+            return Err(format!(
+                "thread {}'s frame {} has no instruction",
+                thread.tid, frame.level
+            ));
+        };
         let mut tails = Vec::new();
         while let Some(tail) = frames.next_if(|frame| frame.kind == FrameKind::TailCall) {
             tails.push(tail);
@@ -184,18 +196,22 @@ pub fn tail_frames(
         let tid = thread.tid;
         let Some(index) = calls.len().checked_sub(level + 1) else {
             return Err(format!(
-                "thread {tid}'s frame at {} has functions that left by tail calls below it,                  but no call began its activation",
-                frame.instruction
+                "thread {tid}'s frame at {instruction} has functions that left by tail calls below it,                  but no call began its activation"
             ));
         };
         let call = calls[index];
         let jumps = thread.shadow.jumps(index);
         // A caller's code is just before its return address.
-        let code = frame.instruction.get() - u64::from(level != 0);
+        let code = instruction.get() - u64::from(level != 0);
         let mut inner = function(code);
         shown += tails.len();
         for tail in tails {
-            let at = tail.instruction.get();
+            let Some(at) = tail.instruction.map(VirtualAddress::get) else {
+                return Err(format!(
+                    "thread {tid}'s frame {} has no instruction",
+                    tail.level
+                ));
+            };
             let Some(jump) = jumps.iter().find(|jump| at == jump.from || at == jump.next) else {
                 return Err(format!(
                     "thread {tid}'s frame {} says its function left by a tail call at                      {at:#x}, but its activation took no such jump: {jumps:x?}",
@@ -212,8 +228,8 @@ pub fn tail_frames(
         }
         if inner != Some(call.target) {
             return Err(format!(
-                "thread {tid}'s tail calls below the frame at {} began in the function at                  {inner:x?}, but the call entered {:#x}",
-                frame.instruction, call.target
+                "thread {tid}'s tail calls below the frame at {instruction} began in the function at                  {inner:x?}, but the call entered {:#x}",
+                call.target
             ));
         }
         level += 1;

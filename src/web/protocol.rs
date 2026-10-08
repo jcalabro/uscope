@@ -850,8 +850,9 @@ pub struct Frame {
     /// The function, symbol, or address.
     pub name: String,
     pub kind: FrameKind,
-    /// The instruction or return address, in hexadecimal.
-    pub address: String,
+    /// The instruction or return address, in hexadecimal; for a suspended
+    /// task's frame, where it resumes, if that is known.
+    pub address: Option<String>,
     /// The file name of the module the code is in.
     pub module: Option<String>,
     pub source: Option<SourceLine>,
@@ -868,6 +869,10 @@ pub enum FrameKind {
     Signal,
     /// A function that left by a tail call to the frame below it.
     TailCall,
+    /// An async function of a suspended task, which its future holds.
+    Async,
+    /// The future a suspended task's innermost async function awaits.
+    Awaited,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -161,7 +161,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let runtime = trace
             .frames
             .first()
-            .and_then(|frame| inferior.runtime_hooks.get(&frame.instruction))
+            .and_then(|frame| inferior.runtime_hooks.get(&frame.instruction?))
             .and_then(|site| {
                 self.runtimes(inferior)
                     .into_iter()

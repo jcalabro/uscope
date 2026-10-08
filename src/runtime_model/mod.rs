@@ -599,18 +599,12 @@ impl RuntimeImage for ModuleImage {
     }
 
     fn coroutine_body(&self, ty: TypeReference) -> Option<ImageAddress> {
+        if ty.image != self.id() {
+            return None;
+        }
         let mut starts = self
-            .functions()
-            .iter()
-            .filter(|function| {
-                function.coroutine.is_some_and(|runs| {
-                    let runs = TypeReference {
-                        image: ty.image,
-                        id: runs,
-                    };
-                    RuntimeImage::same_type(self, runs, ty)
-                })
-            })
+            .coroutine_functions(ty.id)
+            .into_iter()
             .flat_map(|function| self.instances_for_function(function.id))
             .filter(|instance| matches!(instance.kind, crate::CodeInstanceKind::OutOfLine))
             .filter_map(|instance| instance.ranges.iter().map(|range| range.start).min());

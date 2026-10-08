@@ -453,7 +453,12 @@ async fn backtraces_unwind_through_the_vdso() {
                 .await;
             let frames = frame_modules(&trace, &modules);
             assert!(
-                mapping.contains(&trace.frames[0].instruction.get()),
+                mapping.contains(
+                    &trace.frames[0]
+                        .instruction
+                        .expect("a thread's frame has an instruction")
+                        .get()
+                ),
                 "{context}: {trace:#?}"
             );
             assert_eq!(frames[0].0, support::VDSO, "{context}: {frames:#?}");

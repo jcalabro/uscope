@@ -1972,8 +1972,18 @@ pub fn stack_frame(
     } else {
         String::new()
     };
+    // A suspended task's frames run nowhere until it resumes, and the
+    // future it awaits runs no code of its own.
+    let address = frame
+        .instruction
+        .map_or_else(|| " ".repeat(18), |address| format!("{address:#018x}"));
+    let what = match frame.kind {
+        uscope::FrameKind::Awaited { .. } => "",
+        uscope::FrameKind::Async { .. } => " in async",
+        _ => " in",
+    };
     format!(
-        "{} {} in {}{tail}{iterator}{place}",
+        "{} {}{what} {}{tail}{iterator}{place}",
         renderer.paint(
             if selected {
                 Role::Current
@@ -1982,7 +1992,7 @@ pub fn stack_frame(
             },
             format_args!("#{:<2}", frame.level)
         ),
-        renderer.paint(Role::Metadata, format_args!("{:#018x}", frame.instruction)),
+        renderer.paint(Role::Metadata, address),
         renderer.paint(
             // A runtime's machinery and compiler wrappers recede.
             if frame
@@ -1994,9 +2004,30 @@ pub fn stack_frame(
             } else {
                 Role::Metadata
             },
-            code_name(frame.function.as_ref(), frame.symbol.as_ref())
+            frame_code(frame, images)
         ),
     )
+}
+
+/// What a frame runs, as a backtrace names it: its function or symbol, or,
+/// for the future a suspended task awaits, `awaiting` and that future's
+/// type.
+pub fn frame_code(frame: &StackFrame, images: &BTreeMap<ModuleId, Arc<ModuleImage>>) -> String {
+    if let uscope::FrameKind::Awaited { ty, .. } = frame.kind {
+        let image = images.values().find(|image| image.id() == ty.image);
+        return awaited(image.map(AsRef::as_ref), ty);
+    }
+    code_name(frame.function.as_ref(), frame.symbol.as_ref())
+}
+
+/// The future of type `ty` a suspended task awaits, as its frame is named:
+/// `awaiting tokio::time::sleep::Sleep`.
+pub fn awaited(image: Option<&ModuleImage>, ty: uscope::TypeReference) -> String {
+    let name = image
+        .filter(|image| image.id() == ty.image)
+        .and_then(|image| image.type_info(ty))
+        .map_or_else(|| "a future".to_owned(), super::value::qualified_name);
+    format!("awaiting {name}")
 }
 
 /// A frame's source file and line, from its module's image.
