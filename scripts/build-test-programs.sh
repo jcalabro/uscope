@@ -729,7 +729,8 @@ suite_is_current() {
     local signature="$1"
     [[ -f "$suite_stamp" && -f "$suite_outputs" ]] || return 1
     [[ "$(<"$suite_stamp")" == "$signature" ]] || return 1
-    [[ -z "$(find "$fixtures_dir" sdk views/kernels scripts/gosym-oracle "${BASH_SOURCE[0]}" \
+    [[ -z "$(find "$fixtures_dir" sdk views/kernels scripts/gosym-oracle \
+        scripts/coroutine-oracle.awk "${BASH_SOURCE[0]}" \
         "$frame_oracle_script" -newer "$suite_stamp" -print -quit)" ]] \
         || return 1
     local output
@@ -1965,6 +1966,29 @@ build_tokio_variant() {
         cp -p "$built" "$output"
         rebuilt_outputs["$output"]=true
     done
+    for package in "$@"; do
+        generate_coroutine_oracle "$output_dir/tokio-${package}-${variant}"
+    done
+}
+
+# readelf's description of each coroutine a program has, which a test
+# compares uscope's reading of them with.
+generate_coroutine_oracle() {
+    local program="$1"
+    local oracle="${program}.coroutines"
+    local reducer=scripts/coroutine-oracle.awk
+    if [[ -s "$oracle" && "$oracle" -nt "$program" && "$oracle" -nt "$reducer" ]]; then
+        printf '[cached] %s\n' "$oracle"
+        rebuilt_outputs["$oracle"]=false
+        return
+    fi
+    printf '[oracle] %s\n' "$oracle"
+    rebuilt_outputs["$oracle"]=true
+    local dump="${oracle}.info"
+    readelf --debug-dump=info "$program" >"$dump" 2>/dev/null
+    awk -f "$reducer" "$dump" "$dump" | LC_ALL=C sort -u >"${oracle}.tmp"
+    rm -f "$dump"
+    mv "${oracle}.tmp" "$oracle"
 }
 
 # Every fixture, unoptimized and optimized.
