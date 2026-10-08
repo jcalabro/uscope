@@ -1034,15 +1034,6 @@ impl Waiter {
             .join()
             .map_err(|_| Error::BackendThreadPanicked)
     }
-
-    fn join(self) -> Result<()> {
-        self.thread.map_or(Ok(()), |thread| {
-            thread
-                .handle
-                .join()
-                .map_err(|_| Error::BackendThreadPanicked)
-        })
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
