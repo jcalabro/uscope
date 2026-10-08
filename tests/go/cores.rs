@@ -115,8 +115,12 @@ async fn a_cores_goroutines_are_those_the_runtime_dumped_as_it_crashed() {
         };
         let image = scenario.handle().module_image();
         let tasks = tasks(&scenario).await;
+        // Tasks are listed as `allgs` holds them, and each P takes ids in
+        // batches, so their order need not be their ids'.
+        let mut listed = tasks.iter().map(|task| task.id.number).collect::<Vec<_>>();
+        listed.sort_unstable();
         assert_eq!(
-            tasks.iter().map(|task| task.id.number).collect::<Vec<_>>(),
+            listed,
             dump.keys().copied().collect::<Vec<_>>(),
             "{fixture}"
         );
