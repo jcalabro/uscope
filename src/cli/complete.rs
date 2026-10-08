@@ -335,11 +335,13 @@ pub fn complete(
             COMMANDS.iter().map(|spec| spec.name.to_owned()).collect()
         }
         Command::Set if argument == 0 && !word.contains(['=', '.']) => {
-            let mut candidates = words_of(&["var", "views"]);
+            let mut candidates = words_of(&["var", "views", "step-runtime"]);
             candidates.extend(context.names.iter().cloned());
             candidates
         }
-        Command::Set if words.get(1) == Some(&"views") => words_of(&["on", "off"]),
+        Command::Set if matches!(words.get(1), Some(&("views" | "step-runtime"))) => {
+            words_of(&["on", "off"])
+        }
         Command::Condition | Command::Ignore | Command::Hits => {
             return expression(before, context, fields, &[]);
         }
