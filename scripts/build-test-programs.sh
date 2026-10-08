@@ -33,12 +33,14 @@ read_dash_version() {
 
 # Compiles run at once, as many as there are CPUs (USCOPE_FIXTURE_JOBS sets
 # how many; 1 builds one at a time). A step that reads what earlier steps
-# built waits for every running compile first: each helper that reads
-# outputs does, a compile does when its command or source names the output
-# directory, and the script does wherever it reads outputs itself. Only a
-# compile that the build helpers alone call runs in the background; one a
-# derivation or check makes runs in the foreground. Oracles that nothing
-# here reads run in the background until the end.
+# built waits for them first: one that reads only outputs it names waits for
+# the jobs making those (wait_for), as checks and compiles that link a
+# library built here do, and any other waits for every running compile
+# (wait_builds), as derivations do and the script does wherever it reads
+# outputs itself. Only a compile that the build helpers alone call runs in
+# the background; one a derivation or check makes runs in the foreground.
+# Cores and oracles run in the background too, and whatever reads a core
+# waits for it.
 readonly max_jobs="${USCOPE_FIXTURE_JOBS:-$(nproc)}"
 readonly background_builders=" build_program build_fixture build_c_fixture_directory \
 build_cpp_fixture_directory build_cpp_fixture build_shared_fixture build_symbols_library \
@@ -69,7 +71,8 @@ check_jobs() {
 }
 
 # Runs COMMAND in the background to make OUTPUT once a job slot is free.
-# KIND is build for a compile, which wait_builds waits for, or leaf.
+# KIND is build for a compile, which wait_builds waits for, or leaf for
+# anything else, which a step that reads OUTPUT waits for with wait_for.
 spawn_job() {
     local kind="$1"
     local output="$2"
@@ -97,6 +100,22 @@ wait_builds() {
     check_jobs
 }
 
+# Waits for the running jobs that make any of OUTPUTS, failing if any failed.
+wait_for() {
+    local pid output
+    for pid in "${!job_outputs[@]}"; do
+        for output in "$@"; do
+            if [[ "${job_outputs[$pid]}" == "$output" ]]; then
+                local status=0
+                wait "$pid" || status=$?
+                reap_job "$pid" "$status"
+                break
+            fi
+        done
+    done
+    check_jobs
+}
+
 # Waits for every running job, failing if any failed.
 wait_jobs() {
     local pid
@@ -116,22 +135,37 @@ called_by_builders() {
     done
 }
 
-# Whether a compile of OUTPUT from SOURCE with COMMAND reads anything in the
-# output directory, or makes what a running job makes.
-reads_outputs() {
+# Waits for what a compile of OUTPUT from SOURCE with COMMAND reads in the
+# output directory: what its words name, the libraries its -l options find
+# in a -L directory there, and OUTPUT itself if a running job makes it. A
+# word that names the output directory any other way waits for every
+# compile.
+wait_for_inputs() {
     local source="$1"
     local output="$2"
     shift 2
+    local -a inputs=("$output") directories=() libraries=()
+    [[ "$source" != *"$output_dir"* ]] || inputs+=("$source")
     local word
-    [[ "$source" != *"$output_dir"* ]] || return 0
     for word in "$@"; do
-        [[ "$word" != *"$output_dir"* || "$word" == *"$output"* ]] || return 0
+        case "$word" in
+            -l*) libraries+=("${word#-l}") ;;
+            *"$output") ;;
+            -L"$output_dir"*) directories+=("${word#-L}") ;;
+            "$output_dir"/*) inputs+=("$word") ;;
+            *"$output_dir"*)
+                wait_builds
+                return
+                ;;
+        esac
     done
-    local job
-    for job in "${job_outputs[@]}"; do
-        [[ "$job" != "$output" ]] || return 0
+    local directory library
+    for directory in "${directories[@]}"; do
+        for library in "${libraries[@]}"; do
+            inputs+=("$directory/lib${library}.so" "$directory/lib${library}.a")
+        done
     done
-    return 1
+    wait_for "${inputs[@]}"
 }
 
 # Compiles OUTPUT and records the signature it was built with.
@@ -164,9 +198,7 @@ run_cached_build() {
     local stamp="${output}.command"
     local previous=""
 
-    if reads_outputs "$source" "$output" "${command[@]}"; then
-        wait_builds
-    fi
+    wait_for_inputs "$source" "$output" "${command[@]}"
     if [[ -f "$stamp" ]]; then
         previous=$(<"$stamp")
     fi
@@ -453,7 +485,7 @@ derive_split_debug() {
 # tables and layout the symbolization tests depend on. TABLES names which
 # tables must exist: full, dynamic, or embedded.
 require_symbols_layout() {
-    wait_builds
+    wait_for "$1"
     local library="$1"
     local tables="$2"
     local sections symbols
@@ -594,7 +626,7 @@ build_zig_self_hosted_fixture() {
 }
 
 validation_is_cached() {
-    wait_builds
+    wait_for "$1"
     local output="$1"
     local stamp="$2"
     local signature="$3"
@@ -607,7 +639,6 @@ validation_is_cached() {
 }
 
 record_validation() {
-    wait_builds
     local stamp="$1"
     local signature="$2"
     printf '%s\n' "$signature" >"${stamp}.tmp"
@@ -617,7 +648,7 @@ record_validation() {
 # Fails the build when a fixture no longer emits a sibling-call jump a test
 # depends on, instead of letting the test pass through the regular-callee path.
 require_tail_jump() {
-    wait_builds
+    wait_for "$1"
     local output="$1"
     local caller="$2"
     local callee="$3"
@@ -641,7 +672,7 @@ require_tail_jump() {
 # Fails the build when a function no longer contains an instruction a test
 # depends on, such as a repeated string store or a 16-byte vector store.
 require_instruction() {
-    wait_builds
+    wait_for "$1"
     local output="$1"
     local function="$2"
     local pattern="$3"
@@ -666,7 +697,7 @@ require_instruction() {
 # its interpreter or, linked statically, contains musl's TLS layout code.
 # Otherwise a toolchain that quietly targeted glibc would pass musl's tests.
 require_musl() {
-    wait_builds
+    wait_for "$1"
     local output="$1"
     local stamp="${output}.validation-musl"
     local signature="validator=musl-v1"
@@ -693,7 +724,7 @@ require_musl() {
 # must contain glibc's thread library, whose absence leaves a program without
 # the descriptors libthread_db reads.
 require_static_glibc() {
-    wait_builds
+    wait_for "$1"
     local output="$1"
     local threads="$2"
     local stamp="${output}.validation-static-glibc"
@@ -724,7 +755,7 @@ require_static_glibc() {
 # Fails the build when a fixture's DWARF stops exercising the operation a test
 # depends on, instead of letting the test pass without its coverage.
 require_dwarf_operation() {
-    wait_builds
+    wait_for "$1"
     local output="$1"
     local operation="$2"
     local key=${operation//[^a-zA-Z0-9]/_}
@@ -781,7 +812,7 @@ generate_core() {
     shift 4
     local signature
     signature=$(core_signature "$signal" "$filter" "$inputs" "$@")
-    local stamp="${core}.command"
+    wait_for "$core"
     if core_is_current "$core" "$signature"; then
         rebuilt_outputs["$core"]=false
         printf '[cached] %s\n' "$core"
@@ -789,6 +820,19 @@ generate_core() {
     fi
 
     printf '[core]   %s\n' "$core"
+    rebuilt_outputs["$core"]=true
+    spawn_job leaf "$core" make_core "$core" "$signature" "$signal" "$filter" "$@"
+}
+
+# Runs COMMAND under gdb until it stops with SIGNAL and saves its memory, as
+# FILTER selects, as CORE, recording SIGNATURE beside it.
+make_core() {
+    local core="$1"
+    local signature="$2"
+    local signal="$3"
+    local filter="$4"
+    shift 4
+    local stamp="${core}.command"
     local temporary="${core}.tmp"
     rm -f "$temporary"
     local log
@@ -832,7 +876,6 @@ generate_core() {
     fi
     mv "$temporary" "$core"
     printf '%s\n' "$log" >"${core}.log"
-    rebuilt_outputs["$core"]=true
     printf '%s\n' "$signature" >"${stamp}.tmp"
     mv "${stamp}.tmp" "$stamp"
 }
@@ -861,13 +904,185 @@ suite_is_current() {
     [[ -f "$suite_stamp" && -f "$suite_outputs" ]] || return 1
     [[ "$(<"$suite_stamp")" == "$signature" ]] || return 1
     [[ -z "$(find "$fixtures_dir" sdk views/kernels scripts/gosym-oracle \
-        scripts/coroutine-oracle.awk "${BASH_SOURCE[0]}" \
+        scripts/coroutine-oracle "${BASH_SOURCE[0]}" \
         "$frame_oracle_script" -newer "$suite_stamp" -print -quit)" ]] \
         || return 1
     local output
     while IFS= read -r output; do
         [[ -e "$output" ]] || return 1
     done <"$suite_outputs"
+}
+
+# Post-mortem cores. 0x33 is the kernel's default coredump_filter; 0x23 omits
+# ELF header pages, 0x10 saves only ELF header pages so modified file-backed
+# pages are omitted too, and 0 saves no memory at all, leaving nothing that can
+# verify a module file.
+readonly default_core_filter=0x33
+readonly headerless_core_filter=0x23
+readonly headers_only_core_filter=0x10
+readonly memoryless_core_filter=0x0
+
+# The tokio fixtures: one cargo workspace whose crates come only from its
+# lockfile, which flake.nix vendors, so building fetches nothing. Each
+# variant has a target directory of its own, so the variants build at once,
+# and cargo rebuilds only what changed; a binary is copied out only when
+# cargo rewrote it. Nothing else here reads them, so they build beside the
+# other fixtures, and their outputs are listed in tokio_outputs for the
+# suite's own list.
+readonly tokio_fixtures_dir="${rust_fixtures_dir}/tokio"
+readonly tokio_target_dir="build/tokio-target"
+readonly tokio_outputs="${output_dir}/.tokio.outputs"
+
+# Builds the workspace's PACKAGES with PROFILE and extra RUSTFLAGS into
+# VARIANT's target directory.
+compile_tokio_variant() {
+    local variant="$1"
+    local profile="$2"
+    local flags="$3"
+    shift 3
+    local -a packages=()
+    local package
+    for package in "$@"; do
+        packages+=(--package "$package")
+    done
+    printf '[cargo]  tokio fixtures (%s)\n' "$variant"
+    CARGO_TARGET_DIR="$tokio_target_dir/$variant" RUSTFLAGS="${RUSTFLAGS-} -D warnings ${flags}" \
+        NIX_HARDENING_ENABLE= cargo build --quiet --offline --locked \
+        --manifest-path "$tokio_fixtures_dir/Cargo.toml" --profile "$profile" \
+        --config "source.crates-io.replace-with='vendored'" \
+        --config "source.vendored.directory='${USCOPE_FIXTURE_CRATES}'" "${packages[@]}"
+}
+
+# Copies each of PACKAGES that VARIANT's PROFILE build rewrote to
+# tokio-NAME-VARIANT.
+copy_tokio_variant() {
+    local variant="$1"
+    local profile="$2"
+    shift 2
+    local directory="$profile"
+    [[ "$profile" == dev ]] && directory=debug
+    local package
+    for package in "$@"; do
+        local built="$tokio_target_dir/$variant/$directory/$package"
+        local output="$output_dir/tokio-${package}-${variant}"
+        if [[ -x "$output" ]] && ! [[ "$built" -nt "$output" ]]; then
+            rebuilt_outputs["$output"]=false
+            continue
+        fi
+        cp -p "$built" "$output"
+        rebuilt_outputs["$output"]=true
+    done
+    # Coroutines are compared only in the plain builds.
+    [[ "$variant" == o0 || "$variant" == o3 ]] || return 0
+    for package in "$@"; do
+        generate_coroutine_oracle "$output_dir/tokio-${package}-${variant}"
+    done
+}
+
+# readelf's description of each coroutine a program has, which a test
+# compares uscope's reading of them with. scripts/coroutine-oracle reduces
+# its dump to the coroutines.
+readonly coroutine_reducer="$output_dir/coroutine-oracle"
+generate_coroutine_oracle() {
+    local program="$1"
+    local oracle="${program}.coroutines"
+    local reducer="$coroutine_reducer"
+    if [[ -s "$oracle" && "$oracle" -nt "$program" && "$oracle" -nt "$reducer" ]]; then
+        printf '[cached] %s\n' "$oracle"
+        rebuilt_outputs["$oracle"]=false
+        return
+    fi
+    printf '[oracle] %s\n' "$oracle"
+    rebuilt_outputs["$oracle"]=true
+    # Only tests read the result.
+    spawn_job leaf "$oracle" reduce_coroutines "$program" "$oracle" "$reducer"
+}
+
+# Writes ORACLE, the coroutines REDUCER finds in PROGRAM's dump.
+reduce_coroutines() {
+    local program="$1"
+    local oracle="$2"
+    local reducer="$3"
+    local dump="${oracle}.info"
+    readelf --debug-dump=info "$program" >"$dump" 2>/dev/null
+    "$reducer" "$dump" | LC_ALL=C sort -u >"${oracle}.tmp"
+    rm -f "$dump"
+    mv "${oracle}.tmp" "$oracle"
+}
+
+# Builds every tokio fixture and the cores taken from them, and lists what
+# it made in tokio_outputs. It runs in a shell of its own, which must start
+# before this one starts any job.
+build_tokio_fixtures() {
+    if [[ -z "${USCOPE_FIXTURE_CRATES-}" ]]; then
+        printf 'error: USCOPE_FIXTURE_CRATES is unset; build inside the Nix shell\n' >&2
+        exit 1
+    fi
+    build_go_fixture scripts/coroutine-oracle "$coroutine_reducer"
+    # Each variant: its name, profile, extra RUSTFLAGS, and packages.
+    local -a variants=()
+    local -a builds=()
+    variant() {
+        compile_tokio_variant "$@" &
+        builds+=($!)
+        local name="$1" profile="$2"
+        shift 3
+        variants+=("$name $profile $*")
+    }
+    # Every fixture, unoptimized and optimized. Unoptimized only: a hundred
+    # thousand tasks, which bound what listing them costs, and a task list
+    # the program damages, whose reading the build changes nothing of.
+    local -a fixtures=(std-async panics workers server drivers steps cancel shapes values
+        runtimes blocking migrate deadlock)
+    variant o0 dev "" "${fixtures[@]}" scale corrupt
+    variant o3 release "" "${fixtures[@]}"
+    # Panics that abort rather than unwind.
+    variant abort abort "" panics
+    # Builds that describe less than tokio's types, where the debugger says
+    # what it cannot read: lines only, symbols only, and tokio's sources moved
+    # where its version cannot be read from their path.
+    variant lines lines "" workers
+    variant stripped stripped "" workers
+    variant remapped dev \
+        "--remap-path-prefix=${USCOPE_FIXTURE_CRATES}/tokio-1.52.3=/vendor/tokio" workers
+    # tokio's unstable features, which record where each task was spawned and
+    # give each task's vtable one more offset.
+    variant unstable dev "--cfg tokio_unstable" workers
+    # Symbols mangled as rustc did before v0, which name no generic arguments.
+    variant legacy dev "-Z unstable-options -C symbol-mangling-version=legacy" panics workers
+    local build failed=0
+    for build in "${builds[@]}"; do
+        wait "$build" || failed=1
+    done
+    if (( failed )); then
+        printf 'error: could not build the tokio fixtures\n' >&2
+        exit 1
+    fi
+    local record
+    for record in "${variants[@]}"; do
+        # shellcheck disable=SC2086 # Each record is words.
+        copy_tokio_variant $record
+    done
+
+    # The workers fixture's checkpoint, as gdb dumps it, with each runtime
+    # flavor, the values fixture's first stop, and the runtimes fixture's
+    # checkpoint. The log keeps what the program reported there. One malloc
+    # arena keeps each thread from reserving one of its own, which the core
+    # saves.
+    export TRUTH_CORE=1 MALLOC_ARENA_MAX=1
+    local name
+    for name in o0 o3; do
+        local program="$output_dir/tokio-workers-${name}"
+        generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
+        generate_core "${program}-current.core" 5 "$default_core_filter" "$program" "$program" current
+        program="$output_dir/tokio-values-${name}"
+        generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
+        program="$output_dir/tokio-runtimes-${name}"
+        generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
+    done
+    wait_jobs
+    printf '%s\n' "${!rebuilt_outputs[@]}" >"${tokio_outputs}.tmp"
+    mv "${tokio_outputs}.tmp" "$tokio_outputs"
 }
 
 mkdir -p "$output_dir"
@@ -879,6 +1094,8 @@ fi
 # Written before building so sources edited during this run are newer than the
 # stamp that the final rename publishes.
 printf '%s\n' "$signature" >"${suite_stamp}.tmp"
+build_tokio_fixtures &
+readonly tokio_build=$!
 
 build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic" \
     -O0 -g3 -fPIE -pie
@@ -1784,14 +2001,6 @@ build_fixture gcc "$c_fixtures_dir/vdso.c" "$output_dir/vdso-gcc-o2" \
 build_fixture clang "$c_fixtures_dir/vdso.c" "$output_dir/vdso-clang-o2-nopie" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie
 
-# Post-mortem cores. 0x33 is the kernel's default coredump_filter; 0x23 omits
-# ELF header pages, 0x10 saves only ELF header pages so modified file-backed
-# pages are omitted too, and 0 saves no memory at all, leaving nothing that can
-# verify a module file.
-readonly default_core_filter=0x33
-readonly headerless_core_filter=0x23
-readonly headers_only_core_filter=0x10
-readonly memoryless_core_filter=0x0
 for variant in gcc-o0 clang-o2 gcc-o2-nopie; do
     program="$output_dir/crash-${variant}"
     inputs="$program $output_dir/libcrash.so"
@@ -1842,6 +2051,7 @@ generate_core_without() {
         cp "$output_dir/crash-gcc-o0" "$output_dir/libcrash.so" "$directory/"
     fi
     generate_core "$core" 11 "$default_core_filter" "$inputs" "$directory/crash-gcc-o0" segv
+    wait_for "$core"
     rm -f "$directory/$deleted"
 }
 generate_core_without library libcrash.so
@@ -1866,6 +2076,7 @@ generate_foreign_core() {
         cp "$output_dir/libc-foreign.so.6" "$directory/libc.so.6"
     fi
     generate_core "$core" 11 "$default_core_filter" "$inputs" "$directory/crash-gcc-o0" segv
+    wait_for "$core"
     cp "$output_dir/crash-gcc-o0-rebuilt" "$directory/crash-gcc-o0"
     cp "$output_dir/libcrash-rebuilt.so" "$directory/libcrash.so"
     rm -f "$directory/libc.so.6"
@@ -1912,6 +2123,8 @@ generate_symbol_oracle() {
     local elf="$1"
     local oracle="$symbol_oracle_dir/${2:-${elf##*/}}.readelf"
     local frames="${3:-yes}"
+    # The loader may be listed twice, under two paths.
+    wait_for "$oracle"
     # Nix store files all date from 1970, so the modification time alone never
     # notices a toolchain update. The resolved path names the store entry.
     local header
@@ -1923,6 +2136,14 @@ generate_symbol_oracle() {
         return
     fi
     printf '[oracle] %s\n' "$oracle"
+    spawn_job leaf "$oracle" make_symbol_oracle "$elf" "$oracle" "$frames" "$header"
+}
+
+make_symbol_oracle() {
+    local elf="$1"
+    local oracle="$2"
+    local frames="$3"
+    local header="$4"
     {
         printf '%s\n' "$header"
         readelf -SW "$elf"
@@ -1940,6 +2161,7 @@ generate_backtrace_oracle() {
     wait_builds
     local program="$1"
     local core="$2"
+    wait_for "$core"
     local oracle="${core}.gdb-backtrace"
     rebuilt_outputs["$oracle"]=false
     if [[ -s "$oracle" && "$oracle" -nt "$core" ]]; then
@@ -1947,6 +2169,13 @@ generate_backtrace_oracle() {
         return
     fi
     printf '[oracle] %s\n' "$oracle"
+    spawn_job leaf "$oracle" make_backtrace_oracle "$program" "$core" "$oracle"
+}
+
+make_backtrace_oracle() {
+    local program="$1"
+    local core="$2"
+    local oracle="$3"
     gdb -nx -batch -q \
         -iex 'set auto-load off' \
         -iex 'set debuginfod enabled off' \
@@ -1964,6 +2193,7 @@ generate_frame_oracle() {
     wait_builds
     local program="$1"
     local core="$2"
+    wait_for "$core"
     local oracle="${core}.gdb-frame-variables"
     rebuilt_outputs["$oracle"]=false
     if [[ -s "$oracle" && "$oracle" -nt "$core" && "$oracle" -nt "$frame_oracle_script" ]]; then
@@ -1971,6 +2201,13 @@ generate_frame_oracle() {
         return
     fi
     printf '[oracle] %s\n' "$oracle"
+    spawn_job leaf "$oracle" make_frame_oracle "$program" "$core" "$oracle"
+}
+
+make_frame_oracle() {
+    local program="$1"
+    local core="$2"
+    local oracle="$3"
     local log
     if ! log=$(USCOPE_FRAME_ORACLE="${oracle}.tmp" gdb -nx -batch -q \
         -iex 'set auto-load off' \
@@ -2064,128 +2301,6 @@ for compiler in gcc clang; do
     generate_function_type_oracle "$output_dir/function-types-${compiler}-o0"
 done
 
-# The tokio fixtures: one cargo workspace whose crates come only from its
-# lockfile, which flake.nix vendors, so building fetches nothing. Each
-# variant has a target directory of its own, and cargo rebuilds only what
-# changed; a binary is copied out only when cargo rewrote it.
-readonly tokio_fixtures_dir="${rust_fixtures_dir}/tokio"
-readonly tokio_target_dir="build/tokio-target"
-if [[ -z "${USCOPE_FIXTURE_CRATES-}" ]]; then
-    printf 'error: USCOPE_FIXTURE_CRATES is unset; build inside the Nix shell\n' >&2
-    exit 1
-fi
-
-# Builds the workspace's PACKAGES with PROFILE and extra RUSTFLAGS, and
-# copies each binary to tokio-NAME-VARIANT.
-build_tokio_variant() {
-    local variant="$1"
-    local profile="$2"
-    local flags="$3"
-    shift 3
-    local -a packages=()
-    local package
-    for package in "$@"; do
-        packages+=(--package "$package")
-    done
-    local target="$tokio_target_dir/$variant"
-    printf '[cargo]  tokio fixtures (%s)\n' "$variant"
-    CARGO_TARGET_DIR="$target" RUSTFLAGS="${RUSTFLAGS-} -D warnings ${flags}" \
-        NIX_HARDENING_ENABLE= cargo build --quiet --offline --locked \
-        --manifest-path "$tokio_fixtures_dir/Cargo.toml" --profile "$profile" \
-        --config "source.crates-io.replace-with='vendored'" \
-        --config "source.vendored.directory='${USCOPE_FIXTURE_CRATES}'" "${packages[@]}"
-    local directory="$profile"
-    [[ "$profile" == dev ]] && directory=debug
-    for package in "$@"; do
-        local built="$target/$directory/$package"
-        local output="$output_dir/tokio-${package}-${variant}"
-        if [[ -x "$output" ]] && ! [[ "$built" -nt "$output" ]]; then
-            rebuilt_outputs["$output"]=false
-            continue
-        fi
-        cp -p "$built" "$output"
-        rebuilt_outputs["$output"]=true
-    done
-    # Coroutines are compared only in the plain builds.
-    [[ "$variant" == o0 || "$variant" == o3 ]] || return 0
-    for package in "$@"; do
-        generate_coroutine_oracle "$output_dir/tokio-${package}-${variant}"
-    done
-}
-
-# readelf's description of each coroutine a program has, which a test
-# compares uscope's reading of them with.
-generate_coroutine_oracle() {
-    local program="$1"
-    local oracle="${program}.coroutines"
-    local reducer=scripts/coroutine-oracle.awk
-    if [[ -s "$oracle" && "$oracle" -nt "$program" && "$oracle" -nt "$reducer" ]]; then
-        printf '[cached] %s\n' "$oracle"
-        rebuilt_outputs["$oracle"]=false
-        return
-    fi
-    printf '[oracle] %s\n' "$oracle"
-    rebuilt_outputs["$oracle"]=true
-    # Reducing a large program's dump takes several seconds, and only tests
-    # read the result.
-    spawn_job leaf "$oracle" reduce_coroutines "$program" "$oracle" "$reducer"
-}
-
-# Writes ORACLE, the coroutines REDUCER finds in PROGRAM's dump.
-reduce_coroutines() {
-    local program="$1"
-    local oracle="$2"
-    local reducer="$3"
-    local dump="${oracle}.info"
-    readelf --debug-dump=info "$program" >"$dump" 2>/dev/null
-    awk -f "$reducer" "$dump" "$dump" | LC_ALL=C sort -u >"${oracle}.tmp"
-    rm -f "$dump"
-    mv "${oracle}.tmp" "$oracle"
-}
-
-# Every fixture, unoptimized and optimized.
-readonly tokio_fixtures=(std-async panics workers server drivers steps cancel shapes values runtimes
-    blocking migrate deadlock)
-build_tokio_variant o0 dev "" "${tokio_fixtures[@]}"
-build_tokio_variant o3 release "" "${tokio_fixtures[@]}"
-# A hundred thousand tasks, which bound what listing them costs; the build
-# changes nothing of that.
-build_tokio_variant o0 dev "" scale
-# A task list the program damages, whose reading the build changes nothing
-# of.
-build_tokio_variant o0 dev "" corrupt
-# Panics that abort rather than unwind.
-build_tokio_variant abort abort "" panics
-# Builds that describe less than tokio's types, where the debugger says
-# what it cannot read: lines only, symbols only, and tokio's sources moved
-# where its version cannot be read from their path.
-build_tokio_variant lines lines "" workers
-build_tokio_variant stripped stripped "" workers
-build_tokio_variant remapped dev \
-    "--remap-path-prefix=${USCOPE_FIXTURE_CRATES}/tokio-1.52.3=/vendor/tokio" workers
-# tokio's unstable features, which record where each task was spawned and
-# give each task's vtable one more offset.
-build_tokio_variant unstable dev "--cfg tokio_unstable" workers
-# Symbols mangled as rustc did before v0, which name no generic arguments.
-build_tokio_variant legacy dev "-Z unstable-options -C symbol-mangling-version=legacy" panics workers
-
-# The workers fixture's checkpoint, as gdb dumps it, with each runtime
-# flavor, the values fixture's first stop, and the runtimes fixture's
-# checkpoint. The log keeps what the program reported there. One malloc
-# arena keeps each thread from reserving one of its own, which the core
-# saves.
-export TRUTH_CORE=1 MALLOC_ARENA_MAX=1
-for variant in o0 o3; do
-    program="$output_dir/tokio-workers-${variant}"
-    generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
-    generate_core "${program}-current.core" 5 "$default_core_filter" "$program" "$program" current
-    program="$output_dir/tokio-values-${variant}"
-    generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
-    program="$output_dir/tokio-runtimes-${variant}"
-    generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
-done
-unset TRUTH_CORE MALLOC_ARENA_MAX
-
 # Go's own reading of the function tables of images the Go linker linked,
 # which a test compares uscope's reader with.
 readonly gosym_oracle="$output_dir/gosym-oracle"
@@ -2243,6 +2358,13 @@ done < <(ldd "$output_dir/crash-gcc-o0" | awk '/=> \// { print $3 } /^\t\// { pr
     | grep -E '/(libc\.so|ld-linux)')
 
 wait_jobs
+if ! wait "$tokio_build"; then
+    printf 'error: could not make the tokio fixtures\n' >&2
+    exit 1
+fi
+while IFS= read -r output; do
+    rebuilt_outputs["$output"]=true
+done <"$tokio_outputs"
 printf '%s\n' "${!rebuilt_outputs[@]}" >"${suite_outputs}.tmp"
 mv "${suite_outputs}.tmp" "$suite_outputs"
 mv "${suite_stamp}.tmp" "$suite_stamp"
