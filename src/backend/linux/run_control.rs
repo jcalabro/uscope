@@ -312,18 +312,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         };
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        let starters = match &start.new_task {
-            Some(NewTask::Watching(starters)) => starters.keys().copied().collect(),
-            _ => Vec::new(),
-        };
         let mut installed = Vec::new();
         let mut failure = None;
-        for &address in start
-            .plan_addresses
-            .union(&start.panic_guards)
-            .chain(&start.targets)
-            .chain(&starters)
-        {
+        for address in start.plan_sites() {
             if let Err(error) = install_plan_breakpoint(&self.ptrace, inferior, address, execution)
             {
                 failure = Some(error);

@@ -485,7 +485,10 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         let _ = (stop, task, entry, registers);
         false
     }
-    /// How the task `task` ended, or `None` while it has not.
+    /// How the task `task` ended, or is ending: cancelled once its runtime
+    /// has begun to cancel it, finished once its future returned; `None`
+    /// while it runs on. Fails when the place the task was is no longer
+    /// the task's.
     fn task_end(
         &self,
         stop: &dyn RuntimeStop,
