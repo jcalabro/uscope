@@ -70,6 +70,14 @@ pub enum Step {
         offset: u64,
         ty: TypeReference,
     },
+    /// To the member of one variant of a tagged union whose tag is the byte
+    /// at its start, inactive unless the tag is `tag`.
+    VariantMember {
+        tag: u8,
+        name: Arc<str>,
+        offset: u64,
+        ty: TypeReference,
+    },
     Array {
         dimensions: Arc<[ArrayDimension]>,
         element_size: u64,
@@ -249,6 +257,50 @@ impl World {
             panic!("only records have members");
         };
         *existing = members.into();
+    }
+
+    /// A tagged union, as a Rust enum is, whose tag is the byte at its
+    /// start: the `i`th variant holds its one member, named for the
+    /// variant, when the tag is `i`.
+    pub fn variant(
+        &mut self,
+        name: &str,
+        byte_size: u64,
+        variants: &[(&str, TypeReference, u64)],
+    ) -> TypeReference {
+        let tag = self.base("u8", BaseTypeEncoding::Unsigned, 1);
+        let member = |name: Option<&str>, ty, offset| RecordMember {
+            name: name.map(Into::into),
+            type_ref: ty,
+            layout: RecordMemberLayout::ByteOffset(offset),
+            accessibility: crate::Accessibility::Public,
+            artificial: name.is_none(),
+            embedded: false,
+            declaration: None,
+        };
+        let variants: Vec<crate::Variant> = variants
+            .iter()
+            .zip(0_u128..)
+            .map(|((variant, ty, offset), index)| crate::Variant {
+                name: None,
+                selection: crate::VariantSelection::Selectors(Arc::from([
+                    crate::VariantSelector::Value(IntegerValue::Unsigned(index)),
+                ])),
+                members: Arc::from([member(Some(variant), *ty, *offset)]),
+            })
+            .collect();
+        self.add(
+            name,
+            Some(byte_size),
+            TypeKind::Variant {
+                storage: crate::VariantStorageKind::Struct,
+                common_members: Arc::from([]),
+                bases: Arc::from([]),
+                discriminant: Box::new(crate::VariantDiscriminant::Stored(member(None, tag, 0))),
+                variants: variants.into(),
+                incomplete: false,
+            },
+        )
     }
 
     pub fn pointer(&mut self, target: Option<TypeReference>) -> TypeReference {
@@ -833,6 +885,35 @@ impl World {
         })
     }
 
+    /// The member `name` of a tagged union's variant.
+    fn plan_variant_member(
+        info: &TypeInfo,
+        variants: &[crate::Variant],
+        name: &str,
+    ) -> Result<Planned<Step>, Refusal> {
+        let (tag, member) = variants
+            .iter()
+            .zip(0_u8..)
+            .find_map(|(variant, tag)| {
+                let member = variant.members.first()?;
+                (member.name.as_deref() == Some(name)).then_some((tag, member))
+            })
+            .ok_or_else(|| type_error(format!("`{}` has no member `{name}`", info.name)))?;
+        let RecordMemberLayout::ByteOffset(offset) = member.layout else {
+            panic!("the world lays members out at byte offsets");
+        };
+        Ok(Planned {
+            step: Step::VariantMember {
+                tag,
+                name: name.into(),
+                offset,
+                ty: member.type_ref,
+            },
+            result: Some(member.type_ref),
+            consumed: 0,
+        })
+    }
+
     fn plan_entry(&self, info: &TypeInfo) -> Result<Planned<Step>, Refusal> {
         let (_, key, value) = self
             .maps
@@ -1010,6 +1091,9 @@ impl Scope for World {
                     member.type_ref,
                     0,
                 ))
+            }
+            (StepKind::Member(name), TypeKind::Variant { variants, .. }) => {
+                Self::plan_variant_member(info, variants, name)
             }
             (
                 StepKind::Index { available },
@@ -1226,6 +1310,21 @@ impl Machine for World {
                 })
             }
             Step::Member { offset, ty } => Ok(offset_place(from, *offset, *ty)),
+            Step::VariantMember {
+                tag,
+                name,
+                offset,
+                ty,
+            } => {
+                if self.bytes(from)?.first() != Some(tag) {
+                    return Err(Stop::missing(VariableState::Unavailable(
+                        VariableUnavailableReason::ValueAccess(
+                            ValueAccessUnavailableReason::InactiveVariant(Some(Arc::clone(name))),
+                        ),
+                    )));
+                }
+                Ok(offset_place(from, *offset, *ty))
+            }
             Step::Array {
                 dimensions,
                 element_size,
@@ -1602,6 +1701,15 @@ pub fn memory() -> World {
     twice_bytes.resize(8, 0);
     twice_bytes.extend(bytes);
     world.variable("twice_shaped", twice, &twice_bytes);
+
+    // A Rust `Option<i32>` holding 5, and one holding nothing.
+    let some = world.record("Some", 8, &[("__0", int, 4)]);
+    let none = world.record("None", 0, &[]);
+    let option = world.variant("Option<i32>", 8, &[("None", none, 0), ("Some", some, 0)]);
+    let mut held = vec![1, 0, 0, 0];
+    held.extend(5_i32.to_le_bytes());
+    world.variable("maybe", option, &held);
+    world.variable("nothing", option, &[0; 8]);
 
     containers(&mut world, int, char_pointer);
     world.task = Some(7);

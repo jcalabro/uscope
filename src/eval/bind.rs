@@ -1178,8 +1178,100 @@ impl<'a, S: Scope> Binder<'a, S> {
                 span,
             );
         }
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            let negate = op == BinaryOp::Ne;
+            if let Some(test) = self.holds_variant(left, right, negate, span)? {
+                return Ok(test);
+            }
+            if let Some(test) = self.holds_variant(right, left, negate, span)? {
+                return Ok(test);
+            }
+        }
         let (left, right) = self.operands(left, right)?;
         self.binary_bound(op, left, right, span)
+    }
+
+    /// `value == Name`: whether a tagged union holds its variant `Name`,
+    /// when `name` is a bare name the scope finds no single value by and
+    /// one of the union's variants has. `None` for any other comparison.
+    fn holds_variant(
+        &mut self,
+        value: NodeId,
+        name: NodeId,
+        negate: bool,
+        span: Span,
+    ) -> Result<Option<Bound<S>>, ExpressionError> {
+        let NodeKind::Name(path) = self.tree().kind(name) else {
+            return Ok(None);
+        };
+        if path.segments.len() != 1 || path.global {
+            return Ok(None);
+        }
+        let variant = path.segments[0].name.clone();
+        if let Err(error) = self.bind(name) {
+            if !matches!(
+                error.kind,
+                ErrorKind::UnknownName | ErrorKind::AmbiguousName
+            ) {
+                return Ok(None);
+            }
+        } else {
+            return Ok(None);
+        }
+        let Ok(bound) = self.bind(value) else {
+            return Ok(None);
+        };
+        let base = self.settle(bound)?;
+        let Ty::Program(from) = base.ty else {
+            return Ok(None);
+        };
+        let Ok((_, info)) = representation(self.scope, from) else {
+            return Ok(None);
+        };
+        let TypeKind::Variant { variants, .. } = &info.kind else {
+            return Ok(None);
+        };
+        let names = |variant: &crate::Variant| {
+            variant
+                .name
+                .clone()
+                .into_iter()
+                .chain(match &*variant.members {
+                    [member] => member.name.clone(),
+                    _ => None,
+                })
+        };
+        if !variants
+            .iter()
+            .any(|candidate| names(candidate).any(|known| *known == *variant))
+        {
+            return Ok(None);
+        }
+        if !base.is_place() {
+            return Err(Self::error(
+                base.span,
+                ErrorKind::Type,
+                format!(
+                    "`{}` is a computed value, whose variant cannot be read",
+                    self.quote(base.span)
+                ),
+            ));
+        }
+        let step = self
+            .scope
+            .plan(from, StepKind::Member(&variant))
+            .map_err(|refusal| Self::refused(self.tree().span(name), refusal))?
+            .step;
+        self.node(
+            Op::Holds {
+                base: Box::new(base),
+                step,
+                negate,
+            },
+            Ty::Bool,
+            span,
+        )
+        .map(Some)
     }
 
     /// A binary operator other than `&&` and `||` on bound operands.
