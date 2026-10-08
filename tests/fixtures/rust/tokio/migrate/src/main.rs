@@ -1,9 +1,10 @@
 //! A task that resumes on another thread than it parked on. It parks at a
 //! gate on one worker; a task the program spawns until one runs on that
 //! same thread holds the thread in `block_in_place`, which hands the
-//! worker's core to a new thread, until the task has resumed. A thread
-//! outside the runtime opens the gate, so the wake goes through the
-//! runtime's inject queue, to a thread other than the held one.
+//! worker's core to a new thread, until the task has resumed. Once that
+//! thread has taken the core and parked, a thread outside the runtime
+//! opens the gate, so the wake goes through the runtime's inject queue, to
+//! a thread other than the held one.
 //!
 //! The program prints `TRUTH migrated ME BEFORE AFTER` with the task's id
 //! and both threads, and `TRUTH holder ID TID` for the task holding the
@@ -70,6 +71,12 @@ fn main() {
         }
         runtime.block_on(holder).expect("the holder ends");
     };
+    // The held worker's core goes to a new thread, which parks with it
+    // once it has started, as the other worker has; until then the task
+    // could resume on the other worker beside a worker still starting.
+    while !truth::workers_parked(runtime.handle()) {
+        std::thread::yield_now();
+    }
     open.send(()).expect("the task waits");
     let me = runtime.block_on(async move {
         let me = task.await.expect("the task ends");
