@@ -315,8 +315,9 @@ pub struct TaskSnapshot {
     /// Whether the runtime runs the task for its own work, such as a
     /// garbage collector's worker, rather than the program's.
     pub internal: bool,
-    /// The key-value labels the program gave the task, such as Go's
-    /// profiler labels.
+    /// The key-value labels the program or its runtime gave the task, such
+    /// as Go's profiler labels, or the tokio runtime that holds it in a
+    /// process with several.
     pub labels: Arc<[(Arc<str>, Arc<str>)]>,
 }
 

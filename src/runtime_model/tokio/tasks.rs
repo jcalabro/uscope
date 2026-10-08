@@ -118,7 +118,7 @@ impl TokioRuntime {
                         whole = false;
                         page.gaps.push(
                             format!(
-                                "shard {shard} of the {flavor} runtime's tasks was being \
+                                "shard {shard} of the {flavor}'s tasks was being \
                                  changed at the stop; its tasks may be missing or stale"
                             )
                             .into(),
@@ -140,7 +140,7 @@ impl TokioRuntime {
                     whole = false;
                     page.gaps.push(
                         format!(
-                            "shard {shard} of the {flavor} runtime's tasks holds more than its \
+                            "shard {shard} of the {flavor}'s tasks holds more than its \
                              {} tasks; it is read no further",
                             list.count
                         )
@@ -157,6 +157,7 @@ impl TokioRuntime {
                     Ok(found) => {
                         page.value.tasks.push(RuntimeTask {
                             entry: self.entry(stop, at),
+                            labels: label(census, runtime, list.id),
                             ..owned_task(census, runtime, at, &found)
                         });
                         (previous, at) = (at, found.next);
@@ -167,7 +168,7 @@ impl TokioRuntime {
                         whole = false;
                         page.gaps.push(
                             format!(
-                                "shard {shard} of the {flavor} runtime's tasks: {reason}; the \
+                                "shard {shard} of the {flavor}'s tasks: {reason}; the \
                                  rest of the shard is not listed"
                             )
                             .into(),
@@ -185,6 +186,7 @@ impl TokioRuntime {
             self.count(stop, tasks, runtime, &list).ok()
         };
         if whole
+            && list.counted
             && let Some(total) = total
             && total != list.count
         {
@@ -235,6 +237,16 @@ impl TokioRuntime {
         list: &List,
         index: u64,
     ) -> Result<(u64, bool), Arc<str>> {
+        // A set's one list is its thread's alone, behind no lock.
+        if runtime.flavor == Flavor::Local {
+            let head = records::word(stop, list.shards).ok_or_else(|| {
+                Arc::<str>::from(format!(
+                    "the local set's list at {:#x} is unreadable",
+                    list.shards
+                ))
+            })?;
+            return Ok((head, false));
+        }
         let owned = self.owned(runtime.flavor)?;
         let at = list
             .shards
@@ -403,6 +415,9 @@ impl TokioRuntime {
                 Ok(Some((header, node))) => {
                     return Ok(Some(RuntimeTask {
                         entry: self.entry(stop, header),
+                        labels: self
+                            .list(stop, runtime)
+                            .map_or_else(|_| Vec::new(), |list| label(census, runtime, list.id)),
                         ..owned_task(census, runtime, header, &node)
                     }));
                 }
@@ -426,9 +441,10 @@ impl TokioRuntime {
     }
 
     /// What a thread does for a runtime: a worker polling a listed task
-    /// runs it, and a pool thread runs its closure's task. A worker with
-    /// no task, polling only its own launch, and a pool thread waiting for
-    /// a closure, are the runtime's idle threads. A thread that never
+    /// runs it, as a thread running a set runs the set's task it polls,
+    /// and a pool thread runs its closure's task. A worker with no task,
+    /// polling only its own launch, and a pool thread waiting for a
+    /// closure, are the runtime's idle threads. A thread that never
     /// entered a runtime, or blocks on one, is the program's own; so is
     /// the thread a current-thread runtime blocks on, between its tasks.
     pub(super) fn activity(
@@ -437,7 +453,26 @@ impl TokioRuntime {
         thread: ThreadId,
     ) -> Result<ThreadActivity, Arc<str>> {
         let context = self.context()?;
-        let found = Self::thread_context(stop, context, thread)?;
+        // A program whose sets cannot be read says so in its pages of tasks.
+        let locals = self.locals().ok().flatten();
+        let found = Self::thread_context(stop, context, locals, thread)?;
+        if let Some(found) = found
+            && let (Some(set), Some(number)) = (found.local, found.task)
+        {
+            let set = Instance {
+                flavor: Flavor::Local,
+                handle: set,
+            };
+            if self
+                .listed(stop, self.task_layout()?, set, number, None)?
+                .is_some()
+            {
+                return Ok(ThreadActivity::Task {
+                    number,
+                    stack: StackSegment::Task,
+                });
+            }
+        }
         let Some((found, runtime)) = found.and_then(|found| Some((found, found.runtime?))) else {
             return Ok(ThreadActivity::Outside);
         };
@@ -455,11 +490,12 @@ impl TokioRuntime {
         if !found.worker {
             return Ok(running);
         }
-        let tasks = self.task_layout()?;
-        Ok(match self.listed(stop, tasks, runtime, number, None)? {
-            Some(_) => running,
-            None => between,
-        })
+        Ok(
+            match self.listed(stop, self.task_layout()?, runtime, number, None)? {
+                Some(_) => running,
+                None => between,
+            },
+        )
     }
 
     /// The blocking pools' tasks: each runtime's queued closures, then
@@ -472,20 +508,30 @@ impl TokioRuntime {
         gaps: &mut Vec<Arc<str>>,
     ) -> Vec<RuntimeTask> {
         let mut found = Vec::new();
-        for &runtime in &census.runtimes {
+        let pooled = census
+            .runtimes
+            .iter()
+            .filter(|runtime| runtime.flavor != Flavor::Local);
+        for &runtime in pooled {
             match self.queued(stop, tasks, runtime) {
                 Ok((queued, locked)) => {
                     if locked {
                         gaps.push(
                             format!(
-                                "the {} runtime's blocking pool was being changed at the stop; \
+                                "the {}'s blocking pool was being changed at the stop; \
                                  its queue may be stale",
                                 runtime.flavor.describe()
                             )
                             .into(),
                         );
                     }
-                    found.extend(queued);
+                    let labels = self
+                        .list(stop, runtime)
+                        .map_or_else(|_| Vec::new(), |list| label(census, runtime, list.id));
+                    found.extend(queued.into_iter().map(|task| RuntimeTask {
+                        labels: labels.clone(),
+                        ..task
+                    }));
                 }
                 Err(reason) => gaps.push(format!("queued blocking tasks: {reason}").into()),
             }
@@ -494,7 +540,9 @@ impl TokioRuntime {
             census
                 .threads
                 .iter()
-                .filter(|thread| thread.runtime.is_some() && !thread.worker)
+                // A pool's threads neither run a scheduler nor enter the
+                // runtime, as a thread blocking on it does.
+                .filter(|thread| thread.runtime.is_some() && !thread.worker && !thread.entered)
                 .filter_map(|thread| {
                     Some(RuntimeTask {
                         state: TaskState::Running,
@@ -607,15 +655,30 @@ const fn task(number: u64, locator: u64) -> RuntimeTask {
     }
 }
 
+/// The runtime or set that holds a task, where the process has several,
+/// by its flavor and its list's number.
+fn label(census: &Census, runtime: Instance, list: u64) -> crate::runtime_model::TaskLabels {
+    if census.runtimes.len() < 2 {
+        return Vec::new();
+    }
+    vec![(
+        "runtime".into(),
+        format!("{} {list}", runtime.flavor.describe()).into(),
+    )]
+}
+
 /// A task of a runtime's list, by its state: running on the thread that
 /// polls it, ready to be polled, suspended, or finished.
 fn owned_task(census: &Census, runtime: Instance, header: u64, node: &Node) -> RuntimeTask {
+    let polls = |thread: &&super::ThreadContext| match runtime.flavor {
+        Flavor::Local => thread.local == Some(runtime.handle),
+        _ => thread.runtime == Some(runtime) && thread.worker,
+    };
     let thread = census
         .threads
         .iter()
-        .find(|thread| {
-            thread.runtime == Some(runtime) && thread.worker && thread.task == Some(node.id)
-        })
+        .filter(polls)
+        .find(|thread| thread.task == Some(node.id))
         .map(|thread| thread.thread);
     let cancelled = node.state & CANCELLED != 0;
     let (state, detail) = if node.state & COMPLETE != 0 {

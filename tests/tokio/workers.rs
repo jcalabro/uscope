@@ -95,7 +95,7 @@ impl Workers {
 }
 
 /// Every task, read `page` at a time, and why the list may be incomplete.
-async fn tasks(scenario: &Scenario, page: usize) -> (Vec<TaskSnapshot>, Vec<String>) {
+pub async fn tasks(scenario: &Scenario, page: usize) -> (Vec<TaskSnapshot>, Vec<String>) {
     let mut tasks = Vec::new();
     let mut gaps = Vec::new();
     let mut from = None;
@@ -119,7 +119,7 @@ async fn tasks(scenario: &Scenario, page: usize) -> (Vec<TaskSnapshot>, Vec<Stri
 }
 
 /// What each thread does for the runtime.
-async fn activities(scenario: &mut Scenario) -> BTreeMap<ThreadId, ThreadActivity> {
+pub async fn activities(scenario: &mut Scenario) -> BTreeMap<ThreadId, ThreadActivity> {
     let snapshot = scenario.snapshot().await;
     snapshot
         .threads

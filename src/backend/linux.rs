@@ -741,6 +741,10 @@ struct PublicStop {
     /// Where each runtime said it keeps the tasks it listed at this stop,
     /// forgotten once the debugger writes memory.
     task_locators: RefCell<BTreeMap<crate::TaskId, u64>>,
+    /// The sets of tasks the futures threads drive run, found once asked
+    /// for, and why some may be missing; forgotten once the debugger
+    /// writes memory.
+    task_sets: RefCell<Option<runtimes::TaskSets>>,
     /// What the function a step out finished returned.
     returned: Option<returns::Returned>,
 }
@@ -2305,6 +2309,7 @@ impl PublicStop {
             selected_frames: BTreeMap::new(),
             activities: RefCell::default(),
             task_locators: RefCell::default(),
+            task_sets: RefCell::default(),
             returned: None,
         }
     }

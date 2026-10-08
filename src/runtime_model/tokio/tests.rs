@@ -844,6 +844,84 @@ fn damage() -> impl Strategy<Value = Option<Damage>> {
     ]
 }
 
+/// Whether a future that cannot be read may run a `LocalSet` is in its
+/// type, here the `runtimes` fixture's: the set's `run_until` and its
+/// `RunUntil` may, and so may a pin of one, which `block_on` drives, and
+/// a reference to a set; the fixture's own futures, which hold no set,
+/// may not.
+#[test]
+fn a_futures_type_says_whether_it_may_run_a_set() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("build/test-programs/tokio-runtimes-o0");
+    let image = crate::debug_info::load_module(
+        &path,
+        crate::ModuleImageId::new(0),
+        &crate::debug_info::DebugFileSearch::default(),
+    )
+    .expect("run `just build-test-programs`")
+    .image;
+    let named = |wanted: &dyn Fn(&TypeInfo) -> bool| {
+        image
+            .types()
+            .iter()
+            .filter_map(|node| match node {
+                crate::TypeNode::Resolved(info) if wanted(info) => Some(info.reference),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let path_is = |info: &TypeInfo, path: &[&str], base: &str| {
+        info.identity.as_ref().is_some_and(|identity| {
+            identity
+                .path
+                .iter()
+                .map(AsRef::as_ref)
+                .eq(path.iter().copied())
+                && identity.base.starts_with(base)
+        })
+    };
+    let may = |types: Vec<TypeReference>, expected: bool, what: &str| {
+        assert!(!types.is_empty(), "no {what}");
+        for ty in types {
+            assert_eq!(
+                super::may_hold_set(image.as_ref(), ty),
+                expected,
+                "{what}: {:?}",
+                image.type_info(ty).map(|info| &info.name)
+            );
+        }
+    };
+    may(
+        named(&|info| {
+            path_is(
+                info,
+                &["tokio", "task", "local", "{impl#4}", "run_until"],
+                "{async_fn_env#0}",
+            )
+        }),
+        true,
+        "run_until's future",
+    );
+    may(
+        named(&|info| info.name.starts_with("Pin<&mut tokio::task::local::")),
+        true,
+        "a pinned set's future",
+    );
+    may(
+        named(&|info| info.name.as_ref() == "&tokio::task::local::LocalSet"),
+        true,
+        "a reference to a set",
+    );
+    may(
+        named(&|info| {
+            path_is(info, &["runtimes", "sleep"], "{async_fn_env#0}")
+                || path_is(info, &["runtimes", "parked"], "{async_fn_env#0}")
+        }),
+        false,
+        "the fixture's own async functions",
+    );
+}
+
 fn shared_world() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     &LOCK

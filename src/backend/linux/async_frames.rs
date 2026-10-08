@@ -53,6 +53,19 @@ pub(super) struct AsyncStack {
     pub(super) termination: UnwindTermination,
 }
 
+/// Why the future a frame drives cannot be read, and its declared type
+/// when the debug information says it.
+pub(super) struct Unread {
+    reason: Arc<str>,
+    declared: Option<TypeReference>,
+}
+
+impl Unread {
+    const fn new(reason: Arc<str>, declared: Option<TypeReference>) -> Self {
+        Self { reason, declared }
+    }
+}
+
 /// One variable of a suspended async frame: a member of its future.
 pub(super) struct SavedVariable<'a> {
     pub(super) name: &'a Arc<str>,
@@ -319,6 +332,7 @@ impl<P: InspectionOps> Controller<P> {
         // cannot read its future is noted only if no other frame shows one.
         let mut shown = BTreeSet::new();
         let mut unread = None;
+        let mut lost = Vec::new();
         for (index, frame) in expanded.trace.frames.iter().enumerate() {
             let here = |frames: &Vec<StackFrame>| {
                 StackFrameId::new(u32::try_from(frames.len()).expect("frame count fits u32"))
@@ -350,11 +364,12 @@ impl<P: InspectionOps> Controller<P> {
                             }
                         }
                     }
-                    Err(reason) => {
+                    Err(Unread { reason, declared }) => {
                         unread.get_or_insert_with(|| UnfollowedFuture {
                             driver: here(&frames),
                             reason,
                         });
+                        lost.extend(declared);
                     }
                 }
             }
@@ -363,6 +378,8 @@ impl<P: InspectionOps> Controller<P> {
         }
         if shown.is_empty() {
             unfollowed.extend(unread);
+        } else {
+            lost.clear();
         }
         for (level, frame) in frames.iter_mut().enumerate() {
             let level = u32::try_from(level).expect("frame count fits u32");
@@ -377,12 +394,13 @@ impl<P: InspectionOps> Controller<P> {
             },
             origins,
             futures,
+            lost,
         }
     }
 
     /// The chain of awaits of the future the frame `driver` drives through
     /// its variable `variable`, and the module that describes it; or why
-    /// the future cannot be read.
+    /// the future cannot be read, and its declared type when known.
     #[expect(clippy::too_many_arguments, reason = "a stack's parts and the frame")]
     fn driven_chain(
         &self,
@@ -393,20 +411,33 @@ impl<P: InspectionOps> Controller<P> {
         expanded: &Expanded,
         driver: StackFrameId,
         variable: &str,
-    ) -> std::result::Result<(&RuntimeModule, futures::AwaitChain), Arc<str>> {
+    ) -> std::result::Result<(&RuntimeModule, futures::AwaitChain), Unread> {
         let unread = |why: &dyn std::fmt::Display| -> Arc<str> {
             format!("`{variable}`, which holds the future, {why}").into()
         };
         let resolved = self
             .resolved_in(inferior, root, stack, modules, expanded, driver)
-            .map_err(|error| unread(&format_args!("cannot be read: {error}")))?;
-        let (module, address, selected) = self
-            .frame_scope(&resolved)
-            .ok_or_else(|| unread(&"is in no scope the debug information describes"))?;
+            .map_err(|error| Unread::new(unread(&format_args!("cannot be read: {error}")), None))?;
+        let (module, address, selected) = self.frame_scope(&resolved).ok_or_else(|| {
+            Unread::new(
+                unread(&"is in no scope the debug information describes"),
+                None,
+            )
+        })?;
         let key = module
             .variables
             .visible_object(address, selected, variable)
-            .map_err(|error| unread(&format_args!("cannot be found: {error}")))?;
+            .map_err(|error| {
+                Unread::new(unread(&format_args!("cannot be found: {error}")), None)
+            })?;
+        let declared = module
+            .variables
+            .object_type(key)
+            .ok()
+            .map(|id| TypeReference {
+                image: module.loaded.image,
+                id,
+            });
         let mut runtime = self.frame_runtime(inferior, root, &resolved, module);
         let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
         let located = match module
@@ -415,13 +446,21 @@ impl<P: InspectionOps> Controller<P> {
         {
             Ok(Ok(located)) => located,
             Ok(Err(VariableState::Unavailable(reason))) => {
-                return Err(unread(&format_args!("is unavailable: {reason}")));
+                return Err(Unread::new(
+                    unread(&format_args!("is unavailable: {reason}")),
+                    declared,
+                ));
             }
-            Ok(Err(_)) => return Err(unread(&"is unreadable")),
-            Err(error) => return Err(unread(&format_args!("cannot be read: {error}"))),
+            Ok(Err(_)) => return Err(Unread::new(unread(&"is unreadable"), declared)),
+            Err(error) => {
+                return Err(Unread::new(
+                    unread(&format_args!("cannot be read: {error}")),
+                    declared,
+                ));
+            }
         };
         let ValueStorage::Memory(object) = located.storage else {
-            return Err(unread(&"is not in memory"));
+            return Err(Unread::new(unread(&"is not in memory"), declared));
         };
         let ty = TypeReference {
             image: module.loaded.image,
@@ -430,7 +469,10 @@ impl<P: InspectionOps> Controller<P> {
         // The future a function was passed moves to be pinned, and where
         // it was still reads as a future that never began.
         if !futures::pinned(module.image.as_ref(), ty) {
-            return Err(unread(&"is not the pinned future here"));
+            return Err(Unread::new(
+                unread(&"is not the pinned future here"),
+                declared,
+            ));
         }
         let chain = self.with_module_stop(inferior, &module.loaded, root.reader(), |stop| {
             futures::walk(module.image.as_ref(), stop, object, ty)
