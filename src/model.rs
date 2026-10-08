@@ -2878,6 +2878,135 @@ pub struct FunctionInfo {
     /// over a function. A step treats the body as its enclosing function's
     /// own code, and the code between them as a call it makes.
     pub enclosing: Option<FunctionId>,
+    /// For the function that runs a coroutine, such as the body of a Rust
+    /// `async fn`, the coroutine's type: the future the body's state lives
+    /// in between polls.
+    pub coroutine: Option<TypeId>,
+}
+
+/// A state machine a compiler generated for code that can suspend.
+///
+/// The future of a Rust `async fn` or `async` block is one. Between polls,
+/// its state number says where it waits and which of its variables it
+/// saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoroutineInfo {
+    pub kind: CoroutineKind,
+    /// Where the state number lies in the coroutine, and its size.
+    pub state: StateMember,
+    /// The states, by number.
+    pub states: Arc<[CoroutineState]>,
+    /// What the coroutine captured, which every state holds: an `async
+    /// fn`'s arguments, or the variables an `async` block uses.
+    pub captures: Arc<[RecordMember]>,
+}
+
+/// What source code a coroutine runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoroutineKind {
+    /// The body of an asynchronous function, whose arguments it captures
+    /// and moves into its body as it starts.
+    AsyncFunction,
+    /// An asynchronous block, which captures the variables it uses.
+    AsyncBlock,
+    /// An asynchronous closure's body.
+    AsyncClosure,
+}
+
+/// The member of a coroutine holding its state number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateMember {
+    /// Its byte offset in the coroutine.
+    pub offset: u64,
+    /// Its size in bytes.
+    pub size: u64,
+}
+
+/// One state of a coroutine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoroutineState {
+    /// The state number that selects it.
+    pub value: u64,
+    pub kind: CoroutineStateKind,
+    /// Where the source shows the state: an `await`'s line for a suspended
+    /// state, the function's header before it starts, and its end after.
+    pub location: Option<SourceLocation>,
+    /// The members the state holds besides the captures, laid out from the
+    /// coroutine's start: the variables live across its `await`, and the
+    /// future it awaits.
+    pub saved: Arc<[RecordMember]>,
+}
+
+/// What a coroutine's state means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoroutineStateKind {
+    /// Built but never polled.
+    Unresumed,
+    /// Finished, having produced its value.
+    Returned,
+    /// Finished by panicking.
+    Panicked,
+    /// Waiting at an `await`, the `index`th in the source.
+    Suspended { index: u32 },
+}
+
+/// Where the function that runs a coroutine goes for each of its states,
+/// by decoding its dispatch on the state number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumePoints {
+    /// The dispatch's code, which runs before any state's own.
+    pub dispatch: Arc<[AddressRange<ImageAddress>]>,
+    /// Where each state's code begins.
+    pub points: Arc<[ResumePoint]>,
+}
+
+/// Where the code of one state of a coroutine begins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumePoint {
+    /// The state number.
+    pub state: u64,
+    /// Where the dispatch leaves for the state.
+    pub address: ImageAddress,
+    /// The code that runs from there as the coroutine resumes in the state
+    /// before it goes on to new work: for a suspended state, the code of
+    /// its await's line that resuming reaches, such as polling the awaited
+    /// future again; before the first poll, the code before the body's
+    /// first statement.
+    pub resumption: Arc<[AddressRange<ImageAddress>]>,
+}
+
+impl ResumePoints {
+    /// Where the state with number `state` begins.
+    #[must_use]
+    pub fn point(&self, state: u64) -> Option<&ResumePoint> {
+        self.points.iter().find(|point| point.state == state)
+    }
+}
+
+impl CoroutineInfo {
+    /// The state with number `value`.
+    #[must_use]
+    pub fn state(&self, value: u64) -> Option<&CoroutineState> {
+        self.states.iter().find(|state| state.value == value)
+    }
+
+    /// The state a coroutine is in before it is first polled.
+    #[must_use]
+    pub fn unresumed(&self) -> Option<&CoroutineState> {
+        self.states
+            .iter()
+            .find(|state| state.kind == CoroutineStateKind::Unresumed)
+    }
+}
+
+impl CoroutineState {
+    /// The future a suspended state awaits, among its saved members.
+    #[must_use]
+    pub fn awaitee(&self) -> Option<&RecordMember> {
+        self.saved
+            .iter()
+            .find(|member| member.name.as_deref() == Some("__awaitee"))
+    }
 }
 
 /// What a function is to unwinding and stepping, whatever its language.
@@ -2938,6 +3067,10 @@ pub enum EntryProvenance {
     AnalyzedPrologue,
     /// The first concrete address range supplied the entry address.
     RangeStart,
+    /// The function runs a coroutine, and the entry is where its decoded
+    /// dispatch leaves for the state before the first poll: the body's
+    /// first statement, past the dispatch.
+    CoroutineBody,
 }
 
 /// A concrete entry address suitable for a function breakpoint.

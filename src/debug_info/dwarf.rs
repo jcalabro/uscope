@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -343,6 +343,31 @@ fn load_image(
         &mut source_files,
         &mut source_file_ids,
     )?;
+    let coroutines = super::coroutines::normalize(&variables.types);
+    for (instance, ty) in &variables.coroutine_bodies {
+        if let Some(Ok(_)) = coroutines.get(ty)
+            && let Some(function) = function_metadata
+                .code_instances
+                .get(instance.index())
+                .map(|instance| instance.function)
+        {
+            function_metadata.functions[function.index()].coroutine = Some(*ty);
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    let resume_points = if target.architecture == Architecture::X86_64 {
+        decode_resume_points(
+            &object,
+            &statements,
+            &function_metadata.functions,
+            &mut function_metadata.code_instances,
+            &coroutines,
+        )
+    } else {
+        BTreeMap::new()
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let resume_points = BTreeMap::new();
     let go_code = go_code_ranges(&dwarf, &catalog)?;
     let go_unwind = go_table
         .as_ref()
@@ -374,6 +399,8 @@ fn load_image(
                 globals: variables.globals,
                 types: variables.types,
                 vtables: variables.vtables,
+                coroutines,
+                resume_points,
                 constants: variables.constants,
                 producers: unit_producers(&dwarf, &catalog)?,
                 packages: go_packages(&dwarf, &catalog)?,
@@ -1245,6 +1272,9 @@ struct RawFunction {
     call_site: Option<SourceLocation>,
     ranges: Vec<AddressRange<ImageAddress>>,
     entry: Option<ImageAddress>,
+    /// The names of the namespaces enclosing the DIE, outermost first,
+    /// joined by `::`, as Rust's debug information nests its functions.
+    namespace: Option<Arc<str>>,
 }
 
 struct FunctionMetadata {
@@ -1278,6 +1308,7 @@ fn load_function_metadata(
         concrete.insert(definition_key(function.key, &raw, &by_key)?);
     }
 
+    let async_functions = async_function_paths(&raw);
     for function in &raw {
         let definition = definition_key(function.key, &raw, &by_key)?;
 
@@ -1288,12 +1319,7 @@ fn load_function_metadata(
         let linkage_name = origin.linkage_name.clone();
         // Clang names the thunks a multiply inherited virtual function
         // needs only by their linkage names.
-        let name = origin.name.clone().or_else(|| {
-            linkage_name
-                .as_deref()
-                .and_then(crate::demangle::demangle)
-                .map(Arc::from)
-        });
+        let name = function_name(origin);
         let Some(name) = name else {
             if concrete.contains(&definition) {
                 return Err(DwarfError::MissingFunctionName);
@@ -1306,7 +1332,7 @@ fn load_function_metadata(
         );
         let role = super::roles::function_role(
             linkage_name.as_deref().unwrap_or(&name),
-            origin.trampoline,
+            origin.trampoline || builds_future(origin, &async_functions),
         );
         trampolines.push(origin.trampoline);
 
@@ -1318,6 +1344,7 @@ fn load_function_metadata(
             language: origin.language,
             role,
             enclosing: None,
+            coroutine: None,
         });
         function_ids.insert(definition, id);
     }
@@ -1369,6 +1396,55 @@ fn load_function_metadata(
         code_instances,
         instance_ids,
     })
+}
+
+/// The name a function shows. Clang names the thunks a multiply inherited
+/// virtual function needs only by their linkage names, and the body of a
+/// Rust `async fn` or block shows as the function its programmer wrote.
+fn function_name(function: &RawFunction) -> Option<Arc<str>> {
+    let name = function.name.clone().or_else(|| {
+        function
+            .linkage_name
+            .as_deref()
+            .and_then(crate::demangle::demangle)
+            .map(Arc::from)
+    });
+    match (&name, &function.namespace) {
+        (Some(raw), Some(namespace)) if function.language == SourceLanguage::Rust => {
+            let path = namespace.split("::").map(Arc::from).collect::<Vec<_>>();
+            super::coroutines::body_name(raw, &path).or(name)
+        }
+        _ => name,
+    }
+}
+
+/// The paths of the `async fn`s whose bodies the DIEs describe: the
+/// namespaces rustc puts each body in.
+fn async_function_paths(raw: &[RawFunction]) -> HashSet<Arc<str>> {
+    raw.iter()
+        .filter(|function| {
+            function.language == SourceLanguage::Rust
+                && function
+                    .name
+                    .as_deref()
+                    .is_some_and(super::coroutines::is_async_fn_body)
+        })
+        .filter_map(|function| function.namespace.clone())
+        .collect()
+}
+
+/// Whether a function is an `async fn` as rustc compiles it apart from its
+/// body: code that only builds the future, whose path is the namespace of
+/// the body.
+fn builds_future(function: &RawFunction, async_functions: &HashSet<Arc<str>>) -> bool {
+    function.language == SourceLanguage::Rust
+        && function.name.as_deref().is_some_and(|own| {
+            let path = function
+                .namespace
+                .as_ref()
+                .map_or_else(|| own.to_owned(), |namespace| format!("{namespace}::{own}"));
+            async_functions.contains(path.as_str())
+        })
 }
 
 /// Where a breakpoint on a code instance goes: the entry its DIE names,
@@ -1457,12 +1533,26 @@ fn collect_function_dies(
         let language = unit_language(dwarf, unit)?;
         let mut entries = unit.entries();
         let mut scopes = Vec::<Option<DieKey>>::new();
+        // The namespace path each depth is within.
+        let mut namespaces = Vec::<Option<Arc<str>>>::new();
 
         while let Some(entry) = entries.next_dfs()? {
             let depth =
                 usize::try_from(entry.depth()).map_err(|_| DwarfError::InvalidEntryDepth)?;
             scopes.truncate(depth);
+            namespaces.truncate(depth);
             let parent = scopes.iter().rev().find_map(|key| *key);
+            let namespace = namespaces.last().cloned().flatten();
+            namespaces.push(if entry.tag() == gimli::DW_TAG_namespace {
+                string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?.map(|name| {
+                    namespace.as_ref().map_or_else(
+                        || Arc::clone(&name),
+                        |path| format!("{path}::{name}").into(),
+                    )
+                })
+            } else {
+                namespace.clone()
+            });
             let kind = match entry.tag() {
                 gimli::DW_TAG_subprogram => Some(RawFunctionKind::Subprogram),
                 gimli::DW_TAG_inlined_subroutine => Some(RawFunctionKind::Inline),
@@ -1522,6 +1612,7 @@ fn collect_function_dies(
                         .transpose()?
                         .flatten()
                         .map(ImageAddress::new),
+                    namespace,
                 });
                 scopes.push(Some(key));
             } else {
@@ -1977,6 +2068,144 @@ fn refine_proved_prologue_entries(
     }
 }
 
+/// The bytes of an object file a coroutine's dispatch is decoded from.
+#[cfg(target_arch = "x86_64")]
+struct ObjectCode<'a, 'data>(&'a object::File<'data>);
+
+#[cfg(target_arch = "x86_64")]
+impl ObjectCode<'_, '_> {
+    fn section_bytes(&self, address: u64, kinds: &[object::SectionKind]) -> Option<(&[u8], usize)> {
+        let section = self.0.sections().find(|section| {
+            kinds.contains(&section.kind())
+                && section.address() <= address
+                && address < section.address().saturating_add(section.size())
+        })?;
+        let data = section.data().ok()?;
+        Some((data, usize::try_from(address - section.address()).ok()?))
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl super::dispatch::DispatchImage for ObjectCode<'_, '_> {
+    fn code(&self, address: u64, length: usize) -> Option<&[u8]> {
+        let (data, at) = self.section_bytes(address, &[object::SectionKind::Text])?;
+        let bytes = data.get(at..)?;
+        Some(&bytes[..bytes.len().min(length)])
+    }
+
+    fn data(&self, address: u64, length: usize) -> Option<&[u8]> {
+        let (data, at) = self.section_bytes(
+            address,
+            &[
+                object::SectionKind::ReadOnlyData,
+                object::SectionKind::ReadOnlyString,
+                object::SectionKind::Text,
+            ],
+        )?;
+        data.get(at..at.checked_add(length)?)
+    }
+}
+
+/// Decodes where each out-of-line function that runs a coroutine goes for
+/// each state, and moves the breakpoint entry of every instance of one past
+/// what leads into its body.
+#[cfg(target_arch = "x86_64")]
+fn decode_resume_points(
+    object: &object::File<'_>,
+    statements: &[StatementRow],
+    functions: &[FunctionInfo],
+    instances: &mut [CodeInstanceInfo],
+    coroutines: &BTreeMap<crate::TypeId, std::result::Result<crate::CoroutineInfo, Arc<str>>>,
+) -> BTreeMap<CodeInstanceId, std::result::Result<crate::ResumePoints, Arc<str>>> {
+    let image = ObjectCode(object);
+    let rows = StatementIndex::new(statements);
+    let mut decoded = BTreeMap::new();
+    for instance in instances.iter_mut() {
+        let function = &functions[instance.function.index()];
+        let Some(Ok(coroutine)) = function.coroutine.and_then(|ty| coroutines.get(&ty)) else {
+            continue;
+        };
+        let header = function.declaration.as_ref().map(|location| location.line);
+        let ranges = Arc::clone(&instance.ranges);
+        let in_function = |address: u64| {
+            let address = ImageAddress::new(address);
+            ranges.iter().any(|range| range.contains(address))
+        };
+        // What leads into the body before its first statement carries the
+        // header's line, which the dispatch and the argument moves have,
+        // or none.
+        let leading = |address: u64| {
+            in_function(address)
+                && rows
+                    .line_at(ImageAddress::new(address))
+                    .is_none_or(|line| line.get() == 0 || Some(line) == header)
+        };
+        let body_after = |start: ImageAddress| {
+            super::dispatch::first_beyond(&image, start, &leading)
+                .filter(|body| in_function(body.get()))
+        };
+        if !matches!(instance.kind, CodeInstanceKind::OutOfLine) {
+            // A body inlined into its awaiter is entered straight from the
+            // awaiter's code.
+            if let Some(body) = instance
+                .breakpoint_entry
+                .and_then(|entry| body_after(entry.address))
+            {
+                instance.breakpoint_entry = Some(BreakpointEntry {
+                    address: body,
+                    provenance: EntryProvenance::CoroutineBody,
+                });
+            }
+            continue;
+        }
+        let Some(entry) = ranges.iter().map(|range| range.start).min() else {
+            continue;
+        };
+        let states = coroutine
+            .states
+            .iter()
+            .map(|state| state.value)
+            .collect::<Vec<_>>();
+        let points = super::dispatch::decode(&image, &ranges, entry, coroutine.state, &states).map(
+            |mut points| {
+                let mut moved = points.points.to_vec();
+                for point in &mut moved {
+                    let Some(state) = coroutine.state(point.state) else {
+                        continue;
+                    };
+                    if state.kind == crate::CoroutineStateKind::Unresumed {
+                        let body = body_after(point.address).unwrap_or(point.address);
+                        point.resumption = [AddressRange {
+                            start: point.address,
+                            end: body.max(point.address),
+                        }]
+                        .into();
+                        instance.breakpoint_entry = Some(BreakpointEntry {
+                            address: body,
+                            provenance: EntryProvenance::CoroutineBody,
+                        });
+                        continue;
+                    }
+                    // Resuming reaches the code of the state's own line, of
+                    // the function's header, and of no line.
+                    let own = state.location.as_ref().map(|location| location.line);
+                    let within = |address: u64| {
+                        in_function(address)
+                            && rows.line_at(ImageAddress::new(address)).is_none_or(|line| {
+                                line.get() == 0 || Some(line) == own || Some(line) == header
+                            })
+                    };
+                    point.resumption = super::dispatch::flood(&image, point.address, &within);
+                }
+                points.points = moved.into();
+                points
+            },
+        );
+        decoded.insert(instance.id, points);
+    }
+    decoded
+}
+
 /// Statement rows sorted by address, keeping line-program order among rows
 /// at one address.
 struct StatementIndex<'a>(Vec<&'a StatementRow>);
@@ -1986,6 +2215,14 @@ impl<'a> StatementIndex<'a> {
         let mut rows = statements.iter().collect::<Vec<_>>();
         rows.sort_by_key(|row| row.address);
         Self(rows)
+    }
+
+    /// The line of the row whose code holds `address`: the last row at or
+    /// before it, unless that row has no line.
+    fn line_at(&self, address: ImageAddress) -> Option<LineNumber> {
+        let after = self.0.partition_point(|row| row.address <= address);
+        let row = self.0.get(after.checked_sub(1)?)?;
+        row.location.as_ref().map(|location| location.line)
     }
 
     fn within(&self, range: AddressRange<ImageAddress>) -> &[&'a StatementRow] {

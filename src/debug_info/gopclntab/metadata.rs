@@ -150,6 +150,7 @@ impl Builder<'_, '_> {
             language,
             role,
             enclosing: None,
+            coroutine: None,
         });
         Ok(id)
     }

@@ -84,3 +84,10 @@ path = "fuzz_targets/views.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dispatch"
+path = "fuzz_targets/dispatch.rs"
+test = false
+doc = false
+bench = false

@@ -952,6 +952,8 @@ pub(super) fn fuzz(data: &[u8]) {
             lines: Vec::new(),
             sections: load_sections(&object),
             vtables: Vec::new(),
+            coroutines: std::collections::BTreeMap::new(),
+            resume_points: std::collections::BTreeMap::new(),
             thread_local_storage: has_thread_local_storage(&object),
             constants: std::collections::BTreeMap::new(),
             producers: Vec::new(),

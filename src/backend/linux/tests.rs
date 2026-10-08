@@ -638,6 +638,7 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
                     language: crate::SourceLanguage::C,
                     role: crate::CodeRole::Ordinary,
                     enclosing: None,
+                    coroutine: None,
                 })
                 .collect(),
             code_instances: instances
@@ -670,6 +671,8 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
             lines: Vec::new(),
             sections: Vec::new(),
             vtables: Vec::new(),
+            coroutines: std::collections::BTreeMap::new(),
+            resume_points: std::collections::BTreeMap::new(),
             thread_local_storage: false,
             constants: std::collections::BTreeMap::new(),
             producers: Vec::new(),

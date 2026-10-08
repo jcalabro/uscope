@@ -1006,6 +1006,29 @@ fn resolve_in_image(
             if addresses.is_empty() {
                 return Err(unavailable());
             }
+            // A coroutine's dispatch and the code leading from it into a
+            // state run as it resumes, not as execution arrives at the
+            // line; code a compiler generated, such as the glue dropping a
+            // future, never shows as the program's line.
+            let arrivals = addresses
+                .iter()
+                .copied()
+                .filter(|address| {
+                    !image.is_resume_code(*address)
+                        && !image
+                            .code_instances()
+                            .iter()
+                            .filter(|instance| instance.contains(*address))
+                            .any(|instance| {
+                                image.function(instance.function).is_some_and(|function| {
+                                    function.role == crate::CodeRole::Wrapper
+                                })
+                            })
+                })
+                .collect::<Vec<_>>();
+            if !arrivals.is_empty() {
+                addresses = arrivals;
+            }
             addresses.sort_unstable();
             // Like gdb, stop where the line begins in each instance of its
             // code, not again at its later statements, such as the use of
