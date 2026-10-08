@@ -13,8 +13,15 @@ use crate::invariants::checked;
 use crate::stops::{integer, line, place};
 use crate::support::Scenario;
 
-const BUILDS: [&str; 1] = ["tokio-steps-o0"];
+const BUILDS: [&str; 2] = ["tokio-steps-o0", "tokio-steps-o3"];
 const SOURCE: &str = "steps/src/main.rs";
+
+/// Whether a build is optimized, which may keep no value of a variable,
+/// and inlines one async function's body into another's, whose return
+/// value is then not returned.
+fn optimized(fixture: &str) -> bool {
+    fixture.ends_with("-o3")
+}
 
 /// The runtimes the fixture runs its tasks on, by their argument.
 const MODES: [Option<&str>; 2] = [None, Some("current")];
@@ -86,10 +93,10 @@ async fn next_over_a_pending_await_ends_on_the_next_line_of_its_task() {
                 let context = format!("{fixture} {mode:?} {marker}");
                 let mut scenario = stopped_once(fixture, mode, marker).await;
                 let task = stopped_task(&mut scenario).await;
-                assert_eq!(
-                    integer(&scenario, "me").await,
-                    Some(i128::from(task)),
-                    "{context}"
+                let me = integer(&scenario, "me").await;
+                assert!(
+                    me == Some(i128::from(task)) || me.is_none() && optimized(fixture),
+                    "{context}: {me:?}"
                 );
                 assert_eq!(
                     step(&mut scenario, StepKind::OverSource).await,
@@ -147,6 +154,14 @@ async fn finish_returns_to_the_awaiter_in_the_same_task() {
                 ("// STEP: inner", "outer", "// AWAIT: outer"),
                 ("// STEP: round", "task", "// AWAIT: rounds"),
             ] {
+                // Optimized, `inner` is inlined into `outer` and names no
+                // future, so its return looks like its pending await: the
+                // step goes on to the next line the awaiter reaches.
+                let after = if optimized(fixture) && from == "// STEP: inner" {
+                    "// STEP: outer-after"
+                } else {
+                    after
+                };
                 let context = format!("{fixture} {mode:?} {from}");
                 let mut scenario = stopped_once(fixture, mode, from).await;
                 let task = stopped_task(&mut scenario).await;
@@ -164,8 +179,10 @@ async fn finish_returns_to_the_awaiter_in_the_same_task() {
                     .filter(|variable| variable.kind == VariableKind::Returned)
                     .map(|variable| format!("{:?}", variable.state))
                     .collect::<Vec<_>>();
+                let ready = |poll: &String| poll.contains("Ready") && !poll.contains("Pending");
                 assert!(
-                    matches!(&returned[..], [poll] if poll.contains("Ready") && !poll.contains("Pending")),
+                    matches!(&returned[..], [poll] if ready(poll))
+                        || returned.is_empty() && optimized(fixture),
                     "{context}: {returned:#?}"
                 );
                 scenario.shutdown().await;
@@ -185,8 +202,11 @@ async fn a_step_past_a_tasks_end_says_it_finished() {
                 let context = format!("{fixture} {mode:?} {kind:?}");
                 let mut scenario = stopped_once(fixture, mode, "// STEP: task-last").await;
                 let task = stopped_task(&mut scenario).await;
-                let output = integer(&scenario, "got").await.expect("got")
-                    + integer(&scenario, "more").await.expect("more");
+                let output = integer(&scenario, "got")
+                    .await
+                    .zip(integer(&scenario, "more").await)
+                    .map(|(got, more)| got + more);
+                assert!(output.is_some() || optimized(fixture), "{context}");
                 let mut reason = scenario.step_to_stop(kind).await;
                 // `next` stops at the closing brace first.
                 if reason == (StopReason::Step { kind }) {
@@ -211,9 +231,13 @@ async fn a_step_past_a_tasks_end_says_it_finished() {
                         .filter(|variable| variable.kind == VariableKind::Returned)
                         .map(|variable| format!("{:?}", variable.state))
                         .collect::<Vec<_>>();
+                    let ready = output.map_or_else(
+                        || "summary: \"Ready(".to_owned(),
+                        |output| format!("summary: \"Ready({output})\""),
+                    );
                     assert!(
-                        matches!(&returned[..], [poll] if poll.contains(&format!("summary: \"Ready({output})\""))),
-                        "{context}: {output}: {returned:#?}"
+                        matches!(&returned[..], [poll] if poll.contains(&ready)),
+                        "{context}: {output:?}: {returned:#?}"
                     );
                 }
                 scenario.shutdown().await;
@@ -326,7 +350,8 @@ async fn a_step_of_a_suspended_task_waits_for_it_to_resume() {
                     "{context}"
                 );
                 assert_eq!(stopped_task(&mut scenario).await, task.number, "{context}");
-                if kind == StepKind::OverSource {
+                // Optimized, the await keeps nothing the step can name.
+                if kind == StepKind::OverSource && !optimized(fixture) {
                     // What the await keeps of the task's own number.
                     assert_eq!(
                         integer(&scenario, "before").await,

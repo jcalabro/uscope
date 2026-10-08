@@ -40,18 +40,18 @@ pub async fn integer(scenario: &Scenario, text: &str) -> Option<i128> {
     }
 }
 
-/// The function and line the stop is at.
+/// The function and line the stop is at, in the innermost frame the stop
+/// presents, which may be inlined into another.
 pub async fn place(scenario: &Scenario) -> (String, u64) {
-    let location = scenario
-        .operation("location", scenario.handle().current_location())
-        .await;
+    let trace = backtrace(scenario).await;
+    let frame = trace.frames.first().expect("a frame");
     (
-        location
-            .image
+        frame
             .function
+            .as_ref()
             .map(|function| function.name.to_string())
             .unwrap_or_default(),
-        location.image.source.map_or(0, |source| source.line.get()),
+        frame.source.as_ref().map_or(0, |source| source.line.get()),
     )
 }
 
