@@ -81,7 +81,7 @@ fn parse_angle(name: &str) -> Option<TypeName<'_>> {
     let last = segments.pop()?;
     let (base, arguments) = split_arguments(last, '<', '>', NameSyntax::Angle)?;
     let base = base.trim_end();
-    let named = is_identifier(base) || is_braced_scope(base) && arguments.is_none();
+    let named = is_identifier(base) || is_braced_scope(base);
     (named && segments.iter().all(|segment| is_angle_segment(segment))).then_some(TypeName {
         path: segments,
         base,
@@ -775,6 +775,10 @@ mod tests {
         assert_eq!(
             parts("workers::top::{async_fn_env#0}", Angle),
             (vec!["workers", "top"], "{async_fn_env#0}", None)
+        );
+        assert_eq!(
+            parts("{async_fn_env#0}<u32>", Angle),
+            (vec![], "{async_fn_env#0}", Some(vec!["u32"]))
         );
         assert_eq!(
             parts("main.Pair[string,main.Point]", Go),

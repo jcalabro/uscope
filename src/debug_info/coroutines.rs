@@ -26,6 +26,7 @@ use crate::{
 
 /// What kind of coroutine a type's name says it is, for rustc's names.
 pub fn coroutine_kind(name: &str) -> Option<CoroutineKind> {
+    let name = without_arguments(name)?;
     let name = name.rsplit("::").next().unwrap_or(name);
     let numbered = |prefix: &str| {
         name.strip_prefix(prefix)
@@ -259,6 +260,7 @@ fn state_kind(name: &str) -> Option<CoroutineStateKind> {
 /// numbered within it. `namespace` is the enclosing names, outermost
 /// first.
 pub fn body_name(name: &str, namespace: &[Arc<str>]) -> Option<Arc<str>> {
+    let name = without_arguments(name)?;
     let numbered = |prefix: &str| {
         name.strip_prefix(prefix)
             .and_then(|rest| rest.strip_suffix('}'))
@@ -275,9 +277,35 @@ pub fn body_name(name: &str, namespace: &[Arc<str>]) -> Option<Arc<str>> {
     }
 }
 
+/// A name without the generic arguments that end it, as rustc names an
+/// instance of a generic function or its coroutine, `{async_fn#0}<u32>`;
+/// `None` when the arguments are unbalanced.
+fn without_arguments(name: &str) -> Option<&str> {
+    if !name.ends_with('>') {
+        return Some(name);
+    }
+    let mut depth = 0_usize;
+    for (at, character) in name.char_indices().rev() {
+        match character {
+            // A function type's arrow closes nothing.
+            '>' if name[..at].ends_with('-') => {}
+            '>' => depth += 1,
+            '<' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(&name[..at]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Whether rustc names a function as the body of an `async fn`.
 pub fn is_async_fn_body(name: &str) -> bool {
-    name.strip_prefix("{async_fn#")
+    without_arguments(name)
+        .and_then(|name| name.strip_prefix("{async_fn#"))
         .and_then(|rest| rest.strip_suffix('}'))
         .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
 }
@@ -309,5 +337,21 @@ mod tests {
             Some(CoroutineKind::AsyncBlock)
         );
         assert_eq!(coroutine_kind("{closure_env#1}"), None);
+
+        // A generic function's names end in its arguments.
+        assert_eq!(
+            body_name("{async_fn#0}<alloc::sync::Arc<u32>>", &namespace).as_deref(),
+            Some("leaf")
+        );
+        assert!(is_async_fn_body("{async_fn#0}<u32>"));
+        assert_eq!(
+            coroutine_kind("{async_fn_env#0}<usize, a::{impl#0}::b::{closure_env#0}>"),
+            Some(CoroutineKind::AsyncFunction)
+        );
+        assert_eq!(
+            coroutine_kind("{async_block_env#3}<fn(u32) -> u32>"),
+            Some(CoroutineKind::AsyncBlock)
+        );
+        assert_eq!(coroutine_kind("{async_fn_env#0}<u32"), None);
     }
 }
