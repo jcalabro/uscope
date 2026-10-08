@@ -195,7 +195,8 @@ fn check_stop(stop: &Stop) -> Result<(), String> {
 
 /// A suspended task's backtrace ends where its chain of awaits does, or
 /// says why it cannot go on, and each async frame is a future of its own
-/// that names its function.
+/// that names its function. A future may begin where the one it awaits
+/// does, which its function tells apart.
 fn check_awaits(trace: &Backtrace) -> Result<(), String> {
     if !matches!(
         trace.termination,
@@ -208,14 +209,14 @@ fn check_awaits(trace: &Backtrace) -> Result<(), String> {
         let FrameKind::Async { object } = frame.kind else {
             continue;
         };
-        if !objects.insert(object) {
+        let Some(function) = &frame.function else {
+            return Err(format!("frame {} names no function", frame.level));
+        };
+        if !objects.insert((object, function.id)) {
             return Err(format!(
                 "frame {} repeats the future at {object}",
                 frame.level
             ));
-        }
-        if frame.function.is_none() {
-            return Err(format!("frame {} names no function", frame.level));
         }
     }
     Ok(())
@@ -237,11 +238,11 @@ fn check_driven(trace: &Backtrace) -> Result<(), String> {
         }
         match frame.kind {
             FrameKind::Async { object } => {
-                if !objects.insert(object) {
-                    return Err(format!("frame {index} repeats the future at {object}"));
-                }
-                if frame.function.is_none() {
+                let Some(function) = &frame.function else {
                     return Err(format!("frame {index} names no function"));
+                };
+                if !objects.insert((object, function.id)) {
+                    return Err(format!("frame {index} repeats the future at {object}"));
                 }
             }
             FrameKind::Awaited { .. } => {}

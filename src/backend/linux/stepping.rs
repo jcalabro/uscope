@@ -551,6 +551,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     fn advance_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
+        if self.await_pending_poll(pid)? {
+            return self.continue_thread(pid);
+        }
         self.note_returned_values(pid);
         self.retire_return_guard()?;
         self.retire_epilogue_return_guard()?;
@@ -1126,7 +1129,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             .expect("source step has a starting state");
         // Waiting for its loop, a step completes only at its plan's
         // breakpoints.
-        if start.running_on || start.loops.as_ref().is_some_and(StepLoops::waits) {
+        if start.running_on
+            || start.loops.as_ref().is_some_and(StepLoops::waits)
+            || super::awaits::waits(start)
+        {
             return Ok(false);
         }
         if kind == StepKind::OverInstruction {

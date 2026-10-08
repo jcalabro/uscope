@@ -366,6 +366,12 @@ fn load_image(
     } else {
         BTreeMap::new()
     };
+    #[cfg(target_arch = "x86_64")]
+    variables.info.note_held(
+        &ObjectCode(&object),
+        &function_metadata.code_instances,
+        &resume_points,
+    );
     #[cfg(not(target_arch = "x86_64"))]
     let resume_points = BTreeMap::new();
     let go_code = go_code_ranges(&dwarf, &catalog)?;
@@ -427,7 +433,7 @@ fn load_image(
     Ok(DebugInfo {
         image,
         unwind,
-        variables: variables.info,
+        variables: Arc::new(variables.info),
     })
 }
 

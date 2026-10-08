@@ -12,5 +12,6 @@ mod panics;
 mod resume_points;
 mod soak;
 mod std_async;
+mod steps;
 mod stops;
 mod workers;
