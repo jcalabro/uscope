@@ -7,8 +7,10 @@
 
 pub mod functions;
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::eval::types::c_type_key_of_name;
@@ -344,19 +346,45 @@ pub trait TypeLookup {
     fn type_info(&self, reference: TypeReference) -> Option<&TypeInfo>;
 }
 
+/// The argument texts one lookup has parsed in one syntax, so that
+/// comparing a pattern with many candidates parses each text once.
+struct Parses<'t> {
+    syntax: NameSyntax,
+    parsed: RefCell<HashMap<&'t str, Rc<TypeName<'t>>>>,
+}
+
+impl<'t> Parses<'t> {
+    fn new(syntax: NameSyntax) -> Self {
+        Self {
+            syntax,
+            parsed: RefCell::default(),
+        }
+    }
+
+    fn parse(&self, text: &'t str) -> Rc<TypeName<'t>> {
+        if let Some(parsed) = self.parsed.borrow().get(text) {
+            return Rc::clone(parsed);
+        }
+        let parsed = Rc::new(TypeName::parse(text, self.syntax));
+        self.parsed.borrow_mut().insert(text, Rc::clone(&parsed));
+        parsed
+    }
+}
+
 /// Whether `info` is a type `pattern` names. A pattern's path may omit
 /// outer segments and spell or omit the type's inline namespaces, and with
 /// `exact` false its arguments may omit trailing ones, as C++ omits
 /// defaulted template arguments. Identities keep inline namespaces' names
 /// but not their places, so a pattern may spell one anywhere in its path.
-fn names_type(
-    pattern: &TypeName<'_>,
-    syntax: NameSyntax,
+fn names_type<'t>(
+    pattern: &TypeName<'t>,
+    parses: &Parses<'t>,
     info: &TypeInfo,
     types: &dyn TypeLookup,
     exact: bool,
     depth: usize,
 ) -> bool {
+    let syntax = parses.syntax;
     let Some(identity) = info.identity.as_deref() else {
         return false;
     };
@@ -369,21 +397,19 @@ fn names_type(
     if !same_base {
         return false;
     }
-    let path = pattern
-        .path
-        .iter()
-        .copied()
-        .filter(|segment| {
+    let path = || {
+        pattern.path.iter().filter(|segment| {
             !identity
                 .inline_namespaces
                 .iter()
-                .any(|inline| inline.as_ref() == *segment)
+                .any(|inline| inline.as_ref() == **segment)
         })
-        .collect::<Vec<_>>();
-    if path.len() > identity.path.len()
-        || !identity.path[identity.path.len() - path.len()..]
+    };
+    let length = path().count();
+    if length > identity.path.len()
+        || !identity.path[identity.path.len() - length..]
             .iter()
-            .zip(&path)
+            .zip(path())
             .all(|(have, want)| have.as_ref() == *want)
     {
         return false;
@@ -399,13 +425,13 @@ fn names_type(
     arguments
         .iter()
         .zip(identity.arguments.iter())
-        .all(|(text, argument)| argument_matches(text, argument, syntax, types, depth + 1))
+        .all(|(text, argument)| argument_matches(text, argument, parses, types, depth + 1))
 }
 
-fn argument_matches(
-    text: &str,
+fn argument_matches<'t>(
+    text: &'t str,
     argument: &TypeArgument,
-    syntax: NameSyntax,
+    parses: &Parses<'t>,
     types: &dyn TypeLookup,
     depth: usize,
 ) -> bool {
@@ -434,20 +460,13 @@ fn argument_matches(
                     argument_matches(
                         rest.trim(),
                         &TypeArgument::Type(*target),
-                        syntax,
+                        parses,
                         types,
                         depth + 1,
                     )
                 });
             }
-            names_type(
-                &TypeName::parse(text, syntax),
-                syntax,
-                info,
-                types,
-                true,
-                depth,
-            )
+            names_type(&parses.parse(text), parses, info, types, true, depth)
         }),
     }
 }
@@ -572,6 +591,7 @@ impl TypeIndex {
             .copied()
             .collect::<Vec<_>>();
         for syntax in NameSyntax::ALL {
+            let parses = Parses::new(syntax);
             let pattern = TypeName::parse(text, syntax);
             let key = c_type_key_of_name(pattern.base);
             let candidates = self
@@ -586,7 +606,7 @@ impl TypeIndex {
                 };
                 if types
                     .type_info(reference)
-                    .is_some_and(|info| names_type(&pattern, syntax, info, types, exact, 0))
+                    .is_some_and(|info| names_type(&pattern, &parses, info, types, exact, 0))
                 {
                     found.push(*id);
                 }

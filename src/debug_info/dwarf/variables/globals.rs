@@ -24,6 +24,34 @@ pub(super) struct GlobalScope {
     pub(super) routine: bool,
 }
 
+/// The scope of every DIE outside type units: the distinct scopes, the
+/// first the empty one, and for each unit its DIEs' offsets in order with
+/// the scope each has. Most DIEs share their parent's.
+struct ScopeTable {
+    scopes: Vec<GlobalScope>,
+    units: Vec<UnitScopes>,
+}
+
+#[derive(Default)]
+struct UnitScopes {
+    offsets: Vec<usize>,
+    scopes: Vec<u32>,
+}
+
+impl ScopeTable {
+    fn get(&self, key: DieKey) -> Option<&GlobalScope> {
+        let unit = self.units.get(key.unit)?;
+        let index = unit.offsets.binary_search(&key.offset).ok()?;
+        self.scopes.get(usize::try_from(unit.scopes[index]).ok()?)
+    }
+
+    /// A scope's index once it is in the table.
+    fn add(&mut self, scope: GlobalScope) -> u32 {
+        self.scopes.push(scope);
+        u32::try_from(self.scopes.len() - 1).expect("scope count fits u32")
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum DefinitionResolution {
     New,
@@ -88,54 +116,74 @@ pub(super) fn load_globals<'data>(
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
     types: &mut TypeArenaBuilder<'_, 'data>,
 ) -> std::result::Result<(Vec<GlobalVariableInfo>, Vec<usize>), DwarfError> {
-    let mut scopes_by_die = HashMap::<DieKey, GlobalScope>::new();
+    let mut table = ScopeTable {
+        scopes: vec![GlobalScope::default()],
+        units: Vec::with_capacity(units.len()),
+    };
 
     // Pass one records lexical ownership for every DIE. A later definition
     // may point backward to a declaration nested in a namespace or class.
-    for (unit_index, unit) in units.iter().enumerate() {
-        if is_type_unit(unit) {
-            continue;
-        }
-        let mut entries = unit.entries();
-        let mut scopes = Vec::<GlobalScope>::new();
-        while let Some(entry) = entries.next_dfs()? {
-            let depth =
-                usize::try_from(entry.depth()).map_err(|_| DwarfError::InvalidEntryDepth)?;
-            scopes.truncate(depth);
-            let parent = scopes.last().cloned().unwrap_or_default();
-            let mut scope = parent.clone();
-            match entry.tag() {
-                gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine => {
-                    scope.routine = true;
-                }
-                gimli::DW_TAG_namespace
-                | gimli::DW_TAG_module
-                | gimli::DW_TAG_class_type
-                | gimli::DW_TAG_structure_type
-                | gimli::DW_TAG_union_type => {
-                    let component = match copy_name(dwarf, unit, entry) {
-                        Ok(Some(name)) => name,
-                        Ok(None) if entry.tag() == gimli::DW_TAG_namespace => {
-                            Arc::from("{anonymous}")
-                        }
-                        Ok(None) => Arc::from("{anonymous type}"),
-                        Err(error) => Arc::from(format!("{{malformed scope: {error}}}")),
-                    };
-                    let mut path = parent.path.to_vec();
-                    path.push(component);
-                    scope.path = path.into();
-                }
-                _ => {}
+    for unit in units {
+        let mut unit_scopes = UnitScopes::default();
+        if !is_type_unit(unit) {
+            let mut entries = unit.entries();
+            let mut scopes = Vec::<u32>::new();
+            while let Some(entry) = entries.next_dfs()? {
+                let depth =
+                    usize::try_from(entry.depth()).map_err(|_| DwarfError::InvalidEntryDepth)?;
+                scopes.truncate(depth);
+                let parent = scopes.last().copied().unwrap_or(0);
+                let parent_scope = &table.scopes[usize::try_from(parent).expect("u32 fits usize")];
+                let scope = match entry.tag() {
+                    gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine
+                        if !parent_scope.routine =>
+                    {
+                        let path = Arc::clone(&parent_scope.path);
+                        table.add(GlobalScope {
+                            path,
+                            routine: true,
+                        })
+                    }
+                    gimli::DW_TAG_namespace
+                    | gimli::DW_TAG_module
+                    | gimli::DW_TAG_class_type
+                    | gimli::DW_TAG_structure_type
+                    | gimli::DW_TAG_union_type => {
+                        let component = match copy_name(dwarf, unit, entry) {
+                            Ok(Some(name)) => name,
+                            Ok(None) if entry.tag() == gimli::DW_TAG_namespace => {
+                                Arc::from("{anonymous}")
+                            }
+                            Ok(None) => Arc::from("{anonymous type}"),
+                            Err(error) => Arc::from(format!("{{malformed scope: {error}}}")),
+                        };
+                        let mut path = parent_scope.path.to_vec();
+                        path.push(component);
+                        let routine = parent_scope.routine;
+                        table.add(GlobalScope {
+                            path: path.into(),
+                            routine,
+                        })
+                    }
+                    _ => parent,
+                };
+                unit_scopes.offsets.push(entry.offset().0);
+                unit_scopes.scopes.push(scope);
+                scopes.push(scope);
             }
-            scopes_by_die.insert(
-                DieKey {
-                    unit: unit_index,
-                    offset: entry.offset().0,
-                },
-                scope.clone(),
-            );
-            scopes.push(scope);
         }
+        // Entries follow one another, so their offsets are already in order.
+        if !unit_scopes.offsets.is_sorted() {
+            let mut pairs = unit_scopes
+                .offsets
+                .iter()
+                .copied()
+                .zip(unit_scopes.scopes.iter().copied())
+                .collect::<Vec<_>>();
+            pairs.sort_by_key(|(offset, _)| *offset);
+            (unit_scopes.offsets, unit_scopes.scopes) = pairs.into_iter().unzip();
+        }
+        table.units.push(unit_scopes);
     }
 
     let mut globals = Vec::<GlobalVariableInfo>::new();
@@ -156,7 +204,7 @@ pub(super) fn load_globals<'data>(
                 unit: unit_index,
                 offset: entry.offset().0,
             };
-            let current_scope = scopes_by_die.get(&key).cloned().unwrap_or_default();
+            let current_scope = table.get(key).unwrap_or(&table.scopes[0]);
             if current_scope.routine {
                 continue;
             }
@@ -187,12 +235,12 @@ pub(super) fn load_globals<'data>(
             let scope = chain
                 .iter()
                 .filter_map(|(origin_unit, origin)| {
-                    scopes_by_die.get(&DieKey {
+                    table.get(DieKey {
                         unit: *origin_unit,
                         offset: origin.offset().0,
                     })
                 })
-                .chain(std::iter::once(&current_scope))
+                .chain(std::iter::once(current_scope))
                 .max_by_key(|scope| scope.path.len())
                 .cloned()
                 .unwrap_or_default();
