@@ -60,6 +60,12 @@ lint:
         'clippy-release=CARGO_PROFILE_RELEASE_INCREMENTAL=true cargo clippy --release --all-targets --all-features -- -D warnings' \
         'fuzz=cargo check --quiet --manifest-path fuzz/Cargo.toml'
 
+# Builds the native test fixtures and the tests that nextest ARGS select at
+# once; neither reads what the other makes.
+[private]
+build-tests *ARGS:
+    ./scripts/concurrently.sh "build=cargo nextest run --no-run $(printf '%q ' "$@")" 'fixtures=just build-test-programs'
+
 # Arguments go to nextest, e.g. `just test print_` or `just test --test cli`.
 # Doc tests only run with the full suite. Tests run inside a memory cap, and
 # each test process also caps its own heap (tests/support/memory_cap.rs). `nix develop` turns address
@@ -67,7 +73,8 @@ lint:
 # in any shell. A user's own view files are not the tests', so the user
 # configuration is an empty directory.
 [doc("Builds the native test fixtures and runs the Rust test suite.")]
-test *ARGS: build-test-programs
+test *ARGS:
+    just build-tests "$@"
     test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
 
@@ -77,11 +84,11 @@ test *ARGS: build-test-programs
 # test's flight recording is kept; a later pass of the same test would remove
 # it. Arguments go to nextest, e.g. `just stress 100 -E 'binary(dap)'`.
 [doc("Runs the test suite COUNT times under CPU load.")]
-stress COUNT="10" *ARGS: build-test-programs
+stress COUNT="10" *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     # Build before the busy loops start so they slow only the tests.
-    cargo nextest run --no-run
+    just build-tests "${@:2}"
     cpus="$(nproc)"
     burners=()
     trap 'kill "${burners[@]}" 2>/dev/null || true' EXIT
