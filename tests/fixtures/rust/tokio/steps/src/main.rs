@@ -5,7 +5,8 @@
 //! goes round a loop of awaits that yield, and finishes.
 //!
 //! With no argument the tasks run on a multi-thread runtime's two
-//! workers; with `current`, on a current-thread runtime.
+//! workers; with `current`, on a current-thread runtime; with `local`, in
+//! a `LocalSet` the main thread runs on a current-thread runtime.
 
 use std::hint::black_box;
 
@@ -45,20 +46,25 @@ async fn task(gate: oneshot::Receiver<u64>) -> u64 {
 }
 
 fn main() {
-    let runtime = match std::env::args().nth(1).as_deref() {
+    let mode = std::env::args().nth(1);
+    let runtime = match mode.as_deref() {
         None => tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .build(),
-        Some("current") => tokio::runtime::Builder::new_current_thread().build(),
+        Some("current" | "local") => tokio::runtime::Builder::new_current_thread().build(),
         Some(other) => panic!("unknown mode {other}"),
     }
     .expect("a runtime");
+    let local = (mode.as_deref() == Some("local")).then(tokio::task::LocalSet::new);
     let mut gates = Vec::new();
     let mut handles = Vec::new();
     for _ in 0..TASKS {
         let (open, gate) = oneshot::channel();
         gates.push(open);
-        handles.push(runtime.spawn(task(gate)));
+        handles.push(match &local {
+            Some(local) => local.spawn_local(task(gate)),
+            None => runtime.spawn(task(gate)),
+        });
     }
     let opener = std::thread::spawn(move || {
         while truth::parked_at("gate") != TASKS {
@@ -68,13 +74,17 @@ fn main() {
             open.send(value).expect("the task waits");
         }
     });
-    let sum = runtime.block_on(async {
+    let joined = async {
         let mut sum = 0;
         for handle in handles {
             sum += handle.await.expect("the task ends");
         }
         sum
-    });
+    };
+    let sum = match &local {
+        Some(local) => local.block_on(&runtime, joined),
+        None => runtime.block_on(joined),
+    };
     opener.join().expect("the gates open");
     truth::line(&[&"sum", &sum]);
 }

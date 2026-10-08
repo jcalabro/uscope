@@ -1,6 +1,6 @@
 //! Steps through tokio tasks' async functions, across awaits that are
 //! pending while the other tasks run the same code, on a multi-thread and
-//! a current-thread runtime.
+//! a current-thread runtime, and in a `LocalSet`.
 
 use std::process::Stdio;
 
@@ -23,8 +23,15 @@ fn optimized(fixture: &str) -> bool {
     fixture.ends_with("-o3")
 }
 
-/// The runtimes the fixture runs its tasks on, by their argument.
-const MODES: [Option<&str>; 2] = [None, Some("current")];
+/// The runtimes the fixture runs its tasks on, by their argument: a
+/// `LocalSet` only in the unoptimized build, since stepping in one takes
+/// the paths a current-thread runtime does, and the runtimes tests cover
+/// its optimized build.
+fn modes(fixture: &str) -> impl Iterator<Item = Option<&'static str>> {
+    [None, Some("current")]
+        .into_iter()
+        .chain((!optimized(fixture)).then_some(Some("local")))
+}
 
 fn at(marker: &str) -> BreakpointSpec {
     BreakpointSpec::Source {
@@ -85,7 +92,7 @@ async fn step(scenario: &mut Scenario, kind: StepKind) -> (String, u64) {
 #[tokio::test]
 async fn next_over_a_pending_await_ends_on_the_next_line_of_its_task() {
     for fixture in BUILDS {
-        for mode in MODES {
+        for mode in modes(fixture) {
             for (marker, function, after) in [
                 ("// AWAIT: inner", "inner", "// STEP: inner-after"),
                 ("// AWAIT: outer", "outer", "// STEP: outer-after"),
@@ -118,7 +125,7 @@ async fn next_over_a_pending_await_ends_on_the_next_line_of_its_task() {
 #[tokio::test]
 async fn next_goes_round_a_loop_of_awaits() {
     for fixture in BUILDS {
-        for mode in MODES {
+        for mode in modes(fixture) {
             let context = format!("{fixture} {mode:?}");
             let mut scenario = stopped_once(fixture, mode, "// STEP: round").await;
             let task = stopped_task(&mut scenario).await;
@@ -148,7 +155,7 @@ async fn next_goes_round_a_loop_of_awaits() {
 #[tokio::test]
 async fn finish_returns_to_the_awaiter_in_the_same_task() {
     for fixture in BUILDS {
-        for mode in MODES {
+        for mode in modes(fixture) {
             for (from, awaiter, after) in [
                 ("// STEP: outer-after", "task", "// STEP: task"),
                 ("// STEP: inner", "outer", "// AWAIT: outer"),
@@ -197,7 +204,7 @@ async fn finish_returns_to_the_awaiter_in_the_same_task() {
 #[tokio::test]
 async fn a_step_past_a_tasks_end_says_it_finished() {
     for fixture in BUILDS {
-        for mode in MODES {
+        for mode in modes(fixture) {
             for kind in [StepKind::OverSource, StepKind::Out] {
                 let context = format!("{fixture} {mode:?} {kind:?}");
                 let mut scenario = stopped_once(fixture, mode, "// STEP: task-last").await;
@@ -252,7 +259,7 @@ async fn a_step_past_a_tasks_end_says_it_finished() {
 #[tokio::test]
 async fn a_task_condition_stops_only_in_its_task() {
     for fixture in BUILDS {
-        for mode in MODES {
+        for mode in modes(fixture) {
             let context = format!("{fixture} {mode:?}");
             let mut scenario = stopped_once(fixture, mode, "// STEP: task").await;
             let task = stopped_task(&mut scenario).await;
@@ -303,7 +310,7 @@ async fn a_task_condition_stops_only_in_its_task() {
 #[tokio::test]
 async fn a_step_of_a_suspended_task_waits_for_it_to_resume() {
     for fixture in BUILDS {
-        for mode in MODES {
+        for mode in modes(fixture) {
             for (kind, from, function, marker) in [
                 (
                     StepKind::OverSource,
@@ -415,7 +422,7 @@ async fn another_tasks_breakpoint_ends_a_waiting_step() {
 #[tokio::test]
 async fn instruction_steps_and_advance_in_an_async_function() {
     for fixture in BUILDS {
-        for mode in MODES {
+        for mode in modes(fixture) {
             let context = format!("{fixture} {mode:?}");
             let mut scenario = stopped_once(fixture, mode, "// STEP: round").await;
             let task = stopped_task(&mut scenario).await;
