@@ -9,6 +9,7 @@ mod coroutines;
 mod invariants;
 mod panics;
 mod resume_points;
+mod soak;
 mod std_async;
 mod stops;
 mod workers;
