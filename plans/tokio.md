@@ -1059,6 +1059,30 @@ fail (see Testing).
 6. **Views.** `views/tokio.views`, each type verified by `VIEW:` markers
    against the pin.
    - Leaf descriptions through views, with `JoinHandle` links.
+   - *As built:*
+     - The view language gained what tokio needed: `x == Variant` on a
+       tagged union, `dynamic(PTR, T of CODE)` (a type from the template
+       parameters of the function at a code address, as a task's vtable
+       `poll` names `Cell<T, S>`), `{EXPR}` holes in `empty`, `{EXPR as
+       FORMAT}` holes, and backticked pattern segments for rustc's braced
+       closure and future names.
+     - `tests/fixtures/rust/tokio/values` holds every viewed type in each
+       state its view tells apart and prints its markers, task ids and
+       times included; `tests/debugger/views.rs` checks them in o0, o3, and
+       a core. Times on the runtime's clock, which reads late after the
+       runtime idles, are checked within `{duration A..B}`.
+     - Leaf descriptions are `StackFrame.awaiting`, the leaf future's view
+       summary, set by backtraces; a suspended task's list detail is the
+       same. The CLI writes it after the frame, DAP and the web page in the
+       frame's name. A `JoinHandle` leaf reads `task N pending`, which `task
+       N` follows.
+     - The walker passes through a record whose only member is a coroutine
+       (tokio's `Coop`), so a `Barrier` wait ends at its `Notified`.
+     - Not built: a panic payload's message in a `JoinError` (std's `Box<dyn
+       Any>` vtables have no DWARF; a symbol-based fallback is possible);
+       `yield_now`, which no quiescent fixture can hold suspended; a
+       `select!`/`timeout` leaf shows its own value until adapters are
+       walked.
 7. **The rest.**
    - `LocalSet` tasks, found while their set runs or from the frame that
      runs it.
