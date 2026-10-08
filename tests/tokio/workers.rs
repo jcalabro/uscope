@@ -819,3 +819,40 @@ async fn every_type_of_a_large_program_is_read_and_named_once() {
         workers.scenario.shutdown().await;
     }
 }
+
+/// `next` over a line that spawns a task goes over it in the async code
+/// that spawns it, whichever thread then runs the new task, and never
+/// enters it.
+#[tokio::test]
+async fn next_over_a_spawn_does_not_enter_the_new_task() {
+    const SOURCE: &str = "workers/src/main.rs";
+    for fixture in BUILDS {
+        for current in [false, true] {
+            let context = format!("{fixture} current={current}");
+            let mut workers = Workers::stopped_at(
+                fixture,
+                current,
+                BreakpointSpec::Source {
+                    path: SOURCE.into(),
+                    line: uscope::LineNumber::new(line(SOURCE, "// SPAWN: channel"))
+                        .expect("one-based"),
+                },
+            )
+            .await;
+            let scenario = &mut workers.scenario;
+            let kind = uscope::StepKind::OverSource;
+            assert_eq!(
+                scenario.step_to_stop(kind).await,
+                StopReason::Step { kind },
+                "{context}"
+            );
+            let (function, at) = crate::stops::place(scenario).await;
+            assert_eq!(function, "run", "{context}");
+            assert!(
+                at > line(SOURCE, "// SPAWN: channel"),
+                "{context}: line {at}"
+            );
+            workers.scenario.shutdown().await;
+        }
+    }
+}
