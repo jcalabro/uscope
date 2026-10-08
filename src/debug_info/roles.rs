@@ -75,7 +75,8 @@ pub fn function_role(name: &str, trampoline: bool) -> CodeRole {
 /// one, wraps: `IntoFuture`, the rest of `core::future` and `core::pin`,
 /// the `poll` that `Box` forwards, and `AssertUnwindSafe`. So does the drop
 /// glue rustc generates, which calls the `Drop` impls the program wrote and
-/// carries the lines of what it drops, such as an await's.
+/// carries the lines of what it drops, such as an await's. std's and core's
+/// code that raises a panic is the panic machinery.
 pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
     let within = |path: &str| {
         namespace
@@ -86,6 +87,15 @@ pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
         name.strip_prefix(function)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('<'))
     };
+    // std's and core's code that raises a panic, which a step goes
+    // through to the `Drop` impls the panic runs as it unwinds.
+    if within("core::panicking")
+        || within("std::panicking")
+        || within("__rustc")
+        || (within("std::sys::backtrace") && named("__rust_end_short_backtrace"))
+    {
+        return Some(CodeRole::Panic);
+    }
     (within("core::future")
         || within("core::pin")
         || within("core::panic::unwind_safe")

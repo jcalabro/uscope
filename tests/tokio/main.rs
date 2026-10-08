@@ -6,6 +6,7 @@
 mod support;
 
 mod coroutines;
+mod panics;
 mod resume_points;
 mod std_async;
 mod stops;
