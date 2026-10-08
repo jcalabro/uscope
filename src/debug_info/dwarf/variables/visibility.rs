@@ -4,7 +4,7 @@
 //! does, a Go local is visible only where the line executing is past the
 //! line declaring it, and a block's code includes its nested blocks'.
 
-use std::collections::HashMap;
+use foldhash::{HashMap, HashMapExt};
 
 use crate::model::LineEntry;
 use crate::{

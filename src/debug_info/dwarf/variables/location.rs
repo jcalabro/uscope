@@ -1,9 +1,9 @@
 //! Location descriptions and DWARF expressions copied out of the debug sections.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use foldhash::{HashMap, HashMapExt};
 use gimli::Reader as _;
 
 use crate::debug_info::dwarf::{DwarfError, Reader};

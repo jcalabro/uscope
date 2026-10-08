@@ -248,7 +248,7 @@ fn specification_chains_reject_cycles() {
         unit: 0,
         offset: 0x20,
     };
-    let references = HashMap::from([(first, second), (second, first)]);
+    let references = HashMap::from_iter([(first, second), (second, first)]);
 
     assert!(matches!(
         checked_reference_chain(Some(first), |key| Ok(references.get(&key).copied())),
@@ -998,7 +998,7 @@ fn called_procedures_run_on_the_same_stack() {
     };
     // A procedure resolves an indexed address from its own unit's table.
     let mut indexed = expression(&[gimli::DW_OP_addrx.0, 0, gimli::DW_OP_plus.0]);
-    indexed.indexed_addresses = Arc::new(HashMap::from([(0, 0x1000)]));
+    indexed.indexed_addresses = Arc::new(HashMap::from_iter([(0, 0x1000)]));
     let mut caller = with_procedures(
         expression(&[
             gimli::DW_OP_lit2.0,
@@ -1016,7 +1016,7 @@ fn called_procedures_run_on_the_same_stack() {
             gimli::DW_OP_stack_value.0,
         ]),
         // The unit begins at 0x100, so the calls name 0x120, 0x130, and 0x140.
-        HashMap::from([
+        HashMap::from_iter([
             (
                 0x120,
                 procedure(expression(&[gimli::DW_OP_lit3.0, gimli::DW_OP_mul.0])),

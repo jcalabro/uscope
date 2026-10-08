@@ -60,6 +60,7 @@ tokio = { version = "1.52", features = ["fs", "io-std", "io-util", "macros", "ne
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
 toml = "1.1"
 mimalloc = { version = "0.1", default-features = false }
+foldhash = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cpp_demangle = "0.5"

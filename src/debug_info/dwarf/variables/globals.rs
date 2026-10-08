@@ -1,8 +1,9 @@
 //! The catalog of global data objects, deduplicated across units.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use foldhash::HashMap;
 
 use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, is_type_unit};
 use crate::{

@@ -1,7 +1,9 @@
 //! Inspecting data objects: following value paths and materializing values.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
+
+use foldhash::{HashSet, HashSetExt};
 
 use crate::debug_info::dwarf::DwarfError;
 use crate::debug_info::{

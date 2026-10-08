@@ -1,9 +1,10 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use gimli::{
     BaseAddresses, CfaRule, ColumnType, DebugFrame, DwarfSections, EhFrame, Encoding, EndianSlice,
     EvaluationResult, Location, RegisterRule, RunTimeEndian, SectionId, UnwindContext,
@@ -2404,7 +2405,9 @@ fn target_description(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
+
+    use foldhash::{HashMap, HashMapExt};
 
     use gimli::write::{
         Address, Dwarf as WriteDwarf, EndianVec, LineProgram, LineString, Sections, Unit,
@@ -2420,7 +2423,7 @@ mod tests {
             unit: 3,
             offset: 0x40,
         };
-        let signatures = HashMap::from([(signature, key)]);
+        let signatures = HashMap::from_iter([(signature, key)]);
         let units = Vec::<gimli::Unit<Reader<'_>>>::new();
 
         assert_eq!(

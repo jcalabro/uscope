@@ -1,8 +1,10 @@
 //! Normalizing DWARF type DIEs into the platform-neutral type graph.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 
 use crate::debug_info::dwarf::{DieKey, Reader, TypeSignatures, die_reference_with_signatures};
 use crate::model::ArrayDimension;

@@ -1,9 +1,9 @@
 //! Reading attributes from DIEs and the origins they inherit from.
 
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use foldhash::{HashMap, HashSet, HashSetExt};
 use gimli::Reader as _;
 
 use crate::debug_info::dwarf::{

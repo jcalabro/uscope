@@ -14,10 +14,11 @@
 //!   and selecting storage of every form.
 //! - [`call_sites`]: the calls that recover parameters' entry values.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use foldhash::{HashMap, HashMapExt};
 use gimli::RunTimeEndian;
 
 use crate::debug_info::{
