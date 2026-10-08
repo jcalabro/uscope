@@ -1478,11 +1478,14 @@ impl Cli {
         let traces = self.task_traces().await?;
         let noun = traces.tasks.first().map_or("task", |(task, _)| task.noun);
         let renderer = self.renderers.stdout;
-        let shown = traces
+        // A runtime's lists keep its tasks in an order of their own, so
+        // they are shown by number.
+        let mut shown = traces
             .tasks
             .iter()
             .filter(|(task, _)| all || !task.internal)
             .collect::<Vec<_>>();
+        shown.sort_by_key(|(task, _)| task.id);
         if traces.tasks.is_empty() {
             match traces.gaps.as_slice() {
                 [] => bail!("the program has no {name}"),

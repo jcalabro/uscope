@@ -636,7 +636,7 @@ nearest preceding symbol.
 | --- | --- |
 | `threads` | List threads, with the goroutine each runs. |
 | `thread` *id* | Select a thread. |
-| `tasks` [`-a`] [`-g`] [`-t`] | List a runtime's tasks, Go's goroutines: `-a` with the runtime's own, `-g` grouped by place, `-t` each with its stack. |
+| `tasks` [`-a`] [`-g`] [`-t`] | List a runtime's tasks by number, such as Go's goroutines or tokio's tasks: `-a` with the runtime's own, `-g` grouped by place, `-t` each with its stack. |
 | `task` [*id* [*command*]] | Show the selected task, select one, or run an inspecting command in one. |
 | `handle` *signal* [`stop`\|`nostop`] [`print`\|`noprint`] [`pass`\|`nopass`] | Change how a signal is handled. `stop` implies `print`, and `noprint` implies `nostop`. |
 | `info signals` | List every signal's policy. |

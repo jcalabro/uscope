@@ -731,6 +731,34 @@ fn threads_say_when_what_they_run_is_unknown() {
     }
 }
 
+/// tokio's tasks are listed by number, whatever order its lists keep
+/// them in, each saying what it does and the thread it is on.
+#[test]
+fn tokio_tasks_are_listed_by_number() {
+    let stdout = batch(
+        &["build/test-programs/tokio-workers-o0"],
+        &["break truth_reached", "run", "tasks"],
+    );
+    let tasks = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("  [").or_else(|| line.strip_prefix("* [")))
+        .map(|line| {
+            let (number, rest) = line.split_once(']').expect("a task number");
+            (number.parse::<u64>().expect("a number"), rest)
+        })
+        .collect::<Vec<_>>();
+    let numbers = tasks.iter().map(|(number, _)| *number).collect::<Vec<_>>();
+    assert_eq!(numbers, (3..=12).collect::<Vec<_>>(), "{stdout}");
+    for (number, rest) in &tasks {
+        let expected = match number {
+            11 => " — running a blocking closure (thread ",
+            12 => " — queued in the blocking pool",
+            _ => " — suspended",
+        };
+        assert!(rest.contains(expected), "{stdout}");
+    }
+}
+
 #[test]
 fn library_breakpoints_resolve_at_runtime_and_frames_show_their_own_sources() {
     let stdout = batch(
