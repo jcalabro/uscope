@@ -8,6 +8,7 @@ use std::process::Stdio;
 
 use uscope::{ExceptionStops, ExitStatus, LanguageExceptionKind, LaunchOptions, StopReason};
 
+use crate::invariants::checked;
 use crate::stops::{evaluated, line};
 use crate::support::{Scenario, ScratchDir};
 
@@ -26,7 +27,7 @@ struct Launched {
 async fn launched(fixture: &str, case: &str, stops: Option<ExceptionStops>) -> Launched {
     let scratch = ScratchDir::new("panics");
     let output = scratch.path().join("stdout");
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = checked(fixture);
     if let Some(stops) = stops {
         scenario
             .operation(

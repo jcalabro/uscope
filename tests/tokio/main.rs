@@ -6,6 +6,7 @@
 mod support;
 
 mod coroutines;
+mod invariants;
 mod panics;
 mod resume_points;
 mod std_async;
