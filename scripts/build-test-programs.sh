@@ -31,6 +31,119 @@ read_dash_version() {
     dash_version=${dash_version_by_tool["$tool"]}
 }
 
+# Compiles run at once, as many as there are CPUs (USCOPE_FIXTURE_JOBS sets
+# how many; 1 builds one at a time). A step that reads what earlier steps
+# built waits for every running compile first: each helper that reads
+# outputs does, a compile does when its command or source names the output
+# directory, and the script does wherever it reads outputs itself. Only a
+# compile that the build helpers alone call runs in the background; one a
+# derivation or check makes runs in the foreground. Oracles that nothing
+# here reads run in the background until the end.
+readonly max_jobs="${USCOPE_FIXTURE_JOBS:-$(nproc)}"
+readonly background_builders=" build_program build_fixture build_c_fixture_directory \
+build_cpp_fixture_directory build_cpp_fixture build_shared_fixture build_symbols_library \
+build_disassembly_fixture build_tls_modules_fixture build_rust_fixture build_go_fixture \
+build_go_command build_zig_fixture build_zig_self_hosted_fixture "
+# What each running job makes, by process ID, and the compiles among them.
+declare -A job_outputs=()
+declare -A build_jobs=()
+failed_jobs=()
+trap 'running=$(jobs -pr); [[ -z "$running" ]] || kill $running 2>/dev/null || true' EXIT
+
+# Notes how the job PID ended.
+reap_job() {
+    local pid="$1"
+    local status="$2"
+    if (( status != 0 )); then
+        failed_jobs+=("${job_outputs[$pid]}")
+    fi
+    unset "job_outputs[$pid]" "build_jobs[$pid]"
+}
+
+# Fails the build, naming each job that failed.
+check_jobs() {
+    if (( ${#failed_jobs[@]} > 0 )); then
+        printf 'error: could not make %s\n' "${failed_jobs[@]}" >&2
+        exit 1
+    fi
+}
+
+# Runs COMMAND in the background to make OUTPUT once a job slot is free.
+# KIND is build for a compile, which wait_builds waits for, or leaf.
+spawn_job() {
+    local kind="$1"
+    local output="$2"
+    shift 2
+    while (( ${#job_outputs[@]} >= max_jobs )); do
+        local pid="" status=0
+        wait -n -p pid "${!job_outputs[@]}" || status=$?
+        reap_job "$pid" "$status"
+    done
+    "$@" &
+    job_outputs[$!]="$output"
+    if [[ "$kind" == build ]]; then
+        build_jobs[$!]="$output"
+    fi
+}
+
+# Waits for every running compile, failing if any failed.
+wait_builds() {
+    local pid
+    for pid in "${!build_jobs[@]}"; do
+        local status=0
+        wait "$pid" || status=$?
+        reap_job "$pid" "$status"
+    done
+    check_jobs
+}
+
+# Waits for every running job, failing if any failed.
+wait_jobs() {
+    local pid
+    for pid in "${!job_outputs[@]}"; do
+        local status=0
+        wait "$pid" || status=$?
+        reap_job "$pid" "$status"
+    done
+    check_jobs
+}
+
+# Whether the build helpers alone called the compile running now.
+called_by_builders() {
+    local caller
+    for caller in "${FUNCNAME[@]:2}"; do
+        [[ "$caller" == main || "$background_builders" == *" $caller "* ]] || return 1
+    done
+}
+
+# Whether a compile of OUTPUT from SOURCE with COMMAND reads anything in the
+# output directory, or makes what a running job makes.
+reads_outputs() {
+    local source="$1"
+    local output="$2"
+    shift 2
+    local word
+    [[ "$source" != *"$output_dir"* ]] || return 0
+    for word in "$@"; do
+        [[ "$word" != *"$output_dir"* || "$word" == *"$output"* ]] || return 0
+    done
+    local job
+    for job in "${job_outputs[@]}"; do
+        [[ "$job" != "$output" ]] || return 0
+    done
+    return 1
+}
+
+# Compiles OUTPUT and records the signature it was built with.
+compile() {
+    local output="$1"
+    local signature="$2"
+    shift 2
+    NIX_HARDENING_ENABLE= "$@" || return
+    printf '%s\n' "$signature" >"${output}.command.tmp"
+    mv "${output}.command.tmp" "${output}.command"
+}
+
 source_changed_since_output() {
     local source="$1"
     local output="$2"
@@ -51,6 +164,9 @@ run_cached_build() {
     local stamp="${output}.command"
     local previous=""
 
+    if reads_outputs "$source" "$output" "${command[@]}"; then
+        wait_builds
+    fi
     if [[ -f "$stamp" ]]; then
         previous=$(<"$stamp")
     fi
@@ -64,10 +180,12 @@ run_cached_build() {
     fi
 
     printf '[build]  %s\n' "$output"
-    NIX_HARDENING_ENABLE= "${command[@]}"
     rebuilt_outputs["$output"]=true
-    printf '%s\n' "$signature" >"${stamp}.tmp"
-    mv "${stamp}.tmp" "$stamp"
+    if (( max_jobs > 1 )) && called_by_builders; then
+        spawn_job build "$output" compile "$output" "$signature" "${command[@]}"
+    else
+        compile "$output" "$signature" "${command[@]}"
+    fi
 }
 
 build_program() {
@@ -208,6 +326,7 @@ build_tls_modules_fixture() {
 # that libthread_db checks and the build-id each differ in one byte, while the
 # code stays the toolchain's own so the fixture runs against its loader.
 derive_foreign_libc() {
+    wait_builds
     local input="$1"
     local output="$2"
     local script
@@ -260,6 +379,7 @@ derive_foreign_libc() {
 # compressed object keeps exactly the function symbols the dynamic table
 # omits. The uncompressed object is kept beside the library for oracles.
 derive_stripped_library() {
+    wait_builds
     local input="$1"
     local output="$2"
     local embedded="$3"
@@ -295,6 +415,7 @@ derive_stripped_library() {
 # sits beside it under `.debug`; with `build-id`, the debug file is filed
 # under ROOT/.build-id by the build-id OUTPUT keeps.
 derive_split_debug() {
+    wait_builds
     local input="$1"
     local output="$2"
     local layout="$3"
@@ -332,6 +453,7 @@ derive_split_debug() {
 # tables and layout the symbolization tests depend on. TABLES names which
 # tables must exist: full, dynamic, or embedded.
 require_symbols_layout() {
+    wait_builds
     local library="$1"
     local tables="$2"
     local sections symbols
@@ -472,6 +594,7 @@ build_zig_self_hosted_fixture() {
 }
 
 validation_is_cached() {
+    wait_builds
     local output="$1"
     local stamp="$2"
     local signature="$3"
@@ -484,6 +607,7 @@ validation_is_cached() {
 }
 
 record_validation() {
+    wait_builds
     local stamp="$1"
     local signature="$2"
     printf '%s\n' "$signature" >"${stamp}.tmp"
@@ -493,6 +617,7 @@ record_validation() {
 # Fails the build when a fixture no longer emits a sibling-call jump a test
 # depends on, instead of letting the test pass through the regular-callee path.
 require_tail_jump() {
+    wait_builds
     local output="$1"
     local caller="$2"
     local callee="$3"
@@ -516,6 +641,7 @@ require_tail_jump() {
 # Fails the build when a function no longer contains an instruction a test
 # depends on, such as a repeated string store or a 16-byte vector store.
 require_instruction() {
+    wait_builds
     local output="$1"
     local function="$2"
     local pattern="$3"
@@ -540,6 +666,7 @@ require_instruction() {
 # its interpreter or, linked statically, contains musl's TLS layout code.
 # Otherwise a toolchain that quietly targeted glibc would pass musl's tests.
 require_musl() {
+    wait_builds
     local output="$1"
     local stamp="${output}.validation-musl"
     local signature="validator=musl-v1"
@@ -566,6 +693,7 @@ require_musl() {
 # must contain glibc's thread library, whose absence leaves a program without
 # the descriptors libthread_db reads.
 require_static_glibc() {
+    wait_builds
     local output="$1"
     local threads="$2"
     local stamp="${output}.validation-static-glibc"
@@ -596,6 +724,7 @@ require_static_glibc() {
 # Fails the build when a fixture's DWARF stops exercising the operation a test
 # depends on, instead of letting the test pass without its coverage.
 require_dwarf_operation() {
+    wait_builds
     local output="$1"
     local operation="$2"
     local key=${operation//[^a-zA-Z0-9]/_}
@@ -637,12 +766,14 @@ core_signature() {
 }
 
 core_is_current() {
+    wait_builds
     local core="$1"
     local signature="$2"
     [[ -s "$core" && -f "${core}.command" && "$(<"${core}.command")" == "$signature" ]]
 }
 
 generate_core() {
+    wait_builds
     local core="$1"
     local signal="$2"
     local filter="$3"
@@ -992,6 +1123,7 @@ for variant in "${symbols_variants[@]}"; do
     build_fixture "$compiler" "$c_fixtures_dir/elf-symbols/main.c" \
         "$output_dir/elf-symbols-${name}" -g3 -gdwarf-5 $flags \
         "-L$output_dir" "-lelf-symbols-${library}" '-Wl,-rpath,$ORIGIN'
+wait_builds
     if ! readelf -dW "$output_dir/elf-symbols-${name}" \
         | grep -F "Shared library: [libelf-symbols-${library}.so]" >/dev/null; then
         printf 'error: elf-symbols-%s does not load libelf-symbols-%s.so\n' \
@@ -1698,6 +1830,7 @@ done
 # Cores whose executable or shared library was deleted after the crash. The
 # copies are refreshed whenever a core itself must be regenerated.
 generate_core_without() {
+    wait_builds
     local name="$1"
     local deleted="$2"
     local directory="$output_dir/core-missing-${name}"
@@ -1718,9 +1851,11 @@ generate_core_without executable crash-gcc-o0
 # library; afterwards the executable and library at its recorded paths are
 # replaced by different builds and the C library is removed, so only a
 # sysroot or module path holding the originals can supply them.
+wait_builds
 toolchain_libc=$(ldd "$output_dir/crash-gcc-o0" | awk '$1 == "libc.so.6" { print $3 }')
 derive_foreign_libc "$toolchain_libc" "$output_dir/libc-foreign.so.6"
 generate_foreign_core() {
+    wait_builds
     local directory="$output_dir/core-foreign"
     local core="$directory/crash.core"
     local inputs="$output_dir/crash-gcc-o0 $output_dir/libcrash.so $output_dir/libc-foreign.so.6"
@@ -1773,6 +1908,7 @@ mkdir -p "$symbol_oracle_dir"
 # ELF file, and the symbols objdump synthesizes for its PLT stubs. An
 # embedded MiniDebugInfo object has no frame contents to dump.
 generate_symbol_oracle() {
+    wait_builds
     local elf="$1"
     local oracle="$symbol_oracle_dir/${2:-${elf##*/}}.readelf"
     local frames="${3:-yes}"
@@ -1801,6 +1937,7 @@ generate_symbol_oracle() {
 
 # Records gdb's complete backtrace of a core's crashing thread.
 generate_backtrace_oracle() {
+    wait_builds
     local program="$1"
     local core="$2"
     local oracle="${core}.gdb-backtrace"
@@ -1824,6 +1961,7 @@ generate_backtrace_oracle() {
 
 # Records gdb's variables for every frame of every thread in a core.
 generate_frame_oracle() {
+    wait_builds
     local program="$1"
     local core="$2"
     local oracle="${core}.gdb-frame-variables"
@@ -1882,6 +2020,7 @@ for variant in "${symbols_variants[@]}"; do
     generate_symbol_oracle "$output_dir/elf-symbols-${name}"
 done
 # The C library and loader every fixture runs against, as the loader resolves them.
+wait_builds
 while read -r library; do
     generate_symbol_oracle "$library"
 done < <(ldd "$output_dir/elf-symbols-gcc-o0" | awk '/=> \// { print $3 } /^\t\// { print $1 }' \
@@ -1897,6 +2036,7 @@ done
 # gdb's type and target function of each function pointer, one per line as
 # `name<TAB>type<TAB>function`, read from the executable's own data.
 generate_function_type_oracle() {
+    wait_builds
     local program="$1"
     local oracle="${program}.gdb-function-types"
     rebuilt_outputs["$oracle"]=false
@@ -1986,6 +2126,16 @@ generate_coroutine_oracle() {
     fi
     printf '[oracle] %s\n' "$oracle"
     rebuilt_outputs["$oracle"]=true
+    # Reducing a large program's dump takes several seconds, and only tests
+    # read the result.
+    spawn_job leaf "$oracle" reduce_coroutines "$program" "$oracle" "$reducer"
+}
+
+# Writes ORACLE, the coroutines REDUCER finds in PROGRAM's dump.
+reduce_coroutines() {
+    local program="$1"
+    local oracle="$2"
+    local reducer="$3"
     local dump="${oracle}.info"
     readelf --debug-dump=info "$program" >"$dump" 2>/dev/null
     awk -f "$reducer" "$dump" "$dump" | LC_ALL=C sort -u >"${oracle}.tmp"
@@ -2041,6 +2191,7 @@ unset TRUTH_CORE MALLOC_ARENA_MAX
 readonly gosym_oracle="$output_dir/gosym-oracle"
 build_go_fixture scripts/gosym-oracle "$gosym_oracle"
 generate_gosym_oracle() {
+    wait_builds
     local program="$1"
     local oracle="${program}.gosym"
     rebuilt_outputs["$oracle"]=false
@@ -2062,6 +2213,7 @@ readonly disassembly_oracle_dir="$output_dir/disassembly-oracles"
 mkdir -p "$disassembly_oracle_dir"
 
 generate_disassembly_oracle() {
+    wait_builds
     local elf="$1"
     local oracle="$disassembly_oracle_dir/${elf##*/}.objdump"
     local header
@@ -2084,11 +2236,13 @@ for program in crash-gcc-o0 crash-gcc-o2-nopie crash-clang-o2 crash-rust-o0 cras
     libelf-symbols-stripped.so; do
     generate_disassembly_oracle "$output_dir/$program"
 done
+wait_builds
 while read -r library; do
     generate_disassembly_oracle "$library"
 done < <(ldd "$output_dir/crash-gcc-o0" | awk '/=> \// { print $3 } /^\t\// { print $1 }' \
     | grep -E '/(libc\.so|ld-linux)')
 
+wait_jobs
 printf '%s\n' "${!rebuilt_outputs[@]}" >"${suite_outputs}.tmp"
 mv "${suite_outputs}.tmp" "$suite_outputs"
 mv "${suite_stamp}.tmp" "$suite_stamp"

@@ -8,11 +8,13 @@ max_test_threads := "16"
 # Lints the Rust code and runs the complete test suite.
 default: check
 
-# Checks formatting, runs Clippy, and runs the complete test suite.
-check: lint test web-test
+# The tests' output streams; the others print when they finish.
+[doc("Checks formatting, runs Clippy, and runs the complete test suite at once.")]
+check:
+    ./scripts/concurrently.sh 'test=just test' 'lint=just lint' 'web-test=just web-test'
 
 # Runs everything to check before committing.
-all: lint test web-test web-e2e stress sim
+all: check web-e2e stress sim
 
 # Enters the Nix development shell.
 dev *ARGS="":
@@ -22,10 +24,16 @@ dev *ARGS="":
 install-vscode-symlink:
     ln -s "$PWD/editors/vscode" ~/.vscode/extensions/uscope.uscope-0.1.0
 
-# Builds the native test fixtures and the simulator's golden programs
-# without running Rust tests.
-build-test-programs: golden
+# Builds the native test fixtures and the simulator's golden programs, at
+# once, without running Rust tests.
+build-test-programs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/golden.sh build &
+    golden=$!
+    trap 'kill "$golden" 2>/dev/null || true' EXIT
     ./scripts/build-test-programs.sh
+    wait "$golden"
 
 # Builds the simulator's golden programs into build/golden, failing unless
 # they match the hashes and behavior their manifests record.
@@ -40,14 +48,17 @@ build *ARGS="": build-test-programs
 run *ARGS: build
     ./target/debug/uscope "$@"
 
-# Checks formatting and runs Clippy on development and release builds, which
-# differ in what the flight recorder compiles. Incremental checking halves the
-# release lint after an edit and leaves release builds as they are.
+# Development and release builds differ in what the flight recorder
+# compiles. Incremental checking halves the release lint after an edit and
+# leaves release builds as they are. Cargo locks each profile's directory
+# while it builds, so the development lint has a directory of its own and
+# never waits for a test build, nor makes one wait.
+[doc("Checks formatting and runs Clippy on development and release builds at once.")]
 lint:
-    cargo fmt --check
-    cargo clippy --all-targets --all-features -- -D warnings
-    CARGO_PROFILE_RELEASE_INCREMENTAL=true cargo clippy --release --all-targets --all-features -- -D warnings
-    cargo check --quiet --manifest-path fuzz/Cargo.toml
+    ./scripts/concurrently.sh 'fmt=cargo fmt --check' \
+        'clippy=cargo clippy --target-dir target/clippy --all-targets --all-features -- -D warnings' \
+        'clippy-release=CARGO_PROFILE_RELEASE_INCREMENTAL=true cargo clippy --release --all-targets --all-features -- -D warnings' \
+        'fuzz=cargo check --quiet --manifest-path fuzz/Cargo.toml'
 
 # Arguments go to nextest, e.g. `just test print_` or `just test --test cli`.
 # Doc tests only run with the full suite. Tests run inside a memory cap, and

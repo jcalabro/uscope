@@ -10,7 +10,8 @@
 # or `{async_closure_env#N}`; its path is the namespaces enclosing it.
 
 function header(line, parts) {
-    if (!match(line, /^ <[0-9]+><[0-9a-f]+>: Abbrev Number: [0-9]+/)) {
+    if (substr(line, 1, 2) != " <" \
+        || !match(line, /^ <[0-9]+><[0-9a-f]+>: Abbrev Number: [0-9]+/)) {
         return 0
     }
     split(substr(line, 3), parts, /[<>]/)
@@ -89,6 +90,12 @@ function finish(    path, d) {
 FNR == 1 {
     depth = ""
     coroutine = ""
+}
+
+# Most lines describe attributes nothing here reads. Each kind of line is
+# told by its indentation and second field before any pattern runs.
+substr($0, 1, 4) == "    " && $2 !~ /^DW_AT_(name|type|data_member_location|decl_line|discr_value)/ {
+    next
 }
 
 {
