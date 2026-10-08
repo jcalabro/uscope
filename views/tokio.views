@@ -306,3 +306,117 @@ view rust tokio::task::join_set::JoinSet<T> {
         for e in list(*(&(head == 0 ? lists.notified : lists.idle).head as *usize) as *Entry, p => *(&inner(p->pointers).next as *usize) as *Entry)
         => e->value.0.value.value.0
 }
+
+# A socket is its file descriptor, which the source the I/O driver
+# registered wraps in mio's type, std's, and std's own wrappers, as deep as
+# std nests that kind of socket.
+view rust tokio::net::tcp::stream::TcpStream {
+    show match io.io {
+        None => empty("deregistered")
+        Some => empty("fd {io.io.Some.0.inner.inner.0.inner.0.0.fd.0}")
+    }
+}
+
+view rust tokio::net::tcp::listener::TcpListener {
+    show match io.io {
+        None => empty("deregistered")
+        Some => empty("fd {io.io.Some.0.inner.inner.0.inner.0.0.fd.0}")
+    }
+}
+
+view rust tokio::net::udp::UdpSocket {
+    show match io.io {
+        None => empty("deregistered")
+        Some => empty("fd {io.io.Some.0.inner.inner.0.inner.0.0.fd.0}")
+    }
+}
+
+view rust tokio::net::unix::stream::UnixStream {
+    show match io.io {
+        None => empty("deregistered")
+        Some => empty("fd {io.io.Some.0.inner.inner.0.0.0.fd.0}")
+    }
+}
+
+view rust tokio::net::unix::listener::UnixListener {
+    show match io.io {
+        None => empty("deregistered")
+        Some => empty("fd {io.io.Some.0.inner.inner.0.0.0.fd.0}")
+    }
+}
+
+# A stream's halves are the stream they read or write.
+view rust tokio::net::tcp::split::ReadHalf {
+    show value(*self.0)
+}
+
+view rust tokio::net::tcp::split::WriteHalf {
+    show value(*self.0)
+}
+
+view rust tokio::net::tcp::split_owned::OwnedReadHalf {
+    show value(inner(inner.ptr)->data)
+}
+
+view rust tokio::net::tcp::split_owned::OwnedWriteHalf {
+    show value(inner(inner.ptr)->data)
+}
+
+view rust tokio::net::unix::split_owned::OwnedReadHalf {
+    show value(inner(inner.ptr)->data)
+}
+
+view rust tokio::net::unix::split_owned::OwnedWriteHalf {
+    show value(inner(inner.ptr)->data)
+}
+
+# Buffers are what they read or write, with the bytes they hold between.
+view rust tokio::io::util::buf_reader::BufReader<_> {
+    show value(inner)
+    field buffered = cap - pos
+}
+
+view rust tokio::io::util::buf_writer::BufWriter<_> {
+    show value(inner)
+    field buffered = buf.len - written
+}
+
+view rust tokio::io::util::lines::Lines<_> {
+    show value(reader)
+}
+
+# The futures that read and write, as what they still read or write and
+# from or to what.
+view rust tokio::io::util::read::Read<_> {
+    show empty("reading up to {len(buf)} bytes from {*reader}")
+}
+
+view rust tokio::io::util::read_exact::ReadExact<_> {
+    show empty("reading {len(buf.buf) - buf.filled} more bytes from {*reader}")
+}
+
+view rust tokio::io::util::write_all::WriteAll<_> {
+    show empty("writing {len(buf)} bytes to {*writer}")
+}
+
+# The future Lines::next_line awaits, which reads from its lines' reader.
+view rust core::future::poll_fn::PollFn<tokio::io::util::lines::**::next_line::`{async_fn#0}`::`{closure_env#0}`<_>> {
+    show empty("reading a line from {f._ref__self->reader}")
+    field lines = *f._ref__self
+}
+
+# The future a socket's operations await until the I/O driver finds the
+# socket ready, by the readiness it waits for: readable (1), writable (2),
+# or both. The socket is the awaiting frame's.
+view rust tokio::runtime::io::scheduled_io::Readiness {
+    let interest = inner(waiter).interest.0
+    show match state {
+        Done => empty("ready")
+        _ => match interest {
+            1 => empty("waiting until readable")
+            2 => empty("waiting until writable")
+            3 => empty("waiting until readable or writable")
+            _ => empty("waiting for readiness {interest}")
+        }
+    }
+}

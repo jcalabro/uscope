@@ -861,7 +861,8 @@ async fn go_library_values_present_as_go_shows_them() {
 /// tells apart, and every one of tokio's views binds. Some present values
 /// no expression reaches: a task's cell, which a join handle presents as
 /// the type its task's code says, and the futures tasks wait on for
-/// permits and messages, which the workers tests check.
+/// permits and messages, which the workers tests check, and for lines and
+/// sockets, which the attach tests check.
 #[tokio::test]
 async fn tokio_values_present_as_their_views_say() {
     let mut seen =
@@ -874,6 +875,8 @@ async fn tokio_values_present_as_their_views_say() {
                     "rust tokio::runtime::task::core::Cell<_, _>",
                     "rust tokio::sync::batch_semaphore::Acquire",
                     "rust core::future::poll_fn::PollFn<tokio::sync::mpsc::**::recv::`{async_fn#0}`::`{closure_env#0}`<_>>",
+                    "rust core::future::poll_fn::PollFn<tokio::io::util::lines::**::next_line::`{async_fn#0}`::`{closure_env#0}`<_>>",
+                    "rust tokio::runtime::io::scheduled_io::Readiness",
                 ]
                 .contains(&&*view.header)
             })

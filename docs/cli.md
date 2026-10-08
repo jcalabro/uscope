@@ -762,7 +762,8 @@ main.go:40`. A tokio task says where it was spawned in a build with
 builds record nothing of it. A suspended tokio task is listed with what it
 waits for, as the view of the future it awaits says: `sleeping until
 +59m59.9s`, `task 3 pending`, `waiting for 1 of 1 permits`, `receiving;
-senders: 1`, or `waiting for a notification`.
+senders: 1`, `waiting for a notification`, `reading a line from fd 7`, or
+`waiting until readable`.
 
 Signals follow gdb's defaults. `SIGALRM`, `SIGURG`, `SIGCHLD`, `SIGWINCH`,
 `SIGPROF`, `SIGVTALRM`, `SIGIO`, and `SIGPWR` are delivered without stopping;

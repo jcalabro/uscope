@@ -9,11 +9,15 @@
 
 use std::future::Future;
 use std::hint::black_box;
+use std::os::fd::AsRawFd;
+use std::os::linux::net::SocketAddrExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::net::{TcpListener, TcpStream, UdpSocket, UnixListener, UnixStream};
 use tokio::runtime::Runtime;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -258,6 +262,48 @@ fn main() {
         std::thread::yield_now();
     }
 
+    // Sockets, their halves, buffers around them, and futures that read and
+    // write them, which nothing polls.
+    let listener = runtime
+        .block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("a port to listen on");
+    let address = listener.local_addr().expect("the listening address");
+    let (client, accepted) = runtime.block_on(async {
+        tokio::join!(TcpStream::connect(address), listener.accept())
+    });
+    let mut client = client.expect("a connection");
+    let (accepted, _) = accepted.expect("an accepted connection");
+    let accepted_fd = accepted.as_raw_fd();
+    let (read_half, write_half) = accepted.into_split();
+    let lines = BufReader::new(read_half).lines();
+    let mut buffered = BufWriter::new(write_half);
+    runtime
+        .block_on(buffered.write_all(b"queued"))
+        .expect("room in the buffer");
+    let client_fd = client.as_raw_fd();
+    let (mut client_reader, mut client_writer) = client.split();
+    let mut buffer = [0_u8; 16];
+    let read = client_reader.read(&mut buffer);
+    let write_all = client_writer.write_all(b"hello");
+    let udp = runtime
+        .block_on(UdpSocket::bind("127.0.0.1:0"))
+        .expect("a port");
+    let (mut unix, unix_peer) = UnixStream::pair().expect("a pair of sockets");
+    let unix_fd = unix.as_raw_fd();
+    let (unix_left, _unix_right) = UnixStream::pair().expect("a pair of sockets");
+    let unix_left_fd = unix_left.as_raw_fd();
+    let (unix_read, unix_write) = unix_left.into_split();
+    let mut exact = [0_u8; 8];
+    let read_exact = unix.read_exact(&mut exact);
+    let name = format!("uscope-values-{}", std::process::id());
+    let unix_listener = {
+        let address = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())
+            .expect("an abstract name");
+        let listener = std::os::unix::net::UnixListener::bind_addr(&address).expect("a name");
+        listener.set_nonblocking(true).expect("a nonblocking listener");
+        UnixListener::from_std(listener).expect("a registered listener")
+    };
+
     view("id", id);
     view("pending", format!("task {id} pending"));
     view("finished", 42);
@@ -340,6 +386,26 @@ fn main() {
 
     view("set", format!("len=2 [task {second} pending, task {first} pending]"));
     view("mixed", format!("len=2 [3, task {waiting} pending] (any order)"));
+
+    view("listener", format!("fd {}", listener.as_raw_fd()));
+    view("client", format!("fd {client_fd}"));
+    view("client_reader", format!("fd {client_fd}"));
+    view("lines", format!("fd {accepted_fd}"));
+    view("lines.reader", format!("fd {accepted_fd}"));
+    view("lines.reader", "children: buffered = 0, [raw]");
+    view("lines.reader.inner", format!("fd {accepted_fd}"));
+    view("buffered.inner", format!("fd {accepted_fd}"));
+    view("buffered", format!("fd {accepted_fd}"));
+    view("buffered", "children: buffered = 6, [raw]");
+    view("client_writer", format!("fd {client_fd}"));
+    view("read", format!("reading up to 16 bytes from fd {client_fd}"));
+    view("write_all", format!("writing 5 bytes to fd {client_fd}"));
+    view("udp", format!("fd {}", udp.as_raw_fd()));
+    view("unix_peer", format!("fd {}", unix_peer.as_raw_fd()));
+    view("unix_read", format!("fd {unix_left_fd}"));
+    view("unix_write", format!("fd {unix_left_fd}"));
+    view("read_exact", format!("reading 8 more bytes from fd {unix_fd}"));
+    view("unix_listener", format!("fd {}", unix_listener.as_raw_fd()));
     barrier();
     truth::dump_core_if_asked();
 
@@ -372,6 +438,8 @@ fn main() {
     black_box((&watched, &watch_receiver, &orphan, &broadcaster, &broadcast_receiver));
     black_box((&flood, &lagging, &instant, &sleep, &elapsed, &registered, &interval));
     black_box((&current_sleep, &set, &mixed));
+    black_box((&listener, &lines, &buffered, &read, &write_all, &udp));
+    black_box((&unix_peer, &unix_read, &unix_write, &read_exact, &unix_listener));
 
     drop(write_guard);
     drop(shared_guard);

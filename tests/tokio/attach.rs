@@ -1,8 +1,10 @@
-//! uscope attached to the running `server` fixture: its connection's task
-//! is listed as a launched program's would be, a request stops at a
-//! breakpoint in the handler on that task, and once detached the server
-//! answers the request it was stopped in and goes on serving.
+//! uscope attached to the running `server` fixture: its listener's and its
+//! connection's tasks are listed as a launched program's would be, each
+//! with what it waits for, a request stops at a breakpoint in the handler
+//! on the connection's task, and once detached the server answers the
+//! request it was stopped in and goes on serving.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -55,11 +57,12 @@ impl Client {
     }
 }
 
-/// Attached to a server with one connection, the connection's task is
-/// the program's only one, and its frames are the handler's. A request
-/// sent while the server is stopped stops at the handler's breakpoint on
-/// that task, with the count it answers. Detached, the server answers it
-/// and the next, and quits when asked.
+/// Attached to a server with one connection, the listener's task waits
+/// for its socket to be readable and the connection's for its next line,
+/// on the socket the server names; a line sent while the server is stopped
+/// stops at the handler's breakpoint on the connection's task, with the
+/// count it answers. Detached, the server answers it and the next, and
+/// quits when asked.
 #[tokio::test]
 async fn an_attached_servers_task_is_listed_and_it_serves_once_detached() {
     for fixture in BUILDS {
@@ -67,6 +70,8 @@ async fn an_attached_servers_task_is_listed_and_it_serves_once_detached() {
         let mut client = Client::connect(&server);
         client.send("first");
         assert_eq!(client.answer(), "first 1", "{fixture}");
+        client.send("fd");
+        let fd = client.answer();
 
         let mut scenario =
             Scenario::attached(fixture, server.attach().await).checking_stops(check_tokio_stop);
@@ -75,36 +80,54 @@ async fn an_attached_servers_task_is_listed_and_it_serves_once_detached() {
         }
         let (listed, gaps) = tasks(&scenario, 4096).await;
         assert!(gaps.is_empty(), "{fixture}: {gaps:?}");
-        let [task] = &listed[..] else {
-            panic!("{fixture}: {listed:#?}");
-        };
-        // Having answered, the handler waits for the next line, or is on
-        // its way back to that await.
-        assert!(
-            matches!(task.state, TaskState::Blocked | TaskState::Running),
-            "{fixture}: {task:#?}"
-        );
         let stop = scenario.snapshot().await.stop_id.expect("stopped");
-        let trace = scenario
-            .operation(
-                "backtrace",
-                scenario
-                    .handle()
-                    .at(StopContext {
-                        stop,
-                        execution: ExecutionContext::Task(task.id),
-                        frame: StackFrameId::INNERMOST,
-                    })
-                    .backtrace(),
-            )
-            .await;
-        assert!(
-            trace
-                .frames
-                .iter()
-                .any(|frame| frame.function.as_ref().is_some_and(|f| &*f.name == "serve")),
-            "{fixture}: {trace:#?}"
-        );
+        let mut by_function = BTreeMap::new();
+        for task in &listed {
+            let trace = scenario
+                .operation(
+                    "backtrace",
+                    scenario
+                        .handle()
+                        .at(StopContext {
+                            stop,
+                            execution: ExecutionContext::Task(task.id),
+                            frame: StackFrameId::INNERMOST,
+                        })
+                        .backtrace(),
+                )
+                .await;
+            let function = ["listen", "serve"].into_iter().find(|name| {
+                trace
+                    .frames
+                    .iter()
+                    .any(|frame| frame.function.as_ref().is_some_and(|f| &*f.name == *name))
+            });
+            let function = function.unwrap_or_else(|| panic!("{fixture}: {trace:#?}"));
+            assert!(
+                by_function.insert(function, task).is_none(),
+                "{fixture}: {listed:#?}"
+            );
+        }
+        // Having accepted or answered, each task waits again, or is on its
+        // way back to its await.
+        for (function, waits_for) in [
+            ("listen", "waiting until readable".to_owned()),
+            ("serve", format!("reading a line from fd {fd}")),
+        ] {
+            let task = by_function
+                .get(function)
+                .unwrap_or_else(|| panic!("{fixture}: no {function} in {listed:#?}"));
+            match task.state {
+                TaskState::Blocked => assert_eq!(
+                    task.detail.as_deref(),
+                    Some(&*waits_for),
+                    "{fixture}: {task:#?}"
+                ),
+                TaskState::Running => {}
+                _ => panic!("{fixture}: {task:#?}"),
+            }
+        }
+        let task = by_function["serve"];
 
         let breakpoint = scenario
             .add_source_breakpoint(SOURCE, line(SOURCE, "// SERVED: answer"))
