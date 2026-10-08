@@ -18,8 +18,8 @@ use crate::{
     AddressDescription, Backtrace, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo,
     CodeInstanceKind, CodeRole, Error, ExecutionContext, ExecutionLocation, FrameKind,
     ImageAddress, ImageLocation, InlineFrameLookup, LoadedModule, ModuleAddress, ModuleId,
-    ModuleImage, Result, SourceLocation, StackFrame, StackFrameId, StackSegment, UnwindTermination,
-    VariableUnavailableReason, VirtualAddress,
+    ModuleImage, Result, SourceLocation, StackFrame, StackFrameId, StackSegment, TypeReference,
+    UnwindTermination, VariableUnavailableReason, VirtualAddress,
 };
 
 use super::activation::{StackPosition, StackView};
@@ -226,6 +226,9 @@ impl<P: InspectionOps> Controller<P> {
 
     pub(super) fn backtrace(&self, stop_id: StopId, root: &StackRoot) -> Result<Backtrace> {
         let inferior = self.stopped_root(stop_id, root)?;
+        if let Some(trace) = self.async_backtrace(inferior, root)? {
+            return Ok(trace);
+        }
         let presentation = self.root_presentation(root)?;
         let stack = self.physical_stack(inferior, root, DEFAULT_MAX_FRAMES)?;
         let modules = self.unwind_modules(inferior);
@@ -334,6 +337,7 @@ impl<P: InspectionOps> Controller<P> {
                 after_call,
                 ..
             } => (None, registers.clone(), *after_call, Vec::new()),
+            RootOrigin::Suspended { .. } => return Err(Error::FrameSuspended),
         };
         let instruction = registers
             .get(X86_64_RIP)
@@ -423,6 +427,9 @@ impl<P: InspectionOps> Controller<P> {
         frame: StackFrameId,
         presentation: Option<&FramePresentation>,
     ) -> Result<ResolvedFrame> {
+        if let Some(resolved) = self.resolve_async_frame(inferior, root, frame)? {
+            return Ok(resolved);
+        }
         let level = usize::try_from(frame.get()).expect("u32 fits usize");
         // Every activation presents at least one logical frame, so unwinding
         // one activation per level always reaches the requested frame.
@@ -593,14 +600,14 @@ impl<P: InspectionOps> Controller<P> {
     ) -> Result<ExecutionLocation> {
         let resolved = self.resolve_frame(inferior, root, frame)?;
         let selected = resolved.frame.ok_or(Error::AmbiguousInlineFrame)?;
+        // A suspended frame whose resume address is unknown has no code to
+        // locate.
+        let instruction = selected.instruction.ok_or(Error::FrameSuspended)?;
         let (module, address) = resolved.code.ok_or(Error::AddressOutsideModule)?;
         let module = self
             .modules
             .get(&module)
             .ok_or(Error::ModuleNotLoaded(module))?;
-        // A suspended frame whose resume address is unknown has no code to
-        // locate.
-        let instruction = selected.instruction.ok_or(Error::LocationUnavailable)?;
         let mut location = module.image.locate(address);
         location.function = selected.function;
         location.source = selected.source;
@@ -1235,6 +1242,14 @@ pub(super) enum RootOrigin {
         /// read.
         reader: Pid,
     },
+    /// A suspended task's future, of type `ty`, which the code of `module`
+    /// describes. Its frames are the chain of awaits the future holds.
+    Suspended {
+        future: VirtualAddress,
+        ty: TypeReference,
+        module: LoadedModule,
+        reader: Pid,
+    },
 }
 
 impl StackRoot {
@@ -1249,7 +1264,9 @@ impl StackRoot {
     /// The stopped thread whose memory and state the stack is read through.
     pub(super) const fn reader(&self) -> Pid {
         match self.origin {
-            RootOrigin::Thread(pid) | RootOrigin::Saved { reader: pid, .. } => pid,
+            RootOrigin::Thread(pid)
+            | RootOrigin::Saved { reader: pid, .. }
+            | RootOrigin::Suspended { reader: pid, .. } => pid,
         }
     }
 
@@ -1257,7 +1274,7 @@ impl StackRoot {
     pub(super) const fn thread(&self) -> Option<Pid> {
         match self.origin {
             RootOrigin::Thread(pid) => Some(pid),
-            RootOrigin::Saved { .. } => None,
+            RootOrigin::Saved { .. } | RootOrigin::Suspended { .. } => None,
         }
     }
 }
@@ -1285,6 +1302,13 @@ pub(super) enum FrameScope {
     Function,
     /// One inline instance's scope.
     Inline(CodeInstanceId),
+    /// A suspended async function's, whose future of type `ty` at
+    /// `object` is in the state numbered `state`.
+    Suspended {
+        object: VirtualAddress,
+        ty: TypeReference,
+        state: u64,
+    },
 }
 
 /// One logical frame of a stopped thread and the state that evaluates its

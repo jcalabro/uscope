@@ -1621,8 +1621,11 @@ impl Cli {
         &self,
         frames: impl Iterator<Item = &StackFrame>,
     ) -> Result<BTreeMap<ModuleId, Arc<ModuleImage>>> {
+        // An awaited future is named by its type, which its image holds.
         let modules = frames
-            .filter(|frame| frame.source.is_some())
+            .filter(|frame| {
+                frame.source.is_some() || matches!(frame.kind, uscope::FrameKind::Awaited { .. })
+            })
             .filter_map(|frame| frame.module)
             .collect::<std::collections::BTreeSet<_>>();
         let mut images = BTreeMap::new();
@@ -2312,10 +2315,7 @@ impl Cli {
 
         let renderer = self.renderers.stdout;
         let modules = self.debugger.loaded_modules().await?;
-        let mut images = BTreeMap::new();
-        if let (Some(module), Some(_)) = (frame.module, &frame.source) {
-            images.insert(module, self.debugger.loaded_module_image(module).await?);
-        }
+        let images = self.source_images(std::iter::once(&frame)).await?;
         let mut output =
             format::stack_frame(&frame, iterates, Some(&modules), &images, true, renderer);
         if frame.source.is_some() {

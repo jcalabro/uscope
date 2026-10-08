@@ -27,12 +27,12 @@ use crate::protocol::{DebuggerEvent, StopId};
 use crate::{
     AddressValue, ByteOrder, CodeInstanceId, DereferenceReference, DereferenceState,
     DereferenceUnavailableReason, Error, ImageAddress, InspectedValue, ModuleId, RecordKind,
-    RegisterSnapshot, Result, StackFrameId, TextCompletion, TextSummary, TypeInfo, TypeKind,
-    TypeNode, TypeReference, ValueChildren, VariableState, VariableUnavailableReason,
+    RegisterSnapshot, Result, StackFrameId, TextCompletion, TextSummary, TypeId, TypeInfo,
+    TypeKind, TypeNode, TypeReference, ValueChildren, VariableState, VariableUnavailableReason,
     VariableValue, VariableValueSource, VirtualAddress,
 };
 
-use super::frames::{FrameRegisters, ResolvedFrame, StackRoot};
+use super::frames::{FrameRegisters, FrameScope, ResolvedFrame, StackRoot};
 use super::inspection::{
     LinuxVariableRuntime, global_context_address, validate_inspection_limits, variable_context,
 };
@@ -44,9 +44,19 @@ use super::{Controller, Inferior, RuntimeModule, validate_image_current};
 #[derive(Debug, Clone, Copy)]
 pub(super) struct StopObject {
     module: ModuleId,
-    key: ObjectKey,
+    key: ObjectRef,
     /// Whether it is a local or parameter of the frame.
     local: bool,
+}
+
+/// Which data object a frame names.
+#[derive(Debug, Clone, Copy)]
+enum ObjectRef {
+    /// One the debug information describes.
+    Data(ObjectKey),
+    /// A variable a suspended async frame keeps in its future, or the
+    /// future itself: a value of type `ty` at `address`.
+    Saved { ty: TypeId, address: VirtualAddress },
 }
 
 impl StopObject {
@@ -54,7 +64,7 @@ impl StopObject {
     pub(super) const fn global(module: ModuleId, key: ObjectKey) -> Self {
         Self {
             module,
-            key,
+            key: ObjectRef::Data(key),
             local: false,
         }
     }
@@ -206,6 +216,45 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
 }
 
 impl<P: InspectionOps> Frame<'_, P> {
+    /// The variable `name` names in a suspended async frame, which its
+    /// future keeps, or the future for `$future`; `None` in any other
+    /// frame, or for a name it keeps no variable of.
+    fn lookup_saved(&self, name: &str) -> std::result::Result<Option<Lookup<StopObject>>, Refusal> {
+        // The future a suspended frame holds, and the type of its own.
+        let (object, ty) = match (self.resolved.scope, self.resolved.frame.as_ref()) {
+            (FrameScope::Suspended { object, ty, .. }, _) => (object, ty),
+            (_, Some(frame)) => match frame.kind {
+                crate::FrameKind::Awaited { object, ty } => (object, ty),
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let Some(module) = self.controller.module_of(ty) else {
+            return Ok(None);
+        };
+        let saved = |ty: TypeReference, address| Lookup::Object {
+            object: StopObject {
+                module: module.loaded.id,
+                key: ObjectRef::Saved { ty: ty.id, address },
+                local: true,
+            },
+            ty: Ok(ty),
+        };
+        if name == "$future" {
+            return Ok(Some(saved(ty, object)));
+        }
+        let variables = self
+            .controller
+            .saved_variables(self.resolved)
+            .map_err(|error| refusal(&error))?;
+        let mut named = variables.iter().filter(|variable| **variable.name == *name);
+        match (named.next(), named.next()) {
+            (Some(variable), None) => Ok(Some(saved(variable.ty, variable.address))),
+            (Some(_), Some(_)) => Ok(Some(Lookup::Ambiguous(vec![name.to_owned()]))),
+            (None, _) => Ok(None),
+        }
+    }
+
     /// The global `name` names in exactly one loaded module.
     fn lookup_global(
         &self,
@@ -306,7 +355,7 @@ fn object(module: &RuntimeModule, key: ObjectKey, local: bool) -> Lookup<StopObj
     Lookup::Object {
         object: StopObject {
             module: module.loaded.id,
-            key,
+            key: ObjectRef::Data(key),
             local,
         },
         ty: module.variables.object_type(key).map(|id| TypeReference {
@@ -554,6 +603,9 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
         name: &str,
         outermost: bool,
     ) -> std::result::Result<Lookup<StopObject>, Refusal> {
+        if !outermost && let Some(found) = self.lookup_saved(name)? {
+            return Ok(found);
+        }
         if !outermost && let Some((module, address, selected)) = self.code {
             match module.variables.visible_object(address, selected, name) {
                 Ok(key) => return Ok(object(module, key, true)),
@@ -771,10 +823,22 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
     fn locate(&mut self, object: &StopObject) -> std::result::Result<StopPlace, Stop> {
         let module = self.module(object.module)?;
         let address = self.address(module);
+        let key = match object.key {
+            ObjectRef::Data(key) => key,
+            ObjectRef::Saved { ty, address } => {
+                return Ok(StopPlace {
+                    module: object.module,
+                    located: Located {
+                        ty,
+                        storage: ValueStorage::Memory(address),
+                    },
+                });
+            }
+        };
         let mut runtime = self.frame.runtime(module);
         let accessed = module
             .variables
-            .locate(object.key, address, &mut runtime, self.budget)
+            .locate(key, address, &mut runtime, self.budget)
             .map_err(Stop::Failed)?;
         Self::accessed(accessed, object.module)
     }
@@ -1516,7 +1580,12 @@ impl<P: InspectionOps> Controller<P> {
                     .modules
                     .get(&object.module)
                     .ok_or(Error::ModuleNotLoaded(object.module))?;
-                let storage = module.variables.object_storage(object.key);
+                let ObjectRef::Data(key) = object.key else {
+                    return Err(Error::WatchTargetUnsupported(
+                        "a suspended task's variables cannot be watched".into(),
+                    ));
+                };
+                let storage = module.variables.object_storage(key);
                 let local = object
                     .local
                     .then(|| scope.code.map(|(_, address, _)| address))

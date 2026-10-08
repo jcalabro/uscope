@@ -453,12 +453,11 @@ impl RuntimeModel for TokioRuntime {
             (TaskState::Running, None) => {
                 Err(format!("the thread running task {} is unknown", task.number).into())
             }
-            _ => Err(format!(
-                "task {} is not running, and the debugger does not read a suspended \
-                 task's frames",
-                task.number
-            )
-            .into()),
+            (TaskState::Unknown(reason), _) => Err(reason),
+            _ => {
+                let (future, ty) = self.future(stop, found.locator)?;
+                Ok(Some(TaskContext::Suspended { future, ty }))
+            }
         }
     }
 
