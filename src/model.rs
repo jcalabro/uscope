@@ -3696,12 +3696,17 @@ impl Backtrace {
     /// The innermost frame of code the program's author wrote or calls,
     /// past a runtime's machinery and the wrappers a compiler writes, as a
     /// runtime's own traceback shows a task: where it waits, not how. The
-    /// future a suspended task awaits runs no code, and is never one.
+    /// future a suspended task awaits runs no code, and is never one; nor
+    /// is a frame past a runtime's dispatch, which runs the runtime's code
+    /// for the thread, not the task's.
     #[must_use]
     pub fn user_frame(&self) -> Option<&StackFrame> {
-        self.frames.iter().find(|frame| {
-            frame.role == CodeRole::Ordinary && !matches!(frame.kind, FrameKind::Awaited { .. })
-        })
+        self.frames
+            .iter()
+            .take_while(|frame| frame.role != CodeRole::Dispatch)
+            .find(|frame| {
+                frame.role == CodeRole::Ordinary && !matches!(frame.kind, FrameKind::Awaited { .. })
+            })
     }
 
     /// For each frame, the level of the frame whose loop it runs as an

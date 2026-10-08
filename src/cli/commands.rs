@@ -472,8 +472,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Backtrace,
         "backtrace",
         ["bt"],
-        "backtrace",
-        "Show the selected thread's or task's stack"
+        "backtrace [-r]",
+        "Show the selected thread's or task's stack; -r shows the runtime frames it folds"
     ),
     command!(
         Frame,
@@ -720,7 +720,11 @@ impl Cli {
             }
             Command::Context => self.context().await?,
             Command::Edit => self.edit().await?,
-            Command::Backtrace => self.backtrace(None).await?,
+            Command::Backtrace => match arguments.as_slice() {
+                [] => self.backtrace(None, false).await?,
+                ["-r"] => self.backtrace(None, true).await?,
+                _ => return Err(spec.usage_error()),
+            },
             Command::Frame | Command::Up | Command::Down => {
                 self.frame(parse_frame_target(spec, first)?).await?
             }
@@ -1518,9 +1522,15 @@ impl Cli {
                 ));
                 if stacks {
                     let stack = match trace {
-                        Ok(trace) => {
-                            format::backtrace(trace, u32::MAX, None, None, &traces.images, renderer)
-                        }
+                        Ok(trace) => format::backtrace(
+                            trace,
+                            u32::MAX,
+                            None,
+                            None,
+                            &traces.images,
+                            false,
+                            renderer,
+                        ),
                         Err(error) => error.to_string(),
                     };
                     lines.extend(stack.lines().map(|line| format!("    {line}")));
@@ -2316,8 +2326,15 @@ impl Cli {
         let renderer = self.renderers.stdout;
         let modules = self.debugger.loaded_modules().await?;
         let images = self.source_images(std::iter::once(&frame)).await?;
-        let mut output =
-            format::stack_frame(&frame, iterates, Some(&modules), &images, true, renderer);
+        let mut output = format::stack_frame(
+            &frame,
+            iterates,
+            Some(&modules),
+            &images,
+            true,
+            false,
+            renderer,
+        );
         if frame.source.is_some() {
             output.push('\n');
             match self.source_context().await {
@@ -2428,7 +2445,7 @@ impl Cli {
     }
 
     /// The selected thread's backtrace, of at most `limit` frames.
-    pub(super) async fn backtrace(&self, limit: Option<usize>) -> Result<String> {
+    pub(super) async fn backtrace(&self, limit: Option<usize>, raw: bool) -> Result<String> {
         let selected = self.selected_level().await?;
         let trace = self.debugger.backtrace().await?;
         let modules = if trace
@@ -2448,6 +2465,7 @@ impl Cli {
             limit,
             modules.as_ref(),
             &images,
+            raw,
             self.renderers.stdout,
         ))
     }

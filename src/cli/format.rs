@@ -1872,6 +1872,7 @@ pub fn backtrace(
     limit: Option<usize>,
     modules: Option<&LoadedModuleSnapshot>,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    raw: bool,
     renderer: Renderer,
 ) -> String {
     let shown = limit.unwrap_or(usize::MAX).min(trace.frames.len());
@@ -1884,7 +1885,31 @@ pub fn backtrace(
         .any(|pair| pair[0].segment != pair[1].segment);
     let mut segment = None;
     let iterators = trace.loop_iterators();
-    for (frame, iterates) in trace.frames[..shown].iter().zip(iterators) {
+    let folded = if raw {
+        Vec::new()
+    } else {
+        runtime_runs(&trace.frames[..shown], selected)
+    };
+    for (index, (frame, iterates)) in trace.frames[..shown].iter().zip(iterators).enumerate() {
+        if let Some(run) = folded.iter().find(|run| run.contains(&index)) {
+            if run.start == index {
+                let (first, last) = (&trace.frames[run.start], &trace.frames[run.end - 1]);
+                lines.push(
+                    renderer
+                        .paint(
+                            Role::Muted,
+                            format_args!(
+                                "    … #{}–#{}: {} of the runtime; `bt -r` shows them",
+                                first.level,
+                                last.level,
+                                plural(run.len() as u64, "frame")
+                            ),
+                        )
+                        .to_string(),
+                );
+            }
+            continue;
+        }
         if switches && segment != Some(frame.segment) {
             segment = Some(frame.segment);
             lines.push(
@@ -1902,6 +1927,7 @@ pub fn backtrace(
             modules,
             images,
             frame.level == selected,
+            raw,
             renderer,
         ));
     }
@@ -1926,6 +1952,59 @@ pub fn backtrace(
     lines.join("\n")
 }
 
+/// The runs of a runtime's frames a backtrace folds into a line each,
+/// by index: two or more frames in a row on one stack of its machinery,
+/// its dispatch, and the wrappers between them, at least one the
+/// runtime's own; and every frame past the innermost dispatch, which runs
+/// the runtime's code for the thread rather than the task's. Where the
+/// stack stopped, and the selected frame, are always shown.
+fn runtime_runs(frames: &[StackFrame], selected: u32) -> Vec<std::ops::Range<usize>> {
+    let dispatch = frames
+        .iter()
+        .position(|frame| frame.role == CodeRole::Dispatch)
+        .filter(|at| frames[*at].level >= selected);
+    let Some(dispatch) = dispatch else {
+        return machinery_runs(frames, selected);
+    };
+    let mut runs = machinery_runs(&frames[..=dispatch], selected);
+    let below = dispatch + 1..frames.len();
+    if below.len() >= 2 {
+        // The dispatch frame joins the run that ends at it.
+        match runs.last_mut() {
+            Some(run) if run.end == below.start => run.end = below.end,
+            _ => runs.push(below),
+        }
+    }
+    runs
+}
+
+/// The runs [`runtime_runs`] folds by role alone.
+fn machinery_runs(frames: &[StackFrame], selected: u32) -> Vec<std::ops::Range<usize>> {
+    let runtime =
+        |frame: &StackFrame| matches!(frame.role, CodeRole::RuntimeInternal | CodeRole::Dispatch);
+    let folds = |frame: &StackFrame| {
+        frame.level != 0
+            && frame.level != selected
+            && (runtime(frame) || frame.role == CodeRole::Wrapper)
+    };
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < frames.len() {
+        let mut end = start;
+        while end < frames.len()
+            && folds(&frames[end])
+            && frames[end].segment == frames[start].segment
+        {
+            end += 1;
+        }
+        if end - start >= 2 && frames[start..end].iter().any(runtime) {
+            runs.push(start..end);
+        }
+        start = end.max(start + 1);
+    }
+    runs
+}
+
 /// Whose stack a run of frames is on.
 pub const fn stack_owner(segment: StackSegment) -> &'static str {
     match segment {
@@ -1944,6 +2023,7 @@ pub fn stack_frame(
     modules: Option<&LoadedModuleSnapshot>,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
     selected: bool,
+    raw: bool,
     renderer: Renderer,
 ) -> String {
     let place = frame_source(frame, images, renderer).map_or_else(
@@ -2004,9 +2084,68 @@ pub fn stack_frame(
             } else {
                 Role::Metadata
             },
-            frame_code(frame, images)
+            {
+                let name = frame_code(frame, images);
+                // A Rust function's arguments can run to hundreds of
+                // characters; a backtrace keeps its path and its name.
+                if raw
+                    || frame
+                        .function
+                        .as_ref()
+                        .is_none_or(|function| function.language != uscope::SourceLanguage::Rust)
+                {
+                    name
+                } else {
+                    elide_arguments(&name)
+                }
+            }
         ),
     )
+}
+
+/// The longest generic argument list a backtrace shows whole.
+const MAX_ARGUMENTS: usize = 24;
+
+/// A name with each outermost generic argument list longer than
+/// [`MAX_ARGUMENTS`] written `<…>`, as `run<…>`.
+pub fn elide_arguments(name: &str) -> String {
+    let mut elided = String::with_capacity(name.len());
+    let mut depth = 0_usize;
+    let mut opened = 0;
+    for (at, character) in name.char_indices() {
+        match character {
+            // An arrow closes nothing.
+            '>' if name[..at].ends_with('-') => {}
+            '<' => {
+                if depth == 0 {
+                    opened = at;
+                }
+                depth += 1;
+                continue;
+            }
+            '>' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    let list = &name[opened..=at];
+                    if list.chars().count() - 2 > MAX_ARGUMENTS {
+                        elided.push_str("<…>");
+                    } else {
+                        elided.push_str(list);
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            elided.push(character);
+        }
+    }
+    // An unbalanced list is left as it was written.
+    if depth > 0 {
+        return name.to_owned();
+    }
+    elided
 }
 
 /// What a frame runs, as a backtrace names it: its function or symbol, or,
@@ -2295,6 +2434,31 @@ pub fn signal_received(
 
 #[cfg(test)]
 mod tests {
+    use super::elide_arguments;
+
+    #[test]
+    fn long_generic_arguments_are_elided() {
+        for (name, shown) in [
+            ("poll", "poll"),
+            ("new<u32>", "new<u32>"),
+            (
+                "run<alloc::sync::Arc<tokio::runtime::Handle, alloc::alloc::Global>>",
+                "run<…>",
+            ),
+            (
+                "{closure#0}<tokio::runtime::blocking::task::BlockingTask<F>, S>",
+                "{closure#0}<…>",
+            ),
+            ("call<fn(u32) -> u32>", "call<fn(u32) -> u32>"),
+            (
+                "unbalanced<a::b::c::d::e::f::g::h::i",
+                "unbalanced<a::b::c::d::e::f::g::h::i",
+            ),
+        ] {
+            assert_eq!(elide_arguments(name), shown, "{name}");
+        }
+    }
+
     use super::*;
     use uscope::PointerWidth;
 
