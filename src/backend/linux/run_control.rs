@@ -1407,7 +1407,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// thread, unless a barrier is already doing so. Among coincident stops,
     /// the highest-priority reason is published.
     pub(super) fn begin_visible_stop(&mut self, pid: Pid, reason: StopReason) -> Result<()> {
-        let reason = self.requested_step_reason(reason);
+        let reason = self.dropped_step_reason(self.requested_step_reason(reason));
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let thread = inferior.thread_mut(pid)?;
         thread.state = NativeThreadState::Stopped;

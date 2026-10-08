@@ -47,7 +47,7 @@ async fn stopped_once(fixture: &str, mode: Option<&str>, marker: &str) -> Scenar
 }
 
 /// The number of the task the stopped thread runs.
-async fn stopped_task(scenario: &mut Scenario) -> u64 {
+pub async fn stopped_task(scenario: &mut Scenario) -> u64 {
     let snapshot = scenario.snapshot().await;
     let InferiorState::Stopped { thread_id, .. } = snapshot.inferior else {
         panic!("not stopped: {:?}", snapshot.inferior);

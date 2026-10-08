@@ -9,6 +9,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "cancel"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+ "truth",
+]
+
+[[package]]
 name = "drivers"
 version = "0.0.0"
 dependencies = [

@@ -1555,10 +1555,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         instance_id: crate::CodeInstanceId,
         plan_addresses: &mut BTreeSet<VirtualAddress>,
     ) -> Result<()> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        let Some(instance) = self.module_image.code_instance(instance_id) else {
+        if self.module_image.code_instance(instance_id).is_none() {
             return Ok(());
-        };
+        }
         // A frame without a trustworthy caller, such as a coroutine's
         // first frame or one a stack overflow corrupted, still steps by
         // line. Its return, if it comes, is then followed like a return
@@ -1568,6 +1567,23 @@ impl<P: LinuxTraceOps> Controller<P> {
             Err(error) if is_caller_unavailable(&error) => None,
             Err(error) => return Err(error),
         };
+        plan_addresses.extend(self.other_lines(instance_id, source)?);
+        plan_addresses.extend(return_address);
+        Ok(())
+    }
+
+    /// The statements of the code instance `instance_id` on other lines
+    /// than `source`.
+    pub(super) fn other_lines(
+        &self,
+        instance_id: crate::CodeInstanceId,
+        source: &SourceLocation,
+    ) -> Result<BTreeSet<VirtualAddress>> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let Some(instance) = self.module_image.code_instance(instance_id) else {
+            return Ok(BTreeSet::new());
+        };
+        let mut statements = BTreeSet::new();
         for line in self.module_image.line_entries() {
             if !line.statement || !instance.contains(line.range.start) {
                 continue;
@@ -1576,11 +1592,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             if source_for_code_instance(&self.module_image, &location, instance_id)
                 .is_some_and(|candidate| source_line_changed(Some(source), Some(&candidate)))
             {
-                plan_addresses.insert(inferior.loaded_module.virtual_address(line.range.start)?);
+                statements.insert(inferior.loaded_module.virtual_address(line.range.start)?);
             }
         }
-        plan_addresses.extend(return_address);
-        Ok(())
+        Ok(statements)
     }
 
     /// Returns the return address and stack pointer of the call instruction

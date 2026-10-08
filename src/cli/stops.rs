@@ -124,6 +124,7 @@ const fn in_code(reason: &StopReason) -> bool {
             | StopReason::Step { .. }
             | StopReason::StepIncomplete { .. }
             | StopReason::TaskEnded { .. }
+            | StopReason::FutureDropped { .. }
             | StopReason::Watchpoint { .. }
             | StopReason::Exception(_)
             | StopReason::LanguageException(_)
