@@ -13,6 +13,7 @@ use uscope::{
     TaskSnapshot, TaskState, ThreadActivity, ThreadId,
 };
 
+use crate::invariants::checked;
 use crate::stops::{backtrace, integer};
 use crate::support::{Scenario, ScratchDir};
 
@@ -21,6 +22,8 @@ const BUILDS: [&str; 2] = ["tokio-workers-o0", "tokio-workers-o3"];
 /// generic arguments, where tokio's functions are told apart by their
 /// debug information.
 const LEGACY: &str = "tokio-workers-legacy";
+/// Builds that describe no types: lines only, and symbols only.
+const UNTYPED: [&str; 2] = ["tokio-workers-lines", "tokio-workers-stripped"];
 
 /// One build of the fixture, stopped at its first stop, with what it
 /// printed going to a file.
@@ -35,7 +38,13 @@ impl Workers {
     async fn stopped_at(fixture: &str, current: bool, spec: BreakpointSpec) -> Self {
         let scratch = ScratchDir::new("workers");
         let output = scratch.path().join("stdout");
-        let mut scenario = Scenario::launch(fixture);
+        // A build without types cannot say what its threads do, which is
+        // what its own test checks.
+        let mut scenario = if UNTYPED.contains(&fixture) {
+            Scenario::launch(fixture)
+        } else {
+            checked(fixture)
+        };
         scenario.add_breakpoint_spec(spec).await;
         let reason = scenario
             .run_with_to_stop(LaunchOptions {
@@ -416,10 +425,7 @@ async fn before_any_runtime_there_are_no_tasks() {
 async fn a_build_without_types_refuses_tasks_and_says_why() {
     let context =
         "std::sys::thread_local::native::eager::Storage<tokio::runtime::context::Context>";
-    for (fixture, lines) in [
-        ("tokio-workers-lines", true),
-        ("tokio-workers-stripped", false),
-    ] {
+    for (fixture, lines) in UNTYPED.into_iter().zip([true, false]) {
         let mut workers = Workers::parked(fixture, false).await;
         let (tasks, gaps) = workers.tasks(64).await;
         assert!(tasks.is_empty(), "{fixture}: {tasks:#?}");
