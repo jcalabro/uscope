@@ -10,7 +10,7 @@ use super::{
 };
 use crate::runtime_model::records;
 use crate::runtime_model::{Partial, RuntimeStop, RuntimeTask, TaskPage, TaskRef, ThreadActivity};
-use crate::{StackSegment, TaskState, ThreadId};
+use crate::{RecordedPlace, StackSegment, TaskState, ThreadId, VirtualAddress};
 
 /// One task of a list, checked: it belongs to the list, its vtable is a
 /// task's, and it links back to the task before it.
@@ -553,6 +553,41 @@ impl TokioRuntime {
     }
 }
 
+/// The longest path of a spawn location read.
+const MAX_PATH: u64 = 4096;
+
+impl TokioRuntime {
+    /// Where the program spawned the task whose header is at `header`, for
+    /// a build that records it.
+    pub(super) fn spawned_at(&self, stop: &dyn RuntimeStop, header: u64) -> Option<RecordedPlace> {
+        let spawns = self.layout.spawns.as_ref().ok()?;
+        let tasks = self.task_layout().ok()?;
+        let vtable = records::word(stop, header.wrapping_add(tasks.vtable))?;
+        let offset = records::word(stop, vtable.wrapping_add(spawns.offset))?;
+        let location = records::word(stop, header.wrapping_add(offset))?;
+        let file = records::word(stop, location.wrapping_add(spawns.file))?;
+        let length = records::word(stop, location.wrapping_add(spawns.length))?;
+        if length > MAX_PATH {
+            return None;
+        }
+        let mut path = vec![0; usize::try_from(length).ok()?];
+        if !stop.read(VirtualAddress::new(file), &mut path) {
+            return None;
+        }
+        Some(RecordedPlace {
+            path: String::from_utf8(path).ok()?.into(),
+            line: u32::try_from(records::read(stop, location.wrapping_add(spawns.line), 4)?)
+                .ok()?,
+            column: u32::try_from(records::read(
+                stop,
+                location.wrapping_add(spawns.column),
+                4,
+            )?)
+            .ok()?,
+        })
+    }
+}
+
 /// A task as a page lists it, with nothing known of it but its number
 /// and where it is.
 const fn task(number: u64, locator: u64) -> RuntimeTask {
@@ -564,6 +599,7 @@ const fn task(number: u64, locator: u64) -> RuntimeTask {
         thread: None,
         resume: None,
         creation: None,
+        spawned: None,
         entry: None,
         parent: None,
         internal: false,

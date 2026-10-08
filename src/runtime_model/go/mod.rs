@@ -311,11 +311,15 @@ impl GoRuntime {
             address,
             after_call: resume != entry,
         });
-        // A goroutine is created by a call to the runtime.
-        let creation = address(word(layout.gopc)?).map(|address| CodeAddress {
-            address,
-            after_call: true,
-        });
+        // A goroutine is created by a call to the runtime. The main
+        // goroutine is the runtime's start-up's, which Go's traceback does
+        // not name.
+        let creation = address(word(layout.gopc)?)
+            .filter(|_| number != 1)
+            .map(|address| CodeAddress {
+                address,
+                after_call: true,
+            });
         Ok(Some(RuntimeTask {
             number,
             locator: g,
@@ -324,6 +328,7 @@ impl GoRuntime {
             thread,
             resume: if on_thread { None } else { resume },
             creation,
+            spawned: None,
             entry: address(entry),
             parent: layout
                 .parent_goid

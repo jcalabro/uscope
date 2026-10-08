@@ -731,7 +731,11 @@ breakpoints and steps work by it, but its goroutines cannot be read, which
 parked or running, points `backtrace`, `frame`, `print`, `registers`, and
 the other inspecting commands at it, and `$task` in an expression is its id.
 `goroutine` *id* *command* runs one of those commands in the goroutine and
-then selects again what was selected.
+then selects again what was selected. `goroutine` alone shows the selected
+goroutine and the call that created it, as `created by main.main at
+main.go:40`. A tokio task says where it was spawned in a build with
+`tokio_unstable`, which records it, as `created at src/main.rs:12`; other
+builds record nothing of it.
 
 Signals follow gdb's defaults. `SIGALRM`, `SIGURG`, `SIGCHLD`, `SIGWINCH`,
 `SIGPROF`, `SIGVTALRM`, `SIGIO`, and `SIGPWR` are delivered without stopping;

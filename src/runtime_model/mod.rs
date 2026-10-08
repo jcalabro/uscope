@@ -170,6 +170,9 @@ pub struct RuntimeTask {
     pub resume: Option<CodeAddress>,
     /// The call that created the task.
     pub creation: Option<CodeAddress>,
+    /// Where the program created the task, for a runtime that records the
+    /// place by its source rather than by the call.
+    pub spawned: Option<crate::RecordedPlace>,
     /// The function the task began in.
     pub entry: Option<VirtualAddress>,
     /// The task that created this one.

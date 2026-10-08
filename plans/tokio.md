@@ -498,8 +498,14 @@ compiler's split of an `async fn`:
 - **A running task** (`TaskContext::OnThread`) is its thread's frames.
   - The physical and inline frames of nested resume functions already form
     its async stack.
-  - Frames from the task's root `poll` down to the worker's run loop form the
-    runtime's segment (`System`). They are marked and folded (see Clients).
+  - Frames from the task's root `poll` down to the worker's run loop are the
+    runtime's. They are marked and folded (see Clients).
+  - *As built:* no segment marks them. A tokio task's polls and its
+    scheduler share one OS stack, so neither "the task's stack" nor "the
+    runtime's stack" would be true. The innermost `Dispatch` frame
+    (`Harness::poll`) is where the task's frames end instead:
+    `Backtrace::user_frame` never looks past it, and the CLI folds
+    everything below it.
 - **A suspended task** (`TaskContext::Suspended`) has async frames, innermost
   first, built from its future by the neutral walker:
   - a coroutine frame for each `async fn` or block, at its `SuspendN` line,
@@ -527,6 +533,17 @@ compiler's split of an `async fn`:
     The backend reads that variable in the frame.
   - In an optimized build that leaves it undescribed, the segment is replaced
     by one line saying why.
+  - *As built:* the drivers are `CachedParkThread::block_on` (`f`), which
+    every multi-thread `block_on` and `Handle::block_on` parks in, and the
+    current-thread scheduler's `CurrentThread::block_on` and the closure
+    in `CoreGuard::block_on` (each `future`). Only a pinned variable is
+    read: an optimized current-thread build describes the moved-from
+    argument, whose bytes still read as a future that never began. A
+    future shows once, before the innermost frame that reads it; no frame
+    below a running coroutine is read, since that future is being polled.
+    Where no frame shows it, `Backtrace::unfollowed` says why at the
+    driver. At o3, multi-thread drivers lose `f`; current-thread ones keep
+    it.
 - **A torn chain ends with a typed termination,** never a guess. That covers
   an unreadable future, a discriminant out of range, a cycle, or the depth
   limit.
@@ -814,6 +831,13 @@ How the tokio model answers, at one stop:
   dereferenced.
 - **The spawn location**, when the build has `tokio_unstable`: when
   `Core.spawned_at` binds, it is the task's `creation`.
+  - *As built:* read through the vtable's `spawn_location_offset`, as
+    tokio does. A `Location` names a path, not an address, so
+    `TaskLocation.address` is optional and its `recorded` place is matched
+    to a source file of the module's image. A running blocking closure is
+    known only by its number, with no header, so its spawn location is not
+    known. `task` alone prints `created at …`, and a goroutine's `created
+    by …`, except the main goroutine's, which Go's traceback leaves out.
 - **The entry** is the root future's resume function, at its `Unresumed`
   location, the "defined at" place.
 
@@ -901,7 +925,9 @@ tokio depends on it.
     `info locals` then work on its async frames.
   - **Backtraces fold the runtime.**
     - A run of `RuntimeInternal` and `Dispatch` frames prints as one line,
-      such as `… 18 frames of tokio's scheduler (worker 2) …`.
+      such as `… 18 frames of tokio's scheduler (worker 2) …`. *As built:*
+      `… #4–#21: 18 frames of the runtime; `bt -r` shows them`, for every
+      runtime, Go's too, as the maintainer chose.
     - `bt -r` prints them all. Nothing is dropped: the frames still exist,
       DAP still lists them, and selecting by number still counts them.
     - This refines Go's settled "every frame is shown" for runtimes whose
@@ -988,8 +1014,9 @@ fail (see Testing).
      variables.
    - Running tasks' segments, and backtrace folding.
    - `block_on` splicing.
-   - Leaf descriptions through views, with `JoinHandle` links.
    - Task panics name their task.
+   - *As built:* leaf descriptions moved to phase 6, since a description
+     is a view's summary and the views are written there.
 5. **Run control across awaits.**
    - Task-owned steps for tokio.
    - `next` and `finish` across `Pending`.
@@ -999,6 +1026,7 @@ fail (see Testing).
    - `$task` conditions.
 6. **Views.** `views/tokio.views`, each type verified by `VIEW:` markers
    against the pin.
+   - Leaf descriptions through views, with `JoinHandle` links.
 7. **The rest.**
    - `LocalSet` tasks, found while their set runs or from the frame that
      runs it.

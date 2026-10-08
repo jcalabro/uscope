@@ -2006,6 +2006,9 @@ build_tokio_variant lines lines "" workers
 build_tokio_variant stripped stripped "" workers
 build_tokio_variant remapped dev \
     "--remap-path-prefix=${USCOPE_FIXTURE_CRATES}/tokio-1.52.3=/vendor/tokio" workers
+# tokio's unstable features, which record where each task was spawned and
+# give each task's vtable one more offset.
+build_tokio_variant unstable dev "--cfg tokio_unstable" workers
 # Symbols mangled as rustc did before v0, which name no generic arguments.
 build_tokio_variant legacy dev "-Z unstable-options -C symbol-mangling-version=legacy" panics workers
 

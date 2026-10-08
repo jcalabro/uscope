@@ -769,6 +769,44 @@ fn tokio_tasks_are_listed_by_number() {
     }
 }
 
+/// `task` alone shows the selected task and where it was created: the
+/// call that created a goroutine, and the line tokio recorded spawning a
+/// task from, in a build with `tokio_unstable`.
+#[test]
+fn a_task_says_where_it_was_created() {
+    let created = |program: &str, commands: &[&str], source: &str| {
+        let stdout = batch(&[program], commands);
+        let line = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("    created "))
+            .unwrap_or_else(|| panic!("a creation: {stdout}"))
+            .to_owned();
+        let (place, number) = line
+            .rsplit_once(':')
+            .unwrap_or_else(|| panic!("a line: {line}"));
+        let number = number.parse::<usize>().expect("a line number");
+        let text = std::fs::read_to_string(fixture(source)).expect("the fixture's source");
+        let creating = text.lines().nth(number - 1).expect("the line").to_owned();
+        (place.to_owned(), creating)
+    };
+    let source = "tests/fixtures/rust/tokio/workers/src/main.rs";
+    let (place, creating) = created(
+        "build/test-programs/tokio-workers-unstable",
+        &["break truth_reached", "run", "task 4", "task"],
+        source,
+    );
+    assert_eq!(place, format!("at {source}"));
+    assert!(creating.contains("tokio::spawn("), "{creating}");
+    let source = "tests/fixtures/go/workers/main.go";
+    let (place, creating) = created(
+        "build/test-programs/workers-go-o0",
+        &["break main.worker", "run", "goroutine"],
+        source,
+    );
+    assert_eq!(place, format!("by main.main at {source}"));
+    assert!(creating.trim_start().starts_with("go "), "{creating}");
+}
+
 /// A task's panic stop says where it panicked, on which thread, and in
 /// which task, then the message, and shows the source there.
 #[test]

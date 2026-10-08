@@ -267,13 +267,28 @@ pub enum TaskState {
 /// created it, or the function it began in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskLocation {
-    pub address: VirtualAddress,
-    /// The loaded module whose image holds the address.
+    /// The place's code, unless its runtime recorded it only by its source.
+    pub address: Option<VirtualAddress>,
+    /// The loaded module whose image holds the address, or whose source
+    /// the runtime recorded the place in.
     pub module: Option<ModuleId>,
     /// The function holding the address, or the call at it for a return
     /// address.
     pub function: Option<Arc<str>>,
     pub source: Option<SourceLocation>,
+    /// The place as its runtime recorded it, by its source's path, as
+    /// Rust's `Location` does; the source file it names may be none of
+    /// the module's.
+    pub recorded: Option<RecordedPlace>,
+}
+
+/// A place in a program's source a runtime recorded by the path the
+/// compiler gave it, rather than by an address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedPlace {
+    pub path: Arc<str>,
+    pub line: u32,
+    pub column: u32,
 }
 
 /// One task of a language runtime at a stop.

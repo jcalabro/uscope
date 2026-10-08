@@ -6,6 +6,9 @@
 //! Each local a test reads is saved across the await, and each task keeps
 //! its own id in `me`.
 //!
+//! Each line that spawns a task is marked with the task's tag, for a
+//! build with `tokio_unstable`, which records where each task was spawned.
+//!
 //! Beside them, the blocking pool runs one closure, which waits, and has
 //! another queued behind it. On the current-thread runtime, the main
 //! future also wakes the notified task and spawns one more, and neither
@@ -108,15 +111,15 @@ async fn run(handle: Option<tokio::runtime::Handle>) {
     let barrier = Arc::new(Barrier::new(2));
     let semaphore = Arc::new(Semaphore::new(0));
 
-    let channel = tokio::spawn(top(Wait::Channel(receiver)));
+    let channel = tokio::spawn(top(Wait::Channel(receiver))); // SPAWN: channel
     let mut tasks = vec![
-        tokio::spawn(top(Wait::Sleep)),
-        tokio::spawn(top(Wait::Lock(mutex))),
-        tokio::spawn(top(Wait::Join(channel))),
-        tokio::spawn(top(Wait::Notified(notify.clone()))),
-        tokio::spawn(top(Wait::Oneshot(oneshot_receiver))),
-        tokio::spawn(top(Wait::Barrier(barrier.clone()))),
-        tokio::spawn(top(Wait::Permit(semaphore.clone()))),
+        tokio::spawn(top(Wait::Sleep)),                     // SPAWN: sleep
+        tokio::spawn(top(Wait::Lock(mutex))),               // SPAWN: lock
+        tokio::spawn(top(Wait::Join(channel))),             // SPAWN: join
+        tokio::spawn(top(Wait::Notified(notify.clone()))),  // SPAWN: notify
+        tokio::spawn(top(Wait::Oneshot(oneshot_receiver))), // SPAWN: oneshot
+        tokio::spawn(top(Wait::Barrier(barrier.clone()))),  // SPAWN: barrier
+        tokio::spawn(top(Wait::Permit(semaphore.clone()))), // SPAWN: permit
     ];
 
     // The pool's one thread for the program runs the first closure until
@@ -128,7 +131,7 @@ async fn run(handle: Option<tokio::runtime::Handle>) {
         released.recv().expect("the program releases the closure");
     });
     let blocking_thread = started.recv().expect("the closure starts");
-    let queued = tokio::task::spawn_blocking(|| ());
+    let queued = tokio::task::spawn_blocking(|| ()); // SPAWN: queued
 
     while !truth::all_parked(8) || handle.as_ref().is_some_and(|handle| !truth::workers_parked(handle)) {
         if handle.is_some() {
@@ -143,7 +146,7 @@ async fn run(handle: Option<tokio::runtime::Handle>) {
     let fresh = handle.is_none().then(|| {
         notify.notify_one();
         truth::line(&[&"woken", &tasks[3].id()]);
-        let fresh = tokio::spawn(top(Wait::Sleep));
+        let fresh = tokio::spawn(top(Wait::Sleep)); // SPAWN: fresh
         truth::line(&[&"spawned", &fresh.id()]);
         fresh
     });

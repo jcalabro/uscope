@@ -1573,7 +1573,13 @@ impl Cli {
             let traces = self.traced(vec![task], Vec::new()).await?;
             let (task, trace) = &traces.tasks[0];
             let place = format::task_place(task, trace, &traces.images, renderer);
-            return Ok(format::task(task, &place, true, renderer));
+            let line = format::task(task, &place, true, renderer);
+            return Ok(
+                match format::task_creation(task, &traces.images, renderer) {
+                    Some(creation) => format!("{line}\n    {creation}"),
+                    None => line,
+                },
+            );
         };
         let number = argument
             .parse::<u64>()
