@@ -642,6 +642,8 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 }
             }
         }
+        // Many names spell the same argument, which resolves alike each time.
+        let mut answers = HashMap::new();
         let mut resolved = Vec::new();
         for (entry, language, positions) in unresolved {
             let Some(TypeEntry::Resolved(info)) = self.entries.get(*entry) else {
@@ -655,8 +657,13 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 let TypeArgument::Unknown(text) = &arguments[*position] else {
                     continue;
                 };
-                if let Some(found) = resolve_argument(text, *language, &index, &lookup, &pointers) {
-                    arguments[*position] = found;
+                let found = answers
+                    .entry((Arc::clone(text), *language))
+                    .or_insert_with(|| {
+                        resolve_argument(text, *language, &index, &lookup, &pointers)
+                    });
+                if let Some(found) = found {
+                    arguments[*position] = found.clone();
                 }
             }
             resolved.push((*entry, arguments));
