@@ -2,7 +2,7 @@
 # lockfile, which flake.nix vendors; nothing is fetched at build time.
 [workspace]
 resolver = "3"
-members = ["truth", "std-async", "panics", "workers", "server", "drivers", "steps", "cancel", "shapes", "values"]
+members = ["truth", "std-async", "panics", "workers", "server", "drivers", "steps", "cancel", "shapes", "values", "runtimes"]
 
 [workspace.package]
 version = "0.0.0"

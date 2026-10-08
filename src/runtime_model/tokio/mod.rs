@@ -6,8 +6,11 @@
 //! its runtime, its scheduler when it is a worker, and the task it polls.
 //! A runtime's spawned tasks hang from its `OwnedTasks`, sharded linked
 //! lists through each task's trailer; its blocking pool queues the
-//! closures no thread runs yet. Every node is checked before it is read,
-//! so a corrupted list is reported, never followed.
+//! closures no thread runs yet. A `LocalSet` keeps its tasks in a list of
+//! its own, which a thread's `CURRENT` names while the thread runs the
+//! set, and which the future a thread drives names while it waits. Every
+//! node is checked before it is read, so a corrupted list is reported,
+//! never followed.
 
 mod future;
 mod layout;
@@ -16,7 +19,7 @@ mod tasks;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use layout::{Context, Flavor, Layout, Owned, Tasks};
+use layout::{Context, Flavor, Layout, Locals, Owned, Tasks};
 
 use super::records::{self, Missing};
 use super::{
@@ -105,8 +108,8 @@ struct TokioRuntime {
     bodies: Mutex<BTreeMap<crate::TypeReference, Option<ImageAddress>>>,
 }
 
-/// One runtime the stop's threads entered: its flavor, and its handle's
-/// address.
+/// One runtime the stop's threads entered, or a `LocalSet` one runs or
+/// drives: its flavor, and its handle's address, or the set's `Shared`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Instance {
     flavor: Flavor,
@@ -126,6 +129,8 @@ struct ThreadContext {
     entered: bool,
     /// The task the thread polls.
     task: Option<u64>,
+    /// The `LocalSet` the thread runs, by its `Shared`.
+    local: Option<u64>,
 }
 
 /// The runtimes at one stop and what each thread does for them.
@@ -136,13 +141,16 @@ struct Census {
     gaps: Vec<Arc<str>>,
 }
 
-/// One runtime's task list, as read at a stop.
+/// One runtime's or set's task list, as read at a stop: its shards, or a
+/// set's one head, and the count of a runtime's, which a set keeps none
+/// of.
 #[derive(Debug, Clone, Copy)]
 struct List {
     id: u64,
     shards: u64,
     length: u64,
     count: u64,
+    counted: bool,
 }
 
 /// Where a page of tasks begins: at the start, at a task of a runtime's
@@ -217,13 +225,28 @@ impl TokioRuntime {
         self.layout.tasks.as_ref().map_err(Arc::clone)
     }
 
+    fn locals(&self) -> Result<Option<&Locals>, Missing> {
+        self.layout
+            .locals
+            .as_ref()
+            .map(Option::as_ref)
+            .map_err(Arc::clone)
+    }
+
     /// Every stopped thread's context, and the runtimes they entered in
-    /// the order of their threads.
+    /// the order of their threads, then the sets they run or drive.
     fn census(&self, stop: &dyn RuntimeStop) -> Result<Census, Missing> {
         let context = self.context()?;
+        let locals = self.locals();
         let mut census = Census::default();
+        if let Err(reason) = &locals {
+            census
+                .gaps
+                .push(format!("tasks of local sets cannot be read: {reason}").into());
+        }
+        let locals = locals.ok().flatten();
         for thread in stop.threads() {
-            match Self::thread_context(stop, context, thread) {
+            match Self::thread_context(stop, context, locals, thread) {
                 Ok(Some(found)) => {
                     if let Some(runtime) = found.runtime
                         && !census.runtimes.contains(&runtime)
@@ -238,7 +261,49 @@ impl TokioRuntime {
                     .push(format!("thread {thread}'s tokio context: {reason}").into()),
             }
         }
+        let running = census.threads.iter().filter_map(|thread| thread.local);
+        for set in running.chain(stop.task_sets()) {
+            let set = Instance {
+                flavor: Flavor::Local,
+                handle: set,
+            };
+            if !census.runtimes.contains(&set) {
+                census.runtimes.push(set);
+            }
+        }
         Ok(census)
+    }
+
+    /// The `Shared` of the set whose `Rc<Context>` points to `context`.
+    fn set_shared(stop: &dyn RuntimeStop, locals: &Locals, context: u64) -> Result<u64, Arc<str>> {
+        let shared = records::word(
+            stop,
+            context
+                .wrapping_add(locals.value)
+                .wrapping_add(locals.shared),
+        )
+        .ok_or_else(|| format!("the local set's context at {context:#x} is unreadable"))?;
+        Ok(shared.wrapping_add(locals.data))
+    }
+
+    /// The set a thread's `CURRENT` says it runs, or `None`.
+    fn running_set(
+        stop: &dyn RuntimeStop,
+        locals: &Locals,
+        thread: ThreadId,
+    ) -> Result<Option<u64>, Arc<str>> {
+        let base = thread_local(stop, &locals.tls, thread)?;
+        let unreadable =
+            || Arc::<str>::from(format!("the local set context at {base:#x} is unreadable"));
+        let state =
+            records::read(stop, base.wrapping_add(locals.state), 1).ok_or_else(unreadable)?;
+        if state != locals.alive {
+            return Ok(None);
+        }
+        match records::word(stop, base.wrapping_add(locals.context)).ok_or_else(unreadable)? {
+            0 => Ok(None),
+            context => Self::set_shared(stop, locals, context).map(Some),
+        }
     }
 
     /// What a thread's `CONTEXT` says, or `None` when the thread never
@@ -246,6 +311,7 @@ impl TokioRuntime {
     fn thread_context(
         stop: &dyn RuntimeStop,
         context: &Context,
+        locals: Option<&Locals>,
         thread: ThreadId,
     ) -> Result<Option<ThreadContext>, Arc<str>> {
         let base = thread_local(stop, &context.tls, thread)?;
@@ -289,12 +355,17 @@ impl TokioRuntime {
         } else {
             None
         };
+        let local = match locals {
+            Some(locals) => Self::running_set(stop, locals, thread)?,
+            None => None,
+        };
         Ok(Some(ThreadContext {
             thread,
             runtime,
             worker,
             entered,
             task,
+            local,
         }))
     }
 
@@ -304,11 +375,25 @@ impl TokioRuntime {
             .iter()
             .find(|(known, ..)| *known == flavor)
             .map(|(.., runtime)| &runtime.owned)
-            .ok_or_else(|| format!("the {} runtime is unknown", flavor.describe()).into())
+            .ok_or_else(|| format!("the {} is unknown", flavor.describe()).into())
     }
 
-    /// A runtime's task list.
+    /// A runtime's or set's task list.
     fn list(&self, stop: &dyn RuntimeStop, runtime: Instance) -> Result<List, Arc<str>> {
+        if runtime.flavor == Flavor::Local {
+            let locals = self.locals()?.ok_or("the program describes no local set")?;
+            let at = runtime.handle;
+            let id = records::word(stop, at.wrapping_add(locals.id))
+                .filter(|id| *id != 0)
+                .ok_or_else(|| format!("the local set at {at:#x} has no task list"))?;
+            return Ok(List {
+                id,
+                shards: at.wrapping_add(locals.head),
+                length: 1,
+                count: MAX_TASKS,
+                counted: false,
+            });
+        }
         let owned = self.owned(runtime.flavor)?;
         let at = runtime.handle.wrapping_add(owned.at);
         let unreadable = || Arc::<str>::from(format!("the task list at {at:#x} is unreadable"));
@@ -319,6 +404,7 @@ impl TokioRuntime {
             shards: word(owned.shards)?,
             length: word(owned.shards + 8)?,
             count: word(owned.count)?,
+            counted: true,
         };
         let mask = word(owned.mask)?;
         if !list.length.is_power_of_two()
@@ -556,6 +642,40 @@ impl RuntimeModel for TokioRuntime {
         TASK_NOUN.0
     }
 
+    /// A `LocalSet` a thread drives, as `LocalSet::block_on` and
+    /// `run_until` do through `RunUntil`, or as the set itself is awaited.
+    fn task_set(
+        &self,
+        stop: &dyn RuntimeStop,
+        future: VirtualAddress,
+        ty: crate::TypeReference,
+    ) -> Option<u64> {
+        let locals = self.locals().ok().flatten()?;
+        let info = self.image.type_info(ty)?;
+        let set = match local_type(info)? {
+            "LocalSet" => future.get(),
+            "RunUntil" => {
+                let crate::TypeKind::Record { members, .. } = &info.kind else {
+                    return None;
+                };
+                let member = members
+                    .iter()
+                    .find(|member| member.name.as_deref() == Some("local_set"))?;
+                let crate::RecordMemberLayout::ByteOffset(offset) = member.layout else {
+                    return None;
+                };
+                records::word(stop, future.get().wrapping_add(offset))?
+            }
+            _ => return None,
+        };
+        let context = records::word(stop, set.wrapping_add(locals.set))?;
+        Self::set_shared(stop, locals, context).ok()
+    }
+
+    fn may_run_task_set(&self, ty: crate::TypeReference) -> bool {
+        self.locals().is_ok_and(|locals| locals.is_some()) && may_hold_set(self.image.as_ref(), ty)
+    }
+
     fn task_entries(
         &self,
         stop: &dyn RuntimeStop,
@@ -655,6 +775,110 @@ impl RuntimeModel for TokioRuntime {
     fn driven_future(&self, function: &crate::FunctionInfo) -> Option<&'static str> {
         future::driven_future(function)
     }
+}
+
+/// The name of a type of `tokio::task::local`, such as `LocalSet`.
+fn local_type(info: &crate::TypeInfo) -> Option<&str> {
+    let identity = info.identity.as_ref()?;
+    identity
+        .path
+        .iter()
+        .map(AsRef::as_ref)
+        .eq(["tokio", "task", "local"])
+        .then_some(&*identity.base)
+}
+
+/// Whether a type is a `Box` or a `Pin`, which hold the future they point
+/// to.
+fn holds_pointee(info: &crate::TypeInfo) -> bool {
+    info.identity.as_ref().is_some_and(|identity| {
+        let path = identity.path.iter().map(AsRef::as_ref);
+        match &*identity.base {
+            "Box" => path.eq(["alloc", "boxed"]),
+            "Pin" => path.eq(["core", "pin"]),
+            _ => false,
+        }
+    })
+}
+
+/// Whether a future of type `ty` may run a `LocalSet` when polled, as its
+/// type says without its value: whether it holds a set, a `RunUntil`, or
+/// a reference to a set, in place or through a box or pin, or a future
+/// whose type only its value says.
+fn may_hold_set(image: &dyn RuntimeImage, ty: crate::TypeReference) -> bool {
+    use crate::TypeKind;
+    fn members(
+        fields: &[crate::RecordMember],
+        boxed: bool,
+    ) -> impl Iterator<Item = (crate::TypeReference, bool)> + '_ {
+        fields.iter().map(move |member| (member.type_ref, boxed))
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut pending = vec![(ty, false)];
+    while let Some((ty, boxed)) = pending.pop() {
+        if !seen.insert((ty.id, boxed)) {
+            continue;
+        }
+        let Some(info) = image.type_info(ty) else {
+            continue;
+        };
+        if matches!(local_type(info), Some("LocalSet" | "RunUntil")) {
+            return true;
+        }
+        match &info.kind {
+            TypeKind::Pointer {
+                target: Some(target),
+                ..
+            }
+            | TypeKind::Reference { target, .. } => {
+                let Some(pointee) = image.type_info(*target) else {
+                    continue;
+                };
+                if pointee.name.starts_with("dyn core::future::future::Future")
+                    || local_type(pointee) == Some("LocalSet")
+                {
+                    return true;
+                }
+                // A box or pin holds the future it points to; another
+                // pointer's target is some other future's, or no future.
+                if boxed {
+                    pending.push((*target, false));
+                }
+            }
+            TypeKind::Record {
+                members: fields,
+                bases,
+                ..
+            } => {
+                let boxed = boxed || holds_pointee(info);
+                pending.extend(members(fields, boxed));
+                pending.extend(bases.iter().map(|base| (base.type_ref, boxed)));
+            }
+            TypeKind::Union {
+                members: fields, ..
+            } => pending.extend(members(fields, boxed)),
+            TypeKind::Variant {
+                common_members,
+                bases,
+                variants,
+                ..
+            } => {
+                pending.extend(members(common_members, boxed));
+                pending.extend(bases.iter().map(|base| (base.type_ref, boxed)));
+                for variant in variants.iter() {
+                    pending.extend(members(&variant.members, boxed));
+                }
+            }
+            TypeKind::Array { element, .. } => pending.push((*element, boxed)),
+            TypeKind::Modified { target, .. }
+            | TypeKind::Named {
+                target: Some(target),
+                ..
+            } => pending.push((*target, boxed)),
+            _ => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]

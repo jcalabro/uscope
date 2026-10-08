@@ -1994,7 +1994,7 @@ generate_coroutine_oracle() {
 }
 
 # Every fixture, unoptimized and optimized.
-readonly tokio_fixtures=(std-async panics workers server drivers steps cancel shapes values)
+readonly tokio_fixtures=(std-async panics workers server drivers steps cancel shapes values runtimes)
 build_tokio_variant o0 dev "" "${tokio_fixtures[@]}"
 build_tokio_variant o3 release "" "${tokio_fixtures[@]}"
 # Panics that abort rather than unwind.
@@ -2013,15 +2013,18 @@ build_tokio_variant unstable dev "--cfg tokio_unstable" workers
 build_tokio_variant legacy dev "-Z unstable-options -C symbol-mangling-version=legacy" panics workers
 
 # The workers fixture's checkpoint, as gdb dumps it, with each runtime
-# flavor, and the values fixture's first stop. The log keeps what the
-# program reported there. One malloc arena keeps each thread from reserving
-# one of its own, which the core saves.
+# flavor, the values fixture's first stop, and the runtimes fixture's
+# checkpoint. The log keeps what the program reported there. One malloc
+# arena keeps each thread from reserving one of its own, which the core
+# saves.
 export TRUTH_CORE=1 MALLOC_ARENA_MAX=1
 for variant in o0 o3; do
     program="$output_dir/tokio-workers-${variant}"
     generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
     generate_core "${program}-current.core" 5 "$default_core_filter" "$program" "$program" current
     program="$output_dir/tokio-values-${variant}"
+    generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
+    program="$output_dir/tokio-runtimes-${variant}"
     generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
 done
 unset TRUTH_CORE MALLOC_ARENA_MAX

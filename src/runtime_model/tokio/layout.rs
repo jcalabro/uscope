@@ -31,18 +31,23 @@ const FLAVORS: [(Flavor, &str, &str); 2] = [
     ),
 ];
 
-/// A runtime's scheduler.
+/// Where the thread-local that names the `LocalSet` a thread runs is.
+const LOCAL_SCOPE: &str = "tokio::task::local::CURRENT";
+
+/// A runtime's scheduler, or a `LocalSet`, which keeps tasks of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Flavor {
     MultiThread,
     CurrentThread,
+    Local,
 }
 
 impl Flavor {
     pub const fn describe(self) -> &'static str {
         match self {
-            Self::MultiThread => "multi-thread",
-            Self::CurrentThread => "current-thread",
+            Self::MultiThread => "multi-thread runtime",
+            Self::CurrentThread => "current-thread runtime",
+            Self::Local => "local set",
         }
     }
 }
@@ -54,6 +59,8 @@ pub struct Layout {
     pub tasks: Result<Tasks, Missing>,
     pub pool: Result<Pool, Missing>,
     pub spawns: Result<Spawns, Missing>,
+    /// `None` for a program that never runs a `LocalSet`.
+    pub locals: Result<Option<Locals>, Missing>,
 }
 
 impl Layout {
@@ -62,12 +69,87 @@ impl Layout {
         let tasks = Tasks::bind(image);
         let pool = Pool::bind(image);
         let spawns = Spawns::bind(image);
+        let locals = Locals::bind(image);
         Self {
             context,
             tasks,
             pool,
             spawns,
+            locals,
         }
+    }
+}
+
+/// A `LocalSet`'s tasks, which no runtime lists: the set's `Shared` holds
+/// them in a list of its own, which a thread's `CURRENT` reaches while
+/// the thread runs the set, and the set itself reaches always.
+#[derive(Debug)]
+pub struct Locals {
+    pub tls: ThreadLocal,
+    /// std's state of the thread's storage, a byte, and the value saying
+    /// the thread made it.
+    pub state: u64,
+    pub alive: u64,
+    /// The `Option<Rc<Context>>` the storage holds, a pointer or null.
+    pub context: u64,
+    /// The `LocalSet`'s own `Rc<Context>` pointer.
+    pub set: u64,
+    /// The `Context` within its `Rc`'s allocation, and the `Arc<Shared>`
+    /// pointer within the `Context`.
+    pub value: u64,
+    pub shared: u64,
+    /// The `Shared` within its `Arc`'s allocation.
+    pub data: u64,
+    /// The list's id and head within the `Shared`.
+    pub id: u64,
+    pub head: u64,
+}
+
+impl Locals {
+    fn bind(image: &dyn RuntimeImage) -> Result<Option<Self>, Missing> {
+        let Some(tls) = image.thread_local_within(LOCAL_SCOPE, CONTEXT_STORAGE) else {
+            return Ok(None);
+        };
+        let tls = tls?;
+        let storage = records::named(
+            image,
+            "std::sys::thread_local::native::eager::Storage<tokio::task::local::LocalData>",
+        )?;
+        let state = records::field(image, storage, &["state", "value", "value"])?;
+        let alive = records::enumerator(image, state.ty, "Alive")?;
+        if records::size(image, state.ty)? != 1 {
+            return Err("eager::Storage's state is not one byte".into());
+        }
+        let context = records::field(
+            image,
+            storage,
+            &["val", "value", "ctx", "inner", "__0", "value"],
+        )?;
+        pointer_sized(image, context.ty, "a LocalSet's context")?;
+        let set = records::named(image, "tokio::task::local::LocalSet")?;
+        let rc = records::field(image, set, &["context", "ptr", "pointer"])?;
+        let inner = records::target(image, rc.ty)?;
+        let value = records::field(image, inner, &["value"])?;
+        let arc = records::field(image, value.ty, &["shared", "ptr", "pointer"])?;
+        let shared = records::target(image, arc.ty)?;
+        let data = records::field(image, shared, &["data"])?;
+        let owned = |path: &[&str]| {
+            let mut whole = vec!["local_state", "owned"];
+            whole.extend_from_slice(path);
+            records::sized(image, data.ty, &whole, 8)
+        };
+        Ok(Some(Self {
+            tls,
+            state: state.offset,
+            alive,
+            context: context.offset,
+            set: rc.offset,
+            value: value.offset,
+            shared: arc.offset,
+            data: data.offset,
+            id: owned(&["id"])?,
+            head: owned(&["inner", "__0", "value", "list", "head"])?,
+        }))
     }
 }
 

@@ -13,6 +13,7 @@ use crate::protocol::StopId;
 use crate::runtime_model::{
     self, CodeAddress, RuntimeModel, RuntimeStop, RuntimeTask, TaskContext, TaskRef,
 };
+use crate::unwind::DEFAULT_MAX_FRAMES;
 use crate::{
     ColumnNumber, Error, ExecutionContext, ImageAddress, InspectionUsage, LineNumber, LoadedModule,
     ModuleImage, RecordedPlace, Result, RuntimeId, SourceLocation, StackSegment, TaskCursor,
@@ -28,6 +29,13 @@ use super::signals::Signal;
 use super::{
     BreakpointSite, Controller, Inferior, debug_pid, debug_thread_id, validate_public_stop,
 };
+
+/// The sets of tasks the futures threads drive at a stop run, by where
+/// the runtime keeps them, and why some may be missing.
+pub(super) struct TaskSets {
+    sets: Arc<[u64]>,
+    gaps: Arc<[Arc<str>]>,
+}
 
 /// The most tasks one page holds.
 pub(super) const MAX_TASK_PAGE: usize = 4096;
@@ -77,6 +85,8 @@ struct ProcessStop<'a, P> {
     usage: Option<&'a Cell<InspectionUsage>>,
     /// The process's threads, in the order of their ids.
     threads: Vec<ThreadId>,
+    /// The sets of tasks threads drive, once found at this stop.
+    task_sets: Vec<u64>,
 }
 
 impl<P: InspectionOps> RuntimeStop for ProcessStop<'_, P> {
@@ -120,6 +130,10 @@ impl<P: InspectionOps> RuntimeStop for ProcessStop<'_, P> {
 
     fn load_bias(&self) -> u64 {
         self.bias
+    }
+
+    fn task_sets(&self) -> Vec<u64> {
+        self.task_sets.clone()
     }
 
     fn threads(&self) -> Vec<ThreadId> {
@@ -236,7 +250,104 @@ impl<P: InspectionOps> Controller<P> {
                 .keys()
                 .map(|pid| debug_thread_id(*pid))
                 .collect(),
+            task_sets: inferior
+                .public_stop
+                .as_ref()
+                .and_then(|stop| {
+                    let found = stop.task_sets.borrow();
+                    found.as_ref().map(|found| found.sets.to_vec())
+                })
+                .unwrap_or_default(),
         })
+    }
+
+    /// The sets of tasks the futures the program's own threads drive run,
+    /// which no runtime lists, found once for a published stop from the
+    /// futures their stacks show, and why some may be missing.
+    pub(super) fn task_sets(&self, inferior: &Inferior) -> Arc<[Arc<str>]> {
+        let Some(stop) = inferior.public_stop.as_ref() else {
+            return Arc::from([]);
+        };
+        if let Some(found) = stop.task_sets.borrow().as_ref() {
+            return Arc::clone(&found.gaps);
+        }
+        let (sets, gaps) = self.find_task_sets(inferior, stop.triggering_thread);
+        let gaps: Arc<[Arc<str>]> = gaps.into();
+        *stop.task_sets.borrow_mut() = Some(TaskSets {
+            sets: sets.into(),
+            gaps: Arc::clone(&gaps),
+        });
+        gaps
+    }
+
+    fn find_task_sets(&self, inferior: &Inferior, reader: Pid) -> (Vec<u64>, Vec<Arc<str>>) {
+        let runtimes = self.runtimes(inferior);
+        let mut sets = std::collections::BTreeSet::new();
+        let mut gaps = Vec::new();
+        if runtimes.is_empty() {
+            return (Vec::new(), gaps);
+        }
+        let modules = self.unwind_modules(inferior);
+        for &pid in inferior.threads.keys() {
+            // Only a thread no runtime schedules tasks on drives a future.
+            if self.thread_activity(inferior, pid) != Some(ThreadActivity::Outside) {
+                continue;
+            }
+            let root = StackRoot::of_thread(pid);
+            let expanded = self.root_presentation(&root).and_then(|presentation| {
+                let stack = self.physical_stack(inferior, &root, DEFAULT_MAX_FRAMES)?;
+                self.expand_backtrace(
+                    inferior,
+                    &root,
+                    &stack,
+                    DEFAULT_MAX_FRAMES,
+                    &modules,
+                    presentation.as_ref(),
+                )
+            });
+            let expanded = match expanded {
+                Ok(expanded) => expanded,
+                Err(error) => {
+                    gaps.push(
+                        format!(
+                            "thread {}'s stack, where it may drive tasks, cannot be read: {error}",
+                            debug_thread_id(pid)
+                        )
+                        .into(),
+                    );
+                    continue;
+                }
+            };
+            // A set that a future that cannot be read runs is not found.
+            if let Some(unread) = expanded.trace.unfollowed.first()
+                && expanded.lost.iter().any(|ty| {
+                    runtimes.iter().any(|runtime| {
+                        runtime.module.image == ty.image && runtime.model.may_run_task_set(*ty)
+                    })
+                })
+            {
+                gaps.push(
+                    format!(
+                        "thread {} drives a future that may run a local set, whose tasks are not listed: {}",
+                        debug_thread_id(pid),
+                        unread.reason
+                    )
+                    .into(),
+                );
+            }
+            for future in &expanded.futures {
+                for runtime in runtimes
+                    .iter()
+                    .filter(|runtime| runtime.module.image == future.ty.image)
+                {
+                    let set = self.with_runtime_stop(inferior, runtime, reader, |stop| {
+                        runtime.model.task_set(stop, future.object, future.ty)
+                    });
+                    sets.extend(set);
+                }
+            }
+        }
+        (sets.into_iter().collect(), gaps)
     }
 
     /// How to ask a runtime about `task`: by its number, and where the
@@ -274,8 +385,12 @@ impl<P: InspectionOps> Controller<P> {
         });
         let mut tasks = Vec::new();
         // A runtime that cannot be read leaves its tasks out of every page.
+        // So are the tasks of a set that cannot be found.
+        let set_gaps = self.task_sets(inferior);
         let mut gaps = if from.is_none() {
-            self.unbound_runtimes(inferior)
+            let mut gaps = self.unbound_runtimes(inferior);
+            gaps.extend(set_gaps.iter().cloned());
+            gaps
         } else {
             Vec::new()
         };
@@ -608,6 +723,7 @@ impl<P: InspectionOps> Controller<P> {
         else {
             return Ok(None);
         };
+        self.task_sets(inferior);
         let found = self.with_runtime_stop(inferior, &runtime, reader, |stop| {
             runtime
                 .model

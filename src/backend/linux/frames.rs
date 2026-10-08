@@ -257,7 +257,7 @@ impl<P: InspectionOps> Controller<P> {
 
     /// A stack's logical frames, with the frames of the functions that left
     /// by tail calls that its calls' sites and debug information find.
-    fn expand_backtrace(
+    pub(super) fn expand_backtrace(
         &self,
         inferior: &Inferior,
         root: &StackRoot,
@@ -1021,6 +1021,8 @@ pub(super) struct Expanded {
     pub(super) origins: Vec<FrameOrigin>,
     /// The futures whose frames the trace shows, where frames drive them.
     pub(super) futures: Vec<futures::AsyncFrame>,
+    /// The declared types of the futures frames drive that cannot be read.
+    pub(super) lost: Vec<crate::TypeReference>,
 }
 
 /// A stack's logical frames: each activation's inline frames, innermost
@@ -1089,6 +1091,7 @@ fn expand_inline_backtrace(
         },
         origins,
         futures: Vec::new(),
+        lost: Vec::new(),
     })
 }
 

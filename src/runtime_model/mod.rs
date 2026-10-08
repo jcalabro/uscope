@@ -148,6 +148,12 @@ pub trait RuntimeStop {
     fn load_bias(&self) -> u64;
     /// Every thread of the process, in the order of their ids.
     fn threads(&self) -> Vec<ThreadId>;
+    /// The sets of tasks the futures the stop's threads drive run, by
+    /// where the runtime keeps them, as [`RuntimeModel::task_set`] named
+    /// them: tasks that no runtime lists while their set waits.
+    fn task_sets(&self) -> Vec<u64> {
+        Vec::new()
+    }
 }
 
 /// An address in a task's code.
@@ -186,8 +192,9 @@ pub struct RuntimeTask {
     /// Whether the runtime runs the task for its own work, such as a
     /// garbage collector's worker.
     pub internal: bool,
-    /// The key-value labels the program gave the task, in the runtime's
-    /// order, such as Go's profiler labels.
+    /// The key-value labels the program or its runtime gave the task, in
+    /// the runtime's order, such as Go's profiler labels, or the tokio
+    /// runtime that holds it in a process with several.
     pub labels: TaskLabels,
 }
 
@@ -448,6 +455,26 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     ) -> Result<RuntimeTask, Arc<str>>;
     /// What the runtime calls one of its tasks.
     fn task_noun(&self) -> &'static str;
+    /// Where the runtime keeps the set of tasks that the future at
+    /// `future`, of type `ty`, runs when a thread drives it, as a set of
+    /// tasks no runtime lists runs while its future is polled; `None` for
+    /// a future that runs no such set.
+    fn task_set(
+        &self,
+        stop: &dyn RuntimeStop,
+        future: VirtualAddress,
+        ty: crate::TypeReference,
+    ) -> Option<u64> {
+        let _ = (stop, future, ty);
+        None
+    }
+    /// Whether a future of type `ty`, which a thread drives where its
+    /// value cannot be read, may run a set of tasks that only
+    /// [`Self::task_set`] finds.
+    fn may_run_task_set(&self, ty: crate::TypeReference) -> bool {
+        let _ = ty;
+        false
+    }
     /// The variable through which `function`, the runtime's, polls a
     /// future that no task holds, as a runtime's `block_on` does; `None`
     /// for any other function.

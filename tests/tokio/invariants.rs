@@ -131,11 +131,13 @@ async fn read(handle: &DebuggerHandle) -> Result<Option<Stop>, String> {
 }
 
 fn check_stop(stop: &Stop) -> Result<(), String> {
-    // A list may be changing, and tokio's version may be one the debugger
-    // was not checked against; nothing else is missing.
+    // A list may be changing, tokio's version may be one the debugger was
+    // not checked against, and an optimized build may lose the future
+    // that runs a local set; nothing else is missing.
     if let Some(gap) = stop.gaps.iter().find(|gap| {
         !gap.contains("was being changed at the stop")
             && !gap.contains("its runtime is read as tokio")
+            && !gap.contains("drives a future that may run a local set")
     }) {
         return Err(format!("the tasks are incomplete: {gap}"));
     }
