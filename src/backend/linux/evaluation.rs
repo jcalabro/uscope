@@ -1098,6 +1098,34 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         self.view_entry_place(bound, from, key)
     }
 
+    fn function_generics(
+        &mut self,
+        address: u64,
+    ) -> std::result::Result<Vec<(Arc<str>, TypeReference)>, Stop> {
+        let described = self.frame.modules().find_map(|module| {
+            let image_address = module
+                .loaded
+                .image_address(crate::VirtualAddress::new(address))
+                .ok()
+                .filter(|image_address| module.image.contains_address(*image_address))?;
+            let instance = module.image.locate(image_address).physical_instance?;
+            let function = module
+                .image
+                .function(module.image.code_instance(instance)?.function)?;
+            Some((module.image.id(), Arc::clone(&function.generics)))
+        });
+        let Some((image, generics)) = described else {
+            return Err(Stop::Refused(Refusal::new(
+                ErrorKind::Unsupported,
+                format!("no function the debug information describes has its code at {address:#x}"),
+            )));
+        };
+        Ok(generics
+            .iter()
+            .map(|(name, id)| (Arc::clone(name), TypeReference { image, id: *id }))
+            .collect())
+    }
+
     fn task(&mut self) -> std::result::Result<u64, Stop> {
         let frame = self.frame;
         let refused = |reason: &str| Stop::Refused(Refusal::new(ErrorKind::Unsupported, reason));

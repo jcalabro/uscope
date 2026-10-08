@@ -303,6 +303,9 @@ pub(super) struct LoadedVariables {
     /// Every type named as a coroutine, with what it is or why its layout
     /// cannot be read as one.
     pub coroutines: BTreeMap<TypeId, std::result::Result<crate::CoroutineInfo, Arc<str>>>,
+    /// The generic type arguments of each code instance of a generic
+    /// function, by their parameters' names.
+    pub function_generics: BTreeMap<CodeInstanceId, crate::FunctionGenerics>,
 }
 
 /// The producer a unit names.
@@ -468,6 +471,7 @@ pub(super) fn load_variable_info<'data>(
     let mut vtables = Vec::new();
     let mut go_function_entries = HashMap::new();
     let mut unnamed_parameters = Vec::new();
+    let mut function_generics = BTreeMap::new();
     let mut order = 0_u64;
     let evaluation_units = load_evaluation_units(units)?;
     let mut types = TypeArenaBuilder::new(
@@ -578,6 +582,20 @@ pub(super) fn load_variable_info<'data>(
                     }
                     let ranges =
                         die_code_ranges(dwarf, unit, entry, &catalog.code).map(Arc::<[_]>::from)?;
+                    let key = DieKey {
+                        unit: unit_index,
+                        offset: entry.offset().0,
+                    };
+                    if rust
+                        && defined
+                        && !ranges.is_empty()
+                        && let Some(instance) = instance_ids.get(&key)
+                    {
+                        let generics = types.function_generics(key);
+                        if !generics.is_empty() {
+                            function_generics.insert(*instance, Arc::from(generics));
+                        }
+                    }
                     let function = functions.len();
                     if go && defined {
                         // A func value holds the address its code begins at.
@@ -1157,6 +1175,7 @@ pub(super) fn load_variable_info<'data>(
     Ok(LoadedVariables {
         coroutines,
         coroutine_bodies,
+        function_generics,
         info: DwarfVariableInfo {
             coroutines: running,
             objects: objects.into(),

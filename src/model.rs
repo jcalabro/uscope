@@ -2936,7 +2936,15 @@ pub struct FunctionInfo {
     /// `async fn`, the coroutine's type: the future the body's state lives
     /// in between polls.
     pub coroutine: Option<TypeId>,
+    /// The type arguments a generic function was instantiated with, each
+    /// with its parameter's name, as tokio's `poll::<T, S>` names the
+    /// future it polls `T`. Empty for a function that is not generic, or
+    /// whose debug information names none.
+    pub generics: FunctionGenerics,
 }
+
+/// A generic function's type arguments, each with its parameter's name.
+pub type FunctionGenerics = Arc<[(Arc<str>, TypeId)]>;
 
 /// A state machine a compiler generated for code that can suspend.
 ///

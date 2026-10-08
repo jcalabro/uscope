@@ -333,6 +333,50 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         (arguments, pack)
     }
 
+    /// The generic type arguments of the function whose DIE is `key`, each
+    /// with its parameter's name: the function's own template type
+    /// parameters, or those of the declaration it completes, where rustc
+    /// puts a method's.
+    pub(super) fn function_generics(&mut self, key: DieKey) -> Vec<(Arc<str>, TypeId)> {
+        let mut current = key;
+        for _ in 0..4 {
+            let Some(unit) = self.units.get(current.unit) else {
+                break;
+            };
+            let Ok(entry) = unit.entry(gimli::UnitOffset(current.offset)) else {
+                break;
+            };
+            let mut generics = Vec::new();
+            for child in self.child_entries(&entry, current.unit) {
+                if child.tag() != gimli::DW_TAG_template_type_parameter {
+                    continue;
+                }
+                let name = string_attribute(self.dwarf, unit, &child, gimli::DW_AT_name)
+                    .ok()
+                    .flatten();
+                if let (Some(name), Ok(Some(target))) = (name, self.target(&child, current.unit)) {
+                    generics.push((name, target.id));
+                }
+            }
+            if !generics.is_empty() {
+                return generics;
+            }
+            let reference = entry
+                .attr_value(gimli::DW_AT_specification)
+                .or_else(|| entry.attr_value(gimli::DW_AT_abstract_origin));
+            match die_reference_with_signatures(
+                reference,
+                current.unit,
+                self.units,
+                self.type_signatures,
+            ) {
+                Ok(Some(next)) => current = next,
+                _ => break,
+            }
+        }
+        Vec::new()
+    }
+
     /// A DIE's children, bounded as a record's are.
     fn child_entries(
         &self,
