@@ -13,6 +13,7 @@ use crate::protocol::{
 };
 use crate::{Error, Result, StackFrameId, VirtualAddress};
 
+use super::awaits::Followed;
 use super::breakpoints::{
     install_plan_breakpoint, remove_breakpoint_owner_from, runtime_breakpoint_address,
 };
@@ -870,8 +871,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                 return self.go_on_without_plan(pid, address, Some(kind));
             }
         }
-        if self.await_pending_poll(pid)? {
-            return self.go_on_without_plan(pid, address, None);
+        match self.follow_poll_return(pid, kind)? {
+            Some(Followed::Waits) => return self.go_on_without_plan(pid, address, None),
+            Some(Followed::Ended(reason)) => return self.begin_visible_stop(pid, reason),
+            None => {}
         }
         if self.begin_following(pid, kind)? || self.wait_for_loop(pid, kind)? {
             // The step goes on by single steps, or by its new plan.

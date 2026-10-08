@@ -2553,6 +2553,17 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
             )),
             Some("step incomplete".to_owned()),
         ),
+        StopReason::TaskEnded { task, ending, .. } => {
+            let ending = match ending {
+                uscope::TaskEnding::Finished => "finished",
+                uscope::TaskEnding::Cancelled => "was cancelled",
+            };
+            (
+                "step",
+                Some(format!("the step's task {task} {ending}")),
+                Some(format!("task {task} {ending}")),
+            )
+        }
         StopReason::Pause => ("pause", None, None),
         StopReason::Jump => ("goto", None, None),
         StopReason::Entry | StopReason::Attach => ("entry", None, None),

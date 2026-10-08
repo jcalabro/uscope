@@ -46,11 +46,15 @@ impl<P: InspectionOps> Controller<P> {
     /// without its call returning, as where a loop's body finished or a
     /// panic unwound, returned nothing to show.
     pub(super) fn capture_returned(&self, pid: Pid, reason: &StopReason) -> Option<Returned> {
-        if *reason
-            != (StopReason::Step {
+        if !matches!(
+            reason,
+            StopReason::Step {
+                kind: StepKind::Out
+            } | StopReason::TaskEnded {
                 kind: StepKind::Out,
-            })
-        {
+                ..
+            }
+        ) {
             return None;
         }
         let inferior = self.inferior.as_ref()?;
@@ -115,11 +119,27 @@ impl<P: InspectionOps> Controller<P> {
             .variables
             .returned(returning.function, &mut runtime, &mut budget)
         {
-            Ok(Some(values)) => Some(Returned {
-                module: module.loaded.id,
-                thread: pid,
-                values: values.into(),
-            }),
+            Ok(Some(mut values)) => {
+                // An async body's result is named for the function its
+                // programmer wrote, as the body is.
+                if let Some(function) = module
+                    .image
+                    .locate(returning.function)
+                    .physical_instance
+                    .and_then(|instance| module.image.code_instance(instance))
+                    .and_then(|instance| module.image.function(instance.function))
+                    .filter(|function| function.coroutine.is_some())
+                {
+                    for value in &mut values {
+                        value.name = Arc::clone(&function.name);
+                    }
+                }
+                Some(Returned {
+                    module: module.loaded.id,
+                    thread: pid,
+                    values: values.into(),
+                })
+            }
             Ok(None) => None,
             #[cfg_attr(
                 not(debug_assertions),

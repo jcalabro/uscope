@@ -18,6 +18,7 @@ use crate::{
 };
 
 use super::activation::{Activation, StackPosition, StackView};
+use super::awaits::Followed;
 use super::breakpoints::install_plan_breakpoint;
 use super::frames::{
     DwarfCallerProvider, RoleCallerProvider, StackRoot, code_instance_is_active,
@@ -551,8 +552,10 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     fn advance_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
-        if self.await_pending_poll(pid)? {
-            return self.continue_thread(pid);
+        match self.follow_poll_return(pid, kind)? {
+            Some(Followed::Waits) => return self.continue_thread(pid),
+            Some(Followed::Ended(reason)) => return self.begin_visible_stop(pid, reason),
+            None => {}
         }
         self.note_returned_values(pid);
         self.retire_return_guard()?;
@@ -1885,7 +1888,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// What the physical function holding `address` is to stepping, not
     /// any function inlined into it there.
-    fn code_role(&self, address: VirtualAddress) -> Option<CodeRole> {
+    pub(super) fn code_role(&self, address: VirtualAddress) -> Option<CodeRole> {
         let inferior = self.inferior.as_ref()?;
         let image = inferior.loaded_module.image_address(address).ok()?;
         Some(self.module_image.code_role(image))
@@ -1912,7 +1915,7 @@ const STEPS_OVER: &str = "a step into a new task runs as a step over";
 
 /// Whether code in this role is a language runtime's own: its machinery,
 /// its outermost frames, and what it enters by a trap.
-const fn is_runtime_role(role: CodeRole) -> bool {
+pub(super) const fn is_runtime_role(role: CodeRole) -> bool {
     matches!(
         role,
         CodeRole::RuntimeInternal | CodeRole::Outermost | CodeRole::TrapEntry | CodeRole::Dispatch
