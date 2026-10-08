@@ -12,7 +12,7 @@ use crate::invariants::checked;
 use crate::stops::{line, place};
 use crate::support::Scenario;
 
-const BUILDS: [&str; 1] = ["tokio-cancel-o0"];
+const BUILDS: [&str; 2] = ["tokio-cancel-o0", "tokio-cancel-o3"];
 const SOURCE: &str = "cancel/src/main.rs";
 
 /// The fixture in `mode`, stopped where its task first arrives at the
@@ -91,6 +91,12 @@ async fn a_step_whose_future_is_dropped_ends_on_the_droppers_next_line() {
             ("select", "selecting", "// STEP: select-other"),
             ("timeout", "timing", "// STEP: timeout-after"),
         ] {
+            // Optimized, the branch's value is no statement of its own.
+            let after = if after == "// STEP: select-other" && fixture.ends_with("-o3") {
+                "// STEP: select-end"
+            } else {
+                after
+            };
             for kind in [StepKind::OverSource, StepKind::Out] {
                 let context = format!("{fixture} {mode} {kind:?}");
                 let (mut scenario, task) = waiting(fixture, mode).await;

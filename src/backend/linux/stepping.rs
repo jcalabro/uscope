@@ -432,9 +432,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             location.physical_instance == Some(physical)
                 && !code_instance_is_active(&location, instance)
         });
+        // An async body that may be pending is awaited by the code it
+        // left, whose poll the step follows to its return.
+        let pending = left_inlined
+            && self.active_step().is_some_and(|start| {
+                self.left_inlined_body_pending(pid, start, VirtualAddress::new(registers.rip))
+            });
         let enters = match role {
             CodeRole::Panic => true,
-            CodeRole::Wrapper => returned || left_inlined,
+            CodeRole::Wrapper => returned || left_inlined && !pending,
             _ => false,
         };
         if !enters {

@@ -26,9 +26,17 @@
 //! A future may be dropped while the step waits for it: its runtime drops
 //! a task's future as it cancels the task, and a `select!` or a timeout
 //! drops a future it no longer awaits. The step watches the future's drop
-//! glue for that. Dropped by its runtime, the future's task was cancelled,
-//! and the step ends there; dropped by the program's code, the step goes on
-//! in that code to its next line.
+//! glue for that, every copy of it: each unit of code that drops the type
+//! may have its own, and optimization inlines others, which a thread of the
+//! step's task runs for the task's future. Dropped by its runtime, the
+//! future's task was cancelled, and the step ends there; dropped by the
+//! program's code, the step goes on in that code to its next line.
+//!
+//! The step also watches its runtime take up its task again, as the runtime
+//! model names the code that does: the task may end there, cancelled or
+//! finished, even within the poll the step waits after, with nothing left
+//! to drop that the step can see. Whatever frees the task stops a thread
+//! first, so the task's state still says how it ended.
 
 use std::collections::BTreeSet;
 
@@ -39,6 +47,7 @@ use crate::protocol::{
     TaskEnding,
 };
 use crate::runtime_model::futures::{self, AsyncFrameKind};
+use crate::runtime_model::{TaskEnd, TaskEntries};
 use crate::unwind::DEFAULT_MAX_FRAMES;
 use crate::{
     CodeInstanceId, CodeInstanceKind, CoroutineStateKind, Error, ExecutionContext, FunctionId,
@@ -65,9 +74,26 @@ pub(super) struct AwaitStep {
     /// Where the future resumes, once a poll of it returned `Pending` and
     /// the step waits for the next.
     waiting: BTreeSet<VirtualAddress>,
-    /// Where the code that drops the future begins, which the step watches
-    /// while it waits, when one function drops every future of its type.
-    drop_glue: Option<VirtualAddress>,
+    /// Where each copy of the function that drops the future begins,
+    /// which the step watches while it waits.
+    drop_glue: BTreeSet<VirtualAddress>,
+    /// Where copies of the code that drops the future, inlined into other
+    /// code and passed no place the step can check, begin: a thread of the
+    /// step's task at one drops the task's future of that type.
+    inlined_drops: BTreeSet<VirtualAddress>,
+    /// The code of the step's runtime that takes up its task again, which
+    /// the step watches while it waits, to see the task end.
+    task_entries: Option<(crate::TaskId, TaskEntries)>,
+    /// Where the runtime's code that runs the task returns, while it does.
+    task_return: Option<TaskReturn>,
+}
+
+/// Where a function that runs a task returns to, and the stack pointer
+/// there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TaskReturn {
+    address: VirtualAddress,
+    stack_pointer: u64,
 }
 
 /// An async function's body inlined into another's, which a step runs in.
@@ -75,6 +101,8 @@ pub(super) struct AwaitStep {
 pub(super) struct Inlined {
     /// The future whose poll runs the body.
     poll: RunningFuture,
+    /// Whether the step follows the body's own future.
+    own: bool,
     /// The body's function, which the future must await once only when the
     /// body names no future of its own.
     function: FunctionId,
@@ -90,6 +118,31 @@ impl AwaitStep {
     /// Whether the step waits for its future to be polled again.
     pub(super) fn waits(&self) -> bool {
         !self.waiting.is_empty()
+    }
+
+    /// Where the step stops a thread while it waits.
+    fn watched(&self) -> impl Iterator<Item = VirtualAddress> + '_ {
+        let entries = self
+            .task_entries
+            .iter()
+            .flat_map(|(_, entries)| entries.runs.iter().chain(&entries.frees).copied());
+        self.waiting
+            .iter()
+            .copied()
+            .chain(self.drop_glue.iter().copied())
+            .chain(self.inlined_drops.iter().copied())
+            .chain(entries)
+            .chain(self.task_return.map(|task_return| task_return.address))
+    }
+
+    /// Whether `address` is where the step's runtime takes up its task or
+    /// returns from running it.
+    fn takes_up_task(&self, address: VirtualAddress) -> bool {
+        self.task_return
+            .is_some_and(|task_return| task_return.address == address)
+            || self.task_entries.as_ref().is_some_and(|(_, entries)| {
+                entries.runs.contains(&address) || entries.frees.contains(&address)
+            })
     }
 }
 
@@ -121,12 +174,24 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             (self.running_future(pid, start.code_instance)?, None)
         };
+        record!(
+            "the step follows the future at {}{}",
+            future.object,
+            if inlined.is_some() {
+                ", in an inlined body"
+            } else {
+                ""
+            }
+        );
         Some(AwaitStep {
             future,
             inlined,
             source: start.source.clone(),
             waiting: BTreeSet::new(),
-            drop_glue: None,
+            drop_glue: BTreeSet::new(),
+            inlined_drops: BTreeSet::new(),
+            task_entries: None,
+            task_return: None,
         })
     }
 
@@ -147,8 +212,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             return None;
         }
-        let poll = self.running_future(pid, None)?;
-        let future = self.running_future(pid, Some(instance)).unwrap_or(poll);
+        // The body may be inlined into a function no future runs, such as
+        // a combinator's, and then must name its own.
+        let own = self.running_future(pid, Some(instance));
+        let poll = self.running_future(pid, None).or(own)?;
+        let future = own.unwrap_or(poll);
         let registers = self.ptrace.registers(pid).ok()?;
         let location = self.image_location(VirtualAddress::new(registers.rip))?;
         let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
@@ -156,13 +224,21 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         let depth = chain.instances.iter().position(|id| *id == instance)?;
         // The body's own statements, and those on another line of each
-        // function it is inlined into, out to the one that runs.
+        // async function it is inlined into, out to the one that runs, but
+        // none of a combinator's around it, such as `select!`'s.
         let mut statements = self.body_statements(instance).ok()?;
-        for outer in chain.instances[..depth]
+        let awaiters = chain.instances[..depth]
             .iter()
             .copied()
             .chain(location.physical_instance)
-        {
+            .filter(|outer| {
+                self.module_image
+                    .code_instance(*outer)
+                    .and_then(|outer| self.module_image.function(outer.function))
+                    .is_some_and(|function| function.coroutine.is_some())
+            })
+            .collect::<Vec<_>>();
+        for outer in awaiters {
             let line =
                 super::frames::source_for_code_instance(&self.module_image, &location, outer)?;
             statements.extend(self.other_lines(outer, &line).ok()?);
@@ -171,6 +247,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             future,
             Some(Inlined {
                 poll,
+                own: own.is_some(),
                 function,
                 instances: BTreeSet::from([instance]),
                 statements: self.without_resume_code(statements),
@@ -182,7 +259,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// the code at `address`, which is not where the step goes on, must
     /// go on: the code the body is inlined into awaits it there, which the
     /// step follows while the body may be pending. A body that names its
-    /// future says whether it is; one that does not may be.
+    /// future has returned once the future says so, which it does before
+    /// the code it returns to runs; the state it suspends in may be stored
+    /// only later.
     pub(super) fn left_inlined_body_pending(
         &self,
         pid: Pid,
@@ -197,10 +276,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             return false;
         };
         !inlined.statements.contains(&address)
-            && (awaiting.future == inlined.poll
-                || matches!(
+            && (!inlined.own
+                || !matches!(
                     self.future_state(pid, awaiting.future),
-                    Some((_, CoroutineStateKind::Suspended { .. }))
+                    Some((_, CoroutineStateKind::Returned))
                 ))
     }
 
@@ -307,7 +386,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             Some(resumes) => (own, None, BTreeSet::from([resumes])),
             None => self.suspended_inline_body(&stack, selected)?,
         };
-        let drop_glue = self.drop_glue(future.ty);
+        let (drop_glue, inlined_drops) = self.drop_glue(future.ty);
+        let task_entries = self.task_entries(reader, task);
         record!(
             "a step of task {task} waits for the future at {} at {waiting:?}",
             future.object
@@ -317,15 +397,19 @@ impl<P: LinuxTraceOps> Controller<P> {
             StepKind::IntoSource => StepKind::OverSource,
             kind => kind,
         };
+        let awaiting = AwaitStep {
+            future,
+            inlined,
+            source: stack.frames[selected].source.clone(),
+            waiting,
+            drop_glue,
+            inlined_drops,
+            task_entries,
+            task_return: None,
+        };
         let start = StepStart {
-            plan_addresses: waiting.iter().copied().chain(drop_glue).collect(),
-            awaiting: Some(AwaitStep {
-                future,
-                inlined,
-                source: stack.frames[selected].source.clone(),
-                waiting,
-                drop_glue,
-            }),
+            plan_addresses: awaiting.watched().collect(),
+            awaiting: Some(awaiting),
             ..StepStart::default()
         };
         self.begin_execution(
@@ -381,51 +465,59 @@ impl<P: LinuxTraceOps> Controller<P> {
                 "the async function waits at no await whose resumption is known".into(),
             )
         };
-        let function_of = |index: usize| {
+        // A coroutine's function may have a copy in each unit that uses
+        // it, and any copy may be the one that runs, or is inlined.
+        let functions_of = |index: usize| {
             self.module_image
                 .coroutine_functions(stack.futures[index].ty.id)
-                .first()
+                .iter()
                 .map(|function| function.id)
+                .collect::<Vec<_>>()
         };
-        let out_of_line = |function: FunctionId| {
-            self.module_image
-                .instances_for_function(function)
-                .find(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+        let out_of_line = |functions: &[FunctionId]| {
+            functions
+                .iter()
+                .flat_map(|function| self.module_image.instances_for_function(*function))
+                .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+                .collect::<Vec<_>>()
         };
         // The innermost future out from the selected one whose function
         // runs out of line, which the inlined bodies run in.
         let (running, physical) = (selected + 1..stack.futures.len())
             .filter(|&index| matches!(stack.futures[index].kind, AsyncFrameKind::Coroutine { .. }))
-            .find_map(|index| Some((index, out_of_line(function_of(index)?)?)))
+            .map(|index| (index, out_of_line(&functions_of(index))))
+            .find(|(_, physical)| !physical.is_empty())
             .ok_or_else(unknown)?;
-        let inlined_in = |function: FunctionId| {
-            self.module_image
-                .instances_for_function(function)
+        let inlined_in = |functions: &[FunctionId]| {
+            functions
+                .iter()
+                .flat_map(|function| self.module_image.instances_for_function(*function))
                 .filter(|instance| {
                     matches!(instance.kind, CodeInstanceKind::Inline { .. })
-                        && instance
-                            .ranges
-                            .first()
-                            .is_some_and(|range| physical.contains(range.start))
+                        && instance.ranges.first().is_some_and(|range| {
+                            physical
+                                .iter()
+                                .any(|physical| physical.contains(range.start))
+                        })
                 })
                 .map(|instance| instance.id)
                 .collect::<BTreeSet<_>>()
         };
-        let function = function_of(selected).ok_or_else(unknown)?;
-        let instances = inlined_in(function);
+        let selected_functions = functions_of(selected);
+        let function = *selected_functions.first().ok_or_else(unknown)?;
+        let instances = inlined_in(&selected_functions);
         let mut statements = BTreeSet::new();
         for instance in &instances {
             statements.extend(self.body_statements(*instance)?);
         }
         for index in selected + 1..=running {
-            let (Some(outer), Some(line)) = (function_of(index), &stack.frames[index].source)
-            else {
+            let Some(line) = &stack.frames[index].source else {
                 continue;
             };
             let outers = if index == running {
-                BTreeSet::from([physical.id])
+                physical.iter().map(|instance| instance.id).collect()
             } else {
-                inlined_in(outer)
+                inlined_in(&functions_of(index))
             };
             for instance in outers {
                 statements.extend(self.other_lines(instance, line)?);
@@ -439,6 +531,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.named_by_body(&stack.futures[selected]),
             Some(Inlined {
                 poll: self.named_by_body(&stack.futures[running]),
+                own: true,
                 function,
                 instances,
                 statements: statements.clone(),
@@ -572,7 +665,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             None => self.resume_point(pid, future).into_iter().collect(),
             Some(inlined) => match self.future_state(pid, future) {
                 Some((_, CoroutineStateKind::Suspended { .. })) => {
-                    if future == inlined.poll && self.awaits_twice(pid, future, inlined.function) {
+                    if !inlined.own && self.awaits_twice(pid, future, inlined.function) {
                         return Ok(Some(Followed::Ended(StopReason::StepIncomplete {
                             kind,
                             description: TWICE.into(),
@@ -602,16 +695,33 @@ impl<P: LinuxTraceOps> Controller<P> {
             "the poll of the future at {} returned pending; the step waits at {waiting:?}",
             future.object
         );
-        let drop_glue = self.drop_glue(future.ty);
-        let plan = waiting.iter().copied().chain(drop_glue).collect();
-        self.cleanup_plan_breakpoints(execution)?;
-        self.install_additional_plan_breakpoints(execution, &plan)?;
+        let (drop_glue, inlined_drops) = self.drop_glue(future.ty);
+        let inlined_drops = if task.is_some() {
+            inlined_drops
+        } else {
+            BTreeSet::new()
+        };
+        let task_entries = task.and_then(|task| self.task_entries(pid, task));
+        // The poll that returned `Pending` runs within the runtime's, which
+        // may yet end the task before it returns.
+        let task_return = task_entries
+            .as_ref()
+            .and_then(|_| self.dispatch_return(pid));
         let start = self
             .active_step_mut()
             .expect("the step remained active while its future was pending");
         let mut awaiting = start.awaiting.take().expect("the step follows a future");
         awaiting.waiting = waiting;
         awaiting.drop_glue = drop_glue;
+        awaiting.inlined_drops = inlined_drops;
+        awaiting.task_entries = task_entries;
+        awaiting.task_return = task_return;
+        let plan = awaiting.watched().collect::<BTreeSet<_>>();
+        self.cleanup_plan_breakpoints(execution)?;
+        self.install_additional_plan_breakpoints(execution, &plan)?;
+        let start = self
+            .active_step_mut()
+            .expect("the step remained active while its future was pending");
         *start = StepStart {
             plan_addresses: plan,
             awaiting: Some(awaiting),
@@ -620,37 +730,207 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(Some(Followed::Waits))
     }
 
-    /// Where the one function that drops every future of type `ty`
-    /// begins: rustc names it `drop_glue<T>` for the type's full name.
-    fn drop_glue(&self, ty: TypeReference) -> Option<VirtualAddress> {
-        let module = self.module_of(ty)?;
-        let info = module.image.type_info(ty)?;
+    /// The code of `task`'s runtime that takes it up again, read by the
+    /// stopped thread `reader`.
+    fn task_entries(
+        &self,
+        reader: Pid,
+        task: crate::TaskId,
+    ) -> Option<(crate::TaskId, TaskEntries)> {
+        let inferior = self.inferior.as_ref()?;
+        let runtime = self
+            .runtimes(inferior)
+            .into_iter()
+            .find(|runtime| runtime.id == task.runtime)?;
+        let entries = self.with_runtime_stop(inferior, &runtime, reader, |stop| {
+            runtime
+                .model
+                .task_entries(stop, Self::task_ref(inferior, task))
+        });
+        #[cfg(debug_assertions)]
+        if let Err(reason) = &entries {
+            record!("task {task}'s entries are unreadable: {reason}");
+        }
+        entries.ok().flatten().map(|entries| (task, entries))
+    }
+
+    /// Where the runtime's dispatch that runs the task on thread `pid`
+    /// returns to, read from the thread's stack.
+    fn dispatch_return(&self, pid: Pid) -> Option<TaskReturn> {
+        let inferior = self.inferior.as_ref()?;
+        let stack = self
+            .physical_stack(inferior, &StackRoot::of_thread(pid), DEFAULT_MAX_FRAMES)
+            .ok()?;
+        let level = (0..stack.frames.len()).find(|&level| {
+            stack
+                .lookup_address(level)
+                .and_then(|address| self.code_role(address))
+                == Some(crate::CodeRole::Dispatch)
+        })?;
+        let caller = stack.frames.get(level + 1)?;
+        Some(TaskReturn {
+            address: caller.context.instruction,
+            stack_pointer: caller.registers.get(super::frames::X86_64_RSP)?,
+        })
+    }
+
+    /// Goes on with a step that waits for its task as thread `pid` reaches
+    /// `address`, where the runtime takes up the task or returns from
+    /// running it: once the task has ended, the step ends saying how;
+    /// while it runs, the step watches for its return.
+    fn task_code_reached(
+        &mut self,
+        pid: Pid,
+        address: VirtualAddress,
+        kind: StepKind,
+        (task, entries): (crate::TaskId, TaskEntries),
+        task_return: Option<TaskReturn>,
+    ) -> Result<()> {
+        let registers = self.ptrace.registers(pid)?;
+        let returned = task_return.is_some_and(|task_return| {
+            task_return.address == address && task_return.stack_pointer == registers.rsp
+        });
+        let entered = !returned
+            && self.with_task_runtime(pid, task, |runtime, stop| {
+                Ok(runtime.takes_up(
+                    stop,
+                    &entries,
+                    address,
+                    &super::registers::x86_64_registers(&registers),
+                ))
+            }) == Ok(true);
+        // Whatever frees the task stops a thread first, so the task's
+        // memory still holds it as the code that ran it returns.
+        let ends = returned || entered && entries.frees.contains(&address);
+        if ends {
+            let end =
+                self.with_task_runtime(pid, task, |runtime, stop| runtime.task_end(stop, &entries));
+            let reason = match end {
+                Ok(Some(end)) => {
+                    record!("thread {pid} finds the step's task {task} ended: {end:?}");
+                    Some(StopReason::TaskEnded {
+                        kind,
+                        task,
+                        ending: match end {
+                            TaskEnd::Finished => TaskEnding::Finished,
+                            TaskEnd::Cancelled => TaskEnding::Cancelled,
+                        },
+                    })
+                }
+                Ok(None) if returned => None,
+                Ok(None) => Some(StopReason::StepIncomplete {
+                    kind,
+                    description: "the step's task was freed before it ended".into(),
+                }),
+                Err(reason) => Some(StopReason::StepIncomplete {
+                    kind,
+                    description: format!("whether the step's task ended is unknown: {reason}")
+                        .into(),
+                }),
+            };
+            if let Some(reason) = reason {
+                self.follow_step(pid);
+                return self.begin_visible_stop(pid, reason);
+            }
+        }
+        if entered && entries.runs.contains(&address) {
+            // Entered, the return address is the word the stack pointer
+            // points at, which the return pops.
+            let returns = self.ptrace.read_word(pid, registers.rsp)?;
+            self.watch_task_return(TaskReturn {
+                address: VirtualAddress::new(returns),
+                stack_pointer: registers.rsp + 8,
+            })?;
+        }
+        if self.barrier_active() {
+            self.finish_barrier_if_ready()
+        } else {
+            self.repair_when_alone(pid, address)
+        }
+    }
+
+    /// Watches where the code that runs the step's task returns. A return
+    /// watched before stays a plan site, where a thread passes.
+    fn watch_task_return(&mut self, task_return: TaskReturn) -> Result<()> {
+        let execution = self.active_execution()?;
+        let start = self.active_step_mut().expect("the step waits for its task");
+        let Some(awaiting) = start.awaiting.as_mut() else {
+            return Ok(());
+        };
+        awaiting.task_return = Some(task_return);
+        start.plan_addresses.insert(task_return.address);
+        self.install_additional_plan_breakpoints(execution, &BTreeSet::from([task_return.address]))
+    }
+
+    /// Calls `read` with the model of `task`'s runtime and a stop read by
+    /// thread `pid`.
+    fn with_task_runtime<T>(
+        &self,
+        pid: Pid,
+        task: crate::TaskId,
+        read: impl FnOnce(
+            &dyn crate::runtime_model::RuntimeModel,
+            &dyn crate::runtime_model::RuntimeStop,
+        ) -> std::result::Result<T, std::sync::Arc<str>>,
+    ) -> std::result::Result<T, std::sync::Arc<str>> {
+        let inferior = self.inferior.as_ref().ok_or("the process has ended")?;
+        let runtime = self
+            .runtimes(inferior)
+            .into_iter()
+            .find(|runtime| runtime.id == task.runtime)
+            .ok_or("the task's runtime is no longer loaded")?;
+        self.with_runtime_stop(inferior, &runtime, pid, |stop| {
+            read(runtime.model.as_ref(), stop)
+        })
+    }
+
+    /// Where the code that drops every future of type `ty` begins, which
+    /// rustc names `drop_glue<T>` for the type's full name: each copy of
+    /// the function, and each copy inlined elsewhere.
+    fn drop_glue(&self, ty: TypeReference) -> (BTreeSet<VirtualAddress>, BTreeSet<VirtualAddress>) {
+        let mut named = BTreeSet::new();
+        let mut inlined = BTreeSet::new();
+        let Some(module) = self.module_of(ty) else {
+            return (named, inlined);
+        };
+        let Some(identity) = module
+            .image
+            .type_info(ty)
+            .and_then(|info| Some((info.identity.as_deref()?.path.clone(), info.name.clone())))
+        else {
+            return (named, inlined);
+        };
         let mut name = String::from("drop_glue<");
-        for segment in info.identity.as_deref()?.path.iter() {
+        for segment in identity.0.iter() {
             name.push_str(segment);
             name.push_str("::");
         }
-        name.push_str(&info.name);
+        name.push_str(&identity.1);
         name.push('>');
-        let function = module
+        let entry = |instance: &crate::CodeInstanceInfo| {
+            instance
+                .breakpoint_entry
+                .map(|entry| entry.address)
+                .or_else(|| instance.ranges.iter().map(|range| range.start).min())
+                .and_then(|address| module.loaded.virtual_address(address).ok())
+        };
+        // Each codegen unit may have a copy of its own.
+        for function in module
             .image
             .functions()
             .iter()
-            .find(|function| *function.name == *name)?;
-        let mut instances = module
-            .image
-            .instances_for_function(function.id)
-            .filter(|instance| matches!(instance.kind, crate::CodeInstanceKind::OutOfLine));
-        let entry = instances
-            .next()?
-            .ranges
-            .iter()
-            .map(|range| range.start)
-            .min()?;
-        if instances.next().is_some() {
-            return None;
+            .filter(|function| *function.name == *name)
+        {
+            for instance in module.image.instances_for_function(function.id) {
+                let copies = if matches!(instance.kind, crate::CodeInstanceKind::OutOfLine) {
+                    &mut named
+                } else {
+                    &mut inlined
+                };
+                copies.extend(entry(instance));
+            }
         }
-        module.loaded.virtual_address(entry).ok()
+        (named, inlined)
     }
 
     /// Ends or goes on with a step whose future a thread at its drop glue
@@ -677,19 +957,19 @@ impl<P: LinuxTraceOps> Controller<P> {
         let stack =
             self.physical_stack(inferior, &StackRoot::of_thread(pid), DEFAULT_MAX_FRAMES)?;
         // The future is dropped by the code that drops what holds it, as
-        // the drop glue of each value around it passes it on.
-        let dropper = (1..stack.frames.len())
-            .find(|&level| {
-                stack.lookup_address(level).is_none_or(|lookup| {
-                    self.image_location(lookup)
-                        .and_then(|location| location.function)
-                        .is_none_or(|function| !is_drop_glue(&function.name))
-                })
-            })
+        // the drop glue of each value around it passes it on, whether as a
+        // function of its own or inlined into the dropper's.
+        let physical = |level: usize| {
+            let location = self.image_location(stack.lookup_address(level)?)?;
+            let instance = self
+                .module_image
+                .code_instance(location.physical_instance?)?;
+            self.module_image.function(instance.function)
+        };
+        let dropper = (0..stack.frames.len())
+            .find(|&level| physical(level).is_none_or(|function| !is_drop_glue(&function.name)))
             .filter(|&level| {
-                stack
-                    .lookup_address(level)
-                    .is_some_and(|lookup| self.code_role(lookup) == Some(crate::CodeRole::Ordinary))
+                physical(level).is_some_and(|function| function.role == crate::CodeRole::Ordinary)
             });
         let Some(dropper) = dropper else {
             let reason = task.map_or_else(
@@ -873,7 +1153,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .filter(|awaiting| {
                         awaiting.waits()
                             && (awaiting.waiting.contains(&address)
-                                || awaiting.drop_glue == Some(address))
+                                || awaiting.drop_glue.contains(&address)
+                                || awaiting.inlined_drops.contains(&address)
+                                || awaiting.takes_up_task(address))
                     })
                     .map(|awaiting| (*kind, *owner, awaiting)),
                 _ => None,
@@ -881,9 +1163,23 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Ok(false);
         };
-        // Drop glue is passed the place it drops.
-        if awaiting.drop_glue == Some(address) {
-            if self.ptrace.registers(pid)?.rdi == awaiting.future.object.get() {
+        if let Some(entries) = awaiting
+            .task_entries
+            .clone()
+            .filter(|_| awaiting.takes_up_task(address))
+        {
+            self.task_code_reached(pid, address, kind, entries, awaiting.task_return)?;
+            return Ok(true);
+        }
+        // Drop glue is passed the place it drops; a copy of it inlined
+        // elsewhere drops one in the task that runs it.
+        if awaiting.drop_glue.contains(&address) || awaiting.inlined_drops.contains(&address) {
+            let ours = if awaiting.drop_glue.contains(&address) {
+                self.ptrace.registers(pid)?.rdi == awaiting.future.object.get()
+            } else {
+                self.runs_step(owner, pid)
+            };
+            if ours {
                 self.future_dropped(pid, address, kind, awaiting.future)?;
             } else if self.barrier_active() {
                 self.finish_barrier_if_ready()?;
@@ -892,18 +1188,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             return Ok(true);
         }
-        // An inlined body's code may hold its future nowhere; the future
-        // names its task, which then names the future.
-        let polled = awaiting
-            .inlined
-            .as_ref()
-            .map_or(awaiting.future, |inlined| inlined.poll);
-        let ours = match self.running_future(pid, None) {
-            Some(running) => running == polled,
-            None => {
-                awaiting.inlined.is_some() && owner.task.is_some() && self.runs_step(owner, pid)
-            }
-        };
+        let ours = self.resumes_step(pid, address, owner, &awaiting);
         if !ours {
             if self.barrier_active() {
                 self.finish_barrier_if_ready()?;
@@ -957,6 +1242,61 @@ impl<P: LinuxTraceOps> Controller<P> {
             .expect("the step remained active as its future resumed") = resumed;
         self.go_on_without_plan(pid, address, Some(kind))?;
         Ok(true)
+    }
+}
+
+impl<P: LinuxTraceOps> Controller<P> {
+    /// Whether two futures are one: at one place, and of one type, which
+    /// each unit of code that uses it may describe anew.
+    fn same_future(&self, left: RunningFuture, right: RunningFuture) -> bool {
+        left.object == right.object
+            && (left.ty == right.ty
+                || self
+                    .module_of(left.ty)
+                    .is_some_and(|module| module.image.same_type(left.ty, right.ty)))
+    }
+
+    /// Whether the future that thread `pid` resumes at `address`, where
+    /// the step `awaiting` waits, is the step's: named by the body where it
+    /// names its own, or by the future whose poll runs it. An inlined
+    /// body's code may hold its future nowhere; the future names its task,
+    /// which then names the future.
+    fn resumes_step(
+        &self,
+        pid: Pid,
+        address: VirtualAddress,
+        owner: StepOwner,
+        awaiting: &AwaitStep,
+    ) -> bool {
+        let Some(inlined) = &awaiting.inlined else {
+            return self
+                .running_future(pid, None)
+                .is_some_and(|running| self.same_future(running, awaiting.future));
+        };
+        let body = self
+            .image_location(address)
+            .and_then(|location| match location.inline_frames {
+                InlineFrameLookup::Unique(chain) => chain
+                    .instances
+                    .iter()
+                    .copied()
+                    .find(|instance| inlined.instances.contains(instance)),
+                _ => None,
+            });
+        let named = if inlined.own {
+            body.and_then(|instance| self.running_future(pid, Some(instance)))
+                .map(|own| self.same_future(own, awaiting.future))
+        } else {
+            None
+        };
+        named
+            .or_else(|| {
+                (inlined.poll != awaiting.future || !inlined.own)
+                    .then(|| self.running_future(pid, None))
+                    .flatten()
+                    .map(|running| self.same_future(running, inlined.poll))
+            })
+            .unwrap_or_else(|| owner.task.is_some() && self.runs_step(owner, pid))
     }
 }
 

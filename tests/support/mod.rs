@@ -536,11 +536,17 @@ impl Scenario {
     /// Starts a step of the selected thread or task, and returns once it
     /// runs, with what ends it.
     pub async fn start_stepping(&mut self, kind: StepKind) -> JoinHandle<Result<StopReason>> {
-        let task = self.spawn_request(&format!("step {kind:?}"), move |handle| async move {
+        let mut task = self.spawn_request(&format!("step {kind:?}"), move |handle| async move {
             handle.step(kind).await
         });
-        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. }))
-            .await;
+        // A step refused never continues the inferior.
+        let refused = tokio::select! {
+            _ = self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. })) => None,
+            ended = &mut task => Some(ended),
+        };
+        if let Some(ended) = refused {
+            self.fail(&format!("step {kind:?} ended unstarted: {ended:?}"));
+        }
         task
     }
 

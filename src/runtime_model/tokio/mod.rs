@@ -21,8 +21,8 @@ use layout::{Context, Flavor, Layout, Owned, Tasks};
 use super::records::{self, Missing};
 use super::{
     Crossing, DynamicValue, Partial, RuntimeException, RuntimeHook, RuntimeImage, RuntimeModel,
-    RuntimeSignals, RuntimeStop, RuntimeTask, StoredValue, TaskContext, TaskPage, TaskRef,
-    ThreadActivity,
+    RuntimeSignals, RuntimeStop, RuntimeTask, StoredValue, TaskContext, TaskEnd, TaskEntries,
+    TaskPage, TaskRef, ThreadActivity,
 };
 use crate::unwind::RegisterFile;
 use crate::{ImageAddress, StackSegment, TaskState, ThreadId, ThreadLocal, VirtualAddress};
@@ -38,6 +38,8 @@ const VERSIONED_SOURCE: &str = "src/runtime/task/raw.rs";
 /// The task state's bits (`runtime/task/state.rs`), which tokio keeps in
 /// constants its debug information does not describe.
 const RUNNING: u64 = 0b1;
+/// The register a function's first argument is passed in.
+const RDI: u16 = 5;
 const COMPLETE: u64 = 0b10;
 const NOTIFIED: u64 = 0b100;
 const CANCELLED: u64 = 0b10_0000;
@@ -552,6 +554,93 @@ impl RuntimeModel for TokioRuntime {
 
     fn task_noun(&self) -> &'static str {
         TASK_NOUN.0
+    }
+
+    fn task_entries(
+        &self,
+        stop: &dyn RuntimeStop,
+        task: TaskRef,
+    ) -> Result<Option<TaskEntries>, Arc<str>> {
+        let tasks = self.task_layout()?;
+        let census = self.census(stop)?;
+        let Some(found) = self.find(stop, &census, task)? else {
+            return Ok(None);
+        };
+        let header = found.locator;
+        if header == 0 {
+            return Ok(None);
+        }
+        let unreadable = || Arc::<str>::from(format!("task {} is unreadable", task.number));
+        let vtable =
+            records::word(stop, header.wrapping_add(tasks.vtable)).ok_or_else(unreadable)?;
+        let entry = |offset: u64| {
+            records::word(stop, vtable.wrapping_add(offset))
+                .map(VirtualAddress::new)
+                .ok_or_else(unreadable)
+        };
+        let (poll, shutdown) = (entry(tasks.poll)?, entry(tasks.shutdown)?);
+        // The task's cell is freed as the box that holds it is dropped,
+        // which the glue for `Box<Cell<T, S>>` does for the task's `T` and
+        // `S`, as its poll function's name spells them.
+        let frees = self
+            .image
+            .function_name(ImageAddress::new(poll.get().wrapping_sub(stop.load_bias())))
+            .and_then(|name| {
+                let arguments = name.strip_prefix("poll")?.to_owned();
+                Some(self.image.function_entries(&format!(
+                    "drop_glue<alloc::boxed::Box<tokio::runtime::task::core::Cell{arguments}, \
+                     alloc::alloc::Global>>"
+                )))
+            })
+            .unwrap_or_default();
+        Ok(Some(TaskEntries {
+            task: TaskRef {
+                number: task.number,
+                locator: Some(header),
+            },
+            runs: vec![poll, shutdown],
+            frees: frees
+                .into_iter()
+                .map(|entry| VirtualAddress::new(entry.get().wrapping_add(stop.load_bias())))
+                .collect(),
+        }))
+    }
+
+    fn takes_up(
+        &self,
+        stop: &dyn RuntimeStop,
+        task: &TaskEntries,
+        entry: VirtualAddress,
+        registers: &RegisterFile,
+    ) -> bool {
+        let (Some(header), Some(argument)) = (task.task.locator, registers.get(RDI)) else {
+            return false;
+        };
+        // The functions that run the task are passed its header; the glue
+        // that frees it, the box that holds it.
+        if task.frees.contains(&entry) {
+            records::word(stop, argument) == Some(header)
+        } else {
+            argument == header
+        }
+    }
+
+    fn task_end(
+        &self,
+        stop: &dyn RuntimeStop,
+        task: &TaskEntries,
+    ) -> Result<Option<TaskEnd>, Arc<str>> {
+        let tasks = self.task_layout()?;
+        let header = task.task.locator.ok_or("the task is not located")?;
+        let state = records::word(stop, header.wrapping_add(tasks.state))
+            .ok_or_else(|| format!("task {} is unreadable", task.task.number))?;
+        Ok(
+            (state & COMPLETE != 0).then_some(if state & CANCELLED == 0 {
+                TaskEnd::Finished
+            } else {
+                TaskEnd::Cancelled
+            }),
+        )
     }
 
     fn driven_future(&self, function: &crate::FunctionInfo) -> Option<&'static str> {

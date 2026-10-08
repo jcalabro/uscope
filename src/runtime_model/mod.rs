@@ -67,6 +67,12 @@ pub trait RuntimeImage: std::fmt::Debug {
     /// Where the named function's body begins, past the prologue that sets
     /// up its frame, or `None` when that is not known.
     fn function_body(&self, name: &str) -> Option<ImageAddress>;
+    /// Where each copy of the functions the debug information names `name`
+    /// begins: a generic function may have one in each unit that uses it.
+    fn function_entries(&self, name: &str) -> Vec<ImageAddress> {
+        let _ = name;
+        Vec::new()
+    }
     /// Where the member reached through `path` lies within a named record,
     /// through nested records.
     fn member(&self, type_name: &str, path: &[&str]) -> Option<Member>;
@@ -456,6 +462,60 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         let _ = path;
         false
     }
+    /// The runtime's code that takes up the task `task` again, which a
+    /// step that waits for the task watches to see it end; `None` when
+    /// the runtime names no such code.
+    fn task_entries(
+        &self,
+        stop: &dyn RuntimeStop,
+        task: TaskRef,
+    ) -> Result<Option<TaskEntries>, Arc<str>> {
+        let _ = (stop, task);
+        Ok(None)
+    }
+    /// Whether a stopped thread entering `entry`, one of `task`'s entries,
+    /// given its registers there, takes up that task rather than another.
+    fn takes_up(
+        &self,
+        stop: &dyn RuntimeStop,
+        task: &TaskEntries,
+        entry: VirtualAddress,
+        registers: &RegisterFile,
+    ) -> bool {
+        let _ = (stop, task, entry, registers);
+        false
+    }
+    /// How the task `task` ended, or `None` while it has not.
+    fn task_end(
+        &self,
+        stop: &dyn RuntimeStop,
+        task: &TaskEntries,
+    ) -> Result<Option<TaskEnd>, Arc<str>> {
+        let _ = (stop, task);
+        Ok(None)
+    }
+}
+
+/// The runtime's code that takes up one task again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskEntries {
+    /// The task, as the runtime locates it.
+    pub task: TaskRef,
+    /// Where the functions that run the task, such as polling it or
+    /// shutting it down, begin: the task may end before they return.
+    pub runs: Vec<VirtualAddress>,
+    /// Where each copy of the function that frees the task begins, once it
+    /// has ended.
+    pub frees: Vec<VirtualAddress>,
+}
+
+/// How a task ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskEnd {
+    /// Its future returned its output.
+    Finished,
+    /// Its future was dropped before it finished.
+    Cancelled,
 }
 
 /// Every runtime a module carries, each bound against its debug
@@ -519,6 +579,16 @@ impl RuntimeImage for ModuleImage {
 
     /// Where a function breakpoint enters the function, once that is past
     /// its first instruction.
+    fn function_entries(&self, name: &str) -> Vec<ImageAddress> {
+        self.functions()
+            .iter()
+            .filter(|function| *function.name == *name)
+            .flat_map(|function| self.instances_for_function(function.id))
+            .filter(|instance| matches!(instance.kind, crate::CodeInstanceKind::OutOfLine))
+            .filter_map(|instance| instance.ranges.iter().map(|range| range.start).min())
+            .collect()
+    }
+
     fn function_body(&self, name: &str) -> Option<ImageAddress> {
         let entry = self.symbol_named(name).ok()?.address;
         let instance = self.locate(entry).physical_instance?;
