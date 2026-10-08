@@ -360,12 +360,13 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     fn task_noun(&self) -> &'static str;
 }
 
-/// The runtime a module carries, bound against its debug information, or
-/// why it cannot be; `None` for a module with no runtime model knows.
+/// Every runtime a module carries, each bound against its debug
+/// information or with why it cannot be; none for a module with no runtime
+/// a model knows.
 pub fn detect(
-    image: Arc<dyn RuntimeImage + Send + Sync>,
-) -> Option<Result<Arc<dyn RuntimeModel>, Arc<str>>> {
-    go::detect(image)
+    image: &Arc<dyn RuntimeImage + Send + Sync>,
+) -> Vec<Result<Arc<dyn RuntimeModel>, Arc<str>>> {
+    go::detect(Arc::clone(image)).into_iter().collect()
 }
 
 impl RuntimeImage for ModuleImage {

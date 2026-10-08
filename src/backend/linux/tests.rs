@@ -4428,9 +4428,9 @@ fn a_step_follows_its_task_to_another_thread_and_passes_the_others() {
         .controller
         .runtime_models
         .borrow_mut()
-        .insert(image.id(), Some(Ok(Arc::clone(&runtime) as _)));
+        .insert(image.id(), vec![Ok(Arc::clone(&runtime) as _)]);
     let task = crate::TaskId {
-        runtime: crate::RuntimeId::new(harness.inferior().loaded_module.id.get()),
+        runtime: crate::RuntimeId::new(harness.inferior().loaded_module.id.get() * 4),
         number: 1,
     };
     runtime.runs(first, 1);

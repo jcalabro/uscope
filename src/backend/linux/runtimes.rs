@@ -39,14 +39,31 @@ pub(super) struct BoundRuntime {
     pub(super) model: Arc<dyn RuntimeModel>,
 }
 
-/// The models bound to each image so far: `None` for an image with no
-/// runtime, or why binding one failed.
+/// The models bound to each image so far, each with why binding it failed
+/// if it did.
 pub(super) type RuntimeCache = std::cell::RefCell<
     std::collections::BTreeMap<
         crate::ModuleImageId,
-        Option<std::result::Result<Arc<dyn RuntimeModel>, Arc<str>>>,
+        Vec<std::result::Result<Arc<dyn RuntimeModel>, Arc<str>>>,
     >,
 >;
+
+/// The most runtimes one module carries, which numbers each runtime by its
+/// module and its place among the module's runtimes, the same at every
+/// stop.
+const RUNTIMES_PER_MODULE: u32 = 4;
+
+/// The id of the `index`th runtime the module `module` carries.
+fn runtime_id(module: crate::ModuleId, index: usize) -> Option<RuntimeId> {
+    let index = u32::try_from(index)
+        .ok()
+        .filter(|index| *index < RUNTIMES_PER_MODULE)?;
+    module
+        .get()
+        .checked_mul(RUNTIMES_PER_MODULE)?
+        .checked_add(index)
+        .map(RuntimeId::new)
+}
 
 /// One stop of the process, as a runtime model reads it.
 struct ProcessStop<'a, P> {
@@ -109,13 +126,17 @@ impl<P: InspectionOps> Controller<P> {
     /// [`Self::unbound_runtimes`].
     pub(super) fn runtimes(&self, inferior: &Inferior) -> Vec<BoundRuntime> {
         self.loaded_images(inferior)
-            .filter_map(|(module, image)| {
-                let model = self.bind_runtime(image)?.ok()?;
-                Some(BoundRuntime {
-                    id: RuntimeId::new(module.id.get()),
-                    module,
-                    model,
-                })
+            .flat_map(|(module, image)| {
+                self.bind_runtimes(image)
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(move |(index, model)| {
+                        Some(BoundRuntime {
+                            id: runtime_id(module.id, index)?,
+                            module,
+                            model: model.ok()?,
+                        })
+                    })
             })
             .collect()
     }
@@ -124,7 +145,8 @@ impl<P: InspectionOps> Controller<P> {
     /// it bound, as when its debug information is stripped.
     pub(super) fn unbound_runtimes(&self, inferior: &Inferior) -> Vec<Arc<str>> {
         self.loaded_images(inferior)
-            .filter_map(|(_, image)| self.bind_runtime(image)?.err())
+            .flat_map(|(_, image)| self.bind_runtimes(image))
+            .filter_map(std::result::Result::err)
             .collect()
     }
 
@@ -140,14 +162,14 @@ impl<P: InspectionOps> Controller<P> {
         )
     }
 
-    fn bind_runtime(
+    fn bind_runtimes(
         &self,
         image: &Arc<ModuleImage>,
-    ) -> Option<std::result::Result<Arc<dyn RuntimeModel>, Arc<str>>> {
+    ) -> Vec<std::result::Result<Arc<dyn RuntimeModel>, Arc<str>>> {
         self.runtime_models
             .borrow_mut()
             .entry(image.id())
-            .or_insert_with(|| runtime_model::detect(Arc::clone(image) as _))
+            .or_insert_with(|| runtime_model::detect(&(Arc::clone(image) as _)))
             .clone()
     }
 
