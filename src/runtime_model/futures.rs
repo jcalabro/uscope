@@ -226,11 +226,7 @@ fn representation(
             }
             | TypeKind::Reference { target, .. } => Shape::Pointer(*target),
             TypeKind::Record { members, .. } => {
-                let pinned = info.identity.as_ref().is_some_and(|identity| {
-                    identity.language == SourceLanguage::Rust
-                        && identity.base.as_ref() == "Pin"
-                        && identity.path.iter().map(AsRef::as_ref).eq(["core", "pin"])
-                });
+                let pinned = is_pin(info);
                 let member = |name: &str| {
                     members
                         .iter()
@@ -263,6 +259,25 @@ fn representation(
         return Some((ty, shape));
     }
     None
+}
+
+/// Whether a value of type `ty` is a pinned pointer to a future, which
+/// stays where it is until it is dropped: what a variable that holds a
+/// future being polled must be, since the memory a future moved from goes
+/// on looking like a future.
+pub fn pinned(image: &dyn RuntimeImage, ty: TypeReference) -> bool {
+    representation(image, ty)
+        .and_then(|(ty, _)| image.type_info(ty))
+        .is_some_and(is_pin)
+}
+
+/// Whether a type is Rust's `Pin`.
+fn is_pin(info: &crate::TypeInfo) -> bool {
+    info.identity.as_ref().is_some_and(|identity| {
+        identity.language == SourceLanguage::Rust
+            && identity.base.as_ref() == "Pin"
+            && identity.path.iter().map(AsRef::as_ref).eq(["core", "pin"])
+    })
 }
 
 /// Whether a pointer type points to a trait object's data.

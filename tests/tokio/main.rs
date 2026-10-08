@@ -6,6 +6,7 @@
 mod support;
 
 mod coroutines;
+mod drivers;
 mod invariants;
 mod panics;
 mod resume_points;

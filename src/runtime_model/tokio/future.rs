@@ -54,6 +54,36 @@ impl FutureLayout {
     }
 }
 
+/// The functions that poll a future no task holds, each with the variable
+/// that holds it: the thread parker that multi-thread runtimes' `block_on`
+/// and every `Handle::block_on` park on, and the current-thread scheduler's
+/// `block_on`, which polls the future between its tasks.
+const DRIVERS: [(&str, &str); 3] = [
+    (
+        "tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{closure#0}",
+        "future",
+    ),
+    ("tokio::runtime::park::CachedParkThread::block_on", "f"),
+    (
+        "tokio::runtime::scheduler::current_thread::CurrentThread::block_on",
+        "future",
+    ),
+];
+
+/// The variable that holds the future `function` drives, if it is one of
+/// tokio's functions that drive one.
+pub(super) fn driven_future(function: &crate::FunctionInfo) -> Option<&'static str> {
+    if function.role != crate::CodeRole::RuntimeInternal {
+        return None;
+    }
+    let demangled = crate::demangle::demangle(function.linkage_name.as_deref()?)?;
+    let path = crate::demangle::rust_path(&demangled)?;
+    DRIVERS
+        .iter()
+        .find(|(driver, _)| *driver == path)
+        .map(|(_, variable)| *variable)
+}
+
 impl TokioRuntime {
     /// The future of the task whose header is at `header`, and its type,
     /// or why the task has none.

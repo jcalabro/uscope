@@ -9,7 +9,7 @@ use nix::unistd::Pid;
 use crate::debug_info::{TailJump, UnwindInfo, VariableRuntimeError};
 use crate::model::FrameMetadata;
 use crate::protocol::{FramePresentation, PresentedFrame, StepKind, StopId, StopReason};
-use crate::runtime_model::Crossing;
+use crate::runtime_model::{Crossing, futures};
 use crate::unwind::{
     CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, MemoryReader, RegisterFile,
     collect_frames,
@@ -256,13 +256,14 @@ impl<P: InspectionOps> Controller<P> {
         presentation: Option<&FramePresentation>,
     ) -> Result<Expanded> {
         let callers = Callers::with_stack(self, inferior, root.clone(), stack.clone(), unwound);
-        expand_inline_backtrace(
+        let expanded = expand_inline_backtrace(
             stack,
             root.context,
             modules,
             presentation,
             &mut |activation, code| callers.tail_jumps(activation, code),
-        )
+        )?;
+        Ok(self.splice_driven(inferior, root, stack, modules, expanded))
     }
 
     /// The inferior, once `stop_id` is its current stop and `root` begins in
@@ -461,18 +462,40 @@ impl<P: InspectionOps> Controller<P> {
 
         let expanded =
             self.expand_backtrace(inferior, root, &stack, max_frames, &modules, presentation)?;
+        self.resolved_in(inferior, root, &stack, &modules, &expanded, frame)
+    }
+
+    /// One logical frame of an expanded stack, and the state that
+    /// evaluates its variables.
+    pub(super) fn resolved_in(
+        &self,
+        inferior: &Inferior,
+        root: &StackRoot,
+        stack: &PhysicalStack,
+        modules: &[UnwindModule<'_>],
+        expanded: &Expanded,
+        frame: StackFrameId,
+    ) -> Result<ResolvedFrame> {
+        let level = usize::try_from(frame.get()).expect("u32 fits usize");
         let Some(selected) = expanded.trace.frames.get(level).cloned() else {
             return Err(Error::FrameNotFound {
                 frame,
                 frames: u32::try_from(expanded.trace.frames.len()).expect("frame count fits u32"),
             });
         };
-        let FrameOrigin { activation, jump } = expanded.origins[level];
+        let FrameOrigin {
+            activation,
+            jump,
+            future,
+        } = expanded.origins[level];
+        if let Some(future) = future {
+            return Ok(self.suspended_frame(frame, selected, &expanded.futures[future]));
+        }
         let physical = &stack.frames[activation];
         let code = jump.or_else(|| {
             stack
                 .lookup_address(activation)
-                .and_then(|lookup| unwind_module_for(&modules, lookup))
+                .and_then(|lookup| unwind_module_for(modules, lookup))
                 .map(|(module, address)| (module.loaded.id, address))
         });
         let presented = match selected.kind {
@@ -527,7 +550,7 @@ impl<P: InspectionOps> Controller<P> {
             code,
             scope,
             registers: stack.registers(activation),
-            cfa: self.frame_cfa(root.reader(), &modules, code, &physical.registers),
+            cfa: self.frame_cfa(root.reader(), modules, code, &physical.registers),
             activation,
             below_stack_pointer: self.below_stack_pointer(inferior, root, physical),
         })
@@ -968,19 +991,25 @@ pub(super) fn source_line_changed(
 
 /// Where a logical frame of a backtrace comes from.
 #[derive(Debug, Clone, Copy)]
-struct FrameOrigin {
+pub(super) struct FrameOrigin {
     /// The physical activation whose state the frame has, or, for a frame
-    /// whose function left by a tail call, the one whose state replaced it.
-    activation: usize,
+    /// whose function left by a tail call, the one whose state replaced it;
+    /// for a future's frame, the one that drives it.
+    pub(super) activation: usize,
     /// For a frame whose function left by a tail call, the module and an
     /// address within its jump.
-    jump: Option<(ModuleId, ImageAddress)>,
+    pub(super) jump: Option<(ModuleId, ImageAddress)>,
+    /// For a frame of a future a frame drives, the future, in
+    /// [`Expanded::futures`].
+    pub(super) future: Option<usize>,
 }
 
 /// A stack's logical frames, and where each comes from.
-struct Expanded {
-    trace: Backtrace,
-    origins: Vec<FrameOrigin>,
+pub(super) struct Expanded {
+    pub(super) trace: Backtrace,
+    pub(super) origins: Vec<FrameOrigin>,
+    /// The futures whose frames the trace shows, where frames drive them.
+    pub(super) futures: Vec<futures::AsyncFrame>,
 }
 
 /// A stack's logical frames: each activation's inline frames, innermost
@@ -1004,6 +1033,7 @@ fn expand_inline_backtrace(
             FrameOrigin {
                 activation,
                 jump: None,
+                future: None,
             },
         );
         // A signal interrupted its frame rather than calling it.
@@ -1029,6 +1059,7 @@ fn expand_inline_backtrace(
                     FrameOrigin {
                         activation,
                         jump: Some((module.loaded.id, jump.lookup)),
+                        future: None,
                     },
                 );
             }
@@ -1043,8 +1074,10 @@ fn expand_inline_backtrace(
             context: subject,
             frames: frames.into(),
             termination: stack.termination.clone(),
+            unfollowed: Arc::from([]),
         },
         origins,
+        futures: Vec::new(),
     })
 }
 

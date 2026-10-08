@@ -133,6 +133,20 @@ pub fn workers_parked(handle: &tokio::runtime::Handle) -> bool {
     (0..metrics.num_workers()).all(|worker| metrics.worker_park_unpark_count(worker) % 2 == 1)
 }
 
+/// Whether the thread `tid` sleeps in a futex wait, as a thread parked on
+/// a condition variable does.
+pub fn thread_parked(tid: i32) -> bool {
+    let task = format!("/proc/self/task/{tid}");
+    let sleeping = std::fs::read_to_string(format!("{task}/stat")).is_ok_and(|stat| {
+        // The state follows the command's closing parenthesis.
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| rest.starts_with('S'))
+    });
+    let in_futex = std::fs::read_to_string(format!("{task}/syscall"))
+        .is_ok_and(|syscall| syscall.split_whitespace().next() == Some("202"));
+    sleeping && in_futex
+}
+
 /// Prints a checkpoint's lines and stops there under a debugger. The
 /// caller has waited until nothing moves. With `TRUTH_CORE` set, the
 /// program then traps, for the debugger that runs it to dump its core.

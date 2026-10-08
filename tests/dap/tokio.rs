@@ -7,10 +7,15 @@ use crate::dap::{Configuration, Dap, Profile, fixture};
 
 /// The workers fixture, stopped at its checkpoint, with its threads.
 fn at_checkpoint(name: &str) -> (Dap, i64, Vec<(i64, String)>) {
+    stopped_at_checkpoint(name, "tokio-workers-o0")
+}
+
+/// A tokio fixture, stopped at its checkpoint, with its threads.
+fn stopped_at_checkpoint(name: &str, program: &str) -> (Dap, i64, Vec<(i64, String)>) {
     let mut dap = Dap::start(name);
     let started = dap.launch(
         Profile::VsCode,
-        &fixture("tokio-workers-o0"),
+        &fixture(program),
         json!({}),
         &Configuration {
             functions: vec!["truth_reached".to_owned()],
@@ -111,5 +116,49 @@ fn a_suspended_tasks_stack_is_its_chain_of_awaits() {
     );
     // Each task records its own number, `me`, in its locals.
     assert_eq!(local["result"], (task * 100 + 3).to_string(), "{local}");
+    dap.finish();
+}
+
+/// A thread that blocks on a future shows the future's awaits under a
+/// label, before the frame of tokio's that drives it, and each async
+/// function's frame keeps its locals.
+#[test]
+fn a_blocked_threads_stack_holds_the_future_it_drives() {
+    let (mut dap, stopped, listed) = stopped_at_checkpoint("tokio driven", "tokio-drivers-o0");
+    // The main thread drives `#[tokio::main]`'s future while another
+    // reaches the checkpoint.
+    let (main, _) = listed
+        .iter()
+        .find(|(id, _)| *id != stopped)
+        .unwrap_or_else(|| panic!("{listed:?}"));
+    let trace = dap.request("stackTrace", json!({"threadId": main}));
+    let frames = trace["stackFrames"].as_array().expect("frames");
+    let names = frames
+        .iter()
+        .map(|frame| frame["name"].as_str().expect("a name"))
+        .collect::<Vec<_>>();
+    let label = names
+        .iter()
+        .position(|name| *name == "in the future the next frame drives")
+        .unwrap_or_else(|| panic!("{trace}"));
+    assert!(
+        names[label + 1].starts_with("awaiting tokio::sync::oneshot::Receiver<u32>"),
+        "{trace}"
+    );
+    assert_eq!(
+        names[label + 2..label + 5],
+        [
+            "async waiting",
+            "async driven",
+            "async tokio_main::{async block#0}"
+        ],
+        "{trace}"
+    );
+    assert_eq!(names[label + 5], "on the thread's stack", "{trace}");
+    let local = dap.request(
+        "evaluate",
+        json!({"expression": "waiting_local", "frameId": frames[label + 2]["id"], "context": "watch"}),
+    );
+    assert_eq!(local["result"], "7", "{local}");
     dap.finish();
 }

@@ -548,6 +548,10 @@ impl RuntimeModel for TokioRuntime {
     fn task_noun(&self) -> &'static str {
         TASK_NOUN.0
     }
+
+    fn driven_future(&self, function: &crate::FunctionInfo) -> Option<&'static str> {
+        future::driven_future(function)
+    }
 }
 
 #[cfg(test)]

@@ -584,7 +584,7 @@ async fn check_awaits(
 
 /// An async function's frame lists the local its task recorded, with the
 /// value recorded, and an expression reads the same value from it.
-async fn check_saved_local(
+pub async fn check_saved_local(
     scenario: &Scenario,
     view: StopContext,
     frame: &uscope::StackFrame,

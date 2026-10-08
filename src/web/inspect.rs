@@ -85,6 +85,11 @@ pub async fn backtrace(
                 .and_then(|image| image.path().file_name())
                 .map(|name| name.to_string_lossy().into_owned()),
             source,
+            unfollowed: trace
+                .unfollowed
+                .iter()
+                .find(|future| future.driver == frame.id)
+                .map(|future| future.reason.to_string()),
         });
     }
     Ok(Backtrace {

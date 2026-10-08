@@ -1195,6 +1195,7 @@ mod tests {
                 })
                 .collect(),
             termination,
+            unfollowed: Arc::from([]),
         }
     }
 
@@ -1258,6 +1259,7 @@ mod tests {
                     context: ThreadId::new(u64::try_from(tid).expect("a positive tid")).into(),
                     frames,
                     termination: UnwindTermination::Complete,
+                    unfollowed: Arc::from([]),
                 },
             )
         };

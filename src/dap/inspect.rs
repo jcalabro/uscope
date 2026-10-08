@@ -264,9 +264,18 @@ impl Session {
         for (frame, iterates) in trace.frames.iter().zip(iterators) {
             if switches && segment != Some(frame.segment) {
                 segment = Some(frame.segment);
+                entries.push(Err(
+                    crate::cli::format::stack_label(frame.segment).to_owned()
+                ));
+            }
+            for future in trace
+                .unfollowed
+                .iter()
+                .filter(|future| future.driver == frame.id)
+            {
                 entries.push(Err(format!(
-                    "on {}",
-                    crate::cli::format::stack_owner(frame.segment)
+                    "<the future the next frame drives is not shown in full: {}>",
+                    future.reason
                 )));
             }
             entries.push(Ok((frame, iterates)));

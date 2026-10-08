@@ -340,7 +340,12 @@ address: string | null,
 /**
  * The file name of the module the code is in.
  */
-module: string | null, source: SourceLine | null, };
+module: string | null, source: SourceLine | null, 
+/**
+ * For a frame that drives a future whose awaits the stack does not
+ * show in full, why.
+ */
+unfollowed: string | null, };
 
 export type FrameKind = "physical" | "inline" | "signal" | "tailCall" | "async" | "awaited";
 

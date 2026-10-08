@@ -317,6 +317,10 @@ pub enum StackSegment {
     System,
     /// A runtime's signal-handling stack.
     Signal,
+    /// No stack: the chain of awaits of a future that the frame below
+    /// drives, such as the one a runtime's `block_on` polls, which is
+    /// suspended between its polls.
+    Future,
 }
 
 /// What a stopped thread runs for a language runtime.
@@ -3690,6 +3694,19 @@ pub struct Backtrace {
     pub frames: Arc<[StackFrame]>,
     /// The completion or failure reason for the trace.
     pub termination: UnwindTermination,
+    /// The futures frames of the trace drive whose chains of awaits it
+    /// shows in part or not at all.
+    pub unfollowed: Arc<[UnfollowedFuture]>,
+}
+
+/// A future a frame drives whose chain of awaits a backtrace does not show
+/// in full.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnfollowedFuture {
+    /// The frame that drives the future.
+    pub driver: StackFrameId,
+    /// Why the chain is not shown, or where it ends.
+    pub reason: Arc<str>,
 }
 
 impl Backtrace {

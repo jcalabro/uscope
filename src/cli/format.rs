@@ -15,8 +15,8 @@ use uscope::{
     LineNumber, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity,
     ModuleImage, RegisterSnapshot, SourceContext, SourceLine, StackFrame, StackSegment,
     StateSnapshot, StepKind, StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary,
-    TaskSnapshot, ThreadActivity, ThreadState, VirtualAddress, WatchScope, Watchpoint,
-    WatchpointHit, WatchpointInvalidation,
+    TaskSnapshot, ThreadActivity, ThreadState, UnfollowedFuture, VirtualAddress, WatchScope,
+    Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
 
 use super::commands::{COMMANDS, CommandSpec, aliases};
@@ -1888,11 +1888,37 @@ pub fn backtrace(
     let folded = if raw {
         Vec::new()
     } else {
-        runtime_runs(&trace.frames[..shown], selected)
+        runtime_runs(trace, shown, selected)
+    };
+    let note = |lines: &mut Vec<String>, frames: std::ops::Range<usize>| {
+        for future in trace.unfollowed.iter().filter(|future| {
+            usize::try_from(future.driver.get()).is_ok_and(|level| frames.contains(&level))
+        }) {
+            lines.push(
+                renderer
+                    .paint(Role::Warning, format_args!("    {}", unfollowed(future)))
+                    .to_string(),
+            );
+        }
+    };
+    let mut label = |lines: &mut Vec<String>, frame: &StackFrame| {
+        if switches && segment != Some(frame.segment) {
+            segment = Some(frame.segment);
+            lines.push(
+                renderer
+                    .paint(
+                        Role::Metadata,
+                        format_args!("    {}:", stack_label(frame.segment)),
+                    )
+                    .to_string(),
+            );
+        }
     };
     for (index, (frame, iterates)) in trace.frames[..shown].iter().zip(iterators).enumerate() {
         if let Some(run) = folded.iter().find(|run| run.contains(&index)) {
             if run.start == index {
+                label(&mut lines, frame);
+                note(&mut lines, run.clone());
                 let (first, last) = (&trace.frames[run.start], &trace.frames[run.end - 1]);
                 lines.push(
                     renderer
@@ -1910,17 +1936,8 @@ pub fn backtrace(
             }
             continue;
         }
-        if switches && segment != Some(frame.segment) {
-            segment = Some(frame.segment);
-            lines.push(
-                renderer
-                    .paint(
-                        Role::Metadata,
-                        format_args!("    on {}:", stack_owner(frame.segment)),
-                    )
-                    .to_string(),
-            );
-        }
+        label(&mut lines, frame);
+        note(&mut lines, index..index + 1);
         lines.push(stack_frame(
             frame,
             iterates,
@@ -1958,15 +1975,27 @@ pub fn backtrace(
 /// runtime's own; and every frame past the innermost dispatch, which runs
 /// the runtime's code for the thread rather than the task's. Where the
 /// stack stopped, and the selected frame, are always shown.
-fn runtime_runs(frames: &[StackFrame], selected: u32) -> Vec<std::ops::Range<usize>> {
+fn runtime_runs(trace: &Backtrace, shown: usize, selected: u32) -> Vec<std::ops::Range<usize>> {
+    let frames = &trace.frames[..shown];
+    // A frame that drives a future is shown with it, or with why it is not.
+    let mut kept = trace
+        .frames
+        .windows(2)
+        .filter(|pair| {
+            pair[0].segment == StackSegment::Future && pair[1].segment != StackSegment::Future
+        })
+        .map(|pair| pair[1].level)
+        .chain(trace.unfollowed.iter().map(|future| future.driver.get()))
+        .collect::<BTreeSet<_>>();
+    kept.insert(selected);
     let dispatch = frames
         .iter()
         .position(|frame| frame.role == CodeRole::Dispatch)
         .filter(|at| frames[*at].level >= selected);
     let Some(dispatch) = dispatch else {
-        return machinery_runs(frames, selected);
+        return machinery_runs(frames, &kept);
     };
-    let mut runs = machinery_runs(&frames[..=dispatch], selected);
+    let mut runs = machinery_runs(&frames[..=dispatch], &kept);
     let below = dispatch + 1..frames.len();
     if below.len() >= 2 {
         // The dispatch frame joins the run that ends at it.
@@ -1979,12 +2008,12 @@ fn runtime_runs(frames: &[StackFrame], selected: u32) -> Vec<std::ops::Range<usi
 }
 
 /// The runs [`runtime_runs`] folds by role alone.
-fn machinery_runs(frames: &[StackFrame], selected: u32) -> Vec<std::ops::Range<usize>> {
+fn machinery_runs(frames: &[StackFrame], kept: &BTreeSet<u32>) -> Vec<std::ops::Range<usize>> {
     let runtime =
         |frame: &StackFrame| matches!(frame.role, CodeRole::RuntimeInternal | CodeRole::Dispatch);
     let folds = |frame: &StackFrame| {
         frame.level != 0
-            && frame.level != selected
+            && !kept.contains(&frame.level)
             && (runtime(frame) || frame.role == CodeRole::Wrapper)
     };
     let mut runs = Vec::new();
@@ -2005,14 +2034,26 @@ fn machinery_runs(frames: &[StackFrame], selected: u32) -> Vec<std::ops::Range<u
     runs
 }
 
-/// Whose stack a run of frames is on.
-pub const fn stack_owner(segment: StackSegment) -> &'static str {
+/// Where a run of frames is: whose stack it is on, or the future the frame
+/// after it drives.
+pub const fn stack_label(segment: StackSegment) -> &'static str {
     match segment {
-        StackSegment::Thread => "the thread's stack",
-        StackSegment::Task => "the task's stack",
-        StackSegment::System => "the runtime's stack",
-        StackSegment::Signal => "the signal stack",
+        StackSegment::Thread => "on the thread's stack",
+        StackSegment::Task => "on the task's stack",
+        StackSegment::System => "on the runtime's stack",
+        StackSegment::Signal => "on the signal stack",
+        StackSegment::Future => "in the future the next frame drives",
     }
+}
+
+/// The line that says why the chain of awaits of the future the frame
+/// `driver` drives is shown in part or not at all.
+pub fn unfollowed(future: &UnfollowedFuture) -> String {
+    format!(
+        "the future #{} drives is not shown in full: {}",
+        future.driver.get(),
+        future.reason
+    )
 }
 
 /// Renders one backtrace frame: its level, instruction, code, the level of
