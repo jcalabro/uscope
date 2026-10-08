@@ -848,6 +848,36 @@ fn a_task_panic_says_where_and_in_which_task() {
     );
 }
 
+/// `finish` from a task's own async function says the task finished, and
+/// what the function's last poll returned, named for the function.
+#[test]
+fn finishing_a_tasks_function_says_the_task_finished() {
+    let source = "tests/fixtures/rust/tokio/steps/src/main.rs";
+    let line = support::source_line(source, "// STEP: task-last");
+    let stdout = batch(
+        &["build/test-programs/tokio-steps-o0"],
+        &[
+            &format!("break main.rs:{line}"),
+            "run",
+            "delete 1",
+            "finish",
+        ],
+    );
+    let (_, finished) = stdout
+        .split_once("deleted breakpoint 1\n")
+        .unwrap_or_else(|| panic!("a finish: {stdout}"));
+    let header = finished.lines().next().expect("the stop's header");
+    let task = header
+        .strip_prefix("stopped as task ")
+        .and_then(|rest| rest.split_once(" finished, after frame return in "))
+        .map_or_else(|| panic!("the task finished: {stdout}"), |(task, _)| task);
+    assert!(header.ends_with(&format!(" [{task}]")), "{stdout}");
+    assert!(
+        finished.contains("returned (Poll<u64>) task = Ready("),
+        "{stdout}"
+    );
+}
+
 /// A backtrace folds each run of a runtime's frames into a line that says
 /// which frames it holds, and everything past the dispatch that polls the
 /// task; `bt -r` shows every frame, with its whole name. Frame numbers

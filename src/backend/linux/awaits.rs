@@ -12,8 +12,9 @@
 
 use nix::unistd::Pid;
 
-use crate::protocol::StepKind;
+use crate::protocol::{StepKind, StopReason, TaskEnding};
 use crate::runtime_model::futures::{self, AsyncFrameKind};
+use crate::unwind::DEFAULT_MAX_FRAMES;
 use crate::{
     CodeInstanceId, CoroutineStateKind, Error, Result, SourceLocation, TypeReference,
     VirtualAddress,
@@ -134,55 +135,77 @@ impl<P: LinuxTraceOps> Controller<P> {
         })
     }
 
-    /// Where a future that is not running resumes when it is next polled:
-    /// the point its suspended state goes on from, or `None` when it is in
-    /// no suspended state, having returned, or its resume point is unknown.
-    fn resume_point(&self, pid: Pid, future: RunningFuture) -> Option<VirtualAddress> {
+    /// The state a future that is not running is in, and its number.
+    fn future_state(&self, pid: Pid, future: RunningFuture) -> Option<(u64, CoroutineStateKind)> {
         let inferior = self.inferior.as_ref()?;
         let module = self.module_of(future.ty)?;
         // The walk lists the future it began at last.
         let chain = self.with_module_stop(inferior, &module.loaded, pid, |stop| {
             futures::walk(module.image.as_ref(), stop, future.object, future.ty)
         });
-        let AsyncFrameKind::Coroutine {
-            state,
-            kind: CoroutineStateKind::Suspended { .. },
-            ..
-        } = chain.frames.last()?.kind
-        else {
+        match chain.frames.last()?.kind {
+            AsyncFrameKind::Coroutine { state, kind, .. } => Some((state, kind)),
+            AsyncFrameKind::Leaf => None,
+        }
+    }
+
+    /// Where a future that is not running resumes when it is next polled:
+    /// the point its suspended state goes on from, or `None` when it is in
+    /// no suspended state, having returned, or its resume point is unknown.
+    fn resume_point(&self, pid: Pid, future: RunningFuture) -> Option<VirtualAddress> {
+        let (state, CoroutineStateKind::Suspended { .. }) = self.future_state(pid, future)? else {
             return None;
         };
+        let module = self.module_of(future.ty)?;
         let functions = module.image.coroutine_functions(future.ty.id);
         let address = super::async_frames::resume_address(&module.image, &functions, state)?;
         module.loaded.virtual_address(address).ok()
     }
 
-    /// When the poll that ran the active step's body has just returned
-    /// `Pending`, waits for the step's future to be polled again where it
-    /// resumes, in place of the rest of the step's plan. Returns whether
-    /// the step now waits; the thread is then left stopped, for the caller
-    /// to let it run on.
-    pub(super) fn await_pending_poll(&mut self, pid: Pid) -> Result<bool> {
-        let Some((execution, future, activation)) = self
+    /// Follows the active step's future once the poll that ran its body
+    /// has just returned: when it returned `Pending`, the step waits for the
+    /// future to be polled again where it resumes, in place of the rest of
+    /// its plan; when the future returned to its runtime as its task's own,
+    /// the step ends there, with the task. `None` while the poll runs, or
+    /// when the step goes on as any other does. The thread is left stopped
+    /// either way.
+    pub(super) fn follow_poll_return(
+        &mut self,
+        pid: Pid,
+        kind: StepKind,
+    ) -> Result<Option<Followed>> {
+        let Some((execution, task, future, activation)) = self
             .inferior
             .as_ref()
             .and_then(|inferior| inferior.active.as_ref())
             .and_then(|active| match &active.kind {
                 ActiveKind::Step { owner, start, .. } if self.runs_step(*owner, pid) => {
                     let awaiting = start.awaiting.as_ref().filter(|step| !step.waits())?;
-                    Some((active.id, awaiting.future, start.activation?))
+                    Some((active.id, owner.task, awaiting.future, start.activation?))
                 }
                 _ => None,
             })
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let registers = self.ptrace.registers(pid)?;
         if !activation.has_returned(self.stack_position(pid, &registers)) {
-            return Ok(false);
+            return Ok(None);
         }
         let Some(resumes) = self.resume_point(pid, future) else {
-            return Ok(false);
+            let ended = task.filter(|_| {
+                self.future_state(pid, future)
+                    .is_some_and(|(_, state)| state == CoroutineStateKind::Returned)
+                    && self.returned_to_runtime(pid, &registers)
+            });
+            return Ok(ended.map(|task| {
+                record!("the step's task {task} finished");
+                Followed::Ended(StopReason::TaskEnded {
+                    kind,
+                    task,
+                    ending: TaskEnding::Finished,
+                })
+            }));
         };
         record!(
             "the poll of the future at {} returned pending; the step waits at {resumes}",
@@ -201,7 +224,35 @@ impl<P: LinuxTraceOps> Controller<P> {
             awaiting: Some(awaiting),
             ..StepStart::default()
         };
-        Ok(true)
+        Ok(Some(Followed::Waits))
+    }
+
+    /// Whether a thread whose future just returned is in its runtime's
+    /// code, polling no future of the program's: it returned from its
+    /// task's own future, not to an awaiter, nor to a future of the
+    /// runtime's that the program awaits, such as a timeout.
+    fn returned_to_runtime(&self, pid: Pid, registers: &nix::libc::user_regs_struct) -> bool {
+        if !self
+            .code_role(VirtualAddress::new(registers.rip))
+            .is_some_and(super::stepping::is_runtime_role)
+        {
+            return false;
+        }
+        let Some(inferior) = self.inferior.as_ref() else {
+            return false;
+        };
+        let Ok(stack) =
+            self.physical_stack(inferior, &StackRoot::of_thread(pid), DEFAULT_MAX_FRAMES)
+        else {
+            return false;
+        };
+        stack.frames.iter().all(|frame| {
+            self.image_location(frame.context.instruction)
+                .and_then(|location| location.physical_instance)
+                .and_then(|instance| self.module_image.code_instance(instance))
+                .and_then(|instance| self.module_image.function(instance.function))
+                .is_none_or(|function| function.coroutine.is_none())
+        })
     }
 
     /// Goes on with a step that waits for its future at `address`, once a
@@ -269,6 +320,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.go_on_without_plan(pid, address, Some(kind))?;
         Ok(true)
     }
+}
+
+/// What a step does once the poll that ran its future's body returned.
+pub(super) enum Followed {
+    /// It waits for the future to be polled again.
+    Waits,
+    /// It ends, for this reason.
+    Ended(StopReason),
 }
 
 /// Whether a step waits for its future to be polled again, and so cannot

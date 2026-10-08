@@ -213,6 +213,7 @@ pub(super) const fn visible_stop_priority(reason: &StopReason) -> u8 {
         | StopReason::WatchpointArmFailed { .. }
         | StopReason::Step { .. }
         | StopReason::StepIncomplete { .. }
+        | StopReason::TaskEnded { .. }
         | StopReason::ThreadExited { .. } => 2,
         StopReason::Exec { .. } => 3,
         StopReason::Unclassifiable { .. } => 4,

@@ -473,6 +473,7 @@ const fn reason_kind(reason: &StopReason) -> &'static str {
         StopReason::WatchpointArmFailed { .. } => "watchpointArmFailed",
         StopReason::Step { .. } => "step",
         StopReason::StepIncomplete { .. } => "stepIncomplete",
+        StopReason::TaskEnded { .. } => "taskEnded",
         StopReason::Pause => "pause",
         StopReason::Jump => "jump",
         StopReason::Exception(_) => "exception",

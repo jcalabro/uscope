@@ -47,6 +47,14 @@ pub fn expression_error(text: &str, error: &uscope::ExpressionError) -> String {
     output
 }
 
+/// How a task ended, as a stop says it: `task 7 finished`.
+pub const fn task_ending(ending: uscope::TaskEnding) -> &'static str {
+    match ending {
+        uscope::TaskEnding::Finished => "finished",
+        uscope::TaskEnding::Cancelled => "was cancelled",
+    }
+}
+
 /// Returns `count noun`, adding an `s` unless the count is one.
 pub fn plural(count: u64, noun: &str) -> String {
     format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
@@ -748,6 +756,28 @@ const fn exception_kind(kind: LanguageExceptionKind) -> &'static str {
     }
 }
 
+/// How a stop that ends a step says why it stopped.
+fn step_stop(reason: &StopReason, renderer: Renderer) -> String {
+    let stopped = |role| renderer.paint(role, "stopped");
+    match reason {
+        StopReason::Step { kind } => {
+            format!("{} after {}", stopped(Role::Current), step_name(*kind))
+        }
+        StopReason::StepIncomplete { kind, description } => format!(
+            "{} before the {} completed: {description}",
+            stopped(Role::Warning),
+            step_name(*kind)
+        ),
+        StopReason::TaskEnded { kind, task, ending } => format!(
+            "{} as task {task} {}, after {}",
+            stopped(Role::Current),
+            task_ending(*ending),
+            step_name(*kind)
+        ),
+        _ => unreachable!("{reason:?} ends no step"),
+    }
+}
+
 /// Summarizes a stop on one line, without watched values or source.
 pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
     let stopped = |role| renderer.paint(role, "stopped");
@@ -783,14 +813,9 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             stopped(Role::Error),
             renderer.paint(Role::Metadata, thread_id)
         ),
-        StopReason::Step { kind } => {
-            format!("{} after {}", stopped(Role::Current), step_name(*kind))
-        }
-        StopReason::StepIncomplete { kind, description } => format!(
-            "{} before the {} completed: {description}",
-            stopped(Role::Warning),
-            step_name(*kind)
-        ),
+        StopReason::Step { .. }
+        | StopReason::StepIncomplete { .. }
+        | StopReason::TaskEnded { .. } => step_stop(reason, renderer),
         StopReason::Pause => format!("inferior {}", renderer.paint(Role::Current, "paused")),
         StopReason::Jump => format!(
             "{} where the thread was moved to resume",

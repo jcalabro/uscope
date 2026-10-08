@@ -5,8 +5,8 @@
 use std::process::Stdio;
 
 use uscope::{
-    BreakpointSpec, InferiorState, LaunchOptions, LineNumber, StepKind, StopReason, ThreadActivity,
-    VariableKind,
+    BreakpointSpec, InferiorState, LaunchOptions, LineNumber, StepKind, StopReason, TaskEnding,
+    ThreadActivity, VariableKind,
 };
 
 use crate::invariants::checked;
@@ -163,6 +163,54 @@ async fn finish_returns_to_the_awaiter_in_the_same_task() {
                 "{context}: {returned:#?}"
             );
             scenario.shutdown().await;
+        }
+    }
+}
+
+/// A step past the end of a task's own async function ends where the
+/// function's future returns to tokio, saying the task finished: `next`
+/// from its last line, and `finish`, which shows what it returned.
+#[tokio::test]
+async fn a_step_past_a_tasks_end_says_it_finished() {
+    for fixture in BUILDS {
+        for mode in MODES {
+            for kind in [StepKind::OverSource, StepKind::Out] {
+                let context = format!("{fixture} {mode:?} {kind:?}");
+                let mut scenario = stopped_once(fixture, mode, "// STEP: task-last").await;
+                let task = stopped_task(&mut scenario).await;
+                let output = integer(&scenario, "got").await.expect("got")
+                    + integer(&scenario, "more").await.expect("more");
+                let mut reason = scenario.step_to_stop(kind).await;
+                // `next` stops at the closing brace first.
+                if reason == (StopReason::Step { kind }) {
+                    assert_eq!(place(&scenario).await.0, "task", "{context}");
+                    reason = scenario.step_to_stop(kind).await;
+                }
+                let StopReason::TaskEnded {
+                    kind: ended,
+                    task: finished,
+                    ending: TaskEnding::Finished,
+                } = reason
+                else {
+                    panic!("{context}: {reason:?}");
+                };
+                assert_eq!((ended, finished.number), (kind, task), "{context}");
+                if kind == StepKind::Out {
+                    let returned = scenario
+                        .operation("variables", scenario.handle().variables())
+                        .await
+                        .variables
+                        .iter()
+                        .filter(|variable| variable.kind == VariableKind::Returned)
+                        .map(|variable| format!("{:?}", variable.state))
+                        .collect::<Vec<_>>();
+                    assert!(
+                        matches!(&returned[..], [poll] if poll.contains(&format!("summary: \"Ready({output})\""))),
+                        "{context}: {output}: {returned:#?}"
+                    );
+                }
+                scenario.shutdown().await;
+            }
         }
     }
 }

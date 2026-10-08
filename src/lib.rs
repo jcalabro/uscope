@@ -99,7 +99,7 @@ pub use protocol::{
     FramePresentation, GlobalVariableQuery, HeldChild, HeldProcess, HitComparison, HitCondition,
     InferiorState, InvalidatedWatchpoint, KernelSource, LanguageException, LanguageExceptionKind,
     LaunchOptions, LogPart, ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation,
-    ResumeScope, SignalPolicy, StateSnapshot, StepKind, StepTarget, StopId, StopReason,
+    ResumeScope, SignalPolicy, StateSnapshot, StepKind, StepTarget, StopId, StopReason, TaskEnding,
     ThreadSnapshot, ThreadState, TypeViews, ValueChildQuery, VariableQuery, ViewCandidate,
     ViewCheck, ViewExplanation, WatchAccess, WatchScope, WatchTarget, Watchpoint,
     WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions,

@@ -1231,6 +1231,16 @@ pub struct StepTarget {
     pub callee: Option<Arc<str>>,
 }
 
+/// How a task a step followed ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskEnding {
+    /// Its future returned its output.
+    Finished,
+    /// Its future was dropped before it finished, as when the task was
+    /// aborted or its runtime shut down.
+    Cancelled,
+}
+
 /// Describes why execution stopped or completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
@@ -1278,6 +1288,14 @@ pub enum StopReason {
         kind: StepKind,
         /// Why the step could not be followed.
         description: Arc<str>,
+    },
+    /// A step followed its task to the task's end, and stopped in the
+    /// runtime's code where the task's future returned or was dropped: the
+    /// task runs no more of the program's code.
+    TaskEnded {
+        kind: StepKind,
+        task: crate::TaskId,
+        ending: TaskEnding,
     },
     /// Execution stopped at the user's request.
     Pause,
