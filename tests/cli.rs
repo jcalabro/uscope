@@ -741,7 +741,10 @@ fn tokio_tasks_are_listed_by_number() {
     );
     let tasks = stdout
         .lines()
-        .filter_map(|line| line.strip_prefix("  [").or_else(|| line.strip_prefix("* [")))
+        .filter_map(|line| {
+            line.strip_prefix("  [")
+                .or_else(|| line.strip_prefix("* ["))
+        })
         .map(|line| {
             let (number, rest) = line.split_once(']').expect("a task number");
             (number.parse::<u64>().expect("a number"), rest)
