@@ -16,7 +16,8 @@ use crate::runtime_model::{
 use crate::{
     ColumnNumber, Error, ExecutionContext, ImageAddress, InspectionUsage, LineNumber, LoadedModule,
     ModuleImage, RecordedPlace, Result, RuntimeId, SourceLocation, StackSegment, TaskCursor,
-    TaskId, TaskLocation, TaskPage, TaskSnapshot, ThreadActivity, ThreadId, VirtualAddress,
+    TaskId, TaskLocation, TaskPage, TaskSnapshot, TaskState, ThreadActivity, ThreadId,
+    VirtualAddress,
 };
 
 use super::activation::TaskStack;
@@ -318,6 +319,14 @@ impl<P: InspectionOps> Controller<P> {
             );
             if tasks.len() == limit {
                 break;
+            }
+        }
+        // A task suspended in its future waits for what that future does.
+        for task in &mut tasks {
+            if task.state == TaskState::Blocked
+                && let Some(awaiting) = self.task_awaiting(inferior, stop_id, task.id, reader)
+            {
+                task.detail = Some(awaiting);
             }
         }
         Ok(TaskPage {

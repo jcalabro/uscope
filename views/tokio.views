@@ -136,6 +136,14 @@ view rust tokio::sync::mpsc::chan::Chan<T, _> {
         => b->values.0[s].0.value.value.value.0
 }
 
+# The future mpsc's recv awaits, which polls the channel its receiver
+# holds.
+view rust core::future::poll_fn::PollFn<tokio::sync::mpsc::**::recv::`{async_fn#0}`::`{closure_env#0}`<_>> {
+    let chan = inner(f._ref__self__chan->inner.ptr)->data
+    show empty("receiving; senders: {inner(chan.tx_count)}")
+    field channel = chan
+}
+
 view rust tokio::sync::mpsc::bounded::Sender<T> {
     let chan = inner(chan.inner.ptr)->data
     show value(chan)
@@ -248,8 +256,16 @@ view rust tokio::sync::notify::Notify {
     }
 }
 
+# A future that waits for a Notify, by its state, and while it waits, by
+# the notification its waiter holds once one is sent to it.
 view rust tokio::sync::notify::Notified {
-    show value(*notify)
+    let sent = inner(waiter.notification.0) != 0
+    show match state {
+        Init => empty("not yet waiting")
+        Waiting => if sent { empty("notified") } else { empty("waiting for a notification") }
+        Done => empty("notified")
+    }
+    field notify = *notify
 }
 
 # A sleep's deadline, against the runtime's own clock: the time its timer

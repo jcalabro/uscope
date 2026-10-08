@@ -349,12 +349,12 @@ impl Session {
             execution,
             frame: frame.id,
         })?;
-        let mut name = if let uscope::FrameKind::Awaited { ty, .. } = frame.kind {
+        let mut name = if let uscope::FrameKind::Awaited { .. } = frame.kind {
             let image = match frame.module {
                 Some(module) => self.image(module).await,
                 None => None,
             };
-            crate::cli::format::awaited(image.as_deref(), ty)
+            crate::cli::format::awaited_frame(image.as_deref(), frame).unwrap_or_default()
         } else if frame.function.is_none() && frame.symbol.is_none() {
             // Code without a name is named by its address and module.
             let module = match frame.module {

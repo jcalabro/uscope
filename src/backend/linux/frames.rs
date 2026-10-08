@@ -224,16 +224,16 @@ impl<P: InspectionOps> Controller<P> {
         Ok(describe_address(&modules, address))
     }
 
+    /// A stack's frames, each future one awaits with what it waits for.
     pub(super) fn backtrace(&self, stop_id: StopId, root: &StackRoot) -> Result<Backtrace> {
         let inferior = self.stopped_root(stop_id, root)?;
-        if let Some(trace) = self.async_backtrace(inferior, root)? {
-            return Ok(trace);
-        }
-        let presentation = self.root_presentation(root)?;
-        let stack = self.physical_stack(inferior, root, DEFAULT_MAX_FRAMES)?;
-        let modules = self.unwind_modules(inferior);
-        Ok(self
-            .expand_backtrace(
+        let mut trace = if let Some(trace) = self.async_backtrace(inferior, root)? {
+            trace
+        } else {
+            let presentation = self.root_presentation(root)?;
+            let stack = self.physical_stack(inferior, root, DEFAULT_MAX_FRAMES)?;
+            let modules = self.unwind_modules(inferior);
+            self.expand_backtrace(
                 inferior,
                 root,
                 &stack,
@@ -241,7 +241,18 @@ impl<P: InspectionOps> Controller<P> {
                 &modules,
                 presentation.as_ref(),
             )?
-            .trace)
+            .trace
+        };
+        if trace
+            .frames
+            .iter()
+            .any(|frame| matches!(frame.kind, FrameKind::Awaited { .. }))
+        {
+            let mut frames = trace.frames.to_vec();
+            self.describe_awaited(inferior, stop_id, root, &mut frames);
+            trace.frames = frames.into();
+        }
+        Ok(trace)
     }
 
     /// A stack's logical frames, with the frames of the functions that left

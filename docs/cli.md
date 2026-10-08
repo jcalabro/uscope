@@ -594,11 +594,12 @@ polls its tasks.
 
 A tokio task that no thread runs keeps its async functions in its future,
 and its backtrace is the chain of awaits that future holds, innermost
-first: the future it waits on, named by its type, then each async function
-at the await it is suspended at, out to the one the task began in:
+first: the future it waits on, named by its type and with what it waits
+for as its view says, then each async function at the await it is
+suspended at, out to the one the task began in:
 
 ```text
-#0                     awaiting tokio::sync::oneshot::Receiver<u32>
+#0                     awaiting tokio::sync::oneshot::Receiver<u32> — empty
 #1  0x00005555555cb77d in async leaf at src/main.rs:66
 #2  0x00005555555cca74 in async middle at src/main.rs:84
 #3  0x00005555555cb248 in async top at src/main.rs:94
@@ -621,7 +622,7 @@ saying so, with each async function's variables as a task's has them:
 ```text
     … #5–#13: 9 frames of the runtime; `bt -r` shows them
     in the future the next frame drives:
-#14                    awaiting tokio::sync::oneshot::Receiver<u32>
+#14                    awaiting tokio::sync::oneshot::Receiver<u32> — empty
 #15 0x00005555555d8135 in async waiting at src/main.rs:28
 #16 0x00005555555d7db5 in async driven at src/main.rs:36
     on the thread's stack:
@@ -756,7 +757,10 @@ then selects again what was selected. `goroutine` alone shows the selected
 goroutine and the call that created it, as `created by main.main at
 main.go:40`. A tokio task says where it was spawned in a build with
 `tokio_unstable`, which records it, as `created at src/main.rs:12`; other
-builds record nothing of it.
+builds record nothing of it. A suspended tokio task is listed with what it
+waits for, as the view of the future it awaits says: `sleeping until
++59m59.9s`, `task 3 pending`, `waiting for 1 of 1 permits`, `receiving;
+senders: 1`, or `waiting for a notification`.
 
 Signals follow gdb's defaults. `SIGALRM`, `SIGURG`, `SIGCHLD`, `SIGWINCH`,
 `SIGPROF`, `SIGVTALRM`, `SIGIO`, and `SIGPWR` are delivered without stopping;

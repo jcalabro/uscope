@@ -4,8 +4,9 @@
 //! The walk names no runtime. It knows the shapes futures take in debug
 //! information: a coroutine, whose state says where it waits and which of
 //! its members it awaits; a pointer to a future, such as a `Box`; a pinned
-//! one, as Rust's `Pin` wraps it; and a trait object, whose vtable says
-//! what it holds. Any other future is a leaf, which the runtime or a view
+//! one, as Rust's `Pin` wraps it; a trait object, whose vtable says what it
+//! holds; and a record whose only member is a coroutine, which can await
+//! nothing but that coroutine. Any other future is a leaf, which the runtime or a view
 //! describes. Every way the walk can end is said, never guessed past.
 
 use std::collections::BTreeSet;
@@ -162,24 +163,13 @@ fn follow(
                 };
                 (object, ty) = (object.wrapping_add(offset), pointer);
             }
-            Shape::TraitObject { data, vtable } => {
-                let (Some(pointer), Some(table)) = (
-                    records::word(stop, object.wrapping_add(data)),
-                    records::word(stop, object.wrapping_add(vtable)),
-                ) else {
-                    return ChainEnd::Broken(
-                        format!("the trait object at {object:#x} is unreadable").into(),
-                    );
-                };
-                let held = ImageAddress::new(table.wrapping_sub(stop.load_bias()));
-                let Some(held) = image.trait_object_type(held) else {
-                    return ChainEnd::Broken(
-                        format!("the vtable at {table:#x} is no future's the program describes")
-                            .into(),
-                    );
-                };
-                (object, ty) = (pointer, held);
+            Shape::Wrapper { coroutine, offset } => {
+                (object, ty) = (object.wrapping_add(offset), coroutine);
             }
+            Shape::TraitObject { data, vtable } => match held(image, stop, object, data, vtable) {
+                Ok(held) => (object, ty) = held,
+                Err(end) => return end,
+            },
             Shape::Other => {
                 frames.push(AsyncFrame {
                     object: VirtualAddress::new(object),
@@ -193,6 +183,32 @@ fn follow(
     ChainEnd::TooDeep
 }
 
+/// The future the trait object at `object` holds, with its data pointer
+/// and vtable at those offsets, and its type, which the vtable says.
+fn held(
+    image: &dyn RuntimeImage,
+    stop: &dyn RuntimeStop,
+    object: u64,
+    data: u64,
+    vtable: u64,
+) -> Result<(u64, TypeReference), ChainEnd> {
+    let (Some(pointer), Some(table)) = (
+        records::word(stop, object.wrapping_add(data)),
+        records::word(stop, object.wrapping_add(vtable)),
+    ) else {
+        return Err(ChainEnd::Broken(
+            format!("the trait object at {object:#x} is unreadable").into(),
+        ));
+    };
+    let held = ImageAddress::new(table.wrapping_sub(stop.load_bias()));
+    let Some(held) = image.trait_object_type(held) else {
+        return Err(ChainEnd::Broken(
+            format!("the vtable at {table:#x} is no future's the program describes").into(),
+        ));
+    };
+    Ok((pointer, held))
+}
+
 /// How the walk passes through a future of some type.
 enum Shape {
     /// A pointer to the future of the target type.
@@ -204,6 +220,11 @@ enum Shape {
     },
     /// A trait object: where its data pointer and its vtable lie.
     TraitObject { data: u64, vtable: u64 },
+    /// A record that holds only a coroutine of this type, at this offset.
+    Wrapper {
+        coroutine: TypeReference,
+        offset: u64,
+    },
     /// Anything else, which is a leaf unless it is a coroutine.
     Other,
 }
@@ -242,6 +263,17 @@ fn representation(
                         pointer: only.type_ref,
                         layout: only.layout,
                     },
+                    (false, [only], ..) => match only.layout {
+                        RecordMemberLayout::ByteOffset(offset)
+                            if is_coroutine(image, only.type_ref) =>
+                        {
+                            Shape::Wrapper {
+                                coroutine: only.type_ref,
+                                offset,
+                            }
+                        }
+                        _ => Shape::Other,
+                    },
                     (false, [_, _], Some(pointer), Some(vtable)) => {
                         match (
                             pointer.layout,
@@ -264,6 +296,25 @@ fn representation(
         return Some((ty, shape));
     }
     None
+}
+
+/// Whether a value of type `ty` is a coroutine, through names and
+/// qualifiers.
+fn is_coroutine(image: &dyn RuntimeImage, mut ty: TypeReference) -> bool {
+    for _ in 0..MAX_WRAPPERS {
+        match image.type_info(ty).map(|info| &info.kind) {
+            Some(
+                TypeKind::Named {
+                    target: Some(target),
+                    ..
+                }
+                | TypeKind::Modified { target, .. },
+            ) => ty = *target,
+            Some(_) => return image.coroutine(ty).is_some(),
+            None => return false,
+        }
+    }
+    false
 }
 
 /// Whether a value of type `ty` is a pinned pointer to a future, which

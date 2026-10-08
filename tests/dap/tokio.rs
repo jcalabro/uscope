@@ -51,7 +51,14 @@ fn tokio_tasks_are_threads_beside_the_programs_own() {
             .filter(|(_, name)| name.contains(text))
             .count()
     };
-    assert_eq!(named("— suspended"), 8, "{listed:?}");
+    // Each suspended task says what it waits for.
+    assert_eq!(named("] leaf — "), 8, "{listed:?}");
+    assert_eq!(
+        named("] leaf — waiting for 1 of 1 permits"),
+        2,
+        "{listed:?}"
+    );
+    assert_eq!(named("] leaf — sleeping until +"), 1, "{listed:?}");
     assert_eq!(named("— queued in the blocking pool"), 1, "{listed:?}");
     assert_eq!(
         named("— running a blocking closure (thread "),
@@ -74,7 +81,7 @@ fn a_suspended_tasks_stack_is_its_chain_of_awaits() {
     let (mut dap, _, listed) = at_checkpoint("tokio awaits");
     let (task, _) = listed
         .iter()
-        .find(|(_, name)| name.contains("— suspended"))
+        .find(|(_, name)| name.contains("] leaf — "))
         .unwrap_or_else(|| panic!("{listed:?}"));
     let trace = dap.request("stackTrace", json!({"threadId": task}));
     let frames = trace["stackFrames"].as_array().expect("frames");
@@ -142,7 +149,7 @@ fn a_blocked_threads_stack_holds_the_future_it_drives() {
         .position(|name| *name == "in the future the next frame drives")
         .unwrap_or_else(|| panic!("{trace}"));
     assert!(
-        names[label + 1].starts_with("awaiting tokio::sync::oneshot::Receiver<u32>"),
+        names[label + 1] == "awaiting tokio::sync::oneshot::Receiver<u32> — empty",
         "{trace}"
     );
     assert_eq!(

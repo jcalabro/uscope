@@ -3588,6 +3588,10 @@ pub struct StackFrame {
     /// What the frame's code is to stepping and unwinding: its function's
     /// role, or its symbol's where no function describes it.
     pub role: CodeRole,
+    /// What the future an [`FrameKind::Awaited`] frame names waits for, as
+    /// the view that presents it summarizes it; `None` for any other frame,
+    /// or a future no view presents.
+    pub awaiting: Option<Arc<str>>,
 }
 
 pub struct FrameMetadata {
@@ -3639,6 +3643,7 @@ impl StackFrame {
             source: metadata.source,
             symbol: metadata.symbol,
             role: metadata.role,
+            awaiting: None,
         }
     }
 }
