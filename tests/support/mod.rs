@@ -19,6 +19,7 @@ use std::process::{
     Child, ChildStdin, ChildStdout, Command, ExitStatus as ProcessExitStatus, Stdio,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use nix::sys::personality::{self, Persona};
@@ -28,7 +29,7 @@ use tokio::time::timeout;
 use uscope::{
     Backtrace, Breakpoint, BreakpointId, BreakpointSpec, CoreDumpOptions, Debugger, DebuggerEvent,
     DebuggerHandle, ExceptionDisposition, ExecutionId, ExitStatus, LaunchOptions, LineNumber,
-    LoadedModuleSnapshot, ProcessId, RegisterRole, RegisterSnapshot, Result, ResumeScope,
+    LoadedModuleSnapshot, ProcessId, Program, RegisterRole, RegisterSnapshot, Result, ResumeScope,
     StackFrameId, StateSnapshot, StepKind, StopReason, ThreadId, VirtualAddress,
 };
 
@@ -226,6 +227,37 @@ impl Drop for ExternalProcess {
     }
 }
 
+/// How many fixtures a test process keeps read: a test that loops over
+/// builds launches each build again and again before it goes on to the next.
+const LOADED_FIXTURES: usize = 2;
+
+/// The fixture at `path`, read once for each test process however many
+/// scenarios launch it, since reading a large program's debug information
+/// takes much longer than most scenarios. Fixtures are built before tests
+/// run, and nothing changes them while they do.
+fn loaded_fixture(path: &Path) -> Program {
+    static LOADED: Mutex<Vec<(PathBuf, Program)>> = Mutex::new(Vec::new());
+    assert!(
+        path.exists(),
+        "missing test fixture {}; run `just build-test-programs`",
+        path.display()
+    );
+    let mut loaded = LOADED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(index) = loaded.iter().position(|(loaded, _)| loaded == path) {
+        let entry = loaded.remove(index);
+        let program = entry.1.clone();
+        loaded.push(entry);
+        return program;
+    }
+    let program = Program::load(path, &uscope::DebugFileOptions::default())
+        .unwrap_or_else(|error| panic!("read fixture {}: {error}", path.display()));
+    if loaded.len() == LOADED_FIXTURES {
+        loaded.remove(0);
+    }
+    loaded.push((path.to_owned(), program.clone()));
+    program
+}
+
 pub struct Scenario {
     name: String,
     debugger: Option<Debugger>,
@@ -265,7 +297,9 @@ impl Scenario {
 
     /// Launches the named fixture under a scenario of the same name.
     pub fn launch(fixture: &str) -> Self {
-        Self::new(fixture, Self::fixture(fixture))
+        let debugger = Debugger::for_program(loaded_fixture(&Self::fixture(fixture)))
+            .expect("initialize debugger scenario");
+        Self::from_debugger(fixture.to_owned(), debugger)
     }
 
     /// Opens a post-mortem core dump through the public API.

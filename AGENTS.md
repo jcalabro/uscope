@@ -23,7 +23,7 @@
 
 - Practice test-driven development and prefer meaningful behavioral tests over numerous trivial assertions.
 - Unit-test deterministic algorithms, invariants, boundaries, and typed failure modes only where code is very complicated. Use as few unit tests as possible, prefer tests that are higher leverage.
-- Use `tests/support::Scenario` for real debugger workflows. It runs the public request/event path, records a transcript, applies deadlines, shuts down the debugger, and verifies the inferior was reaped. Use `support::ScratchDir` for temporary files and `support::ExternalProcess` for attach targets so nothing outlives a failing test.
+- Use `tests/support::Scenario` for real debugger workflows. It runs the public request/event path, records a transcript, applies deadlines, shuts down the debugger, and verifies the inferior was reaped. Use `support::ScratchDir` for temporary files and `support::ExternalProcess` for attach targets so nothing outlives a failing test. `Scenario::launch` reads a fixture's debug information once per test process and shares it among that test's scenarios; use `Scenario::new` for a program the test changes.
 - Run integration tests with nextest, which gives each test its own process: one process can trace with only one live session at a time.
 - Replace superseded integration tests instead of retaining duplicate coverage.
 - Keep CLI tests separate when they validate parsing, batch behavior, or rendered output rather than debugger semantics.

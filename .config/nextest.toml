@@ -2,10 +2,12 @@
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# These suites compare whole modules with binutils and gdb, so their tests run
-# for a second or more. Starting them first keeps them off the end of a run.
+# These suites compare whole modules with binutils and gdb, and the tokio
+# suite reads programs whose debug information takes a second each to load,
+# so their tests run for seconds. Starting them first keeps them off the end
+# of a run.
 [[profile.default.overrides]]
-filter = 'binary(disassembly) | binary(symbols) | binary(frames)'
+filter = 'binary(disassembly) | binary(symbols) | binary(frames) | binary(tokio)'
 priority = 50
 
 # `just soak` runs one test for as long as it is told to.

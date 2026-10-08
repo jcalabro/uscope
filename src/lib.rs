@@ -335,6 +335,39 @@ pub struct DebuggerHandle {
     events: broadcast::Sender<DebuggerEvent>,
 }
 
+/// A native executable and its debug information, read once.
+///
+/// Every debugger made from it with [`Debugger::for_program`] shares what
+/// was read, which is immutable, so debugging the same program again does
+/// not read it again.
+#[derive(Clone)]
+pub struct Program {
+    executable: backend::ExecutableSource,
+    debug_info: debug_info::DebugInfo,
+}
+
+impl Program {
+    /// Reads a native executable and its debug information, finding its
+    /// modules' separate debug files as `debug_files` says.
+    pub fn load(executable: impl AsRef<Path>, debug_files: &DebugFileOptions) -> Result<Self> {
+        let mut executable = backend::executable_source(executable.as_ref())?;
+        executable.debug_files = debug_info::DebugFileSearch::new(debug_files);
+        Self::from_executable_source(executable)
+    }
+
+    fn from_executable_source(executable: backend::ExecutableSource) -> Result<Self> {
+        let debug_info = debug_info::load_program(
+            &executable.display_path,
+            &executable.data,
+            &executable.debug_files,
+        )?;
+        Ok(Self {
+            executable,
+            debug_info,
+        })
+    }
+}
+
 impl Debugger {
     /// Creates a debugger for a native executable and starts its backend controller.
     pub fn new(executable: impl AsRef<Path>) -> Result<Self> {
@@ -344,9 +377,21 @@ impl Debugger {
     /// Creates a debugger for a native executable whose modules' separate
     /// debug files are found as `debug_files` says.
     pub fn new_with(executable: impl AsRef<Path>, debug_files: &DebugFileOptions) -> Result<Self> {
-        let mut executable = backend::executable_source(executable.as_ref())?;
-        executable.debug_files = debug_info::DebugFileSearch::new(debug_files);
-        Self::from_executable_source(executable)
+        Self::for_program(Program::load(executable, debug_files)?)
+    }
+
+    /// Creates a debugger for a program already read and starts its
+    /// backend controller.
+    pub fn for_program(program: Program) -> Result<Self> {
+        let Program {
+            executable,
+            debug_info,
+        } = program;
+        Self::start(|channels| {
+            let image = Arc::clone(&debug_info.image);
+            let controller = backend::spawn_controller(executable, debug_info, channels)?;
+            Ok((image, None, controller))
+        })
     }
 
     /// Attaches to an existing local process and returns once it is coherently stopped.
@@ -434,7 +479,7 @@ impl Debugger {
         executable: backend::ExecutableSource,
         held: bool,
     ) -> Result<Self> {
-        let debugger = Self::from_executable_source(executable)?;
+        let debugger = Self::for_program(Program::from_executable_source(executable)?)?;
         let attached = debugger
             .handle
             .request(|reply| Request::Attach {
@@ -462,19 +507,6 @@ impl Debugger {
         Self::start(|channels| {
             let session = backend::open_core(options, channels)?;
             Ok((session.image, Some(session.info), session.controller))
-        })
-    }
-
-    fn from_executable_source(executable: backend::ExecutableSource) -> Result<Self> {
-        let debug_info = debug_info::load_program(
-            &executable.display_path,
-            &executable.data,
-            &executable.debug_files,
-        )?;
-        Self::start(|channels| {
-            let image = Arc::clone(&debug_info.image);
-            let controller = backend::spawn_controller(executable, debug_info, channels)?;
-            Ok((image, None, controller))
         })
     }
 

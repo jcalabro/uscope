@@ -196,6 +196,7 @@ pub struct TextLocation {
     pub length: Option<u64>,
 }
 
+#[derive(Clone)]
 pub struct DebugInfo {
     pub image: Arc<ModuleImage>,
     pub unwind: Arc<dyn UnwindInfo>,
