@@ -38,6 +38,10 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a scenario's check of a stop may take, all its requests
 /// together.
 const STOP_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long an attach may take. It reads the executable's debug
+/// information, which a launched scenario reads before any deadline, and
+/// which takes several times as long under `just stress` as idle.
+const ATTACH_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Checks what must hold at every stop of a scenario, through the handle;
 /// an error says what does not, and fails the scenario.
@@ -161,9 +165,9 @@ impl ExternalProcess {
         ProcessId::new(u64::from(self.child.as_ref().expect("live child").id()))
     }
 
-    /// Attaches a debugger to the process within the event deadline.
+    /// Attaches a debugger to the process within the attach deadline.
     pub async fn attach(&self) -> Debugger {
-        timeout(EVENT_TIMEOUT, Debugger::attach(self.process_id()))
+        timeout(ATTACH_TIMEOUT, Debugger::attach(self.process_id()))
             .await
             .expect("attach timed out")
             .expect("attach debugger")
