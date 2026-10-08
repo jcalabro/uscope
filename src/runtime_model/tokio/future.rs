@@ -1,0 +1,110 @@
+//! A task's future, which its cell holds while the task has not finished.
+//!
+//! A task's vtable polls it through `raw::poll::<T, S>`, whose name in the
+//! debug information spells the future's type `T` and the scheduler's `S`.
+//! The task's cell is the `Cell<T, S>` of the same arguments, and its
+//! `core.stage` holds the future in its `Running` variant.
+
+use std::sync::Arc;
+
+use super::{TokioRuntime, records};
+use crate::runtime_model::futures::{self, AsyncFrameKind};
+use crate::runtime_model::records::Sum;
+use crate::runtime_model::{RuntimeImage, RuntimeStop};
+use crate::{ImageAddress, TypeReference, VirtualAddress};
+
+/// Where the future is in the cells one poll function polls.
+#[derive(Debug, Clone)]
+pub(super) struct FutureLayout {
+    /// The cell's stage, from its header.
+    stage: u64,
+    stages: Sum,
+    /// The future, from the stage.
+    future: u64,
+    ty: TypeReference,
+}
+
+impl FutureLayout {
+    fn bind(image: &dyn RuntimeImage, poll: ImageAddress) -> Result<Self, Arc<str>> {
+        let name = image
+            .function_name(poll)
+            .ok_or("the debug information names no function that polls the task")?;
+        let arguments = name
+            .strip_prefix("poll")
+            .filter(|arguments| arguments.starts_with('<'))
+            .ok_or_else(|| format!("{name} polls no task"))?;
+        let cell = records::named(
+            image,
+            &format!("tokio::runtime::task::core::Cell{arguments}"),
+        )?;
+        let header = records::field(image, cell, &["header"])?;
+        let stage = records::field(image, cell, &["core", "stage", "stage", "__0", "value"])?;
+        let stages = records::sum(image, stage.ty)?;
+        let running = stages.variant("Running")?.payload;
+        let future = records::field(image, running.ty, &["__0"])?;
+        Ok(Self {
+            stage: stage
+                .offset
+                .checked_sub(header.offset)
+                .ok_or("a task's stage lies before its header")?,
+            future: records::within(running.offset, future.offset)?,
+            stages,
+            ty: future.ty,
+        })
+    }
+}
+
+impl TokioRuntime {
+    /// The future of the task whose header is at `header`, and its type,
+    /// or why the task has none.
+    pub(super) fn future(
+        &self,
+        stop: &dyn RuntimeStop,
+        header: u64,
+    ) -> Result<(VirtualAddress, TypeReference), Arc<str>> {
+        let tasks = self.task_layout()?;
+        let unreadable = || Arc::<str>::from(format!("the task at {header:#x} is unreadable"));
+        let vtable =
+            records::word(stop, header.wrapping_add(tasks.vtable)).ok_or_else(unreadable)?;
+        let poll = records::word(stop, vtable.wrapping_add(tasks.poll)).ok_or_else(unreadable)?;
+        let poll = ImageAddress::new(poll.wrapping_sub(stop.load_bias()));
+        let layout = self
+            .futures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(poll)
+            .or_insert_with(|| FutureLayout::bind(self.image.as_ref(), poll))
+            .clone()?;
+        let stage = header.wrapping_add(layout.stage);
+        let variant = layout.stages.active(stop, stage)?;
+        match &*variant.name {
+            "Running" => Ok((
+                VirtualAddress::new(stage.wrapping_add(layout.future)),
+                layout.ty,
+            )),
+            "Finished" => Err("the task has finished, and holds its output".into()),
+            _ => Err("the task's output has been taken".into()),
+        }
+    }
+
+    /// Where the function that runs a task's outermost coroutine begins,
+    /// once the future that holds it is past.
+    pub(super) fn entry(&self, stop: &dyn RuntimeStop, header: u64) -> Option<VirtualAddress> {
+        let (future, ty) = self.future(stop, header).ok()?;
+        let chain = futures::walk(self.image.as_ref(), stop, future, ty);
+        let outermost = chain.frames.last()?;
+        let AsyncFrameKind::Coroutine { .. } = outermost.kind else {
+            return None;
+        };
+        let body = *self
+            .bodies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(outermost.ty)
+            .or_insert_with(|| self.image.coroutine_body(outermost.ty))
+            .as_ref()?;
+        Some(VirtualAddress::new(
+            body.get().wrapping_add(stop.load_bias()),
+        ))
+    }
+}
