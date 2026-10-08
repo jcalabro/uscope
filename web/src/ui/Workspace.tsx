@@ -19,16 +19,18 @@ import { Palette } from "./Palette";
 import { Registers } from "./Registers";
 import { useSplit } from "./Split";
 import { Stack } from "./Stack";
+import { Tasks } from "./Tasks";
 import { Threads } from "./Threads";
 import { Variables, Watch } from "./Values";
 
 export interface Focus {
   session: string;
   state: State;
-  /** The stop, thread, and frame shown; none before the program stops. */
+  /** The stop, thread or task, and frame shown; none before the program
+   * stops. */
   at: At | null;
   look: Look;
-  /** The stack of the thread shown, once it has arrived. */
+  /** The stack of the thread or task shown, once it has arrived. */
   trace: Backtrace | undefined;
   /** Why the data shown may not be the program's now, if it may not. */
   stale: "running" | "passed" | "disconnected" | null;
@@ -44,20 +46,22 @@ export function useFocus(): Focus {
   return focus;
 }
 
-/** The URL's stop, thread, and frame, or null on the session's own page. */
+/** The URL's stop, thread or task, and frame, or null on the session's
+ * own page. */
 function useAt(): At | null {
   const params = useParams({ strict: false }) as {
     stop?: string;
     thread?: string;
+    task?: string;
     frame?: string;
   };
-  const { stop, thread, frame } = params;
+  const { stop, thread, task, frame } = params;
   return useMemo(
     () =>
-      stop !== undefined && thread !== undefined && frame !== undefined
-        ? parseAt({ stop, thread, frame })
+      stop !== undefined && frame !== undefined && (thread !== undefined || task !== undefined)
+        ? parseAt({ stop, thread, task, frame })
         : null,
-    [stop, thread, frame],
+    [stop, thread, task, frame],
   );
 }
 
@@ -71,7 +75,9 @@ export function Workspace() {
   useMirror(session, at, look);
   const trace = useRequest(
     "backtrace",
-    at && state?.session === session ? { stop: at.stop, thread: at.thread } : null,
+    at && state?.session === session
+      ? { stop: at.stop, thread: at.thread, task: at.task ?? null }
+      : null,
   ).data;
   usePresence(at, trace);
   const frames = trace?.frames.length ?? 0;
@@ -110,6 +116,7 @@ export function Workspace() {
       >
         <div className="column">
           <Threads />
+          <Tasks />
           <Stack />
           <Breakpoints />
         </div>

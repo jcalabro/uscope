@@ -229,6 +229,22 @@ impl<'a, S: Scope> Binder<'a, S> {
         match self.tree().kind(id).clone() {
             NodeKind::Name(path) => self.name(&path, span),
             NodeKind::Register(name) if name == "task" => self.node(Op::Task, Ty::Exact, span),
+            // The frame names its future `$future`, which no source
+            // variable can be named.
+            NodeKind::Register(name) if name == "future" => {
+                match self
+                    .scope
+                    .lookup("$future", false)
+                    .map_err(|refusal| Self::refused(span, refusal))?
+                {
+                    Lookup::Object { object, ty } => self.object("$future", object, ty, span),
+                    _ => Err(Self::error(
+                        span,
+                        ErrorKind::UnknownName,
+                        "the selected frame runs no future",
+                    )),
+                }
+            }
             NodeKind::Register(name) => {
                 let register = self.scope.register(&name).ok_or_else(|| {
                     Self::error(
@@ -922,7 +938,32 @@ impl<'a, S: Scope> Binder<'a, S> {
                 };
                 self.deref_value(pointer, &element, span)
             }
-            category => Err(self.type_error(&node, &category, "is not a pointer")),
+            // A value a view presents as another, as a smart pointer
+            // presents what it points to, dereferences to that one.
+            category => match &node.ty {
+                Ty::Program(from)
+                    if node.is_place() && !matches!(category, Category::Opaque(_)) =>
+                {
+                    match self.scope.plan(*from, StepKind::Deref) {
+                        Ok(super::target::Planned {
+                            step,
+                            result: Some(ty),
+                            ..
+                        }) => self.node(
+                            Op::Step {
+                                base: Box::new(node),
+                                step,
+                                indices: Vec::new(),
+                                follows: true,
+                            },
+                            Ty::Program(ty),
+                            span,
+                        ),
+                        _ => Err(self.type_error(&node, &category, "is not a pointer")),
+                    }
+                }
+                _ => Err(self.type_error(&node, &category, "is not a pointer")),
+            },
         }
     }
 
@@ -1137,8 +1178,100 @@ impl<'a, S: Scope> Binder<'a, S> {
                 span,
             );
         }
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            let negate = op == BinaryOp::Ne;
+            if let Some(test) = self.holds_variant(left, right, negate, span)? {
+                return Ok(test);
+            }
+            if let Some(test) = self.holds_variant(right, left, negate, span)? {
+                return Ok(test);
+            }
+        }
         let (left, right) = self.operands(left, right)?;
         self.binary_bound(op, left, right, span)
+    }
+
+    /// `value == Name`: whether a tagged union holds its variant `Name`,
+    /// when `name` is a bare name the scope finds no single value by and
+    /// one of the union's variants has. `None` for any other comparison.
+    fn holds_variant(
+        &mut self,
+        value: NodeId,
+        name: NodeId,
+        negate: bool,
+        span: Span,
+    ) -> Result<Option<Bound<S>>, ExpressionError> {
+        let NodeKind::Name(path) = self.tree().kind(name) else {
+            return Ok(None);
+        };
+        if path.segments.len() != 1 || path.global {
+            return Ok(None);
+        }
+        let variant = path.segments[0].name.clone();
+        if let Err(error) = self.bind(name) {
+            if !matches!(
+                error.kind,
+                ErrorKind::UnknownName | ErrorKind::AmbiguousName
+            ) {
+                return Ok(None);
+            }
+        } else {
+            return Ok(None);
+        }
+        let Ok(bound) = self.bind(value) else {
+            return Ok(None);
+        };
+        let base = self.settle(bound)?;
+        let Ty::Program(from) = base.ty else {
+            return Ok(None);
+        };
+        let Ok((_, info)) = representation(self.scope, from) else {
+            return Ok(None);
+        };
+        let TypeKind::Variant { variants, .. } = &info.kind else {
+            return Ok(None);
+        };
+        let names = |variant: &crate::Variant| {
+            variant
+                .name
+                .clone()
+                .into_iter()
+                .chain(match &*variant.members {
+                    [member] => member.name.clone(),
+                    _ => None,
+                })
+        };
+        if !variants
+            .iter()
+            .any(|candidate| names(candidate).any(|known| *known == *variant))
+        {
+            return Ok(None);
+        }
+        if !base.is_place() {
+            return Err(Self::error(
+                base.span,
+                ErrorKind::Type,
+                format!(
+                    "`{}` is a computed value, whose variant cannot be read",
+                    self.quote(base.span)
+                ),
+            ));
+        }
+        let step = self
+            .scope
+            .plan(from, StepKind::Member(&variant))
+            .map_err(|refusal| Self::refused(self.tree().span(name), refusal))?
+            .step;
+        self.node(
+            Op::Holds {
+                base: Box::new(base),
+                step,
+                negate,
+            },
+            Ty::Bool,
+            span,
+        )
+        .map(Some)
     }
 
     /// A binary operator other than `&&` and `||` on bound operands.

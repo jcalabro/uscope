@@ -13,6 +13,7 @@ use crate::protocol::{
 };
 use crate::{Error, Result, StackFrameId, VirtualAddress};
 
+use super::awaits::Followed;
 use super::breakpoints::{
     install_plan_breakpoint, remove_breakpoint_owner_from, runtime_breakpoint_address,
 };
@@ -108,6 +109,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             if requested == StepKind::IntoNewTask {
                 start.new_task = Some(NewTask::Watching(self.task_starters()));
             }
+            if frame.get() == 0 {
+                start.awaiting = self.await_step(pid, kind, &start);
+            }
             start.into_call = into_call;
             self.begin_execution(
                 process_id,
@@ -182,6 +186,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|targets| {
                 let mut start = self.step_start(pid, StepKind::Out, frame)?;
                 start.targets = targets;
+                // An async function's frame returns once its future is
+                // ready, not each time its poll returns `Pending`.
+                if frame.get() == 0 {
+                    start.awaiting = self.await_step(pid, StepKind::Out, &start);
+                }
                 // Reaching a location stops as an advance; the frame
                 // returning first, as the step out it runs as.
                 self.begin_execution(
@@ -303,18 +312,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         };
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        let starters = match &start.new_task {
-            Some(NewTask::Watching(starters)) => starters.keys().copied().collect(),
-            _ => Vec::new(),
-        };
         let mut installed = Vec::new();
         let mut failure = None;
-        for &address in start
-            .plan_addresses
-            .union(&start.panic_guards)
-            .chain(&start.targets)
-            .chain(&starters)
-        {
+        for address in start.plan_sites() {
             if let Err(error) = install_plan_breakpoint(&self.ptrace, inferior, address, execution)
             {
                 failure = Some(error);
@@ -800,6 +800,9 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         // No user breakpoint stops at this hit: none owns the site, or each
         // declined it by its hit condition.
+        if self.reach_resumed_future(pid, address)? {
+            return Ok(());
+        }
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let step = inferior
             .active
@@ -820,47 +823,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.follow_step(pid);
         }
         if let Some((_, kind)) = planned {
-            // A step out may go on from its function's return address, so
-            // what the function returned is read as it arrives there.
-            self.note_returned_values(pid);
-            if self.is_advance_target(address) {
-                return self.reach_advance_target(pid, address);
-            }
-            if self.reach_waypoint(pid, address)? {
-                return Ok(());
-            }
-            match self.reach_loop(pid, address, kind)? {
-                LoopReach::Elsewhere => {}
-                LoopReach::Complete => {
-                    return self.begin_visible_stop(pid, StopReason::Step { kind });
-                }
-                LoopReach::Pass => return self.repair_when_alone(pid, address),
-                LoopReach::Restarted => {
-                    return self.go_on_without_plan(pid, address, Some(kind));
-                }
-            }
-            if self.begin_following(pid, kind)? || self.wait_for_loop(pid, kind)? {
-                // The step goes on by single steps, or by its new plan.
-                return self.go_on_without_plan(pid, address, Some(kind));
-            }
-            let mode = self.step_mode(kind);
-            if !steps_instructions(kind) {
-                self.begin_epilogue_traversal(pid)?;
-            }
-            self.note_returned_activation(pid, mode)?;
-            if self.source_step_returned_to_undescribed_code(pid, mode)? {
-                self.let_step_run_on()?;
-                return self.go_on_without_plan(pid, address, None);
-            }
-            if let Some(reason) = self.user_step_stop(pid, kind)? {
-                // The plan's sites, this one among them, are removed when
-                // the stop is published.
-                return self.begin_visible_stop(pid, reason);
-            }
-
-            self.mark_epilogue_return_for_retirement(address);
-            self.mark_return_guard_for_retirement(pid, address)?;
-            return self.repair_when_alone(pid, address);
+            return self.reach_plan_site(pid, address, kind);
         }
 
         // A declined user hit, or another thread at a stepping plan's site,
@@ -880,6 +843,57 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             self.repair_when_alone(pid, address)
         }
+    }
+
+    /// Goes on with the active step at a site of its plan, which its own
+    /// thread or task reached.
+    fn reach_plan_site(&mut self, pid: Pid, address: VirtualAddress, kind: StepKind) -> Result<()> {
+        // A step out may go on from its function's return address, so
+        // what the function returned is read as it arrives there.
+        self.note_returned_values(pid);
+        if self.is_advance_target(address) {
+            return self.reach_advance_target(pid, address);
+        }
+        if self.reach_waypoint(pid, address)? {
+            return Ok(());
+        }
+        match self.reach_loop(pid, address, kind)? {
+            LoopReach::Elsewhere => {}
+            LoopReach::Complete => {
+                return self.begin_visible_stop(pid, StopReason::Step { kind });
+            }
+            LoopReach::Pass => return self.repair_when_alone(pid, address),
+            LoopReach::Restarted => {
+                return self.go_on_without_plan(pid, address, Some(kind));
+            }
+        }
+        match self.follow_poll_return(pid, kind)? {
+            Some(Followed::Waits) => return self.go_on_without_plan(pid, address, None),
+            Some(Followed::Ended(reason)) => return self.begin_visible_stop(pid, reason),
+            None => {}
+        }
+        if self.begin_following(pid, kind)? || self.wait_for_loop(pid, kind)? {
+            // The step goes on by single steps, or by its new plan.
+            return self.go_on_without_plan(pid, address, Some(kind));
+        }
+        let mode = self.step_mode(kind);
+        if !steps_instructions(kind) {
+            self.begin_epilogue_traversal(pid)?;
+        }
+        self.note_returned_activation(pid, mode)?;
+        if self.source_step_returned_to_undescribed_code(pid, mode)? {
+            self.let_step_run_on()?;
+            return self.go_on_without_plan(pid, address, None);
+        }
+        if let Some(reason) = self.user_step_stop(pid, kind)? {
+            // The plan's sites, this one among them, are removed when
+            // the stop is published.
+            return self.begin_visible_stop(pid, reason);
+        }
+
+        self.mark_epilogue_return_for_retirement(address);
+        self.mark_return_guard_for_retirement(pid, address)?;
+        self.repair_when_alone(pid, address)
     }
 
     /// Whether the active step's thread runs freely until it returns to a
@@ -905,7 +919,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// Ends an advance whose thread reached one of its targets, unless it
     /// arrived where it stood when the advance began, and so goes on.
-    fn reach_advance_target(&mut self, pid: Pid, address: VirtualAddress) -> Result<()> {
+    pub(super) fn reach_advance_target(&mut self, pid: Pid, address: VirtualAddress) -> Result<()> {
         if !self.take_standing_arrival(address) {
             return self.begin_visible_stop(
                 pid,
@@ -1389,7 +1403,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// thread, unless a barrier is already doing so. Among coincident stops,
     /// the highest-priority reason is published.
     pub(super) fn begin_visible_stop(&mut self, pid: Pid, reason: StopReason) -> Result<()> {
-        let reason = self.requested_step_reason(reason);
+        let reason = self.dropped_step_reason(self.requested_step_reason(reason));
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let thread = inferior.thread_mut(pid)?;
         thread.state = NativeThreadState::Stopped;

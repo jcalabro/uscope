@@ -412,3 +412,48 @@ fn an_interactive_session_asks_once_whether_to_trust_a_project() {
     session.send_line("quit").expect("quit");
     session.expect(expectrl::Eof).expect("exit");
 }
+
+/// `[step] runtime = "enter"` makes `step` stop in a runtime's own code,
+/// here tokio's receive, and `set step-runtime off` makes the next step go
+/// over it again.
+#[test]
+fn the_step_setting_enters_the_runtime_until_turned_off() {
+    let project = Project::new("config-step-runtime");
+    project.project("[step]\nruntime = \"enter\"\n");
+    let shapes = fixture("build/test-programs/tokio-shapes-o0");
+    let source = "tests/fixtures/rust/tokio/shapes/src/main.rs";
+    // The first receive's marker is also the start of the second's.
+    let at = |marker: &str| format!("break {source}:{}", support::source_line(source, marker));
+    let (first, again) = (at("// INTO: recv"), at("// INTO: recv-again"));
+    let output = project.run(&[
+        "--batch",
+        "-e",
+        &first,
+        "-e",
+        &again,
+        "-e",
+        "run",
+        "-e",
+        "step",
+        "-e",
+        "set step-runtime off",
+        "-e",
+        "continue",
+        "-e",
+        "step",
+        shapes.to_str().expect("UTF-8 path"),
+    ]);
+    let (stdout, _) = succeeded(&output);
+    let after = support::source_line(source, "// STEP: recv-again-after");
+    assert_in_order(
+        &stdout,
+        &[
+            "stopped after source step in recv at ",
+            "sync/mpsc/bounded.rs:",
+            "steps pass over runtime code",
+            "stopped at breakpoint 2",
+            "stopped after source step in shapes at ",
+            &format!("{source}:{after}"),
+        ],
+    );
+}

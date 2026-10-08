@@ -68,6 +68,65 @@ pub fn function_role(name: &str, trampoline: bool) -> CodeRole {
     symbol_role(name)
 }
 
+/// The role of a Rust function, by the path of namespaces rustc nests it
+/// in, outermost first and joined by `::`, and its own name, or `None` for
+/// an ordinary function. The library's code that only hands a future on,
+/// which every `.await` runs between the awaiting function and the awaited
+/// one, wraps: `IntoFuture`, the rest of `core::future` and `core::pin`,
+/// the `poll` that `Box` forwards and the `deref_mut` through which a
+/// `Pin<Box<_>>` reaches its future, and `AssertUnwindSafe`. So does the drop
+/// glue rustc generates, which calls the `Drop` impls the program wrote and
+/// carries the lines of what it drops, such as an await's. std's and core's
+/// code that raises a panic is the panic machinery.
+///
+/// All of tokio is machinery, as Go's runtime is: its runtime, its tasks'
+/// harness, the drivers and pools beneath them, and the libraries a
+/// program awaits, such as `tokio::sync`, whose frames a task's backtrace
+/// folds and a step passes through. So is mio's code, which the drivers
+/// call. A task's frames begin where its harness polls it.
+pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
+    let within = |path: &str| {
+        namespace
+            .strip_prefix(path)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+    };
+    let named = |function: &str| {
+        name.strip_prefix(function)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('<'))
+    };
+    // std's code that catches a panic, under which a runtime polls its
+    // tasks and a thread runs its closure, is machinery like theirs.
+    if within("std::panicking::catch_unwind")
+        || (within("std::panicking") || within("std::panic")) && named("catch_unwind")
+    {
+        return Some(CodeRole::RuntimeInternal);
+    }
+    // std's and core's code that raises a panic, which a step goes
+    // through to the `Drop` impls the panic runs as it unwinds.
+    if within("core::panicking")
+        || within("std::panicking")
+        || within("__rustc")
+        || (within("std::sys::backtrace") && named("__rust_end_short_backtrace"))
+    {
+        return Some(CodeRole::Panic);
+    }
+    // `Harness::poll::<T, S>`, which rustc nests in its type, and which
+    // stays a function of its own in every build: optimization inlines
+    // what calls it, and the vtable's `raw::poll` only jumps to it.
+    if namespace == "tokio::runtime::task::harness" && name.starts_with("poll<") {
+        return Some(CodeRole::Dispatch);
+    }
+    if within("tokio") || within("mio") {
+        return Some(CodeRole::RuntimeInternal);
+    }
+    (within("core::future")
+        || within("core::pin")
+        || within("core::panic::unwind_safe")
+        || (within("alloc::boxed") && (named("poll") || named("deref_mut")))
+        || (within("core::ptr") && (named("drop_glue") || named("drop_in_place"))))
+    .then_some(CodeRole::Wrapper)
+}
+
 /// Which functions are Go's ABI wrappers, which carry no trampoline mark:
 /// each shares its function's name, and is declared in Go's generated file
 /// while the function is not.
@@ -127,6 +186,8 @@ pub fn symbol_role(name: &str) -> CodeRole {
         "_start" => CodeRole::Outermost,
         // glibc's `sa_restorer`, which a signal handler returns to.
         "__restore_rt" => CodeRole::SignalTrampoline,
+        // Rust's intrinsic that calls code under `catch_unwind`.
+        "__rust_try" => CodeRole::RuntimeInternal,
         _ => CodeRole::Ordinary,
     }
 }

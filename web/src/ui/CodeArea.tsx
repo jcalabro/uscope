@@ -140,7 +140,7 @@ export function CodeArea() {
       ) : (
         <div className="empty center-message">
           {at && frame && !frame.source
-            ? `${frame.name} has no source: it is at ${frame.address}${frame.module ? ` in ${frame.module}` : ""}.`
+            ? `${frame.name} has no source${frame.address ? `: it is at ${frame.address}` : ""}${frame.module ? ` in ${frame.module}` : ""}.`
             : at && !trace
               ? stale === "passed"
                 ? `Stop #${at.stop} has passed.`

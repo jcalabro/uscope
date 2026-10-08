@@ -12,12 +12,13 @@ use crate::protocol::{
 };
 use crate::unwind::{CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext};
 use crate::{
-    CodeInstanceKind, CodeRole, Error, ImageAddress, ImageLocation, InlineFrameLookup,
-    LoadedModule, Result, SourceLocation, StackFrameId, StackSegment, TaskId, ThreadActivity,
-    VirtualAddress,
+    CodeInstanceId, CodeInstanceKind, CodeRole, Error, ImageAddress, ImageLocation,
+    InlineFrameLookup, LoadedModule, Result, SourceLocation, StackFrameId, StackSegment, TaskId,
+    ThreadActivity, VirtualAddress,
 };
 
 use super::activation::{Activation, StackPosition, StackView};
+use super::awaits::Followed;
 use super::breakpoints::install_plan_breakpoint;
 use super::frames::{
     DwarfCallerProvider, RoleCallerProvider, StackRoot, code_instance_is_active,
@@ -234,23 +235,23 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Whether the thread is stopped in code a source step leaves for its
     /// caller rather than stepping through: a stack switch, whose call-frame
     /// information cannot follow it, or the runtime's own machinery when
-    /// the step did not begin there.
+    /// the step may not enter it.
     fn stopped_where_step_leaves(&self, pid: Pid) -> Result<bool> {
         let registers = self.ptrace.registers(pid)?;
-        let began_in_runtime = self.step_began_in_runtime();
+        let enters_runtime = self.step_enters_runtime();
         Ok(match self.code_role(VirtualAddress::new(registers.rip)) {
             Some(CodeRole::StackSwitch) => true,
-            Some(role) => is_runtime_role(role) && !began_in_runtime,
+            Some(role) => is_runtime_role(role) && !enters_runtime,
             None => false,
         })
     }
 
-    fn step_began_in_runtime(&self) -> bool {
+    fn step_enters_runtime(&self) -> bool {
         self.inferior
             .as_ref()
             .and_then(|inferior| inferior.active.as_ref())
             .is_some_and(|active| {
-                matches!(&active.kind, ActiveKind::Step { start, .. } if start.began_in_runtime)
+                matches!(&active.kind, ActiveKind::Step { start, .. } if start.enters_runtime)
             })
     }
 
@@ -405,7 +406,8 @@ impl<P: LinuxTraceOps> Controller<P> {
                     start.returned_to.or(start.activation),
                     start
                         .code_instance
-                        .filter(|instance| start.physical_instance != Some(*instance)),
+                        .filter(|instance| start.physical_instance != Some(*instance))
+                        .zip(start.physical_instance),
                 )),
                 _ => None,
             })
@@ -424,11 +426,21 @@ impl<P: LinuxTraceOps> Controller<P> {
             .code_role(VirtualAddress::new(registers.rip))
             .unwrap_or_default();
         let returned = frame.is_some_and(|frame| frame.has_returned(position));
-        let left_inlined =
-            inlined.is_some_and(|instance| !code_instance_is_active(&location, instance));
+        // Left for the code it is inlined into, not for a function it
+        // calls.
+        let left_inlined = inlined.is_some_and(|(instance, physical)| {
+            location.physical_instance == Some(physical)
+                && !code_instance_is_active(&location, instance)
+        });
+        // An async body that may be pending is awaited by the code it
+        // left, whose poll the step follows to its return.
+        let pending = left_inlined
+            && self.active_step().is_some_and(|start| {
+                self.left_inlined_body_pending(pid, start, VirtualAddress::new(registers.rip))
+            });
         let enters = match role {
             CodeRole::Panic => true,
-            CodeRole::Wrapper => returned || left_inlined,
+            CodeRole::Wrapper => returned || left_inlined && !pending,
             _ => false,
         };
         if !enters {
@@ -551,6 +563,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     fn advance_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
+        match self.follow_poll_return(pid, kind)? {
+            Some(Followed::Waits) => return self.continue_thread(pid),
+            Some(Followed::Ended(reason)) => return self.begin_visible_stop(pid, reason),
+            None => {}
+        }
         self.note_returned_values(pid);
         self.retire_return_guard()?;
         self.retire_epilogue_return_guard()?;
@@ -1126,7 +1143,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             .expect("source step has a starting state");
         // Waiting for its loop, a step completes only at its plan's
         // breakpoints.
-        if start.running_on || start.loops.as_ref().is_some_and(StepLoops::waits) {
+        if start.running_on
+            || start.loops.as_ref().is_some_and(StepLoops::waits)
+            || super::awaits::waits(start)
+        {
             return Ok(false);
         }
         if kind == StepKind::OverInstruction {
@@ -1198,9 +1218,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                     // tail-called replacement, not the caller. Keep stepping
                     // when its return address could not be independently
                     // proven for accelerated traversal.
-                    if location.physical_instance != start.physical_instance
-                        && !activation.has_returned(self.stack_position(pid, &registers))
-                    {
+                    let returned = activation.has_returned(self.stack_position(pid, &registers));
+                    if location.physical_instance != start.physical_instance && !returned {
+                        return Ok(false);
+                    }
+                    if !returned && self.left_inlined_body_pending(pid, start, instruction) {
                         return Ok(false);
                     }
                     return Ok(source_step_destination(&self.module_image, &location, kind));
@@ -1314,9 +1336,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             }),
         )?;
         let current_instance = selected_code_instance(described, &presentation)?;
+        if self.runs_for_runtime(described, current_instance, start) {
+            return Ok(false);
+        }
+        let physical_role = self.code_role(VirtualAddress::new(registers.rip));
         // Code inlined into other code is its own function's, as the
         // program's function a wrapper calls may be.
-        let physical_role = self.code_role(VirtualAddress::new(registers.rip));
         let role = current_instance
             .filter(|instance| described.physical_instance != Some(*instance))
             .and_then(|instance| self.module_image.code_instance(instance))
@@ -1334,6 +1359,19 @@ impl<P: LinuxTraceOps> Controller<P> {
                 source_for_code_instance(&self.module_image, location, instance)
             })
         });
+        // What leads into an async body, its dispatch and the moves of its
+        // arguments, carries the body's header line; the step goes on into
+        // the body.
+        let leads_into_body = current_instance
+            .and_then(|instance| self.module_image.code_instance(instance))
+            .and_then(|instance| self.module_image.function(instance.function))
+            .filter(|function| function.coroutine.is_some())
+            .and_then(|function| function.declaration.as_ref())
+            .zip(source.as_ref())
+            .is_some_and(|(header, at)| header.file == at.file && header.line == at.line);
+        if leads_into_body {
+            return Ok(false);
+        }
         // As when it starts, stepping in never requires the activation: code
         // without unwind information is judged by its location alone.
         let activation = self.top_activation(pid, registers).ok();
@@ -1385,6 +1423,35 @@ impl<P: LinuxTraceOps> Controller<P> {
                     || current_instance != start.code_instance
                     || source_line_changed(start.source.as_ref(), source.as_ref())),
         )
+    }
+
+    /// Whether code the step reached runs for runtime code it does not
+    /// enter: inlined into that code, as the standard library's code the
+    /// runtime runs is, or into what that code is inlined into. Such code
+    /// is the runtime's work; the step leaves it for the runtime's caller.
+    fn runs_for_runtime(
+        &self,
+        location: &ImageLocation,
+        current: Option<CodeInstanceId>,
+        start: &StepStart,
+    ) -> bool {
+        let passed = |instance: &CodeInstanceId| {
+            self.module_image
+                .code_instance(*instance)
+                .and_then(|instance| self.module_image.function(instance.function))
+                .is_some_and(|function| is_runtime_role(function.role) && !start.enters_runtime)
+        };
+        let enclosing = match &location.inline_frames {
+            InlineFrameLookup::Unique(chain) => {
+                let inner = current
+                    .and_then(|current| chain.instances.iter().position(|id| *id == current))
+                    .unwrap_or(0);
+                &chain.instances[..inner]
+            }
+            _ => &[],
+        };
+        location.physical_instance != current
+            && (location.physical_instance.iter().any(passed) || enclosing.iter().any(passed))
     }
 
     pub(super) fn step_start(
@@ -1513,9 +1580,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             plan_addresses,
             call_return,
             panic_guards,
-            began_in_runtime: self
-                .code_role(VirtualAddress::new(registers.rip))
-                .is_some_and(is_runtime_role),
+            enters_runtime: self.step_into_runtime
+                || self
+                    .code_role(VirtualAddress::new(registers.rip))
+                    .is_some_and(is_runtime_role),
             loops,
             returning,
             ..StepStart::default()
@@ -1533,10 +1601,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         instance_id: crate::CodeInstanceId,
         plan_addresses: &mut BTreeSet<VirtualAddress>,
     ) -> Result<()> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        let Some(instance) = self.module_image.code_instance(instance_id) else {
+        if self.module_image.code_instance(instance_id).is_none() {
             return Ok(());
-        };
+        }
         // A frame without a trustworthy caller, such as a coroutine's
         // first frame or one a stack overflow corrupted, still steps by
         // line. Its return, if it comes, is then followed like a return
@@ -1546,19 +1613,47 @@ impl<P: LinuxTraceOps> Controller<P> {
             Err(error) if is_caller_unavailable(&error) => None,
             Err(error) => return Err(error),
         };
+        plan_addresses.extend(self.other_lines(instance_id, source)?);
+        plan_addresses.extend(return_address);
+        Ok(())
+    }
+
+    /// The statements of the code instance `instance_id` on other lines
+    /// than `source`.
+    pub(super) fn other_lines(
+        &self,
+        instance_id: crate::CodeInstanceId,
+        source: &SourceLocation,
+    ) -> Result<BTreeSet<VirtualAddress>> {
+        self.statements_of(instance_id, Some(source))
+    }
+
+    /// The statements of the code instance `instance_id`, on any line but
+    /// `except`'s.
+    pub(super) fn statements_of(
+        &self,
+        instance_id: crate::CodeInstanceId,
+        except: Option<&SourceLocation>,
+    ) -> Result<BTreeSet<VirtualAddress>> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let Some(instance) = self.module_image.code_instance(instance_id) else {
+            return Ok(BTreeSet::new());
+        };
+        let mut statements = BTreeSet::new();
         for line in self.module_image.line_entries() {
             if !line.statement || !instance.contains(line.range.start) {
                 continue;
             }
             let location = self.module_image.locate(line.range.start);
-            if source_for_code_instance(&self.module_image, &location, instance_id)
-                .is_some_and(|candidate| source_line_changed(Some(source), Some(&candidate)))
-            {
-                plan_addresses.insert(inferior.loaded_module.virtual_address(line.range.start)?);
+            if source_for_code_instance(&self.module_image, &location, instance_id).is_some_and(
+                |candidate| {
+                    except.is_none_or(|source| source_line_changed(Some(source), Some(&candidate)))
+                },
+            ) {
+                statements.insert(inferior.loaded_module.virtual_address(line.range.start)?);
             }
         }
-        plan_addresses.extend(return_address);
-        Ok(())
+        Ok(statements)
     }
 
     /// Returns the return address and stack pointer of the call instruction
@@ -1866,7 +1961,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// What the physical function holding `address` is to stepping, not
     /// any function inlined into it there.
-    fn code_role(&self, address: VirtualAddress) -> Option<CodeRole> {
+    pub(super) fn code_role(&self, address: VirtualAddress) -> Option<CodeRole> {
         let inferior = self.inferior.as_ref()?;
         let image = inferior.loaded_module.image_address(address).ok()?;
         Some(self.module_image.code_role(image))
@@ -1893,7 +1988,7 @@ const STEPS_OVER: &str = "a step into a new task runs as a step over";
 
 /// Whether code in this role is a language runtime's own: its machinery,
 /// its outermost frames, and what it enters by a trap.
-const fn is_runtime_role(role: CodeRole) -> bool {
+pub(super) const fn is_runtime_role(role: CodeRole) -> bool {
     matches!(
         role,
         CodeRole::RuntimeInternal | CodeRole::Outermost | CodeRole::TrapEntry | CodeRole::Dispatch
@@ -1902,12 +1997,12 @@ const fn is_runtime_role(role: CodeRole) -> bool {
 
 /// Whether a source step goes on through code in this role rather than
 /// end there: code the program's author did not write, except the
-/// runtime's own machinery when the step began in it. Wrappers and the
+/// runtime's own machinery when the step may enter it. Wrappers and the
 /// code that begins a panic are stepped through to what they call.
 const fn passes_over(role: CodeRole, start: &StepStart) -> bool {
     match role {
         CodeRole::Wrapper | CodeRole::StackSwitch | CodeRole::Panic => true,
-        role => is_runtime_role(role) && !start.began_in_runtime,
+        role => is_runtime_role(role) && !start.enters_runtime,
     }
 }
 

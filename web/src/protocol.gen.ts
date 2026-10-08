@@ -8,9 +8,9 @@ export type Envelope = {
 /**
  * Chosen by the tab; the answer carries it back.
  */
-id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery });
+id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt });
 
-export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery };
+export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt };
 
 export type SetName = { name: string, };
 
@@ -70,6 +70,10 @@ export type Step = {
  */
 stop: number, thread: number, 
 /**
+ * The task stepped, which runs on the thread.
+ */
+task?: TaskKey | null, 
+/**
  * The frame a step out leaves; every other step starts from the
  * innermost frame.
  */
@@ -85,7 +89,7 @@ export type Jump = {
 /**
  * The stop the thread is moved at, which must still be current.
  */
-stop: number, thread: number, 
+stop: number, thread: number, task?: TaskKey | null, 
 /**
  * `FILE:LINE`, or another location a breakpoint takes.
  */
@@ -109,7 +113,7 @@ url: string,
  */
 label: string, };
 
-export type ThreadAt = { stop: number, thread: number, };
+export type ThreadAt = { stop: number, thread: number, task?: TaskKey | null, };
 
 export type SourcePath = { 
 /**
@@ -333,15 +337,21 @@ index: number,
  */
 name: string, kind: FrameKind, 
 /**
- * The instruction or return address, in hexadecimal.
+ * The instruction or return address, in hexadecimal; for a suspended
+ * task's frame, where it resumes, if that is known.
  */
-address: string, 
+address: string | null, 
 /**
  * The file name of the module the code is in.
  */
-module: string | null, source: SourceLine | null, };
+module: string | null, source: SourceLine | null, 
+/**
+ * For a frame that drives a future whose awaits the stack does not
+ * show in full, why.
+ */
+unfollowed: string | null, };
 
-export type FrameKind = "physical" | "inline" | "signal" | "tailCall";
+export type FrameKind = "physical" | "inline" | "signal" | "tailCall" | "async" | "awaited";
 
 export type SourceLine = { path: string, line: number, column: number | null, };
 
@@ -385,7 +395,7 @@ breakable: Array<number>, };
 
 export type Added = { id: number, };
 
-export type FrameAt = { stop: number, thread: number, frame: number, };
+export type FrameAt = { stop: number, thread: number, task?: TaskKey | null, frame: number, };
 
 export type ChildrenOf = { 
 /**
@@ -394,7 +404,7 @@ export type ChildrenOf = {
  */
 handle: number, start: number, count: number, };
 
-export type Evaluate = { expression: string, stop: number, thread: number, frame: number, };
+export type Evaluate = { expression: string, stop: number, thread: number, task?: TaskKey | null, frame: number, };
 
 export type SetValue = { 
 /**
@@ -404,7 +414,7 @@ path: string,
 /**
  * An expression for the new value.
  */
-value: string, stop: number, thread: number, frame: number, };
+value: string, stop: number, thread: number, task?: TaskKey | null, frame: number, };
 
 export type Complete = { 
 /**
@@ -414,13 +424,13 @@ text: string,
 /**
  * The frame whose names complete; absent when nothing is stopped.
  */
-stop?: number | null, thread?: number | null, frame?: number | null, };
+stop?: number | null, thread?: number | null, task?: TaskKey | null, frame?: number | null, };
 
 export type ConsoleLine = { line: string, 
 /**
  * The frame the line runs in; absent when nothing is stopped.
  */
-stop?: number | null, thread?: number | null, frame?: number | null, };
+stop?: number | null, thread?: number | null, task?: TaskKey | null, frame?: number | null, };
 
 export type Scopes = { scopes: Array<Scope>, };
 
@@ -493,7 +503,7 @@ address?: string | null,
 /**
  * Intel unless AT&T is asked for.
  */
-syntax?: Syntax | null, stop: number, thread: number, frame: number, };
+syntax?: Syntax | null, stop: number, thread: number, task?: TaskKey | null, frame: number, };
 
 export type ReadMemory = { 
 /**
@@ -519,7 +529,7 @@ target: string, access: WatchAccess,
 /**
  * The frame an expression is resolved in; an address range needs none.
  */
-stop?: number | null, thread?: number | null, frame?: number | null, condition?: string | null, hitCondition?: string | null, };
+stop?: number | null, thread?: number | null, task?: TaskKey | null, frame?: number | null, condition?: string | null, hitCondition?: string | null, };
 
 export type EditWatchpoint = { id: number, condition?: string | null, hitCondition?: string | null, };
 
@@ -664,3 +674,48 @@ debugFile: string | null,
  * Why the separate debug file found for it could not be used.
  */
 debugFileProblem: string | null, };
+
+export type StopAt = { stop: number, };
+
+export type TaskKey = { runtime: number, number: number, };
+
+export type TaskList = { 
+/**
+ * What the runtimes call a task, such as `task` or `goroutine`.
+ */
+noun: string | null, tasks: Array<Task>, 
+/**
+ * Whether there are more tasks than those listed, which the list
+ * leaves out to stay small.
+ */
+more: boolean, 
+/**
+ * Why the list may be missing tasks, or describe some wrongly.
+ */
+gaps: Array<string>, };
+
+export type Task = { key: TaskKey, state: TaskState, 
+/**
+ * The code the program wrote that it is in, as the CLI says it.
+ */
+place: string, 
+/**
+ * The frame of that code in the task's stack, which choosing the task
+ * shows; absent for a task that runs only its runtime's code.
+ */
+frame: Frame | null, 
+/**
+ * The runtime's own words for what it does or waits for.
+ */
+detail: string | null, 
+/**
+ * Labels the program or runtime gave it, such as `{runtime: "local
+ * set 3"}`.
+ */
+labels: string | null, 
+/**
+ * The thread running it.
+ */
+thread: number | null, };
+
+export type TaskState = "running" | "runnable" | "blocked" | "exited" | "unknown";

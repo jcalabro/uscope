@@ -13,10 +13,12 @@ use crate::protocol::StopId;
 use crate::runtime_model::{
     self, CodeAddress, RuntimeModel, RuntimeStop, RuntimeTask, TaskContext, TaskRef,
 };
+use crate::unwind::DEFAULT_MAX_FRAMES;
 use crate::{
-    Error, ExecutionContext, ImageAddress, InspectionUsage, LoadedModule, ModuleImage, Result,
-    RuntimeId, StackSegment, TaskCursor, TaskId, TaskLocation, TaskPage, TaskSnapshot,
-    ThreadActivity, ThreadId, VirtualAddress,
+    ColumnNumber, Error, ExecutionContext, ImageAddress, InspectionUsage, LineNumber, LoadedModule,
+    ModuleImage, RecordedPlace, Result, RuntimeId, SourceLocation, StackSegment, TaskCursor,
+    TaskId, TaskLocation, TaskPage, TaskSnapshot, TaskState, ThreadActivity, ThreadId,
+    VirtualAddress,
 };
 
 use super::activation::TaskStack;
@@ -27,6 +29,13 @@ use super::signals::Signal;
 use super::{
     BreakpointSite, Controller, Inferior, debug_pid, debug_thread_id, validate_public_stop,
 };
+
+/// The sets of tasks the futures threads drive at a stop run, by where
+/// the runtime keeps them, and why some may be missing.
+pub(super) struct TaskSets {
+    sets: Arc<[u64]>,
+    gaps: Arc<[Arc<str>]>,
+}
 
 /// The most tasks one page holds.
 pub(super) const MAX_TASK_PAGE: usize = 4096;
@@ -39,14 +48,31 @@ pub(super) struct BoundRuntime {
     pub(super) model: Arc<dyn RuntimeModel>,
 }
 
-/// The models bound to each image so far: `None` for an image with no
-/// runtime, or why binding one failed.
+/// The models bound to each image so far, each with why binding it failed
+/// if it did.
 pub(super) type RuntimeCache = std::cell::RefCell<
     std::collections::BTreeMap<
         crate::ModuleImageId,
-        Option<std::result::Result<Arc<dyn RuntimeModel>, Arc<str>>>,
+        Vec<std::result::Result<Arc<dyn RuntimeModel>, Arc<str>>>,
     >,
 >;
+
+/// The most runtimes one module carries, which numbers each runtime by its
+/// module and its place among the module's runtimes, the same at every
+/// stop.
+const RUNTIMES_PER_MODULE: u32 = 4;
+
+/// The id of the `index`th runtime the module `module` carries.
+fn runtime_id(module: crate::ModuleId, index: usize) -> Option<RuntimeId> {
+    let index = u32::try_from(index)
+        .ok()
+        .filter(|index| *index < RUNTIMES_PER_MODULE)?;
+    module
+        .get()
+        .checked_mul(RUNTIMES_PER_MODULE)?
+        .checked_add(index)
+        .map(RuntimeId::new)
+}
 
 /// One stop of the process, as a runtime model reads it.
 struct ProcessStop<'a, P> {
@@ -57,6 +83,10 @@ struct ProcessStop<'a, P> {
     bias: u64,
     /// Where the reads made are counted, when they are.
     usage: Option<&'a Cell<InspectionUsage>>,
+    /// The process's threads, in the order of their ids.
+    threads: Vec<ThreadId>,
+    /// The sets of tasks threads drive, once found at this stop.
+    task_sets: Vec<u64>,
 }
 
 impl<P: InspectionOps> RuntimeStop for ProcessStop<'_, P> {
@@ -101,6 +131,14 @@ impl<P: InspectionOps> RuntimeStop for ProcessStop<'_, P> {
     fn load_bias(&self) -> u64 {
         self.bias
     }
+
+    fn task_sets(&self) -> Vec<u64> {
+        self.task_sets.clone()
+    }
+
+    fn threads(&self) -> Vec<ThreadId> {
+        self.threads.clone()
+    }
 }
 
 impl<P: InspectionOps> Controller<P> {
@@ -109,13 +147,17 @@ impl<P: InspectionOps> Controller<P> {
     /// [`Self::unbound_runtimes`].
     pub(super) fn runtimes(&self, inferior: &Inferior) -> Vec<BoundRuntime> {
         self.loaded_images(inferior)
-            .filter_map(|(module, image)| {
-                let model = self.bind_runtime(image)?.ok()?;
-                Some(BoundRuntime {
-                    id: RuntimeId::new(module.id.get()),
-                    module,
-                    model,
-                })
+            .flat_map(|(module, image)| {
+                self.bind_runtimes(image)
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(move |(index, model)| {
+                        Some(BoundRuntime {
+                            id: runtime_id(module.id, index)?,
+                            module,
+                            model: model.ok()?,
+                        })
+                    })
             })
             .collect()
     }
@@ -124,7 +166,8 @@ impl<P: InspectionOps> Controller<P> {
     /// it bound, as when its debug information is stripped.
     pub(super) fn unbound_runtimes(&self, inferior: &Inferior) -> Vec<Arc<str>> {
         self.loaded_images(inferior)
-            .filter_map(|(_, image)| self.bind_runtime(image)?.err())
+            .flat_map(|(_, image)| self.bind_runtimes(image))
+            .filter_map(std::result::Result::err)
             .collect()
     }
 
@@ -140,14 +183,14 @@ impl<P: InspectionOps> Controller<P> {
         )
     }
 
-    fn bind_runtime(
+    fn bind_runtimes(
         &self,
         image: &Arc<ModuleImage>,
-    ) -> Option<std::result::Result<Arc<dyn RuntimeModel>, Arc<str>>> {
+    ) -> Vec<std::result::Result<Arc<dyn RuntimeModel>, Arc<str>>> {
         self.runtime_models
             .borrow_mut()
             .entry(image.id())
-            .or_insert_with(|| runtime_model::detect(Arc::clone(image) as _))
+            .or_insert_with(|| runtime_model::detect(&(Arc::clone(image) as _)))
             .clone()
     }
 
@@ -173,18 +216,143 @@ impl<P: InspectionOps> Controller<P> {
         usage: Option<&Cell<InspectionUsage>>,
         read: impl FnOnce(&dyn RuntimeStop) -> T,
     ) -> T {
+        self.with_process_stop(inferior, &runtime.module, reader, usage, read)
+    }
+
+    /// Runs `read` against the process at a stop, as the code of `module`
+    /// sees it, reading memory through the stopped thread `reader`.
+    pub(super) fn with_module_stop<T>(
+        &self,
+        inferior: &Inferior,
+        module: &LoadedModule,
+        reader: Pid,
+        read: impl FnOnce(&dyn RuntimeStop) -> T,
+    ) -> T {
+        self.with_process_stop(inferior, module, reader, None, read)
+    }
+
+    pub(super) fn with_process_stop<T>(
+        &self,
+        inferior: &Inferior,
+        module: &LoadedModule,
+        reader: Pid,
+        usage: Option<&Cell<InspectionUsage>>,
+        read: impl FnOnce(&dyn RuntimeStop) -> T,
+    ) -> T {
         read(&ProcessStop {
             ptrace: &self.ptrace,
             reader,
             breakpoints: &inferior.breakpoints,
-            bias: runtime.module.load_bias,
+            bias: module.load_bias,
             usage,
+            threads: inferior
+                .threads
+                .keys()
+                .map(|pid| debug_thread_id(*pid))
+                .collect(),
+            task_sets: inferior
+                .public_stop
+                .as_ref()
+                .and_then(|stop| {
+                    let found = stop.task_sets.borrow();
+                    found.as_ref().map(|found| found.sets.to_vec())
+                })
+                .unwrap_or_default(),
         })
+    }
+
+    /// The sets of tasks the futures the program's own threads drive run,
+    /// which no runtime lists, found once for a published stop from the
+    /// futures their stacks show, and why some may be missing.
+    pub(super) fn task_sets(&self, inferior: &Inferior) -> Arc<[Arc<str>]> {
+        let Some(stop) = inferior.public_stop.as_ref() else {
+            return Arc::from([]);
+        };
+        if let Some(found) = stop.task_sets.borrow().as_ref() {
+            return Arc::clone(&found.gaps);
+        }
+        let (sets, gaps) = self.find_task_sets(inferior, stop.triggering_thread);
+        let gaps: Arc<[Arc<str>]> = gaps.into();
+        *stop.task_sets.borrow_mut() = Some(TaskSets {
+            sets: sets.into(),
+            gaps: Arc::clone(&gaps),
+        });
+        gaps
+    }
+
+    fn find_task_sets(&self, inferior: &Inferior, reader: Pid) -> (Vec<u64>, Vec<Arc<str>>) {
+        let runtimes = self.runtimes(inferior);
+        let mut sets = std::collections::BTreeSet::new();
+        let mut gaps = Vec::new();
+        if runtimes.is_empty() {
+            return (Vec::new(), gaps);
+        }
+        let modules = self.unwind_modules(inferior);
+        for &pid in inferior.threads.keys() {
+            // Only a thread no runtime schedules tasks on drives a future.
+            if self.thread_activity(inferior, pid) != Some(ThreadActivity::Outside) {
+                continue;
+            }
+            let root = StackRoot::of_thread(pid);
+            let expanded = self.root_presentation(&root).and_then(|presentation| {
+                let stack = self.physical_stack(inferior, &root, DEFAULT_MAX_FRAMES)?;
+                self.expand_backtrace(
+                    inferior,
+                    &root,
+                    &stack,
+                    DEFAULT_MAX_FRAMES,
+                    &modules,
+                    presentation.as_ref(),
+                )
+            });
+            let expanded = match expanded {
+                Ok(expanded) => expanded,
+                Err(error) => {
+                    gaps.push(
+                        format!(
+                            "thread {}'s stack, where it may drive tasks, cannot be read: {error}",
+                            debug_thread_id(pid)
+                        )
+                        .into(),
+                    );
+                    continue;
+                }
+            };
+            // A set that a future that cannot be read runs is not found.
+            if let Some(unread) = expanded.trace.unfollowed.first()
+                && expanded.lost.iter().any(|ty| {
+                    runtimes.iter().any(|runtime| {
+                        runtime.module.image == ty.image && runtime.model.may_run_task_set(*ty)
+                    })
+                })
+            {
+                gaps.push(
+                    format!(
+                        "thread {} drives a future that may run a local set, whose tasks are not listed: {}",
+                        debug_thread_id(pid),
+                        unread.reason
+                    )
+                    .into(),
+                );
+            }
+            for future in &expanded.futures {
+                for runtime in runtimes
+                    .iter()
+                    .filter(|runtime| runtime.module.image == future.ty.image)
+                {
+                    let set = self.with_runtime_stop(inferior, runtime, reader, |stop| {
+                        runtime.model.task_set(stop, future.object, future.ty)
+                    });
+                    sets.extend(set);
+                }
+            }
+        }
+        (sets.into_iter().collect(), gaps)
     }
 
     /// How to ask a runtime about `task`: by its number, and where the
     /// runtime said it keeps it when it listed it at this stop.
-    fn task_ref(inferior: &Inferior, task: TaskId) -> TaskRef {
+    pub(super) fn task_ref(inferior: &Inferior, task: TaskId) -> TaskRef {
         TaskRef {
             number: task.number,
             locator: inferior
@@ -217,8 +385,12 @@ impl<P: InspectionOps> Controller<P> {
         });
         let mut tasks = Vec::new();
         // A runtime that cannot be read leaves its tasks out of every page.
+        // So are the tasks of a set that cannot be found.
+        let set_gaps = self.task_sets(inferior);
         let mut gaps = if from.is_none() {
-            self.unbound_runtimes(inferior)
+            let mut gaps = self.unbound_runtimes(inferior);
+            gaps.extend(set_gaps.iter().cloned());
+            gaps
         } else {
             Vec::new()
         };
@@ -264,6 +436,15 @@ impl<P: InspectionOps> Controller<P> {
                 break;
             }
         }
+        // A task suspended in its future waits for what that future does.
+        for task in &mut tasks {
+            if task.state == TaskState::Blocked
+                && let Some(awaiting) =
+                    self.task_awaiting(inferior, stop_id, task.id, reader, &usage)
+            {
+                task.detail = Some(awaiting);
+            }
+        }
         Ok(TaskPage {
             tasks: tasks.into(),
             next: (cursor.runtime < runtimes.len()).then_some(cursor),
@@ -290,7 +471,11 @@ impl<P: InspectionOps> Controller<P> {
             detail: task.detail.clone(),
             thread: task.thread,
             resume: task.resume.map(code),
-            creation: task.creation.map(code),
+            creation: task.creation.map(code).or_else(|| {
+                task.spawned
+                    .as_ref()
+                    .map(|place| self.recorded_location(inferior, &runtime.module, place))
+            }),
             entry: task.entry.map(|address| {
                 code(CodeAddress {
                     address,
@@ -324,20 +509,57 @@ impl<P: InspectionOps> Controller<P> {
             });
         let Some((module, location)) = found else {
             return TaskLocation {
-                address: code.address,
+                address: Some(code.address),
                 module: None,
                 function: None,
                 source: None,
+                recorded: None,
             };
         };
         TaskLocation {
-            address: code.address,
+            address: Some(code.address),
             module: Some(module.id),
             function: location
                 .function
                 .map(|function| function.name)
                 .or_else(|| location.symbol.map(|symbol| symbol.name)),
             source: location.source,
+            recorded: None,
+        }
+    }
+
+    /// A place a runtime recorded in the source of its module, in the
+    /// source file of the module's image that its path names, if one does.
+    fn recorded_location(
+        &self,
+        inferior: &Inferior,
+        module: &LoadedModule,
+        place: &RecordedPlace,
+    ) -> TaskLocation {
+        let image = if module.id == inferior.loaded_module.id {
+            Some(&self.module_image)
+        } else {
+            self.modules.get(&module.id).map(|found| &found.image)
+        };
+        let source = image
+            .and_then(|image| {
+                image
+                    .source_file_matching(std::path::Path::new(&*place.path))
+                    .ok()
+            })
+            .and_then(|file| {
+                Some(SourceLocation {
+                    file: file.id,
+                    line: LineNumber::new(u64::from(place.line))?,
+                    column: ColumnNumber::new(u64::from(place.column)),
+                })
+            });
+        TaskLocation {
+            address: None,
+            module: Some(module.id),
+            function: None,
+            source,
+            recorded: Some(place.clone()),
         }
     }
 }
@@ -359,15 +581,52 @@ impl<P: InspectionOps> Controller<P> {
         activity
     }
 
-    fn read_thread_activity(&self, inferior: &Inferior, pid: Pid) -> Option<ThreadActivity> {
+    /// The task a stopped thread runs, as its runtime reads it from the
+    /// thread's own state, without the runtime's shared state: what run
+    /// control asks at a hit, before the threads still running, which may
+    /// be changing that state, have stopped. `None` without a runtime.
+    pub(super) fn current_task(
+        &self,
+        inferior: &Inferior,
+        pid: Pid,
+    ) -> Option<std::result::Result<Option<TaskId>, Arc<str>>> {
         let runtimes = self.runtimes(inferior);
-        // A thread may run the tasks of a runtime that cannot be read.
         let mut found = self
             .unbound_runtimes(inferior)
             .into_iter()
             .next()
             .map_or_else(
-                || (!runtimes.is_empty()).then_some(ThreadActivity::Idle),
+                || (!runtimes.is_empty()).then_some(Ok(None)),
+                |reason| Some(Err(reason)),
+            );
+        for runtime in &runtimes {
+            let current = self.with_runtime_stop(inferior, runtime, pid, |stop| {
+                runtime.model.current_task(stop, debug_thread_id(pid))
+            });
+            match current {
+                Ok(Some(number)) => {
+                    return Some(Ok(Some(TaskId {
+                        runtime: runtime.id,
+                        number,
+                    })));
+                }
+                Ok(None) => {}
+                Err(reason) => found = Some(Err(reason)),
+            }
+        }
+        found
+    }
+
+    fn read_thread_activity(&self, inferior: &Inferior, pid: Pid) -> Option<ThreadActivity> {
+        let runtimes = self.runtimes(inferior);
+        // A thread may run the tasks of a runtime that cannot be read. One
+        // runtime's idle thread is idle whatever another says of it.
+        let mut found = self
+            .unbound_runtimes(inferior)
+            .into_iter()
+            .next()
+            .map_or_else(
+                || (!runtimes.is_empty()).then_some(ThreadActivity::Outside),
                 |reason| Some(ThreadActivity::Unknown(reason)),
             );
         for runtime in &runtimes {
@@ -384,7 +643,12 @@ impl<P: InspectionOps> Controller<P> {
                         stack,
                     });
                 }
-                runtime_model::ThreadActivity::Idle => {}
+                runtime_model::ThreadActivity::Idle => {
+                    if found == Some(ThreadActivity::Outside) {
+                        found = Some(ThreadActivity::Idle);
+                    }
+                }
+                runtime_model::ThreadActivity::Outside => {}
                 runtime_model::ThreadActivity::Unknown(reason) => {
                     found = Some(ThreadActivity::Unknown(reason));
                 }
@@ -495,6 +759,7 @@ impl<P: InspectionOps> Controller<P> {
         else {
             return Ok(None);
         };
+        self.task_sets(inferior);
         let found = self.with_runtime_stop(inferior, &runtime, reader, |stop| {
             runtime
                 .model
@@ -508,6 +773,12 @@ impl<P: InspectionOps> Controller<P> {
             })) => RootOrigin::Saved {
                 registers,
                 after_call,
+                reader,
+            },
+            Ok(Some(TaskContext::Suspended { future, ty })) => RootOrigin::Suspended {
+                future,
+                ty,
+                module: runtime.module,
                 reader,
             },
             Ok(None) => return Ok(None),

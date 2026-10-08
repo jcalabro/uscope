@@ -919,7 +919,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         let orphans = self.orphans.take().expect("orphans exist");
         // The program is gone, so a failure has no one to report to.
-        if orphans.waiter.is_some_and(|waiter| waiter.join().is_err()) {
+        if orphans
+            .waiter
+            .is_some_and(|waiter| waiter.stop_and_join().is_err())
+        {
             record!("the waiter of the orphaned children panicked");
         }
         if self.shutting_down {
@@ -1138,8 +1141,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             let killed = std::mem::take(&mut inferior.killed_children);
             let waiter = inferior.waiter.take();
             if pending.is_empty() && killed.is_empty() {
+                // Nothing is left to wait for, though the debugger's
+                // process may have children from outside the session.
                 if let Some(waiter) = waiter {
-                    waiter.join()?;
+                    waiter.stop_and_join()?;
                 }
             } else {
                 // The waiter reports the children's first stops, at which

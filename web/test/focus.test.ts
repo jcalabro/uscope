@@ -10,6 +10,7 @@ import {
   parsePlace,
   parseSearch,
   recordedPath,
+  stopPath,
   stringifySearch,
   validateLook,
 } from "../src/focus";
@@ -84,6 +85,15 @@ describe("places and paths", () => {
       frame: 1,
     });
     expect(parseAt({ stop: "12", thread: "x", frame: "0" })).toBeNull();
+  });
+
+  it("names a task by its runtime and number, and reads it back", () => {
+    const at = { stop: 7, thread: 0, task: { runtime: 2, number: 31 }, frame: 3 };
+    expect(stopPath("k7q2", at)).toBe("/s/k7q2/stop/7/task/2.31/f/3");
+    expect(parseAt({ stop: "7", task: "2.31", frame: "3" })).toEqual(at);
+    for (const task of ["2", "2.x", "2.31.4", "", ".31"]) {
+      expect(parseAt({ stop: "7", task, frame: "0" }), task).toBeNull();
+    }
   });
 
   it("follows a new stop keeping the view, watches, and expansion, not the place", () => {

@@ -257,6 +257,8 @@ pub enum TaskState {
     Runnable,
     /// Waiting for an event, such as a channel or a lock.
     Blocked,
+    /// Finished, and not yet released by its runtime.
+    Exited,
     /// The runtime's state for the task could not be read, for this reason.
     Unknown(Arc<str>),
 }
@@ -265,13 +267,28 @@ pub enum TaskState {
 /// created it, or the function it began in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskLocation {
-    pub address: VirtualAddress,
-    /// The loaded module whose image holds the address.
+    /// The place's code, unless its runtime recorded it only by its source.
+    pub address: Option<VirtualAddress>,
+    /// The loaded module whose image holds the address, or whose source
+    /// the runtime recorded the place in.
     pub module: Option<ModuleId>,
     /// The function holding the address, or the call at it for a return
     /// address.
     pub function: Option<Arc<str>>,
     pub source: Option<SourceLocation>,
+    /// The place as its runtime recorded it, by its source's path, as
+    /// Rust's `Location` does; the source file it names may be none of
+    /// the module's.
+    pub recorded: Option<RecordedPlace>,
+}
+
+/// A place in a program's source a runtime recorded by the path the
+/// compiler gave it, rather than by an address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedPlace {
+    pub path: Arc<str>,
+    pub line: u32,
+    pub column: u32,
 }
 
 /// One task of a language runtime at a stop.
@@ -298,8 +315,9 @@ pub struct TaskSnapshot {
     /// Whether the runtime runs the task for its own work, such as a
     /// garbage collector's worker, rather than the program's.
     pub internal: bool,
-    /// The key-value labels the program gave the task, such as Go's
-    /// profiler labels.
+    /// The key-value labels the program or its runtime gave the task, such
+    /// as Go's profiler labels, or the tokio runtime that holds it in a
+    /// process with several.
     pub labels: Arc<[(Arc<str>, Arc<str>)]>,
 }
 
@@ -315,6 +333,10 @@ pub enum StackSegment {
     System,
     /// A runtime's signal-handling stack.
     Signal,
+    /// No stack: the chain of awaits of a future that the frame below
+    /// drives, such as the one a runtime's `block_on` polls, which is
+    /// suspended between its polls.
+    Future,
 }
 
 /// What a stopped thread runs for a language runtime.
@@ -322,9 +344,13 @@ pub enum StackSegment {
 pub enum ThreadActivity {
     /// A task, or the runtime's code on its behalf.
     Task { task: TaskId, stack: StackSegment },
-    /// The runtime's scheduler with no task, or code no runtime knows, such
-    /// as a thread C created.
+    /// The runtime's scheduler with no task, or for Go, code the runtime
+    /// does not know, such as a thread C created.
     Idle,
+    /// The program's own code, on a thread no runtime schedules tasks on,
+    /// such as one the program spawned or the one that blocks on a
+    /// runtime.
+    Outside,
     /// The runtime's state for the thread could not be read, for this
     /// reason.
     Unknown(Arc<str>),
@@ -694,7 +720,8 @@ pub enum VariantSelection {
     Selectors(Arc<[VariantSelector]>),
 }
 
-/// A stored discriminator member or a tag type without runtime storage.
+/// A stored discriminator member, a tag type without runtime storage, or
+/// neither.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VariantDiscriminant {
@@ -702,6 +729,10 @@ pub enum VariantDiscriminant {
     Stored(RecordMember),
     /// A tag type is described but no discriminator field exists in storage.
     TagType(TypeReference),
+    /// Nothing is stored or described, as rustc describes a sum type only
+    /// one of whose variants can hold a value, such as `Result<T,
+    /// Infallible>`, or none can, such as `Infallible`.
+    Absent,
 }
 
 /// One variant and the components selected with it.
@@ -1409,6 +1440,9 @@ pub struct ViewChildren {
     /// For a view presenting the value as another, that value's children,
     /// which are the elements.
     pub(crate) inner: Option<Arc<ValueChildrenReference>>,
+    /// Which of those children the elements are, by their positions, when
+    /// they are only some of them.
+    pub(crate) picked: Option<Arc<[u64]>>,
 }
 
 impl fmt::Debug for ViewChildren {
@@ -1432,6 +1466,7 @@ impl PartialEq for ViewChildren {
             && self.elements == other.elements
             && self.fields == other.fields
             && self.inner == other.inner
+            && self.picked == other.picked
     }
 }
 
@@ -1701,6 +1736,9 @@ pub enum CallFrameUnavailableReason {
     /// The frame's function left by a tail call, which gave its place on
     /// the stack to the function it jumped to.
     TailCall,
+    /// The frame is a suspended task's: its future holds its state, and it
+    /// has no place on any stack.
+    Suspended,
 }
 
 /// Why the value a parameter held on entry cannot be recovered from the
@@ -1849,6 +1887,13 @@ pub enum VariableUnavailableReason {
         /// The pointer's target.
         address: VirtualAddress,
     },
+    /// The variable of a function that can suspend was last written
+    /// before the await its current run resumed from, which did not keep
+    /// it, so its storage holds whatever has used that memory since.
+    NotSavedAcrossAwait {
+        /// The line of the await the function resumed from.
+        line: LineNumber,
+    },
     /// A runtime-sized array or slice index is outside its current bounds.
     IndexOutOfBounds {
         /// Requested source index.
@@ -1919,6 +1964,9 @@ impl fmt::Display for VariableUnavailableReason {
             Self::CallFrameUnavailable(CallFrameUnavailableReason::TailCall) => {
                 formatter.write_str("a tail call discarded the frame")
             }
+            Self::CallFrameUnavailable(CallFrameUnavailableReason::Suspended) => {
+                formatter.write_str("the frame is suspended, and is on no stack")
+            }
             Self::EntryValue(reason) => {
                 write!(formatter, "the entry value is unavailable: {reason}")
             }
@@ -1977,6 +2025,10 @@ impl fmt::Display for VariableUnavailableReason {
                 formatter.write_str("DWARF expression evaluation limit exceeded")
             }
             Self::NoTask => formatter.write_str("the thread runs no task"),
+            Self::NotSavedAcrossAwait { line } => write!(
+                formatter,
+                "the value was not kept across the await at line {line}, which this call resumed from"
+            ),
             Self::BelowStackPointer { address } => write!(
                 formatter,
                 "the pointer is stale: {address} is below the frame's stack pointer, in memory only its callees use"
@@ -2296,6 +2348,9 @@ pub struct Presentation {
     /// With [`PresentedShape::Raw`], why the view failed; otherwise why the
     /// summary stopped short.
     pub problem: Option<ViewProblem>,
+    /// For a value presented as an integer, as an atomic is, that integer,
+    /// so a client can write it as it writes any, such as in hexadecimal.
+    pub number: Option<Arc<InspectedValue>>,
 }
 
 /// The inspection state of one visible variable.
@@ -2878,6 +2933,175 @@ pub struct FunctionInfo {
     /// over a function. A step treats the body as its enclosing function's
     /// own code, and the code between them as a call it makes.
     pub enclosing: Option<FunctionId>,
+    /// For the function that runs a coroutine, such as the body of a Rust
+    /// `async fn`, the coroutine's type: the future the body's state lives
+    /// in between polls.
+    pub coroutine: Option<TypeId>,
+    /// The type arguments a generic function was instantiated with, each
+    /// with its parameter's name, as tokio's `poll::<T, S>` names the
+    /// future it polls `T`. Empty for a function that is not generic, or
+    /// whose debug information names none.
+    pub generics: FunctionGenerics,
+}
+
+/// A generic function's type arguments, each with its parameter's name.
+pub type FunctionGenerics = Arc<[(Arc<str>, TypeId)]>;
+
+/// A state machine a compiler generated for code that can suspend.
+///
+/// The future of a Rust `async fn` or `async` block is one. Between polls,
+/// its state number says where it waits and which of its variables it
+/// saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoroutineInfo {
+    pub kind: CoroutineKind,
+    /// Where the state number lies in the coroutine, and its size.
+    pub state: StateMember,
+    /// The states, by number.
+    pub states: Arc<[CoroutineState]>,
+    /// What the coroutine captured, which every state holds: an `async
+    /// fn`'s arguments, or the variables an `async` block uses.
+    pub captures: Arc<[RecordMember]>,
+}
+
+/// What source code a coroutine runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoroutineKind {
+    /// The body of an asynchronous function, whose arguments it captures
+    /// and moves into its body as it starts.
+    AsyncFunction,
+    /// An asynchronous block, which captures the variables it uses.
+    AsyncBlock,
+    /// An asynchronous closure's body.
+    AsyncClosure,
+}
+
+/// The member of a coroutine holding its state number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateMember {
+    /// Its byte offset in the coroutine.
+    pub offset: u64,
+    /// Its size in bytes.
+    pub size: u64,
+}
+
+/// One state of a coroutine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoroutineState {
+    /// The state number that selects it.
+    pub value: u64,
+    pub kind: CoroutineStateKind,
+    /// Where the source shows the state: an `await`'s line for a suspended
+    /// state, the function's header before it starts, and its end after.
+    pub location: Option<SourceLocation>,
+    /// The members the state holds besides the captures, laid out from the
+    /// coroutine's start: the variables live across its `await`, and the
+    /// future it awaits.
+    pub saved: Arc<[RecordMember]>,
+}
+
+/// What a coroutine's state means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoroutineStateKind {
+    /// Built but never polled.
+    Unresumed,
+    /// Finished, having produced its value.
+    Returned,
+    /// Finished by panicking.
+    Panicked,
+    /// Waiting at an `await`, the `index`th in the source.
+    Suspended { index: u32 },
+}
+
+/// Where the function that runs a coroutine goes for each of its states,
+/// by decoding its dispatch on the state number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumePoints {
+    /// The dispatch's code, which runs before any state's own.
+    pub dispatch: Arc<[AddressRange<ImageAddress>]>,
+    /// Where each state's code begins.
+    pub points: Arc<[ResumePoint]>,
+}
+
+/// Where the code of one state of a coroutine begins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumePoint {
+    /// The state number.
+    pub state: u64,
+    /// Where the dispatch leaves for the state.
+    pub address: ImageAddress,
+    /// The code that runs from there as the coroutine resumes in the state
+    /// before it goes on to new work: for a suspended state, the code of
+    /// its await's line that resuming reaches, such as polling the awaited
+    /// future again; before the first poll, the code before the body's
+    /// first statement.
+    pub resumption: Arc<[AddressRange<ImageAddress>]>,
+}
+
+impl ResumePoints {
+    /// Where the state with number `state` begins.
+    #[must_use]
+    pub fn point(&self, state: u64) -> Option<&ResumePoint> {
+        self.points.iter().find(|point| point.state == state)
+    }
+}
+
+impl CoroutineInfo {
+    /// The state with number `value`.
+    #[must_use]
+    pub fn state(&self, value: u64) -> Option<&CoroutineState> {
+        self.states.iter().find(|state| state.value == value)
+    }
+
+    /// The variables a coroutine in `state` holds, as its source names
+    /// them, each with whether it is a capture: what the state keeps
+    /// across its await, but for the compiler's own members, named `__`;
+    /// and the captures while they are the coroutine's own. An async
+    /// block's are always; an async function's are its arguments until
+    /// its body starts, which moves them into variables of its own.
+    pub fn variables<'a>(
+        &'a self,
+        state: &'a CoroutineState,
+    ) -> impl Iterator<Item = (&'a RecordMember, bool)> {
+        let captured = state.kind == CoroutineStateKind::Unresumed
+            || self.kind != CoroutineKind::AsyncFunction;
+        let own = |member: &&RecordMember| {
+            member
+                .name
+                .as_deref()
+                .is_some_and(|name| !name.starts_with("__"))
+        };
+        state
+            .saved
+            .iter()
+            .filter(own)
+            .map(|member| (member, false))
+            .chain(
+                self.captures
+                    .iter()
+                    .filter(move |_| captured)
+                    .filter(own)
+                    .map(|member| (member, true)),
+            )
+    }
+
+    /// The state a coroutine is in before it is first polled.
+    #[must_use]
+    pub fn unresumed(&self) -> Option<&CoroutineState> {
+        self.states
+            .iter()
+            .find(|state| state.kind == CoroutineStateKind::Unresumed)
+    }
+}
+
+impl CoroutineState {
+    /// The future a suspended state awaits, among its saved members.
+    #[must_use]
+    pub fn awaitee(&self) -> Option<&RecordMember> {
+        self.saved
+            .iter()
+            .find(|member| member.name.as_deref() == Some("__awaitee"))
+    }
 }
 
 /// What a function is to unwinding and stepping, whatever its language.
@@ -2938,6 +3162,10 @@ pub enum EntryProvenance {
     AnalyzedPrologue,
     /// The first concrete address range supplied the entry address.
     RangeStart,
+    /// The function runs a coroutine, and the entry is where its decoded
+    /// dispatch leaves for the state before the first poll: the body's
+    /// first statement, past the dispatch.
+    CoroutineBody,
 }
 
 /// A concrete entry address suitable for a function breakpoint.
@@ -3307,6 +3535,25 @@ pub enum FrameKind {
     /// of tail calls between a call and the frame it entered shows it, and
     /// its state is gone but for what was passed to it.
     TailCall,
+    /// An async function or block of a suspended task, whose state is the
+    /// future at `object`: no thread runs it, so it has no registers, and
+    /// its variables are those its state keeps.
+    Async { object: VirtualAddress },
+    /// The future at `object`, of type `ty`, that a suspended task's
+    /// innermost async frame awaits, which is no async function's.
+    Awaited {
+        object: VirtualAddress,
+        ty: TypeReference,
+    },
+}
+
+impl FrameKind {
+    /// Whether the frame is a suspended task's, read from its future: an
+    /// async frame or the future it awaits.
+    #[must_use]
+    pub const fn is_suspended(self) -> bool {
+        matches!(self, Self::Async { .. } | Self::Awaited { .. })
+    }
 }
 
 /// A platform-independent stack frame.
@@ -3318,10 +3565,14 @@ pub struct StackFrame {
     pub level: u32,
     /// How the frame was reconstructed.
     pub kind: FrameKind,
-    /// The loaded module containing the instruction, when known.
+    /// The loaded module containing the instruction, when known. The
+    /// future an [`FrameKind::Awaited`] frame names has no instruction:
+    /// its module is the one whose image describes the future's type.
     pub module: Option<ModuleId>,
-    /// The exact instruction or resume address for the frame.
-    pub instruction: VirtualAddress,
+    /// The exact instruction or resume address for the frame. A suspended
+    /// task's async frame has the address its function resumes at, where
+    /// that is known, and the future it awaits has none.
+    pub instruction: Option<VirtualAddress>,
     /// Whose stack the frame is on. A backtrace changes segment where a
     /// runtime switched stacks.
     pub segment: StackSegment,
@@ -3338,6 +3589,10 @@ pub struct StackFrame {
     /// What the frame's code is to stepping and unwinding: its function's
     /// role, or its symbol's where no function describes it.
     pub role: CodeRole,
+    /// What the future an [`FrameKind::Awaited`] frame names waits for, as
+    /// the view that presents it summarizes it; `None` for any other frame,
+    /// or a future no view presents.
+    pub awaiting: Option<Arc<str>>,
 }
 
 pub struct FrameMetadata {
@@ -3359,7 +3614,7 @@ impl StackFrame {
             level,
             kind,
             module,
-            instruction,
+            Some(instruction),
             FrameMetadata {
                 code_instance: None,
                 function: None,
@@ -3374,7 +3629,7 @@ impl StackFrame {
         level: u32,
         kind: FrameKind,
         module: Option<ModuleId>,
-        instruction: VirtualAddress,
+        instruction: Option<VirtualAddress>,
         metadata: FrameMetadata,
     ) -> Self {
         Self {
@@ -3389,6 +3644,7 @@ impl StackFrame {
             source: metadata.source,
             symbol: metadata.symbol,
             role: metadata.role,
+            awaiting: None,
         }
     }
 }
@@ -3415,6 +3671,9 @@ pub enum UnwindTermination {
     /// A runtime switched stacks at the frame, and where the stack it
     /// switched from continues could not be found.
     UnresolvedStackSwitch { reason: Arc<str> },
+    /// A suspended task's chain of awaits could not be followed past its
+    /// last frame, for this reason.
+    BrokenAwaitChain { reason: Arc<str> },
     /// A previously visited frame state was encountered again.
     CycleDetected,
     /// The configured maximum frame count was reached.
@@ -3452,6 +3711,9 @@ impl fmt::Display for UnwindTermination {
                     "the stack continues where its runtime switched stacks: {reason}"
                 )
             }
+            Self::BrokenAwaitChain { reason } => {
+                write!(formatter, "the chain of awaits ends early: {reason}")
+            }
             Self::CycleDetected => formatter.write_str("unwind metadata produced a frame cycle"),
             Self::DepthLimit => formatter.write_str("unwind depth limit reached"),
         }
@@ -3467,17 +3729,36 @@ pub struct Backtrace {
     pub frames: Arc<[StackFrame]>,
     /// The completion or failure reason for the trace.
     pub termination: UnwindTermination,
+    /// The futures frames of the trace drive whose chains of awaits it
+    /// shows in part or not at all.
+    pub unfollowed: Arc<[UnfollowedFuture]>,
+}
+
+/// A future a frame drives whose chain of awaits a backtrace does not show
+/// in full.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnfollowedFuture {
+    /// The frame that drives the future.
+    pub driver: StackFrameId,
+    /// Why the chain is not shown, or where it ends.
+    pub reason: Arc<str>,
 }
 
 impl Backtrace {
     /// The innermost frame of code the program's author wrote or calls,
     /// past a runtime's machinery and the wrappers a compiler writes, as a
-    /// runtime's own traceback shows a task: where it waits, not how.
+    /// runtime's own traceback shows a task: where it waits, not how. The
+    /// future a suspended task awaits runs no code, and is never one; nor
+    /// is a frame past a runtime's dispatch, which runs the runtime's code
+    /// for the thread, not the task's.
     #[must_use]
     pub fn user_frame(&self) -> Option<&StackFrame> {
         self.frames
             .iter()
-            .find(|frame| frame.role == CodeRole::Ordinary)
+            .take_while(|frame| frame.role != CodeRole::Dispatch)
+            .find(|frame| {
+                frame.role == CodeRole::Ordinary && !matches!(frame.kind, FrameKind::Awaited { .. })
+            })
     }
 
     /// For each frame, the level of the frame whose loop it runs as an

@@ -39,6 +39,10 @@ runs, an exact integer: in Go, a goroutine's, so a breakpoint's condition
 a thread runs, `$task` is refused; a thread between tasks, such as one idle
 in Go's scheduler, has none, and `$task` is unavailable there.
 
+`$future` is the future of the selected frame's async function or block,
+which holds the variables it keeps across its awaits and the state it is in.
+A frame that runs no future has none.
+
 ```uscope-example
 ns::counter               => reads as `ns::counter`
 ::counter                 => reads as `::counter`
@@ -82,6 +86,7 @@ $nope                  => error unknown-name at `$nope`
 twice                  => error ambiguous-name at `twice`
 $task                  => 7 : integer
 $task == 7             => true : bool
+$future.a              => 5 : int
 long                   => 3 : int
 long * 2               => 6 : integer
 words.int + words.class => 10 : integer
@@ -92,6 +97,7 @@ sizeof(long)           => 8 : integer
 ```uscope-example
 world: scalars
 $task                  => error unsupported at `$task`
+$future                => error unknown-name at `$future`
 ```
 
 ## Literals
@@ -337,7 +343,11 @@ count between them. Pointers compare with pointers, `null`, and `0`; to
 compare an address with another number, cast the pointer. Arrays index by
 each of their dimensions, and decay to a pointer to their first element in
 arithmetic. A slice's index is checked against its length when the
-expression runs.
+expression runs. A value a view presents as another value
+(`docs/views.md`), as Rust's `Arc` and C++'s `std::unique_ptr` present
+what they point to, dereferences to that value: `*arc` is what the `Arc`
+shares, and `*p` on one the view presents as empty, such as a null
+`unique_ptr`, is an error.
 
 ```uscope-example
 world: memory
@@ -369,6 +379,8 @@ arr + 1 == ip          => true : bool
 vp + 1                 => error type at `vp`
 *vp                    => error type at `vp`
 *s                     => error type at `s`
+*shared                => 22 : int
+*shared + shared.count => 24 : integer
 s.missing              => error type at `missing`
 s->a                   => error type at `s`
 &r                     => error not-an-lvalue at `r`
@@ -567,6 +579,21 @@ RED                    => error ambiguous-name at `RED`
 color == RED           => false : bool
 light == RED           => false : bool
 light == Light::AMBER  => true : bool
+```
+
+A tagged union, such as a Rust enum, equals the bare name of the variant it
+holds, and a member of a variant it does not hold is unavailable.
+
+```uscope-example
+world: memory
+maybe == Some          => true : bool
+maybe != None          => true : bool
+nothing == Some        => false : bool
+None == nothing        => true : bool
+maybe.Some.0           => 5 : int
+nothing.Some.0         => unavailable at `nothing.Some`
+maybe == Other         => error unknown-name at `Other`
+maybe == 1             => error type at `maybe == 1`
 ```
 
 ## Text

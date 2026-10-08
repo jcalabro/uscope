@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b82ea1c7318a4e8eb177db85bf473a3c602434c5e634950c9aaed33054319107 # shrinks to shard_bits = 1, sizes = [3, 4, 0, 0, 0, 0, 0, 0], damage = Some(WrongCount), target = Index(0), page = 1

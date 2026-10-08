@@ -711,15 +711,15 @@ generate_core() {
 suite_signature() {
     local -a paths=()
     local tool path
-    for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc go zig objdump gdb \
-        setarch; do
+    for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc cargo go zig objdump \
+        gdb setarch; do
         if path=$(type -P "$tool"); then
             paths+=("$path")
         fi
     done
     # Statically linked glibc fixtures link from a store path of their own.
-    printf 'suite-v1\nGOOS=%s GOARCH=%s\nGLIBC_STATIC_LIBRARIES=%s\n' \
-        "${GOOS-}" "${GOARCH-}" "$GLIBC_STATIC_LIBRARIES"
+    printf 'suite-v1\nGOOS=%s GOARCH=%s\nGLIBC_STATIC_LIBRARIES=%s\nUSCOPE_FIXTURE_CRATES=%s\n' \
+        "${GOOS-}" "${GOARCH-}" "$GLIBC_STATIC_LIBRARIES" "${USCOPE_FIXTURE_CRATES-}"
     stat -L --format='%n %Y' "${paths[@]}"
 }
 
@@ -729,7 +729,8 @@ suite_is_current() {
     local signature="$1"
     [[ -f "$suite_stamp" && -f "$suite_outputs" ]] || return 1
     [[ "$(<"$suite_stamp")" == "$signature" ]] || return 1
-    [[ -z "$(find "$fixtures_dir" sdk views/kernels scripts/gosym-oracle "${BASH_SOURCE[0]}" \
+    [[ -z "$(find "$fixtures_dir" sdk views/kernels scripts/gosym-oracle \
+        scripts/coroutine-oracle.awk "${BASH_SOURCE[0]}" \
         "$frame_oracle_script" -newer "$suite_stamp" -print -quit)" ]] \
         || return 1
     local output
@@ -1922,6 +1923,118 @@ generate_function_type_oracle() {
 for compiler in gcc clang; do
     generate_function_type_oracle "$output_dir/function-types-${compiler}-o0"
 done
+
+# The tokio fixtures: one cargo workspace whose crates come only from its
+# lockfile, which flake.nix vendors, so building fetches nothing. Each
+# variant has a target directory of its own, and cargo rebuilds only what
+# changed; a binary is copied out only when cargo rewrote it.
+readonly tokio_fixtures_dir="${rust_fixtures_dir}/tokio"
+readonly tokio_target_dir="build/tokio-target"
+if [[ -z "${USCOPE_FIXTURE_CRATES-}" ]]; then
+    printf 'error: USCOPE_FIXTURE_CRATES is unset; build inside the Nix shell\n' >&2
+    exit 1
+fi
+
+# Builds the workspace's PACKAGES with PROFILE and extra RUSTFLAGS, and
+# copies each binary to tokio-NAME-VARIANT.
+build_tokio_variant() {
+    local variant="$1"
+    local profile="$2"
+    local flags="$3"
+    shift 3
+    local -a packages=()
+    local package
+    for package in "$@"; do
+        packages+=(--package "$package")
+    done
+    local target="$tokio_target_dir/$variant"
+    printf '[cargo]  tokio fixtures (%s)\n' "$variant"
+    CARGO_TARGET_DIR="$target" RUSTFLAGS="${RUSTFLAGS-} -D warnings ${flags}" \
+        NIX_HARDENING_ENABLE= cargo build --quiet --offline --locked \
+        --manifest-path "$tokio_fixtures_dir/Cargo.toml" --profile "$profile" \
+        --config "source.crates-io.replace-with='vendored'" \
+        --config "source.vendored.directory='${USCOPE_FIXTURE_CRATES}'" "${packages[@]}"
+    local directory="$profile"
+    [[ "$profile" == dev ]] && directory=debug
+    for package in "$@"; do
+        local built="$target/$directory/$package"
+        local output="$output_dir/tokio-${package}-${variant}"
+        if [[ -x "$output" ]] && ! [[ "$built" -nt "$output" ]]; then
+            rebuilt_outputs["$output"]=false
+            continue
+        fi
+        cp -p "$built" "$output"
+        rebuilt_outputs["$output"]=true
+    done
+    # Coroutines are compared only in the plain builds.
+    [[ "$variant" == o0 || "$variant" == o3 ]] || return 0
+    for package in "$@"; do
+        generate_coroutine_oracle "$output_dir/tokio-${package}-${variant}"
+    done
+}
+
+# readelf's description of each coroutine a program has, which a test
+# compares uscope's reading of them with.
+generate_coroutine_oracle() {
+    local program="$1"
+    local oracle="${program}.coroutines"
+    local reducer=scripts/coroutine-oracle.awk
+    if [[ -s "$oracle" && "$oracle" -nt "$program" && "$oracle" -nt "$reducer" ]]; then
+        printf '[cached] %s\n' "$oracle"
+        rebuilt_outputs["$oracle"]=false
+        return
+    fi
+    printf '[oracle] %s\n' "$oracle"
+    rebuilt_outputs["$oracle"]=true
+    local dump="${oracle}.info"
+    readelf --debug-dump=info "$program" >"$dump" 2>/dev/null
+    awk -f "$reducer" "$dump" "$dump" | LC_ALL=C sort -u >"${oracle}.tmp"
+    rm -f "$dump"
+    mv "${oracle}.tmp" "$oracle"
+}
+
+# Every fixture, unoptimized and optimized.
+readonly tokio_fixtures=(std-async panics workers server drivers steps cancel shapes values runtimes
+    blocking migrate deadlock)
+build_tokio_variant o0 dev "" "${tokio_fixtures[@]}"
+build_tokio_variant o3 release "" "${tokio_fixtures[@]}"
+# A hundred thousand tasks, which bound what listing them costs; the build
+# changes nothing of that.
+build_tokio_variant o0 dev "" scale
+# A task list the program damages, whose reading the build changes nothing
+# of.
+build_tokio_variant o0 dev "" corrupt
+# Panics that abort rather than unwind.
+build_tokio_variant abort abort "" panics
+# Builds that describe less than tokio's types, where the debugger says
+# what it cannot read: lines only, symbols only, and tokio's sources moved
+# where its version cannot be read from their path.
+build_tokio_variant lines lines "" workers
+build_tokio_variant stripped stripped "" workers
+build_tokio_variant remapped dev \
+    "--remap-path-prefix=${USCOPE_FIXTURE_CRATES}/tokio-1.52.3=/vendor/tokio" workers
+# tokio's unstable features, which record where each task was spawned and
+# give each task's vtable one more offset.
+build_tokio_variant unstable dev "--cfg tokio_unstable" workers
+# Symbols mangled as rustc did before v0, which name no generic arguments.
+build_tokio_variant legacy dev "-Z unstable-options -C symbol-mangling-version=legacy" panics workers
+
+# The workers fixture's checkpoint, as gdb dumps it, with each runtime
+# flavor, the values fixture's first stop, and the runtimes fixture's
+# checkpoint. The log keeps what the program reported there. One malloc
+# arena keeps each thread from reserving one of its own, which the core
+# saves.
+export TRUTH_CORE=1 MALLOC_ARENA_MAX=1
+for variant in o0 o3; do
+    program="$output_dir/tokio-workers-${variant}"
+    generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
+    generate_core "${program}-current.core" 5 "$default_core_filter" "$program" "$program" current
+    program="$output_dir/tokio-values-${variant}"
+    generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
+    program="$output_dir/tokio-runtimes-${variant}"
+    generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
+done
+unset TRUTH_CORE MALLOC_ARENA_MAX
 
 # Go's own reading of the function tables of images the Go linker linked,
 # which a test compares uscope's reader with.

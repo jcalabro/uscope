@@ -842,6 +842,60 @@ textarea.input {
   color: var(--ink);
 }
 
+.chip.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+/* ---------- tasks ---------- */
+
+.pane-head .link-button {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font: 10px var(--mono);
+  cursor: pointer;
+}
+
+.pane-head .link-button:hover {
+  color: var(--ink);
+}
+
+/* The function keeps room beside what the task waits for, which gives way
+   first. */
+.task-row .fn {
+  flex: 0 1 auto;
+  min-width: 6ch;
+  max-width: 45%;
+}
+
+.task-row .detail {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-row .end,
+.task-row > .dim:first-child {
+  flex: none;
+}
+
+/* Numbers line up, as a runtime's tasks run into the hundreds. */
+.task-row .task-number {
+  min-width: 3ch;
+  text-align: right;
+}
+
+.task-numbers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 2px 10px 6px;
+}
+
 .table {
   border: 1px solid var(--line);
   border-radius: 6px;

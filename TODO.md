@@ -6,7 +6,6 @@
 
 ## Languages and platforms
 
-- First-class tokio support.
 - Other Linux architectures, then other operating systems.
 
 ## Clients

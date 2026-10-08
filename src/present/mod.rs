@@ -783,15 +783,22 @@ pub fn child_path(parent: Option<&Expression>, child: &ValueChild) -> Option<Exp
 }
 
 /// A value's text: its summary, with integers in hexadecimal when asked.
-/// A value a view presents is shown as the view presents it.
+/// A value a view presents is shown as the view presents it, and one it
+/// presents as a number as that number.
 pub fn text(type_info: Option<&TypeInfo>, state: &VariableState, hexadecimal: bool) -> String {
-    let presented = matches!(
-        state,
+    let presented = match state {
         VariableState::Available {
-            presentation: Some(_),
+            presentation: Some(presentation),
             ..
+        } => {
+            // A number a view presents is written as that number is.
+            if hexadecimal && let Some(number) = &presentation.number {
+                return text(number.type_info.as_ref(), &number.state, true);
+            }
+            true
         }
-    );
+        _ => false,
+    };
     (hexadecimal && !presented)
         .then(|| hex(type_info.and_then(|type_info| type_info.byte_size), state))
         .flatten()
@@ -918,6 +925,7 @@ mod tests {
             summary: Arc::from("ok"),
             children: ValueChildren::NotApplicable,
             problem: None,
+            number: None,
         };
         let state = VariableState::Available {
             source: VariableValueSource::Computed,

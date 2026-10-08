@@ -49,6 +49,10 @@ max-elements = 256        # children shown per aggregate, at most 512
 syntax = "intel"          # intel | att; --disassembly-syntax wins
 show-bytes = true
 
+[step]
+runtime = "skip"          # skip | enter: stop in a language runtime's own code, such as
+                          # Go's or tokio's, or pass over it to the program's code it calls
+
 [breakpoints]
 save = true               # keep breakpoints and displays in the project's .uscope/state
 

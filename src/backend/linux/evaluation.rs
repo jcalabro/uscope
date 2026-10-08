@@ -27,12 +27,12 @@ use crate::protocol::{DebuggerEvent, StopId};
 use crate::{
     AddressValue, ByteOrder, CodeInstanceId, DereferenceReference, DereferenceState,
     DereferenceUnavailableReason, Error, ImageAddress, InspectedValue, ModuleId, RecordKind,
-    RegisterSnapshot, Result, StackFrameId, TextCompletion, TextSummary, TypeInfo, TypeKind,
-    TypeNode, TypeReference, ValueChildren, VariableState, VariableUnavailableReason,
+    RegisterSnapshot, Result, StackFrameId, TextCompletion, TextSummary, TypeId, TypeInfo,
+    TypeKind, TypeNode, TypeReference, ValueChildren, VariableState, VariableUnavailableReason,
     VariableValue, VariableValueSource, VirtualAddress,
 };
 
-use super::frames::{FrameRegisters, ResolvedFrame, StackRoot};
+use super::frames::{FrameRegisters, FrameScope, ResolvedFrame, StackRoot};
 use super::inspection::{
     LinuxVariableRuntime, global_context_address, validate_inspection_limits, variable_context,
 };
@@ -44,9 +44,19 @@ use super::{Controller, Inferior, RuntimeModule, validate_image_current};
 #[derive(Debug, Clone, Copy)]
 pub(super) struct StopObject {
     module: ModuleId,
-    key: ObjectKey,
+    key: ObjectRef,
     /// Whether it is a local or parameter of the frame.
     local: bool,
+}
+
+/// Which data object a frame names.
+#[derive(Debug, Clone, Copy)]
+enum ObjectRef {
+    /// One the debug information describes.
+    Data(ObjectKey),
+    /// A variable a suspended async frame keeps in its future, or the
+    /// future itself: a value of type `ty` at `address`.
+    Saved { ty: TypeId, address: VirtualAddress },
 }
 
 impl StopObject {
@@ -54,7 +64,7 @@ impl StopObject {
     pub(super) const fn global(module: ModuleId, key: ObjectKey) -> Self {
         Self {
             module,
-            key,
+            key: ObjectRef::Data(key),
             local: false,
         }
     }
@@ -69,6 +79,8 @@ pub(super) enum StopStep {
     Element(Arc<ViewBound>),
     /// To the value for a key of a value a view presents as a map.
     Entry(Arc<ViewBound>),
+    /// To the value a view presents a value as, for `*x`.
+    Presented(Arc<ViewBound>),
     /// To a global, from anywhere: a view's `global(NAME)`.
     Global(StopObject),
 }
@@ -82,6 +94,9 @@ impl fmt::Debug for StopStep {
             Self::Provider { module, .. } => write!(formatter, "StopStep({module:?})"),
             Self::Element(bound) => write!(formatter, "StopStep(element of {})", bound.view.header),
             Self::Entry(bound) => write!(formatter, "StopStep(entry of {})", bound.view.header),
+            Self::Presented(bound) => {
+                write!(formatter, "StopStep(presented by {})", bound.view.header)
+            }
             Self::Global(object) => write!(formatter, "StopStep(global {object:?})"),
         }
     }
@@ -201,6 +216,45 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
 }
 
 impl<P: InspectionOps> Frame<'_, P> {
+    /// The variable `name` names in a suspended async frame, which its
+    /// future keeps, or the future for `$future`; `None` in any other
+    /// frame, or for a name it keeps no variable of.
+    fn lookup_saved(&self, name: &str) -> std::result::Result<Option<Lookup<StopObject>>, Refusal> {
+        // The future a suspended frame holds, and the type of its own.
+        let (object, ty) = match (self.resolved.scope, self.resolved.frame.as_ref()) {
+            (FrameScope::Suspended { object, ty, .. }, _) => (object, ty),
+            (_, Some(frame)) => match frame.kind {
+                crate::FrameKind::Awaited { object, ty } => (object, ty),
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let Some(module) = self.controller.module_of(ty) else {
+            return Ok(None);
+        };
+        let saved = |ty: TypeReference, address| Lookup::Object {
+            object: StopObject {
+                module: module.loaded.id,
+                key: ObjectRef::Saved { ty: ty.id, address },
+                local: true,
+            },
+            ty: Ok(ty),
+        };
+        if name == "$future" {
+            return Ok(Some(saved(ty, object)));
+        }
+        let variables = self
+            .controller
+            .saved_variables(self.resolved)
+            .map_err(|error| refusal(&error))?;
+        let mut named = variables.iter().filter(|variable| **variable.name == *name);
+        match (named.next(), named.next()) {
+            (Some(variable), None) => Ok(Some(saved(variable.ty, variable.address))),
+            (Some(_), Some(_)) => Ok(Some(Lookup::Ambiguous(vec![name.to_owned()]))),
+            (None, _) => Ok(None),
+        }
+    }
+
     /// The global `name` names in exactly one loaded module.
     fn lookup_global(
         &self,
@@ -301,7 +355,7 @@ fn object(module: &RuntimeModule, key: ObjectKey, local: bool) -> Lookup<StopObj
     Lookup::Object {
         object: StopObject {
             module: module.loaded.id,
-            key,
+            key: ObjectRef::Data(key),
             local,
         },
         ty: module.variables.object_type(key).map(|id| TypeReference {
@@ -337,8 +391,8 @@ fn definition(image: &crate::ModuleImage, info: &TypeInfo) -> String {
             .type_info(reference)
             .map_or_else(|| "?".to_owned(), |info| info.name.to_string())
     };
-    let shape = match &info.kind {
-        TypeKind::Record { members, .. } | TypeKind::Union { members, .. } => members
+    let members = |members: &[crate::RecordMember]| {
+        members
             .iter()
             .map(|member| {
                 format!(
@@ -349,7 +403,33 @@ fn definition(image: &crate::ModuleImage, info: &TypeInfo) -> String {
                 )
             })
             .collect::<Vec<_>>()
-            .join(","),
+            .join(",")
+    };
+    let shape = match &info.kind {
+        TypeKind::Record {
+            members: fields, ..
+        }
+        | TypeKind::Union {
+            members: fields, ..
+        } => members(fields),
+        TypeKind::Variant {
+            common_members,
+            discriminant,
+            variants,
+            ..
+        } => {
+            let tag = match discriminant.as_ref() {
+                crate::VariantDiscriminant::Stored(member) => members(std::slice::from_ref(member)),
+                crate::VariantDiscriminant::TagType(tag) => name(*tag),
+                crate::VariantDiscriminant::Absent => String::new(),
+            };
+            let variants = variants
+                .iter()
+                .map(|variant| format!("{:?}={}", variant.selection, members(&variant.members)))
+                .collect::<Vec<_>>()
+                .join(";");
+            format!("{}|{tag}|{variants}", members(common_members))
+        }
         TypeKind::Named {
             target: Some(target),
             ..
@@ -523,6 +603,9 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
         name: &str,
         outermost: bool,
     ) -> std::result::Result<Lookup<StopObject>, Refusal> {
+        if !outermost && let Some(found) = self.lookup_saved(name)? {
+            return Ok(found);
+        }
         if !outermost && let Some((module, address, selected)) = self.code {
             match module.variables.visible_object(address, selected, name) {
                 Ok(key) => return Ok(object(module, key, true)),
@@ -577,6 +660,11 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
                 self.controller.view_index(from).map_or(planned, Ok)
             }
             (Err(_), StepKind::Entry) => self.controller.view_entry(from).map_or(planned, Ok),
+            // A value that is no pointer dereferences to the value the
+            // view that presents it presents it as.
+            (Err(_) | Ok(Planned { result: None, .. }), StepKind::Deref) => {
+                self.controller.view_deref(from).map_or(planned, Ok)
+            }
             _ => planned,
         }
     }
@@ -735,10 +823,22 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
     fn locate(&mut self, object: &StopObject) -> std::result::Result<StopPlace, Stop> {
         let module = self.module(object.module)?;
         let address = self.address(module);
+        let key = match object.key {
+            ObjectRef::Data(key) => key,
+            ObjectRef::Saved { ty, address } => {
+                return Ok(StopPlace {
+                    module: object.module,
+                    located: Located {
+                        ty,
+                        storage: ValueStorage::Memory(address),
+                    },
+                });
+            }
+        };
         let mut runtime = self.frame.runtime(module);
         let accessed = module
             .variables
-            .locate(object.key, address, &mut runtime, self.budget)
+            .locate(key, address, &mut runtime, self.budget)
             .map_err(Stop::Failed)?;
         Self::accessed(accessed, object.module)
     }
@@ -748,7 +848,10 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             StopStep::Provider { step, .. } => step
                 .check_indices(indices)
                 .map_err(|error| Stop::Refused(refusal(&error))),
-            StopStep::Element(_) | StopStep::Entry(_) | StopStep::Global(_) => Ok(()),
+            StopStep::Element(_)
+            | StopStep::Entry(_)
+            | StopStep::Presented(_)
+            | StopStep::Global(_) => Ok(()),
         }
     }
 
@@ -770,6 +873,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 return self.view_element(bound, from, *index);
             }
             StopStep::Global(object) => return self.locate(object),
+            StopStep::Presented(bound) => return self.view_presented(bound, from),
             StopStep::Entry(_) => {
                 return Err(Stop::Refused(Refusal::new(
                     ErrorKind::Type,
@@ -994,20 +1098,65 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         self.view_entry_place(bound, from, key)
     }
 
+    fn function_generics(
+        &mut self,
+        address: u64,
+    ) -> std::result::Result<Vec<(Arc<str>, TypeReference)>, Stop> {
+        let described = self.frame.modules().find_map(|module| {
+            let image_address = module
+                .loaded
+                .image_address(crate::VirtualAddress::new(address))
+                .ok()
+                .filter(|image_address| module.image.contains_address(*image_address))?;
+            let instance = module.image.locate(image_address).physical_instance?;
+            let function = module
+                .image
+                .function(module.image.code_instance(instance)?.function)?;
+            Some((module.image.id(), Arc::clone(&function.generics)))
+        });
+        let Some((image, generics)) = described else {
+            return Err(Stop::Refused(Refusal::new(
+                ErrorKind::Unsupported,
+                format!("no function the debug information describes has its code at {address:#x}"),
+            )));
+        };
+        Ok(generics
+            .iter()
+            .map(|(name, id)| (Arc::clone(name), TypeReference { image, id: *id }))
+            .collect())
+    }
+
     fn task(&mut self) -> std::result::Result<u64, Stop> {
         let frame = self.frame;
         let refused = |reason: &str| Stop::Refused(Refusal::new(ErrorKind::Unsupported, reason));
         if let crate::ExecutionContext::Task(task) = frame.root.context {
             return Ok(task.number);
         }
+        // A condition at a hit, before the other threads stop, reads the
+        // task from the thread's own state alone, which they cannot change.
+        if frame.inferior.public_stop.is_none() {
+            return match frame
+                .controller
+                .current_task(frame.inferior, frame.root.reader())
+            {
+                Some(Ok(Some(task))) => Ok(task.number),
+                Some(Ok(None)) => Err(Stop::missing(VariableState::Unavailable(
+                    VariableUnavailableReason::NoTask,
+                ))),
+                Some(Err(reason)) => Err(refused(&reason)),
+                None => Err(refused("the program has no tasks")),
+            };
+        }
         match frame
             .controller
             .thread_activity(frame.inferior, frame.root.reader())
         {
             Some(crate::ThreadActivity::Task { task, .. }) => Ok(task.number),
-            Some(crate::ThreadActivity::Idle) => Err(Stop::missing(VariableState::Unavailable(
-                VariableUnavailableReason::NoTask,
-            ))),
+            Some(crate::ThreadActivity::Idle | crate::ThreadActivity::Outside) => {
+                Err(Stop::missing(VariableState::Unavailable(
+                    VariableUnavailableReason::NoTask,
+                )))
+            }
             Some(crate::ThreadActivity::Unknown(reason)) => Err(refused(&reason)),
             None => Err(refused("the program has no tasks")),
         }
@@ -1474,7 +1623,12 @@ impl<P: InspectionOps> Controller<P> {
                     .modules
                     .get(&object.module)
                     .ok_or(Error::ModuleNotLoaded(object.module))?;
-                let storage = module.variables.object_storage(object.key);
+                let ObjectRef::Data(key) = object.key else {
+                    return Err(Error::WatchTargetUnsupported(
+                        "a suspended task's variables cannot be watched".into(),
+                    ));
+                };
+                let storage = module.variables.object_storage(key);
                 let local = object
                     .local
                     .then(|| scope.code.map(|(_, address, _)| address))

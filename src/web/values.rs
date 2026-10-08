@@ -223,10 +223,10 @@ impl Reader<'_> {
     }
 
     pub async fn scopes(&self, at: FrameAt) -> Result<Scopes, Failure> {
-        let context = inspect::context(&self.handle, at.stop, at.thread, at.frame).await?;
+        let context = inspect::context(&self.handle, at.stop, at.execution(), at.frame).await?;
         let trace = self
             .handle
-            .at(inspect::innermost(at.stop, at.thread))
+            .at(inspect::innermost(at.stop, at.execution()))
             .backtrace()
             .await?;
         let frame = trace.frames.iter().find(|frame| frame.id == context.frame);
@@ -332,7 +332,7 @@ impl Reader<'_> {
         text: &str,
         mode: EvaluationMode,
     ) -> Result<Row, Failure> {
-        let context = inspect::context(&self.handle, at.stop, at.thread, at.frame).await?;
+        let context = inspect::context(&self.handle, at.stop, at.execution(), at.frame).await?;
         let expression = Expression::parse(text).map_err(expression_failure)?;
         self.evaluated(context, text, expression, mode).await
     }
@@ -419,7 +419,7 @@ impl Reader<'_> {
                 "a value's path names it; it does not assign",
             ));
         }
-        let context = inspect::context(&self.handle, at.stop, at.thread, at.frame).await?;
+        let context = inspect::context(&self.handle, at.stop, at.execution(), at.frame).await?;
         let assignment =
             Expression::parse(&format!("{target} = {value}")).map_err(expression_failure)?;
         let mut row = self
@@ -436,7 +436,9 @@ impl Reader<'_> {
         at: Option<FrameAt>,
     ) -> Result<protocol::Completions, Failure> {
         let context = match at {
-            Some(at) => Some(inspect::context(&self.handle, at.stop, at.thread, at.frame).await?),
+            Some(at) => {
+                Some(inspect::context(&self.handle, at.stop, at.execution(), at.frame).await?)
+            }
             None => None,
         };
         let (completing, partial, start) = complete::completing(text);

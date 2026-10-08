@@ -70,6 +70,14 @@ pub enum Step {
         offset: u64,
         ty: TypeReference,
     },
+    /// To the member of one variant of a tagged union whose tag is the byte
+    /// at its start, inactive unless the tag is `tag`.
+    VariantMember {
+        tag: u8,
+        name: Arc<str>,
+        offset: u64,
+        ty: TypeReference,
+    },
     Array {
         dimensions: Arc<[ArrayDimension]>,
         element_size: u64,
@@ -86,6 +94,9 @@ pub enum Step {
         key: TypeReference,
         value: TypeReference,
     },
+    /// To what a shared pointer, `{u64 count; V *value}`, points to, as
+    /// the view that presents it would.
+    Presented(TypeReference),
 }
 
 /// A world the evaluator binds and runs in.
@@ -107,9 +118,14 @@ pub struct World {
     pub work: Option<u64>,
     /// Maps, `{K *keys; V *values; u64 n}`, with their key and value types.
     maps: Vec<(TypeReference, TypeReference, TypeReference)>,
+    /// Shared pointers, `{u64 count; V *value}`, with their value types.
+    shared: Vec<(TypeReference, TypeReference)>,
     /// The id of the task the stopped thread runs, when the program has
     /// tasks.
     pub task: Option<u64>,
+    /// Generic functions, by the address their code begins at, with their
+    /// type arguments by their parameters' names.
+    functions: BTreeMap<u64, Vec<(Arc<str>, TypeReference)>>,
 }
 
 impl World {
@@ -246,6 +262,62 @@ impl World {
         *existing = members.into();
     }
 
+    /// A generic function whose code is at `address`, instantiated with
+    /// `generics`, each by its parameter's name.
+    pub fn function(&mut self, address: u64, generics: &[(&str, TypeReference)]) {
+        self.functions.insert(
+            address,
+            generics
+                .iter()
+                .map(|(name, ty)| (Arc::from(*name), *ty))
+                .collect(),
+        );
+    }
+
+    /// A tagged union, as a Rust enum is, whose tag is the byte at its
+    /// start: the `i`th variant holds its one member, named for the
+    /// variant, when the tag is `i`.
+    pub fn variant(
+        &mut self,
+        name: &str,
+        byte_size: u64,
+        variants: &[(&str, TypeReference, u64)],
+    ) -> TypeReference {
+        let tag = self.base("u8", BaseTypeEncoding::Unsigned, 1);
+        let member = |name: Option<&str>, ty, offset| RecordMember {
+            name: name.map(Into::into),
+            type_ref: ty,
+            layout: RecordMemberLayout::ByteOffset(offset),
+            accessibility: crate::Accessibility::Public,
+            artificial: name.is_none(),
+            embedded: false,
+            declaration: None,
+        };
+        let variants: Vec<crate::Variant> = variants
+            .iter()
+            .zip(0_u128..)
+            .map(|((variant, ty, offset), index)| crate::Variant {
+                name: None,
+                selection: crate::VariantSelection::Selectors(Arc::from([
+                    crate::VariantSelector::Value(IntegerValue::Unsigned(index)),
+                ])),
+                members: Arc::from([member(Some(variant), *ty, *offset)]),
+            })
+            .collect();
+        self.add(
+            name,
+            Some(byte_size),
+            TypeKind::Variant {
+                storage: crate::VariantStorageKind::Struct,
+                common_members: Arc::from([]),
+                bases: Arc::from([]),
+                discriminant: Box::new(crate::VariantDiscriminant::Stored(member(None, tag, 0))),
+                variants: variants.into(),
+                incomplete: false,
+            },
+        )
+    }
+
     pub fn pointer(&mut self, target: Option<TypeReference>) -> TypeReference {
         let name = target.map_or_else(
             || "void*".to_owned(),
@@ -348,6 +420,16 @@ impl World {
         );
         self.maps.push((map, key, value));
         map
+    }
+
+    /// A shared pointer `{u64 count; V *value}`, which a view would present
+    /// as what it points to.
+    pub fn shared_type(&mut self, name: &str, value: TypeReference) -> TypeReference {
+        let u64 = self.base("u64", BaseTypeEncoding::Unsigned, 8);
+        let pointer = self.pointer(Some(value));
+        let shared = self.record(name, 16, &[("count", u64, 0), ("value", pointer, 8)]);
+        self.shared.push((shared, value));
+        shared
     }
 
     /// A map's bytes, with its keys and values allocated.
@@ -805,6 +887,48 @@ impl World {
 
 impl World {
     /// The step to the value for a key of a map.
+    fn plan_presented(&self, info: &TypeInfo) -> Result<Planned<Step>, Refusal> {
+        let (_, value) = self
+            .shared
+            .iter()
+            .find(|(shared, _)| *shared == info.reference)
+            .ok_or_else(|| type_error(format!("`{}` is no pointer", info.name)))?;
+        Ok(Planned {
+            step: Step::Presented(*value),
+            result: Some(*value),
+            consumed: 0,
+        })
+    }
+
+    /// The member `name` of a tagged union's variant.
+    fn plan_variant_member(
+        info: &TypeInfo,
+        variants: &[crate::Variant],
+        name: &str,
+    ) -> Result<Planned<Step>, Refusal> {
+        let (tag, member) = variants
+            .iter()
+            .zip(0_u8..)
+            .find_map(|(variant, tag)| {
+                let member = variant.members.first()?;
+                (member.name.as_deref() == Some(name)).then_some((tag, member))
+            })
+            .ok_or_else(|| type_error(format!("`{}` has no member `{name}`", info.name)))?;
+        let RecordMemberLayout::ByteOffset(offset) = member.layout else {
+            panic!("the world lays members out at byte offsets");
+        };
+        Ok(Planned {
+            step: Step::VariantMember {
+                tag,
+                name: name.into(),
+                offset,
+                ty: member.type_ref,
+            },
+            result: Some(member.type_ref),
+            consumed: 0,
+        })
+    }
+
     fn plan_entry(&self, info: &TypeInfo) -> Result<Planned<Step>, Refusal> {
         let (_, key, value) = self
             .maps
@@ -983,6 +1107,9 @@ impl Scope for World {
                     0,
                 ))
             }
+            (StepKind::Member(name), TypeKind::Variant { variants, .. }) => {
+                Self::plan_variant_member(info, variants, name)
+            }
             (
                 StepKind::Index { available },
                 TypeKind::Array {
@@ -1041,6 +1168,7 @@ impl Scope for World {
                 }
             }
             (StepKind::Entry, TypeKind::Record { .. }) => self.plan_entry(info),
+            (StepKind::Deref, TypeKind::Record { .. }) => self.plan_presented(info),
             (step, _) => Err(type_error(format!(
                 "`{}` does not take {step:?}",
                 info.name
@@ -1170,6 +1298,14 @@ impl Machine for World {
                 "a map's entries are found by key",
             ))),
             Step::Global(object) => self.locate(object),
+            Step::Presented(target) => {
+                let bytes = self.bytes(from)?;
+                let address = u64::from_le_bytes(bytes[8..16].try_into().expect("a word"));
+                Ok(Place::Memory {
+                    address,
+                    ty: *target,
+                })
+            }
             Step::Deref(target) => {
                 let bytes = self.bytes(from)?;
                 let address = match self.decode(from.ty(), &bytes) {
@@ -1189,6 +1325,21 @@ impl Machine for World {
                 })
             }
             Step::Member { offset, ty } => Ok(offset_place(from, *offset, *ty)),
+            Step::VariantMember {
+                tag,
+                name,
+                offset,
+                ty,
+            } => {
+                if self.bytes(from)?.first() != Some(tag) {
+                    return Err(Stop::missing(VariableState::Unavailable(
+                        VariableUnavailableReason::ValueAccess(
+                            ValueAccessUnavailableReason::InactiveVariant(Some(Arc::clone(name))),
+                        ),
+                    )));
+                }
+                Ok(offset_place(from, *offset, *ty))
+            }
             Step::Array {
                 dimensions,
                 element_size,
@@ -1346,6 +1497,15 @@ impl Machine for World {
             }
         }
         Ok(None)
+    }
+
+    fn function_generics(&mut self, address: u64) -> Result<Vec<(Arc<str>, TypeReference)>, Stop> {
+        self.functions.get(&address).cloned().ok_or_else(|| {
+            Stop::Refused(Refusal::new(
+                ErrorKind::Unsupported,
+                format!("no function the debug information describes has its code at {address:#x}"),
+            ))
+        })
     }
 
     fn task(&mut self) -> Result<u64, Stop> {
@@ -1528,6 +1688,7 @@ pub fn memory() -> World {
     world.variable("limit", constant, &100_i32.to_le_bytes());
     let int_reference = world.reference(int);
     world.variable("first", int_reference, &arr_address.to_le_bytes());
+    world.variable("$future", record, &s);
     world.register_variable("r", int, "rbx", &9_i32.to_le_bytes());
     world.optimized_out("gone", int);
     world.set_register("rip", 0x40_1000);
@@ -1564,6 +1725,15 @@ pub fn memory() -> World {
     twice_bytes.resize(8, 0);
     twice_bytes.extend(bytes);
     world.variable("twice_shaped", twice, &twice_bytes);
+
+    // A Rust `Option<i32>` holding 5, and one holding nothing.
+    let some = world.record("Some", 8, &[("__0", int, 4)]);
+    let none = world.record("None", 0, &[]);
+    let option = world.variant("Option<i32>", 8, &[("None", none, 0), ("Some", some, 0)]);
+    let mut held = vec![1, 0, 0, 0];
+    held.extend(5_i32.to_le_bytes());
+    world.variable("maybe", option, &held);
+    world.variable("nothing", option, &[0; 8]);
 
     containers(&mut world, int, char_pointer);
     world.task = Some(7);
@@ -1606,4 +1776,9 @@ fn containers(world: &mut World, int: TypeReference, char_pointer: TypeReference
         .collect();
     let bytes = world.map_bytes(&keys, &values, 2);
     world.variable("ages", ages, &bytes);
+    let shared = world.shared_type("Shared", int);
+    let value = world.allocate(&22_i32.to_le_bytes());
+    let mut bytes = 2_u64.to_le_bytes().to_vec();
+    bytes.extend(value.to_le_bytes());
+    world.variable("shared", shared, &bytes);
 }

@@ -63,28 +63,29 @@ pub use model::{
     Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArgumentOrigin,
     ArrayDimension, Backtrace, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding,
     BreakpointEntry, BreakpointLocation, ByteOrder, CBaseType, CallFrameUnavailableReason,
-    CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole, ColumnNumber, DebugFile,
-    DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue,
-    EmbeddedSymbolTable, EntryProvenance, EntryValueUnavailableReason, EnumerationOrigin,
-    Enumerator, ExecutionContext, ExecutionLocation, FloatValue, FrameKind, FunctionId,
-    FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
-    GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
-    GoKind, GoTypeAttributes, GotSlot, GotTarget, ImageAddress, ImageAddressDescription,
-    ImageLocation, InlineChain, InlineFrameLookup, InspectedValue, InspectionCompletion,
-    InspectionExhaustion, InspectionLimit, InspectionLimits, InspectionUsage, IntegerValue,
-    LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
-    LoadedModuleSnapshot, MapKey, MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason,
-    ModuleAddress, ModuleId, ModuleImage, ModuleImageId, NamedTypeRelationship, OptimizedOutReason,
-    PointerWidth, Presentation, PresentedCount, PresentedShape, RecordKind, RecordMember,
-    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, RuntimeId, ScalarValue, SectionId, SectionInfo,
+    CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole, ColumnNumber, CoroutineInfo,
+    CoroutineKind, CoroutineState, CoroutineStateKind, DebugFile, DereferenceReference,
+    DereferenceState, DereferenceUnavailableReason, DereferencedValue, EmbeddedSymbolTable,
+    EntryProvenance, EntryValueUnavailableReason, EnumerationOrigin, Enumerator, ExecutionContext,
+    ExecutionLocation, FloatValue, FrameKind, FunctionGenerics, FunctionId, FunctionInfo,
+    GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo, GlobalVariablePage,
+    GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility, GoKind,
+    GoTypeAttributes, GotSlot, GotTarget, ImageAddress, ImageAddressDescription, ImageLocation,
+    InlineChain, InlineFrameLookup, InspectedValue, InspectionCompletion, InspectionExhaustion,
+    InspectionLimit, InspectionLimits, InspectionUsage, IntegerValue, LineNumber, LineSequenceId,
+    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MapKey,
+    MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason, ModuleAddress, ModuleId,
+    ModuleImage, ModuleImageId, NamedTypeRelationship, OptimizedOutReason, PointerWidth,
+    Presentation, PresentedCount, PresentedShape, RecordKind, RecordMember, RecordMemberLayout,
+    RecordedPlace, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot,
+    RegisterValue, ResumePoint, ResumePoints, RuntimeId, ScalarValue, SectionId, SectionInfo,
     SectionLocation, ShapeUnresolvedReason, SourceContext, SourceFile, SourceFileId,
     SourceLanguage, SourceLine, SourceLocation, StackFrame, StackFrameId, StackSegment,
-    StatementFlags, StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId,
-    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TaskCursor,
-    TaskId, TaskLocation, TaskPage, TaskSnapshot, TaskState, TextCompletion, TextSummary,
-    ThreadActivity, ThreadId, ThreadLocal, TlsUnavailableReason, TypeArgument, TypeId,
-    TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
+    StateMember, StatementFlags, StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance,
+    SymbolId, SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription,
+    TaskCursor, TaskId, TaskLocation, TaskPage, TaskSnapshot, TaskState, TextCompletion,
+    TextSummary, ThreadActivity, ThreadId, ThreadLocal, TlsUnavailableReason, TypeArgument, TypeId,
+    TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference, UnfollowedFuture,
     UnsupportedVariableFeature, UnwindTermination, ValueAccessUnavailableReason, ValueBitRange,
     ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren, ValueChildrenReference,
     Variable, VariableInvalidReason, VariableKind, VariableMalformedKind, VariableMalformedReason,
@@ -95,11 +96,11 @@ pub use model::{
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, ConditionOwner,
     CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, DebugFileOptions, DebuggerEvent,
-    ExceptionDisposition, ExceptionInfo, ExceptionStops, ExecutionId, ExitStatus,
+    ExceptionDisposition, ExceptionFilter, ExceptionInfo, ExceptionStops, ExecutionId, ExitStatus,
     FramePresentation, GlobalVariableQuery, HeldChild, HeldProcess, HitComparison, HitCondition,
     InferiorState, InvalidatedWatchpoint, KernelSource, LanguageException, LanguageExceptionKind,
     LaunchOptions, LogPart, ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation,
-    ResumeScope, SignalPolicy, StateSnapshot, StepKind, StepTarget, StopId, StopReason,
+    ResumeScope, SignalPolicy, StateSnapshot, StepKind, StepTarget, StopId, StopReason, TaskEnding,
     ThreadSnapshot, ThreadState, TypeViews, ValueChildQuery, VariableQuery, ViewCandidate,
     ViewCheck, ViewExplanation, WatchAccess, WatchScope, WatchTarget, Watchpoint,
     WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions,
@@ -245,6 +246,14 @@ pub fn fuzz_debug_register_plan(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_elf_symbols(data: &[u8]) {
     debug_info::fuzz_elf_symbols(data);
+}
+
+/// Exercises the decoding of a coroutine's dispatch on its state on
+/// hostile code for the fuzz harness.
+#[cfg(all(feature = "fuzzing", target_arch = "x86_64"))]
+#[doc(hidden)]
+pub fn fuzz_dispatch(data: &[u8]) {
+    debug_info::fuzz_dispatch(data);
 }
 
 /// Exercises Go function-table decoding on hostile bytes for the fuzz
@@ -1348,21 +1357,19 @@ impl DebuggerHandle {
         self.selected().await?.source_context(radius).await
     }
 
-    /// Reads source lines surrounding a frame's location.
+    /// Reads source lines surrounding a source location of `module`.
     async fn source_context_at(
         &self,
-        execution: ExecutionLocation,
+        module: ModuleId,
+        location: Option<SourceLocation>,
         radius: u32,
     ) -> Result<SourceContext> {
-        let location = execution
-            .image
-            .source
-            .ok_or(Error::SourceLocationUnavailable)?;
+        let location = location.ok_or(Error::SourceLocationUnavailable)?;
 
         // Source files are identified within the image of the module that
         // contains the frame's code.
         let file = self
-            .loaded_module_image(execution.module)
+            .loaded_module_image(module)
             .await?
             .source_file(location.file)
             .cloned()
@@ -1456,6 +1463,24 @@ impl DebuggerHandle {
     /// work before paging, so a page holds only the program's.
     pub async fn program_tasks(&self, from: Option<TaskCursor>, limit: usize) -> Result<TaskPage> {
         self.task_page(from, limit, true).await
+    }
+
+    /// One page of the program's tasks, as [`Self::program_tasks`] gives,
+    /// at `stop`, which must still be the current stop.
+    pub async fn program_tasks_at(
+        &self,
+        stop: StopId,
+        from: Option<TaskCursor>,
+        limit: usize,
+    ) -> Result<TaskPage> {
+        self.request(|reply| Request::Tasks {
+            stop_id: stop,
+            from,
+            limit,
+            program_only: true,
+            reply,
+        })
+        .await
     }
 
     async fn task_page(
@@ -1602,6 +1627,16 @@ impl DebuggerHandle {
     /// Turns presenting values with views on or off.
     pub async fn enable_views(&self, enabled: bool) -> Result<()> {
         self.request(|reply| Request::EnableViews { enabled, reply })
+            .await
+    }
+
+    /// Chooses whether steps stop in a language runtime's own code, as
+    /// they otherwise pass through it to the program's code it calls, and
+    /// returns the previous choice. The choice applies to the steps that
+    /// begin after it and lasts for the whole session. Frames keep their
+    /// roles either way: backtraces fold the runtime's frames as before.
+    pub async fn set_step_into_runtime(&self, enter: bool) -> Result<bool> {
+        self.request(|reply| Request::SetStepIntoRuntime { enter, reply })
             .await
     }
 
@@ -1918,8 +1953,25 @@ impl StopView<'_> {
     /// Lazily reads source lines surrounding the frame's location through
     /// the handle's [`SourcePathMap`].
     pub async fn source_context(&self, radius: u32) -> Result<SourceContext> {
-        let location = self.location().await?;
-        self.handle.source_context_at(location, radius).await
+        let (module, source) = match self.location().await {
+            Ok(location) => (location.module, location.image.source),
+            // A suspended task's frame with no code to locate still waits
+            // at a line.
+            Err(Error::FrameSuspended) => {
+                let trace = self.backtrace().await?;
+                let frame = trace
+                    .frames
+                    .iter()
+                    .find(|frame| frame.id == self.context.frame)
+                    .ok_or(Error::SourceLocationUnavailable)?;
+                (
+                    frame.module.ok_or(Error::SourceLocationUnavailable)?,
+                    frame.source.clone(),
+                )
+            }
+            Err(error) => return Err(error),
+        };
+        self.handle.source_context_at(module, source, radius).await
     }
 
     /// Inspects every visible parameter and local variable of the frame.

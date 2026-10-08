@@ -37,6 +37,7 @@ are reported as such.
 | Language | Values | Execution control |
 | --- | --- | --- |
 | C, C++, Rust (GCC, Clang, rustc) | Parameters, locals, and globals, including values split across registers and memory, parameters recovered from their callers, and partly optimized-out values | Full |
+| Async Rust, with tokio 1.52 | What each suspended async function keeps across its await, and tokio's types | Full; tokio tasks, async backtraces, steps that stay in a task across awaits, and panics |
 | Zig 0.16 (LLVM backend) | Parameters, locals, and globals | Full; inline frames when emitted |
 | Go 1.27 `gc` (with cgo) | Parameters, locals, and globals, including partly optimized-out values | Full; goroutines as tasks, stacks across the runtime's switches, and panics |
 
@@ -83,6 +84,7 @@ uscope dap                         # serve DAP on stdio
 - [docs/views.md](docs/views.md) and [docs/writing-views.md](docs/writing-views.md): views.
 - [docs/dap.md](docs/dap.md): editor setup and DAP support.
 - [docs/go.md](docs/go.md): how uscope debugs Go programs.
+- [docs/tokio.md](docs/tokio.md): how uscope debugs async Rust and tokio.
 - [AGENTS.md](AGENTS.md): architecture and development rules.
 
 ## Development

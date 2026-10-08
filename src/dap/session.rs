@@ -693,6 +693,7 @@ impl Session {
             inherited,
             threads,
             debug_files: _,
+            step_into_runtime,
         } = configuration;
         let launched = matches!(start, Start::Launch(_));
         let core = matches!(start, Start::Core(_));
@@ -719,6 +720,9 @@ impl Session {
         for code in uscope::signal_codes() {
             default_policies.insert(code, handle.signal_policy(code).await.map_err(error)?);
         }
+        if step_into_runtime {
+            handle.set_step_into_runtime(true).await.map_err(error)?;
+        }
         self.target = Some(Target {
             debugger: Some(debugger),
             handle,
@@ -743,6 +747,7 @@ impl Session {
         }
         self.load_views(working_directory, &view_files).await?;
         self.apply_signal_policies().await?;
+
         if !launched {
             // A client restarts a core dump by opening it again, and an
             // attached process by detaching and attaching to it again.
@@ -2552,6 +2557,22 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
                 "the step stopped before it completed: {description}"
             )),
             Some("step incomplete".to_owned()),
+        ),
+        StopReason::TaskEnded { task, ending, .. } => {
+            let ending = match ending {
+                uscope::TaskEnding::Finished => "finished",
+                uscope::TaskEnding::Cancelled => "was cancelled",
+            };
+            (
+                "step",
+                Some(format!("the step's task {task} {ending}")),
+                Some(format!("task {task} {ending}")),
+            )
+        }
+        StopReason::FutureDropped { .. } => (
+            "step",
+            Some("the future the step waited for was dropped".to_owned()),
+            Some("future dropped".to_owned()),
         ),
         StopReason::Pause => ("pause", None, None),
         StopReason::Jump => ("goto", None, None),

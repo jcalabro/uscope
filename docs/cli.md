@@ -86,6 +86,7 @@ config check` checks every file, for a project's CI.
 | `[stop]` | `show`, the sections a stop prints, and their sizes |
 | `[print]` | `style` (`compact` or `pretty`), `radix`, `width`, `indent`, `max-depth`, `max-elements` |
 | `[disassembly]` | `syntax`, `show-bytes` |
+| `[step]` | `runtime`: `skip` passes over a language runtime's own code, `enter` stops in it, as `set step-runtime` chooses |
 | `[breakpoints]` | `save` |
 | `[debug-info]` | `directories`, searched for separate debug files after `--debug-directory`'s and relative to the project root, and `debuginfod` |
 | `[history]` | `size` |
@@ -171,10 +172,11 @@ or `$VISUAL` or `$EDITOR` with `+line path`.
 | `run`, `r` | Launch the program. |
 | `continue`, `c` | Resume every thread. |
 | `step`, `s` / `next`, `n` | Step into / over calls, by source line. |
-| `step task` | Step into the task the line starts, such as a goroutine. |
+| `step task` | Step into the task the line starts, such as a goroutine or a tokio task. |
 | `step` *function* \| `*`*0xaddress* | Step into one call of the line: the first that calls *function*, or the call instruction at an address. |
 | `info calls` | List the calls of the selected thread's line that `step` can go into. |
 | `stepi`, `si` / `nexti`, `ni` | Step one instruction, into / over calls. |
+| `set step-runtime on`\|`off` | Let steps stop in a language runtime's own code, or pass over it. |
 | `finish`, `fin` | Run until the selected frame returns. |
 | `advance`, `adv` *location* | Run until the selected thread reaches a location, or the selected frame returns. |
 | `jump`, `j` *location* | Move the selected thread, without running it, to resume at a location in its function. |
@@ -225,16 +227,37 @@ whichever thread the runtime resumes it on, other tasks that run the same
 code meanwhile never end it, and its frames are followed when the runtime
 moves the task's stack. `step task`, or the runtime's own name for a task
 such as `step goroutine`, steps over the line, unless its task starts
-another task meanwhile, as a `go` statement does, even in a function the
-line calls: the step then belongs to the first task started, and stops
-where that task's function begins, through the wrapper that passes it its
-arguments. The started task is then selected. A line that starts no task
+another task meanwhile, as a `go` statement or tokio's `spawn` and
+`spawn_local` do, even in a function the line calls: the step then belongs
+to the first task started, and stops where that task's function begins,
+through the wrapper that passes it its arguments, or at the first line of
+the async function or block a tokio task polls, on whichever thread first
+polls it. The started task is then selected. A line that starts no task
 ends as `next` does.
+
+In an async function, a step follows the function's future across its
+awaits. `next` over an await that is not ready lets the task go on, waits
+for that future to be polled again, on whichever thread, and stops at the
+function's next line; other tasks running the same function meanwhile pass.
+`finish` and `advance` wait the same way, until the function returns to its
+awaiter, where `finish` shows what it returned. A step of a task no thread
+runs, selected with `task N`, waits for the task to resume. A breakpoint, a
+signal, or `pause` ends a waiting step as it ends any. When the future goes
+away meanwhile, the step says how: `stopped as task 7 was cancelled` as its
+runtime cancels the task, `stopped as task 7 finished` as the task's own
+future returns, and `whose future was dropped` on the next line of the code
+that dropped it, as `select!` and timeouts do. Where an optimized build
+inlines an async function into its awaiter and keeps no record of its
+future, `finish` from it goes on to the awaiter's next line, since its
+return and its waiting look alike there.
 
 `step` stops only in code the program's author wrote: it passes through
 the runtime's private machinery, compiler-generated wrappers, and stack
 switches to the code they call, and steps out of them where they call none.
-A step begun in the runtime may stop there. `step` at a `return` enters the
+A step begun in the runtime may stop there, and `set step-runtime on`, or
+`runtime = "enter"` in `[step]`, lets every step stop there, as in tokio's
+`recv` on `step` into `rx.recv().await`; `set step-runtime off` restores
+the default. Backtraces fold the runtime's frames either way. `step` at a `return` enters the
 deferred calls it runs; `next` and `finish` run them, but stop in a deferred
 call that a panic runs. The body of a loop over an iterator function is a
 function the iterator calls, which steps treat as the loop's own code:
@@ -467,7 +490,7 @@ detaching.
 
 | Command | |
 | --- | --- |
-| `backtrace`, `bt` | Show the selected thread's or goroutine's stack. |
+| `backtrace`, `bt` [`-r`] | Show the selected thread's or task's stack; `-r` shows the runtime frames it folds, with their whole names. |
 | `frame`, `fr` [*level*] | Show the selected frame, or select one by level. |
 | `up` / `down` [*count*] | Select a caller / callee frame. |
 | `where` | Show the selected frame's location and module. |
@@ -478,20 +501,35 @@ detaching.
 | `undisplay` *ids* | Remove displays: numbers, ranges such as `1-3`, or `all`. |
 
 A stop's first line says why and where, in words, and names its thread when
-the process has more than one; a resume that ran over a second says how long:
+the process has more than one, and the task the thread runs, if any; a
+resume that ran over a second says how long:
 
 ```text
 stopped at breakpoint 1 (hit 3) in parse_header at src/parse.c:41 [thread 41672 of 4] (ran 1.42s)
 ```
 
-Breakpoint, step, watchpoint, signal, and pause stops then print the sections
-`[stop] show` lists, in order: `source`, the lines around the stop as `list`
-shows them; `locals`, as `print` alone; `displays`; `registers`;
-`disassembly`, `[stop] disassembly-instructions` around the instruction;
-`backtrace`, its first `[stop] backtrace-frames` frames; and `threads`. The
-default is `["source"]`. Displays print after the sections when the list
-leaves them out. A section that fails prints its error and the others still
-print; a stop where no source line is known prints no source, since the
+A runtime's exception says the same, then its message:
+
+```text
+stopped as an exception was raised in formatted at src/main.rs:34 [thread 41690 of 3] [3]:
+panicked: formatted 7 times
+```
+
+Every other thread the stop found at a breakpoint or watchpoint gets a line
+of its own after it, with the task it runs:
+
+```text
+thread 41673 [7] also stopped at breakpoint 1 (hit 4) in parse_header at src/parse.c:41
+```
+
+Breakpoint, step, watchpoint, signal, exception, and pause stops then print
+the sections `[stop] show` lists, in order: `source`, the lines around the
+stop as `list` shows them; `locals`, as `print` alone; `displays`;
+`registers`; `disassembly`, `[stop] disassembly-instructions` around the
+instruction; `backtrace`, its first `[stop] backtrace-frames` frames; and
+`threads`. The default is `["source"]`. Displays print after the sections when
+the list leaves them out. A section that fails prints its error and the others
+still print; a stop where no source line is known prints no source, since the
 header has given its address.
 
 A display prints as `print` would, after its number, in the selected frame. One
@@ -537,6 +575,69 @@ the signal stack, or the thread's. The runtime's own functions are dimmed.
 Go's calls into C run the C on the runtime's stack, and C's calls back into
 Go run the Go on the goroutine's, so a backtrace from either shows the
 frames of both languages between them.
+
+A runtime's machinery runs tens of frames deep, so a backtrace folds each
+run of two or more of its frames, with the wrappers between them, into one
+line, as does everything past the dispatch where the runtime hands the
+thread to a task, which is the runtime's code for the thread:
+
+```text
+#3  0x00005555555cb472 in top at src/main.rs:94
+    … #4–#65: 62 frames of the runtime; `bt -r` shows them
+```
+
+Frame numbers count every frame, so `frame 20` selects the same frame
+either way, and the frame a stop is in and the selected frame are never
+folded. A Rust function's generic arguments, when they run past a few
+words, are written `<…>`; `bt -r` shows every frame with its whole name.
+All of tokio is its runtime's machinery, the libraries a program awaits
+too, as Go's runtime is; so is std's `catch_unwind`, under which a runtime
+polls its tasks.
+
+A tokio task that no thread runs keeps its async functions in its future,
+and its backtrace is the chain of awaits that future holds, innermost
+first: the future it waits on, named by its type and with what it waits
+for as its view says, then each async function at the await it is
+suspended at, out to the one the task began in:
+
+```text
+#0                     awaiting tokio::sync::oneshot::Receiver<u32> — empty
+#1  0x00005555555cb77d in async leaf at src/main.rs:66
+#2  0x00005555555cca74 in async middle at src/main.rs:84
+#3  0x00005555555cb248 in async top at src/main.rs:94
+```
+
+An async frame's address is where its function resumes, where the
+debugger could find it; it is blank where optimization left no function of
+its own to resume in. `print` alone lists what the function keeps across
+that await, and an expression reads those variables by name; `$future` is
+the frame's future. A suspended frame has no registers and runs no code, so
+`registers` and `disassemble` there say so. A task spawned but never polled
+is its one async function, at its header. A chain the debugger cannot
+follow, as through memory it cannot read, ends where it can, saying why.
+
+A future that `block_on` drives belongs to no task: the thread that blocks
+on it holds it between polls. That thread's backtrace shows the future's
+chain of awaits just before tokio's frame that drives it, headed by a line
+saying so, with each async function's variables as a task's has them:
+
+```text
+    … #5–#13: 9 frames of the runtime; `bt -r` shows them
+    in the future the next frame drives:
+#14                    awaiting tokio::sync::oneshot::Receiver<u32> — empty
+#15 0x00005555555d8135 in async waiting at src/main.rs:28
+#16 0x00005555555d7db5 in async driven at src/main.rs:36
+    on the thread's stack:
+#17 0x00005555555cb85f in {closure#0}<…> at …/current_thread/mod.rs:806
+```
+
+The future being polled runs on the thread's stack instead, and shows there
+as any code does. An optimized build may keep no trace of where the future
+is; the backtrace then says so at the frame that drives it:
+
+```text
+    the future #6 drives is not shown in full: `f`, which holds the future, is unavailable: the value is optimized out
+```
 The body of a Go `range` over a function is a function of its own, named
 like `main.counted-range1`, which the iterator calls; the iterator's frames
 between the body and its loop's function say so, as `(the iterator of #2's
@@ -587,7 +688,8 @@ same everywhere; `[print] width` fixes it.
 
 `print` prints on one line unless `[print] style = "pretty"` makes it print as
 `pp` does. Both take formats, which combine, as in `p/xr` or `pp/x`: `/x`
-prints integers in hexadecimal, members and elements included, `/d` in
+prints integers in hexadecimal, members and elements included, and numbers
+a view presents, such as an atomic's, `/d` in
 decimal, overriding `[print] radix`, `/r` values as stored, without views,
 `/p` laid out as `pp` does, and `/l` on one line.
 
@@ -628,10 +730,11 @@ nearest preceding symbol.
 | --- | --- |
 | `threads` | List threads, with the goroutine each runs. |
 | `thread` *id* | Select a thread. |
-| `tasks` [`-a`] [`-g`] [`-t`] | List a runtime's tasks, Go's goroutines: `-a` with the runtime's own, `-g` grouped by place, `-t` each with its stack. |
+| `tasks` [`-a`] [`-g`] [`-t`] | List a runtime's tasks by number, such as Go's goroutines or tokio's tasks: `-a` with the runtime's own, `-g` grouped by place, `-t` each with its stack. |
 | `task` [*id* [*command*]] | Show the selected task, select one, or run an inspecting command in one. |
 | `handle` *signal* [`stop`\|`nostop`] [`print`\|`noprint`] [`pass`\|`nopass`] | Change how a signal is handled. `stop` implies `print`, and `noprint` implies `nostop`. |
 | `info signals` | List every signal's policy. |
+| `catch` [*exception*] [`on`\|`off`] | Show or choose which exceptions language runtimes report stop: Go's `unhandled`, `runtime-fatal`, and `raised`, and `rust-panic`. |
 
 Each runtime's own name for its tasks names these commands too:
 `goroutines` and `goroutine` in Go. A goroutine is listed where the code the
@@ -652,7 +755,15 @@ breakpoints and steps work by it, but its goroutines cannot be read, which
 parked or running, points `backtrace`, `frame`, `print`, `registers`, and
 the other inspecting commands at it, and `$task` in an expression is its id.
 `goroutine` *id* *command* runs one of those commands in the goroutine and
-then selects again what was selected.
+then selects again what was selected. `goroutine` alone shows the selected
+goroutine and the call that created it, as `created by main.main at
+main.go:40`. A tokio task says where it was spawned in a build with
+`tokio_unstable`, which records it, as `created at src/main.rs:12`; other
+builds record nothing of it. A suspended tokio task is listed with what it
+waits for, as the view of the future it awaits says: `sleeping until
++59m59.9s`, `task 3 pending`, `waiting for 1 of 1 permits`, `receiving;
+senders: 1`, `waiting for a notification`, `reading a line from fd 7`, or
+`waiting until readable`.
 
 Signals follow gdb's defaults. `SIGALRM`, `SIGURG`, `SIGCHLD`, `SIGWINCH`,
 `SIGPROF`, `SIGVTALRM`, `SIGIO`, and `SIGPWR` are delivered without stopping;
@@ -667,9 +778,22 @@ A language runtime that handles signals itself changes their defaults:
 whose runtime turns a fault into a panic. A `handle` command still applies
 over that. What the runtime then reports stops instead:
 
-- a panic nothing recovered, as it ends the program;
+- a panic nothing recovered, as it ends the program (`unhandled`);
 - a fatal error, such as `all goroutines are asleep - deadlock!`, or a
-  fault the runtime cannot turn into a panic, as one in C is.
+  fault the runtime cannot turn into a panic, as one in C is (`runtime-fatal`).
+
+`catch raised on` stops at every panic as it begins too, whether or not
+the program recovers from it.
+
+Every Rust panic stops as it begins, before anything catches it, whether a
+task's runtime, the program's own `catch_unwind`, or nothing: `rust-panic`,
+which `catch rust-panic off` turns off. The stop prints the panic's message,
+as the program's panic hook was given it, and selects the program's frame
+that panicked, below the standard library's code that raised the panic for
+it, as `unwrap` does. A panic whose value is no text, as `panic_any(42)`
+raises, is named by its value's type, and `resume_unwind` is reported as
+the panic it resumes. With `panic = "abort"`, the panic stops before the
+abort it ends in.
 
 The stop prints the message the runtime prints, chained panics and all, and
 selects the frame that panicked or faulted, below the runtime's own. A

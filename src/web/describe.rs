@@ -92,7 +92,9 @@ impl Images {
             Some(file.path.display().to_string())
         });
         Place {
-            address: hex(frame.instruction.get()),
+            address: frame
+                .instruction
+                .map_or_else(String::new, |address| hex(address.get())),
             function: Some(frame_name(frame, image.as_deref())),
             line: path
                 .as_ref()
@@ -111,6 +113,9 @@ fn symbol_name(image: &ModuleImage, address: ImageAddress) -> Option<String> {
 
 /// A frame's name: its function or symbol, or else its address and module.
 pub fn frame_name(frame: &StackFrame, image: Option<&ModuleImage>) -> String {
+    if let Some(awaited) = format::awaited_frame(image, frame) {
+        return awaited;
+    }
     if frame.function.is_some() || frame.symbol.is_some() {
         return format::code_name(frame.function.as_ref(), frame.symbol.as_ref());
     }
@@ -118,7 +123,10 @@ pub fn frame_name(frame: &StackFrame, image: Option<&ModuleImage>) -> String {
         .and_then(|image| image.path().file_name())
         .map(|name| format!(" in {}", name.to_string_lossy()))
         .unwrap_or_default();
-    format!("{:#x}{module}", frame.instruction.get())
+    frame.instruction.map_or_else(
+        || format!("a suspended frame{module}"),
+        |address| format!("{address:#x}{module}"),
+    )
 }
 
 pub fn hex(address: u64) -> String {
@@ -465,6 +473,8 @@ const fn reason_kind(reason: &StopReason) -> &'static str {
         StopReason::WatchpointArmFailed { .. } => "watchpointArmFailed",
         StopReason::Step { .. } => "step",
         StopReason::StepIncomplete { .. } => "stepIncomplete",
+        StopReason::TaskEnded { .. } => "taskEnded",
+        StopReason::FutureDropped { .. } => "futureDropped",
         StopReason::Pause => "pause",
         StopReason::Jump => "jump",
         StopReason::Exception(_) => "exception",

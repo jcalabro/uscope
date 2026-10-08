@@ -165,7 +165,20 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                         assert_eq!(exception.kind, LanguageExceptionKind::Fatal);
                     }
                     check_case(&scenario, case, &context).await;
-                    scenario.resume_to_stop().await
+                    // Go's checkdead unlocks the scheduler before it calls
+                    // fatal, and nothing marks the program panicking until
+                    // fatal runs on, so another thread going idle meanwhile
+                    // may report the same deadlock; each report stops.
+                    let checkdead = matches!(case, "deadlock" | "goexit");
+                    let mut next = scenario.resume_to_stop().await;
+                    while checkdead
+                        && matches!(&next, StopReason::LanguageException(again)
+                            if again.kind == LanguageExceptionKind::Fatal
+                                && again.message == exception.message)
+                    {
+                        next = scenario.resume_to_stop().await;
+                    }
+                    next
                 }
             };
             let StopReason::Exited(ExitStatus::Code(code)) = reason else {
@@ -255,10 +268,9 @@ fn exception(reason: &StopReason, context: &str) -> (LanguageExceptionKind, Stri
 
 #[tokio::test]
 async fn exceptions_stop_as_chosen() {
-    let raised = ExceptionStops {
-        raised: true,
-        ..ExceptionStops::default()
-    };
+    let raised = ExceptionStops::default()
+        .with("raised", true)
+        .expect("Go declares its panics");
     for fixture in BUILDS {
         // Each panic stops as it is raised, in the frame that raised it,
         // the one the program recovers from too. The runtime's own errors
@@ -298,11 +310,7 @@ async fn exceptions_stop_as_chosen() {
 
         // With none chosen, a fault the runtime turns into a panic neither
         // stops for its signal nor for the panic.
-        let none = ExceptionStops {
-            raised: false,
-            unhandled: false,
-            fatal: false,
-        };
+        let none = ExceptionStops::NONE;
         let (scenario, reason) = launched(fixture, "nil-dereference", none).await;
         assert_eq!(reason, StopReason::Exited(ExitStatus::Code(2)), "{fixture}");
         scenario.shutdown().await;
@@ -316,10 +324,9 @@ async fn exceptions_stop_as_chosen() {
 /// is still one panic, which stops once.
 #[tokio::test]
 async fn a_panic_preempted_as_it_begins_stops_once() {
-    let raised = ExceptionStops {
-        raised: true,
-        ..ExceptionStops::default()
-    };
+    let raised = ExceptionStops::default()
+        .with("raised", true)
+        .expect("Go declares its panics");
     for fixture in BUILDS {
         let (mut scenario, reason) = launched(fixture, "recovered", raised).await;
         let (kind, _) = exception(&reason, fixture);

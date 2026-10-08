@@ -8,9 +8,7 @@ use std::sync::Arc;
 
 use object::{Object, ObjectSection};
 
-use super::super::{
-    ImageSymbol, Member, RuntimeImage, RuntimeModel, RuntimeStop, ThreadActivity, detect,
-};
+use super::super::{ImageSymbol, Member, RuntimeImage, RuntimeModel, RuntimeStop, ThreadActivity};
 use crate::{
     ImageAddress, IntegerValue, ModuleImage, StackSegment, TaskState, ThreadId, ThreadLocal,
     VirtualAddress,
@@ -84,6 +82,15 @@ impl RuntimeImage for Image {
 
     fn has_function(&self, name: &str) -> bool {
         self.shows(name) && RuntimeImage::has_function(self.module.as_ref(), name)
+    }
+
+    fn function_answering(&self, name: &str) -> Option<ImageSymbol> {
+        self.shows(name)
+            .then(|| RuntimeImage::function_answering(self.module.as_ref(), name))?
+    }
+
+    fn symbol_at(&self, address: ImageAddress) -> Option<Arc<str>> {
+        RuntimeImage::symbol_at(self.module.as_ref(), address)
     }
 
     fn function_body(&self, name: &str) -> Option<ImageAddress> {
@@ -175,6 +182,10 @@ impl RuntimeStop for Memory {
 
     fn load_bias(&self) -> u64 {
         0
+    }
+
+    fn threads(&self) -> Vec<ThreadId> {
+        self.threads.keys().copied().collect()
     }
 }
 
@@ -286,7 +297,7 @@ impl<'a> World<'a> {
             hidden: self.image.hidden.clone(),
             tlsg: self.image.tlsg,
         };
-        detect(Arc::new(image))
+        super::detect(Arc::new(image))
             .expect("a Go runtime")
             .expect("the runtime binds")
     }

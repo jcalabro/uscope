@@ -30,6 +30,7 @@ use super::evaluate::{
 use super::generic::Generic;
 use super::location::{Expression, ExpressionUse, LocationSelectionError};
 use super::pieces::storage_from_pieces;
+use super::shape::tagless_variant;
 use super::shape::{
     ValueShape, ValueShapeError, indirection_byte_size, transparent_type_from, value_shape_from,
 };
@@ -37,7 +38,7 @@ use super::storage;
 use super::types::{
     DynamicAggregateChild, DynamicAggregateLayoutKey, TypeResolution, type_info_from,
 };
-use super::variant::{is_single_default_variant, selected_variant_index};
+use super::variant::selected_variant_index;
 use super::{
     CatalogDataObject, CatalogFunction, ConstantValue, DwarfVariableInfo, MAX_AGGREGATE_DEPTH,
     MAX_EVALUATION_MEMORY_BYTES, Metadata, MetadataAbsence, ValueDescription, malformed_reason,
@@ -1588,15 +1589,15 @@ impl DwarfVariableInfo {
         budget: &mut InspectionBudget,
     ) -> std::result::Result<(Option<IntegerValue>, Option<usize>), EvaluateError> {
         let VariantDiscriminant::Stored(member) = discriminant else {
-            // Without stored discriminator bytes, only a lone default variant
-            // is known to be active; choosing among several would be a guess.
-            return if is_single_default_variant(variants) {
-                Ok((None, Some(0)))
-            } else {
-                Err(EvaluateError::Unavailable(
-                    crate::UnsupportedVariableFeature::TypeRepresentation.into(),
-                ))
-            };
+            // Without stored discriminator bytes, only a variant known to be
+            // the only one that can hold a value is active.
+            return tagless_variant(&self.types, aggregate)
+                .map(|index| (None, Some(index)))
+                .ok_or_else(|| {
+                    EvaluateError::Unavailable(
+                        crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                    )
+                });
         };
         let shape = self.value_shape(member.type_ref.id)?;
         let representation = match &shape {

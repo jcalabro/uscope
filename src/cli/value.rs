@@ -715,7 +715,13 @@ pub async fn expanded(
                 presentation.count,
             )
             else {
-                output.text(presentation.summary.to_string());
+                // A number a view presents is written as that number is.
+                let number = presentation
+                    .number
+                    .as_deref()
+                    .filter(|_| layout.hexadecimal)
+                    .and_then(|number| hexadecimal_text(number.type_info.as_ref()?, &number.state));
+                output.text(number.unwrap_or_else(|| presentation.summary.to_string()));
                 continue;
             };
             let length = match count {
@@ -1047,7 +1053,7 @@ fn watched_scalar(type_info: &TypeInfo, image: Option<&ModuleImage>) -> Option<W
 /// A type's name with the path its producer's name leaves out, as in
 /// `std::vector<int, std::allocator<int> >`. Go and Zig names already
 /// carry their packages and modules.
-fn qualified_name(type_info: &TypeInfo) -> String {
+pub fn qualified_name(type_info: &TypeInfo) -> String {
     let Some(identity) = type_info.identity.as_deref() else {
         return type_info.name.to_string();
     };

@@ -155,6 +155,13 @@ pub enum Op<O, S> {
         indices: Vec<Node<O, S>>,
         follows: bool,
     },
+    /// Whether the tagged union at `base` holds the variant whose member
+    /// `step` reaches, `negate`d for `!=`.
+    Holds {
+        base: Box<Node<O, S>>,
+        step: S,
+        negate: bool,
+    },
     /// The place a computed pointer to a program type points at.
     At {
         address: Box<Node<O, S>>,
