@@ -633,7 +633,7 @@ nearest preceding symbol.
 | `task` [*id* [*command*]] | Show the selected task, select one, or run an inspecting command in one. |
 | `handle` *signal* [`stop`\|`nostop`] [`print`\|`noprint`] [`pass`\|`nopass`] | Change how a signal is handled. `stop` implies `print`, and `noprint` implies `nostop`. |
 | `info signals` | List every signal's policy. |
-| `catch` [*exception*] [`on`\|`off`] | Show or choose which exceptions language runtimes report stop: `unhandled`, `runtime-fatal`, and `raised`. |
+| `catch` [*exception*] [`on`\|`off`] | Show or choose which exceptions language runtimes report stop: Go's `unhandled`, `runtime-fatal`, and `raised`, and `rust-panic`. |
 
 Each runtime's own name for its tasks names these commands too:
 `goroutines` and `goroutine` in Go. A goroutine is listed where the code the
@@ -675,6 +675,16 @@ over that. What the runtime then reports stops instead:
 
 `catch raised on` stops at every panic as it begins too, whether or not
 the program recovers from it.
+
+Every Rust panic stops as it begins, before anything catches it, whether a
+task's runtime, the program's own `catch_unwind`, or nothing: `rust-panic`,
+which `catch rust-panic off` turns off. The stop prints the panic's message,
+as the program's panic hook was given it, and selects the program's frame
+that panicked, below the standard library's code that raised the panic for
+it, as `unwrap` does. A panic whose value is no text, as `panic_any(42)`
+raises, is named by its value's type, and `resume_unwind` is reported as
+the panic it resumes. With `panic = "abort"`, the panic stops before the
+abort it ends in.
 
 The stop prints the message the runtime prints, chained panics and all, and
 selects the frame that panicked or faulted, below the runtime's own. A

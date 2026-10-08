@@ -11,6 +11,7 @@
 //! of it, and keeps every language's runtime in a module of its own.
 
 mod go;
+mod rust;
 
 use std::sync::Arc;
 
@@ -51,6 +52,11 @@ pub trait RuntimeImage: std::fmt::Debug {
     fn constant(&self, name: &str) -> Option<IntegerValue>;
     /// A named object or function.
     fn symbol(&self, name: &str) -> Option<ImageSymbol>;
+    /// The one function whose symbol demangles to a name as people write
+    /// it, such as `__rustc::rust_panic`, whose symbol carries a hash.
+    fn function_answering(&self, name: &str) -> Option<ImageSymbol>;
+    /// The demangled name of the symbol that begins at an address.
+    fn symbol_at(&self, address: ImageAddress) -> Option<Arc<str>>;
     /// Whether the image has a function of this name, by its debug
     /// information, its symbols, or a language's own function table.
     fn has_function(&self, name: &str) -> bool;
@@ -193,7 +199,12 @@ pub const TASK_NOUNS: [(&str, &str); 1] = [go::TASK_NOUN];
 
 /// The exceptions each runtime a model knows reports, which clients may
 /// choose to stop at before they know which runtimes a program has.
-pub const EXCEPTION_FILTERS: [ExceptionFilter; 3] = go::EXCEPTION_FILTERS;
+pub const EXCEPTION_FILTERS: [ExceptionFilter; 4] = [
+    go::EXCEPTION_FILTERS[0],
+    go::EXCEPTION_FILTERS[1],
+    go::EXCEPTION_FILTERS[2],
+    rust::EXCEPTION_FILTERS[0],
+];
 
 /// How a runtime uses the process's signals, by Linux signal number.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -362,6 +373,13 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     ) -> Result<RuntimeTask, Arc<str>>;
     /// What the runtime calls one of its tasks.
     fn task_noun(&self) -> &'static str;
+    /// Whether code from the source file at `path` is the runtime's own
+    /// library, which raises its exceptions on the program's behalf: an
+    /// exception blames the program's frame that called it.
+    fn own_source(&self, path: &std::path::Path) -> bool {
+        let _ = path;
+        false
+    }
 }
 
 /// Every runtime a module carries, each bound against its debug
@@ -370,7 +388,10 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
 pub fn detect(
     image: &Arc<dyn RuntimeImage + Send + Sync>,
 ) -> Vec<Result<Arc<dyn RuntimeModel>, Arc<str>>> {
-    go::detect(Arc::clone(image)).into_iter().collect()
+    go::detect(Arc::clone(image))
+        .into_iter()
+        .chain(rust::detect(image).map(Ok))
+        .collect()
 }
 
 impl RuntimeImage for ModuleImage {
@@ -384,6 +405,26 @@ impl RuntimeImage for ModuleImage {
 
     fn has_function(&self, name: &str) -> bool {
         self.functions_named(name).next().is_some() || self.symbol_named(name).is_ok()
+    }
+
+    fn function_answering(&self, name: &str) -> Option<ImageSymbol> {
+        let mut found = self
+            .symbols_answering(name)
+            .filter(|symbol| symbol.kind == crate::SymbolKind::Function);
+        let symbol = found.next()?;
+        found.next().is_none().then_some(ImageSymbol {
+            address: symbol.address,
+            size: symbol
+                .extent
+                .map(|extent| extent.range.end.get() - extent.range.start.get()),
+        })
+    }
+
+    fn symbol_at(&self, address: ImageAddress) -> Option<Arc<str>> {
+        let symbol = self
+            .symbolize(address)
+            .filter(|symbol| symbol.offset == 0)?;
+        Some(crate::demangle::demangle(&symbol.name).map_or(symbol.name, Arc::from))
     }
 
     fn symbol(&self, name: &str) -> Option<ImageSymbol> {

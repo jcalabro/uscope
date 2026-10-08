@@ -84,6 +84,15 @@ impl RuntimeImage for Image {
         self.shows(name) && RuntimeImage::has_function(self.module.as_ref(), name)
     }
 
+    fn function_answering(&self, name: &str) -> Option<ImageSymbol> {
+        self.shows(name)
+            .then(|| RuntimeImage::function_answering(self.module.as_ref(), name))?
+    }
+
+    fn symbol_at(&self, address: ImageAddress) -> Option<Arc<str>> {
+        RuntimeImage::symbol_at(self.module.as_ref(), address)
+    }
+
     fn function_body(&self, name: &str) -> Option<ImageAddress> {
         self.shows(name)
             .then(|| RuntimeImage::function_body(self.module.as_ref(), name))?

@@ -144,20 +144,46 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// Selects the frame a runtime's exception blames, the first one the
-    /// program wrote, below the runtime's own frames that report it.
+    /// program wrote, below the runtime's own frames that report it and
+    /// the runtime's library code that raised it for the program.
     pub(super) fn select_blamed_frame(&mut self, pid: Pid) {
-        let Some(stop) = self
-            .inferior
-            .as_ref()
-            .and_then(|inferior| inferior.public_stop.as_ref())
-        else {
+        let Some(inferior) = self.inferior.as_ref() else {
+            return;
+        };
+        let Some(stop) = inferior.public_stop.as_ref() else {
             return;
         };
         let (stop_id, context) = (stop.id, stop.selected);
         let Ok(trace) = self.backtrace(stop_id, &StackRoot::of_thread(pid)) else {
             return;
         };
-        let Some(frame) = trace.user_frame().map(|frame| frame.id) else {
+        // The runtime whose hook the thread entered.
+        let runtime = trace
+            .frames
+            .first()
+            .and_then(|frame| inferior.runtime_hooks.get(&frame.instruction))
+            .and_then(|site| {
+                self.runtimes(inferior)
+                    .into_iter()
+                    .find(|runtime| runtime.id == site.runtime)
+            });
+        let own = |frame: &crate::StackFrame| {
+            let (Some(runtime), Some(module), Some(source)) =
+                (&runtime, frame.module, &frame.source)
+            else {
+                return false;
+            };
+            self.modules
+                .get(&module)
+                .and_then(|module| module.image.source_file(source.file))
+                .is_some_and(|file| runtime.model.own_source(&file.path))
+        };
+        let Some(frame) = trace
+            .frames
+            .iter()
+            .find(|frame| frame.role == crate::CodeRole::Ordinary && !own(frame))
+            .map(|frame| frame.id)
+        else {
             return;
         };
         debug_assert_eq!(
