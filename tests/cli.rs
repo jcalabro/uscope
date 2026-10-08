@@ -732,7 +732,8 @@ fn threads_say_when_what_they_run_is_unknown() {
 }
 
 /// tokio's tasks are listed by number, whatever order its lists keep
-/// them in, each saying what it does and the thread it is on.
+/// them in, each saying what it does and the thread it is on, and where
+/// a suspended one waits in the program's own code, past tokio's.
 #[test]
 fn tokio_tasks_are_listed_by_number() {
     let stdout = batch(
@@ -759,7 +760,77 @@ fn tokio_tasks_are_listed_by_number() {
             _ => " — suspended",
         };
         assert!(rest.contains(expected), "{stdout}");
+        if expected == " — suspended" {
+            assert!(
+                rest.starts_with(" leaf at tests/fixtures/rust/tokio/workers/src/main.rs:"),
+                "{stdout}"
+            );
+        }
     }
+}
+
+/// A backtrace folds each run of a runtime's frames into a line that says
+/// which frames it holds, and everything past the dispatch that polls the
+/// task; `bt -r` shows every frame, with its whole name. Frame numbers
+/// count every frame either way, and the selected frame is always shown.
+#[test]
+fn a_runtimes_frames_fold_into_a_line() {
+    let stdout = batch(
+        &["build/test-programs/tokio-workers-o0"],
+        &["break task_reached", "run", "bt", "bt -r", "frame 20", "bt"],
+    );
+    // Each backtrace ends saying where unwinding stopped.
+    let [folded, raw, selected, _] = stdout.split("\nunwind stopped").collect::<Vec<_>>()[..]
+    else {
+        panic!("three backtraces: {stdout}");
+    };
+    // `frame` shows the frame it selects before its source.
+    let selected = selected
+        .split_once("=> ")
+        .and_then(|(_, rest)| rest.split_once('\n'))
+        .map_or(selected, |(_, rest)| rest);
+    let frames = |text: &str| {
+        text.lines()
+            .filter(|line| line.starts_with('#') || line.starts_with("    … #"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let (folded, raw, selected) = (frames(folded), frames(raw), frames(selected));
+    let last = raw.len() - 1;
+    assert!(raw.iter().all(|line| line.starts_with('#')), "{stdout}");
+    assert!(
+        raw.iter()
+            .any(|line| line.contains(" in run<alloc::sync::Arc<")),
+        "{stdout}"
+    );
+    assert_in_order(
+        &folded.join("\n"),
+        &[
+            "#0 ",
+            " in task_reached at ",
+            "#1 ",
+            " in leaf at ",
+            "#2 ",
+            " in middle at ",
+            "#3 ",
+            " in top at ",
+            &format!(
+                "\n    … #4–#{last}: {} frames of the runtime; `bt -r` shows them",
+                last - 3
+            ),
+        ],
+    );
+    assert_eq!(folded.len(), 5, "{stdout}");
+    // The selected frame stands alone, with its neighbours folded around it.
+    assert!(
+        selected.iter().any(|line| line.starts_with("#20 ")),
+        "{stdout}"
+    );
+    assert!(
+        selected.iter().any(|line| line.starts_with("    … #4–#")),
+        "{stdout}"
+    );
+    assert!(selected.len() < raw.len(), "{stdout}");
 }
 
 #[test]
@@ -2918,13 +2989,17 @@ fn a_goroutine_is_selected_or_inspected_by_its_id() {
         "goroutine 1",
         "goroutine",
     ]);
-    // Each goroutine's frames follow it, the runtime's own among them.
+    // Each goroutine's frames follow it, the runtime's own folded but
+    // where it parked.
     assert_in_order(
         &stdout,
         &[
             "main.worker at ",
             "\n    #0 ",
             "in runtime.gopark",
+            "\n        … #1–#2: 2 frames of the runtime",
+            "\n    #3 ",
+            "in main.worker at ",
             "unwind stopped",
         ],
     );

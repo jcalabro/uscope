@@ -467,7 +467,7 @@ detaching.
 
 | Command | |
 | --- | --- |
-| `backtrace`, `bt` | Show the selected thread's or goroutine's stack. |
+| `backtrace`, `bt` [`-r`] | Show the selected thread's or task's stack; `-r` shows the runtime frames it folds, with their whole names. |
 | `frame`, `fr` [*level*] | Show the selected frame, or select one by level. |
 | `up` / `down` [*count*] | Select a caller / callee frame. |
 | `where` | Show the selected frame's location and module. |
@@ -544,6 +544,45 @@ the signal stack, or the thread's. The runtime's own functions are dimmed.
 Go's calls into C run the C on the runtime's stack, and C's calls back into
 Go run the Go on the goroutine's, so a backtrace from either shows the
 frames of both languages between them.
+
+A runtime's machinery runs tens of frames deep, so a backtrace folds each
+run of two or more of its frames, with the wrappers between them, into one
+line, as does everything past the dispatch where the runtime hands the
+thread to a task, which is the runtime's code for the thread:
+
+```text
+#3  0x00005555555cb472 in top at src/main.rs:94
+    … #4–#65: 62 frames of the runtime; `bt -r` shows them
+```
+
+Frame numbers count every frame, so `frame 20` selects the same frame
+either way, and the frame a stop is in and the selected frame are never
+folded. A Rust function's generic arguments, when they run past a few
+words, are written `<…>`; `bt -r` shows every frame with its whole name.
+All of tokio is its runtime's machinery, the libraries a program awaits
+too, as Go's runtime is; so is std's `catch_unwind`, under which a runtime
+polls its tasks.
+
+A tokio task that no thread runs keeps its async functions in its future,
+and its backtrace is the chain of awaits that future holds, innermost
+first: the future it waits on, named by its type, then each async function
+at the await it is suspended at, out to the one the task began in:
+
+```text
+#0                     awaiting tokio::sync::oneshot::Receiver<u32>
+#1  0x00005555555cb77d in async leaf at src/main.rs:66
+#2  0x00005555555cca74 in async middle at src/main.rs:84
+#3  0x00005555555cb248 in async top at src/main.rs:94
+```
+
+An async frame's address is where its function resumes, where the
+debugger could find it; it is blank where optimization left no function of
+its own to resume in. `print` alone lists what the function keeps across
+that await, and an expression reads those variables by name; `$future` is
+the frame's future. A suspended frame has no registers and runs no code, so
+`registers` and `disassemble` there say so. A task spawned but never polled
+is its one async function, at its header. A chain the debugger cannot
+follow, as through memory it cannot read, ends where it can, saying why.
 The body of a Go `range` over a function is a function of its own, named
 like `main.counted-range1`, which the iterator calls; the iterator's frames
 between the body and its loop's function say so, as `(the iterator of #2's

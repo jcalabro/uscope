@@ -93,6 +93,13 @@ pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
         name.strip_prefix(function)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('<'))
     };
+    // std's code that catches a panic, under which a runtime polls its
+    // tasks and a thread runs its closure, is machinery like theirs.
+    if within("std::panicking::catch_unwind")
+        || (within("std::panicking") || within("std::panic")) && named("catch_unwind")
+    {
+        return Some(CodeRole::RuntimeInternal);
+    }
     // std's and core's code that raises a panic, which a step goes
     // through to the `Drop` impls the panic runs as it unwinds.
     if within("core::panicking")
@@ -178,6 +185,8 @@ pub fn symbol_role(name: &str) -> CodeRole {
         "_start" => CodeRole::Outermost,
         // glibc's `sa_restorer`, which a signal handler returns to.
         "__restore_rt" => CodeRole::SignalTrampoline,
+        // Rust's intrinsic that calls code under `catch_unwind`.
+        "__rust_try" => CodeRole::RuntimeInternal,
         _ => CodeRole::Ordinary,
     }
 }

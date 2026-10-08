@@ -301,7 +301,10 @@ impl Cli {
                 Section::Displays => Ok(self.displays_section(activation).await),
                 Section::Registers => self.registers_section(activation).await,
                 Section::Disassembly => self.disassembly_section().await,
-                Section::Backtrace => self.backtrace(Some(stop.backtrace_frames as usize)).await,
+                Section::Backtrace => {
+                    self.backtrace(Some(stop.backtrace_frames as usize), false)
+                        .await
+                }
                 Section::Threads => self
                     .debugger
                     .snapshot()
