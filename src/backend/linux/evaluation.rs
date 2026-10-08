@@ -357,9 +357,12 @@ fn definition(image: &crate::ModuleImage, info: &TypeInfo) -> String {
             .join(",")
     };
     let shape = match &info.kind {
-        TypeKind::Record { members: fields, .. } | TypeKind::Union { members: fields, .. } => {
-            members(fields)
+        TypeKind::Record {
+            members: fields, ..
         }
+        | TypeKind::Union {
+            members: fields, ..
+        } => members(fields),
         TypeKind::Variant {
             common_members,
             discriminant,
@@ -367,9 +370,7 @@ fn definition(image: &crate::ModuleImage, info: &TypeInfo) -> String {
             ..
         } => {
             let tag = match discriminant.as_ref() {
-                crate::VariantDiscriminant::Stored(member) => {
-                    members(std::slice::from_ref(member))
-                }
+                crate::VariantDiscriminant::Stored(member) => members(std::slice::from_ref(member)),
                 crate::VariantDiscriminant::TagType(tag) => name(*tag),
                 crate::VariantDiscriminant::Absent => String::new(),
             };
@@ -1044,9 +1045,11 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             .thread_activity(frame.inferior, frame.root.reader())
         {
             Some(crate::ThreadActivity::Task { task, .. }) => Ok(task.number),
-            Some(crate::ThreadActivity::Idle | crate::ThreadActivity::Outside) => Err(
-                Stop::missing(VariableState::Unavailable(VariableUnavailableReason::NoTask)),
-            ),
+            Some(crate::ThreadActivity::Idle | crate::ThreadActivity::Outside) => {
+                Err(Stop::missing(VariableState::Unavailable(
+                    VariableUnavailableReason::NoTask,
+                )))
+            }
             Some(crate::ThreadActivity::Unknown(reason)) => Err(refused(&reason)),
             None => Err(refused("the program has no tasks")),
         }

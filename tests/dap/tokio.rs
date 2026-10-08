@@ -34,10 +34,19 @@ fn tokio_tasks_are_threads_beside_the_programs_own() {
     let (first, name) = &listed[0];
     assert_eq!(*first, stop.thread, "{listed:?}");
     assert!(name.ends_with("— at breakpoint 1"), "{listed:?}");
-    let named = |text: &str| listed.iter().filter(|(_, name)| name.contains(text)).count();
+    let named = |text: &str| {
+        listed
+            .iter()
+            .filter(|(_, name)| name.contains(text))
+            .count()
+    };
     assert_eq!(named("— suspended"), 8, "{listed:?}");
     assert_eq!(named("— queued in the blocking pool"), 1, "{listed:?}");
-    assert_eq!(named("— running a blocking closure (thread "), 1, "{listed:?}");
+    assert_eq!(
+        named("— running a blocking closure (thread "),
+        1,
+        "{listed:?}"
+    );
     // The process's first thread, which waits for the one that stopped, is
     // the program's own; the runtime's idle workers are left out.
     assert_eq!(listed.len(), 12, "{listed:?}");

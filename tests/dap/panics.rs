@@ -19,8 +19,7 @@ fn the_default_filters_stop_on_a_task_panic_at_its_caller() {
     assert_eq!(stop.reason, "exception", "{stop:?}");
     let info = dap.request("exceptionInfo", json!({"threadId": stop.thread}));
     assert_eq!(
-        info["description"],
-        "panicked: called `Option::unwrap()` on a `None` value",
+        info["description"], "panicked: called `Option::unwrap()` on a `None` value",
         "{info}"
     );
     assert_eq!(info["breakMode"], "always", "{info}");
