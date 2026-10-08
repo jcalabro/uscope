@@ -83,10 +83,14 @@ object = { version = "0.39", features = ["read", "write"] }
 
 # Debug-info normalization is deliberately CPU-heavy. A small amount of
 # optimization keeps the full behavioral matrix fast without the compile cost
-# or disabled safety checks of the release profile.
+# or disabled safety checks of the release profile: at no optimization the
+# suite takes three times as long. Optimized builds otherwise link-time
+# optimize across a crate's codegen units, which repeats for the whole crate
+# after every edit and takes as long as compiling the edit.
 [profile.test]
 opt-level = 1
 debug = 1
+lto = "off"
 
 # Simulation sweeps: optimized, with the debug assertions that keep the
 # flight recorder and internal checks on.
@@ -100,3 +104,6 @@ overflow-checks = true
 # `--config 'profile.test.package.uscope.debug=1'` when stepping through a test.
 [profile.test.package.uscope]
 debug = 0
+# The crate has more modules than an incremental build's 256 default codegen
+# units, so a clean build merged them and ran fewer at once.
+codegen-units = 4096
