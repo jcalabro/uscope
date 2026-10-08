@@ -217,7 +217,7 @@ impl<P: InspectionOps> Controller<P> {
         self.with_process_stop(inferior, module, reader, None, read)
     }
 
-    fn with_process_stop<T>(
+    pub(super) fn with_process_stop<T>(
         &self,
         inferior: &Inferior,
         module: &LoadedModule,
@@ -324,7 +324,8 @@ impl<P: InspectionOps> Controller<P> {
         // A task suspended in its future waits for what that future does.
         for task in &mut tasks {
             if task.state == TaskState::Blocked
-                && let Some(awaiting) = self.task_awaiting(inferior, stop_id, task.id, reader)
+                && let Some(awaiting) =
+                    self.task_awaiting(inferior, stop_id, task.id, reader, &usage)
             {
                 task.detail = Some(awaiting);
             }

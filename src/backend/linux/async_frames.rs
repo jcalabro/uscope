@@ -5,6 +5,7 @@
 //! registers; each async function's variables are the members its state
 //! keeps.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -17,10 +18,10 @@ use crate::runtime_model::futures::{self, AsyncFrameKind, ChainEnd};
 
 use crate::{
     Backtrace, CallFrameUnavailableReason, CodeInstanceKind, CodeRole, CoroutineInfo, Error,
-    FrameKind, ImageAddress, InspectionLimits, LoadedModule, ModuleImage, PresentedShape,
-    RecordMemberLayout, Result, StackFrame, StackFrameId, StackSegment, TypeReference,
-    UnfollowedFuture, UnwindTermination, Variable, VariableKind, VariableQuery, VariableState,
-    VariableUnavailableReason, VirtualAddress,
+    FrameKind, ImageAddress, InspectionLimits, InspectionUsage, LoadedModule, ModuleImage,
+    PresentedShape, RecordMemberLayout, Result, StackFrame, StackFrameId, StackSegment,
+    TypeReference, UnfollowedFuture, UnwindTermination, Variable, VariableKind, VariableQuery,
+    VariableState, VariableUnavailableReason, VirtualAddress,
 };
 
 use super::evaluation::{StopMachine, StopPlace};
@@ -31,6 +32,18 @@ use super::frames::{
 use super::inspection::variable_context;
 use super::native::InspectionOps;
 use super::{Controller, Inferior, RuntimeModule};
+
+/// What describing one suspended task in a list may cost: far less than an
+/// inspection, since a page may hold thousands, and enough for any of the
+/// views of what tokio's futures wait for.
+const DESCRIPTION_LIMITS: InspectionLimits = InspectionLimits {
+    variables: 16,
+    value_nodes: 64,
+    aggregate_depth: 16,
+    memory_reads: 64,
+    memory_bytes: 16 * 1_024,
+    expression_work: 256_000,
+};
 
 /// A suspended task's frames, innermost first, each with the future it
 /// was read from, and why they end.
@@ -57,6 +70,16 @@ impl<P: InspectionOps> Controller<P> {
         inferior: &Inferior,
         root: &StackRoot,
     ) -> Result<Option<AsyncStack>> {
+        self.async_stack_counted(inferior, root, None)
+    }
+
+    /// [`Self::async_stack`], counting its reads in `usage` when given.
+    fn async_stack_counted(
+        &self,
+        inferior: &Inferior,
+        root: &StackRoot,
+        usage: Option<&Cell<InspectionUsage>>,
+    ) -> Result<Option<AsyncStack>> {
         let RootOrigin::Suspended {
             future,
             ty,
@@ -68,7 +91,7 @@ impl<P: InspectionOps> Controller<P> {
         };
         let runtime_module = self.suspended_module(module, *ty)?;
         let image = runtime_module.image.as_ref();
-        let chain = self.with_module_stop(inferior, module, *reader, |stop| {
+        let chain = self.with_process_stop(inferior, module, *reader, usage, |stop| {
             futures::walk(image, stop, *future, *ty)
         });
         let frames = chain
@@ -125,6 +148,7 @@ impl<P: InspectionOps> Controller<P> {
 
     /// Each frame of a future a chain awaits with what it waits for: the
     /// summary of the view that presents the future.
+    /// The views share one inspection's budget.
     pub(super) fn describe_awaited(
         &self,
         inferior: &Inferior,
@@ -132,23 +156,38 @@ impl<P: InspectionOps> Controller<P> {
         root: &StackRoot,
         frames: &mut [StackFrame],
     ) {
+        let mut budget = InspectionBudget::new(InspectionLimits::default());
         for frame in frames {
-            frame.awaiting = self.awaited_summary(inferior, stop_id, root, frame);
+            frame.awaiting = self.awaited_summary(inferior, stop_id, root, frame, &mut budget);
         }
     }
 
     /// What a suspended task waits for: what its chain of awaits ends at,
-    /// as the view that presents that future summarizes it.
+    /// as the view that presents that future summarizes it, within a small
+    /// budget of its own, which `usage` is charged with, as are the reads
+    /// that follow the chain.
     pub(super) fn task_awaiting(
         &self,
         inferior: &Inferior,
         stop_id: StopId,
         task: crate::TaskId,
         reader: nix::unistd::Pid,
+        usage: &Cell<InspectionUsage>,
     ) -> Option<Arc<str>> {
         let root = self.task_root(inferior, task, reader).ok()??;
-        let stack = self.async_stack(inferior, &root).ok()??;
-        self.awaited_summary(inferior, stop_id, &root, stack.frames.first()?)
+        let stack = self
+            .async_stack_counted(inferior, &root, Some(usage))
+            .ok()??;
+        let mut budget = InspectionBudget::new(DESCRIPTION_LIMITS);
+        let described =
+            self.awaited_summary(inferior, stop_id, &root, stack.frames.first()?, &mut budget);
+        let (mut total, spent) = (usage.get(), budget.usage());
+        total.value_nodes += spent.value_nodes;
+        total.memory_reads += spent.memory_reads;
+        total.memory_bytes += spent.memory_bytes;
+        total.expression_work += spent.expression_work;
+        usage.set(total);
+        described
     }
 
     fn awaited_summary(
@@ -157,6 +196,7 @@ impl<P: InspectionOps> Controller<P> {
         stop_id: StopId,
         root: &StackRoot,
         frame: &StackFrame,
+        budget: &mut InspectionBudget,
     ) -> Option<Arc<str>> {
         let FrameKind::Awaited { object, ty } = frame.kind else {
             return None;
@@ -169,9 +209,8 @@ impl<P: InspectionOps> Controller<P> {
         };
         let resolved = self.suspended_frame(frame.id, frame.clone(), &leaf);
         let scope = self.frame_for(inferior, stop_id, root, &resolved);
-        let mut budget = InspectionBudget::new(InspectionLimits::default());
         // The backtrace is itself the request run control waits behind.
-        let mut machine = StopMachine::new(&scope, &mut budget, false);
+        let mut machine = StopMachine::new(&scope, budget, false);
         let place = StopPlace {
             module: module.loaded.id,
             located: Located {
