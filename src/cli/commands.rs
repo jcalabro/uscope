@@ -552,7 +552,8 @@ pub fn command_named(name: &str) -> Option<&'static CommandSpec> {
 }
 
 /// A command's other names, with each runtime's own name for its tasks for
-/// the commands about tasks: `goroutines` for `tasks` in Go.
+/// the commands about tasks: `goroutines` for `tasks` in Go. A runtime that
+/// calls its tasks tasks adds none.
 pub fn aliases(command: &CommandSpec) -> impl Iterator<Item = &'static str> {
     let nouns = uscope::TASK_NOUNS.iter();
     let runtime = match command.command {
@@ -560,7 +561,11 @@ pub fn aliases(command: &CommandSpec) -> impl Iterator<Item = &'static str> {
         Command::Task => nouns.map(|(singular, _)| *singular).collect(),
         _ => Vec::new(),
     };
-    command.aliases.iter().copied().chain(runtime)
+    command
+        .aliases
+        .iter()
+        .copied()
+        .chain(runtime.into_iter().filter(|noun| *noun != command.name))
 }
 
 /// Whether `word` names a task: `task`, or a runtime's own name for one,

@@ -11,14 +11,17 @@
 //! of it, and keeps every language's runtime in a module of its own.
 
 mod go;
+mod records;
 mod rust;
+mod tokio;
 
 use std::sync::Arc;
 
 use crate::unwind::RegisterFile;
 use crate::{
     EntryProvenance, ExceptionFilter, ImageAddress, IntegerValue, ModuleImage, RecordMemberLayout,
-    StackSegment, TaskState, ThreadId, ThreadLocal, TypeInfo, TypeKind, TypeNode, VirtualAddress,
+    StackSegment, TaskState, ThreadId, ThreadLocal, TypeInfo, TypeKind, TypeNode, TypeReference,
+    VirtualAddress,
 };
 
 /// A result with the reasons it may be incomplete, such as a task whose
@@ -71,6 +74,40 @@ pub trait RuntimeImage: std::fmt::Debug {
     /// Where each thread's copy of the named thread-local variable is, or
     /// why that is unknown; `None` when the image defines none by the name.
     fn thread_local(&self, name: &str) -> Option<Result<ThreadLocal, Arc<str>>>;
+    /// Where each thread's copy is of the one thread-local variable named
+    /// `name` somewhere within `scope`, such as the storage std's
+    /// `thread_local!` makes for a variable; `None` when there is none.
+    fn thread_local_within(
+        &self,
+        scope: &str,
+        name: &str,
+    ) -> Option<Result<ThreadLocal, Arc<str>>> {
+        let _ = (scope, name);
+        None
+    }
+    /// The image's types of a qualified name, such as
+    /// `tokio::runtime::task::core::Header`: one for each unit that
+    /// describes the type.
+    fn types_named(&self, name: &str) -> Vec<TypeReference> {
+        let _ = name;
+        Vec::new()
+    }
+    /// What one of the image's types is.
+    fn type_info(&self, ty: TypeReference) -> Option<&TypeInfo> {
+        let _ = ty;
+        None
+    }
+    /// Whether two of the image's types are one type, described by two
+    /// units.
+    fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        left == right
+    }
+    /// The path of a source file the image's code was compiled from that
+    /// ends with `suffix`, such as `src/runtime/task/raw.rs`.
+    fn source_path_ending(&self, suffix: &str) -> Option<std::path::PathBuf> {
+        let _ = suffix;
+        None
+    }
 }
 
 /// One validated stop of the process a runtime runs in.
@@ -85,6 +122,8 @@ pub trait RuntimeStop {
     fn instruction(&self, thread: ThreadId) -> Option<VirtualAddress>;
     /// What the module carrying the runtime adds to its image addresses.
     fn load_bias(&self) -> u64;
+    /// Every thread of the process, in the order of their ids.
+    fn threads(&self) -> Vec<ThreadId>;
 }
 
 /// An address in a task's code.
@@ -195,7 +234,7 @@ pub enum Crossing {
 
 /// What each runtime a model knows calls its tasks, singular and plural,
 /// so that clients can speak of them as the runtime's users do.
-pub const TASK_NOUNS: [(&str, &str); 1] = [go::TASK_NOUN];
+pub const TASK_NOUNS: [(&str, &str); 2] = [go::TASK_NOUN, self::tokio::TASK_NOUN];
 
 /// The exceptions each runtime a model knows reports, which clients may
 /// choose to stop at before they know which runtimes a program has.
@@ -391,6 +430,7 @@ pub fn detect(
     go::detect(Arc::clone(image))
         .into_iter()
         .chain(rust::detect(image).map(Ok))
+        .chain(self::tokio::detect(image))
         .collect()
 }
 
@@ -483,6 +523,50 @@ impl RuntimeImage for ModuleImage {
 
     fn thread_local(&self, name: &str) -> Option<Result<ThreadLocal, Arc<str>>> {
         Self::thread_local(self, name)
+    }
+
+    fn thread_local_within(
+        &self,
+        scope: &str,
+        name: &str,
+    ) -> Option<Result<ThreadLocal, Arc<str>>> {
+        Self::thread_local_within(self, scope, name)
+    }
+
+    /// Only the types whose path and name spell the name whole.
+    fn types_named(&self, name: &str) -> Vec<TypeReference> {
+        Self::types_named(self, name)
+            .into_iter()
+            .filter(|ty| {
+                Self::type_info(self, *ty).is_some_and(|info| {
+                    let mut qualified = info
+                        .identity
+                        .as_ref()
+                        .map(|identity| identity.path.join("::"))
+                        .unwrap_or_default();
+                    if !qualified.is_empty() {
+                        qualified.push_str("::");
+                    }
+                    qualified.push_str(&info.name);
+                    qualified == name
+                })
+            })
+            .collect()
+    }
+
+    fn type_info(&self, ty: TypeReference) -> Option<&TypeInfo> {
+        Self::type_info(self, ty)
+    }
+
+    fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        left == right || Self::same_type(self, left, right)
+    }
+
+    fn source_path_ending(&self, suffix: &str) -> Option<std::path::PathBuf> {
+        self.source_files()
+            .iter()
+            .find(|file| file.path.ends_with(suffix))
+            .map(|file| file.path.to_path_buf())
     }
 
     fn function_name(&self, address: ImageAddress) -> Option<Arc<str>> {

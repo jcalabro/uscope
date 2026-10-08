@@ -830,6 +830,35 @@ impl ModuleImage {
         self.thread_locals.get(name).cloned()
     }
 
+    /// Where each thread's copy is of the one thread-local variable whose
+    /// demangled name lies within `scope` and ends in `name`, as the
+    /// storage std's `thread_local!` makes is named within the variable's
+    /// own scope; `None` when the image defines none.
+    #[must_use]
+    pub fn thread_local_within(
+        &self,
+        scope: &str,
+        name: &str,
+    ) -> Option<std::result::Result<ThreadLocal, Arc<str>>> {
+        let mut found = self.thread_locals.iter().filter(|(symbol, _)| {
+            symbol.contains(name)
+                && crate::demangle::demangle(symbol).is_some_and(|demangled| {
+                    demangled
+                        .strip_prefix(scope)
+                        .is_some_and(|rest| rest.starts_with("::"))
+                        && demangled
+                            .strip_suffix(name)
+                            .is_some_and(|rest| rest.ends_with("::"))
+                })
+        });
+        let (_, place) = found.next()?;
+        Some(if found.next().is_some() {
+            Err(format!("several thread-local variables are named {name} within {scope}").into())
+        } else {
+            place.clone()
+        })
+    }
+
     /// Returns every global catalog entry in deterministic source order.
     #[must_use]
     pub fn globals(&self) -> &[GlobalVariableInfo] {

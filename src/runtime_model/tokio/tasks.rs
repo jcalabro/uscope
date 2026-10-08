@@ -1,0 +1,592 @@
+//! Reading tokio's tasks at one stop: each runtime's list, shard by shard,
+//! then the blocking pools' closures, queued and running.
+
+use std::sync::Arc;
+
+use super::layout::Pool;
+use super::{
+    CANCELLED, COMPLETE, Census, Cursor, Instance, List, MAX_TASKS, NOTIFIED, RUNNING, Tasks,
+    TokioRuntime,
+};
+use crate::runtime_model::records;
+use crate::runtime_model::{Partial, RuntimeStop, RuntimeTask, TaskPage, TaskRef, ThreadActivity};
+use crate::{StackSegment, TaskState, ThreadId};
+
+/// One task of a list, checked: it belongs to the list, its vtable is a
+/// task's, and it links back to the task before it.
+#[derive(Debug, Clone, Copy)]
+struct Node {
+    id: u64,
+    state: u64,
+    next: u64,
+}
+
+/// Where a page resumes within the runtimes' lists: the runtime's index,
+/// the shard, and the task with the task before it.
+type Resume = (usize, u64, Option<(u64, u64)>);
+
+impl TokioRuntime {
+    /// Fills a page from `cursor`: the runtimes' lists, then the blocking
+    /// pools' tasks.
+    pub(super) fn page(
+        &self,
+        stop: &dyn RuntimeStop,
+        census: &Census,
+        cursor: Cursor,
+        limit: usize,
+        program_only: bool,
+        page: &mut Partial<TaskPage>,
+    ) {
+        page.gaps.extend(census.gaps.iter().cloned());
+        let tasks = match self.task_layout() {
+            Ok(tasks) => tasks,
+            Err(reason) => {
+                page.gaps
+                    .push(format!("tokio's tasks cannot be read: {reason}").into());
+                return;
+            }
+        };
+        let resume = match cursor {
+            Cursor::Start => Some((0, 0, None)),
+            Cursor::Node(header) => match self.locate(stop, census, tasks, header) {
+                Ok(resume) => Some(resume),
+                Err(reason) => {
+                    page.gaps.push(reason);
+                    return;
+                }
+            },
+            Cursor::Blocking(_) => None,
+        };
+        if let Some((first, mut shard, mut node)) = resume {
+            for &runtime in census.runtimes.iter().skip(first) {
+                if self.list_page(stop, census, runtime, (shard, node), limit, page) {
+                    return;
+                }
+                (shard, node) = (0, None);
+            }
+        }
+        let start = match cursor {
+            Cursor::Blocking(index) => index,
+            Cursor::Start | Cursor::Node(_) => 0,
+        };
+        let blocking = self.blocking(stop, census, tasks, &mut page.gaps);
+        for (index, task) in (0..).zip(blocking).skip(usize::try_from(start).unwrap_or(usize::MAX)) {
+            if program_only && task.internal {
+                continue;
+            }
+            if page.value.tasks.len() == limit {
+                page.value.next = Some(Cursor::Blocking(index).encode());
+                return;
+            }
+            page.value.tasks.push(task);
+        }
+    }
+
+    /// Lists one runtime's tasks from a shard, at a task or the shard's
+    /// head, until the page is full, which it says.
+    fn list_page(
+        &self,
+        stop: &dyn RuntimeStop,
+        census: &Census,
+        runtime: Instance,
+        (mut shard, mut node): (u64, Option<(u64, u64)>),
+        limit: usize,
+        page: &mut Partial<TaskPage>,
+    ) -> bool {
+        let list = self
+            .task_layout()
+            .and_then(|tasks| Ok((tasks, self.list(stop, runtime)?)));
+        let (tasks, list) = match list {
+            Ok(list) => list,
+            Err(reason) => {
+                page.gaps.push(reason);
+                return false;
+            }
+        };
+        let flavor = runtime.flavor.describe();
+        let shard_start = (shard, node.is_some());
+        // A list read with no shard changing or damaged holds its count.
+        let mut whole = true;
+        let mut total = 0;
+        while shard < list.length {
+            let head = match self.shard(stop, runtime, &list, shard) {
+                Ok((head, locked)) => {
+                    if locked {
+                        whole = false;
+                        page.gaps.push(
+                            format!(
+                                "shard {shard} of the {flavor} runtime's tasks was being \
+                                 changed at the stop; its tasks may be missing or stale"
+                            )
+                            .into(),
+                        );
+                    }
+                    head
+                }
+                Err(reason) => {
+                    whole = false;
+                    page.gaps.push(reason);
+                    shard += 1;
+                    continue;
+                }
+            };
+            let (mut at, mut previous) = node.take().unwrap_or((head, 0));
+            let mut walked = 0;
+            while at != 0 {
+                if walked >= list.count {
+                    whole = false;
+                    page.gaps.push(
+                        format!(
+                            "shard {shard} of the {flavor} runtime's tasks holds more than its \
+                             {} tasks; it is read no further",
+                            list.count
+                        )
+                        .into(),
+                    );
+                    break;
+                }
+                match self.node(stop, tasks, &list, at, previous) {
+                    // A page ends only before a task the next can list.
+                    Ok(_) if page.value.tasks.len() == limit => {
+                        page.value.next = Some(Cursor::Node(at).encode());
+                        return true;
+                    }
+                    Ok(found) => {
+                        page.value.tasks.push(owned_task(census, runtime, at, &found));
+                        (previous, at) = (at, found.next);
+                        walked += 1;
+                        total += 1;
+                    }
+                    Err(reason) => {
+                        whole = false;
+                        page.gaps.push(
+                            format!(
+                                "shard {shard} of the {flavor} runtime's tasks: {reason}; the \
+                                 rest of the shard is not listed"
+                            )
+                            .into(),
+                        );
+                        break;
+                    }
+                }
+            }
+            shard += 1;
+        }
+        // A page that began within the list counts it whole once it ends.
+        let total = if shard_start == (0, false) {
+            Some(total)
+        } else {
+            self.count(stop, tasks, runtime, &list).ok()
+        };
+        if whole && let Some(total) = total
+            && total != list.count
+        {
+            page.gaps.push(
+                format!(
+                    "the {flavor} runtime counts {} tasks, but its list holds {total}",
+                    list.count
+                )
+                .into(),
+            );
+        }
+        false
+    }
+
+    /// How many tasks a runtime's list holds, or why that is not known: a
+    /// shard is damaged or was being changed.
+    fn count(
+        &self,
+        stop: &dyn RuntimeStop,
+        tasks: &Tasks,
+        runtime: Instance,
+        list: &List,
+    ) -> Result<u64, Arc<str>> {
+        let mut total = 0;
+        for shard in 0..list.length {
+            let (mut at, locked) = self.shard(stop, runtime, list, shard)?;
+            if locked {
+                return Err("a shard was being changed".into());
+            }
+            let mut previous = 0;
+            while at != 0 {
+                if total >= list.count {
+                    return Err("the list holds more than its count".into());
+                }
+                let found = self.node(stop, tasks, list, at, previous)?;
+                (previous, at) = (at, found.next);
+                total += 1;
+            }
+        }
+        Ok(total)
+    }
+
+    /// A shard's head, and whether its lock was held at the stop.
+    fn shard(
+        &self,
+        stop: &dyn RuntimeStop,
+        runtime: Instance,
+        list: &List,
+        index: u64,
+    ) -> Result<(u64, bool), Arc<str>> {
+        let owned = self.owned(runtime.flavor)?;
+        let at = list.shards.wrapping_add(index.wrapping_mul(owned.shard_size));
+        let unreadable = || Arc::<str>::from(format!("the shard at {at:#x} is unreadable"));
+        let lock = records::read(stop, at + owned.shard_lock, 4).ok_or_else(unreadable)?;
+        let head = records::word(stop, at + owned.head).ok_or_else(unreadable)?;
+        Ok((head, lock != 0))
+    }
+
+    /// Reads the task at `header`, the task after `previous` in its shard,
+    /// or its head when `previous` is zero.
+    fn node(
+        &self,
+        stop: &dyn RuntimeStop,
+        tasks: &Tasks,
+        list: &List,
+        header: u64,
+        previous: u64,
+    ) -> Result<Node, Arc<str>> {
+        let word = |address: u64| {
+            records::word(stop, address)
+                .ok_or_else(|| Arc::<str>::from(format!("the task at {header:#x} is unreadable")))
+        };
+        let owner = word(header.wrapping_add(tasks.owner))?;
+        if owner != list.id {
+            return Err(format!(
+                "the task at {header:#x} belongs to task list {owner}, not {}",
+                list.id
+            )
+            .into());
+        }
+        let (vtable, trailer) = self.trailer(stop, tasks, header)?;
+        let back = word(trailer.wrapping_add(tasks.prev))?;
+        if back != previous {
+            return Err(format!(
+                "the task at {header:#x} links back to {back:#x}, not {previous:#x}"
+            )
+            .into());
+        }
+        let id_offset = word(vtable.wrapping_add(tasks.id_offset))?;
+        Ok(Node {
+            id: word(header.wrapping_add(id_offset))?,
+            state: word(header.wrapping_add(tasks.state))?,
+            next: word(trailer.wrapping_add(tasks.next))?,
+        })
+    }
+
+    /// A task's checked vtable and where its trailer is.
+    fn trailer(
+        &self,
+        stop: &dyn RuntimeStop,
+        tasks: &Tasks,
+        header: u64,
+    ) -> Result<(u64, u64), Arc<str>> {
+        let word = |address: u64| {
+            records::word(stop, address)
+                .ok_or_else(|| Arc::<str>::from(format!("the task at {header:#x} is unreadable")))
+        };
+        let vtable = word(header.wrapping_add(tasks.vtable))?;
+        self.checked_vtable(stop, vtable)?;
+        let offset = word(vtable.wrapping_add(tasks.trailer_offset))?;
+        Ok((vtable, header.wrapping_add(offset)))
+    }
+
+    /// Where a page resumes at the task `header` a previous page ended
+    /// before, once the task is still in its runtime's list.
+    fn locate(
+        &self,
+        stop: &dyn RuntimeStop,
+        census: &Census,
+        tasks: &Tasks,
+        header: u64,
+    ) -> Result<Resume, Arc<str>> {
+        let stale = || Arc::<str>::from("the page's cursor names no task at this stop");
+        let owner = records::word(stop, header.wrapping_add(tasks.owner)).ok_or_else(stale)?;
+        for (index, &runtime) in census.runtimes.iter().enumerate() {
+            let list = self.list(stop, runtime)?;
+            if list.id != owner {
+                continue;
+            }
+            let (vtable, trailer) = self.trailer(stop, tasks, header)?;
+            let id_offset =
+                records::word(stop, vtable.wrapping_add(tasks.id_offset)).ok_or_else(stale)?;
+            let id = records::word(stop, header.wrapping_add(id_offset)).ok_or_else(stale)?;
+            let shard = id & (list.length - 1);
+            let previous =
+                records::word(stop, trailer.wrapping_add(tasks.prev)).ok_or_else(stale)?;
+            if self.follows(stop, tasks, runtime, &list, shard, previous)? != header {
+                return Err(stale());
+            }
+            return Ok((index, shard, Some((header, previous))));
+        }
+        Err(stale())
+    }
+
+    /// The task after `previous` in a shard, or its head when `previous`
+    /// is zero.
+    fn follows(
+        &self,
+        stop: &dyn RuntimeStop,
+        tasks: &Tasks,
+        runtime: Instance,
+        list: &List,
+        shard: u64,
+        previous: u64,
+    ) -> Result<u64, Arc<str>> {
+        if previous == 0 {
+            return Ok(self.shard(stop, runtime, list, shard)?.0);
+        }
+        let (_, trailer) = self.trailer(stop, tasks, previous)?;
+        records::word(stop, trailer.wrapping_add(tasks.next))
+            .ok_or_else(|| format!("the task at {previous:#x} is unreadable").into())
+    }
+
+    /// The task numbered `number` in a runtime's list, at `locator` when
+    /// that still holds it, or else in the shard its number picks.
+    fn listed(
+        &self,
+        stop: &dyn RuntimeStop,
+        tasks: &Tasks,
+        runtime: Instance,
+        number: u64,
+        locator: Option<u64>,
+    ) -> Result<Option<(u64, Node)>, Arc<str>> {
+        let list = self.list(stop, runtime)?;
+        let shard = number & (list.length - 1);
+        if let Some(header) = locator.filter(|header| *header != 0)
+            && let Ok((_, trailer)) = self.trailer(stop, tasks, header)
+            && let Some(previous) = records::word(stop, trailer.wrapping_add(tasks.prev))
+            && self.follows(stop, tasks, runtime, &list, shard, previous) == Ok(header)
+            && let Ok(found) = self.node(stop, tasks, &list, header, previous)
+            && found.id == number
+        {
+            return Ok(Some((header, found)));
+        }
+        let (mut at, _) = self.shard(stop, runtime, &list, shard)?;
+        let mut previous = 0;
+        for _ in 0..=list.count {
+            if at == 0 {
+                return Ok(None);
+            }
+            let found = self.node(stop, tasks, &list, at, previous)?;
+            if found.id == number {
+                return Ok(Some((at, found)));
+            }
+            (previous, at) = (at, found.next);
+        }
+        Err(format!("a shard holds more than its runtime's {} tasks", list.count).into())
+    }
+
+    /// The task a reference names, as a page would list it.
+    pub(super) fn find(
+        &self,
+        stop: &dyn RuntimeStop,
+        census: &Census,
+        task: TaskRef,
+    ) -> Result<Option<RuntimeTask>, Arc<str>> {
+        let tasks = self.task_layout()?;
+        // A runtime whose list cannot be read may hold the task, so it is
+        // absent only once every list was read.
+        let mut unreadable = None;
+        for &runtime in &census.runtimes {
+            match self.listed(stop, tasks, runtime, task.number, task.locator) {
+                Ok(Some((header, node))) => {
+                    return Ok(Some(owned_task(census, runtime, header, &node)));
+                }
+                Ok(None) => {}
+                Err(reason) => unreadable = unreadable.or(Some(reason)),
+            }
+        }
+        let mut gaps = Vec::new();
+        if let Some(found) = self
+            .blocking(stop, census, tasks, &mut gaps)
+            .into_iter()
+            .find(|found| found.number == task.number)
+        {
+            return Ok(Some(found));
+        }
+        unreadable
+            .or_else(|| gaps.into_iter().next())
+            .map_or(Ok(None), |reason| {
+                Err(format!("task {} was not found, and {reason}", task.number).into())
+            })
+    }
+
+    /// What a thread does for a runtime: a worker polling a listed task
+    /// runs it, and a pool thread runs its closure's task; any other
+    /// thread, or a worker running only its own launch, is idle.
+    pub(super) fn activity(
+        &self,
+        stop: &dyn RuntimeStop,
+        thread: ThreadId,
+    ) -> Result<ThreadActivity, Arc<str>> {
+        let context = self.context()?;
+        let Some(found) = Self::thread_context(stop, context, thread)? else {
+            return Ok(ThreadActivity::Idle);
+        };
+        let (Some(runtime), Some(number)) = (found.runtime, found.task) else {
+            return Ok(ThreadActivity::Idle);
+        };
+        let running = ThreadActivity::Task {
+            number,
+            stack: StackSegment::Task,
+        };
+        if !found.worker {
+            return Ok(running);
+        }
+        let tasks = self.task_layout()?;
+        Ok(match self.listed(stop, tasks, runtime, number, None)? {
+            Some(_) => running,
+            None => ThreadActivity::Idle,
+        })
+    }
+
+    /// The blocking pools' tasks: each runtime's queued closures, then
+    /// those threads run.
+    fn blocking(
+        &self,
+        stop: &dyn RuntimeStop,
+        census: &Census,
+        tasks: &Tasks,
+        gaps: &mut Vec<Arc<str>>,
+    ) -> Vec<RuntimeTask> {
+        let mut found = Vec::new();
+        for &runtime in &census.runtimes {
+            match self.queued(stop, tasks, runtime) {
+                Ok((queued, locked)) => {
+                    if locked {
+                        gaps.push(
+                            format!(
+                                "the {} runtime's blocking pool was being changed at the stop; \
+                                 its queue may be stale",
+                                runtime.flavor.describe()
+                            )
+                            .into(),
+                        );
+                    }
+                    found.extend(queued);
+                }
+                Err(reason) => gaps.push(format!("queued blocking tasks: {reason}").into()),
+            }
+        }
+        found.extend(
+            census
+                .threads
+                .iter()
+                .filter(|thread| thread.runtime.is_some() && !thread.worker)
+                .filter_map(|thread| {
+                    Some(RuntimeTask {
+                        state: TaskState::Running,
+                        detail: Some("running a blocking closure".into()),
+                        thread: Some(thread.thread),
+                        ..task(thread.task?, 0)
+                    })
+                }),
+        );
+        found
+    }
+
+    /// A runtime's queued blocking tasks, and whether the pool's lock was
+    /// held at the stop.
+    fn queued(
+        &self,
+        stop: &dyn RuntimeStop,
+        tasks: &Tasks,
+        runtime: Instance,
+    ) -> Result<(Vec<RuntimeTask>, bool), Arc<str>> {
+        let pool: &Pool = self.layout.pool.as_ref().map_err(Arc::clone)?;
+        let context = self.context()?;
+        let spawner = context
+            .runtimes
+            .iter()
+            .find(|(flavor, ..)| *flavor == runtime.flavor)
+            .map(|(.., layout)| layout.spawner)
+            .ok_or("the runtime's flavor is unknown")?;
+        let unreadable = || Arc::<str>::from("the blocking pool is unreadable");
+        let word = |address: u64| records::word(stop, address).ok_or_else(unreadable);
+        let inner = word(runtime.handle.wrapping_add(spawner))?.wrapping_add(pool.data);
+        let locked = records::read(stop, inner.wrapping_add(pool.lock), 4).ok_or_else(unreadable)?;
+        let head = word(inner.wrapping_add(pool.head))?;
+        let length = word(inner.wrapping_add(pool.len))?;
+        let buffer = word(inner.wrapping_add(pool.buffer))?;
+        let capacity = word(inner.wrapping_add(pool.capacity))?;
+        if length > capacity || capacity > MAX_TASKS {
+            return Err(format!("its queue holds {length} of {capacity}").into());
+        }
+        let mut queued = Vec::new();
+        for index in 0..length {
+            let slot = (head + index) % capacity;
+            let at = buffer.wrapping_add(slot * pool.task_size);
+            let header = word(at.wrapping_add(pool.task))?;
+            let (vtable, _) = self.trailer(stop, tasks, header)?;
+            let id_offset = word(vtable.wrapping_add(tasks.id_offset))?;
+            queued.push(RuntimeTask {
+                state: TaskState::Runnable,
+                detail: Some("queued in the blocking pool".into()),
+                internal: self.is_launch(stop, vtable),
+                ..task(word(header.wrapping_add(id_offset))?, header)
+            });
+        }
+        Ok((queued, locked != 0))
+    }
+}
+
+/// A task as a page lists it, with nothing known of it but its number
+/// and where it is.
+const fn task(number: u64, locator: u64) -> RuntimeTask {
+    RuntimeTask {
+        number,
+        locator,
+        state: TaskState::Blocked,
+        detail: None,
+        thread: None,
+        resume: None,
+        creation: None,
+        entry: None,
+        parent: None,
+        internal: false,
+        labels: Vec::new(),
+    }
+}
+
+/// A task of a runtime's list, by its state: running on the thread that
+/// polls it, ready to be polled, suspended, or finished.
+fn owned_task(census: &Census, runtime: Instance, header: u64, node: &Node) -> RuntimeTask {
+    let thread = census
+        .threads
+        .iter()
+        .find(|thread| {
+            thread.runtime == Some(runtime) && thread.worker && thread.task == Some(node.id)
+        })
+        .map(|thread| thread.thread);
+    let cancelled = node.state & CANCELLED != 0;
+    let (state, detail) = if node.state & COMPLETE != 0 {
+        (
+            TaskState::Exited,
+            if cancelled { "cancelled" } else { "completed" },
+        )
+    } else if node.state & RUNNING != 0 {
+        match thread {
+            Some(_) => (TaskState::Running, "running"),
+            None => (
+                TaskState::Unknown("a poll of the task begins or ends on some thread".into()),
+                "running",
+            ),
+        }
+    } else if node.state & NOTIFIED != 0 {
+        (TaskState::Runnable, "runnable")
+    } else {
+        (TaskState::Blocked, "suspended")
+    };
+    let detail = if cancelled && node.state & COMPLETE == 0 {
+        format!("{detail}, cancelled")
+    } else {
+        detail.to_owned()
+    };
+    RuntimeTask {
+        thread: thread.filter(|_| state == TaskState::Running),
+        state,
+        detail: Some(detail.into()),
+        ..task(node.id, header)
+    }
+}
