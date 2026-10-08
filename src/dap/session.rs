@@ -2564,6 +2564,11 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
                 Some(format!("task {task} {ending}")),
             )
         }
+        StopReason::FutureDropped { .. } => (
+            "step",
+            Some("the future the step waited for was dropped".to_owned()),
+            Some("future dropped".to_owned()),
+        ),
         StopReason::Pause => ("pause", None, None),
         StopReason::Jump => ("goto", None, None),
         StopReason::Entry | StopReason::Attach => ("entry", None, None),

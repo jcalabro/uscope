@@ -530,6 +530,9 @@ struct StepStart {
     /// For a step over or out of an async function's body, the future it
     /// runs for, which the step follows across the polls of its awaits.
     awaiting: Option<awaits::AwaitStep>,
+    /// The future the step waited for, once it was dropped and the step
+    /// went on in the code that dropped it.
+    dropped: Option<awaits::RunningFuture>,
 }
 
 /// Whether a step kind executes machine instructions rather than source

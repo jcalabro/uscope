@@ -235,6 +235,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                     description,
                 }
             }
+            StopReason::FutureDropped { kind } if kind == running => {
+                StopReason::FutureDropped { kind: requested }
+            }
             StopReason::TaskEnded { kind, task, ending } if kind == running => {
                 StopReason::TaskEnded {
                     kind: requested,

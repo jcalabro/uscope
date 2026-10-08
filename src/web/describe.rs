@@ -474,6 +474,7 @@ const fn reason_kind(reason: &StopReason) -> &'static str {
         StopReason::Step { .. } => "step",
         StopReason::StepIncomplete { .. } => "stepIncomplete",
         StopReason::TaskEnded { .. } => "taskEnded",
+        StopReason::FutureDropped { .. } => "futureDropped",
         StopReason::Pause => "pause",
         StopReason::Jump => "jump",
         StopReason::Exception(_) => "exception",

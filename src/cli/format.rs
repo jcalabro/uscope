@@ -774,6 +774,11 @@ fn step_stop(reason: &StopReason, renderer: Renderer) -> String {
             task_ending(*ending),
             step_name(*kind)
         ),
+        StopReason::FutureDropped { kind } => format!(
+            "{} after {}, whose future was dropped,",
+            stopped(Role::Current),
+            step_name(*kind)
+        ),
         _ => unreachable!("{reason:?} ends no step"),
     }
 }
@@ -815,7 +820,8 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
         ),
         StopReason::Step { .. }
         | StopReason::StepIncomplete { .. }
-        | StopReason::TaskEnded { .. } => step_stop(reason, renderer),
+        | StopReason::TaskEnded { .. }
+        | StopReason::FutureDropped { .. } => step_stop(reason, renderer),
         StopReason::Pause => format!("inferior {}", renderer.paint(Role::Current, "paused")),
         StopReason::Jump => format!(
             "{} where the thread was moved to resume",

@@ -9,6 +9,13 @@
 //! was. The future is pinned, so its address names it from one poll to the
 //! next, whichever thread polls it; another future of the same function
 //! that resumes there is not the step's.
+//!
+//! A future may be dropped while the step waits for it: its runtime drops
+//! a task's future as it cancels the task, and a `select!` or a timeout
+//! drops a future it no longer awaits. The step watches the future's drop
+//! glue for that. Dropped by its runtime, the future's task was cancelled,
+//! and the step ends there; dropped by the program's code, the step goes on
+//! in that code to its next line.
 
 use nix::unistd::Pid;
 
@@ -20,7 +27,6 @@ use crate::{
     VirtualAddress,
 };
 
-use super::breakpoints::install_plan_breakpoint;
 use super::frames::{FrameScope, ResolvedFrame, StackRoot};
 use super::native::LinuxTraceOps;
 use super::{ActiveKind, Controller, StepStart};
@@ -37,6 +43,9 @@ pub(super) struct AwaitStep {
     /// Where the future resumes, once a poll of it returned `Pending` and
     /// the step waits for the next.
     waiting: Option<VirtualAddress>,
+    /// Where the code that drops the future begins, which the step watches
+    /// while it waits, when one function drops every future of its type.
+    drop_glue: Option<VirtualAddress>,
 }
 
 impl AwaitStep {
@@ -69,6 +78,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             future: self.running_future(pid, start.code_instance)?,
             source: start.source.clone(),
             waiting: None,
+            drop_glue: None,
         })
     }
 
@@ -211,20 +221,224 @@ impl<P: LinuxTraceOps> Controller<P> {
             "the poll of the future at {} returned pending; the step waits at {resumes}",
             future.object
         );
+        let drop_glue = self.drop_glue(future.ty);
+        let plan = std::iter::once(resumes).chain(drop_glue).collect();
         self.cleanup_plan_breakpoints(execution)?;
-        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        install_plan_breakpoint(&self.ptrace, inferior, resumes, execution)?;
+        self.install_additional_plan_breakpoints(execution, &plan)?;
         let start = self
             .active_step_mut()
             .expect("the step remained active while its future was pending");
         let mut awaiting = start.awaiting.take().expect("the step follows a future");
         awaiting.waiting = Some(resumes);
+        awaiting.drop_glue = drop_glue;
         *start = StepStart {
-            plan_addresses: std::collections::BTreeSet::from([resumes]),
+            plan_addresses: plan,
             awaiting: Some(awaiting),
             ..StepStart::default()
         };
         Ok(Some(Followed::Waits))
+    }
+
+    /// Where the one function that drops every future of type `ty`
+    /// begins: rustc names it `drop_glue<T>` for the type's full name.
+    fn drop_glue(&self, ty: TypeReference) -> Option<VirtualAddress> {
+        let module = self.module_of(ty)?;
+        let info = module.image.type_info(ty)?;
+        let mut name = String::from("drop_glue<");
+        for segment in info.identity.as_deref()?.path.iter() {
+            name.push_str(segment);
+            name.push_str("::");
+        }
+        name.push_str(&info.name);
+        name.push('>');
+        let function = module
+            .image
+            .functions()
+            .iter()
+            .find(|function| *function.name == *name)?;
+        let mut instances = module
+            .image
+            .instances_for_function(function.id)
+            .filter(|instance| matches!(instance.kind, crate::CodeInstanceKind::OutOfLine));
+        let entry = instances
+            .next()?
+            .ranges
+            .iter()
+            .map(|range| range.start)
+            .min()?;
+        if instances.next().is_some() {
+            return None;
+        }
+        module.loaded.virtual_address(entry).ok()
+    }
+
+    /// Ends or goes on with a step whose future a thread at its drop glue
+    /// is dropping. When the runtime's code drops it, the runtime cancelled
+    /// its task, and the step ends; when the program's does, the step goes
+    /// on in the frame that drops it, to that frame's next line.
+    fn future_dropped(
+        &mut self,
+        pid: Pid,
+        address: VirtualAddress,
+        kind: StepKind,
+        future: RunningFuture,
+    ) -> Result<()> {
+        record!("thread {pid} drops the future the step waits for");
+        self.follow_step(pid);
+        let task =
+            self.inferior
+                .as_ref()
+                .and_then(|inferior| match &inferior.active.as_ref()?.kind {
+                    ActiveKind::Step { owner, .. } => owner.task,
+                    _ => None,
+                });
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let stack =
+            self.physical_stack(inferior, &StackRoot::of_thread(pid), DEFAULT_MAX_FRAMES)?;
+        // The future is dropped by the code that drops what holds it, as
+        // the drop glue of each value around it passes it on.
+        let dropper = (1..stack.frames.len())
+            .find(|&level| {
+                stack.lookup_address(level).is_none_or(|lookup| {
+                    self.image_location(lookup)
+                        .and_then(|location| location.function)
+                        .is_none_or(|function| !is_drop_glue(&function.name))
+                })
+            })
+            .filter(|&level| {
+                stack
+                    .lookup_address(level)
+                    .is_some_and(|lookup| self.code_role(lookup) == Some(crate::CodeRole::Ordinary))
+            });
+        let Some(dropper) = dropper else {
+            let reason = task.map_or_else(
+                || StopReason::StepIncomplete {
+                    kind,
+                    description: "the future the step waited for was dropped".into(),
+                },
+                |task| StopReason::TaskEnded {
+                    kind,
+                    task,
+                    ending: TaskEnding::Cancelled,
+                },
+            );
+            return self.begin_visible_stop(pid, reason);
+        };
+        #[cfg(debug_assertions)]
+        record!(
+            "frame {dropper} drops it, in {}",
+            stack
+                .lookup_address(dropper)
+                .and_then(|lookup| self.image_location(lookup))
+                .and_then(|location| location.function)
+                .map_or_else(|| "unnamed code".into(), |function| function.name)
+        );
+        let Some(start) = self.step_on_in_frame(pid, &stack, dropper, future)? else {
+            return self.begin_visible_stop(
+                pid,
+                StopReason::StepIncomplete {
+                    kind,
+                    description: "the future the step waited for was dropped by code the step \
+                                  cannot follow"
+                        .into(),
+                },
+            );
+        };
+        let execution = self.active_execution()?;
+        self.cleanup_plan_breakpoints(execution)?;
+        self.install_additional_plan_breakpoints(
+            execution,
+            &start
+                .plan_addresses
+                .union(&start.panic_guards)
+                .copied()
+                .collect(),
+        )?;
+        if let Some(ActiveKind::Step {
+            kind: running,
+            start: active,
+            ..
+        }) = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.active.as_mut())
+            .map(|active| &mut active.kind)
+        {
+            // A step out ends where the step over the dropping frame's line
+            // does, and is reported as the step the client asked for.
+            *running = StepKind::OverSource;
+            **active = start;
+        }
+        self.go_on_without_plan(pid, address, None)
+    }
+
+    /// A step over the line that the physical frame `level` of a stopped
+    /// thread's stack is at, to the frame's next line or its return, which
+    /// goes on after the frame dropped the future `dropped`.
+    fn step_on_in_frame(
+        &self,
+        pid: Pid,
+        stack: &super::frames::PhysicalStack,
+        level: usize,
+        dropped: RunningFuture,
+    ) -> Result<Option<StepStart>> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let (Some(frame), Some(lookup)) = (stack.frames.get(level), stack.lookup_address(level))
+        else {
+            return Ok(None);
+        };
+        let Some(location) = self.image_location(lookup) else {
+            return Ok(None);
+        };
+        let Some(instance) = location.physical_instance else {
+            return Ok(None);
+        };
+        let Some(source) =
+            super::frames::source_for_code_instance(&self.module_image, &location, instance)
+        else {
+            return Ok(None);
+        };
+        let modules = self.unwind_modules(inferior);
+        let code = inferior
+            .loaded_module
+            .image_address(lookup)
+            .ok()
+            .map(|address| (inferior.loaded_module.id, address));
+        let Ok(cfa) = self.frame_cfa(pid, &modules, code, &frame.registers) else {
+            return Ok(None);
+        };
+        let mut plan = self.other_lines(instance, &source)?;
+        if let Some(caller) = stack.frames.get(level + 1) {
+            plan.insert(self.executable_return_address(pid, caller.context.instruction)?);
+        }
+        let registers = self.ptrace.registers(pid)?;
+        Ok(Some(StepStart {
+            source: Some(source),
+            code_instance: Some(instance),
+            physical_instance: Some(instance),
+            activation: Some(self.stack_view(pid).activation(cfa)),
+            stack_pointer: Some(self.stack_position(pid, &registers)),
+            plan_addresses: plan,
+            panic_guards: self.panic_entries(inferior),
+            dropped: Some(dropped),
+            ..StepStart::default()
+        }))
+    }
+
+    /// The stop a step that goes on after its future was dropped reports
+    /// as it completes: that the future was dropped.
+    pub(super) fn dropped_step_reason(&self, reason: StopReason) -> StopReason {
+        let dropped = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .is_some_and(
+                |active| matches!(&active.kind, ActiveKind::Step { start, .. } if start.dropped.is_some()),
+            );
+        match reason {
+            StopReason::Step { kind } if dropped => StopReason::FutureDropped { kind },
+            reason => reason,
+        }
     }
 
     /// Whether a thread whose future just returned is in its runtime's
@@ -273,13 +487,28 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ActiveKind::Step { kind, start, .. } => start
                     .awaiting
                     .clone()
-                    .filter(|awaiting| awaiting.waiting == Some(address))
+                    .filter(|awaiting| {
+                        awaiting.waits()
+                            && (awaiting.waiting == Some(address)
+                                || awaiting.drop_glue == Some(address))
+                    })
                     .map(|awaiting| (*kind, awaiting)),
                 _ => None,
             })
         else {
             return Ok(false);
         };
+        // Drop glue is passed the place it drops.
+        if awaiting.drop_glue == Some(address) {
+            if self.ptrace.registers(pid)?.rdi == awaiting.future.object.get() {
+                self.future_dropped(pid, address, kind, awaiting.future)?;
+            } else if self.barrier_active() {
+                self.finish_barrier_if_ready()?;
+            } else {
+                self.repair_when_alone(pid, address)?;
+            }
+            return Ok(true);
+        }
         if self.running_future(pid, None) != Some(awaiting.future) {
             if self.barrier_active() {
                 self.finish_barrier_if_ready()?;
@@ -320,6 +549,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.go_on_without_plan(pid, address, Some(kind))?;
         Ok(true)
     }
+}
+
+/// Whether a function is one rustc makes to drop a value of some type.
+fn is_drop_glue(name: &str) -> bool {
+    name.starts_with("drop_glue<") || name.starts_with("drop_in_place<")
 }
 
 /// What a step does once the poll that ran its future's body returned.

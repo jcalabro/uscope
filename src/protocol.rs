@@ -1297,6 +1297,10 @@ pub enum StopReason {
         task: crate::TaskId,
         ending: TaskEnding,
     },
+    /// The future a step waited for was dropped, as a `select!` or a
+    /// timeout drops a future it no longer awaits, and the step went on in
+    /// the code that dropped it to its next line.
+    FutureDropped { kind: StepKind },
     /// Execution stopped at the user's request.
     Pause,
     /// A thread was moved to resume elsewhere, by a jump or by assigning
