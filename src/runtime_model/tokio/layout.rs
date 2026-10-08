@@ -53,6 +53,7 @@ pub struct Layout {
     pub context: Result<Context, Missing>,
     pub tasks: Result<Tasks, Missing>,
     pub pool: Result<Pool, Missing>,
+    pub spawns: Result<Spawns, Missing>,
 }
 
 impl Layout {
@@ -60,11 +61,47 @@ impl Layout {
         let context = Context::bind(image);
         let tasks = Tasks::bind(image);
         let pool = Pool::bind(image);
+        let spawns = Spawns::bind(image);
         Self {
             context,
             tasks,
             pool,
+            spawns,
         }
+    }
+}
+
+/// Where each task was spawned, which tokio records only in a build with
+/// `tokio_unstable`: the offset in a task's vtable of the offset from its
+/// header to its `&'static Location`, and where a `Location` keeps its
+/// file's name, its length, its line, and its column.
+#[derive(Debug)]
+pub struct Spawns {
+    pub offset: u64,
+    pub file: u64,
+    pub length: u64,
+    pub line: u64,
+    pub column: u64,
+}
+
+impl Spawns {
+    fn bind(image: &dyn RuntimeImage) -> Result<Self, Missing> {
+        let vtable = records::named(image, "tokio::runtime::task::raw::Vtable")?;
+        let offset = records::sized(image, vtable, &["spawn_location_offset"], 8)
+            .map_err(|_| "the program was built without tokio_unstable")?;
+        let location = records::named(image, "core::panic::location::Location")?;
+        // The file's name is a `NonNull<str>` in recent releases of Rust,
+        // and was a `&str` before; either is a slice's pointer and length.
+        let name = records::field(image, location, &["filename", "pointer"])
+            .or_else(|_| records::field(image, location, &["file"]))?;
+        records::slice_element(image, name.ty)?;
+        Ok(Self {
+            offset,
+            file: name.offset,
+            length: records::within(name.offset, 8)?,
+            line: records::sized(image, location, &["line"], 4)?,
+            column: records::sized(image, location, &["col"], 4)?,
+        })
     }
 }
 

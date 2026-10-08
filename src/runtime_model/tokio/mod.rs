@@ -427,6 +427,11 @@ impl RuntimeModel for TokioRuntime {
                 .gaps
                 .push(format!("tokio's tasks cannot be read: {reason}").into()),
         }
+        // A running blocking closure's task is known only by its number,
+        // with no header to read where it was spawned from.
+        for task in page.value.tasks.iter_mut().filter(|task| task.locator != 0) {
+            task.spawned = self.spawned_at(stop, task.locator);
+        }
         page
     }
 

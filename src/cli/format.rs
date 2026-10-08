@@ -956,6 +956,42 @@ pub fn task(task: &TaskSnapshot, place: &str, selected: bool, renderer: Renderer
     )
 }
 
+/// Where a task was created, as its runtime knows: `created by main.main
+/// at main.go:40` for the call that created it, or `created at
+/// src/main.rs:12` for a place its runtime recorded only by its source.
+pub fn task_creation(
+    task: &TaskSnapshot,
+    images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    renderer: Renderer,
+) -> Option<String> {
+    let creation = task.creation.as_ref()?;
+    let source = creation
+        .source
+        .as_ref()
+        .and_then(|source| {
+            let file = images.get(&creation.module?)?.source_file(source.file)?;
+            Some(renderer.location(&file.path, source.line))
+        })
+        .or_else(|| {
+            creation
+                .recorded
+                .as_ref()
+                .map(|place| renderer.location(std::path::Path::new(&*place.path), place.line))
+        });
+    let by = creation
+        .function
+        .as_ref()
+        .map(|function| format!(" by {}", renderer.paint(Role::Name, function)));
+    let at = source.map(|source| format!(" at {}", renderer.paint(Role::Metadata, source)));
+    (by.is_some() || at.is_some()).then(|| {
+        format!(
+            "created{}{}",
+            by.unwrap_or_default(),
+            at.unwrap_or_default()
+        )
+    })
+}
+
 /// A task's labels as Go's tracebacks show them, `{job: resize, user: "a
 /// b"}`, quoting a key or value only where it needs it; `None` without
 /// labels.

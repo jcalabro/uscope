@@ -24,6 +24,9 @@ const BUILDS: [&str; 2] = ["tokio-workers-o0", "tokio-workers-o3"];
 /// generic arguments, where tokio's functions are told apart by their
 /// debug information.
 const LEGACY: &str = "tokio-workers-legacy";
+/// A build with `tokio_unstable`, which records where each task was
+/// spawned, and gives each task's vtable one more offset.
+const UNSTABLE: &str = "tokio-workers-unstable";
 /// Builds that describe no types: lines only, and symbols only.
 const UNTYPED: [&str; 2] = ["tokio-workers-lines", "tokio-workers-stripped"];
 
@@ -205,6 +208,24 @@ impl Truth {
         awaits
     }
 
+    /// The line that spawned each task, as the fixture marks it with the
+    /// task's tag: an async task's innermost await's. A running blocking
+    /// closure's task is known only by its number, from its thread, so
+    /// where it was spawned is not known.
+    fn spawns(&self) -> BTreeMap<u64, Option<u64>> {
+        const SOURCE: &str = "workers/src/main.rs";
+        let tagged = self
+            .tasks
+            .iter()
+            .map(|(id, awaits)| (*id, Some(awaits[0].as_str())))
+            .chain(self.running.map(|(id, _)| (id, None)))
+            .chain(self.queued.map(|id| (id, Some("queued"))))
+            .chain(self.spawned.map(|id| (id, Some("fresh"))));
+        tagged
+            .map(|(id, tag)| (id, tag.map(|tag| line(SOURCE, &format!("// SPAWN: {tag}")))))
+            .collect()
+    }
+
     /// Each task the program has, with the state, description, and thread
     /// the debugger must list it with.
     fn expected(&self) -> BTreeMap<u64, (TaskState, String, Option<ThreadId>)> {
@@ -253,9 +274,10 @@ impl Truth {
 }
 
 /// Every task of either runtime flavor is listed once, in its state, with
-/// nothing missing, across pages of any size.
+/// nothing missing, across pages of any size. A build that records where
+/// each task was spawned says so; no other says anything.
 async fn tasks_are_listed_exactly(current: bool) {
-    for fixture in BUILDS.into_iter().chain([LEGACY]) {
+    for fixture in BUILDS.into_iter().chain([LEGACY, UNSTABLE]) {
         let mut workers = Workers::parked(fixture, current).await;
         let truth = workers.truth();
         assert_eq!(truth.tasks.len(), 8, "{fixture}: {truth:?}");
@@ -276,9 +298,44 @@ async fn tasks_are_listed_exactly(current: bool) {
         sabotaged[0].detail = Some("running".into());
         assert!(truth.check_tasks(&sabotaged).is_err(), "{fixture}");
 
+        let image = workers.scenario.handle().module_image();
+        let spawned = spawn_lines(&tasks, image);
+        if fixture == UNSTABLE {
+            assert_eq!(spawned, truth.spawns(), "{fixture}");
+        } else {
+            assert!(
+                spawned.values().all(Option::is_none),
+                "{fixture}: {spawned:?}"
+            );
+        }
+
         check_threads(&mut workers.scenario, current, &truth, &tasks).await;
         workers.scenario.shutdown().await;
     }
+}
+
+/// The line of the fixture each task was created at, if the list says.
+fn spawn_lines(tasks: &[TaskSnapshot], image: &uscope::ModuleImage) -> BTreeMap<u64, Option<u64>> {
+    tasks
+        .iter()
+        .map(|task| {
+            let line = task.creation.as_ref().map(|creation| {
+                let source = creation
+                    .source
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("task {}: {creation:?}", task.id.number));
+                let file = image.source_file(source.file).expect("a source file");
+                assert!(
+                    file.path
+                        .ends_with(crate::stops::source("workers/src/main.rs")),
+                    "task {}: {file:?}",
+                    task.id.number
+                );
+                source.line.get()
+            });
+            (task.id.number, line)
+        })
+        .collect()
 }
 
 /// A thread runs a task only when the list says the task is on it: the

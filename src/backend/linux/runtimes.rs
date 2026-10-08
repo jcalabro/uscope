@@ -14,9 +14,9 @@ use crate::runtime_model::{
     self, CodeAddress, RuntimeModel, RuntimeStop, RuntimeTask, TaskContext, TaskRef,
 };
 use crate::{
-    Error, ExecutionContext, ImageAddress, InspectionUsage, LoadedModule, ModuleImage, Result,
-    RuntimeId, StackSegment, TaskCursor, TaskId, TaskLocation, TaskPage, TaskSnapshot,
-    ThreadActivity, ThreadId, VirtualAddress,
+    ColumnNumber, Error, ExecutionContext, ImageAddress, InspectionUsage, LineNumber, LoadedModule,
+    ModuleImage, RecordedPlace, Result, RuntimeId, SourceLocation, StackSegment, TaskCursor,
+    TaskId, TaskLocation, TaskPage, TaskSnapshot, ThreadActivity, ThreadId, VirtualAddress,
 };
 
 use super::activation::TaskStack;
@@ -346,7 +346,11 @@ impl<P: InspectionOps> Controller<P> {
             detail: task.detail.clone(),
             thread: task.thread,
             resume: task.resume.map(code),
-            creation: task.creation.map(code),
+            creation: task.creation.map(code).or_else(|| {
+                task.spawned
+                    .as_ref()
+                    .map(|place| self.recorded_location(inferior, &runtime.module, place))
+            }),
             entry: task.entry.map(|address| {
                 code(CodeAddress {
                     address,
@@ -380,20 +384,57 @@ impl<P: InspectionOps> Controller<P> {
             });
         let Some((module, location)) = found else {
             return TaskLocation {
-                address: code.address,
+                address: Some(code.address),
                 module: None,
                 function: None,
                 source: None,
+                recorded: None,
             };
         };
         TaskLocation {
-            address: code.address,
+            address: Some(code.address),
             module: Some(module.id),
             function: location
                 .function
                 .map(|function| function.name)
                 .or_else(|| location.symbol.map(|symbol| symbol.name)),
             source: location.source,
+            recorded: None,
+        }
+    }
+
+    /// A place a runtime recorded in the source of its module, in the
+    /// source file of the module's image that its path names, if one does.
+    fn recorded_location(
+        &self,
+        inferior: &Inferior,
+        module: &LoadedModule,
+        place: &RecordedPlace,
+    ) -> TaskLocation {
+        let image = if module.id == inferior.loaded_module.id {
+            Some(&self.module_image)
+        } else {
+            self.modules.get(&module.id).map(|found| &found.image)
+        };
+        let source = image
+            .and_then(|image| {
+                image
+                    .source_file_matching(std::path::Path::new(&*place.path))
+                    .ok()
+            })
+            .and_then(|file| {
+                Some(SourceLocation {
+                    file: file.id,
+                    line: LineNumber::new(u64::from(place.line))?,
+                    column: ColumnNumber::new(u64::from(place.column)),
+                })
+            });
+        TaskLocation {
+            address: None,
+            module: Some(module.id),
+            function: None,
+            source,
+            recorded: Some(place.clone()),
         }
     }
 }
