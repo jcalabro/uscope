@@ -103,6 +103,9 @@ struct ThreadContext {
     /// Whether the thread runs a scheduler: a worker, or the thread a
     /// current-thread runtime blocks on.
     worker: bool,
+    /// Whether the thread entered its runtime: a worker, or a thread that
+    /// blocks on it.
+    entered: bool,
     /// The task the thread polls.
     task: Option<u64>,
 }
@@ -245,6 +248,8 @@ impl TokioRuntime {
             None
         };
         let worker = records::word(stop, base + context.scheduler).ok_or_else(unreadable)? != 0;
+        let entered =
+            &*context.entered_state.active(stop, base + context.entered.offset)?.name == "Entered";
         let option = base + context.task.offset;
         let task = if &*context.task_option.active(stop, option)?.name == "Some" {
             Some(records::word(stop, option + context.task_some).ok_or_else(unreadable)?)
@@ -255,6 +260,7 @@ impl TokioRuntime {
             thread,
             runtime,
             worker,
+            entered,
             task,
         }))
     }

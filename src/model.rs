@@ -324,9 +324,13 @@ pub enum StackSegment {
 pub enum ThreadActivity {
     /// A task, or the runtime's code on its behalf.
     Task { task: TaskId, stack: StackSegment },
-    /// The runtime's scheduler with no task, or code no runtime knows, such
-    /// as a thread C created.
+    /// The runtime's scheduler with no task, or for Go, code the runtime
+    /// does not know, such as a thread C created.
     Idle,
+    /// The program's own code, on a thread no runtime schedules tasks on,
+    /// such as one the program spawned or the one that blocks on a
+    /// runtime.
+    Outside,
     /// The runtime's state for the thread could not be read, for this
     /// reason.
     Unknown(Arc<str>),

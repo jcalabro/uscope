@@ -92,10 +92,10 @@ impl Session {
     /// program has none or the client's threads are the system's.
     ///
     /// DAP cannot page threads, so the list is ordered by what a user looks
-    /// for first: the task that stopped, the tasks on threads and any
-    /// thread that stopped running none, then the program's tasks, and
-    /// with `runtimeTasks` the runtime's. It is cut at `maxTasks`, and a
-    /// last entry counts the rest.
+    /// for first: the task that stopped, the tasks on threads, any thread
+    /// that stopped running none, and the program's own threads, then the
+    /// program's tasks, and with `runtimeTasks` the runtime's. It is cut
+    /// at `maxTasks`, and a last entry counts the rest.
     async fn task_threads(&mut self, stop: &Stop) -> Result<Option<Vec<Value>>, ErrorBody> {
         let Some(listing) = self.thread_listing().filter(|listing| listing.tasks) else {
             return Ok(None);
@@ -153,10 +153,12 @@ impl Session {
             })
             .collect::<Vec<_>>();
         // A thread that stopped for a reason of its own but runs no task is
-        // there too, so its stop can be inspected.
+        // there too, so its stop can be inspected, and so is every thread
+        // of the program's own; only a runtime's idle threads are not.
         for thread in snapshot.threads.iter() {
             let runs_task = matches!(thread.activity, Some(uscope::ThreadActivity::Task { .. }));
-            if !runs_task && stopped(thread.id).is_some() {
+            let own = matches!(thread.activity, Some(uscope::ThreadActivity::Outside));
+            if !runs_task && (own || stopped(thread.id).is_some()) {
                 let context = ExecutionContext::Thread(thread.id);
                 entries.push((rank(context, true, false), None, context));
             }

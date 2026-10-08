@@ -394,13 +394,14 @@ impl<P: InspectionOps> Controller<P> {
 
     fn read_thread_activity(&self, inferior: &Inferior, pid: Pid) -> Option<ThreadActivity> {
         let runtimes = self.runtimes(inferior);
-        // A thread may run the tasks of a runtime that cannot be read.
+        // A thread may run the tasks of a runtime that cannot be read. One
+        // runtime's idle thread is idle whatever another says of it.
         let mut found = self
             .unbound_runtimes(inferior)
             .into_iter()
             .next()
             .map_or_else(
-                || (!runtimes.is_empty()).then_some(ThreadActivity::Idle),
+                || (!runtimes.is_empty()).then_some(ThreadActivity::Outside),
                 |reason| Some(ThreadActivity::Unknown(reason)),
             );
         for runtime in &runtimes {
@@ -417,7 +418,12 @@ impl<P: InspectionOps> Controller<P> {
                         stack,
                     });
                 }
-                runtime_model::ThreadActivity::Idle => {}
+                runtime_model::ThreadActivity::Idle => {
+                    if found == Some(ThreadActivity::Outside) {
+                        found = Some(ThreadActivity::Idle);
+                    }
+                }
+                runtime_model::ThreadActivity::Outside => {}
                 runtime_model::ThreadActivity::Unknown(reason) => {
                     found = Some(ThreadActivity::Unknown(reason));
                 }

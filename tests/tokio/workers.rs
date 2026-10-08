@@ -220,17 +220,24 @@ async fn tasks_are_listed_exactly(current: bool) {
         sabotaged[0].detail = Some("running".into());
         assert!(truth.check_tasks(&sabotaged).is_err(), "{fixture}");
 
-        check_threads(&mut workers, &truth, &tasks).await;
+        check_threads(&mut workers, current, &truth, &tasks).await;
         workers.scenario.shutdown().await;
     }
 }
 
 /// A thread runs a task only when the list says the task is on it: the
-/// blocking pool's thread runs its closure's task, and every worker and
-/// the thread at the checkpoint run none.
-async fn check_threads(workers: &mut Workers, truth: &Truth, tasks: &[TaskSnapshot]) {
+/// blocking pool's thread runs its closure's task. The workers are the
+/// runtime's idle threads, and the thread at the checkpoint, which blocks
+/// on the runtime, is the program's own, as is every other.
+async fn check_threads(
+    workers: &mut Workers,
+    current: bool,
+    truth: &Truth,
+    tasks: &[TaskSnapshot],
+) {
     let activities = workers.activities().await;
     let (blocking, thread) = truth.running.expect("a blocking closure runs");
+    let mut idle = 0;
     for (id, activity) in &activities {
         match activity {
             ThreadActivity::Task { task, .. } => {
@@ -238,11 +245,14 @@ async fn check_threads(workers: &mut Workers, truth: &Truth, tasks: &[TaskSnapsh
                 let listed = tasks.iter().find(|listed| listed.id == *task);
                 assert_eq!(listed.and_then(|listed| listed.thread), Some(*id));
             }
-            ThreadActivity::Idle => {}
+            ThreadActivity::Idle => idle += 1,
+            ThreadActivity::Outside => {}
             ThreadActivity::Unknown(reason) => panic!("thread {id}: {reason}"),
         }
     }
-    assert!(activities.contains_key(&truth.main.expect("the checkpoint's thread")));
+    let main = truth.main.expect("the checkpoint's thread");
+    assert_eq!(activities.get(&main), Some(&ThreadActivity::Outside), "{activities:#?}");
+    assert_eq!(idle, if current { 0 } else { 2 }, "{activities:#?}");
 }
 
 #[tokio::test]

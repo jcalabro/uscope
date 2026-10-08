@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use super::layout::Pool;
+use super::layout::{Flavor, Pool};
 use super::{
     CANCELLED, COMPLETE, Census, Cursor, Instance, List, MAX_TASKS, NOTIFIED, RUNNING, Tasks,
     TokioRuntime,
@@ -413,19 +413,29 @@ impl TokioRuntime {
     }
 
     /// What a thread does for a runtime: a worker polling a listed task
-    /// runs it, and a pool thread runs its closure's task; any other
-    /// thread, or a worker running only its own launch, is idle.
+    /// runs it, and a pool thread runs its closure's task. A worker with
+    /// no task, polling only its own launch, and a pool thread waiting for
+    /// a closure, are the runtime's idle threads. A thread that never
+    /// entered a runtime, or blocks on one, is the program's own; so is
+    /// the thread a current-thread runtime blocks on, between its tasks.
     pub(super) fn activity(
         &self,
         stop: &dyn RuntimeStop,
         thread: ThreadId,
     ) -> Result<ThreadActivity, Arc<str>> {
         let context = self.context()?;
-        let Some(found) = Self::thread_context(stop, context, thread)? else {
-            return Ok(ThreadActivity::Idle);
+        let found = Self::thread_context(stop, context, thread)?;
+        let Some((found, runtime)) =
+            found.and_then(|found| Some((found, found.runtime?)))
+        else {
+            return Ok(ThreadActivity::Outside);
         };
-        let (Some(runtime), Some(number)) = (found.runtime, found.task) else {
-            return Ok(ThreadActivity::Idle);
+        let between = match (found.worker, runtime.flavor, found.entered) {
+            (true, Flavor::MultiThread, _) | (false, _, false) => ThreadActivity::Idle,
+            _ => ThreadActivity::Outside,
+        };
+        let Some(number) = found.task else {
+            return Ok(between);
         };
         let running = ThreadActivity::Task {
             number,
@@ -437,7 +447,7 @@ impl TokioRuntime {
         let tasks = self.task_layout()?;
         Ok(match self.listed(stop, tasks, runtime, number, None)? {
             Some(_) => running,
-            None => ThreadActivity::Idle,
+            None => between,
         })
     }
 
