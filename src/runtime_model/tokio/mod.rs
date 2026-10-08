@@ -574,6 +574,17 @@ impl RuntimeModel for TokioRuntime {
         }
     }
 
+    /// The task the thread's `CONTEXT` names, which tokio sets for each
+    /// poll of a task, its own launches' and blocking closures' too.
+    fn current_task(
+        &self,
+        stop: &dyn RuntimeStop,
+        thread: ThreadId,
+    ) -> Result<Option<u64>, Arc<str>> {
+        let context = self.context()?;
+        Ok(Self::thread_context(stop, context, None, thread)?.and_then(|found| found.task))
+    }
+
     fn task_context(
         &self,
         stop: &dyn RuntimeStop,

@@ -666,10 +666,8 @@ impl<P: InspectionOps> Controller<P> {
             return owner.thread == pid;
         };
         self.inferior.as_ref().is_some_and(|inferior| {
-            matches!(
-                self.thread_activity(inferior, pid),
-                Some(crate::ThreadActivity::Task { task: running, .. }) if running == task
-            )
+            self.current_task(inferior, pid)
+                .is_some_and(|current| current == Ok(Some(task)))
         })
     }
 
