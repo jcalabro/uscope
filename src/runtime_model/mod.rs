@@ -10,7 +10,7 @@
 //! process control, debug-information parsing, I/O, clocks, and threads out
 //! of it, and keeps every language's runtime in a module of its own.
 
-mod futures;
+pub mod futures;
 mod go;
 mod records;
 mod rust;
@@ -232,6 +232,12 @@ pub enum TaskContext {
         /// the call before it, as when a task parked by calling into its
         /// runtime.
         after_call: bool,
+    },
+    /// No thread runs the task: its frames are the chain of awaits that
+    /// begins at its future, of type `ty`, at `future`.
+    Suspended {
+        future: VirtualAddress,
+        ty: TypeReference,
     },
 }
 

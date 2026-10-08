@@ -9,14 +9,17 @@
 //! - A thread runs a task exactly when the list puts the task on it, but
 //!   for a worker's own launch, which the list puts on its worker.
 //! - A thread running a task has tokio's dispatch among its frames.
+//! - A suspended task's backtrace is its chain of awaits: it ends where the
+//!   chain does, or says why it cannot go on; each async frame is a future
+//!   of its own, and names its function.
 
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
 use uscope::{
-    Backtrace, CodeRole, DebuggerHandle, ExecutionContext, InferiorState, StackFrameId,
-    StopContext, TaskSnapshot, ThreadActivity, ThreadId,
+    Backtrace, CodeRole, DebuggerHandle, ExecutionContext, FrameKind, InferiorState, StackFrameId,
+    StopContext, TaskSnapshot, TaskState, ThreadActivity, ThreadId, UnwindTermination,
 };
 
 use crate::support::Scenario;
@@ -43,6 +46,8 @@ struct Stop {
     threads: Vec<(ThreadId, ThreadActivity, Backtrace)>,
     tasks: Vec<TaskSnapshot>,
     gaps: Vec<String>,
+    /// Each suspended task's backtrace.
+    suspended: Vec<(u64, Backtrace)>,
 }
 
 async fn check(handle: &DebuggerHandle) -> Result<(), String> {
@@ -96,10 +101,30 @@ async fn read(handle: &DebuggerHandle) -> Result<Option<Stop>, String> {
             None => break,
         }
     }
+    let mut suspended = Vec::new();
+    for task in tasks.iter().filter(|task| {
+        matches!(task.state, TaskState::Blocked | TaskState::Runnable) && task.thread.is_none()
+    }) {
+        // A blocking closure no thread runs yet has no future of its own.
+        if task.detail.as_deref() == Some("queued in the blocking pool") {
+            continue;
+        }
+        let trace = handle
+            .at(StopContext {
+                stop: stop_id,
+                execution: ExecutionContext::Task(task.id),
+                frame: StackFrameId::INNERMOST,
+            })
+            .backtrace()
+            .await
+            .map_err(|error| failed(&format!("task {}'s backtrace", task.id.number), error))?;
+        suspended.push((task.id.number, trace));
+    }
     Ok(Some(Stop {
         threads,
         tasks,
         gaps,
+        suspended,
     }))
 }
 
@@ -159,13 +184,45 @@ fn check_stop(stop: &Stop) -> Result<(), String> {
             ));
         }
     }
+    for (task, trace) in &stop.suspended {
+        check_awaits(trace).map_err(|problem| format!("task {task}: {problem}: {trace:#?}"))?;
+    }
+    Ok(())
+}
+
+/// A suspended task's backtrace ends where its chain of awaits does, or
+/// says why it cannot go on, and each async frame is a future of its own
+/// that names its function.
+fn check_awaits(trace: &Backtrace) -> Result<(), String> {
+    if !matches!(
+        trace.termination,
+        UnwindTermination::Complete | UnwindTermination::BrokenAwaitChain { .. }
+    ) {
+        return Err(format!("its awaits end at {}", trace.termination));
+    }
+    let mut objects = BTreeSet::new();
+    for frame in trace.frames.iter() {
+        let FrameKind::Async { object } = frame.kind else {
+            continue;
+        };
+        if !objects.insert(object) {
+            return Err(format!(
+                "frame {} repeats the future at {object}",
+                frame.level
+            ));
+        }
+        if frame.function.is_none() {
+            return Err(format!("frame {} names no function", frame.level));
+        }
+    }
     Ok(())
 }
 
 /// The checks fail on the faults they look for: a task listed twice or
 /// on a thread that does not run it, a thread running a task the list
-/// leaves off it or without tokio's dispatch, an unknown thread, and a
-/// gap other than a list changing.
+/// leaves off it or without tokio's dispatch, an unknown thread, a gap
+/// other than a list changing, and an await chain that repeats a future
+/// or names no function.
 #[tokio::test]
 async fn the_checks_fail_on_the_faults_they_look_for() {
     let mut scenario = checked("tokio-workers-o0");
@@ -210,6 +267,34 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
     unknown.threads[index].1 = ThreadActivity::Unknown("unreadable".into());
     let mut gap = stop.clone();
     gap.gaps.push("shard 0 is broken".into());
+    let (_, trace) = stop
+        .suspended
+        .iter()
+        .find(|(_, trace)| {
+            trace
+                .frames
+                .iter()
+                .any(|frame| matches!(frame.kind, FrameKind::Async { .. }))
+        })
+        .expect("a task is suspended in an async function");
+    let at = trace
+        .frames
+        .iter()
+        .position(|frame| matches!(frame.kind, FrameKind::Async { .. }))
+        .expect("an async frame");
+    let sabotage = |change: &dyn Fn(&mut Vec<uscope::StackFrame>)| {
+        let mut frames = trace.frames.to_vec();
+        change(&mut frames);
+        let mut sabotaged = stop.clone();
+        let trace = Backtrace {
+            frames: frames.into(),
+            ..trace.clone()
+        };
+        sabotaged.suspended.push((0, trace));
+        sabotaged
+    };
+    let repeated = sabotage(&|frames| frames.push(frames[at].clone()));
+    let unnamed = sabotage(&|frames| frames[at].function = None);
     for (fault, sabotaged) in [
         ("twice", twice),
         ("moved", moved),
@@ -217,6 +302,8 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
         ("idle", idle),
         ("unknown", unknown),
         ("gap", gap),
+        ("repeated", repeated),
+        ("unnamed", unnamed),
     ] {
         assert!(check_stop(&sabotaged).is_err(), "{fault}");
     }

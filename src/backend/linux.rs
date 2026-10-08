@@ -59,6 +59,7 @@ use registers::Fxsave;
 use tls::{CLibrary, TlsModule};
 
 mod activation;
+mod async_frames;
 mod breakpoints;
 mod callers;
 mod classify;

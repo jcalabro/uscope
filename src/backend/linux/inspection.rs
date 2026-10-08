@@ -64,6 +64,13 @@ impl<P: InspectionOps> Controller<P> {
         } else {
             Some(self.resolve_frame(inferior, root, frame)?)
         };
+        if resolved
+            .as_ref()
+            .and_then(|resolved| resolved.frame.as_ref())
+            .is_some_and(|frame| frame.kind.is_suspended())
+        {
+            return Err(Error::FrameSuspended);
+        }
         let discarded = crate::unwind::RegisterFile::new([]);
         let caller = match resolved.as_ref().map(|frame| &frame.registers) {
             Some(FrameRegisters::Caller(registers)) => Some(registers),
@@ -89,7 +96,9 @@ impl<P: InspectionOps> Controller<P> {
     ) -> Option<(&RuntimeModule, ImageAddress, Option<CodeInstanceId>)> {
         let (module, address) = frame.code?;
         let selected = match frame.scope {
-            FrameScope::Unavailable => return None,
+            // A suspended frame's variables are in its future, which no
+            // scope of its function's code describes.
+            FrameScope::Unavailable | FrameScope::Suspended { .. } => return None,
             FrameScope::Function => None,
             FrameScope::Inline(instance) => Some(instance),
         };
@@ -140,7 +149,11 @@ impl<P: InspectionOps> Controller<P> {
         // its function's own.
         let resolved = self.resolve_frame(inferior, root, frame)?;
         let scope = self.frame_scope(&resolved);
+        let suspended = matches!(resolved.scope, FrameScope::Suspended { .. });
         let inspect_locals = |budget: &mut InspectionBudget| {
+            if suspended {
+                return self.async_variables(stop_id, root, &resolved, query, budget);
+            }
             let (module, address, selected) = scope.ok_or(Error::VariableContextUnsupported)?;
             let mut runtime = self.frame_runtime(inferior, root, &resolved, module);
             module.variables.inspect(
@@ -176,7 +189,7 @@ impl<P: InspectionOps> Controller<P> {
                 variables
             }
             VariableQuery::Name(name) => {
-                let local = if scope.is_some() {
+                let local = if scope.is_some() || suspended {
                     inspect_locals(&mut budget)
                 } else {
                     Err(Error::VariableNotFound(name.clone()))

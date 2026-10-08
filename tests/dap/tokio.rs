@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 
 use crate::dap::{Configuration, Dap, Profile, fixture};
 
-#[test]
-fn tokio_tasks_are_threads_beside_the_programs_own() {
-    let mut dap = Dap::start("tokio tasks");
+/// The workers fixture, stopped at its checkpoint, with its threads.
+fn at_checkpoint(name: &str) -> (Dap, i64, Vec<(i64, String)>) {
+    let mut dap = Dap::start(name);
     let started = dap.launch(
         Profile::VsCode,
         &fixture("tokio-workers-o0"),
@@ -30,9 +30,15 @@ fn tokio_tasks_are_threads_beside_the_programs_own() {
             )
         })
         .collect::<Vec<_>>();
+    (dap, stop.thread, listed)
+}
+
+#[test]
+fn tokio_tasks_are_threads_beside_the_programs_own() {
+    let (dap, stopped, listed) = at_checkpoint("tokio tasks");
     // The thread that stopped runs no task, and comes first.
     let (first, name) = &listed[0];
-    assert_eq!(*first, stop.thread, "{listed:?}");
+    assert_eq!(*first, stopped, "{listed:?}");
     assert!(name.ends_with("— at breakpoint 1"), "{listed:?}");
     let named = |text: &str| {
         listed
@@ -51,5 +57,59 @@ fn tokio_tasks_are_threads_beside_the_programs_own() {
     // the program's own; the runtime's idle workers are left out.
     assert_eq!(listed.len(), 12, "{listed:?}");
     assert_eq!(named("tokio-rt-worker"), 0, "{listed:?}");
+    dap.finish();
+}
+
+/// A suspended task's stack is its chain of awaits: the future it awaits,
+/// then each async function at its await, with tokio's own subdued. An
+/// async function's frame shows the locals it keeps, and offers no
+/// registers, which it has none of.
+#[test]
+fn a_suspended_tasks_stack_is_its_chain_of_awaits() {
+    let (mut dap, _, listed) = at_checkpoint("tokio awaits");
+    let (task, _) = listed
+        .iter()
+        .find(|(_, name)| name.contains("— suspended"))
+        .unwrap_or_else(|| panic!("{listed:?}"));
+    let trace = dap.request("stackTrace", json!({"threadId": task}));
+    let frames = trace["stackFrames"].as_array().expect("frames");
+    let awaited = &frames[0];
+    assert!(
+        awaited["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("awaiting ")),
+        "{trace}"
+    );
+    assert!(
+        awaited.get("instructionPointerReference").is_none(),
+        "{trace}"
+    );
+    let own = frames
+        .iter()
+        .filter(|frame| frame.get("presentationHint").is_none())
+        .map(|frame| frame["name"].as_str().expect("a name"))
+        .collect::<Vec<_>>();
+    assert_eq!(own, ["async leaf", "async middle", "async top"], "{trace}");
+
+    let leaf = frames
+        .iter()
+        .find(|frame| frame["name"] == "async leaf")
+        .expect("the leaf's frame");
+    let scopes = dap.request("scopes", json!({"frameId": leaf["id"]}))["scopes"]
+        .as_array()
+        .expect("scopes")
+        .iter()
+        .map(|scope| scope["name"].as_str().expect("a name").to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        !scopes.iter().any(|scope| scope == "Registers"),
+        "{scopes:?}"
+    );
+    let local = dap.request(
+        "evaluate",
+        json!({"expression": "leaf_local", "frameId": leaf["id"], "context": "watch"}),
+    );
+    // Each task records its own number, `me`, in its locals.
+    assert_eq!(local["result"], (task * 100 + 3).to_string(), "{local}");
     dap.finish();
 }

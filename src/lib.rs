@@ -1356,21 +1356,19 @@ impl DebuggerHandle {
         self.selected().await?.source_context(radius).await
     }
 
-    /// Reads source lines surrounding a frame's location.
+    /// Reads source lines surrounding a source location of `module`.
     async fn source_context_at(
         &self,
-        execution: ExecutionLocation,
+        module: ModuleId,
+        location: Option<SourceLocation>,
         radius: u32,
     ) -> Result<SourceContext> {
-        let location = execution
-            .image
-            .source
-            .ok_or(Error::SourceLocationUnavailable)?;
+        let location = location.ok_or(Error::SourceLocationUnavailable)?;
 
         // Source files are identified within the image of the module that
         // contains the frame's code.
         let file = self
-            .loaded_module_image(execution.module)
+            .loaded_module_image(module)
             .await?
             .source_file(location.file)
             .cloned()
@@ -1926,8 +1924,25 @@ impl StopView<'_> {
     /// Lazily reads source lines surrounding the frame's location through
     /// the handle's [`SourcePathMap`].
     pub async fn source_context(&self, radius: u32) -> Result<SourceContext> {
-        let location = self.location().await?;
-        self.handle.source_context_at(location, radius).await
+        let (module, source) = match self.location().await {
+            Ok(location) => (location.module, location.image.source),
+            // A suspended task's frame with no code to locate still waits
+            // at a line.
+            Err(Error::FrameSuspended) => {
+                let trace = self.backtrace().await?;
+                let frame = trace
+                    .frames
+                    .iter()
+                    .find(|frame| frame.id == self.context.frame)
+                    .ok_or(Error::SourceLocationUnavailable)?;
+                (
+                    frame.module.ok_or(Error::SourceLocationUnavailable)?,
+                    frame.source.clone(),
+                )
+            }
+            Err(error) => return Err(error),
+        };
+        self.handle.source_context_at(module, source, radius).await
     }
 
     /// Inspects every visible parameter and local variable of the frame.

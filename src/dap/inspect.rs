@@ -522,7 +522,11 @@ impl Session {
                 "expensive": false,
             })),
         }
-        if let Some((module, file)) = self.frame_file(context).await {
+        let frame = self.frame_of(context).await;
+        if let Some((module, file)) = frame
+            .as_ref()
+            .and_then(|frame| Some((frame.module?, frame.source.as_ref()?.file)))
+        {
             let reference = self.references.variables(Variables::Statics {
                 context,
                 module,
@@ -534,15 +538,18 @@ impl Session {
                 "expensive": true,
             }));
         }
-        let reference = self
-            .references
-            .variables(Variables::Registers { context })?;
-        scopes.push(json!({
-            "name": "Registers",
-            "presentationHint": "registers",
-            "variablesReference": reference,
-            "expensive": true,
-        }));
+        // A suspended task's frame has no registers.
+        if !frame.is_some_and(|frame| frame.kind.is_suspended()) {
+            let reference = self
+                .references
+                .variables(Variables::Registers { context })?;
+            scopes.push(json!({
+                "name": "Registers",
+                "presentationHint": "registers",
+                "variablesReference": reference,
+                "expensive": true,
+            }));
+        }
         Ok(json!({"scopes": scopes}))
     }
 
@@ -680,7 +687,11 @@ impl Session {
         options: Options,
     ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
         let snapshot = self.frame_variables(context).await?;
-        let module = self.frame_file(context).await.map(|(module, _)| module);
+        let module = self
+            .frame_of(context)
+            .await
+            .filter(|frame| frame.source.is_some())
+            .and_then(|frame| frame.module);
         let handle = self.target_handle()?;
         let code = self.code();
         let listed = presenter(&handle, &code, options)
@@ -690,17 +701,14 @@ impl Session {
     }
 
     /// The module and source file of a frame's location, when it has one.
-    async fn frame_file(
-        &mut self,
-        context: StopContext,
-    ) -> Option<(uscope::ModuleId, uscope::SourceFileId)> {
+    async fn frame_of(&mut self, context: StopContext) -> Option<StackFrame> {
         let stop = self.current_stop().ok()?;
         let trace = self.backtrace(&stop, context.execution).await.ok()?;
-        let frame = trace
+        trace
             .frames
             .iter()
-            .find(|frame| frame.id == context.frame)?;
-        Some((frame.module?, frame.source.as_ref()?.file))
+            .find(|frame| frame.id == context.frame)
+            .cloned()
     }
 
     /// Presents what the shared presenter listed as the client's variables.

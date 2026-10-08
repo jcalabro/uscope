@@ -201,11 +201,34 @@ impl<P: InspectionOps> Controller<P> {
         usage: Option<&Cell<InspectionUsage>>,
         read: impl FnOnce(&dyn RuntimeStop) -> T,
     ) -> T {
+        self.with_process_stop(inferior, &runtime.module, reader, usage, read)
+    }
+
+    /// Runs `read` against the process at a stop, as the code of `module`
+    /// sees it, reading memory through the stopped thread `reader`.
+    pub(super) fn with_module_stop<T>(
+        &self,
+        inferior: &Inferior,
+        module: &LoadedModule,
+        reader: Pid,
+        read: impl FnOnce(&dyn RuntimeStop) -> T,
+    ) -> T {
+        self.with_process_stop(inferior, module, reader, None, read)
+    }
+
+    fn with_process_stop<T>(
+        &self,
+        inferior: &Inferior,
+        module: &LoadedModule,
+        reader: Pid,
+        usage: Option<&Cell<InspectionUsage>>,
+        read: impl FnOnce(&dyn RuntimeStop) -> T,
+    ) -> T {
         read(&ProcessStop {
             ptrace: &self.ptrace,
             reader,
             breakpoints: &inferior.breakpoints,
-            bias: runtime.module.load_bias,
+            bias: module.load_bias,
             usage,
             threads: inferior
                 .threads
@@ -547,6 +570,12 @@ impl<P: InspectionOps> Controller<P> {
             })) => RootOrigin::Saved {
                 registers,
                 after_call,
+                reader,
+            },
+            Ok(Some(TaskContext::Suspended { future, ty })) => RootOrigin::Suspended {
+                future,
+                ty,
+                module: runtime.module,
                 reader,
             },
             Ok(None) => return Ok(None),

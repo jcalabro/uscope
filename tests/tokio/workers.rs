@@ -9,8 +9,10 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use uscope::{
-    BreakpointSpec, CodeRole, CoreDumpOptions, InferiorState, LaunchOptions, StopReason, TaskPage,
-    TaskSnapshot, TaskState, ThreadActivity, ThreadId,
+    BreakpointSpec, CodeRole, CoreDumpOptions, Evaluation, ExecutionContext, Expression, FrameKind,
+    InferiorState, LaunchOptions, ScalarValue, StackFrameId, StopContext, StopReason, TaskPage,
+    TaskSnapshot, TaskState, ThreadActivity, ThreadId, UnwindTermination, VariableState,
+    VariableValue,
 };
 
 use crate::invariants::checked;
@@ -134,6 +136,8 @@ async fn activities(scenario: &mut Scenario) -> BTreeMap<ThreadId, ThreadActivit
 struct Truth {
     /// Each async task's awaits, innermost first.
     tasks: BTreeMap<u64, Vec<String>>,
+    /// The values each task recorded, by name.
+    values: BTreeMap<u64, BTreeMap<String, String>>,
     /// The blocking closure running, and its thread.
     running: Option<(u64, ThreadId)>,
     queued: Option<u64>,
@@ -162,10 +166,43 @@ impl Truth {
                 ["woken", id] => truth.woken = Some(number(id)),
                 ["spawned", id] => truth.spawned = Some(number(id)),
                 ["main", tid] => truth.main = Some(thread(tid)),
+                ["value", id, name, value] => {
+                    truth
+                        .values
+                        .entry(number(id))
+                        .or_default()
+                        .insert(name.to_owned(), value.to_owned());
+                }
                 _ => {}
             }
         }
         truth
+    }
+
+    /// Each suspended task's async functions, innermost first, each with
+    /// the line it waits at: its await's, or for a task spawned but never
+    /// polled, its function's header.
+    fn awaits(&self) -> BTreeMap<u64, Vec<(String, u64)>> {
+        const SOURCE: &str = "workers/src/main.rs";
+        let function = |tag: &str| match tag {
+            "middle" | "top" => tag.to_owned(),
+            _ => "leaf".to_owned(),
+        };
+        let mut awaits = self
+            .tasks
+            .iter()
+            .map(|(id, tags)| {
+                let frames = tags
+                    .iter()
+                    .map(|tag| (function(tag), line(SOURCE, &format!("// AWAIT: {tag}"))))
+                    .collect();
+                (*id, frames)
+            })
+            .collect::<BTreeMap<_, _>>();
+        if let Some(spawned) = self.spawned {
+            awaits.insert(spawned, vec![("top".into(), line(SOURCE, "async fn top("))]);
+        }
+        awaits
     }
 
     /// Each task the program has, with the state, description, and thread
@@ -339,8 +376,8 @@ async fn a_task_at_a_breakpoint_runs_on_the_current_thread() {
 }
 
 /// tokio's runtime is its machinery in a backtrace, and a task's frames
-/// begin where its scheduler polls it; the program's own frames, and
-/// tokio's libraries it calls, are ordinary.
+/// begin where its scheduler polls it; the program's own frames are
+/// ordinary.
 async fn tokios_machinery_is_marked(current: bool) {
     let at = BreakpointSpec::Function("task_reached".into());
     for fixture in BUILDS {
@@ -448,6 +485,154 @@ async fn each_task_began_in_the_function_it_spawned() {
     }
 }
 
+/// A suspended task's backtrace is its chain of awaits, innermost first:
+/// the future it waits on, then each async function at the await it is
+/// suspended at, down to the one it began in. Each async function's frame
+/// shows the variables it keeps across that await, with the values the
+/// task recorded. A task spawned but never polled is its one function,
+/// at its header.
+async fn suspended_tasks_show_their_awaits(current: bool) {
+    for fixture in BUILDS {
+        let mut workers = Workers::parked(fixture, current).await;
+        let truth = workers.truth();
+        let (tasks, _) = workers.tasks(4096).await;
+        check_awaits(
+            &mut workers.scenario,
+            &truth,
+            &tasks,
+            &format!("{fixture} {current}"),
+        )
+        .await;
+        workers.scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn suspended_tasks_show_their_awaits_on_a_worker() {
+    suspended_tasks_show_their_awaits(false).await;
+}
+
+#[tokio::test]
+async fn suspended_tasks_show_their_awaits_on_the_current_thread() {
+    suspended_tasks_show_their_awaits(true).await;
+}
+
+/// Each suspended task's backtrace is its async functions, as the
+/// program reported them, past tokio's own; it ends at the future the
+/// task awaits, unless the task was never polled, and its frames have no
+/// registers. Each function's frame keeps the local its task recorded.
+async fn check_awaits(
+    scenario: &mut Scenario,
+    truth: &Truth,
+    tasks: &[TaskSnapshot],
+    context: &str,
+) {
+    let InferiorState::Stopped { stop_id, .. } = scenario.snapshot().await.inferior else {
+        panic!("{context}: not stopped");
+    };
+    for (id, frames) in &truth.awaits() {
+        let task = tasks
+            .iter()
+            .find(|task| task.id.number == *id)
+            .unwrap_or_else(|| panic!("{context}: task {id} is not listed"));
+        let view = |frame| StopContext {
+            stop: stop_id,
+            execution: ExecutionContext::Task(task.id),
+            frame,
+        };
+        let context = format!("{context} task {id}");
+        let handle = scenario.handle();
+        let trace = scenario
+            .operation(
+                "task backtrace",
+                handle.at(view(StackFrameId::INNERMOST)).backtrace(),
+            )
+            .await;
+        let shown = trace
+            .frames
+            .iter()
+            .filter(|frame| frame.role != CodeRole::RuntimeInternal)
+            .filter_map(|frame| {
+                let FrameKind::Async { .. } = frame.kind else {
+                    return None;
+                };
+                Some((
+                    frame.function.as_ref()?.name.to_string(),
+                    frame.source.as_ref().map_or(0, |source| source.line.get()),
+                ))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(&shown, frames, "{context}: {trace:#?}");
+        assert_eq!(trace.termination, UnwindTermination::Complete, "{context}");
+        let first = &trace.frames[0];
+        assert!(
+            (Some(*id) == truth.spawned) != matches!(first.kind, FrameKind::Awaited { .. }),
+            "{context}: {first:#?}"
+        );
+        // A suspended frame runs no code, and has no registers.
+        let refused = handle.at(view(first.id)).registers().await;
+        assert!(
+            matches!(refused, Err(uscope::Error::FrameSuspended)),
+            "{context}: {refused:?}"
+        );
+        let recorded = truth.values.get(id).cloned().unwrap_or_default();
+        for frame in trace.frames.iter() {
+            check_saved_local(scenario, view(frame.id), frame, &recorded, &context).await;
+        }
+    }
+}
+
+/// An async function's frame lists the local its task recorded, with the
+/// value recorded, and an expression reads the same value from it.
+async fn check_saved_local(
+    scenario: &Scenario,
+    view: StopContext,
+    frame: &uscope::StackFrame,
+    recorded: &BTreeMap<String, String>,
+    context: &str,
+) {
+    let Some(name) = frame.function.as_ref().map(|function| &function.name) else {
+        return;
+    };
+    let local = format!("{name}_local");
+    let Some(value) = recorded.get(&local) else {
+        return;
+    };
+    let handle = scenario.handle();
+    let variables = scenario
+        .operation("task variables", handle.at(view).variables())
+        .await;
+    let found = variables
+        .variables
+        .iter()
+        .find(|variable| *variable.name == *local)
+        .unwrap_or_else(|| panic!("{context} {name}: {variables:#?}"));
+    let unsigned = |state: &VariableState| match state {
+        VariableState::Available {
+            value: VariableValue::Scalar(ScalarValue::Unsigned(shown)),
+            ..
+        } => Some(shown.to_string()),
+        _ => None,
+    };
+    assert_eq!(
+        unsigned(&found.state).as_ref(),
+        Some(value),
+        "{context} {name}: {found:#?}"
+    );
+    let expression = Expression::parse(&local).expect("an expression");
+    let evaluated = scenario
+        .operation(&local, handle.at(view).evaluate(&expression))
+        .await;
+    let Evaluation::Value { value: printed, .. } = evaluated else {
+        panic!("{context} {name}: {evaluated:?}");
+    };
+    assert_eq!(
+        unsigned(&printed.state).as_ref(),
+        Some(value),
+        "{context} {name}: {printed:#?}"
+    );
+}
+
 /// A build that describes no types, with lines only or symbols only, has
 /// no tasks to list: they are refused naming the type they need, never
 /// read from an offset the debugger guessed, and no thread is said to run
@@ -523,7 +708,8 @@ async fn an_unknown_version_is_read_as_the_supported_one_and_says_so() {
 }
 
 /// A core gdb dumped at the checkpoint lists the tasks the program
-/// reported there, and each thread does what it did, as live.
+/// reported there, each thread does what it did, and each task awaits
+/// what it did, as live.
 #[tokio::test]
 async fn a_cores_tasks_are_those_the_program_reported() {
     for fixture in BUILDS {
@@ -546,6 +732,7 @@ async fn a_cores_tasks_are_those_the_program_reported() {
                 .check_tasks(&tasks)
                 .unwrap_or_else(|problem| panic!("{core}: {problem}"));
             check_threads(&mut scenario, current, &truth, &tasks).await;
+            check_awaits(&mut scenario, &truth, &tasks, &core).await;
             scenario.shutdown().await;
         }
     }

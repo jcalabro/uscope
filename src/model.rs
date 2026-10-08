@@ -3021,6 +3021,38 @@ impl CoroutineInfo {
         self.states.iter().find(|state| state.value == value)
     }
 
+    /// The variables a coroutine in `state` holds, as its source names
+    /// them, each with whether it is a capture: what the state keeps
+    /// across its await, but for the compiler's own members, named `__`;
+    /// and the captures while they are the coroutine's own. An async
+    /// block's are always; an async function's are its arguments until
+    /// its body starts, which moves them into variables of its own.
+    pub fn variables<'a>(
+        &'a self,
+        state: &'a CoroutineState,
+    ) -> impl Iterator<Item = (&'a RecordMember, bool)> {
+        let captured = state.kind == CoroutineStateKind::Unresumed
+            || self.kind != CoroutineKind::AsyncFunction;
+        let own = |member: &&RecordMember| {
+            member
+                .name
+                .as_deref()
+                .is_some_and(|name| !name.starts_with("__"))
+        };
+        state
+            .saved
+            .iter()
+            .filter(own)
+            .map(|member| (member, false))
+            .chain(
+                self.captures
+                    .iter()
+                    .filter(move |_| captured)
+                    .filter(own)
+                    .map(|member| (member, true)),
+            )
+    }
+
     /// The state a coroutine is in before it is first polled.
     #[must_use]
     pub fn unresumed(&self) -> Option<&CoroutineState> {
@@ -3663,12 +3695,13 @@ pub struct Backtrace {
 impl Backtrace {
     /// The innermost frame of code the program's author wrote or calls,
     /// past a runtime's machinery and the wrappers a compiler writes, as a
-    /// runtime's own traceback shows a task: where it waits, not how.
+    /// runtime's own traceback shows a task: where it waits, not how. The
+    /// future a suspended task awaits runs no code, and is never one.
     #[must_use]
     pub fn user_frame(&self) -> Option<&StackFrame> {
-        self.frames
-            .iter()
-            .find(|frame| frame.role == CodeRole::Ordinary)
+        self.frames.iter().find(|frame| {
+            frame.role == CodeRole::Ordinary && !matches!(frame.kind, FrameKind::Awaited { .. })
+        })
     }
 
     /// For each frame, the level of the frame whose loop it runs as an

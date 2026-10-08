@@ -78,10 +78,11 @@ pub fn function_role(name: &str, trampoline: bool) -> CodeRole {
 /// carries the lines of what it drops, such as an await's. std's and core's
 /// code that raises a panic is the panic machinery.
 ///
-/// tokio's runtime, its tasks' harness, and the drivers and pools beneath
-/// them are its machinery, as is mio's code, which the drivers call; its
-/// libraries the program calls, such as `tokio::sync`, are not. A task's
-/// frames begin where its harness polls it.
+/// All of tokio is machinery, as Go's runtime is: its runtime, its tasks'
+/// harness, the drivers and pools beneath them, and the libraries a
+/// program awaits, such as `tokio::sync`, whose frames a task's backtrace
+/// folds and a step passes through. So is mio's code, which the drivers
+/// call. A task's frames begin where its harness polls it.
 pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
     let within = |path: &str| {
         namespace
@@ -107,17 +108,7 @@ pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
     if namespace == "tokio::runtime::task::harness" && name.starts_with("poll<") {
         return Some(CodeRole::Dispatch);
     }
-    if [
-        "tokio::runtime",
-        "tokio::task",
-        "tokio::loom",
-        "tokio::util",
-        "tokio::macros",
-        "mio",
-    ]
-    .into_iter()
-    .any(within)
-    {
+    if within("tokio") || within("mio") {
         return Some(CodeRole::RuntimeInternal);
     }
     (within("core::future")
