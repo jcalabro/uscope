@@ -1131,6 +1131,40 @@ fn pp_lays_values_out_to_the_width_and_print_formats_combine() {
     );
 }
 
+/// `print/x` writes a number a view presents in hexadecimal, as it would
+/// the number stored, and leaves a value presented as anything else as its
+/// view presents it.
+#[test]
+fn print_x_writes_numbers_views_present_in_hexadecimal() {
+    let stdout = batch(
+        &["build/test-programs/containers-rust-o0"],
+        &[
+            "break barrier",
+            "run",
+            "up",
+            "print/x counter",
+            "print/x signed_counter",
+            "print/x boxed",
+            "print/x *rc",
+            "print/x arc",
+            "print counter",
+            "print len(*arc)",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "(Atomic<u32>) counter = 0x5\n",
+            "(Atomic<i64>) signed_counter = 0xfffffffffffffff7\n",
+            "boxed = 0x2a\n",
+            "(u64) *rc = 0x7\n",
+            "arc = \"shared\"\n",
+            "(Atomic<u32>) counter = 5\n",
+            "(integer) len(*arc) = 6\n",
+        ],
+    );
+}
+
 /// A long sequence of leaves fills its lines, and a map puts each entry on
 /// a line of its own.
 #[test]

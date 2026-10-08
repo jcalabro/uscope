@@ -86,6 +86,9 @@ pub enum Step {
         key: TypeReference,
         value: TypeReference,
     },
+    /// To what a shared pointer, `{u64 count; V *value}`, points to, as
+    /// the view that presents it would.
+    Presented(TypeReference),
 }
 
 /// A world the evaluator binds and runs in.
@@ -107,6 +110,8 @@ pub struct World {
     pub work: Option<u64>,
     /// Maps, `{K *keys; V *values; u64 n}`, with their key and value types.
     maps: Vec<(TypeReference, TypeReference, TypeReference)>,
+    /// Shared pointers, `{u64 count; V *value}`, with their value types.
+    shared: Vec<(TypeReference, TypeReference)>,
     /// The id of the task the stopped thread runs, when the program has
     /// tasks.
     pub task: Option<u64>,
@@ -348,6 +353,16 @@ impl World {
         );
         self.maps.push((map, key, value));
         map
+    }
+
+    /// A shared pointer `{u64 count; V *value}`, which a view would present
+    /// as what it points to.
+    pub fn shared_type(&mut self, name: &str, value: TypeReference) -> TypeReference {
+        let u64 = self.base("u64", BaseTypeEncoding::Unsigned, 8);
+        let pointer = self.pointer(Some(value));
+        let shared = self.record(name, 16, &[("count", u64, 0), ("value", pointer, 8)]);
+        self.shared.push((shared, value));
+        shared
     }
 
     /// A map's bytes, with its keys and values allocated.
@@ -805,6 +820,19 @@ impl World {
 
 impl World {
     /// The step to the value for a key of a map.
+    fn plan_presented(&self, info: &TypeInfo) -> Result<Planned<Step>, Refusal> {
+        let (_, value) = self
+            .shared
+            .iter()
+            .find(|(shared, _)| *shared == info.reference)
+            .ok_or_else(|| type_error(format!("`{}` is no pointer", info.name)))?;
+        Ok(Planned {
+            step: Step::Presented(*value),
+            result: Some(*value),
+            consumed: 0,
+        })
+    }
+
     fn plan_entry(&self, info: &TypeInfo) -> Result<Planned<Step>, Refusal> {
         let (_, key, value) = self
             .maps
@@ -1041,6 +1069,7 @@ impl Scope for World {
                 }
             }
             (StepKind::Entry, TypeKind::Record { .. }) => self.plan_entry(info),
+            (StepKind::Deref, TypeKind::Record { .. }) => self.plan_presented(info),
             (step, _) => Err(type_error(format!(
                 "`{}` does not take {step:?}",
                 info.name
@@ -1170,6 +1199,14 @@ impl Machine for World {
                 "a map's entries are found by key",
             ))),
             Step::Global(object) => self.locate(object),
+            Step::Presented(target) => {
+                let bytes = self.bytes(from)?;
+                let address = u64::from_le_bytes(bytes[8..16].try_into().expect("a word"));
+                Ok(Place::Memory {
+                    address,
+                    ty: *target,
+                })
+            }
             Step::Deref(target) => {
                 let bytes = self.bytes(from)?;
                 let address = match self.decode(from.ty(), &bytes) {
@@ -1607,4 +1644,9 @@ fn containers(world: &mut World, int: TypeReference, char_pointer: TypeReference
         .collect();
     let bytes = world.map_bytes(&keys, &values, 2);
     world.variable("ages", ages, &bytes);
+    let shared = world.shared_type("Shared", int);
+    let value = world.allocate(&22_i32.to_le_bytes());
+    let mut bytes = 2_u64.to_le_bytes().to_vec();
+    bytes.extend(value.to_le_bytes());
+    world.variable("shared", shared, &bytes);
 }

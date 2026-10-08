@@ -523,6 +523,7 @@ fn formatted<M: Machine>(
             summary: summary.into(),
             children: children.clone(),
             problem: None,
+            number: None,
         }));
     }
     Ok(value)
@@ -1093,6 +1094,25 @@ pub fn length<M: Machine>(
         BoundShape::If { .. } | BoundShape::Unmatched { .. } => {
             unreachable!("`if` and `match` are resolved")
         }
+    }
+}
+
+/// The place of the value `this` is presented as, for `*x`.
+pub fn presented_place<M: Machine>(
+    bound: &BoundView<M::Step>,
+    machine: &mut M,
+    this: M::Place,
+) -> Result<M::Place, Failure> {
+    let mut machine = ViewMachine::new(machine, bound, this);
+    match resolve(bound, &mut machine)? {
+        BoundShape::Value(program) => match interp::value(program, &mut machine)? {
+            Value::Place(place) => Ok(place),
+            _ => Err(refused("the view computes the value it presents")),
+        },
+        BoundShape::Empty(text) => Err(refused(format!(
+            "the value is `{text}`, which holds no value"
+        ))),
+        _ => Err(refused("the view presents no value it stands for")),
     }
 }
 

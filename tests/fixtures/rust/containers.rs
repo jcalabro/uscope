@@ -4,8 +4,9 @@
 //! for N of the character c, and `problem:` says the view must refuse the
 //! value, and why.
 
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell, UnsafeCell};
 use std::cmp::Reverse;
+use std::convert::Infallible;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque};
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt::Debug;
@@ -132,7 +133,11 @@ fn main() {
     let dropped = Rc::downgrade(&Rc::new(1_u8)); // VIEW: dropped => dropped
     let arc = Arc::new(String::from("shared")); // VIEW: arc => "shared"
     let arc_weak = Arc::downgrade(&arc); // VIEW: arc_weak => children: capacity = 6, strong = 1, weak = 1, [raw]
+    // A value a view presents as another dereferences to it, as Rust's
+    // smart pointers do.
+    // VIEW: *arc => "shared"
     let cell = Cell::new(5_i32); // VIEW: cell => 5
+    let unsafe_cell = UnsafeCell::new(3_u16); // VIEW: unsafe_cell => 3
     let ref_cell = RefCell::new(vec![1, 2]); // VIEW: ref_cell => children: [0] = 1, [1] = 2, borrow = 1, [raw]
     let borrowed = ref_cell.borrow();
     let mutex = Mutex::new(9_u8); // VIEW: mutex => children: locked = false, poisoned = false, [raw]
@@ -140,6 +145,9 @@ fn main() {
     let nothing: Option<i32> = None; // VIEW: nothing => None
     let ok: Result<u32, String> = Ok(7); // VIEW: ok => Ok(7)
     let failed: Result<u32, String> = Err(String::from("no")); // VIEW: failed => Err("no")
+    // A sum with one variant that can hold a value stores no tag.
+    let infallible: Result<u8, Infallible> = Ok(3); // VIEW: infallible => Ok(3)
+    let never_ok: Result<Infallible, ()> = Err(()); // VIEW: never_ok => Err
     let shape = Shape::Square { side: 4 }; // VIEW: shape => Square {side: 4}
     let dynamic: Box<dyn Debug> = Box::new(Point { x: 1, y: 2 }); // VIEW: dynamic => Point {x: 1, y: 2}
 
@@ -187,6 +195,7 @@ fn main() {
     let c_ref = c"c ref"; // VIEW: c_ref => "c ref"
     let c_ref_too: &CStr = c_text.as_c_str(); // VIEW: c_ref_too => "c text"
     let pinned = Box::pin(11_i32); // VIEW: pinned => 11
+    // VIEW: *pinned => 11
     let pinned_ref: Pin<&mut Vec<u8>> = Pin::new(&mut pin_target);
 
     black_box((
@@ -247,7 +256,7 @@ fn main() {
     black_box((&non_null, &once, &no_once, &once_lock, &no_once_lock, &rw_lock));
     black_box((&reading, &linked, &no_linked, &heap, &shared_text, &atomic_text));
     black_box((&shared_slice, &path_ref, &os_ref, &c_ref, &c_ref_too, &pinned));
-    black_box((&pinned_ref, &writing));
+    black_box((&pinned_ref, &writing, &unsafe_cell, &infallible, &never_ok));
     barrier(std::ptr::from_ref(&text).cast());
     std::process::exit(i32::from(ints.len() + many.len() != 303));
 }

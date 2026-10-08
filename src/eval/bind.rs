@@ -938,7 +938,32 @@ impl<'a, S: Scope> Binder<'a, S> {
                 };
                 self.deref_value(pointer, &element, span)
             }
-            category => Err(self.type_error(&node, &category, "is not a pointer")),
+            // A value a view presents as another, as a smart pointer
+            // presents what it points to, dereferences to that one.
+            category => match &node.ty {
+                Ty::Program(from)
+                    if node.is_place() && !matches!(category, Category::Opaque(_)) =>
+                {
+                    match self.scope.plan(*from, StepKind::Deref) {
+                        Ok(super::target::Planned {
+                            step,
+                            result: Some(ty),
+                            ..
+                        }) => self.node(
+                            Op::Step {
+                                base: Box::new(node),
+                                step,
+                                indices: Vec::new(),
+                                follows: true,
+                            },
+                            Ty::Program(ty),
+                            span,
+                        ),
+                        _ => Err(self.type_error(&node, &category, "is not a pointer")),
+                    }
+                }
+                _ => Err(self.type_error(&node, &category, "is not a pointer")),
+            },
         }
     }
 

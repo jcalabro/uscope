@@ -298,6 +298,27 @@ fn element_type<P: InspectionOps>(
     }
 }
 
+/// The program type of the value a view presents a value as, when every
+/// branch that presents one agrees and it is a place; a branch that
+/// presents the value as empty, as a null pointer is, presents none.
+fn presented_type(shape: &BoundShape<StopStep>) -> Option<TypeReference> {
+    match shape {
+        BoundShape::Value(program) => match program.result() {
+            Ty::Program(reference) if program.is_place() => Some(*reference),
+            _ => None,
+        },
+        BoundShape::If {
+            then, otherwise, ..
+        } => match (presented_type(then), presented_type(otherwise)) {
+            (Some(left), Some(right)) if left == right => Some(left),
+            (Some(found), None) if matches!(**otherwise, BoundShape::Empty(_)) => Some(found),
+            (None, Some(found)) if matches!(**then, BoundShape::Empty(_)) => Some(found),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The program type of a map's values, when every branch that presents
 /// one agrees and its values are places.
 fn entry_type(shape: &BoundShape<StopStep>) -> Option<TypeReference> {
@@ -559,6 +580,21 @@ impl<P: InspectionOps> Controller<P> {
             step: StopStep::Element(bound),
             result: Some(element),
             consumed: 1,
+        })
+    }
+
+    /// The step from a value of `from` to the value its view presents it
+    /// as, for `*x`.
+    pub(super) fn view_deref(&self, from: TypeReference) -> Option<Planned<StopStep>> {
+        if !self.views.enabled {
+            return None;
+        }
+        let bound = self.view_choice(from).bound.clone()?;
+        let presented = presented_type(&bound.shape)?;
+        Some(Planned {
+            step: StopStep::Presented(bound),
+            result: Some(presented),
+            consumed: 0,
         })
     }
 
@@ -1084,6 +1120,26 @@ fn built_in_presentation(
         summary: summary.into(),
         children: presented_children(raw, None, inner, elements, 0),
         problem: None,
+        number: None,
+    }
+}
+
+/// The integer `value` is, or a view presents it as.
+fn number(value: &InspectedValue) -> Option<Arc<InspectedValue>> {
+    match &value.state {
+        VariableState::Available {
+            presentation: Some(presentation),
+            ..
+        } => presentation.number.clone(),
+        VariableState::Available {
+            value:
+                crate::VariableValue::Scalar(
+                    crate::ScalarValue::Signed(_) | crate::ScalarValue::Unsigned(_),
+                )
+                | crate::VariableValue::Enumeration { .. },
+            ..
+        } => Some(Arc::new(value.clone())),
+        _ => None,
     }
 }
 
@@ -1108,6 +1164,7 @@ fn failed(view: Arc<crate::ViewName>, problem: ViewProblem) -> Presentation {
         summary: problem.to_string().into(),
         children: ValueChildren::NotApplicable,
         problem: Some(problem),
+        number: None,
     }
 }
 
@@ -1230,6 +1287,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             summary: presented.summary.into(),
             children: presented_children(&raw, Some(bound), inner, elements, presented.named),
             problem: presented.partial,
+            number: presented.inner.as_ref().and_then(number),
         };
         let mut value = present_as(value, presentation);
         if let Some(text) = presented.text
@@ -2082,6 +2140,18 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 )
             })
             .map_err(|failure| view_stop(failure, bound, ErrorKind::Unsupported))
+    }
+
+    /// The place of the value the view presents the value at `from` as,
+    /// for `*x`.
+    pub(super) fn view_presented(
+        &mut self,
+        bound: &Arc<ViewBound>,
+        from: &StopPlace,
+    ) -> std::result::Result<StopPlace, Stop> {
+        let mut machine = self.nested(self.depth);
+        crate::view::run::presented_place(bound, &mut machine, from.clone())
+            .map_err(|failure| view_stop(failure, bound, ErrorKind::Type))
     }
 
     /// The place of the value the map at `from` holds for `key`, as a view

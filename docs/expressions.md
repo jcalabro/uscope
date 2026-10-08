@@ -343,7 +343,11 @@ count between them. Pointers compare with pointers, `null`, and `0`; to
 compare an address with another number, cast the pointer. Arrays index by
 each of their dimensions, and decay to a pointer to their first element in
 arithmetic. A slice's index is checked against its length when the
-expression runs.
+expression runs. A value a view presents as another value
+(`docs/views.md`), as Rust's `Arc` and C++'s `std::unique_ptr` present
+what they point to, dereferences to that value: `*arc` is what the `Arc`
+shares, and `*p` on one the view presents as empty, such as a null
+`unique_ptr`, is an error.
 
 ```uscope-example
 world: memory
@@ -375,6 +379,8 @@ arr + 1 == ip          => true : bool
 vp + 1                 => error type at `vp`
 *vp                    => error type at `vp`
 *s                     => error type at `s`
+*shared                => 22 : int
+*shared + shared.count => 24 : integer
 s.missing              => error type at `missing`
 s->a                   => error type at `s`
 &r                     => error not-an-lvalue at `r`
