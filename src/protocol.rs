@@ -1829,6 +1829,11 @@ pub enum Request {
         enabled: bool,
         reply: Reply<()>,
     },
+    /// Chooses whether steps stop in a language runtime's own code.
+    SetStepIntoRuntime {
+        enter: bool,
+        reply: Reply<bool>,
+    },
     ExplainView {
         expression: crate::Expression,
         stop_id: StopId,
@@ -2002,6 +2007,7 @@ impl Request {
             Self::Globals { .. } => "globals".to_owned(),
             Self::SetViews { .. } => "set views".to_owned(),
             Self::EnableViews { enabled, .. } => format!("enable views {enabled}"),
+            Self::SetStepIntoRuntime { enter, .. } => format!("step into runtime {enter}"),
             Self::ExplainView { expression, .. } => {
                 format!("explain the view of `{}`", expression.text())
             }

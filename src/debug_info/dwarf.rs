@@ -1281,6 +1281,8 @@ struct RawFunction {
     /// The names of the namespaces enclosing the DIE, outermost first,
     /// joined by `::`, as Rust's debug information nests its functions.
     namespace: Option<Arc<str>>,
+    /// The type the function returns.
+    returns: Option<DieKey>,
 }
 
 struct FunctionMetadata {
@@ -1298,7 +1300,7 @@ fn load_function_metadata(
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
 ) -> std::result::Result<FunctionMetadata, DwarfError> {
-    let raw = collect_function_dies(dwarf, catalog, source_files, source_file_ids)?;
+    let (raw, futures) = collect_function_dies(dwarf, catalog, source_files, source_file_ids)?;
     let by_key: HashMap<_, _> = raw
         .iter()
         .enumerate()
@@ -1314,7 +1316,6 @@ fn load_function_metadata(
         concrete.insert(definition_key(function.key, &raw, &by_key)?);
     }
 
-    let async_functions = async_function_paths(&raw);
     for function in &raw {
         let definition = definition_key(function.key, &raw, &by_key)?;
 
@@ -1338,10 +1339,14 @@ fn load_function_metadata(
         );
         let role = super::roles::function_role(
             linkage_name.as_deref().unwrap_or(&name),
-            origin.trampoline || builds_future(origin, &async_functions),
+            origin.trampoline || builds_future(origin, &futures),
         );
+        // What builds a future only wraps, even a runtime's: a step that
+        // enters the runtime goes on into the future's body.
         let role = match (&origin.namespace, &origin.name) {
-            (Some(namespace), Some(own)) if origin.language == SourceLanguage::Rust => {
+            (Some(namespace), Some(own))
+                if origin.language == SourceLanguage::Rust && role != crate::CodeRole::Wrapper =>
+            {
                 super::roles::rust_role(namespace, own).unwrap_or(role)
             }
             _ => role,
@@ -1430,37 +1435,23 @@ fn function_name(function: &RawFunction) -> Option<Arc<str>> {
     }
 }
 
-/// The paths of the `async fn`s whose bodies the DIEs describe: the
-/// namespaces rustc puts each body in.
-fn async_function_paths(raw: &[RawFunction]) -> HashSet<Arc<str>> {
-    raw.iter()
-        .filter(|function| {
-            function.language == SourceLanguage::Rust
-                && function
-                    .name
-                    .as_deref()
-                    .is_some_and(super::coroutines::is_async_fn_body)
-        })
-        .filter_map(|function| function.namespace.clone())
-        .collect()
-}
-
 /// Whether a function is an `async fn` as rustc compiles it apart from its
-/// body: code that only builds the future, whose path, less a generic
-/// function's arguments, is the namespace of the body.
-fn builds_future(function: &RawFunction, async_functions: &HashSet<Arc<str>>) -> bool {
+/// body: code that only builds the future, which returns the coroutine of
+/// the `async fn` of its own name, less a generic function's arguments.
+/// `futures` names the function each `async fn`'s coroutine type belongs
+/// to.
+fn builds_future(function: &RawFunction, futures: &Futures) -> bool {
     function.language == SourceLanguage::Rust
         && function
-            .name
-            .as_deref()
-            .and_then(super::coroutines::without_arguments)
-            .is_some_and(|own| {
-                let path = function
-                    .namespace
-                    .as_ref()
-                    .map_or_else(|| own.to_owned(), |namespace| format!("{namespace}::{own}"));
-                async_functions.contains(path.as_str())
-            })
+            .returns
+            .and_then(|returns| futures.get(&returns))
+            .zip(
+                function
+                    .name
+                    .as_deref()
+                    .and_then(super::coroutines::without_arguments),
+            )
+            .is_some_and(|(of, own)| **of == *own)
 }
 
 /// Where a breakpoint on a code instance goes: the entry its DIE names,
@@ -1538,9 +1529,10 @@ fn collect_function_dies(
     catalog: &UnitCatalog<'_>,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
-) -> std::result::Result<Vec<RawFunction>, DwarfError> {
+) -> std::result::Result<(Vec<RawFunction>, Futures), DwarfError> {
     let units = catalog.units.as_slice();
     let mut functions = Vec::new();
+    let mut futures = Futures::new();
 
     for (unit_index, unit) in units.iter().enumerate() {
         if is_type_unit(unit) {
@@ -1559,16 +1551,7 @@ fn collect_function_dies(
             namespaces.truncate(depth);
             let parent = scopes.iter().rev().find_map(|key| *key);
             let namespace = namespaces.last().cloned().flatten();
-            namespaces.push(if entry.tag() == gimli::DW_TAG_namespace {
-                string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?.map(|name| {
-                    namespace.as_ref().map_or_else(
-                        || Arc::clone(&name),
-                        |path| format!("{path}::{name}").into(),
-                    )
-                })
-            } else {
-                namespace.clone()
-            });
+            namespaces.push(namespace_within(dwarf, unit, entry, namespace.as_ref())?);
             let kind = match entry.tag() {
                 gimli::DW_TAG_subprogram => Some(RawFunctionKind::Subprogram),
                 gimli::DW_TAG_inlined_subroutine => Some(RawFunctionKind::Inline),
@@ -1578,6 +1561,11 @@ fn collect_function_dies(
                 unit: unit_index,
                 offset: entry.offset().0,
             };
+            if language == SourceLanguage::Rust
+                && let Some(function) = future_of(dwarf, unit, entry, namespace.as_deref())?
+            {
+                futures.insert(key, function);
+            }
 
             if let Some(kind) = kind {
                 let concrete_ranges = die_code_ranges(dwarf, unit, entry, &catalog.code)?;
@@ -1629,6 +1617,7 @@ fn collect_function_dies(
                         .flatten()
                         .map(ImageAddress::new),
                     namespace,
+                    returns: die_reference(entry.attr_value(gimli::DW_AT_type), unit_index, units)?,
                 });
                 scopes.push(Some(key));
             } else {
@@ -1637,7 +1626,50 @@ fn collect_function_dies(
         }
     }
 
-    Ok(functions)
+    Ok((functions, futures))
+}
+
+/// The namespace path a DIE's children are within: its own name appended
+/// to `namespace` when it is a namespace.
+fn namespace_within(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    namespace: Option<&Arc<str>>,
+) -> std::result::Result<Option<Arc<str>>, DwarfError> {
+    if entry.tag() != gimli::DW_TAG_namespace {
+        return Ok(namespace.cloned());
+    }
+    Ok(
+        string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?.map(|name| {
+            namespace.map_or_else(
+                || Arc::clone(&name),
+                |path| format!("{path}::{name}").into(),
+            )
+        }),
+    )
+}
+
+/// The coroutine type of each `async fn`, and that function's name.
+type Futures = HashMap<DieKey, Arc<str>>;
+
+/// The name of the `async fn` whose coroutine type a DIE is, which rustc
+/// nests in the function's namespace.
+fn future_of(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    namespace: Option<&str>,
+) -> std::result::Result<Option<Arc<str>>, DwarfError> {
+    if entry.tag() != gimli::DW_TAG_structure_type {
+        return Ok(None);
+    }
+    let name = string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?;
+    Ok((name.as_deref().and_then(super::coroutines::coroutine_kind)
+        == Some(crate::CoroutineKind::AsyncFunction))
+    .then(|| namespace.and_then(|namespace| namespace.rsplit("::").next()))
+    .flatten()
+    .map(Arc::from))
 }
 
 /// The language a unit is written in, by its root DIE.

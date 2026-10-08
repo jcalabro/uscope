@@ -1611,6 +1611,16 @@ impl DebuggerHandle {
             .await
     }
 
+    /// Chooses whether steps stop in a language runtime's own code, as
+    /// they otherwise pass through it to the program's code it calls, and
+    /// returns the previous choice. The choice applies to the steps that
+    /// begin after it and lasts for the whole session. Frames keep their
+    /// roles either way: backtraces fold the runtime's frames as before.
+    pub async fn set_step_into_runtime(&self, enter: bool) -> Result<bool> {
+        self.request(|reply| Request::SetStepIntoRuntime { enter, reply })
+            .await
+    }
+
     /// Evaluates an expression in the selected frame for its value, reading
     /// only. A range has no single value; evaluate it for its elements.
     pub async fn inspect(&self, expression: &Expression) -> Result<InspectedValue> {

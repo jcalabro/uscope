@@ -499,9 +499,9 @@ struct StepStart {
     /// For a step over a call instruction, the return address and the stack
     /// pointer the call returns with.
     call_return: Option<(VirtualAddress, StackPosition)>,
-    /// Whether the step began in a language runtime's own code, where it
-    /// may then stop, as it may not when it began elsewhere.
-    began_in_runtime: bool,
+    /// Whether the step may stop in a language runtime's own code: it began
+    /// there, or the session's steps enter the runtime.
+    enters_runtime: bool,
     /// Where a step over or out traps a panic its task begins: the entries
     /// of the runtime's code that starts one.
     panic_guards: BTreeSet<VirtualAddress>,
@@ -1190,6 +1190,8 @@ struct Controller<P: InspectionOps> {
     signals: SignalPolicies,
     /// Which exceptions that runtimes report stop the program.
     exception_stops: crate::ExceptionStops,
+    /// Whether steps stop in a language runtime's own code.
+    step_into_runtime: bool,
     /// The language runtime each image carries, bound on first need.
     runtime_models: runtimes::RuntimeCache,
     revision: u64,
@@ -1301,6 +1303,7 @@ impl<P: InspectionOps> Controller<P> {
             deferred_start: None,
             signals: SignalPolicies::default(),
             exception_stops: crate::ExceptionStops::default(),
+            step_into_runtime: false,
             runtime_models: RefCell::default(),
             revision: 0,
         }
@@ -1827,6 +1830,9 @@ impl<P: InspectionOps> Controller<P> {
             Request::EnableViews { enabled, reply } => {
                 self.views.enabled = enabled;
                 let _ = reply.send(Ok(()));
+            }
+            Request::SetStepIntoRuntime { enter, reply } => {
+                let _ = reply.send(Ok(std::mem::replace(&mut self.step_into_runtime, enter)));
             }
             Request::ExplainType { name, reply } => {
                 let _ = reply.send(Ok(self.explain_type(&name)));
