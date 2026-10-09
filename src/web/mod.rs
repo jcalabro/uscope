@@ -43,6 +43,7 @@ const MAX_MESSAGE: usize = 1024 * 1024;
 
 /// Serves a browser debugger.
 #[derive(clap::Args)]
+#[expect(clippy::struct_excessive_bools, reason = "each is a flag")]
 #[command(after_help = "\
 Common forms:
   uscope web                       choose what to debug in the page
@@ -65,6 +66,12 @@ pub struct WebArgs {
     /// Start the program at once instead of at the first continue.
     #[arg(long, conflicts_with_all = ["attach", "core"])]
     run: bool,
+
+    /// Let a process attached to run on at once instead of staying stopped
+    /// at the attach until a tab continues it; this applies to processes
+    /// the page attaches to as well.
+    #[arg(long)]
+    resume: bool,
 
     /// Stop at the program's first instruction when it starts.
     #[arg(long, conflicts_with_all = ["attach", "core"])]
@@ -170,6 +177,7 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         ..uscope::DebugFileOptions::default()
     };
     let session = Session::new(cwd, origins.primary().to_owned(), tokens, debug_files);
+    session.resume_attached(args.resume);
     let app = Arc::new(App {
         session: Arc::clone(&session),
         origins,
