@@ -1,26 +1,26 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use gimli::{
     BaseAddresses, CfaRule, ColumnType, DebugFrame, DwarfSections, EhFrame, Encoding, EndianSlice,
-    EvaluationResult, Location, RegisterRule, RunTimeEndian, SectionId, UnwindContext,
-    UnwindExpression, UnwindSection, Value,
+    EvaluationResult, Location, RegisterRule, RunTimeEndian, UnwindContext, UnwindExpression,
+    UnwindSection, Value,
 };
 use object::{Object, ObjectSection, ObjectSegment};
+use rayon::prelude::*;
 
 use super::{DebugInfo, UnwindInfo};
-use crate::model::{LineEntry, ModuleMetadata};
+use crate::image::lines::{Files, LineTables, Row};
+use crate::model::ModuleMetadata;
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     AddressRange, Architecture, BreakpointEntry, ByteOrder, CodeInstanceId, CodeInstanceInfo,
     CodeInstanceKind, ColumnNumber, EmbeddedSymbolTable, EntryProvenance, Error, FunctionId,
-    FunctionInfo, ImageAddress, LineNumber, LineSequenceId, ModuleImage, PointerWidth, Result,
-    SourceFile, SourceFileId, SourceLanguage, SourceLocation, StatementFlags, StatementRow,
-    TargetDescription, UnwindTermination, VirtualAddress,
+    FunctionInfo, ImageAddress, LineNumber, ModuleImage, PointerWidth, Result, SourceLanguage,
+    SourceLocation, StatementRow, TargetDescription, UnwindTermination, VirtualAddress,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +35,8 @@ enum DwarfError {
     UnsupportedArchitecture(object::Architecture),
     #[error("unsupported supplementary DWARF reference")]
     UnsupportedSupplementaryReference,
+    #[error(transparent)]
+    LineTables(#[from] crate::image::lines::TooManyRows),
     #[error("DWARF entry depth cannot be represented")]
     InvalidEntryDepth,
     #[error("DWARF code range is reversed")]
@@ -159,10 +161,10 @@ pub fn load(
 ) -> Result<DebugInfo> {
     let _load = crate::span!("load", "{}", path.display());
     let phase = crate::span!("read");
-    let data: Arc<[u8]> = fs::read(path)?.into();
+    let data: Arc<[u8]> = crate::image::backing::read_input(path)?.0.into();
     crate::count!("input_bytes", data.len());
     drop(phase);
-    load_debug_info(path, &data, image_id, search).map_err(Error::debug_info)
+    load_bytes_on_pool(path, &data, image_id, search)
 }
 
 pub fn load_bytes(
@@ -172,7 +174,19 @@ pub fn load_bytes(
     search: &super::DebugFileSearch,
 ) -> Result<DebugInfo> {
     let _load = crate::span!("load", "{}", path.display());
-    load_debug_info(path, data, image_id, search).map_err(Error::debug_info)
+    load_bytes_on_pool(path, data, image_id, search)
+}
+
+/// Loads an image's debug information on the loader's workers.
+fn load_bytes_on_pool(
+    path: &Path,
+    data: &[u8],
+    image_id: crate::ModuleImageId,
+    search: &super::DebugFileSearch,
+) -> Result<DebugInfo> {
+    crate::pool::install(|| load_debug_info(path, data, image_id, search))
+        .map_err(Error::debug_info)?
+        .map_err(Error::debug_info)
 }
 
 /// Loads an image's debug information. A file without DWARF of its own may
@@ -216,6 +230,29 @@ fn load_debug_info(
     })
 }
 
+/// An object's DWARF sections, those compressed decompressed in parallel.
+fn load_sections<'data>(
+    object: &object::File<'data>,
+) -> std::result::Result<DwarfSections<Cow<'data, [u8]>>, DwarfError> {
+    // gimli names the sections it reads by asking for each in turn.
+    let mut wanted = Vec::new();
+    DwarfSections::load(|id| {
+        wanted.push(id);
+        Ok::<_, DwarfError>(())
+    })?;
+    let mut loaded = wanted
+        .into_par_iter()
+        .map(|id| {
+            let data = match object.section_by_name(id.name()) {
+                Some(section) => section.uncompressed_data()?,
+                None => Cow::Borrowed(&[][..]),
+            };
+            Ok((id, data))
+        })
+        .collect::<std::result::Result<HashMap<_, _>, DwarfError>>()?;
+    DwarfSections::load(|id| Ok::<_, DwarfError>(loaded.remove(&id).unwrap_or(Cow::Borrowed(&[]))))
+}
+
 /// What a separate debug file contributes to an image.
 enum Separate<'a> {
     None,
@@ -243,14 +280,7 @@ fn load_image(
     let dwarf_object = debug_object.as_ref().unwrap_or(&object);
 
     let phase = crate::span!("sections");
-    let sections = DwarfSections::load(
-        |id: SectionId| -> std::result::Result<Cow<'_, [u8]>, DwarfError> {
-            match dwarf_object.section_by_name(id.name()) {
-                Some(section) => Ok(section.uncompressed_data()?),
-                None => Ok(Cow::Borrowed(&[])),
-            }
-        },
-    )?;
+    let sections = load_sections(dwarf_object)?;
 
     let endian = if object.is_little_endian() {
         RunTimeEndian::Little
@@ -259,21 +289,23 @@ fn load_image(
     };
 
     let dwarf = sections.borrow(|section| EndianSlice::new(section, endian));
-    let mut source_files = Vec::new();
-    let mut source_file_ids = HashMap::new();
-    let mut statements = Vec::new();
-    let mut lines = Vec::new();
-    let mut next_sequence = 0_u32;
+    let mut files = Files::default();
+    let mut line_tables = LineTables::default();
+    let mut headers = Vec::new();
     let mut unit_headers = dwarf.units();
-    let mut units = Vec::new();
-
     while let Some(header) = unit_headers.next()? {
-        units.push(dwarf.unit(header)?);
+        headers.push(header);
     }
     let mut type_unit_headers = dwarf.type_units();
     while let Some(header) = type_unit_headers.next()? {
-        units.push(dwarf.unit(header)?);
+        headers.push(header);
     }
+    // Each unit's abbreviations, root DIE, and line program header, in
+    // parallel and in order.
+    let units = headers
+        .into_par_iter()
+        .map(|header| dwarf.unit(header))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     let catalog = UnitCatalog {
         type_signatures: type_signature_index(&units)?,
         units,
@@ -289,30 +321,35 @@ fn load_image(
         Err(error) => (None, unusable_table(&error)),
     };
     let phase = crate::span!("functions");
-    let mut function_metadata = load_function_metadata(
-        &dwarf,
-        &catalog,
-        go_table.as_deref(),
-        &mut source_files,
-        &mut source_file_ids,
-    )?;
+    let mut function_metadata =
+        load_function_metadata(&dwarf, &catalog, go_table.as_deref(), &mut files)?;
 
     drop(phase);
     let phase = crate::span!("lines");
-    for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
-        load_lines(
-            &dwarf,
-            unit,
-            &catalog.code,
-            &mut source_files,
-            &mut source_file_ids,
-            &mut statements,
-            &mut lines,
-            &mut next_sequence,
-        )?;
+    // Each unit's line program, decoded in parallel with files of its own,
+    // and appended in unit order: interning a unit's files in the order it
+    // first names them gives every file the identifier a serial load would.
+    let unit_lines = catalog
+        .units
+        .par_iter()
+        .filter(|unit| !is_type_unit(unit))
+        .map(|unit| {
+            let mut files = Files::default();
+            let mut tables = LineTables::default();
+            load_lines(&dwarf, unit, &catalog.code, &mut files, &mut tables)?;
+            Ok((files, tables))
+        })
+        .collect::<std::result::Result<Vec<_>, DwarfError>>()?;
+    for (unit_files, tables) in unit_lines {
+        let ids = unit_files
+            .paths()
+            .iter()
+            .map(|path| files.intern(path.clone()))
+            .collect::<Vec<_>>();
+        line_tables.append(&tables, |file| ids[file.index()])?;
     }
 
-    crate::count!("line_rows", statements.len());
+    crate::count!("line_rows", line_tables.rows.len());
     drop(phase);
 
     // Code no DWARF describes, such as a stripped image's, gets functions
@@ -328,12 +365,8 @@ fn load_image(
             &mut super::gopclntab::Catalog {
                 functions: &mut function_metadata.functions,
                 code_instances: &mut function_metadata.code_instances,
-                statements: &mut statements,
-                lines: &mut lines,
-                next_sequence: &mut next_sequence,
-                source_file: &mut |path| {
-                    source_file_id(path, &mut source_files, &mut source_file_ids)
-                },
+                lines: &mut line_tables,
+                source_file: &mut |path| files.intern(path),
             },
         )
     {
@@ -343,6 +376,10 @@ fn load_image(
 
     drop(phase);
     let phase = crate::span!("prologues");
+    // The prologue, variable, and coroutine analyses below still read rows
+    // and ranges as records: an adapter until they read the tables (P2-P4).
+    let statements = line_tables.statement_rows();
+    let lines = line_tables.line_entries();
     super::roles::link_loop_bodies(&mut function_metadata.functions);
     refine_proved_prologue_entries(
         &object,
@@ -363,8 +400,7 @@ fn load_image(
             lines: &lines,
             instances: &function_metadata.code_instances,
         },
-        &mut source_files,
-        &mut source_file_ids,
+        &mut files,
     )?;
     for (instance, generics) in std::mem::take(&mut variables.function_generics) {
         if let Some(function) = function_metadata
@@ -408,6 +444,7 @@ fn load_image(
     );
     #[cfg(not(target_arch = "x86_64"))]
     let resume_points = BTreeMap::new();
+    drop((statements, lines));
     drop(phase);
     let phase = crate::span!("unwind_and_symbols");
     let go_code = go_code_ranges(&dwarf, &catalog)?;
@@ -448,9 +485,8 @@ fn load_image(
                 constants: variables.constants,
                 producers: unit_producers(&dwarf, &catalog)?,
                 packages: go_packages(&dwarf, &catalog)?,
-                source_files,
-                statements,
-                lines,
+                files,
+                lines: line_tables,
                 sections: super::elf::load_sections(&object),
                 thread_local_storage: super::elf::has_thread_local_storage(&object),
                 thread_locals: super::elf::load_thread_locals(&object),
@@ -1336,10 +1372,9 @@ fn load_function_metadata(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     catalog: &UnitCatalog<'_>,
     go_table: Option<&super::gopclntab::GoTable>,
-    source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+    files: &mut Files,
 ) -> std::result::Result<FunctionMetadata, DwarfError> {
-    let (raw, futures) = collect_function_dies(dwarf, catalog, source_files, source_file_ids)?;
+    let (raw, futures) = collect_function_dies(dwarf, catalog, files)?;
     let by_key: HashMap<_, _> = raw
         .iter()
         .enumerate()
@@ -1431,7 +1466,7 @@ fn load_function_metadata(
     assign_go_function_roles(
         &mut functions,
         &trampolines,
-        source_files,
+        files.paths(),
         &code_instances,
         go_table,
     );
@@ -1524,7 +1559,7 @@ fn breakpoint_entry(function: &RawFunction) -> Option<BreakpointEntry> {
 fn assign_go_function_roles(
     functions: &mut [FunctionInfo],
     trampolines: &[bool],
-    source_files: &[SourceFile],
+    source_files: &[PathBuf],
     instances: &[CodeInstanceInfo],
     go_table: Option<&super::gopclntab::GoTable>,
 ) {
@@ -1572,8 +1607,7 @@ fn assign_go_function_roles(
 fn collect_function_dies(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     catalog: &UnitCatalog<'_>,
-    source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+    files: &mut Files,
 ) -> std::result::Result<(Vec<RawFunction>, Futures), DwarfError> {
     let units = catalog.units.as_slice();
     let mut functions = Vec::new();
@@ -1641,8 +1675,7 @@ fn collect_function_dies(
                         gimli::DW_AT_decl_file,
                         gimli::DW_AT_decl_line,
                         gimli::DW_AT_decl_column,
-                        source_files,
-                        source_file_ids,
+                        files,
                     )?,
                     call_site: entry_source_location(
                         dwarf,
@@ -1651,8 +1684,7 @@ fn collect_function_dies(
                         gimli::DW_AT_call_file,
                         gimli::DW_AT_call_line,
                         gimli::DW_AT_call_column,
-                        source_files,
-                        source_file_ids,
+                        files,
                     )?,
                     ranges: concrete_ranges,
                     entry: entry
@@ -1853,8 +1885,7 @@ fn entry_source_location(
     file_attribute: gimli::DwAt,
     line_attribute: gimli::DwAt,
     column_attribute: gimli::DwAt,
-    source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+    files: &mut Files,
 ) -> std::result::Result<Option<SourceLocation>, DwarfError> {
     let Some(file_index) = entry
         .attr(file_attribute)
@@ -1878,7 +1909,7 @@ fn entry_source_location(
     let path = source_path(dwarf, unit, program.header(), file)?;
 
     Ok(Some(SourceLocation {
-        file: source_file_id(path, source_files, source_file_ids),
+        file: files.intern(path),
         line,
         column: entry
             .attr(column_attribute)
@@ -1887,19 +1918,14 @@ fn entry_source_location(
     }))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "line loading appends to every per-image table the loader builds"
-)]
+/// Appends a unit's line program to `tables`: every row of each sequence
+/// in the image's code, and the range of code each located row describes.
 fn load_lines(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit: &gimli::Unit<Reader<'_>>,
     code: &CodeRanges,
-    source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
-    statements: &mut Vec<StatementRow>,
-    lines: &mut Vec<LineEntry>,
-    next_sequence: &mut u32,
+    files: &mut Files,
+    tables: &mut LineTables,
 ) -> std::result::Result<(), DwarfError> {
     let Some(program) = unit.line_program.clone() else {
         return Ok(());
@@ -1914,138 +1940,72 @@ fn load_lines(
         if !code.contains_address(ImageAddress::new(sequence.start)) {
             continue;
         }
-        let sequence_id = LineSequenceId::new(*next_sequence);
-        *next_sequence = next_sequence
-            .checked_add(1)
-            .ok_or(gimli::Error::UnsupportedOffset)?;
+        tables.begin_sequence()?;
         let mut rows = program.resume_from(&sequence);
-        let mut previous: Option<(u64, SourceLocation, bool)> = None;
-        let mut ordinal = 0_u32;
+        // The line range being described: its start, the row whose location
+        // it has, and whether it begins at a statement.
+        let mut open: Option<(u64, u32, bool)> = None;
 
         while let Some((header, row)) = rows.next_row()? {
-            if row.end_sequence() {
-                push_line_range(&mut previous, row.address(), lines);
-                continue;
-            }
-            let flags = StatementFlags::empty()
-                .with_statement(row.is_stmt())
-                .with_prologue_end(row.prologue_end())
-                .with_epilogue_begin(row.epilogue_begin());
-            let row_ordinal = ordinal;
-            ordinal = ordinal
-                .checked_add(1)
-                .ok_or(gimli::Error::UnsupportedOffset)?;
-
-            // A row without a file or with line 0 is compiler-generated code.
-            // It still ends the previous entry's range, so the gap is not
-            // attributed to a neighboring line, and keeps its prologue and
-            // epilogue markers.
-            let location = match (
-                row.file(header),
-                row.line().and_then(|line| LineNumber::new(line.get())),
-            ) {
-                (Some(file), Some(line)) => {
-                    let file = if let Some(&id) = file_ids.get(&row.file_index()) {
+            let line = row.line().map_or(0, std::num::NonZeroU64::get);
+            // Only a row with a line names a file: one with line 0 is
+            // compiler-generated code, whose file is never shown.
+            let file = match row.file(header) {
+                Some(file) if line != 0 => {
+                    Some(if let Some(&id) = file_ids.get(&row.file_index()) {
                         id
                     } else {
-                        let path = source_path(dwarf, unit, header, file)?;
-                        let id = source_file_id(path, source_files, source_file_ids);
+                        let id = files.intern(source_path(dwarf, unit, header, file)?);
                         file_ids.insert(row.file_index(), id);
                         id
-                    };
-                    Some(SourceLocation {
-                        file,
-                        line,
-                        column: match row.column() {
-                            ColumnType::LeftEdge => None,
-                            ColumnType::Column(column) => ColumnNumber::new(column.get()),
-                        },
                     })
                 }
                 _ => None,
             };
+            let decoded = Row {
+                address: row.address(),
+                file,
+                line: if file.is_some() { line } else { 0 },
+                column: match row.column() {
+                    ColumnType::LeftEdge => 0,
+                    ColumnType::Column(column) => column.get(),
+                },
+                operation_index: row.op_index(),
+                discriminator: row.discriminator(),
+                isa: row.isa(),
+                statement: row.is_stmt(),
+                prologue_end: row.prologue_end(),
+                epilogue_begin: row.epilogue_begin(),
+                end_sequence: row.end_sequence(),
+            };
+            let at = tables.push_row(&decoded)?;
 
-            if location.is_some() || flags.prologue_end() || flags.epilogue_begin() {
-                statements.push(StatementRow {
-                    address: ImageAddress::new(row.address()),
-                    operation_index: row.op_index(),
-                    location: location.clone(),
-                    discriminator: row.discriminator(),
-                    flags,
-                    isa: row.isa(),
-                    sequence: sequence_id,
-                    ordinal: row_ordinal,
-                });
+            // A row without a location still ends the previous range, so the
+            // gap is not attributed to a neighboring line.
+            if decoded.end_sequence || decoded.location().is_none() {
+                close_line_range(&mut open, row.address(), tables)?;
+                continue;
             }
 
-            let Some(location) = location else {
-                push_line_range(&mut previous, row.address(), lines);
-                continue;
-            };
-
-            // Rows at one address collapse into a single entry, a statement
+            // Rows at one address collapse into a single range, a statement
             // boundary if any collapsed row recommends it. Its location is
             // the last statement row's, as gdb presents it: a later row that
             // is no statement, such as the line an inlined call came from,
             // does not describe where execution stands.
-            if let Some((start, _, true)) = &previous
-                && *start == row.address()
+            if let Some((start, _, true)) = open
+                && start == row.address()
                 && !row.is_stmt()
             {
                 continue;
             }
             let statement = row.is_stmt()
-                || previous
-                    .as_ref()
-                    .is_some_and(|(start, _, statement)| *start == row.address() && *statement);
-            push_line_range(&mut previous, row.address(), lines);
-            previous = Some((row.address(), location, statement));
+                || open.is_some_and(|(start, _, statement)| start == row.address() && statement);
+            close_line_range(&mut open, row.address(), tables)?;
+            open = Some((row.address(), at, statement));
         }
     }
 
     Ok(())
-}
-
-fn source_file_id(
-    path: PathBuf,
-    source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
-) -> SourceFileId {
-    if let Some(&id) = source_file_ids.get(&path) {
-        return id;
-    }
-    let id = SourceFileId::new(
-        u32::try_from(source_files.len()).expect("source file count fits in u32"),
-    );
-    source_files.push(SourceFile {
-        id,
-        path: Arc::new(path.clone()),
-    });
-    source_file_ids.insert(path, id);
-    id
-}
-
-fn type_unit_source_file_id(
-    path: PathBuf,
-    source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
-) -> SourceFileId {
-    if path.is_relative() {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "only a unique match is used, which no iteration order changes"
-        )]
-        let mut suffix_matches = source_file_ids
-            .iter()
-            .filter(|(candidate, _)| candidate.is_absolute() && candidate.ends_with(&path))
-            .map(|(_, id)| *id);
-        if let Some(id) = suffix_matches.next()
-            && suffix_matches.next().is_none()
-        {
-            return id;
-        }
-    }
-    source_file_id(path, source_files, source_file_ids)
 }
 
 fn source_path(
@@ -2089,23 +2049,24 @@ fn source_path(
     Ok(path)
 }
 
-fn push_line_range(
-    previous: &mut Option<(u64, SourceLocation, bool)>,
+fn close_line_range(
+    open: &mut Option<(u64, u32, bool)>,
     end: u64,
-    lines: &mut Vec<LineEntry>,
-) {
-    if let Some((start, location, statement)) = previous.take()
+    tables: &mut LineTables,
+) -> std::result::Result<(), DwarfError> {
+    if let Some((start, row, statement)) = open.take()
         && start < end
     {
-        lines.push(LineEntry {
-            range: AddressRange {
+        tables.push_range(
+            AddressRange {
                 start: ImageAddress::new(start),
                 end: ImageAddress::new(end),
             },
-            location,
+            row,
             statement,
-        });
+        )?;
     }
+    Ok(())
 }
 
 /// Moves an out-of-line function's breakpoint entry past a prologue that
@@ -2436,7 +2397,7 @@ fn target_description(
 mod tests {
     use std::collections::BTreeMap;
 
-    use foldhash::{HashMap, HashMapExt};
+    use foldhash::HashMap;
 
     use gimli::write::{
         Address, Dwarf as WriteDwarf, EndianVec, LineProgram, LineString, Sections, Unit,
@@ -2444,6 +2405,8 @@ mod tests {
     use gimli::{Encoding, Format, LineEncoding, LittleEndian, Register};
 
     use super::*;
+    use crate::{LineSequenceId, SourceFileId, StatementFlags};
+    use std::fs;
 
     #[test]
     fn type_signature_references_resolve_only_indexed_primary_dies() {
@@ -2480,28 +2443,18 @@ mod tests {
 
     #[test]
     fn relative_type_unit_source_paths_coalesce_only_with_a_unique_absolute_suffix() {
-        let mut files = Vec::new();
-        let mut ids = HashMap::new();
-        let absolute = type_unit_source_file_id(
-            PathBuf::from("/work/project/src/types.cpp"),
-            &mut files,
-            &mut ids,
-        );
+        let mut files = Files::default();
+        let absolute = files.intern_suffix(PathBuf::from("/work/project/src/types.cpp"));
         assert_eq!(
-            type_unit_source_file_id(PathBuf::from("src/types.cpp"), &mut files, &mut ids),
+            files.intern_suffix(PathBuf::from("src/types.cpp")),
             absolute
         );
-        assert_eq!(files.len(), 1);
+        assert_eq!(files.paths().len(), 1);
 
-        type_unit_source_file_id(
-            PathBuf::from("/other/project/src/types.cpp"),
-            &mut files,
-            &mut ids,
-        );
-        let ambiguous_relative =
-            type_unit_source_file_id(PathBuf::from("src/types.cpp"), &mut files, &mut ids);
+        files.intern_suffix(PathBuf::from("/other/project/src/types.cpp"));
+        let ambiguous_relative = files.intern_suffix(PathBuf::from("src/types.cpp"));
         assert_ne!(ambiguous_relative, absolute);
-        assert_eq!(files.len(), 3);
+        assert_eq!(files.paths().len(), 3);
     }
 
     struct TestMemory {
@@ -2553,11 +2506,8 @@ mod tests {
         let mut headers = dwarf.units();
         let header = headers.next().unwrap().expect("one test unit");
         let unit = dwarf.unit(header).expect("read test unit");
-        let mut source_files = Vec::new();
-        let mut source_file_ids = HashMap::new();
-        let mut statements = Vec::new();
-        let mut lines = Vec::new();
-        let mut next_sequence = 0;
+        let mut files = Files::default();
+        let mut tables = LineTables::default();
 
         let code = |start, end| {
             CodeRanges(vec![AddressRange {
@@ -2566,30 +2516,14 @@ mod tests {
             }])
         };
         // A sequence outside the image's code belongs to a discarded function.
-        load_lines(
-            &dwarf,
-            &unit,
-            &code(0x200, 0x300),
-            &mut source_files,
-            &mut source_file_ids,
-            &mut statements,
-            &mut lines,
-            &mut next_sequence,
-        )
-        .expect("load test line program");
-        assert!(statements.is_empty() && lines.is_empty());
+        load_lines(&dwarf, &unit, &code(0x200, 0x300), &mut files, &mut tables)
+            .expect("load test line program");
+        assert!(tables.rows.is_empty() && tables.ranges.is_empty());
 
-        load_lines(
-            &dwarf,
-            &unit,
-            &code(0x100, 0x200),
-            &mut source_files,
-            &mut source_file_ids,
-            &mut statements,
-            &mut lines,
-            &mut next_sequence,
-        )
-        .expect("load test line program");
+        load_lines(&dwarf, &unit, &code(0x100, 0x200), &mut files, &mut tables)
+            .expect("load test line program");
+        let statements = tables.statement_rows();
+        let lines = tables.line_entries();
 
         assert_eq!(statements.len(), 2);
         assert_eq!(statements[0].address, ImageAddress::new(0x100));
@@ -2837,6 +2771,53 @@ mod tests {
                 .fde_for_address(bases, address, S::cie_from_offset)
                 .map(|fde| fde.offset());
             assert_eq!(index.lookup(address), walk, "address {address:#x}");
+        }
+    }
+
+    /// Loading on one worker, two, or eight builds byte-identical line
+    /// tables, and the same answers from every other table.
+    #[test]
+    fn every_number_of_workers_loads_the_same_image() {
+        for fixture in [
+            "containers-cpp-clang-o2",
+            "containers-rust-o2",
+            "callers-go-stripped",
+        ] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("build/test-programs")
+                .join(fixture);
+            let data = fs::read(&path).expect("run `just build-test-programs`");
+            let load = |jobs| {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(jobs)
+                    .build()
+                    .expect("a pool");
+                let info = pool
+                    .install(|| {
+                        load_bytes(
+                            &path,
+                            &data,
+                            crate::ModuleImageId::new(0),
+                            &super::super::DebugFileSearch::default(),
+                        )
+                    })
+                    .expect("load the fixture");
+                let image = info.image;
+                (
+                    image.line_image_bytes().to_vec(),
+                    image.source_files().to_vec(),
+                    format!("{:?}", image.functions()),
+                    format!("{:?}", image.code_instances()),
+                )
+            };
+            let serial = load(1);
+            assert!(!serial.0.is_empty() && !serial.1.is_empty(), "{fixture}");
+            for jobs in [2, 8] {
+                assert!(
+                    load(jobs) == serial,
+                    "{fixture} differs with {jobs} workers"
+                );
+            }
         }
     }
 

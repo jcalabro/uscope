@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Compares this checkout's answers with the reference binary's: dumps each
-# program with both, in parallel, and shows where the dumps differ. With no
-# programs, it compares the differential corpus. Pass `--sections a,b` (or
+# program with both, in parallel, this checkout's on one worker and on many,
+# and shows where the dumps differ. With no programs, it compares the
+# differential corpus. Pass `--sections a,b` (or
 # any other dump option) after `--` to narrow every dump.
 #
 #   scripts/differential.sh [PROGRAM...] [-- DUMP-OPTION...]
@@ -48,18 +49,28 @@ fi
 
 mkdir -p "$out"
 status=0
+jobs="$(nproc)"
+(( jobs > 16 )) && jobs=16
 for program in "${programs[@]}"; do
     name="$(basename "$program")"
+    # The current loader runs on one worker and on as many as it would by
+    # default: each must answer as the reference does.
     "$reference" dump "$program" "${options[@]}" -o "$out/$name.reference" &
-    "$current" dump "$program" "${options[@]}" -o "$out/$name.current" &
-    wait %1 %2
-    if cmp -s "$out/$name.reference" "$out/$name.current"; then
+    "$current" --jobs 1 dump "$program" "${options[@]}" -o "$out/$name.serial" &
+    "$current" --jobs "$jobs" dump "$program" "${options[@]}" -o "$out/$name.parallel" &
+    wait %1 %2 %3
+    same=1
+    for run in serial parallel; do
+        if ! cmp -s "$out/$name.reference" "$out/$name.$run"; then
+            echo "DIFFERENT $name ($run): diff $out/$name.reference $out/$name.$run"
+            diff "$out/$name.reference" "$out/$name.$run" | head -20 | cut -c1-400
+            same=0
+            status=1
+        fi
+    done
+    if (( same )); then
         echo "same      $name"
-        rm -f "$out/$name.reference" "$out/$name.current"
-    else
-        echo "DIFFERENT $name: diff $out/$name.reference $out/$name.current"
-        diff "$out/$name.reference" "$out/$name.current" | head -20 | cut -c1-400
-        status=1
+        rm -f "$out/$name.reference" "$out/$name.serial" "$out/$name.parallel"
     fi
 done
 exit "$status"

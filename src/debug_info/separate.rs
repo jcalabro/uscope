@@ -204,7 +204,7 @@ fn keep(path: &Path, data: &[u8]) -> bool {
 
 /// Reads a file when `describes` accepts its contents.
 fn read_if(path: &Path, describes: impl Fn(&[u8]) -> bool) -> Option<DebugFile> {
-    let data = fs::read(path).ok()?;
+    let data = crate::image::backing::read_input(path).ok()?.0;
     describes(&data).then(|| DebugFile {
         path: path.to_path_buf(),
         data,

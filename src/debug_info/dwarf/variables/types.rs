@@ -1,7 +1,7 @@
 //! Normalizing DWARF type DIEs into the platform-neutral type graph.
 
+use crate::image::lines::Files;
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -11,9 +11,9 @@ use crate::model::ArrayDimension;
 use crate::{
     Accessibility, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, ByteOrder,
     EnumerationOrigin, Enumerator, GoKind, IntegerValue, ModuleImageId, NamedTypeRelationship,
-    RecordKind, RecordMember, RecordMemberLayout, ReferenceKind, SourceFile, SourceFileId,
-    SourceLanguage, SourceLocation, TypeId, TypeInfo, TypeKind, TypeModifier, TypeReference,
-    Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
+    RecordKind, RecordMember, RecordMemberLayout, ReferenceKind, SourceLanguage, SourceLocation,
+    TypeId, TypeInfo, TypeKind, TypeModifier, TypeReference, Variant, VariantDiscriminant,
+    VariantSelection, VariantSelector, VariantStorageKind,
 };
 
 use super::codec::{complex_part, enumeration_constant};
@@ -1246,11 +1246,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
     }
 
-    pub(super) fn populate_record_member_declarations(
-        &mut self,
-        source_files: &mut Vec<SourceFile>,
-        source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
-    ) {
+    pub(super) fn populate_record_member_declarations(&mut self, files: &mut Files) {
         for metadata in self.record_member_declarations.clone() {
             let record = metadata.aggregate;
             let key = metadata.die;
@@ -1264,16 +1260,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     .map_err(|error| Arc::from(error.to_string()))?;
                 let chain = origin_chain(self.units, key.unit, &entry)
                     .map_err(|error| Arc::from(error.to_string()))?;
-                declaration_with_origins(
-                    self.dwarf,
-                    self.units,
-                    unit,
-                    &entry,
-                    &chain,
-                    source_files,
-                    source_file_ids,
-                )
-                .map_err(|error| Arc::from(error.to_string()))
+                declaration_with_origins(self.dwarf, self.units, unit, &entry, &chain, files)
+                    .map_err(|error| Arc::from(error.to_string()))
             })();
             let declaration = match declaration {
                 Ok(declaration) => declaration,

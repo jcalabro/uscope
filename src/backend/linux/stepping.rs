@@ -913,8 +913,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(caller_instance) = self.module_image.code_instance(caller_instance_id) else {
             return Ok(statements);
         };
-        for line in self.module_image.line_entries() {
-            if !line.statement || !caller_instance.contains(line.range.start) {
+        for line in self.module_image.line_entries_in(caller_instance) {
+            if !line.statement {
                 continue;
             }
             if self
@@ -1640,8 +1640,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(BTreeSet::new());
         };
         let mut statements = BTreeSet::new();
-        for line in self.module_image.line_entries() {
-            if !line.statement || !instance.contains(line.range.start) {
+        for line in self.module_image.line_entries_in(instance) {
+            if !line.statement {
                 continue;
             }
             let location = self.module_image.locate(line.range.start);

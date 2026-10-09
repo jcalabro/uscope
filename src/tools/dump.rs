@@ -81,7 +81,7 @@ pub fn dump(path: &Path, options: &Options, out: &mut dyn Write) -> anyhow::Resu
     )?;
     let names = Names::new(&info.image);
     let mut dump = Dumper {
-        info: &info,
+        info: Some(&info),
         image: &info.image,
         names: &names,
         out,
@@ -310,13 +310,19 @@ const fn kind_tag(kind: &TypeKind) -> &'static str {
 }
 
 struct Dumper<'a> {
-    info: &'a DebugInfo,
+    /// The loaded module, which the variables and unwind sections read.
+    info: Option<&'a DebugInfo>,
     image: &'a ModuleImage,
     names: &'a Names,
     out: &'a mut dyn Write,
 }
 
-impl Dumper<'_> {
+impl<'a> Dumper<'a> {
+    const fn loaded(&self) -> &'a DebugInfo {
+        self.info
+            .expect("only a loaded module's sections read its variables and unwinding")
+    }
+
     fn heading(&mut self, name: &str) -> std::io::Result<()> {
         writeln!(self.out, "## {name}")
     }
@@ -412,11 +418,11 @@ impl Dumper<'_> {
         self.sorted(names.files.clone())?;
         self.heading("statement rows")?;
         for row in image.statement_rows() {
-            self.line(&names.debug(row))?;
+            self.line(&names.debug(&row))?;
         }
         self.heading("line entries")?;
         for entry in image.line_entries() {
-            self.line(&names.debug(entry))?;
+            self.line(&names.debug(&entry))?;
         }
         Ok(())
     }
@@ -608,11 +614,18 @@ impl Dumper<'_> {
         let mut runtime = Synthetic;
         for address in self.addresses_of_interest() {
             let at = ImageAddress::new(address);
-            let call_site = self
-                .info
-                .variables
-                .call_site(at, &mut runtime, &mut InspectionBudget::default())
-                .map_err(|error| runtime_error(&error));
+            // A synthetic image, which only tests dump, has no call sites.
+            let call_site = self.info.map_or_else(
+                || "-".to_owned(),
+                |info| {
+                    names.debug(
+                        &info
+                            .variables
+                            .call_site(at, &mut runtime, &mut InspectionBudget::default())
+                            .map_err(|error| runtime_error(&error)),
+                    )
+                },
+            );
             let location = image.locate(at);
             let description = image.describe(at);
             let symbol = |symbol: Option<&crate::SymbolLocation>| {
@@ -676,7 +689,7 @@ impl Dumper<'_> {
                 image.code_role(at),
                 image.is_resume_code(at),
                 names.debug(&image.control_boundaries_at(at).collect::<Vec<_>>()),
-                names.debug(&call_site),
+                call_site,
             );
             if text != previous {
                 self.line(&format!("{address:#x} {text}"))?;
@@ -861,7 +874,7 @@ impl Dumper<'_> {
     fn variables(&mut self, per_instance: usize) -> std::io::Result<()> {
         let image = self.image;
         let names = self.names;
-        let variables = &self.info.variables;
+        let variables = &self.loaded().variables;
         self.heading("variables")?;
         let context = |address| VariableContext {
             stop_id: crate::StopId::new(1),
@@ -872,6 +885,7 @@ impl Dumper<'_> {
             address: Some(address),
         };
         let mut lines = Vec::new();
+        let statements = image.statement_rows().collect::<Vec<_>>();
         for instance in image.code_instances() {
             let selected = match instance.kind {
                 CodeInstanceKind::OutOfLine => None,
@@ -888,7 +902,7 @@ impl Dumper<'_> {
                 }
             }
             let rows = instance.ranges.first().map_or(&[][..], |range| {
-                let rows = image.statement_rows();
+                let rows = statements.as_slice();
                 let first = rows.partition_point(|row| row.address < range.start);
                 let rest = &rows[first.min(rows.len())..];
                 let count = rest.partition_point(|row| row.address < range.end);
@@ -979,9 +993,9 @@ impl Dumper<'_> {
         for address in addresses {
             let at = ImageAddress::new(address);
             let mut memory = Synthetic;
-            let cfa = self.info.unwind.cfa(at, &registers, &mut memory);
+            let cfa = self.loaded().unwind.cfa(at, &registers, &mut memory);
             let step = self
-                .info
+                .loaded()
                 .unwind
                 .unwind(at, &registers, &mut memory)
                 .map(|step| (step.registers, step.cfa, step.signal_frame));
@@ -1081,5 +1095,103 @@ impl VariableRuntime for Synthetic {
         Err(VariableRuntimeError::Malformed(
             "the synthetic process has no caller".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::image::lines::{Files, LineTables, Row};
+    use crate::model::ModuleMetadata;
+    use crate::{AddressRange, ImageAddress, ModuleImage, SourceFileId};
+
+    /// The line sections' dump of an image with these rows, each line's
+    /// range running to the next row.
+    fn dumped(rows: &[Row]) -> String {
+        let mut files = Files::default();
+        files.intern(PathBuf::from("/src/a.c"));
+        let mut lines = LineTables::default();
+        lines.begin_sequence().unwrap();
+        for (index, row) in rows.iter().enumerate() {
+            let at = lines.push_row(row).unwrap();
+            if let Some(next) = rows.get(index + 1)
+                && row.location().is_some()
+                && row.address < next.address
+            {
+                let range = AddressRange {
+                    start: ImageAddress::new(row.address),
+                    end: ImageAddress::new(next.address),
+                };
+                lines.push_range(range, at, row.statement).unwrap();
+            }
+        }
+        let image = ModuleImage::new(
+            PathBuf::from("/a"),
+            crate::TargetDescription::X86_64,
+            AddressRange {
+                start: ImageAddress::new(0),
+                end: ImageAddress::new(0x1000),
+            },
+            ModuleMetadata {
+                files,
+                lines,
+                ..ModuleMetadata::default()
+            },
+        );
+        let names = super::Names::new(&image);
+        let mut out = Vec::new();
+        let mut dump = super::Dumper {
+            info: None,
+            image: &image,
+            names: &names,
+            out: &mut out,
+        };
+        dump.lines().unwrap();
+        dump.addresses().unwrap();
+        dump.breakpoints().unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    type Change = (&'static str, fn(&mut Row));
+
+    /// The differential compares dumps, so a part of a row the dump left
+    /// out could change unseen: changing any part of any row changes it.
+    #[test]
+    fn the_dump_shows_every_part_of_every_row() {
+        let row = |address, line| Row {
+            address,
+            file: Some(SourceFileId::new(0)),
+            line,
+            statement: true,
+            ..Row::default()
+        };
+        let rows = [
+            row(0x10, 3),
+            row(0x14, 4),
+            row(0x18, 4),
+            Row {
+                end_sequence: true,
+                ..row(0x20, 4)
+            },
+        ];
+        let base = dumped(&rows);
+        let changes: [Change; 10] = [
+            ("address", |row| row.address += 1),
+            ("file", |row| row.file = None),
+            ("line", |row| row.line += 7),
+            ("column", |row| row.column = 9),
+            ("operation index", |row| row.operation_index = 1),
+            ("discriminator", |row| row.discriminator = 2),
+            ("isa", |row| row.isa = 3),
+            ("statement", |row| row.statement = !row.statement),
+            ("prologue end", |row| row.prologue_end = true),
+            ("epilogue begin", |row| row.epilogue_begin = true),
+        ];
+        for (name, change) in changes {
+            let mut different = rows;
+            change(&mut different[1]);
+            assert_ne!(dumped(&different), base, "the dump omits a row's {name}");
+        }
     }
 }

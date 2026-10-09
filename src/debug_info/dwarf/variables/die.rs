@@ -1,17 +1,16 @@
 //! Reading attributes from DIEs and the origins they inherit from.
 
-use std::path::PathBuf;
+use crate::image::lines::Files;
 use std::sync::Arc;
 
-use foldhash::{HashMap, HashSet, HashSetExt};
+use foldhash::{HashSet, HashSetExt};
 use gimli::Reader as _;
 
 use crate::debug_info::dwarf::{
-    DieKey, DwarfError, Reader, die_reference, is_type_unit, source_file_id, source_path,
-    string_attribute, type_unit_source_file_id,
+    DieKey, DwarfError, Reader, die_reference, is_type_unit, source_path, string_attribute,
 };
 use crate::{
-    AddressRange, ColumnNumber, ImageAddress, LineNumber, SourceFile, SourceFileId, SourceLocation,
+    AddressRange, ColumnNumber, ImageAddress, LineNumber, SourceFileId, SourceLocation,
     VariableKind,
 };
 
@@ -302,8 +301,7 @@ pub(super) fn declaration_with_origins<'data>(
     unit: &gimli::Unit<Reader<'data>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
-    source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+    files: &mut Files,
 ) -> std::result::Result<Option<SourceLocation>, DwarfError> {
     // DWARF inherits declaration attributes individually: each of decl_file,
     // decl_line, and decl_column comes from the first DIE in the chain that
@@ -339,9 +337,9 @@ pub(super) fn declaration_with_origins<'data>(
     };
     let path = source_path(dwarf, file_unit, program.header(), file)?;
     let file = if is_type_unit(file_unit) {
-        type_unit_source_file_id(path, source_files, source_file_ids)
+        files.intern_suffix(path)
     } else {
-        source_file_id(path, source_files, source_file_ids)
+        files.intern(path)
     };
     Ok(Some(SourceLocation {
         file,

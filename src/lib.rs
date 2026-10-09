@@ -23,8 +23,10 @@ mod eval;
 #[cfg(debug_assertions)]
 #[doc(hidden)]
 pub mod flight_recorder;
+pub(crate) mod image;
 mod inspection;
 pub(crate) mod model;
+pub mod pool;
 pub mod profile;
 mod protocol;
 mod runtime_model;
@@ -240,6 +242,14 @@ pub fn force_internal_tls_lookup(forced: bool) {
 #[doc(hidden)]
 pub fn fuzz_core_dump(data: &[u8]) {
     backend::fuzz_core_dump(data);
+}
+
+/// Exercises image validation, and every lookup in an image it accepts,
+/// for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_image(data: &[u8]) {
+    image::sample::fuzz(data);
 }
 
 /// Exercises debug-register planning invariants for the fuzz harness.

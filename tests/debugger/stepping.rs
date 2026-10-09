@@ -2156,7 +2156,6 @@ fn epilogue_markers(scenario: &Scenario, function: &str) -> BTreeSet<uscope::Ima
         .expect("physical marked function");
     image
         .statement_rows()
-        .iter()
         .filter(|row| row.flags.epilogue_begin() && instance.contains(row.address))
         .map(|row| row.address)
         .collect()

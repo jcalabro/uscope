@@ -342,7 +342,6 @@ fn expected_physical_entry(scenario: &Scenario, case: &EntryBoundaryCase) -> usc
 
     if let Some(marker) = image
         .statement_rows()
-        .iter()
         .find(|row| row.flags.prologue_end() && instance.contains(row.address))
     {
         return marker.address;
@@ -353,7 +352,6 @@ fn expected_physical_entry(scenario: &Scenario, case: &EntryBoundaryCase) -> usc
         .expect("markerless entry case has an explicit conservative expectation");
     image
         .statement_rows()
-        .iter()
         .find(|row| {
             instance.contains(row.address)
                 && row.flags.is_statement()

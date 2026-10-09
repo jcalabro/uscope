@@ -4,7 +4,6 @@ compile_error!("uscope currently supports only Linux x86-64");
 mod linux;
 
 use std::fs;
-use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -83,13 +82,11 @@ fn read_executable_source(
     display_path: PathBuf,
     process_start_time: Option<u64>,
 ) -> Result<ExecutableSource> {
-    let metadata = fs::metadata(read_path)?;
+    let (data, stamp) = crate::image::backing::read_input(read_path)?;
     Ok(ExecutableSource {
         display_path: Arc::new(display_path),
-        data: fs::read(read_path)?.into(),
-        identity: FileIdentity {
-            inode: metadata.ino(),
-        },
+        data: data.into(),
+        identity: FileIdentity { inode: stamp.inode },
         process_start_time,
         debug_files: crate::debug_info::DebugFileSearch::default(),
     })

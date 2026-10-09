@@ -273,23 +273,15 @@ impl ModuleImage {
         file: SourceFileId,
         line: LineNumber,
     ) -> (Option<LineNumber>, Option<LineNumber>) {
-        let before = self
-            .statements_by_source_line
-            .range(..(file, line))
-            .next_back()
-            .filter(|((other, _), _)| *other == file)
-            .map(|((_, line), _)| *line);
+        let before = line
+            .get()
+            .checked_sub(1)
+            .and_then(|previous| self.previous_statement_line(file, previous));
         let after = line
             .get()
             .checked_add(1)
             .and_then(LineNumber::new)
-            .and_then(|next| {
-                self.statements_by_source_line
-                    .range((file, next)..)
-                    .next()
-                    .filter(|((other, _), _)| *other == file)
-                    .map(|((_, line), _)| *line)
-            });
+            .and_then(|next| self.next_statement_line(file, next));
         (before, after)
     }
 }

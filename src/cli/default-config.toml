@@ -59,6 +59,8 @@ save = true               # keep breakpoints and displays in the project's .usco
 [debug-info]
 directories = []          # searched for separate debug files before the system's
 debuginfod = false        # download missing debug files from DEBUGINFOD_URLS
+# jobs = 16               # threads loading debug information: by default one per CPU,
+                          # up to 16; USCOPE_JOBS wins
 
 [history]
 size = 10000              # lines kept in $XDG_STATE_HOME/uscope/history

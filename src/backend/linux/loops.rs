@@ -388,9 +388,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         let image = &self.module_image;
         image
-            .line_entries()
-            .iter()
-            .filter(|line| line.statement && instance.contains(line.range.start))
+            .line_entries_in(instance)
+            .filter(|line| line.statement)
             .filter(|line| {
                 innermost_function(image, &image.locate(line.range.start))
                     .is_some_and(|function| bodies.contains(&function))

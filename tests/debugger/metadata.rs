@@ -37,10 +37,7 @@ async fn discarded_functions_are_not_cataloged_at_their_tombstone_addresses() {
         .expect("the fixture has code");
     assert!(first_code.get() > 0x1000, "code starts at {first_code}");
     assert!(
-        image
-            .statement_rows()
-            .iter()
-            .all(|row| row.address >= first_code),
+        image.statement_rows().all(|row| row.address >= first_code),
         "a line row lies before the first function"
     );
     assert!(
@@ -415,7 +412,7 @@ async fn hand_written_assembly_after_a_function_has_no_source_line() {
     let extent = bare.extent.expect("bare has a size").range;
     // The fixture's layout: no row begins in bare, and the row before it
     // runs on past it.
-    let rows = image.statement_rows();
+    let rows = image.statement_rows().collect::<Vec<_>>();
     assert!(
         rows.iter().all(|row| !extent.contains(row.address)),
         "a row describes bare"
@@ -566,12 +563,16 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
         "unexpected {fixture} chain"
     );
 
-    assert!(!image.statement_rows().is_empty());
+    assert!(image.statement_rows().next().is_some());
     if fixture.starts_with("inline-gcc") {
         assert!(
-            image.statement_rows().windows(2).any(|rows| {
-                rows[0].sequence == rows[1].sequence && rows[0].address == rows[1].address
-            }),
+            image
+                .statement_rows()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|rows| {
+                    rows[0].sequence == rows[1].sequence && rows[0].address == rows[1].address
+                }),
             "{fixture} lost equal-address line rows"
         );
     }

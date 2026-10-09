@@ -1188,21 +1188,15 @@ fn fuzz_table(table: &GoTable, code: &[u8]) {
         );
     }
 
-    let (mut functions, mut instances, mut statements, mut lines) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut files = Vec::new();
-    let mut next_sequence = 0;
+    let (mut functions, mut instances) = (Vec::new(), Vec::new());
+    let mut lines = crate::image::lines::LineTables::default();
+    let mut files = crate::image::lines::Files::default();
     let completed = {
         let mut catalog = Catalog {
             functions: &mut functions,
             code_instances: &mut instances,
-            statements: &mut statements,
             lines: &mut lines,
-            next_sequence: &mut next_sequence,
-            source_file: &mut |path| {
-                files.push(path);
-                crate::SourceFileId::new(u32::try_from(files.len() - 1).expect("file count"))
-            },
+            source_file: &mut |path| files.intern(path),
         };
         complete_metadata(table, code, &mut catalog).is_ok()
     };
@@ -1217,7 +1211,13 @@ fn fuzz_table(table: &GoTable, code: &[u8]) {
             );
             assert!(instance.ranges.iter().all(|range| range.start < range.end));
         }
-        assert!(lines.iter().all(|line| line.range.start < line.range.end));
+        // The line tables are valid: they seal into an image.
+        let mut image = crate::image::Builder::new(crate::TargetDescription::X86_64);
+        lines.add_to(&mut image);
+        files.add_to(&mut image).expect("paths without NULs");
+        image
+            .seal(crate::image::Limits::default())
+            .expect("the completed line tables are valid");
     }
 }
 

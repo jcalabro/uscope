@@ -8,11 +8,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::{GoFunction, GoPosition, GoTable, PcRun, Result};
-use crate::model::LineEntry;
+use crate::image::lines::{LineTables, Row};
 use crate::{
     AddressRange, BreakpointEntry, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind,
-    EntryProvenance, FunctionId, FunctionInfo, ImageAddress, LineNumber, LineSequenceId,
-    SourceFileId, SourceLanguage, SourceLocation, StatementFlags, StatementRow,
+    EntryProvenance, FunctionId, FunctionInfo, ImageAddress, LineNumber, SourceFileId,
+    SourceLanguage, SourceLocation,
 };
 
 /// A function's source positions, by the code each covers.
@@ -22,9 +22,7 @@ type Positions = Vec<(std::ops::Range<u64>, GoPosition)>;
 pub struct Catalog<'a> {
     pub functions: &'a mut Vec<FunctionInfo>,
     pub code_instances: &'a mut Vec<CodeInstanceInfo>,
-    pub statements: &'a mut Vec<StatementRow>,
-    pub lines: &'a mut Vec<LineEntry>,
-    pub next_sequence: &'a mut u32,
+    pub lines: &'a mut LineTables,
     /// Interns a source path.
     pub source_file: &'a mut dyn FnMut(PathBuf) -> SourceFileId,
 }
@@ -41,13 +39,11 @@ pub fn complete<'code>(
         table,
         functions: Vec::new(),
         instances: Vec::new(),
-        statements: Vec::new(),
-        lines: Vec::new(),
+        lines: LineTables::default(),
         files: HashMap::new(),
         by_name: HashMap::new(),
         first_function: catalog.functions.len(),
         first_instance: catalog.code_instances.len(),
-        next_sequence: *catalog.next_sequence,
         source_file: &mut *catalog.source_file,
     };
     // Every function is declared before any inlined call names one.
@@ -60,11 +56,12 @@ pub fn complete<'code>(
     for (function, (id, positions, inlined)) in declared {
         builder.define(function, id, &positions, &inlined, code)?;
     }
-    *catalog.next_sequence = builder.next_sequence;
+    catalog
+        .lines
+        .append(&builder.lines, |file| file)
+        .map_err(|_| super::malformed("too many line rows"))?;
     catalog.functions.append(&mut builder.functions);
     catalog.code_instances.append(&mut builder.instances);
-    catalog.statements.append(&mut builder.statements);
-    catalog.lines.append(&mut builder.lines);
     Ok(())
 }
 
@@ -72,12 +69,17 @@ pub fn complete<'code>(
 struct Described(Vec<(u64, u64)>);
 
 impl Described {
-    fn new(instances: &[CodeInstanceInfo], lines: &[LineEntry]) -> Self {
+    fn new(instances: &[CodeInstanceInfo], lines: &LineTables) -> Self {
         let mut ranges = instances
             .iter()
             .flat_map(|instance| instance.ranges.iter())
-            .chain(lines.iter().map(|line| &line.range))
             .map(|range| (range.start.get(), range.end.get()))
+            .chain(
+                lines
+                    .ranges
+                    .iter()
+                    .map(|range| (range.start.get(), range.end.get())),
+            )
             .collect::<Vec<_>>();
         ranges.sort_unstable();
         let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
@@ -100,15 +102,13 @@ struct Builder<'a, 'catalog> {
     table: &'a GoTable,
     functions: Vec<FunctionInfo>,
     instances: Vec<CodeInstanceInfo>,
-    statements: Vec<StatementRow>,
-    lines: Vec<LineEntry>,
+    lines: LineTables,
     files: HashMap<Arc<str>, SourceFileId>,
     /// The function each name names, for inlined calls: the first function
     /// of that name that is not a wrapper.
     by_name: HashMap<Arc<str>, FunctionId>,
     first_function: usize,
     first_instance: usize,
-    next_sequence: u32,
     source_file: &'catalog mut dyn FnMut(PathBuf) -> SourceFileId,
 }
 
@@ -246,38 +246,41 @@ impl Builder<'_, '_> {
         self.add_inlined_calls(function, inlined, physical)
     }
 
-    /// One line-table sequence for the function: every run of a position is
-    /// a statement, since the table marks none.
+    /// One line-table sequence for the function: a row for each run of a
+    /// position, each a statement, since the table marks none, and a row
+    /// ending the sequence where the last run ends. A run without a line
+    /// keeps its row, so that rows keep their positions' ordinals.
     fn add_lines(&mut self, positions: &Positions) -> Result<()> {
-        if positions.is_empty() {
+        let Some((last, _)) = positions.last() else {
             return Ok(());
+        };
+        let too_many = |_| super::malformed("too many line rows");
+        self.lines.begin_sequence().map_err(too_many)?;
+        for (pcs, position) in positions {
+            let location = self.location(&position.file, position.line);
+            let row = self
+                .lines
+                .push_row(&Row {
+                    address: pcs.start,
+                    file: location.as_ref().map(|location| location.file),
+                    line: location.as_ref().map_or(0, |location| location.line.get()),
+                    statement: true,
+                    ..Row::default()
+                })
+                .map_err(too_many)?;
+            if location.is_some() {
+                self.lines
+                    .push_range(range(pcs.start, pcs.end), row, true)
+                    .map_err(too_many)?;
+            }
         }
-        let sequence = LineSequenceId::new(self.next_sequence);
-        self.next_sequence = self
-            .next_sequence
-            .checked_add(1)
-            .ok_or_else(|| super::malformed("too many line sequences"))?;
-        for (ordinal, (pcs, position)) in positions.iter().enumerate() {
-            let Some(location) = self.location(&position.file, position.line) else {
-                continue;
-            };
-            self.statements.push(StatementRow {
-                address: ImageAddress::new(pcs.start),
-                operation_index: 0,
-                location: Some(location.clone()),
-                discriminator: 0,
-                flags: StatementFlags::empty().with_statement(true),
-                isa: 0,
-                sequence,
-                ordinal: u32::try_from(ordinal)
-                    .map_err(|_| super::malformed("too many line rows"))?,
-            });
-            self.lines.push(LineEntry {
-                range: range(pcs.start, pcs.end),
-                location,
-                statement: true,
-            });
-        }
+        self.lines
+            .push_row(&Row {
+                address: last.end,
+                end_sequence: true,
+                ..Row::default()
+            })
+            .map_err(too_many)?;
         Ok(())
     }
 

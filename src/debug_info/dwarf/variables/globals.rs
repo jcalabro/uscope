@@ -1,14 +1,14 @@
 //! The catalog of global data objects, deduplicated across units.
 
-use std::path::PathBuf;
+use crate::image::lines::Files;
 use std::sync::Arc;
 
 use foldhash::HashMap;
 
 use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, is_type_unit};
 use crate::{
-    GlobalVariableId, GlobalVariableInfo, GlobalVariableType, GlobalVariableVisibility, SourceFile,
-    SourceFileId, VariableKind, VariableMalformedKind,
+    GlobalVariableId, GlobalVariableInfo, GlobalVariableType, GlobalVariableVisibility,
+    VariableKind, VariableMalformedKind,
 };
 
 use super::die::{
@@ -113,8 +113,7 @@ pub(super) fn load_globals<'data>(
     units: &[gimli::Unit<Reader<'data>>],
     objects: &mut Vec<CatalogDataObject>,
     order: &mut u64,
-    source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+    files: &mut Files,
     types: &mut TypeArenaBuilder<'_, 'data>,
 ) -> std::result::Result<(Vec<GlobalVariableInfo>, Vec<usize>), DwarfError> {
     let mut table = ScopeTable {
@@ -262,15 +261,7 @@ pub(super) fn load_globals<'data>(
                         .join("::")
                 ))
             };
-            let declaration = declaration_with_origins(
-                dwarf,
-                units,
-                unit,
-                entry,
-                &chain,
-                source_files,
-                source_file_ids,
-            );
+            let declaration = declaration_with_origins(dwarf, units, unit, entry, &chain, files);
             let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
             let type_info = types.variable_type(type_unit, type_value);
             let value =
