@@ -1010,7 +1010,9 @@ fn a_shard_being_changed_is_one_gap_however_its_links_disagree() {
     let prev = tasks.prev;
     let owned = &world.runtime_layout(Flavor::MultiThread).owned;
     let lock = owned.shard_lock;
-    world.memory.write(runtime.shards + lock, 1, 4);
+    world
+        .memory
+        .write(runtime.shards + lock.offset, 1, lock.size);
     // A task being linked in front of the second has not yet been linked
     // back to.
     let second = runtime.headers[0][1];
