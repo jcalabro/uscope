@@ -171,3 +171,62 @@ async fn the_page_can_ask_whether_its_cookie_is_good() {
     assert_eq!(check(&cookie).as_deref(), Some("204"));
     assert_eq!(check("uscope-1=c-0").as_deref(), Some("403"));
 }
+
+#[tokio::test]
+async fn a_public_url_serves_everything_under_its_path_to_its_proxy_and_nothing_else() {
+    let mut web = Web::start("public", &["--public-url", "https://Proxy.example/debug/7"]);
+    assert_eq!(web.base, "/debug/7/");
+    let get = |path: &str, host: &str| {
+        web.http(&format!(
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        ))
+    };
+    let page = get("/debug/7/s/abc/stop/1/t/2/f/0", "proxy.example");
+    assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+    // The URL itself, with and without its slash, is the page.
+    for root in ["/debug/7/", "/debug/7"] {
+        let page = get(root, "proxy.example");
+        assert!(
+            page.starts_with("HTTP/1.1 200") && page.contains("uscope-base"),
+            "{root}: {page}"
+        );
+    }
+    // The proxy's own pages may frame it; no other page may.
+    assert!(page.contains("frame-ancestors 'self'"), "{page}");
+    for outside in ["/s/abc", "/api/check", "/debug/8/s/abc", "/debug/7x/s/abc"] {
+        let refused = get(outside, "proxy.example");
+        assert!(refused.starts_with("HTTP/1.1 404"), "{outside}: {refused}");
+    }
+    let unknown = get("/debug/7/s/abc", "evil.example");
+    assert!(unknown.starts_with("HTTP/1.1 421"), "{unknown}");
+
+    // The cookie goes back only under the path, and only over HTTPS.
+    let token = web.control_token.clone();
+    let login = web.http(&format!(
+        "POST /debug/7/api/login HTTP/1.1\r\nHost: proxy.example\r\nOrigin: https://proxy.example\r\n\
+         Connection: close\r\nContent-Length: {}\r\n\r\n{token}",
+        token.len()
+    ));
+    assert!(login.starts_with("HTTP/1.1 204"), "{login}");
+    assert!(
+        login.contains("Path=/debug/7/") && login.contains("Secure"),
+        "{login}"
+    );
+    let (refused, _) = web.post_login(&token, Some("http://proxy.example"), Some("proxy.example"));
+    assert_eq!(refused, 403);
+
+    let mut client = web.control("tab").await;
+    assert_eq!(client.next().await["type"], "hello");
+    // Shared links name the proxy.
+    let link = client
+        .ok("share", json!({"role": "view", "to": "/s/abc"}))
+        .await;
+    assert!(
+        link["url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("https://proxy.example/debug/7/join?to=")),
+        "{link}"
+    );
+    drop(client);
+    assert!(web.interrupt().success());
+}

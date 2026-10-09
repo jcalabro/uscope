@@ -8,6 +8,9 @@ const server = `127.0.0.1:${process.env.USCOPE_WEB_PORT ?? "7342"}`;
 
 export default defineConfig({
   plugins: [react()],
+  // Files are named relative to the page, so it can be served under any
+  // path; the server roots them at its own (`assets::rooted`).
+  base: "./",
   build: {
     outDir: "../build/web",
     emptyOutDir: true,
