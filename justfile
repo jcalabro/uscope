@@ -232,25 +232,6 @@ profile-counters PROGRAM:
     cargo build --quiet --profile profiling --features tools --bin uscope-tools
     perf stat -e instructions:u,cycles:u,cache-references:u,cache-misses:u,branch-misses:u ./target/profiling/uscope-tools load "$1" >/dev/null
 
-# Checks that the Tracy client the `tracy` feature builds is the version of
-# the viewer the shell provides, which reads no other.
-tracy-check:
-    ./scripts/check-tracy.sh
-
-# Records a load of PROGRAM, with its allocations, into FILE for Tracy's
-# viewer (`tracy FILE`); to watch a session live instead, open `tracy` and
-# run a `tracy` build of uscope.
-tracy-load PROGRAM FILE="target/tracy/load.tracy": tracy-check
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cargo build --quiet --profile profiling --target-dir target/tracy --features tools,tracy-alloc --bin uscope-tools
-    mkdir -p "$(dirname "$2")"
-    tracy-capture -f -o "$2" >/dev/null &
-    capture=$!
-    USCOPE_TRACY_WAIT=10 ./target/tracy/profiling/uscope-tools load "$1" >/dev/null
-    wait "$capture"
-    echo "recorded $2"
-
 # Runs one fuzz target: expression-parse, dwarf-expression, core-dump, dispatch,
 # elf-symbols, gopclntab, disassembly, debug-register-plan, dap-transport,
 # dap-request, views, or image. Arguments go to libFuzzer.

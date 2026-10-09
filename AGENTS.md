@@ -50,7 +50,7 @@ Development builds (`debug_assertions`) record every client request, ptrace cont
 
 - Give a new phase a `span!` and count hot work with `count!` (`src/profile`); never time with one-off prints, and never open a span per entry or row. `--timings FILE` reports every span, stops and requests among them, and `just timings FILE [NEW]` summarizes one report or compares two.
 - `just bench-smoke` fails when a load's allocation count differs from `bench/baseline.json`; record it again with `--record` only for a deliberate change. `just bench --compare BASE` shows what a change moved, and `just profile-*` answer where instructions and allocations go.
-- The shell provides Tracy's viewer (`tracy`); builds with the `tracy` feature report to it, and `just tracy-check` keeps its client and viewer versions together. `nix develop .#profile` adds the other profilers people read at a screen.
+- `nix develop .#profile` adds the profilers people read at a screen.
 
 ## Simulator
 

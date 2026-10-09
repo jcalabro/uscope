@@ -345,7 +345,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <li><b>The bytes in memory are the bytes on disk.</b> A header, a directory, and aligned tables, written with <code>write_all</code>. Inputs and cached images are read into owned, aligned memory and validated before use.</li>
           <li><b>Ingest in parallel</b> by compile unit and by section on a bounded pool, then merge in unit order so the image is byte-identical for any number of threads.</li>
           <li><b>Build each thing once.</b> One sequential DIE decode per unit followed by explicit resolution passes; conservative type deduplication; pooled strings; persisted indexes.</li>
-          <li><b>Never guess.</b> Instrument once and feed every reader: text and JSON reports that people, scripts, and coding agents can diff, Tracy for people at a screen, and deterministic instruction and allocation benchmarks that fail when a change regresses them.</li>
+          <li><b>Never guess.</b> Instrument once and feed every reader: text and JSON reports that people, scripts, and coding agents can diff, Perfetto and the usual profilers for people at a screen, and deterministic instruction and allocation benchmarks that fail when a change regresses them.</li>
           <li><b>Never do it twice.</b> Images are cached by content, so a program uscope has seen loads in milliseconds: every re-run, every shared library, and every test fixture.</li>
         </ol>
       </div>
@@ -878,7 +878,6 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <div><b>--timings JSON</b>summary, counters,<br>Chrome trace events</div>
           <div><b>Text reports</b><code>just timings</code><br><code>just bench --compare</code></div>
           <div><b>Flight recorder</b>phase marks in<br>debug builds</div>
-          <div><b>Tracy</b>zones, plots, memory, samples<br>(<code>tracy</code> feature)</div>
           <div><b>Perfetto</b>the same JSON in<br>ui.perfetto.dev or SQL</div>
         </div>
         <figcaption>Each output is a sink of the same <code>span!</code> and <code>count!</code> calls. Sinks that are off cost about one predictable branch per span.</figcaption>
@@ -890,10 +889,10 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <thead><tr><th>Question</th><th>A person reaches for</th><th>An agent reaches for</th></tr></thead>
           <tbody>
             <tr><td>Did this change make loading faster, slower, or bigger?</td><td colspan="2"><code>just bench --compare BASE</code>: a short table of every measure that moved, with absolute and relative change, noise flagged. Both readers use the same table.</td></tr>
-            <tr><td>Where does a load spend its time?</td><td>Tracy timeline, or the <code>--timings</code> file in ui.perfetto.dev</td><td><code>just timings FILE</code>: phases sorted by time, with CPU time, allocations, and counters</td></tr>
+            <tr><td>Where does a load spend its time?</td><td>The <code>--timings</code> file in ui.perfetto.dev</td><td><code>just timings FILE</code>: phases sorted by time, with CPU time, allocations, and counters</td></tr>
             <tr><td>Which functions cost the instructions inside a phase?</td><td>KCachegrind, hotspot, or samply</td><td><code>just profile-instructions PROGRAM</code>: Callgrind's inclusive call tree as text, trimmed to uscope frames</td></tr>
-            <tr><td>Who allocates, and how much stays live?</td><td>Tracy memory view (<code>tracy-alloc</code>), or heaptrack</td><td><code>just profile-heap PROGRAM</code>: DHAT on a <code>system-alloc</code> build, allocations grouped by first uscope frame</td></tr>
-            <tr><td>Is the parallel pipeline balanced?</td><td>Tracy or Perfetto thread lanes</td><td><code>just timings FILE --threads</code>: busy share per worker, the longest unit, and the critical path, computed from the trace events</td></tr>
+            <tr><td>Who allocates, and how much stays live?</td><td>heaptrack</td><td><code>just profile-heap PROGRAM</code>: DHAT on a <code>system-alloc</code> build, allocations grouped by first uscope frame</td></tr>
+            <tr><td>Is the parallel pipeline balanced?</td><td>Perfetto thread lanes</td><td><code>just timings FILE --threads</code>: busy share per worker, the longest unit, and the critical path, computed from the trace events</td></tr>
             <tr><td>Cache misses, branch misses, IPC?</td><td colspan="2"><code>perf stat</code> through <code>just profile-counters PROGRAM</code>: text for both</td></tr>
             <tr><td>Where does time go without rebuilding?</td><td>samply in the Firefox profiler</td><td><code>perf record</code> with <code>perf report --stdio</code></td></tr>
           </tbody>
@@ -909,8 +908,8 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
             <li>Measure wall and thread CPU time for synchronous spans; worker metrics sum CPU work, not elapsed time. Peak RSS is process high-water, not a subtractable per-span counter. Attribute allocations explicitly: process totals in an isolated load, optional worker/span counters, live bytes tracked through cross-thread frees and reallocations without allocator recursion. This allocator needs its own narrowly documented unsafe implementation.</li>
             <li>Instruction counters exclude kernel/hypervisor execution and do not inherit into the debuggee. Scope them to loader workers and report enabled/running time plus unavailable or multiplexed status. Never silently replace an unavailable counter with zero. Use explicit flow/dependency IDs for a critical-path report; nested timing spans alone cannot reconstruct a parallel DAG.</li>
             <li>Cap trace buffers and dynamic labels; report dropped events. Disabled instrumentation must avoid clocks, allocation and input-dependent formatting. Simulation recording stays outside deterministic world state. Flush reports on both load success and failure, and distinguish foreground load, cache validation and background write time.</li>
-            <li>Keep one global allocator definition per binary. Define feature composition so the existing <code>--all-features</code> gate still compiles: <code>system-alloc</code> selects System over mimalloc, counting wraps the selected allocator, and optional Tracy reporting wraps it once. Compile default/all-feature/release combinations and exercise disabled tracing without profiler threads or sockets.</li>
-            <li>Sinks are chosen at run time (<code>--timings</code>, the flight recorder in debug builds) or at build time (the <code>tracy</code> feature). Adding a sink never means touching the instrumented code.</li>
+            <li>Keep one global allocator definition per binary. Define feature composition so the existing <code>--all-features</code> gate still compiles: <code>system-alloc</code> selects System over mimalloc, and counting wraps the selected allocator. Compile default/all-feature/release combinations.</li>
+            <li>Sinks are chosen at run time (<code>--timings</code>, the flight recorder in debug builds) or at build time. Adding a sink never means touching the instrumented code.</li>
           </ul>
         </article>
         <article class="card">
@@ -940,16 +939,14 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           </ul>
         </article>
         <article class="card">
-          <header><span class="id">M5</span><h3>Tracy, for people</h3></header>
+          <header><span class="id">M5</span><h3>Profilers for people</h3></header>
           <ul>
-            <li>The optional <code>tracy</code> feature mirrors spans and counters to Tracy. Treat <code>tracy-client =0.18.4</code>, sys 0.28.0 and viewer 0.13.1 as the probe's candidate combination, not a permanent compatibility claim. Pin and compile the exact client/sys/viewer tuple in the profile shell and verify a captured trace before accepting it.</li>
-            <li>Build it with <code>default-features = false</code> plus <code>enable</code>, <code>ondemand</code>, and <code>only-localhost</code>, and with <code>system-tracing</code>, <code>sampling</code>, and <code>callstack-inlines</code> for call-stack samples. Their perf events are inherited, so a debuggee started while the viewer is connected is sampled too; that is acceptable in a profiling build and never happens in tests. Leave out the crash handler, which installs fatal-signal handlers, and broadcast, which sends UDP announcements.</li>
-            <li><code>tracy-alloc</code> wraps mimalloc in <code>ProfiledAllocator</code> to show memory per zone.</li>
-            <li>A <code>nix develop .#profile</code> shell adds <code>tracy</code>, <code>samply</code>, <code>hotspot</code>, <code>heaptrack</code>, <code>hyperfine</code>, <code>poop</code>, and KCachegrind, keeping GUI tools out of the default shell.</li>
+            <li>A <code>nix develop .#profile</code> shell adds <code>samply</code>, <code>hotspot</code>, <code>heaptrack</code>, <code>hyperfine</code>, <code>poop</code>, and KCachegrind, keeping GUI tools out of the default shell. The <code>--timings</code> file opens in Perfetto for a timeline.</li>
+            <li>Tracy was built (S.1), then removed by decision.</li>
           </ul>
         </article>
       </div>
-      <div class="callout">Keep P0's instrumentation small: phase counters, bounded events and a machine-readable report. Reassess an existing tracing adapter before maintaining a general profiler framework. Nanosecond costs in the probe are configuration-specific; measure disabled overhead and enabled whole-load overhead. Tracy is optional and follows its <a href="https://docs.rs/tracy-client/0.18.4/tracy_client/">documented feature controls</a>.</div>
+      <div class="callout">Keep P0's instrumentation small: phase counters, bounded events and a machine-readable report. Reassess an existing tracing adapter before maintaining a general profiler framework. Nanosecond costs in the probe are configuration-specific; measure disabled overhead and enabled whole-load overhead.</div>
     </section>
 
     <!-- ================================================================ -->
@@ -1005,7 +1002,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <article class="card">
           <header><span class="id">D7</span><h3>Instrumentation</h3></header>
           <div class="options">
-            <div class="option dec"><span class="tag">Initial</span><b>A small phase/counter API</b><span class="why">Machine-readable reports first, optional Tracy from the same events. Validate overhead on whole loads; retain a small implementation rather than building a profiling framework.</span></div>
+            <div class="option dec"><span class="tag">Initial</span><b>A small phase/counter API</b><span class="why">Machine-readable reports first. Validate overhead on whole loads; retain a small implementation rather than building a profiling framework.</span></div>
             <div class="option alt"><span class="tag">Alt</span><b>Tracy as the primary tool</b><span class="why">Excellent for a person at a screen. An agent can reach it only through <code>tracy-capture</code> and <code>tracy-csvexport</code>, a live connection, and an exact version pin, which yields aggregates without the timeline that makes Tracy worth using.</span></div>
             <div class="option alt"><span class="tag">Alt</span><b><code>tracing</code> with subscribers</b><span class="why">Reconsider if an adapter removes enough custom code. Compare configurations and whole-workload cost, not unrelated per-span microbenchmarks.</span></div>
           </div>
@@ -1153,10 +1150,10 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       </div>
 
       <div class="phase">
-        <header><span class="pid">Side</span><h3>Tracy, any time</h3><span class="st done">done</span></header>
+        <header><span class="pid">Side</span><h3>Tracy, any time</h3><span class="st done">removed</span></header>
         <p>Off the critical path. Lands whenever it is wanted.</p>
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
-          <tr><td>S.1</td><td>The <code>tracy</code> and <code>tracy-alloc</code> features, the <code>tracy-client-sys</code> version check, and the <code>nix develop .#profile</code> shell.</td><td><span class="st done">done</span></td><td><code>tracy-client =0.18.4</code> with <code>enable</code>, <code>ondemand</code>, and <code>only-localhost</code> only, locking <code>tracy-client-sys</code> 0.28.0, which bundles the Tracy 0.13.1 client. With <code>tracy</code>, every span is also a zone, labelled, and every counter a plot of its total, while a viewer is connected; <code>USCOPE_TRACY_WAIT</code> holds a run until one connects. <code>tracy-alloc</code> wraps the selected allocator in <code>ProfiledAllocator</code> once, inside counting, and both binaries install it through <code>profile::alloc::selected()</code>. Without the feature nothing is linked. The default shell provides Tracy 0.13.1's viewer and capture tools and exports <code>TRACY_VERSION</code>, and <code>nix develop .#profile</code> adds samply, hotspot, heaptrack, hyperfine, poop and KCachegrind; <code>just tracy-check</code> fails unless the locked client's <code>TracyVersion.hpp</code> matches it, and <code>just tracy-load PROGRAM</code> records a load. A capture of containers-rust-o2 by nixpkgs' <code>tracy-capture</code> 0.13.1 holds a zone for every loader span.</td></tr>
+          <tr><td>S.1</td><td>The <code>tracy</code> and <code>tracy-alloc</code> features, the <code>tracy-client-sys</code> version check, and the <code>nix develop .#profile</code> shell.</td><td><span class="st done">removed</span></td><td>Built, verified with a captured trace, then removed by decision: the features, the client dependency, the version check, the recipes, and the viewer in the shell are gone. The <code>nix develop .#profile</code> shell stays with the other profilers, and both binaries keep one shared allocator definition, <code>profile::alloc::selected()</code>.</td></tr>
         </tbody></table></div>
       </div>
 
@@ -1195,7 +1192,6 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
             <tr><td>An input changes while uscope reads it.</td><td>Every input is an owned snapshot (D3), checked by descriptor metadata before and after the read, with a bounded retry and then a typed error.</td></tr>
             <tr><td>Thread oversubscription in tests and on small machines.</td><td>A bounded pool, a low jobs setting under nextest, and cached fixtures.</td></tr>
             <tr><td><code>u32</code> limits on very large programs.</td><td>Checked when building; an explicit error naming the limit. Byte offsets into the string pool are the first to hit it, as Zig found, and can move to sequential string ids if needed.</td></tr>
-            <tr><td>The Tracy client and the Tracy viewer drift apart.</td><td>The client is pinned to a tuple verified against the profile shell's viewer by capturing a trace (M5); they move together.</td></tr>
             <tr><td>Image targets turn out optimistic.</td><td>P1 measures real tables early, and this page is updated with the result before later phases build on it.</td></tr>
           </tbody>
         </table>

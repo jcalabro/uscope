@@ -290,7 +290,6 @@ fn main() -> ExitCode {
     }
     #[cfg(debug_assertions)]
     start_flight_recording();
-    uscope::profile::wait_for_viewer();
     // SAFETY: the process has no other thread yet.
     #[allow(unsafe_code, reason = "the environment can only be edited unsafely")]
     unsafe {

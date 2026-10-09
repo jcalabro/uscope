@@ -253,26 +253,17 @@ impl<A> Counting<A> {
 /// The allocator uscope's programs count: mimalloc, which serves the many
 /// small blocks reading debug information takes far faster than the C
 /// library's, or with `system-alloc` the C library's, for heap profilers
-/// that cannot see mimalloc. With `tracy-alloc`, it reports every block to
-/// Tracy too.
+/// that cannot see mimalloc.
 #[cfg(not(feature = "system-alloc"))]
-type Base = mimalloc::MiMalloc;
+pub type Selected = mimalloc::MiMalloc;
 #[cfg(feature = "system-alloc")]
-type Base = std::alloc::System;
-#[cfg(not(feature = "tracy-alloc"))]
-pub type Selected = Base;
-#[cfg(feature = "tracy-alloc")]
-pub type Selected = tracy_client::ProfiledAllocator<Base>;
+pub type Selected = std::alloc::System;
 
 /// The allocator a program installs, counted: `#[global_allocator] static
 /// ALLOCATOR: Counting<Selected> = alloc::selected();`.
 #[must_use]
 pub const fn selected() -> Counting<Selected> {
-    #[cfg(not(feature = "tracy-alloc"))]
-    let selected = Base {};
-    #[cfg(feature = "tracy-alloc")]
-    let selected = tracy_client::ProfiledAllocator::new(Base {}, 0);
-    Counting::new(selected)
+    Counting::new(Selected {})
 }
 
 // SAFETY: every method forwards to `inner` with the caller's arguments and
