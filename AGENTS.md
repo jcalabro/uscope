@@ -14,6 +14,7 @@
 - Software breakpoint sites belong to the process address space. Keep physical installation separate from user and execution-plan ownership, hide trap bytes from user memory reads, and repair co-hit threads sequentially while siblings remain stopped.
 - Debug-info providers normalize data at the boundary. The generic unwind loop iterates caller contexts; gimli owns DWARF CFI interpretation.
 - Resolve source paths while loading debug metadata, but read source contents lazily outside the ptrace controller thread.
+- A load seals a module's debug information as one validated image of tables (`src/image`, `plans/performance.html`); `ModuleImage` and the providers read it through views. The module's path, identifier, and separate debug file's location belong to its binding, never to the image's bytes, so one image serves every binding and the image cache (`src/cache.rs`) can store it. A cache entry's key names its inputs' bytes and the sources the loader was built from.
 - Expressions are one neutral language for every source language (`docs/expressions.md`, `plans/expressions.md`). `src/eval` is pure: it reaches a program only through traits the debugger implements, and a boundary test keeps process control, debug information, I/O, clocks, and threads out of it. Parsing needs no program; binding resolves names in one frame scope; running reads one validated stop.
 - Integer arithmetic is exact, bit operations keep their operand's width, and only casts truncate. Data layout belongs to the debug-info providers; the evaluator never computes an offset. Every example in `docs/expressions.md` runs as a test, so change the reference and the implementation together.
 - Make unsupported states and partial results explicit. Never silently guess when doing so could produce a convincing but incorrect debugger result.
@@ -25,6 +26,7 @@
 - Unit-test deterministic algorithms, invariants, boundaries, and typed failure modes only where code is very complicated. Use as few unit tests as possible, prefer tests that are higher leverage.
 - Use `tests/support::Scenario` for real debugger workflows. It runs the public request/event path, records a transcript, applies deadlines, shuts down the debugger, and verifies the inferior was reaped. Use `support::ScratchDir` for temporary files and `support::ExternalProcess` for attach targets so nothing outlives a failing test. `Scenario::launch` reads a fixture's debug information once per test process and shares it among that test's scenarios; use `Scenario::new` for a program the test changes.
 - Run integration tests with nextest, which gives each test its own process: one process can trace with only one live session at a time.
+- `just test` reads the images `just cache-warm` writes to `target/image-cache`; `just stress` loads afresh, so the loader itself still runs the whole suite. Nothing a test runs may use the user's cache: under nextest the cache is off unless `USCOPE_CACHE_DIR` names one, and tests of the cache open their own in a scratch directory.
 - Replace superseded integration tests instead of retaining duplicate coverage.
 - Keep CLI tests separate when they validate parsing, batch behavior, or rendered output rather than debugger semantics.
 - Native fixture sources live in language directories under `tests/fixtures`; each Go executable has its own package subdirectory. Scenario filenames describe the program without repeating the language. Rust tests may launch fixtures but must not invoke compilers. `just build-test-programs` builds them incrementally, compiling at once on every CPU (`USCOPE_FIXTURE_JOBS=1` builds one at a time). A step of `scripts/build-test-programs.sh` that reads what it built must wait for it first, as its helpers do: `wait_for` the outputs it names, or `wait_builds` for every running compile. The tokio fixtures build in a shell of their own beside the rest.
@@ -43,6 +45,12 @@ Development builds (`debug_assertions`) record every client request, ptrace cont
 - A failing test keeps its recordings in `tests/<suite>/<test>.log` (scenarios) and `<test>.adapter.log` (DAP adapters), and prints their paths; passing tests leave nothing. The directory therefore lists the tests that failed when last run.
 - Each `uscope` run streams to `runs/`, keeping the latest 20, and `latest.log` links to the newest. `USCOPE_FLIGHT_RECORDING=PATH` streams to PATH instead, and an empty value turns recording off.
 - Record new native control paths through `record!` or the `Recorded` ptrace wrapper. Recording must never change what the inferior sees.
+
+## Profiling
+
+- Give a new phase a `span!` and count hot work with `count!` (`src/profile`); never time with one-off prints, and never open a span per entry or row. `--timings FILE` reports every span, stops and requests among them, and `just timings FILE [NEW]` summarizes one report or compares two.
+- `just bench-smoke` fails when a load's allocation count differs from `bench/baseline.json`; record it again with `--record` only for a deliberate change. `just bench --compare BASE` shows what a change moved, and `just profile-*` answer where instructions and allocations go.
+- `nix develop .#profile` adds the profilers people read at a screen.
 
 ## Simulator
 

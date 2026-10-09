@@ -940,25 +940,13 @@ pub(super) fn fuzz(data: &[u8]) {
             end: ImageAddress::new(u64::MAX),
         },
         crate::model::ModuleMetadata {
-            functions: Vec::new(),
-            code_instances: Vec::new(),
             symbols: table.symbols,
             symbol_sources: table.sources,
             got_slots: table.got_slots,
-            globals: Vec::new(),
-            types: Arc::default(),
-            source_files: Vec::new(),
-            statements: Vec::new(),
-            lines: Vec::new(),
             sections: load_sections(&object),
-            vtables: Vec::new(),
-            coroutines: std::collections::BTreeMap::new(),
-            resume_points: std::collections::BTreeMap::new(),
             thread_local_storage: has_thread_local_storage(&object),
-            constants: std::collections::BTreeMap::new(),
-            producers: Vec::new(),
-            packages: Vec::new(),
             thread_locals: load_thread_locals(&object),
+            ..crate::model::ModuleMetadata::default()
         },
     );
     fuzz_lookups(&image, &symbols, data);
@@ -1001,7 +989,7 @@ fn fuzz_lookups(image: &crate::ModuleImage, symbols: &[SymbolInfo], data: &[u8])
         let found = image
             .symbol(found.symbol)
             .expect("found symbols are cataloged");
-        let extent = found.extent.expect("found symbols name code");
+        let extent = found.extent().expect("found symbols name code");
         assert!(extent.range.contains(address));
         for other in containing {
             let other = other.extent.expect("containing");
@@ -1040,9 +1028,8 @@ fn assert_description(image: &crate::ModuleImage, symbols: &[SymbolInfo], addres
     };
     match &description.symbol {
         Some(symbol) if code.is_none() => {
-            assert!(names(
-                image.symbol(symbol.symbol).expect("cataloged symbol")
-            ));
+            let symbol = image.symbol(symbol.symbol).expect("cataloged symbol");
+            assert!(names(&symbol.info()));
         }
         Some(symbol) => assert_eq!(Some(symbol), code.as_ref()),
         None => assert!(code.is_none() && !symbols.iter().any(names)),

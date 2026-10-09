@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use foldhash::HashMap;
 use gimli::{EvaluationResult, Location, RunTimeEndian, Value};
 
 use crate::debug_info::dwarf::Reader;
@@ -15,7 +14,7 @@ use crate::{
 use super::codec::{
     bytes_to_u64, integer_bytes, register_u64, signed_integer_bytes, wrapping_integer_bytes,
 };
-use super::location::{EvaluationUnit, Expression, LocationDescription, LocationSelectionError};
+use super::location::{Expression, LocationListId, LocationSelectionError, LocationTables, select};
 use super::shape::ValueShapeError;
 use super::types::DynamicAggregateLayoutKey;
 use super::{
@@ -37,7 +36,8 @@ pub(super) enum FrameBase<'a> {
 }
 
 pub(super) struct FrameBaseContext<'a> {
-    pub(super) location: &'a Metadata<LocationDescription>,
+    pub(super) location: &'a Metadata<LocationListId>,
+    pub(super) tables: LocationTables<'a>,
     pub(super) address: Option<ImageAddress>,
     pub(super) cache: &'a mut FrameBaseCache,
 }
@@ -105,48 +105,48 @@ impl From<crate::UnsupportedVariableFeature> for EvaluateError {
 fn resolve_frame_base(
     context: &mut FrameBaseContext<'_>,
     endian: RunTimeEndian,
-    units: &[EvaluationUnit],
     runtime: &mut dyn VariableRuntime,
     budget: &mut InspectionBudget,
 ) -> std::result::Result<VirtualAddress, EvaluateError> {
     if matches!(context.cache, FrameBaseCache::Empty) {
         *context.cache = match context.location {
-            Metadata::Value(frame_base) => match frame_base.expression(context.address) {
-                Ok(Some(expression)) => {
-                    match evaluate_frame_base(
-                        expression,
-                        endian,
-                        context.address,
-                        units,
-                        runtime,
-                        budget,
-                    ) {
-                        Ok(value) => FrameBaseCache::Available(value),
-                        // Request-specific exhaustion must not poison the
-                        // frame-base cache shared by later inspections.
-                        Err(EvaluateError::Unavailable(
-                            reason @ (VariableUnavailableReason::EvaluationLimit
-                            | VariableUnavailableReason::InspectionLimit(_)),
-                        )) => return Err(reason.into()),
-                        Err(EvaluateError::Unavailable(reason)) => {
-                            FrameBaseCache::Unavailable(reason)
+            Metadata::Value(frame_base) => {
+                match select(context.tables.list(*frame_base), context.address) {
+                    Ok(Some(expression)) => {
+                        match evaluate_frame_base(
+                            expression,
+                            endian,
+                            context.address,
+                            runtime,
+                            budget,
+                        ) {
+                            Ok(value) => FrameBaseCache::Available(value),
+                            // Request-specific exhaustion must not poison the
+                            // frame-base cache shared by later inspections.
+                            Err(EvaluateError::Unavailable(
+                                reason @ (VariableUnavailableReason::EvaluationLimit
+                                | VariableUnavailableReason::InspectionLimit(_)),
+                            )) => return Err(reason.into()),
+                            Err(EvaluateError::Unavailable(reason)) => {
+                                FrameBaseCache::Unavailable(reason)
+                            }
+                            Err(EvaluateError::Malformed(description)) => {
+                                FrameBaseCache::Malformed(description)
+                            }
+                            Err(error @ EvaluateError::Fatal(_)) => return Err(error),
                         }
-                        Err(EvaluateError::Malformed(description)) => {
-                            FrameBaseCache::Malformed(description)
-                        }
-                        Err(error @ EvaluateError::Fatal(_)) => return Err(error),
                     }
+                    Err(LocationSelectionError::Unavailable(reason)) => {
+                        FrameBaseCache::Unavailable(reason)
+                    }
+                    Err(LocationSelectionError::Malformed(description)) => {
+                        FrameBaseCache::Malformed(description)
+                    }
+                    Ok(None) => FrameBaseCache::Unavailable(
+                        VariableUnavailableReason::UnavailableAtInstruction,
+                    ),
                 }
-                Err(LocationSelectionError::Unavailable(reason)) => {
-                    FrameBaseCache::Unavailable(reason)
-                }
-                Err(LocationSelectionError::Malformed(description)) => {
-                    FrameBaseCache::Malformed(description)
-                }
-                Ok(None) => {
-                    FrameBaseCache::Unavailable(VariableUnavailableReason::UnavailableAtInstruction)
-                }
-            },
+            }
             Metadata::Absent(
                 MetadataAbsence::NoFrameBase
                 | MetadataAbsence::NotApplicable
@@ -168,10 +168,9 @@ fn resolve_frame_base(
 }
 
 fn evaluate_frame_base(
-    expression: &Expression,
+    expression: Expression<'_>,
     endian: RunTimeEndian,
     address: Option<ImageAddress>,
-    units: &[EvaluationUnit],
     runtime: &mut dyn VariableRuntime,
     budget: &mut InspectionBudget,
 ) -> std::result::Result<VirtualAddress, EvaluateError> {
@@ -181,7 +180,6 @@ fn evaluate_frame_base(
         endian,
         address,
         &mut FrameBase::Unsupported,
-        units,
         runtime,
         budget,
     )?;
@@ -209,39 +207,40 @@ fn evaluate_frame_base(
 /// Evaluates a location expression in the frame `runtime` reads, executing
 /// at `address` in this image when known.
 pub(super) fn evaluate<'expression>(
-    expression: &'expression Expression,
+    expression: Expression<'expression>,
     endian: RunTimeEndian,
     address: Option<ImageAddress>,
     frame_base: &mut FrameBase<'_>,
-    units: &[EvaluationUnit],
     runtime: &mut dyn VariableRuntime,
     budget: &mut InspectionBudget,
 ) -> std::result::Result<Vec<gimli::Piece<Reader<'expression>>>, EvaluateError> {
     evaluate_with_object(
-        expression, endian, address, frame_base, units, runtime, budget, None,
+        expression, endian, address, frame_base, runtime, budget, None,
     )
 }
 
 pub(super) fn evaluate_dynamic_aggregate_address(
-    layouts: &HashMap<DynamicAggregateLayoutKey, Expression>,
+    layouts: crate::image::type_facts::TypeFactsView<'_>,
+    tables: LocationTables<'_>,
     key: DynamicAggregateLayoutKey,
     endian: RunTimeEndian,
-    units: &[EvaluationUnit],
     runtime: &mut dyn VariableRuntime,
     budget: &mut InspectionBudget,
     object_address: VirtualAddress,
 ) -> std::result::Result<VirtualAddress, EvaluateError> {
-    let expression = layouts.get(&key).ok_or_else(|| {
-        EvaluateError::Unavailable(
-            crate::UnsupportedVariableFeature::RuntimeAggregateLocation.into(),
-        )
-    })?;
+    let expression = super::layout_child(key.child)
+        .and_then(|child| layouts.dynamic_layout(key.aggregate, child))
+        .ok_or_else(|| {
+            EvaluateError::Unavailable(
+                crate::UnsupportedVariableFeature::RuntimeAggregateLocation.into(),
+            )
+        })?;
+    let expression = tables.expression(expression);
     let pieces = evaluate_with_object(
         expression,
         endian,
         None,
         &mut FrameBase::Unsupported,
-        units,
         runtime,
         budget,
         Some(object_address),
@@ -272,27 +271,22 @@ fn empty_location<'expression>() -> Vec<gimli::Piece<Reader<'expression>>> {
     }]
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "an evaluation reads one frame, at one address, with one budget"
-)]
 fn evaluate_with_object<'expression>(
-    expression: &'expression Expression,
+    expression: Expression<'expression>,
     endian: RunTimeEndian,
     address: Option<ImageAddress>,
     frame_base: &mut FrameBase<'_>,
-    units: &[EvaluationUnit],
     runtime: &mut dyn VariableRuntime,
     budget: &mut InspectionBudget,
     object_address: Option<VirtualAddress>,
 ) -> std::result::Result<Vec<gimli::Piece<Reader<'expression>>>, EvaluateError> {
     budget.consume_expression_work(u64::from(MAX_EVALUATION_ITERATIONS))?;
     // gimli rejects an expression with no operations as a stack underflow.
-    if expression.bytes.is_empty() {
+    if expression.bytes().is_empty() {
         return Ok(empty_location());
     }
-    let reader = gimli::EndianSlice::new(&expression.bytes, endian);
-    let mut evaluation = gimli::Expression(reader).evaluation(expression.encoding);
+    let reader = gimli::EndianSlice::new(expression.bytes(), endian);
+    let mut evaluation = gimli::Expression(reader).evaluation(expression.encoding());
     if let Some(address) = object_address {
         evaluation.set_initial_value(address.get());
         evaluation.set_object_address(address.get());
@@ -311,7 +305,7 @@ fn evaluate_with_object<'expression>(
                 let register = runtime.register(register.0)?;
                 let value = evaluation_value(
                     &register.bytes,
-                    evaluation_value_type(expression, units, base_type.0)?,
+                    evaluation_value_type(expression, base_type.0)?,
                     endian,
                 )?;
                 evaluation_step(evaluation.resume_with_register(value))?
@@ -322,7 +316,7 @@ fn evaluate_with_object<'expression>(
                         return Err("frame base is unavailable".into());
                     }
                     FrameBase::Lazy(context) => {
-                        resolve_frame_base(context, endian, units, runtime, budget)?
+                        resolve_frame_base(context, endian, runtime, budget)?
                     }
                 };
                 evaluation_step(evaluation.resume_with_frame_base(value.get()))?
@@ -341,8 +335,7 @@ fn evaluate_with_object<'expression>(
                 )?))?
             }
             EvaluationResult::RequiresBaseType(offset) => evaluation_step(
-                evaluation
-                    .resume_with_base_type(evaluation_value_type(expression, units, offset.0)?),
+                evaluation.resume_with_base_type(evaluation_value_type(expression, offset.0)?),
             )?,
             EvaluationResult::RequiresMemory {
                 address,
@@ -354,7 +347,7 @@ fn evaluate_with_object<'expression>(
                 let bytes = runtime.read_memory(VirtualAddress::new(address), usize::from(size))?;
                 let value = evaluation_value(
                     &bytes,
-                    evaluation_value_type(expression, units, base_type.0)?,
+                    evaluation_value_type(expression, base_type.0)?,
                     endian,
                 )?;
                 evaluation_step(evaluation.resume_with_memory(value))?
@@ -364,17 +357,17 @@ fn evaluate_with_object<'expression>(
             }
             EvaluationResult::RequiresEntryValue(operand) => {
                 evaluation_step(evaluation.resume_with_entry_value(entry_value(
-                    operand, expression, units, endian, runtime, budget,
+                    operand, expression, endian, runtime, budget,
                 )?))?
             }
             EvaluationResult::RequiresParameterRef(offset) => {
-                let offset = debug_info_offset(expression, units, offset)
+                let offset = debug_info_offset(expression, offset)
                     .ok_or_else(|| Arc::<str>::from("parameter reference outside a unit"))?;
                 let word = runtime.entry_value(EntryParameter::Parameter(offset), budget)?;
                 evaluation_step(evaluation.resume_with_parameter_ref(word))?
             }
             EvaluationResult::RequiresAtLocation(reference) => {
-                let bytes = called_procedure(expression, units, reference, address)?;
+                let bytes = called_procedure(expression, reference, address)?;
                 evaluation_step(
                     evaluation.resume_with_at_location(gimli::EndianSlice::new(bytes, endian)),
                 )?
@@ -407,15 +400,14 @@ fn evaluation_step<T>(
 /// The address at `index` in the unit's address table, relocated when the
 /// expression asks.
 fn indexed_address(
-    expression: &Expression,
+    expression: Expression<'_>,
     index: gimli::DebugAddrIndex<usize>,
     relocate: bool,
     runtime: &dyn VariableRuntime,
 ) -> std::result::Result<u64, EvaluateError> {
-    let address = expression
-        .indexed_addresses
-        .get(&index.0)
-        .copied()
+    let address = u64::try_from(index.0)
+        .ok()
+        .and_then(|index| expression.indexed_address(index))
         .ok_or_else(|| Arc::<str>::from("DWARF address index is unavailable"))?;
     if relocate {
         Ok(runtime.relocate(ImageAddress::new(address))?.get())
@@ -428,13 +420,12 @@ fn indexed_address(
 /// recovers it.
 fn entry_value(
     operand: gimli::Expression<Reader<'_>>,
-    expression: &Expression,
-    units: &[EvaluationUnit],
+    expression: Expression<'_>,
     endian: RunTimeEndian,
     runtime: &mut dyn VariableRuntime,
     budget: &mut InspectionBudget,
 ) -> std::result::Result<gimli::Value, EvaluateError> {
-    let (parameter, value_type) = entry_parameter(operand, expression, units)?;
+    let (parameter, value_type) = entry_parameter(operand, expression)?;
     let word = runtime.entry_value(parameter, budget)?;
     let bytes = match endian {
         RunTimeEndian::Little => word.to_le_bytes(),
@@ -444,38 +435,32 @@ fn entry_value(
 }
 
 /// The `.debug_info` offset of an entry in the expression's own unit.
-fn debug_info_offset(
-    expression: &Expression,
-    units: &[EvaluationUnit],
-    offset: gimli::UnitOffset<usize>,
-) -> Option<u64> {
-    units
-        .get(expression.unit)
-        .and_then(|unit| unit.offset)?
+fn debug_info_offset(expression: Expression<'_>, offset: gimli::UnitOffset<usize>) -> Option<u64> {
+    expression
+        .unit_offset()?
         .checked_add(u64::try_from(offset.0).ok()?)
 }
 
 /// The expression a `DW_OP_call*` runs, which the procedure it names holds
 /// at `address`.
-fn called_procedure<'expression>(
-    expression: &'expression Expression,
-    units: &[EvaluationUnit],
+fn called_procedure(
+    expression: Expression<'_>,
     reference: gimli::DieReference<usize>,
     address: Option<ImageAddress>,
-) -> std::result::Result<&'expression [u8], EvaluateError> {
+) -> std::result::Result<&[u8], EvaluateError> {
     let offset = match reference {
-        gimli::DieReference::UnitRef(offset) => debug_info_offset(expression, units, offset),
+        gimli::DieReference::UnitRef(offset) => debug_info_offset(expression, offset),
         gimli::DieReference::DebugInfoRef(offset) => u64::try_from(offset.0).ok(),
     };
     let procedure = offset
-        .and_then(|offset| expression.procedures.get(&offset))
+        .and_then(|offset| expression.procedure(offset))
         .ok_or(crate::UnsupportedVariableFeature::CrossDieEvaluation)?;
     // A procedure without a location has no effect (DWARF 5 section 2.5.1.5).
-    let Some(location) = procedure else {
+    let Some(location) = procedure.locations() else {
         return Ok(&[]);
     };
-    match location.expression(address) {
-        Ok(Some(called)) => Ok(&called.bytes),
+    match select(location, address) {
+        Ok(Some(called)) => Ok(called.bytes()),
         Ok(None) => Err(VariableUnavailableReason::UnavailableAtInstruction.into()),
         Err(LocationSelectionError::Unavailable(reason)) => Err(reason.into()),
         Err(LocationSelectionError::Malformed(description)) => {
@@ -489,10 +474,9 @@ fn called_procedure<'expression>(
 /// held (DWARF 5 section 2.5.1.7).
 fn entry_parameter(
     operand: gimli::Expression<Reader<'_>>,
-    expression: &Expression,
-    units: &[EvaluationUnit],
+    expression: Expression<'_>,
 ) -> std::result::Result<(EntryParameter, gimli::ValueType), EvaluateError> {
-    let mut operations = operand.operations(expression.encoding);
+    let mut operations = operand.operations(expression.encoding());
     let mut next = || {
         operations
             .next()
@@ -514,7 +498,7 @@ fn entry_parameter(
             None,
         ) => (
             EntryParameter::Register(register.0),
-            evaluation_value_type(expression, units, base_type.0)?,
+            evaluation_value_type(expression, base_type.0)?,
         ),
         (
             Some(gimli::Operation::RegisterOffset {
@@ -528,7 +512,7 @@ fn entry_parameter(
                 space: false,
             }),
             None,
-        ) if u64::from(size) == u64::from(expression.encoding.address_size) => (
+        ) if u64::from(size) == u64::from(expression.encoding().address_size) => (
             EntryParameter::Referent(register.0),
             gimli::ValueType::Generic,
         ),
@@ -538,17 +522,15 @@ fn entry_parameter(
 }
 
 fn evaluation_value_type(
-    expression: &Expression,
-    units: &[EvaluationUnit],
+    expression: Expression<'_>,
     offset: usize,
 ) -> std::result::Result<gimli::ValueType, VariableUnavailableReason> {
     if offset == 0 {
         return Ok(gimli::ValueType::Generic);
     }
-    units
-        .get(expression.unit)
-        .and_then(|unit| unit.base_types.get(&offset))
-        .copied()
+    u64::try_from(offset)
+        .ok()
+        .and_then(|offset| expression.base_type(offset))
         .ok_or_else(|| crate::UnsupportedVariableFeature::TypedValue.into())
 }
 

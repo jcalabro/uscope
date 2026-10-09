@@ -52,21 +52,46 @@ pub fn normalize(types: &[TypeNode]) -> BTreeMap<TypeId, Result<CoroutineInfo, A
         Some(TypeNode::Resolved(info)) => Some(info),
         _ => None,
     };
-    types
-        .iter()
-        .filter_map(|node| match node {
-            TypeNode::Resolved(info)
-                if matches!(
-                    info.kind,
-                    TypeKind::Record { .. } | TypeKind::Variant { .. }
-                ) =>
-            {
-                let kind = coroutine_kind(&info.name)?;
-                Some((info.reference.id, coroutine(info, kind, &by_id)))
-            }
-            TypeNode::Resolved(_) | TypeNode::Malformed { .. } => None,
+    found(types.iter().map(|node| node.reference().id), &by_id)
+}
+
+/// Every coroutine of `table`, as [`normalize`] finds them, decoding only
+/// the types named as coroutines and those their states hold.
+pub fn in_table(
+    table: &crate::image::types::TypeTable,
+) -> BTreeMap<TypeId, Result<CoroutineInfo, Arc<str>>> {
+    let by_id = |id: TypeId| {
+        table.info(crate::TypeReference {
+            image: table.image(),
+            id,
         })
-        .collect()
+    };
+    found(
+        table
+            .view()
+            .aggregates_named(|name| coroutine_kind(name).is_some()),
+        &by_id,
+    )
+}
+
+/// The records and variants among `ids` that their names say are
+/// coroutines, with what each is.
+fn found<'a>(
+    ids: impl Iterator<Item = TypeId>,
+    types: &impl Fn(TypeId) -> Option<&'a TypeInfo>,
+) -> BTreeMap<TypeId, Result<CoroutineInfo, Arc<str>>> {
+    ids.filter_map(|id| {
+        let info = types(id)?;
+        if !matches!(
+            info.kind,
+            TypeKind::Record { .. } | TypeKind::Variant { .. }
+        ) {
+            return None;
+        }
+        let kind = coroutine_kind(&info.name)?;
+        Some((id, coroutine(info, kind, types)))
+    })
+    .collect()
 }
 
 fn coroutine<'a>(
@@ -258,17 +283,23 @@ fn state_kind(name: &str) -> Option<CoroutineStateKind> {
 /// `{async_closure#N}` within the namespace of the function that wrote it:
 /// an `async fn`'s body is that function, and a block or closure is
 /// numbered within it. `namespace` is the enclosing names, outermost
-/// first, and a block within another coroutine's body is named within
-/// that body's name.
-pub fn body_name(name: &str, namespace: &[Arc<str>]) -> Option<Arc<str>> {
+/// first and joined by `::`, and a block within another coroutine's body
+/// is named within that body's name.
+pub fn body_name(name: &str, namespace: &str) -> Option<Arc<str>> {
+    if !name.starts_with("{async_") {
+        return None;
+    }
     let name = without_arguments(name)?;
     let numbered = |prefix: &str| {
         name.strip_prefix(prefix)
             .and_then(|rest| rest.strip_suffix('}'))
             .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
     };
-    let (last, outer) = namespace.split_last()?;
-    let enclosing = body_name(last, outer).unwrap_or_else(|| Arc::clone(last));
+    if namespace.is_empty() {
+        return None;
+    }
+    let (outer, last) = namespace.rsplit_once("::").unwrap_or(("", namespace));
+    let enclosing = body_name(last, outer).unwrap_or_else(|| last.into());
     if numbered("{async_fn#").is_some() {
         Some(enclosing)
     } else if let Some(number) = numbered("{async_block#") {
@@ -318,39 +349,34 @@ mod tests {
 
     #[test]
     fn bodies_are_named_for_the_functions_that_wrote_them() {
-        let namespace = ["steps".into(), "leaf".into()];
+        let namespace = "steps::leaf";
         assert_eq!(
-            body_name("{async_fn#0}", &namespace).as_deref(),
+            body_name("{async_fn#0}", namespace).as_deref(),
             Some("leaf")
         );
         assert_eq!(
-            body_name("{async_block#2}", &namespace).as_deref(),
+            body_name("{async_block#2}", namespace).as_deref(),
             Some("leaf::{async block#2}")
         );
         assert_eq!(
-            body_name("{async_closure#0}", &namespace).as_deref(),
+            body_name("{async_closure#0}", namespace).as_deref(),
             Some("leaf::{async closure#0}")
         );
         // A block in an async function's body, or in another block, is
         // named within the function that wrote it.
-        let within = ["steps".into(), "leaf".into(), "{async_fn#0}".into()];
+        let within = "steps::leaf::{async_fn#0}";
         assert_eq!(
-            body_name("{async_block#1}", &within).as_deref(),
+            body_name("{async_block#1}", within).as_deref(),
             Some("leaf::{async block#1}")
         );
-        let within = [
-            "steps".into(),
-            "leaf".into(),
-            "{async_fn#0}".into(),
-            "{async_block#1}".into(),
-        ];
+        let within = "steps::leaf::{async_fn#0}::{async_block#1}";
         assert_eq!(
-            body_name("{async_block#0}", &within).as_deref(),
+            body_name("{async_block#0}", within).as_deref(),
             Some("leaf::{async block#1}::{async block#0}")
         );
-        assert_eq!(body_name("{closure#0}", &namespace), None);
-        assert_eq!(body_name("{async_fn#}", &namespace), None);
-        assert_eq!(body_name("{async_fn#0}", &[]), None);
+        assert_eq!(body_name("{closure#0}", namespace), None);
+        assert_eq!(body_name("{async_fn#}", namespace), None);
+        assert_eq!(body_name("{async_fn#0}", ""), None);
         assert_eq!(
             coroutine_kind("{async_block_env#1}"),
             Some(CoroutineKind::AsyncBlock)
@@ -359,7 +385,7 @@ mod tests {
 
         // A generic function's names end in its arguments.
         assert_eq!(
-            body_name("{async_fn#0}<alloc::sync::Arc<u32>>", &namespace).as_deref(),
+            body_name("{async_fn#0}<alloc::sync::Arc<u32>>", namespace).as_deref(),
             Some("leaf")
         );
         assert!(is_async_fn_body("{async_fn#0}<u32>"));

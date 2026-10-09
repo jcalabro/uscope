@@ -10,15 +10,13 @@ async fn functions_named_only_by_their_linkage_names_are_cataloged() {
     assert!(
         image
             .functions()
-            .iter()
-            .any(|function| function.name.contains("thunk")
-                && function.name.contains("Tile::~Tile()")
-                && function.linkage_name.as_deref() == Some("_ZThn16_N4TileD1Ev")),
+            .any(|function| function.name().contains("thunk")
+                && function.name().contains("Tile::~Tile()")
+                && function.linkage_name() == Some("_ZThn16_N4TileD1Ev")),
         "{:?}",
         image
             .functions()
-            .iter()
-            .filter(|function| function.name.contains("thunk"))
+            .filter(|function| function.name().contains("thunk"))
             .collect::<Vec<_>>()
     );
 }
@@ -30,17 +28,13 @@ async fn discarded_functions_are_not_cataloged_at_their_tombstone_addresses() {
     let image = load_fixture_image("crash-rust-o0").await;
     let first_code = image
         .code_instances()
-        .iter()
-        .flat_map(|instance| instance.ranges.iter())
+        .flat_map(uscope::CodeInstance::ranges)
         .map(|range| range.start)
         .min()
         .expect("the fixture has code");
     assert!(first_code.get() > 0x1000, "code starts at {first_code}");
     assert!(
-        image
-            .statement_rows()
-            .iter()
-            .all(|row| row.address >= first_code),
+        image.statement_rows().all(|row| row.address >= first_code),
         "a line row lies before the first function"
     );
     assert!(
@@ -72,8 +66,8 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         "types-cpp-gcc-dwarf5",
     ] {
         let image = load_fixture_image(fixture).await;
-        assert!(!image.types().is_empty(), "{fixture}");
-        for (index, node) in image.types().iter().enumerate() {
+        assert!(image.type_count() != 0, "{fixture}");
+        for (index, node) in image.types().enumerate() {
             let reference = node.reference();
             assert_eq!(reference.image, image.id(), "{fixture}: {node:?}");
             assert_eq!(
@@ -106,7 +100,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         let image = &images[fixture];
         let resolved = image
             .types()
-            .iter()
             .filter_map(|node| match node {
                 uscope::TypeNode::Resolved(info) => Some(info),
                 _ => None,
@@ -150,7 +143,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     for fixture in ["variables-cpp-gcc-o0", "variables-cpp-clang-o0"] {
         let image = &images[fixture];
         assert!(
-            image.types().iter().any(|node| matches!(
+            image.types().any(|node| matches!(
                 node,
                 uscope::TypeNode::Resolved(uscope::TypeInfo {
                     name,
@@ -170,7 +163,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         for name in ["counted_global", "packed_global"] {
             let global = image
                 .globals()
-                .iter()
                 .find(|global| global.name.as_ref() == name)
                 .unwrap_or_else(|| panic!("{fixture}: missing global {name}"));
             let uscope::GlobalVariableType::Resolved(info) = &global.type_info else {
@@ -191,7 +183,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         let global_type = |name: &str| {
             let global = image
                 .globals()
-                .iter()
                 .find(|global| global.name.as_ref() == name)
                 .unwrap_or_else(|| panic!("{fixture}: missing global {name}"));
             match &global.type_info {
@@ -220,7 +211,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         }
         let modifiers = image
             .types()
-            .iter()
             .filter_map(|node| match node {
                 uscope::TypeNode::Resolved(uscope::TypeInfo {
                     kind: uscope::TypeKind::Modified { modifier, .. },
@@ -264,10 +254,9 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     ] {
         let found = images[fixture]
             .functions()
-            .iter()
-            .find(|info| info.name.rsplit(['.', ':']).next() == Some(function))
+            .find(|info| info.name().rsplit(['.', ':']).next() == Some(function))
             .unwrap_or_else(|| panic!("{fixture}: no function {function}"));
-        assert_eq!(found.language, language, "{fixture}: {found:?}");
+        assert_eq!(found.language(), language, "{fixture}: {found:?}");
     }
 
     let go = &images["variables-go-o0"];
@@ -283,17 +272,16 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     );
     assert!(
         go.producers()
-            .iter()
             .any(|producer| producer.starts_with("Go cmd/compile go1.27.")),
         "{:?}",
-        go.producers()
+        go.producers().collect::<Vec<_>>()
     );
     assert_eq!(
         images["variables-gcc-o0"].constant("runtime._Grunning"),
         None
     );
     assert!(
-        go.types().iter().any(|node| matches!(
+        go.types().any(|node| matches!(
             node,
             uscope::TypeNode::Resolved(uscope::TypeInfo {
                 kind: uscope::TypeKind::Named {
@@ -307,7 +295,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     );
     let go_names = go
         .types()
-        .iter()
         .filter_map(|node| match node {
             uscope::TypeNode::Resolved(info) => Some(info.name.as_ref()),
             _ => None,
@@ -330,7 +317,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
 
     let zig = &images["variables-zig-o0"];
     assert!(
-        zig.types().iter().any(|node| matches!(
+        zig.types().any(|node| matches!(
             node,
             uscope::TypeNode::Resolved(uscope::TypeInfo {
                 kind: uscope::TypeKind::Named {
@@ -346,7 +333,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     let rust = &images["variables-rust-o0"];
     assert!(
         rust.types()
-            .iter()
             .filter_map(|node| match node {
                 uscope::TypeNode::Resolved(info) => Some(info.name.as_ref()),
                 _ => None,
@@ -375,13 +361,13 @@ async fn line_zero_rows_do_not_extend_the_previous_source_line() {
         .function_named("inspect_scalars")
         .expect("inspect_scalars definition");
     let instance = image
-        .instances_for_function(function.id)
+        .instances_for_function(function.id())
         .next()
         .expect("inspect_scalars instance");
 
     let mut attributed = 0_u64;
     let mut unattributed = 0_u64;
-    for range in instance.ranges.iter() {
+    for range in instance.ranges() {
         for address in range.start.get()..range.end.get() {
             if image
                 .locate(uscope::ImageAddress::new(address))
@@ -409,13 +395,12 @@ async fn hand_written_assembly_after_a_function_has_no_source_line() {
     let image = load_fixture_image("assembly-after-code").await;
     let bare = image
         .symbols()
-        .iter()
-        .find(|symbol| symbol.name.as_ref() == "bare")
+        .find(|symbol| symbol.name() == "bare")
         .expect("the fixture defines bare");
-    let extent = bare.extent.expect("bare has a size").range;
+    let extent = bare.extent().expect("bare has a size").range;
     // The fixture's layout: no row begins in bare, and the row before it
     // runs on past it.
-    let rows = image.statement_rows();
+    let rows = image.statement_rows().collect::<Vec<_>>();
     assert!(
         rows.iter().all(|row| !extent.contains(row.address)),
         "a row describes bare"
@@ -488,8 +473,8 @@ fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {
 fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
     let leaf = image.function_named("leaf").expect("leaf definition");
     let leaf_instances: Vec<_> = image
-        .instances_for_function(leaf.id)
-        .filter(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }))
+        .instances_for_function(leaf.id())
+        .filter(|instance| matches!(instance.kind(), CodeInstanceKind::Inline { .. }))
         .collect();
 
     assert_eq!(
@@ -500,15 +485,15 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
     assert_eq!(
         image
             .code_instances()
-            .iter()
-            .filter(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }))
+            .filter(|instance| matches!(instance.kind(), CodeInstanceKind::Inline { .. }))
             .count(),
         9,
         "unexpected {fixture} inline instance count"
     );
     assert!(
-        image.code_instances().iter().any(|instance| {
-            matches!(instance.kind, CodeInstanceKind::Inline { .. }) && instance.ranges.len() > 1
+        image.code_instances().any(|instance| {
+            matches!(instance.kind(), CodeInstanceKind::Inline { .. })
+                && instance.ranges().len() > 1
         }),
         "{fixture} lost discontiguous ranges"
     );
@@ -517,7 +502,7 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
     for instance in &leaf_instances {
         let CodeInstanceKind::Inline {
             call_site: Some(call_site),
-        } = &instance.kind
+        } = &instance.kind()
         else {
             panic!("{fixture} leaf instance has no call site")
         };
@@ -538,13 +523,13 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
         .iter()
         .find(|instance| {
             instance
-                .parent
+                .parent()
                 .and_then(|parent| image.code_instance(parent))
-                .and_then(|parent| image.function(parent.function))
-                .is_some_and(|function| function.name.as_ref() == "middle")
+                .and_then(|parent| image.function(parent.function()))
+                .is_some_and(|function| function.name() == "middle")
         })
         .expect("nested leaf instance");
-    let location = image.locate(nested_leaf.ranges[0].start);
+    let location = image.locate(nested_leaf.ranges().next().unwrap().start);
     let InlineFrameLookup::Unique(chain) = location.inline_frames else {
         panic!("{fixture} did not resolve one inline chain: {location:?}")
     };
@@ -554,10 +539,9 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
         .map(|instance| {
             let instance = image.code_instance(*instance).expect("known instance");
             image
-                .function(instance.function)
+                .function(instance.function())
                 .expect("known function")
-                .name
-                .as_ref()
+                .name()
         })
         .collect();
     assert_eq!(
@@ -566,12 +550,16 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
         "unexpected {fixture} chain"
     );
 
-    assert!(!image.statement_rows().is_empty());
+    assert!(image.statement_rows().next().is_some());
     if fixture.starts_with("inline-gcc") {
         assert!(
-            image.statement_rows().windows(2).any(|rows| {
-                rows[0].sequence == rows[1].sequence && rows[0].address == rows[1].address
-            }),
+            image
+                .statement_rows()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|rows| {
+                    rows[0].sequence == rows[1].sequence && rows[0].address == rows[1].address
+                }),
             "{fixture} lost equal-address line rows"
         );
     }
@@ -582,7 +570,7 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
     };
     assert!(leaf_instances.iter().all(|instance| {
         instance
-            .breakpoint_entry
+            .breakpoint_entry()
             .is_some_and(|entry| entry.provenance == expected_provenance)
     }));
 }
@@ -601,12 +589,12 @@ async fn go_code_roles_follow_the_runtimes_traceback() {
         let roles = |name: &str| {
             let mut roles = image
                 .functions_named(name)
-                .flat_map(|function| image.instances_for_function(function.id))
-                .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+                .flat_map(|function| image.instances_for_function(function.id()))
+                .filter(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine))
                 .map(|instance| {
-                    let role = image.code_role(instance.ranges[0].start);
-                    let function = image.function(instance.function).expect("a function");
-                    assert_eq!(function.role, role, "{fixture}: {name}");
+                    let role = image.code_role(instance.ranges().next().unwrap().start);
+                    let function = image.function(instance.function()).expect("a function");
+                    assert_eq!(function.role(), role, "{fixture}: {name}");
                     format!("{role:?}")
                 })
                 .collect::<Vec<_>>();
@@ -663,7 +651,7 @@ async fn go_code_roles_follow_the_runtimes_traceback() {
                 ("runtime.goexit.abi0", Outermost),
             ] {
                 let symbol = image.symbol_named(name).expect("a symbol");
-                assert_eq!(symbol.role, role, "{name}");
+                assert_eq!(symbol.role(), role, "{name}");
             }
         }
     }

@@ -53,7 +53,7 @@ async fn stops_with_debug_information(mut scenario: Scenario, debug_file: &Path)
         Some(debug_file),
         "the debug file"
     );
-    assert!(!image.functions().is_empty());
+    assert!(image.functions().len() != 0);
     let breakpoint = scenario
         .operation(
             "add breakpoint",
@@ -76,8 +76,7 @@ async fn stops_with_debug_information(mut scenario: Scenario, debug_file: &Path)
     assert!(
         image
             .symbols()
-            .iter()
-            .any(|symbol| &*symbol.name == "breakpoint_target"),
+            .any(|symbol| symbol.name() == "breakpoint_target"),
         "the debug file's symbols"
     );
     scenario.shutdown().await;
@@ -110,7 +109,7 @@ async fn a_debug_link_to_a_file_from_another_build_is_refused() {
     let scenario = Scenario::new("stale-debuglink", &program);
     let image = scenario.handle().module_image();
     assert_eq!(image.debug_file(), None);
-    assert!(image.functions().is_empty());
+    assert_eq!(image.functions().len(), 0);
     scenario.shutdown().await;
 }
 
@@ -119,7 +118,7 @@ async fn a_debug_directory_holds_the_debug_file_a_build_id_names() {
     let fixture = split("basic-build-id");
     // Without the directory, nothing describes the program.
     let scenario = Scenario::new("build-id-missing", &fixture);
-    assert!(scenario.handle().module_image().functions().is_empty());
+    assert_eq!(scenario.handle().module_image().functions().len(), 0);
     scenario.shutdown().await;
 
     let options = DebugFileOptions {
@@ -239,7 +238,7 @@ async fn debuginfod_downloads_debug_files_into_its_cache() {
         fs::read(split(".debug/basic-debuglink.debug")).expect("a debug file"),
     );
     let scenario = Scenario::with_debug_files("debuginfod-wrong", &fixture, &options(&wrong.url));
-    assert!(scenario.handle().module_image().functions().is_empty());
+    assert_eq!(scenario.handle().module_image().functions().len(), 0);
     assert_eq!(wrong.requests.load(Ordering::SeqCst), 1);
     scenario.shutdown().await;
 
@@ -270,7 +269,7 @@ async fn a_debug_file_needing_a_supplementary_file_is_refused_with_its_reason() 
     };
     let mut scenario = Scenario::with_debug_files("altlink", split("basic-build-id"), &options);
     let image = Arc::clone(scenario.handle().module_image());
-    assert!(image.functions().is_empty());
+    assert_eq!(image.functions().len(), 0);
     assert_eq!(image.debug_file(), None);
     let Some(uscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file() else {
         panic!("{:?}", image.separate_debug_file());

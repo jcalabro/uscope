@@ -336,13 +336,12 @@ fn expected_physical_entry(scenario: &Scenario, case: &EntryBoundaryCase) -> usc
         .function_named(case.function)
         .unwrap_or_else(|error| panic!("{} missing {}: {error}", case.fixture, case.function));
     let instance = image
-        .instances_for_function(function.id)
-        .find(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+        .instances_for_function(function.id())
+        .find(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine))
         .unwrap_or_else(|| panic!("{} missing physical {}", case.fixture, case.function));
 
     if let Some(marker) = image
         .statement_rows()
-        .iter()
         .find(|row| row.flags.prologue_end() && instance.contains(row.address))
     {
         return marker.address;
@@ -353,7 +352,6 @@ fn expected_physical_entry(scenario: &Scenario, case: &EntryBoundaryCase) -> usc
         .expect("markerless entry case has an explicit conservative expectation");
     image
         .statement_rows()
-        .iter()
         .find(|row| {
             instance.contains(row.address)
                 && row.flags.is_statement()

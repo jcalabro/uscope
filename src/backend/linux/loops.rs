@@ -106,8 +106,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         ) else {
             return Ok(None);
         };
-        let function = instance.function;
-        let Some(enclosing) = image.function(function).and_then(|info| info.enclosing) else {
+        let function = instance.function();
+        let Some(enclosing) = image
+            .function(function)
+            .and_then(crate::image::functions::Function::enclosing)
+        else {
             // A step over in the enclosing function enters its loops'
             // bodies. A plan that single steps finds inlined ones.
             if kind != StepKind::OverSource {
@@ -115,9 +118,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             let bodies = image
                 .functions()
-                .iter()
-                .filter(|body| body.enclosing == Some(function))
-                .map(|body| body.id)
+                .filter(|body| body.enclosing() == Some(function))
+                .map(crate::image::functions::Function::id)
                 .collect::<BTreeSet<_>>();
             if bodies.is_empty() {
                 return Ok(None);
@@ -147,13 +149,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         // Inlined with its iterator, the body runs in the enclosing
         // function's own activation.
-        if matches!(instance.kind, CodeInstanceKind::Inline { .. }) {
-            let mut parent = instance.parent;
+        if matches!(instance.kind(), CodeInstanceKind::Inline { .. }) {
+            let mut parent = instance.parent();
             while let Some(outer) = parent.and_then(|id| image.code_instance(id)) {
-                if outer.function == enclosing {
+                if outer.function() == enclosing {
                     return Ok(Some(in_body(activation, None)));
                 }
-                parent = outer.parent;
+                parent = outer.parent();
             }
             return Ok(None);
         }
@@ -380,7 +382,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// begin.
     fn inlined_body_statements(
         &self,
-        instance: &crate::CodeInstanceInfo,
+        instance: crate::CodeInstance<'_>,
         bodies: &BTreeSet<FunctionId>,
     ) -> BTreeSet<VirtualAddress> {
         let Some(inferior) = self.inferior.as_ref() else {
@@ -388,9 +390,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         let image = &self.module_image;
         image
-            .line_entries()
-            .iter()
-            .filter(|line| line.statement && instance.contains(line.range.start))
+            .line_entries_in(instance)
+            .filter(|line| line.statement)
             .filter(|line| {
                 innermost_function(image, &image.locate(line.range.start))
                     .is_some_and(|function| bodies.contains(&function))
@@ -412,8 +413,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         self.module_image
             .instances_for_function(function)
-            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
-            .filter_map(|instance| instance.breakpoint_entry.as_ref())
+            .filter(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine))
+            .filter_map(crate::image::functions::CodeInstance::breakpoint_entry)
             .filter_map(|entry| inferior.loaded_module.virtual_address(entry.address).ok())
             .collect()
     }
@@ -474,8 +475,8 @@ pub(super) fn inline_loop_step_is_complete(
 pub(super) fn is_loop_body(image: &ModuleImage, instance: CodeInstanceId) -> bool {
     image
         .code_instance(instance)
-        .and_then(|instance| image.function(instance.function))
-        .is_some_and(|function| function.enclosing.is_some())
+        .and_then(|instance| image.function(instance.function()))
+        .is_some_and(|function| function.enclosing().is_some())
 }
 
 /// The function whose code is innermost at a location: the innermost
@@ -488,7 +489,7 @@ fn innermost_function(image: &ModuleImage, location: &ImageLocation) -> Option<F
     }?;
     image
         .code_instance(instance)
-        .map(|instance| instance.function)
+        .map(crate::image::functions::CodeInstance::function)
 }
 
 /// Whether a location runs `function`'s code, physically or inlined.
@@ -496,7 +497,7 @@ fn runs_function(image: &ModuleImage, location: &ImageLocation, function: Functi
     let runs = |instance: &CodeInstanceId| {
         image
             .code_instance(*instance)
-            .is_some_and(|instance| instance.function == function)
+            .is_some_and(|instance| instance.function() == function)
     };
     location.physical_instance.as_ref().is_some_and(runs)
         || match &location.inline_frames {

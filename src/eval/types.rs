@@ -67,7 +67,7 @@ pub enum Category {
 /// The types a scope describes, by reference.
 pub trait TypeSource {
     /// One program type, or `None` when its metadata is malformed.
-    fn type_info(&self, ty: TypeReference) -> Option<TypeInfo>;
+    fn type_info(&self, ty: TypeReference) -> Option<&TypeInfo>;
 
     /// The size of the target's addresses, in bytes.
     fn pointer_size(&self) -> u8;
@@ -94,7 +94,7 @@ const MAX_WRAPPERS: usize = 64;
 pub fn representation(
     types: &dyn TypeSource,
     mut ty: TypeReference,
-) -> Result<(TypeReference, TypeInfo), Arc<str>> {
+) -> Result<(TypeReference, &TypeInfo), Arc<str>> {
     for _ in 0..MAX_WRAPPERS {
         let info = types
             .type_info(ty)
@@ -360,7 +360,7 @@ pub fn type_info(types: &dyn TypeSource, ty: &Ty) -> TypeInfo {
     if let Ty::Program(reference) = ty
         && let Some(info) = types.type_info(*reference)
     {
-        return info;
+        return info.clone();
     }
     let name: Arc<str> = type_name(types, ty).into();
     let base = |encoding, byte_size| {

@@ -393,7 +393,7 @@ impl<'a, S: Scope> ViewScope<'a, S> {
 }
 
 impl<S: Scope> TypeSource for ViewScope<'_, S> {
-    fn type_info(&self, ty: TypeReference) -> Option<TypeInfo> {
+    fn type_info(&self, ty: TypeReference) -> Option<&TypeInfo> {
         self.base.type_info(ty)
     }
 
@@ -677,8 +677,10 @@ fn members<S: Scope>(
 ) -> Result<BoundShape<S::Step>, Rejection> {
     let record = representation(scope, scope.self_type)
         .ok()
-        .and_then(|(_, info)| match info.kind {
-            TypeKind::Record { members, bases, .. } => Some((members, bases)),
+        .and_then(|(_, info)| match &info.kind {
+            TypeKind::Record { members, bases, .. } => {
+                Some((Arc::clone(members), Arc::clone(bases)))
+            }
             _ => None,
         });
     let Some((members, bases)) = record else {
@@ -848,7 +850,7 @@ fn suits(format: BoundFormat, ty: &Ty, types: &dyn TypeSource) -> Result<(), Str
         BoundFormat::Utf8 => match category {
             Category::Array { element, .. } | Category::Slice(element) => {
                 types.type_info(element).is_some_and(|info| {
-                    matches!(info.kind, TypeKind::Base(base) if base.byte_size == 1
+                    matches!(&info.kind, TypeKind::Base(base) if base.byte_size == 1
                         && !matches!(base.encoding, BaseTypeEncoding::Boolean | BaseTypeEncoding::Floating))
                 })
             }
@@ -1419,7 +1421,7 @@ fn resolve_type<S: Scope>(
             let of = resolve_type(of, scope)?;
             let outer = scope
                 .type_info(of)
-                .map(|info| info.name)
+                .map(|info| Arc::clone(&info.name))
                 .ok_or_else(|| "the type is malformed".to_owned())?;
             for separator in [".", "::"] {
                 let full = format!("{outer}{separator}{name}");
@@ -1481,10 +1483,13 @@ fn construct<S: Scope>(name: &str, scope: &ViewScope<'_, S>) -> Result<TypeRefer
     }
     let mut found = Vec::<TypeReference>::new();
     for candidate in candidates(&pattern, scope) {
-        let Some(identity) = scope.type_info(candidate).and_then(|info| info.identity) else {
+        let Some(identity) = scope
+            .type_info(candidate)
+            .and_then(|info| info.identity.as_deref())
+        else {
             continue;
         };
-        if super::pattern::matches_with(&pattern, &identity, scope, known.clone()).is_some()
+        if super::pattern::matches_with(&pattern, identity, scope, known.clone()).is_some()
             && !found.iter().any(|other| scope.same_type(*other, candidate))
         {
             found.push(candidate);
@@ -1521,14 +1526,14 @@ fn known_types<S: Scope>(scope: &ViewScope<'_, S>) -> Captures {
 fn candidates<S: Scope>(pattern: &Pattern, scope: &ViewScope<'_, S>) -> Vec<TypeReference> {
     let language = scope
         .type_info(scope.self_type)
-        .and_then(|info| info.identity.map(|identity| identity.language));
+        .and_then(|info| info.identity.as_ref().map(|identity| identity.language));
     scope
         .types_with_base(&pattern.base)
         .into_iter()
         .filter(|candidate| {
             scope
                 .type_info(*candidate)
-                .and_then(|info| info.identity)
+                .and_then(|info| info.identity.as_deref())
                 .is_some_and(|identity| {
                     language.is_none_or(|language| identity.language == language)
                 })

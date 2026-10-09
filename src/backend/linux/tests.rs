@@ -662,23 +662,13 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
                     },
                 )
                 .collect(),
-            symbols: Vec::new(),
-            symbol_sources: crate::model::SymbolTableSources::default(),
-            got_slots: Vec::new(),
-            globals: Vec::new(),
-            types: Arc::default(),
-            source_files: Vec::new(),
-            statements: Vec::new(),
-            lines: Vec::new(),
-            sections: Vec::new(),
-            vtables: Vec::new(),
-            coroutines: std::collections::BTreeMap::new(),
-            resume_points: std::collections::BTreeMap::new(),
-            thread_local_storage: false,
-            constants: std::collections::BTreeMap::new(),
-            producers: Vec::new(),
-            packages: Vec::new(),
-            thread_locals: std::collections::BTreeMap::new(),
+            files: {
+                // The file the call sites name.
+                let mut files = crate::image::lines::Files::default();
+                files.intern(PathBuf::from("/test/inline.c"));
+                files
+            },
+            ..crate::model::ModuleMetadata::default()
         },
     ))
 }
@@ -941,6 +931,9 @@ struct FakeTrace {
     signal_masks: RefCell<BTreeMap<Pid, u64>>,
     /// Processes' start times; others' are unreadable.
     start_times: RefCell<BTreeMap<Pid, u64>>,
+    /// Mapped library files, by path, with their load bias and whether
+    /// their debug information loads.
+    libraries: RefCell<BTreeMap<PathBuf, (u64, bool)>>,
 }
 
 impl FakeTrace {
@@ -1145,16 +1138,71 @@ impl LinuxTraceOps for FakeTrace {
     fn allocate_stop_id(&self) -> StopId {
         allocate_stop_id()
     }
-    fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
-        None
+    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+        let libraries = self.libraries.borrow();
+        let (bias, _) = libraries.get(&mapping.path)?;
+        Some((mapping.path.clone(), *bias))
     }
-    fn load_module(
+    fn module_mappings(&self, _pid: Pid) -> Result<super::modules::ProcessMappings> {
+        Ok(super::modules::ProcessMappings {
+            files: self
+                .libraries
+                .borrow()
+                .iter()
+                .enumerate()
+                .map(|(index, (path, (bias, _)))| ModuleMapping {
+                    path: path.clone(),
+                    inode: 100 + index as u64,
+                    start: *bias,
+                    file_offset: 0,
+                    deleted: false,
+                    executable: true,
+                })
+                .collect(),
+            vdso: None,
+        })
+    }
+    fn load_modules(
         &self,
-        _path: &Path,
-        _id: crate::ModuleImageId,
+        modules: &[(PathBuf, crate::ModuleImageId)],
         _search: &crate::debug_info::DebugFileSearch,
-    ) -> Result<DebugInfo> {
-        panic!("unexpected module load")
+    ) -> Vec<Result<DebugInfo>> {
+        let names = modules
+            .iter()
+            .map(|(path, id)| format!("{}#{}", path.display(), id.get()))
+            .collect::<Vec<_>>();
+        self.record(format!("load_modules {}", names.join(" ")));
+        modules
+            .iter()
+            .map(|(path, id)| {
+                let loads = self
+                    .libraries
+                    .borrow()
+                    .get(path)
+                    .is_some_and(|(_, loads)| *loads);
+                if !loads {
+                    return Err(backend_error(LinuxError::System(Errno::ENOEXEC)));
+                }
+                let tables = crate::model::seal(
+                    crate::TargetDescription::X86_64,
+                    AddressRange {
+                        start: ImageAddress::new(0),
+                        end: ImageAddress::new(0x1000),
+                    },
+                    crate::model::ModuleMetadata::default(),
+                );
+                let binding = crate::model::Binding {
+                    path: Arc::new(path.clone()),
+                    debug_path: None,
+                    id: *id,
+                };
+                Ok(DebugInfo {
+                    image: Arc::new(ModuleImage::bind(&binding, Arc::new(tables)).unwrap()),
+                    unwind: Arc::new(UnusedUnwindInfo),
+                    variables: Arc::new(UnusedVariableInfo),
+                })
+            })
+            .collect()
     }
     fn thread_group_id(&self, _pid: Pid) -> Result<Pid> {
         Ok(self.clone.borrow().expect("a clone is pending").1)
@@ -1163,7 +1211,7 @@ impl LinuxTraceOps for FakeTrace {
         &self,
         _pid: Pid,
         _executable: &Path,
-        _executable_data: &[u8],
+        _image_base: u64,
         _identity: FileIdentity,
     ) -> Result<u64> {
         Ok(0)
@@ -1555,13 +1603,14 @@ fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness
     let (events, event_receiver) = broadcast::channel(256);
     let mut controller = Controller::new(
         SessionLease::detached(),
-        ExecutableSource {
+        crate::backend::ExecutableSource {
             display_path: Arc::new(PathBuf::from("/test/watch")),
             data: sectionless_elf(),
             identity: FileIdentity { inode: 0 },
             process_start_time: None,
             debug_files: crate::debug_info::DebugFileSearch::default(),
-        },
+        }
+        .described(),
         DebugInfo {
             image: Arc::clone(image),
             unwind: Arc::new(UnusedUnwindInfo),
@@ -6108,7 +6157,7 @@ fn glibc_signal_trampoline_expressions_find_the_kernels_saved_registers() {
         .symbols_named("__restore_rt")
         .next()
         .expect("glibc's signal trampoline")
-        .address;
+        .address();
 
     // A handler's frame returned into the trampoline, whose stack holds the
     // ucontext; each saved register gets a value of its own.
@@ -6141,4 +6190,88 @@ fn glibc_signal_trampoline_expressions_find_the_kernels_saved_registers() {
             "DWARF register {register}"
         );
     }
+}
+
+/// The modules a stop observes for the first time load as one batch and
+/// are numbered and registered in the order they were observed, whatever
+/// order their loads finish in; one that does not load keeps its number
+/// and leaves its frames unnamed, and a later stop loads only what is new,
+/// trying again what did not load.
+#[test]
+fn new_modules_load_together_and_register_in_observation_order() {
+    let mut harness = watch_harness(1);
+    for (path, bias, loads) in [
+        ("/lib/libc.so", 0x7000_0000, true),
+        ("/lib/liba.so", 0x7100_0000, true),
+        ("/lib/libb.so", 0x7200_0000, false),
+    ] {
+        harness
+            .trace()
+            .libraries
+            .borrow_mut()
+            .insert(PathBuf::from(path), (bias, loads));
+    }
+    harness.trace().take_actions();
+    let libraries = |harness: &WatchHarness| {
+        harness
+            .controller
+            .modules
+            .values()
+            .filter(|module| module.loaded.id != crate::ModuleId::new(0))
+            .map(|module| {
+                (
+                    module.loaded.id.get(),
+                    module.image.path().display().to_string(),
+                    module.image.id().get(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let loaded = |harness: &mut WatchHarness| {
+        harness
+            .published()
+            .into_iter()
+            .filter_map(|event| match event {
+                DebuggerEvent::ModuleLoaded { module, .. } => {
+                    Some((module.module.id.get(), module.path.display().to_string()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    harness.controller.refresh_modules().unwrap();
+    let loads = harness
+        .trace()
+        .take_actions()
+        .into_iter()
+        .filter(|action| action.starts_with("load_modules"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        loads,
+        ["load_modules /lib/liba.so#1 /lib/libb.so#2 /lib/libc.so#3"]
+    );
+    assert_eq!(
+        libraries(&harness),
+        [(1, "/lib/liba.so".into(), 1), (3, "/lib/libc.so".into(), 3)]
+    );
+    assert_eq!(
+        loaded(&mut harness),
+        [(1, "/lib/liba.so".into()), (3, "/lib/libc.so".into())]
+    );
+
+    harness
+        .trace()
+        .libraries
+        .borrow_mut()
+        .insert(PathBuf::from("/lib/libd.so"), (0x7300_0000, true));
+    harness.controller.refresh_modules().unwrap();
+    let loads = harness
+        .trace()
+        .take_actions()
+        .into_iter()
+        .filter(|action| action.starts_with("load_modules"))
+        .collect::<Vec<_>>();
+    assert_eq!(loads, ["load_modules /lib/libb.so#4 /lib/libd.so#5"]);
+    assert_eq!(loaded(&mut harness), [(5, "/lib/libd.so".into())]);
 }

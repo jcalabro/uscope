@@ -36,7 +36,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .filter(|module| module.loaded.id != crate::ModuleId::new(0))
             .find_map(|module| {
                 let symbol = module.image.symbol_named(LOADER_HOOK).ok()?;
-                module.loaded.virtual_address(symbol.address).ok()
+                module.loaded.virtual_address(symbol.address()).ok()
             })
         else {
             return Ok(());
@@ -69,7 +69,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Brings the module registry, the loader's breakpoint, and every
     /// breakpoint's locations up to date while every thread is stopped.
     pub(super) fn refresh_libraries(&mut self) -> Result<()> {
+        let phase = crate::span!("modules");
         let lost_locations = self.refresh_modules()?;
+        drop(phase);
         self.ensure_loader_breakpoint()?;
         self.sync_runtime_hooks()?;
         self.sync_stack_movers()?;

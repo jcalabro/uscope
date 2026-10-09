@@ -5,6 +5,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::image::functions::{CodeInstance, Function, FunctionView};
+use crate::image::lines::LineView;
+use crate::image::symbols::{Symbol, SymbolView};
+use crate::type_identity::NameIndex as _;
 use crate::{Error, Result};
 
 mod locations;
@@ -13,12 +17,12 @@ pub use locations::PackageInfo;
 
 use super::{
     AddressRange, BreakpointEntry, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole,
-    EntryProvenance, FunctionId, FunctionInfo, GlobalVariableId, GlobalVariableInfo, GotSlot,
-    ImageAddress, ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup,
-    LineEntry, LineNumber, ModuleImageId, SectionId, SectionInfo, SectionLocation, SourceFile,
-    SourceFileId, SourceLanguage, SourceLocation, StatementRow, SymbolExtentProvenance, SymbolId,
-    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TypeId,
-    TypeInfo, TypeNode, TypeReference,
+    FunctionId, FunctionInfo, GlobalVariableId, GlobalVariableInfo, GotSlot, ImageAddress,
+    ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup, LineEntry, LineNumber,
+    ModuleImageId, SectionId, SectionInfo, SectionLocation, SourceFile, SourceFileId,
+    SourceLanguage, SourceLocation, StatementRow, SymbolExtentProvenance, SymbolId, SymbolInfo,
+    SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TypeId, TypeInfo, TypeNode,
+    TypeReference,
 };
 
 #[derive(Default)]
@@ -29,32 +33,43 @@ pub struct ModuleMetadata {
     pub symbol_sources: SymbolTableSources,
     /// The GOT slots the loader fills with functions' addresses.
     pub got_slots: Vec<GotSlot>,
-    pub globals: Vec<GlobalVariableInfo>,
     pub types: Arc<[TypeNode]>,
-    pub source_files: Vec<SourceFile>,
-    pub statements: Vec<StatementRow>,
-    pub lines: Vec<LineEntry>,
+    /// Where variables are: expressions and lists of them, with the units
+    /// they were read from.
+    pub locations: crate::image::locations::LocationsBuilder,
+    /// The data objects and the functions whose frames show them.
+    pub variables: crate::image::variables::Variables,
+    /// The calls the functions make.
+    pub calls: crate::image::calls::Calls,
+    /// What reading values of some types takes beyond their layout.
+    pub type_facts: crate::image::type_facts::TypeFacts,
+    /// Source files by resolved path.
+    pub files: crate::image::lines::Files,
+    /// Every line-program row and the code each line describes.
+    pub lines: crate::image::lines::LineTables,
+    /// The call-frame sections and Go's table, as unwinding reads them.
+    pub unwind: Option<crate::image::unwind::Unwind>,
     pub sections: Vec<SectionInfo>,
-    /// Rust trait objects' vtables, by address, with the concrete type each
-    /// is for.
-    pub vtables: Vec<(ImageAddress, TypeReference)>,
-    /// The coroutines among the types, by type, each with what it is or why
-    /// its layout cannot be read as one.
-    pub coroutines: BTreeMap<TypeId, std::result::Result<crate::CoroutineInfo, Arc<str>>>,
     /// Where each out-of-line code instance that runs a coroutine goes for
-    /// each state, or why its dispatch could not be decoded.
-    pub resume_points: BTreeMap<CodeInstanceId, std::result::Result<crate::ResumePoints, Arc<str>>>,
+    /// each state, and which variables of async bodies hold their values
+    /// on resuming.
+    pub resumes: crate::image::resumes::Resumes,
     /// Whether each thread gets its own copy of a block of the module's
     /// storage.
     pub thread_local_storage: bool,
     /// Integer constants the debug information declares by name, such as a
-    /// Go package's `const`s.
-    pub constants: BTreeMap<Arc<str>, crate::IntegerValue>,
-    /// The distinct compilers and versions that produced the debug
-    /// information, as each unit names its producer.
-    pub producers: Vec<Arc<str>>,
+    /// Go package's `const`s, Rust trait objects' vtables, and the
+    /// compilers and versions that produced the debug information, as each
+    /// unit names its producer.
+    pub declarations: crate::image::declarations::Declarations,
     /// The packages whose units the image has.
     pub packages: Vec<PackageInfo>,
+    /// The separate debug file found for the image, whether it was used or
+    /// could not be.
+    pub debug_file: Option<crate::DebugFile>,
+    /// The bytes of the image's `.debug_uscope_views` section, which holds
+    /// views for its own types; empty when it has none.
+    pub embedded_views: Vec<u8>,
     /// Where each thread's copy of each of the image's thread-local
     /// variables is, by name, or why that is unknown.
     pub thread_locals: BTreeMap<Arc<str>, std::result::Result<ThreadLocal, Arc<str>>>,
@@ -71,6 +86,23 @@ pub enum ThreadLocal {
     /// writes as it loads the image, as a library's code reads its
     /// thread-locals.
     Slot(ImageAddress),
+}
+
+/// An image's types by name and base, as name lookups search them.
+struct TypeNames<'a>(&'a crate::image::types::TypeTable);
+
+impl crate::type_identity::NameIndex for TypeNames<'_> {
+    fn image(&self) -> Option<ModuleImageId> {
+        Some(self.0.image())
+    }
+
+    fn by_name(&self, name: &str) -> Vec<TypeId> {
+        self.0.view().named(name).collect()
+    }
+
+    fn by_base(&self, base: &str) -> Vec<TypeId> {
+        self.0.view().with_base(base).collect()
+    }
 }
 
 #[derive(Debug)]
@@ -154,16 +186,16 @@ fn grouped_index<K: Ord, V: Ord>(
 
 /// Every selector naming a global: its name, qualified name, and linkage
 /// name, and its qualified name after its declaring file's path or name.
-fn global_selectors(metadata: &ModuleMetadata) -> Vec<(Arc<str>, GlobalVariableId)> {
+fn global_selectors(image: &ModuleImage) -> Vec<(Arc<str>, GlobalVariableId)> {
     let mut selectors = Vec::new();
-    for global in &metadata.globals {
+    for global in image.globals() {
         selectors.push((Arc::clone(&global.name), global.id));
         selectors.push((Arc::clone(&global.qualified_name), global.id));
         if let Some(linkage_name) = &global.linkage_name {
             selectors.push((Arc::clone(linkage_name), global.id));
         }
         if let Some(declaration) = &global.declaration
-            && let Some(source) = metadata.source_files.get(declaration.file.index())
+            && let Some(source) = image.source_file(declaration.file)
         {
             let path = source.path.to_string_lossy();
             selectors.push((
@@ -182,61 +214,8 @@ fn global_selectors(metadata: &ModuleMetadata) -> Vec<(Arc<str>, GlobalVariableI
     selectors
 }
 
-/// The entries of each code instance: every distinct `prologue_end` address
-/// within an out-of-line instance, or otherwise its own breakpoint entry.
-fn recommended_entries(
-    metadata: &ModuleMetadata,
-    code_range_index: &RangeIndex<CodeInstanceId>,
-) -> BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>> {
-    let mut prologue_ends = BTreeMap::<CodeInstanceId, Vec<BreakpointEntry>>::new();
-    for row in metadata
-        .statements
-        .iter()
-        .filter(|row| row.flags.prologue_end())
-    {
-        for id in code_range_index.containing(row.address) {
-            if !matches!(
-                metadata.code_instances[id.index()].kind,
-                CodeInstanceKind::OutOfLine
-            ) {
-                continue;
-            }
-            let entries = prologue_ends.entry(id).or_default();
-            if !entries.iter().any(|entry| entry.address == row.address) {
-                entries.push(BreakpointEntry {
-                    address: row.address,
-                    provenance: EntryProvenance::Statement,
-                });
-            }
-        }
-    }
-    metadata
-        .code_instances
-        .iter()
-        .filter_map(|instance| {
-            // A coroutine's body begins past its dispatch, wherever its
-            // prologue ends.
-            let entries = match (
-                prologue_ends.remove(&instance.id),
-                instance.breakpoint_entry,
-            ) {
-                (_, Some(entry)) if entry.provenance == EntryProvenance::CoroutineBody => {
-                    vec![entry]
-                }
-                (Some(entries), _) => entries,
-                (None, entry) => vec![entry?],
-            };
-            Some((instance.id, entries.into()))
-        })
-        .collect()
-}
-
-/// Ends each line entry where a function symbol begins inside it. A line
-/// program describes every function it covers from the function's first
-/// instruction, but its last row before code it does not describe, such as
-/// hand-written assembly placed after a compiled function, runs on to the
-/// next row: that code has no source line.
-fn clip_lines_at_functions(lines: &mut [LineEntry], symbols: &[SymbolInfo]) {
+/// Where each function symbol with an extent begins, in order.
+fn function_starts(symbols: &[SymbolInfo]) -> Vec<ImageAddress> {
     let mut starts = symbols
         .iter()
         .filter(|symbol| symbol.kind == SymbolKind::Function && symbol.extent.is_some())
@@ -244,14 +223,159 @@ fn clip_lines_at_functions(lines: &mut [LineEntry], symbols: &[SymbolInfo]) {
         .collect::<Vec<_>>();
     starts.sort_unstable();
     starts.dedup();
-    for line in lines {
-        let after = starts.partition_point(|start| *start <= line.range.start);
-        if let Some(&start) = starts.get(after)
-            && start < line.range.end
-        {
-            line.range.end = start;
-        }
+    starts
+}
+
+/// The source files an image's tables name.
+fn source_files(tables: &crate::image::Image) -> Arc<[SourceFile]> {
+    let paths = crate::image::Paths(tables.bytes(crate::image::TableKind::Paths));
+    tables
+        .table::<crate::image::lines::FileRecord>()
+        .iter()
+        .enumerate()
+        .map(|(index, file)| SourceFile {
+            id: SourceFileId::new(u32::try_from(index).expect("file indexes fit u32")),
+            path: Arc::new(
+                paths
+                    .get(crate::image::PathId(file.path.get()))
+                    .to_path_buf(),
+            ),
+        })
+        .collect()
+}
+
+/// The image of a module's tables.
+/// Seals a module's metadata as an image.
+pub fn seal(
+    target: TargetDescription,
+    address_range: AddressRange<ImageAddress>,
+    mut metadata: ModuleMetadata,
+) -> crate::image::Image {
+    validate_dense_ids(&metadata);
+    metadata.lines.clip_at(&function_starts(&metadata.symbols));
+    let phase = crate::span!("image.seal");
+    let tables = seal_image(target, address_range, &metadata);
+    drop(phase);
+    crate::count!("image_bytes", tables.as_bytes().len());
+    crate::count!("types", metadata.types.len());
+    tables
+}
+
+fn seal_image(
+    target: TargetDescription,
+    address_range: AddressRange<ImageAddress>,
+    metadata: &ModuleMetadata,
+) -> crate::image::Image {
+    let mut builder = crate::image::Builder::new(target);
+    let mut strings = crate::image::StringsBuilder::default();
+    let mut paths = crate::image::PathsBuilder::default();
+    metadata.lines.add_to(&mut builder);
+    metadata
+        .files
+        .add_to(&mut builder, &mut paths)
+        .expect("source paths come from NUL-terminated strings");
+    crate::image::symbols::add_to(
+        &mut builder,
+        &mut strings,
+        &metadata.symbols,
+        &metadata.sections,
+        &metadata.got_slots,
+    )
+    .expect("names come from NUL-terminated strings");
+    crate::image::facts::add_to(
+        &mut builder,
+        &mut strings,
+        &crate::image::facts::Facts {
+            address_range,
+            symbol_sources: &metadata.symbol_sources,
+            thread_local_storage: metadata.thread_local_storage,
+            thread_locals: &metadata.thread_locals,
+            debug_file: metadata.debug_file.as_ref(),
+        },
+    )
+    .expect("the loader's facts fit an image");
+    let classes = {
+        let _phase = crate::span!("image.type_classes");
+        type_classes(&metadata.types)
+    };
+    metadata.locations.add_to(&mut builder);
+    crate::image::variables::add_to(&mut builder, &mut strings, &metadata.variables)
+        .expect("the loader's data objects fit an image");
+    crate::image::calls::add_to(&mut builder, &mut strings, &metadata.calls)
+        .expect("the loader's calls fit an image");
+    crate::image::type_facts::add_to(&mut builder, &mut strings, &metadata.type_facts)
+        .expect("the loader's type facts fit an image");
+    crate::image::resumes::add_to(&mut builder, &mut strings, &metadata.resumes)
+        .expect("the loader's resume points fit an image");
+    crate::image::declarations::add_to(&mut builder, &mut strings, &metadata.declarations)
+        .expect("the loader's declarations fit an image");
+    let phase = crate::span!("image.encode_types");
+    crate::image::types::add_to(
+        &mut builder,
+        &mut strings,
+        &crate::image::types::Types {
+            nodes: &metadata.types,
+            classes: &classes,
+        },
+    )
+    .expect("the loader's types fit an image");
+    drop(phase);
+    crate::image::packages::add_to(
+        &mut builder,
+        &mut strings,
+        metadata
+            .packages
+            .iter()
+            .map(|package| (&*package.path, &*package.name)),
+        &locations::packaged_names(&metadata.functions, &metadata.packages),
+    )
+    .expect("the loader's packages fit an image");
+    crate::image::functions::add_to(
+        &mut builder,
+        &mut strings,
+        &crate::image::functions::Code {
+            functions: &metadata.functions,
+            instances: &metadata.code_instances,
+            prologue_ends: &metadata.lines.prologue_ends(),
+            instruction_starts: &instruction_starts(metadata),
+        },
+    )
+    .expect("the loader's functions fit an image");
+    if let Some(unwind) = &metadata.unwind {
+        crate::image::unwind::add_to(&mut builder, &mut strings, unwind)
+            .expect("the loader's call-frame information fits an image");
     }
+    builder
+        .bytes(
+            crate::image::TableKind::EmbeddedViews,
+            metadata.embedded_views.clone(),
+        )
+        .bytes(crate::image::TableKind::Paths, paths.into_bytes())
+        .bytes(crate::image::TableKind::Strings, strings.into_bytes());
+    builder
+        .seal(crate::image::Limits::default())
+        .expect("the loader's tables are valid")
+}
+
+/// Each type's identity class, numbered in the order classes first come:
+/// two types share one when their identity keys are equal, as one type
+/// defined in several units is.
+fn type_classes(types: &[TypeNode]) -> Vec<u32> {
+    let image = types.first().map(|node| node.reference().image);
+    let index =
+        crate::type_identity::TypeIndex::build(image, types.len(), |index| match &types[index] {
+            TypeNode::Resolved(info) => Some(info),
+            TypeNode::Malformed { .. } => None,
+        });
+    let mut classes = foldhash::HashMap::default();
+    types
+        .iter()
+        .map(|node| {
+            let key = index.key(node.reference()).expect("every type has a key");
+            let next = u32::try_from(classes.len()).expect("type counts fit u32");
+            *classes.entry(Arc::clone(key)).or_insert(next)
+        })
+        .collect()
 }
 
 fn validate_dense_ids(metadata: &ModuleMetadata) {
@@ -267,13 +391,6 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
             instance.id.index(),
             index,
             "code instance IDs are dense and ordered"
-        );
-    }
-    for (index, source_file) in metadata.source_files.iter().enumerate() {
-        assert_eq!(
-            source_file.id.index(),
-            index,
-            "source file IDs are dense and ordered"
         );
     }
     for (index, symbol) in metadata.symbols.iter().enumerate() {
@@ -309,9 +426,6 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
             "sections are non-empty"
         );
     }
-    for (index, global) in metadata.globals.iter().enumerate() {
-        assert_eq!(global.id.index(), index, "global IDs are dense and ordered");
-    }
     for (index, node) in metadata.types.iter().enumerate() {
         assert_eq!(
             usize::try_from(node.reference().id.get()).expect("type ID fits usize"),
@@ -321,6 +435,16 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
     }
 }
 
+/// What binds an image's bytes to one module of a session: the file it
+/// describes, the separate debug file found for it, and its identifier.
+/// None of it is in the bytes, so one image serves every binding.
+#[derive(Debug, Clone)]
+pub struct Binding {
+    pub path: Arc<PathBuf>,
+    pub debug_path: Option<Arc<PathBuf>>,
+    pub id: ModuleImageId,
+}
+
 /// Immutable, normalized debug metadata for one ELF module image.
 #[derive(Debug)]
 pub struct ModuleImage {
@@ -328,265 +452,89 @@ pub struct ModuleImage {
     path: Arc<PathBuf>,
     target: TargetDescription,
     address_range: AddressRange<ImageAddress>,
-    functions: Arc<[FunctionInfo]>,
-    code_instances: Arc<[CodeInstanceInfo]>,
-    symbols: Arc<[SymbolInfo]>,
-    symbol_sources: SymbolTableSources,
     got_slots: Arc<[GotSlot]>,
     sections: Arc<[SectionInfo]>,
-    thread_local_storage: bool,
-    globals: Arc<[GlobalVariableInfo]>,
-    types: Arc<[TypeNode]>,
+    /// The type graph, decoded as it is asked for.
+    types: Arc<crate::image::types::TypeTable>,
     source_files: Arc<[SourceFile]>,
-    statements: Arc<[StatementRow]>,
-    lines: Arc<[LineEntry]>,
-    functions_by_name: BTreeMap<Arc<str>, Arc<[FunctionId]>>,
-    /// Functions by their names within the packages defining them.
-    function_names: locations::FunctionNames,
-    symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
+    /// Lines, files, symbols, sections, functions, and code, as tables.
+    tables: Arc<crate::image::Image>,
     /// Symbols by the last part of each name they answer to, built on the
     /// first search for one, since it demangles every symbol.
     symbols_by_last_part: std::sync::OnceLock<HashMap<Box<str>, Vec<SymbolId>>>,
     /// The functions that run each coroutine type, by the type's identity,
     /// built on the first search for one.
-    coroutine_functions: std::sync::OnceLock<HashMap<Arc<str>, Vec<FunctionId>>>,
-    globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
-    instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
-    statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
-    control_boundaries_by_address: BTreeMap<ImageAddress, Arc<[u32]>>,
-    recommended_entries_by_instance: BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>>,
-    code_range_index: RangeIndex<CodeInstanceId>,
-    line_range_index: RangeIndex<u32>,
-    symbol_range_index: RangeIndex<SymbolId>,
-    storage_range_index: RangeIndex<SymbolId>,
-    /// Unsized data symbols, each indexed by its one-byte address.
-    unsized_data_index: RangeIndex<SymbolId>,
-    section_range_index: RangeIndex<SectionId>,
-    /// Known instruction starts in address order, one per address.
-    instruction_starts: Arc<[(ImageAddress, crate::BoundaryEvidence)]>,
-    type_index: crate::type_identity::TypeIndex,
-    /// Rust trait objects' vtables, with the concrete type each is for.
-    vtables: std::collections::BTreeMap<ImageAddress, TypeReference>,
-    coroutines: BTreeMap<TypeId, std::result::Result<crate::CoroutineInfo, Arc<str>>>,
-    resume_points: BTreeMap<CodeInstanceId, std::result::Result<crate::ResumePoints, Arc<str>>>,
+    coroutine_functions: std::sync::OnceLock<HashMap<u32, Vec<FunctionId>>>,
+    /// Globals by every selector naming one, built on the first search by
+    /// one.
+    globals_by_selector: std::sync::OnceLock<BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>>,
     /// The dispatches and leads of every decoded coroutine, which no
     /// breakpoint or step stops in.
     resume_code: RangeIndex<CodeInstanceId>,
-    constants: BTreeMap<Arc<str>, crate::IntegerValue>,
-    producers: Arc<[Arc<str>]>,
-    thread_locals: BTreeMap<Arc<str>, std::result::Result<ThreadLocal, Arc<str>>>,
-    /// The index in `types` of the first type each Go runtime type
-    /// descriptor offset names.
-    go_runtime_types: std::collections::BTreeMap<u64, usize>,
     /// The views the image carries for its own types, in its
-    /// `.debug_uscope_views` section.
-    views: Arc<crate::view::ViewSet>,
+    /// `.debug_uscope_views` section, read on first use.
+    views: std::sync::OnceLock<Arc<crate::view::ViewSet>>,
     /// The separate debug file found for the image.
     debug_file: Option<crate::DebugFile>,
 }
 
-/// The first type, in identifier order, that each Go runtime type
-/// descriptor offset names: a named type and its typedef may both.
-fn go_runtime_types(types: &[TypeNode]) -> std::collections::BTreeMap<u64, usize> {
-    let mut offsets = std::collections::BTreeMap::new();
-    for (index, node) in types.iter().enumerate() {
-        if let TypeNode::Resolved(info) = node
-            && let Some(offset) = info
-                .identity
-                .as_ref()
-                .and_then(|identity| identity.go)
-                .and_then(|go| go.runtime_type)
-        {
-            offsets.entry(offset).or_insert(index);
-        }
-    }
-    offsets
-}
-
 impl ModuleImage {
-    #[expect(clippy::too_many_lines, reason = "one constructor builds every index")]
+    /// Seals `metadata` and binds it to `path` as module 0: for tests and
+    /// fuzzing, which build metadata by hand.
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn new(
         path: PathBuf,
         target: TargetDescription,
         address_range: AddressRange<ImageAddress>,
-        mut metadata: ModuleMetadata,
+        metadata: ModuleMetadata,
     ) -> Self {
-        validate_dense_ids(&metadata);
-        clip_lines_at_functions(&mut metadata.lines, &metadata.symbols);
-        let code_range_index =
-            RangeIndex::new(metadata.code_instances.iter().flat_map(|instance| {
-                instance
-                    .ranges
-                    .iter()
-                    .copied()
-                    .map(|range| (range, instance.id))
-            }));
-        let line_range_index =
-            RangeIndex::new(metadata.lines.iter().enumerate().map(|(index, line)| {
-                (
-                    line.range,
-                    u32::try_from(index).expect("line entry count fits u32"),
-                )
-            }));
-        let symbol_range_index = RangeIndex::new(
-            metadata
-                .symbols
-                .iter()
-                .filter_map(|symbol| Some((symbol.extent?.range, symbol.id))),
-        );
-        let storage_range_index = RangeIndex::new(
-            metadata
-                .symbols
-                .iter()
-                .filter_map(|symbol| Some((symbol.storage?, symbol.id))),
-        );
-        let unsized_data_index = RangeIndex::new(metadata.symbols.iter().filter_map(|symbol| {
-            let storage = symbol.storage?;
-            (storage.start == storage.end).then_some((
-                AddressRange {
-                    start: storage.start,
-                    end: ImageAddress::new(storage.start.get().checked_add(1)?),
-                },
-                symbol.id,
-            ))
-        }));
-        let instruction_starts = instruction_starts(&metadata);
-        let section_range_index = RangeIndex::new(
-            metadata
-                .sections
-                .iter()
-                .map(|section| (section.range, section.id)),
-        );
-
-        let type_index = crate::type_identity::TypeIndex::build(
-            metadata
-                .types
-                .first()
-                .map(TypeNode::reference)
-                .map(|reference| reference.image),
-            metadata.types.len(),
-            |index| match &metadata.types[index] {
-                TypeNode::Resolved(info) => Some(info),
-                TypeNode::Malformed { .. } => None,
+        let debug_path = metadata.debug_file.as_ref().map(|file| match file {
+            crate::DebugFile::Used(path) | crate::DebugFile::Unusable { path, .. } => {
+                Arc::clone(path)
+            }
+        });
+        let tables = Arc::new(seal(target, address_range, metadata));
+        Self::bind(
+            &Binding {
+                path: Arc::new(path),
+                debug_path,
+                id: ModuleImageId::new(0),
             },
-        );
+            tables,
+        )
+        .expect("an image binds to the files it was built from")
+    }
 
-        Self {
-            functions_by_name: grouped_index(
-                metadata
-                    .functions
-                    .iter()
-                    .map(|function| (Arc::clone(&function.name), function.id)),
-            ),
-            function_names: locations::FunctionNames::new(&metadata.functions, &metadata.packages),
-            symbols_by_name: grouped_index(
-                metadata
-                    .symbols
-                    .iter()
-                    .map(|symbol| (Arc::clone(&symbol.name), symbol.id)),
-            ),
+    /// The module that `binding` names, described by `tables`: the image
+    /// the loader sealed for it, or the same bytes read back from a cache.
+    pub(crate) fn bind(
+        binding: &Binding,
+        tables: Arc<crate::image::Image>,
+    ) -> std::result::Result<Self, crate::image::facts::Unbound> {
+        let facts = crate::image::facts::FactsView::new(&tables);
+        let debug_file = facts.debug_file(binding.debug_path.clone())?;
+        Ok(Self {
             symbols_by_last_part: std::sync::OnceLock::new(),
             coroutine_functions: std::sync::OnceLock::new(),
-            globals_by_selector: grouped_index(global_selectors(&metadata)),
-            instances_by_function: grouped_index(
-                metadata
-                    .code_instances
-                    .iter()
-                    .map(|instance| (instance.function, instance.id)),
-            ),
-            statements_by_source_line: grouped_index(metadata.statements.iter().filter_map(
-                |row| {
-                    let location = row.location.as_ref()?;
-                    row.flags
-                        .is_statement()
-                        .then_some(((location.file, location.line), row.address))
-                },
+            globals_by_selector: std::sync::OnceLock::new(),
+            id: binding.id,
+            path: Arc::clone(&binding.path),
+            target: tables.target(),
+            address_range: facts.address_range(),
+            got_slots: crate::image::symbols::got_slots(&tables).into(),
+            sections: crate::image::symbols::sections(&tables).into(),
+            types: Arc::new(crate::image::types::TypeTable::new(
+                Arc::clone(&tables),
+                binding.id,
             )),
-            control_boundaries_by_address: grouped_index(
-                metadata
-                    .statements
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, row)| row.flags.prologue_end() || row.flags.epilogue_begin())
-                    .map(|(index, row)| {
-                        let index = u32::try_from(index).expect("line-program row count fits u32");
-                        (row.address, index)
-                    }),
+            source_files: source_files(&tables),
+            resume_code: RangeIndex::new(
+                crate::image::resumes::ResumeView::new(&tables).resume_code(),
             ),
-            recommended_entries_by_instance: recommended_entries(&metadata, &code_range_index),
-            id: ModuleImageId::new(0),
-            path: Arc::new(path),
-            target,
-            address_range,
-            functions: metadata.functions.into(),
-            code_instances: metadata.code_instances.into(),
-            symbols: metadata.symbols.into(),
-            symbol_sources: metadata.symbol_sources,
-            got_slots: metadata.got_slots.into(),
-            sections: metadata.sections.into(),
-            thread_local_storage: metadata.thread_local_storage,
-            globals: metadata.globals.into(),
-            types: Arc::clone(&metadata.types),
-            source_files: metadata.source_files.into(),
-            statements: metadata.statements.into(),
-            lines: metadata.lines.into(),
-            code_range_index,
-            line_range_index,
-            symbol_range_index,
-            storage_range_index,
-            unsized_data_index,
-            section_range_index,
-            instruction_starts,
-            type_index,
-            vtables: metadata.vtables.iter().copied().collect(),
-            coroutines: std::mem::take(&mut metadata.coroutines),
-            resume_code: RangeIndex::new(metadata.resume_points.iter().flat_map(
-                |(instance, points)| {
-                    points.iter().flat_map(move |points| {
-                        points
-                            .dispatch
-                            .iter()
-                            .copied()
-                            .chain(
-                                points
-                                    .points
-                                    .iter()
-                                    .flat_map(|point| point.resumption.iter().copied()),
-                            )
-                            .filter(|range| range.start < range.end)
-                            .map(move |range| (range, *instance))
-                    })
-                },
-            )),
-            resume_points: std::mem::take(&mut metadata.resume_points),
-            constants: std::mem::take(&mut metadata.constants),
-            producers: std::mem::take(&mut metadata.producers).into(),
-            thread_locals: std::mem::take(&mut metadata.thread_locals),
-            go_runtime_types: go_runtime_types(&metadata.types),
-            views: crate::view::ViewSet::empty(),
-            debug_file: None,
-        }
-    }
-
-    pub(crate) fn with_id(mut self, id: ModuleImageId) -> Self {
-        assert!(
-            self.types.iter().all(|node| node.reference().image == id),
-            "every type node is owned by its module image"
-        );
-        self.id = id;
-        self
-    }
-
-    /// Gives the image the views it carries for its own types.
-    pub(crate) fn with_views(mut self, views: Arc<crate::view::ViewSet>) -> Self {
-        self.views = views;
-        self
-    }
-
-    /// Records the separate debug file found for the image.
-    pub(crate) fn with_debug_file(mut self, debug_file: Option<crate::DebugFile>) -> Self {
-        self.debug_file = debug_file;
-        self
+            views: std::sync::OnceLock::new(),
+            debug_file,
+            tables,
+        })
     }
 
     /// The separate debug file the image's debug information and symbols
@@ -608,21 +556,39 @@ impl ModuleImage {
 
     /// The views the image carries for its own types.
     #[must_use]
-    pub(crate) const fn views(&self) -> &Arc<crate::view::ViewSet> {
-        &self.views
+    pub(crate) fn views(&self) -> &Arc<crate::view::ViewSet> {
+        self.views.get_or_init(|| {
+            let bytes = self.tables.bytes(crate::image::TableKind::EmbeddedViews);
+            if bytes.is_empty() {
+                return crate::view::ViewSet::empty();
+            }
+            // Views are named after the module's file.
+            let module = self
+                .path
+                .file_name()
+                .map_or_else(|| "module".into(), |name| name.to_string_lossy());
+            Arc::new(crate::view::embedded::view_set(&module, bytes))
+        })
     }
 
-    /// A type's identity as one string, which every type the same as it
-    /// shares.
+    /// A type's identity class, which every type the same as it shares.
     #[must_use]
-    pub(crate) fn type_key(&self, reference: TypeReference) -> Option<&Arc<str>> {
-        self.type_index.key(reference)
+    pub(crate) fn type_class(&self, reference: TypeReference) -> Option<u32> {
+        if reference.image != self.id {
+            return None;
+        }
+        self.types.view().class(reference.id)
+    }
+
+    /// The image's type graph, which its variable provider shares.
+    pub(crate) const fn type_table(&self) -> &Arc<crate::image::types::TypeTable> {
+        &self.types
     }
 
     /// What kept parts of the views the image carries out.
     #[must_use]
     pub fn view_errors(&self) -> &[crate::ViewFileError] {
-        self.views.errors()
+        self.views().errors()
     }
 
     /// Returns this image's session-scoped identifier.
@@ -660,34 +626,41 @@ impl ModuleImage {
     }
 
     /// Returns all functions described by this image.
-    #[must_use]
-    pub fn functions(&self) -> &[FunctionInfo] {
-        &self.functions
+    pub fn functions(&self) -> impl ExactSizeIterator<Item = Function<'_>> + DoubleEndedIterator {
+        self.function_view().functions()
     }
 
     /// Looks up a source-level function by identifier.
     #[must_use]
-    pub fn function(&self, id: FunctionId) -> Option<&FunctionInfo> {
-        self.functions.get(id.index())
+    pub fn function(&self, id: FunctionId) -> Option<Function<'_>> {
+        self.function_view().function(id)
     }
 
     /// Returns all concrete code instances described by this image.
-    #[must_use]
-    pub fn code_instances(&self) -> &[CodeInstanceInfo] {
-        &self.code_instances
+    pub fn code_instances(
+        &self,
+    ) -> impl ExactSizeIterator<Item = CodeInstance<'_>> + DoubleEndedIterator {
+        self.function_view().instances()
+    }
+
+    fn function_view(&self) -> FunctionView<'_> {
+        FunctionView::new(&self.tables)
+    }
+
+    fn symbol_view(&self) -> SymbolView<'_> {
+        SymbolView::new(&self.tables)
     }
 
     /// Returns all linker symbols described by this image, ordered by
     /// address and then name.
-    #[must_use]
-    pub fn symbols(&self) -> &[SymbolInfo] {
-        &self.symbols
+    pub fn symbols(&self) -> impl ExactSizeIterator<Item = Symbol<'_>> + DoubleEndedIterator {
+        self.symbol_view().all()
     }
 
     /// Looks up a linker symbol by identifier.
     #[must_use]
-    pub fn symbol(&self, id: SymbolId) -> Option<&SymbolInfo> {
-        self.symbols.get(id.index())
+    pub fn symbol(&self, id: SymbolId) -> Option<Symbol<'_>> {
+        self.symbol_view().get(id)
     }
 
     /// Returns the image's allocated sections, ordered by address.
@@ -705,29 +678,35 @@ impl ModuleImage {
     /// Whether each thread gets its own copy of a block of the module's
     /// storage, such as an ELF `PT_TLS` segment describes.
     #[must_use]
-    pub const fn has_thread_local_storage(&self) -> bool {
-        self.thread_local_storage
+    pub fn has_thread_local_storage(&self) -> bool {
+        self.facts().thread_local_storage()
+    }
+
+    fn facts(&self) -> crate::image::facts::FactsView<'_> {
+        crate::image::facts::FactsView::new(&self.tables)
     }
 
     /// Finds the allocated section containing an image address. Should
     /// malformed sections overlap, the innermost one wins.
     fn section_containing(&self, address: ImageAddress) -> Option<&SectionInfo> {
-        self.section_range_index
-            .containing(address)
-            .filter_map(|id| self.section(id))
-            .min_by_key(|section| {
-                (
-                    std::cmp::Reverse(section.range.start),
-                    section.range.end,
-                    section.id,
-                )
-            })
+        crate::image::index::containing(
+            self.tables.shared(crate::image::TableKind::SectionRanges),
+            address,
+        )
+        .filter_map(|id| self.section(SectionId::new(id)))
+        .min_by_key(|section| {
+            (
+                std::cmp::Reverse(section.range.start),
+                section.range.end,
+                section.id,
+            )
+        })
     }
 
     /// Returns which symbol tables this image provided.
     #[must_use]
-    pub const fn symbol_sources(&self) -> &SymbolTableSources {
-        &self.symbol_sources
+    pub fn symbol_sources(&self) -> SymbolTableSources {
+        self.facts().symbol_sources()
     }
 
     /// Finds the code symbol whose extent contains an image address.
@@ -740,18 +719,14 @@ impl ModuleImage {
     /// contains has no symbol; the nearest preceding symbol is never guessed.
     #[must_use]
     pub fn symbolize(&self, address: ImageAddress) -> Option<SymbolLocation> {
-        let symbol = self
-            .symbol_range_index
-            .containing(address)
-            .filter_map(|id| self.symbol(id))
-            .min_by_key(|symbol| symbol_preference(symbol))?;
-        let extent = symbol.extent.expect("indexed symbols have extents");
+        let symbol = self.symbol_view().code_at(address)?;
+        let extent = symbol.extent().expect("indexed symbols have extents");
 
         Some(SymbolLocation {
-            symbol: symbol.id,
-            name: Arc::clone(&symbol.name),
-            kind: symbol.kind,
-            offset: address.get() - symbol.address.get(),
+            symbol: symbol.id(),
+            name: symbol.name().into(),
+            kind: symbol.kind(),
+            offset: address.get() - symbol.address().get(),
             provenance: extent.provenance,
         })
     }
@@ -762,24 +737,14 @@ impl ModuleImage {
     /// unsized data symbol at exactly that address. An address inside no
     /// declared storage is never attributed to the nearest preceding object.
     fn symbolize_data(&self, address: ImageAddress) -> Option<SymbolLocation> {
-        let symbol = self
-            .storage_range_index
-            .containing(address)
-            .filter_map(|id| self.symbol(id))
-            .min_by_key(|symbol| storage_preference(symbol))
-            .or_else(|| {
-                self.unsized_data_index
-                    .containing(address)
-                    .filter_map(|id| self.symbol(id))
-                    .min_by_key(|symbol| storage_preference(symbol))
-            })?;
-        let storage = symbol.storage.expect("indexed symbols have storage");
+        let symbol = self.symbol_view().data_at(address)?;
+        let storage = symbol.storage().expect("indexed symbols have storage");
 
         Some(SymbolLocation {
-            symbol: symbol.id,
-            name: Arc::clone(&symbol.name),
-            kind: symbol.kind,
-            offset: address.get() - symbol.address.get(),
+            symbol: symbol.id(),
+            name: symbol.name().into(),
+            kind: symbol.kind(),
+            offset: address.get() - symbol.address().get(),
             provenance: if storage.start < storage.end {
                 SymbolExtentProvenance::Declared
             } else {
@@ -797,13 +762,7 @@ impl ModuleImage {
         &self,
         range: AddressRange<ImageAddress>,
     ) -> impl Iterator<Item = (ImageAddress, crate::BoundaryEvidence)> + '_ {
-        let first = self
-            .instruction_starts
-            .partition_point(|(address, _)| *address < range.start);
-        self.instruction_starts[first..]
-            .iter()
-            .take_while(move |(address, _)| *address < range.end)
-            .copied()
+        self.function_view().instruction_starts(range)
     }
 
     /// Returns the source line containing an image address, when the line
@@ -811,7 +770,7 @@ impl ModuleImage {
     #[must_use]
     pub fn source_location(&self, address: ImageAddress) -> Option<SourceLocation> {
         self.line_entry_containing(address)
-            .map(|entry| entry.location.clone())
+            .map(|entry| entry.location)
     }
 
     /// Describes an image address by its section and by the code symbol, or
@@ -838,7 +797,7 @@ impl ModuleImage {
     /// why that is unknown; `None` when the image defines none by the name.
     #[must_use]
     pub fn thread_local(&self, name: &str) -> Option<std::result::Result<ThreadLocal, Arc<str>>> {
-        self.thread_locals.get(name).cloned()
+        self.facts().thread_local(name)
     }
 
     /// Where each thread's copy is of the one thread-local variable whose
@@ -851,7 +810,7 @@ impl ModuleImage {
         scope: &str,
         name: &str,
     ) -> Option<std::result::Result<ThreadLocal, Arc<str>>> {
-        let mut found = self.thread_locals.iter().filter(|(symbol, _)| {
+        let mut found = self.facts().thread_locals().filter(|(symbol, _)| {
             symbol.contains(name)
                 && crate::demangle::demangle(symbol).is_some_and(|demangled| {
                     demangled
@@ -866,26 +825,78 @@ impl ModuleImage {
         Some(if found.next().is_some() {
             Err(format!("several thread-local variables are named {name} within {scope}").into())
         } else {
-            place.clone()
+            place
         })
     }
 
     /// Returns every global catalog entry in deterministic source order.
-    #[must_use]
-    pub fn globals(&self) -> &[GlobalVariableInfo] {
-        &self.globals
+    pub fn globals(&self) -> impl ExactSizeIterator<Item = GlobalVariableInfo> + '_ {
+        let view = crate::image::variables::VariableView::new(&self.tables);
+        (0..view.global_count()).map(move |index| {
+            self.decode_global(view, index)
+                .expect("every global in range is in the table")
+        })
     }
 
     /// Looks up a global catalog entry by identifier.
     #[must_use]
-    pub fn global(&self, id: GlobalVariableId) -> Option<&GlobalVariableInfo> {
-        self.globals.get(id.index())
+    pub fn global(&self, id: GlobalVariableId) -> Option<GlobalVariableInfo> {
+        self.decode_global(
+            crate::image::variables::VariableView::new(&self.tables),
+            id.index(),
+        )
     }
 
-    /// Returns the reachable, normalized type graph in stable identifier order.
+    fn decode_global(
+        &self,
+        view: crate::image::variables::VariableView<'_>,
+        index: usize,
+    ) -> Option<GlobalVariableInfo> {
+        use crate::image::variables::TypeResolution;
+
+        let entry = view.global_entry(index)?;
+        let malformed = |description| {
+            crate::GlobalVariableType::Malformed(crate::VariableMalformedReason {
+                kind: crate::VariableMalformedKind::InvalidTypeGraph,
+                description,
+            })
+        };
+        Some(GlobalVariableInfo {
+            id: GlobalVariableId::new(u32::try_from(index).ok()?),
+            name: entry.object.name().into(),
+            qualified_name: entry.qualified_name.into(),
+            linkage_name: entry.linkage_name.map(Arc::from),
+            declaration: entry.object.declaration(),
+            type_info: match entry.object.type_info() {
+                TypeResolution::Resolved(ty) => match self.types.node(ty) {
+                    Some(TypeNode::Resolved(info)) => {
+                        crate::GlobalVariableType::Resolved(info.clone())
+                    }
+                    Some(TypeNode::Malformed { description, .. }) => {
+                        malformed(Arc::clone(description))
+                    }
+                    None => malformed("type graph did not finish building".into()),
+                },
+                TypeResolution::Malformed(description) => malformed(description),
+            },
+            visibility: if entry.external {
+                crate::GlobalVariableVisibility::External
+            } else {
+                crate::GlobalVariableVisibility::CompilationUnit
+            },
+        })
+    }
+
+    /// Returns the reachable, normalized type graph in stable identifier
+    /// order, decoding every type.
+    pub fn types(&self) -> impl ExactSizeIterator<Item = &TypeNode> + '_ {
+        self.types.nodes()
+    }
+
+    /// How many types the image has.
     #[must_use]
-    pub fn types(&self) -> &[TypeNode] {
-        &self.types
+    pub fn type_count(&self) -> usize {
+        self.types.len()
     }
 
     /// Resolves a reference owned by this image to its finalized graph node.
@@ -894,18 +905,62 @@ impl ModuleImage {
         if reference.image != self.id {
             return None;
         }
-        self.types
-            .get(reference.id.index())
-            .filter(|node| node.reference() == reference)
+        self.types.node(reference.id)
     }
 
     /// Resolves a reference to normalized metadata when the node is not malformed.
     #[must_use]
     pub fn type_info(&self, reference: TypeReference) -> Option<&TypeInfo> {
-        match self.type_node(reference)? {
-            TypeNode::Resolved(info) => Some(info),
-            TypeNode::Malformed { .. } => None,
+        self.types.info(reference)
+    }
+
+    /// The enumerators `name` names, by their own name or qualified by
+    /// their enumeration's name, each with its qualified name, value, and
+    /// enumeration, in identifier and then source order.
+    pub(crate) fn enumerators_named(
+        &self,
+        name: &str,
+    ) -> Vec<(String, crate::IntegerValue, TypeReference)> {
+        let view = self.types.view();
+        // An enumerator's own name is the whole name or what follows a
+        // `::` in it.
+        let mut candidates = view.with_enumerator(name).collect::<Vec<_>>();
+        for (separator, _) in name.match_indices("::") {
+            candidates.extend(view.with_enumerator(&name[separator + 2..]));
         }
+        candidates.sort_unstable();
+        candidates.dedup();
+        let mut found = Vec::new();
+        for id in candidates {
+            let Some(info) = self.type_info(TypeReference { image: self.id, id }) else {
+                continue;
+            };
+            let crate::TypeKind::Enumeration { enumerators, .. } = &info.kind else {
+                continue;
+            };
+            for enumerator in enumerators.iter() {
+                let qualified = format!("{}::{}", info.name, enumerator.name);
+                if enumerator.name.as_ref() == name || qualified == name {
+                    found.push((qualified, enumerator.value, info.reference));
+                }
+            }
+        }
+        found
+    }
+
+    /// The resolved types named exactly `name`, in identifier order.
+    pub(crate) fn types_named_exactly<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a TypeInfo> + 'a {
+        self.types
+            .view()
+            .named(name)
+            .filter_map(|id| self.type_info(TypeReference { image: self.id, id }))
+    }
+
+    fn type_names(&self) -> TypeNames<'_> {
+        TypeNames(&self.types)
     }
 
     /// The types with exactly this language, path, and base, whatever their
@@ -917,22 +972,25 @@ impl ModuleImage {
         path: &[&str],
         base: &str,
     ) -> Vec<TypeReference> {
-        self.type_index
-            .instances(language, path, base, &self.types.as_ref())
+        self.type_names()
+            .instances(language, path, base, &*self.types)
     }
 
     /// The value of the integer constant the debug information declares as
     /// `name`, such as `runtime._Grunning`.
     #[must_use]
     pub fn constant(&self, name: &str) -> Option<crate::IntegerValue> {
-        self.constants.get(name).copied()
+        self.declarations().constant(name)
+    }
+
+    fn declarations(&self) -> crate::image::declarations::DeclarationView<'_> {
+        crate::image::declarations::DeclarationView::new(&self.tables)
     }
 
     /// The distinct producers of the image's debug information, such as
     /// `Go cmd/compile go1.27.1; regabi`.
-    #[must_use]
-    pub fn producers(&self) -> &[Arc<str>] {
-        &self.producers
+    pub fn producers(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.declarations().producers()
     }
 
     /// What the coroutine of type `ty` is, or why its layout cannot be read
@@ -942,25 +1000,25 @@ impl ModuleImage {
         &self,
         ty: TypeId,
     ) -> Option<std::result::Result<&crate::CoroutineInfo, &Arc<str>>> {
-        self.coroutines.get(&ty).map(std::result::Result::as_ref)
+        self.types.coroutine(ty)
     }
 
     /// The functions that run the coroutine of type `ty`, or any type the
     /// same as it.
     #[must_use]
-    pub fn coroutine_functions(&self, ty: TypeId) -> Vec<&FunctionInfo> {
-        let key = |id| self.type_key(TypeReference { image: self.id, id });
+    pub fn coroutine_functions(&self, ty: TypeId) -> Vec<Function<'_>> {
+        let class = |id| self.type_class(TypeReference { image: self.id, id });
         let index = self.coroutine_functions.get_or_init(|| {
-            let mut index = HashMap::<Arc<str>, Vec<FunctionId>>::new();
-            for function in self.functions.iter() {
-                if let Some(key) = function.coroutine.and_then(key) {
-                    index.entry(Arc::clone(key)).or_default().push(function.id);
+            let mut index = HashMap::<u32, Vec<FunctionId>>::new();
+            for function in self.functions() {
+                if let Some(class) = function.coroutine().and_then(class) {
+                    index.entry(class).or_default().push(function.id());
                 }
             }
             index
         });
-        key(ty)
-            .and_then(|key| index.get(key))
+        class(ty)
+            .and_then(|class| index.get(&class))
             .into_iter()
             .flatten()
             .filter_map(|id| self.function(*id))
@@ -974,10 +1032,8 @@ impl ModuleImage {
     pub fn resume_points(
         &self,
         instance: CodeInstanceId,
-    ) -> Option<std::result::Result<&crate::ResumePoints, &Arc<str>>> {
-        self.resume_points
-            .get(&instance)
-            .map(std::result::Result::as_ref)
+    ) -> Option<std::result::Result<crate::ResumePoints, Arc<str>>> {
+        crate::image::resumes::ResumeView::new(&self.tables).resume_points(instance)
     }
 
     /// Whether `address` is in a coroutine's dispatch on its state, or in
@@ -991,7 +1047,8 @@ impl ModuleImage {
     /// The concrete type a Rust trait object's vtable at `address` is for.
     #[must_use]
     pub fn trait_object_type(&self, address: ImageAddress) -> Option<TypeReference> {
-        self.vtables.get(&address).copied()
+        let id = self.declarations().vtable(address)?;
+        Some(TypeReference { image: self.id, id })
     }
 
     /// The C++ class whose vtable group, `vtable for X`, holds `address`:
@@ -1000,11 +1057,11 @@ impl ModuleImage {
     pub fn vtable_class(&self, address: ImageAddress) -> Option<(String, ImageAddress)> {
         let location = self.symbolize_data(address)?;
         let symbol = self.symbol(location.symbol)?;
-        let name = crate::demangle::demangle(&symbol.name)?;
+        let name = crate::demangle::demangle(symbol.name())?;
         let class = name
             .strip_prefix("vtable for ")
             .or_else(|| name.strip_prefix("{vtable(")?.strip_suffix(")}"))?;
-        Some((class.to_owned(), symbol.address))
+        Some((class.to_owned(), symbol.address()))
     }
 
     /// The type Go's runtime describes at `offset` from `runtime.types`, as
@@ -1012,18 +1069,16 @@ impl ModuleImage {
     /// several, such as a named type and its typedef, say so.
     #[must_use]
     pub fn go_runtime_type(&self, offset: u64) -> Option<TypeReference> {
-        let index = *self.go_runtime_types.get(&offset)?;
-        match &self.types[index] {
-            TypeNode::Resolved(info) => Some(info.reference),
-            TypeNode::Malformed { .. } => None,
-        }
+        let id = self.types.view().go_runtime_type(offset)?;
+        self.type_info(TypeReference { image: self.id, id })
+            .map(|info| info.reference)
     }
 
     /// The types whose identity has this base, whatever their language,
     /// path, and arguments, in identifier order.
     #[must_use]
     pub fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
-        self.type_index.with_base(base)
+        self.type_names().with_base(base)
     }
 
     /// The types a name could mean, in identifier order: those named
@@ -1032,21 +1087,30 @@ impl ModuleImage {
     /// `std::vector<int, std::allocator<int> >`.
     #[must_use]
     pub fn types_named(&self, name: &str) -> Vec<TypeReference> {
-        self.type_index.named(name, false, &self.types.as_ref())
+        self.type_names().named(name, false, &*self.types)
     }
 
     /// Whether two of this image's types have the same identity, as one
     /// type defined in several units does.
     #[must_use]
     pub fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
-        self.type_index.same_type(left, right)
+        left == right
+            || left.image == self.id
+                && right.image == self.id
+                && self
+                    .types
+                    .view()
+                    .class(left.id)
+                    .zip(self.types.view().class(right.id))
+                    .is_some_and(|(left, right)| left == right)
     }
 
     /// Resolves a basename, canonical qualification, source qualification, or
     /// linkage identity to exactly one catalog entry.
-    pub fn global_named(&self, selector: &str) -> Result<&GlobalVariableInfo> {
+    pub fn global_named(&self, selector: &str) -> Result<GlobalVariableInfo> {
         let matches = self
             .globals_by_selector
+            .get_or_init(|| grouped_index(global_selectors(self)))
             .get(selector)
             .ok_or_else(|| Error::VariableNotFound(selector.to_owned()))?;
         let [id] = matches.as_ref() else {
@@ -1099,10 +1163,25 @@ impl ModuleImage {
         }
     }
 
+    /// The image's tables.
+    pub(crate) const fn tables(&self) -> &Arc<crate::image::Image> {
+        &self.tables
+    }
+
+    /// The bytes of the image's tables.
+    #[cfg(test)]
+    pub(crate) fn image_bytes(&self) -> &[u8] {
+        self.tables.as_bytes()
+    }
+
+    /// The image's line tables.
+    fn lines(&self) -> LineView<'_> {
+        LineView::new(&self.tables)
+    }
+
     /// Returns every ordered source line-program row in this image.
-    #[must_use]
-    pub fn statement_rows(&self) -> &[StatementRow] {
-        &self.statements
+    pub fn statement_rows(&self) -> impl Iterator<Item = StatementRow> + '_ {
+        self.lines().statement_rows()
     }
 
     /// Returns exact line-program control boundaries at an image address.
@@ -1113,12 +1192,8 @@ impl ModuleImage {
     pub fn control_boundaries_at(
         &self,
         address: ImageAddress,
-    ) -> impl Iterator<Item = &StatementRow> {
-        self.control_boundaries_by_address
-            .get(&address)
-            .into_iter()
-            .flat_map(|rows| rows.iter())
-            .filter_map(|row| self.statements.get(*row as usize))
+    ) -> impl Iterator<Item = StatementRow> + '_ {
+        self.lines().control_boundaries_at(address)
     }
 
     /// Returns where a function breakpoint enters one code instance: every
@@ -1128,43 +1203,58 @@ impl ModuleImage {
         &self,
         instance: CodeInstanceId,
     ) -> impl Iterator<Item = BreakpointEntry> + '_ {
-        self.recommended_entries_by_instance
-            .get(&instance)
+        self.code_instance(instance)
             .into_iter()
-            .flat_map(|entries| entries.iter())
-            .copied()
+            .flat_map(CodeInstance::recommended_entries)
     }
 
-    pub(crate) fn line_entries(&self) -> &[LineEntry] {
-        &self.lines
+    #[cfg(feature = "tools")]
+    pub(crate) fn line_entries(&self) -> impl Iterator<Item = LineEntry> + '_ {
+        self.lines().line_entries()
     }
 
-    pub(crate) fn line_entry_containing(&self, address: ImageAddress) -> Option<&LineEntry> {
-        self.line_range_index
-            .containing(address)
-            .min()
-            .and_then(|index| {
-                self.lines
-                    .get(usize::try_from(index).expect("u32 fits usize"))
-            })
+    /// The line ranges that start in `instance`'s code, in order.
+    pub(crate) fn line_entries_in(
+        &self,
+        instance: CodeInstance<'_>,
+    ) -> impl Iterator<Item = LineEntry> + '_ {
+        self.lines().line_entries_starting_in(instance.ranges())
+    }
+
+    pub(crate) fn line_entry_containing(&self, address: ImageAddress) -> Option<LineEntry> {
+        self.lines().line_entry_containing(address)
     }
 
     /// Looks up a concrete code instance by identifier.
     #[must_use]
-    pub fn code_instance(&self, id: CodeInstanceId) -> Option<&CodeInstanceInfo> {
-        self.code_instances.get(id.index())
+    pub fn code_instance(&self, id: CodeInstanceId) -> Option<CodeInstance<'_>> {
+        self.function_view().instance(id)
     }
 
     /// Returns the concrete instances of one source-level function.
     pub fn instances_for_function(
         &self,
         function: FunctionId,
-    ) -> impl Iterator<Item = &CodeInstanceInfo> {
-        self.instances_by_function
-            .get(&function)
+    ) -> impl Iterator<Item = CodeInstance<'_>> {
+        self.function(function)
             .into_iter()
-            .flat_map(|instances| instances.iter())
-            .filter_map(|instance| self.code_instance(*instance))
+            .flat_map(Function::instances)
+    }
+
+    /// The instances whose code contains `address`.
+    fn instances_containing(
+        &self,
+        address: ImageAddress,
+    ) -> impl Iterator<Item = CodeInstance<'_>> {
+        self.function_view().instances_containing(address)
+    }
+
+    /// The physical instance whose code contains `address`, the first of
+    /// several.
+    fn physical_instance(&self, address: ImageAddress) -> Option<CodeInstance<'_>> {
+        self.instances_containing(address)
+            .filter(|instance| instance.is_out_of_line())
+            .min_by_key(|instance| instance.id())
     }
 
     /// Returns image addresses associated with one source line.
@@ -1172,12 +1262,16 @@ impl ModuleImage {
         &self,
         file: SourceFileId,
         line: LineNumber,
-    ) -> impl Iterator<Item = ImageAddress> + '_ {
-        self.statements_by_source_line
-            .get(&(file, line))
-            .into_iter()
-            .flat_map(|addresses| addresses.iter())
-            .copied()
+    ) -> impl Iterator<Item = ImageAddress> + use<> {
+        let lines = self.lines();
+        let mut addresses = lines
+            .statements(file, line.get()..=line.get())
+            .iter()
+            .map(|key| lines.address(key.row.get()))
+            .collect::<Vec<_>>();
+        addresses.sort_unstable();
+        addresses.dedup();
+        addresses.into_iter()
     }
 
     /// Returns the lines of one source file within `lines` that have
@@ -1188,9 +1282,37 @@ impl ModuleImage {
         file: SourceFileId,
         lines: std::ops::RangeInclusive<LineNumber>,
     ) -> impl Iterator<Item = LineNumber> + '_ {
-        self.statements_by_source_line
-            .range((file, *lines.start())..=(file, *lines.end()))
-            .map(|((_, line), _)| *line)
+        let mut previous = None;
+        self.lines()
+            .statements(file, lines.start().get()..=lines.end().get())
+            .iter()
+            .filter_map(move |key| {
+                let line = key.line.get();
+                (previous.replace(line) != Some(line)).then(|| LineNumber::new(line))?
+            })
+    }
+
+    /// The first line of `file` at or after `line` with statements.
+    pub(crate) fn next_statement_line(
+        &self,
+        file: SourceFileId,
+        line: LineNumber,
+    ) -> Option<LineNumber> {
+        let key = self
+            .lines()
+            .statements(file, line.get()..=u64::MAX)
+            .first()?;
+        LineNumber::new(key.line.get())
+    }
+
+    /// The last line of `file` at or before `line` with statements.
+    pub(crate) fn previous_statement_line(
+        &self,
+        file: SourceFileId,
+        line: u64,
+    ) -> Option<LineNumber> {
+        let key = self.lines().statements(file, 1..=line).last()?;
+        LineNumber::new(key.line.get())
     }
 
     /// Finds the line a source breakpoint requested at `line` stops at, as
@@ -1200,52 +1322,40 @@ impl ModuleImage {
     /// into the next one, and a line of a Go file never moves at all.
     #[must_use]
     pub fn breakpoint_line(&self, file: SourceFileId, line: LineNumber) -> Option<LineNumber> {
-        let ((_, next), addresses) = self
-            .statements_by_source_line
-            .range((file, line)..)
-            .next()
-            .filter(|((next_file, _), _)| *next_file == file)?;
-        if *next == line {
+        let next = self.next_statement_line(file, line)?;
+        if next == line {
             return Some(line);
         }
         if self.keeps_line_breakpoints(file) {
             return None;
         }
-        let encloses_request = |instance: &CodeInstanceInfo| {
-            self.statements.iter().any(|row| {
-                row.flags.is_statement()
-                    && instance.contains(row.address)
-                    && row
-                        .location
-                        .as_ref()
-                        .is_some_and(|location| location.file == file && location.line <= line)
-            })
+        let lines = self.lines();
+        let before = lines.statements(file, 1..=line.get());
+        let encloses_request = |instance: CodeInstance<'_>| {
+            before
+                .iter()
+                .any(|key| instance.contains(lines.address(key.row.get())))
         };
-        addresses
-            .iter()
-            .flat_map(|address| {
-                self.code_range_index
-                    .containing(*address)
-                    .filter_map(|instance| self.code_instance(instance))
-            })
-            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+        self.statement_addresses(file, next)
+            .flat_map(|address| self.instances_containing(address))
+            .filter(|instance| instance.is_out_of_line())
             .any(encloses_request)
-            .then_some(*next)
+            .then_some(next)
     }
 
     /// Finds the single function with the supplied source-level name.
     ///
     /// Only functions with code compete: a compile unit that merely calls
     /// a function defined in another one may describe it by a declaration.
-    pub fn function_named(&self, name: &str) -> Result<&FunctionInfo> {
+    pub fn function_named(&self, name: &str) -> Result<Function<'_>> {
         let named = self.functions_named(name).collect::<Vec<_>>();
         let defined = named
             .iter()
             .copied()
-            .filter(|function| self.instances_for_function(function.id).next().is_some())
+            .filter(|function| function.instances().next().is_some())
             .collect::<Vec<_>>();
         match (defined.as_slice(), named.as_slice()) {
-            ([function], _) | ([], [function]) => Ok(function),
+            ([function], _) | ([], [function]) => Ok(*function),
             (_, []) => Err(Error::FunctionNotFound(name.to_owned())),
             _ => Err(Error::DuplicateFunction(name.to_owned())),
         }
@@ -1253,42 +1363,31 @@ impl ModuleImage {
 
     /// Returns every function with the supplied source-level name, such as
     /// C++ overloads and same-named static functions of different files.
-    pub fn functions_named(&self, name: &str) -> impl Iterator<Item = &FunctionInfo> {
-        self.functions_by_name
-            .get(name)
-            .into_iter()
-            .flat_map(|functions| functions.iter())
-            .map(|function| {
-                self.function(*function)
-                    .expect("name index references a function")
-            })
+    pub fn functions_named<'a>(&'a self, name: &str) -> impl Iterator<Item = Function<'a>> + 'a {
+        self.function_view().named(name)
     }
 
     /// Every linker symbol with the supplied name.
-    pub fn symbols_named(&self, name: &str) -> impl Iterator<Item = &SymbolInfo> {
-        self.symbols_by_name
-            .get(name)
-            .into_iter()
-            .flat_map(|symbols| symbols.iter())
-            .filter_map(|symbol| self.symbol(*symbol))
+    pub fn symbols_named<'a>(&'a self, name: &str) -> impl Iterator<Item = Symbol<'a>> + 'a {
+        self.symbol_view().named(name)
     }
 
-    /// Every symbol that answers to a name as [`SymbolInfo::answers_to`]
+    /// Every symbol that answers to a name as [`Symbol::answers_to`]
     /// reads it.
-    pub fn symbols_answering<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a SymbolInfo> {
+    pub fn symbols_answering<'a>(&'a self, name: &'a str) -> impl Iterator<Item = Symbol<'a>> {
         let index = self.symbols_by_last_part.get_or_init(|| {
             let mut index = HashMap::<Box<str>, Vec<SymbolId>>::new();
-            for symbol in self.symbols.iter() {
-                let demangled = crate::demangle::demangle(&symbol.name);
+            for symbol in self.symbols() {
+                let demangled = crate::demangle::demangle(symbol.name());
                 let parts = [
-                    Some(&*symbol.name),
+                    Some(symbol.name()),
                     Some(symbol.unversioned_name()),
                     demangled.as_deref().map(crate::demangle::last_part),
                 ];
                 for part in parts.into_iter().flatten() {
                     let ids = index.entry(part.into()).or_default();
-                    if ids.last() != Some(&symbol.id) {
-                        ids.push(symbol.id);
+                    if ids.last() != Some(&symbol.id()) {
+                        ids.push(symbol.id());
                     }
                 }
             }
@@ -1324,18 +1423,15 @@ impl ModuleImage {
     }
 
     /// Finds the single linker symbol with the supplied name.
-    pub fn symbol_named(&self, name: &str) -> Result<&SymbolInfo> {
-        let matches = self
-            .symbols_by_name
-            .get(name)
+    pub fn symbol_named(&self, name: &str) -> Result<Symbol<'_>> {
+        let mut matches = self.symbols_named(name);
+        let symbol = matches
+            .next()
             .ok_or_else(|| Error::SymbolNotFound(name.to_owned()))?;
-        let [symbol] = matches.as_ref() else {
+        if matches.next().is_some() {
             return Err(Error::DuplicateSymbol(name.to_owned()));
-        };
-
-        Ok(self
-            .symbol(*symbol)
-            .expect("name index references a symbol"))
+        }
+        Ok(symbol)
     }
 
     /// What the code at an image address is to unwinding and stepping: the
@@ -1343,49 +1439,39 @@ impl ModuleImage {
     /// symbol naming it, or else ordinary code.
     #[must_use]
     pub fn code_role(&self, address: ImageAddress) -> CodeRole {
-        let physical = self
-            .code_range_index
-            .containing(address)
-            .filter_map(|instance| self.code_instance(instance))
-            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
-            .min_by_key(|instance| instance.id);
-        if let Some(function) = physical.and_then(|instance| self.function(instance.function)) {
-            return function.role;
+        let physical = self.physical_instance(address);
+        if let Some(function) = physical.and_then(|instance| self.function(instance.function())) {
+            return function.role();
         }
         self.symbolize(address)
             .and_then(|location| self.symbol(location.symbol))
-            .map_or(CodeRole::Ordinary, |symbol| symbol.role)
+            .map_or(CodeRole::Ordinary, Symbol::role)
     }
 
     /// Resolves an image address to its available function and source metadata.
     #[must_use]
     pub fn locate(&self, address: ImageAddress) -> ImageLocation {
-        let physical = self
-            .code_range_index
-            .containing(address)
-            .filter_map(|instance| self.code_instance(instance))
-            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
-            .min_by_key(|instance| instance.id);
-        let inline_frames = self.inline_frames(address, physical.map(|instance| instance.id));
+        let physical = self.physical_instance(address);
+        let inline_frames = self.inline_frames(address, physical.map(CodeInstance::id));
         let logical_instance = match &inline_frames {
             InlineFrameLookup::Unique(chain) => chain.instances.last().copied(),
             InlineFrameLookup::None | InlineFrameLookup::Ambiguous(_) => None,
         };
         let function_id = logical_instance
             .and_then(|instance| self.code_instance(instance))
-            .map(|instance| instance.function)
-            .or_else(|| physical.map(|instance| instance.function));
+            .or(physical)
+            .map(CodeInstance::function);
         let function = function_id
             .and_then(|function_id| self.function(function_id))
-            .cloned();
+            .map(Function::info);
         let source = self
             .line_entry_containing(address)
-            .map(|entry| entry.location.clone());
+            .map(|entry| entry.location);
 
         ImageLocation {
             address,
             function,
-            physical_instance: physical.map(|instance| instance.id),
+            physical_instance: physical.map(CodeInstance::id),
             inline_frames,
             source,
             symbol: self.symbolize(address),
@@ -1399,18 +1485,13 @@ impl ModuleImage {
     ) -> InlineFrameLookup {
         let mut chains = Vec::new();
 
-        for instance in self
-            .code_range_index
-            .containing(address)
-            .filter_map(|instance| self.code_instance(instance))
-            .filter(|instance| {
-                matches!(
-                    instance.kind,
-                    CodeInstanceKind::Inline { call_site: Some(_) }
-                )
-            })
-        {
-            if let Some(chain) = self.inline_chain(instance.id, address, physical)
+        for instance in self.instances_containing(address).filter(|instance| {
+            matches!(
+                instance.kind(),
+                CodeInstanceKind::Inline { call_site: Some(_) }
+            )
+        }) {
+            if let Some(chain) = self.inline_chain(instance.id(), address, physical)
                 && !chains.contains(&chain)
             {
                 chains.push(chain);
@@ -1451,17 +1532,17 @@ impl ModuleImage {
             if !current.contains(address) {
                 return None;
             }
-            match &current.kind {
-                CodeInstanceKind::Inline { call_site: Some(_) } => chain.push(current.id),
+            match current.kind() {
+                CodeInstanceKind::Inline { call_site: Some(_) } => chain.push(current.id()),
                 CodeInstanceKind::Inline { call_site: None } => return None,
                 CodeInstanceKind::OutOfLine => {
-                    if Some(current.id) != physical {
+                    if Some(current.id()) != physical {
                         return None;
                     }
                     break;
                 }
             }
-            instance = current.parent?;
+            instance = current.parent()?;
         }
 
         chain.reverse();
@@ -1473,28 +1554,45 @@ impl ModuleImage {
     pub fn source_file(&self, id: SourceFileId) -> Option<&SourceFile> {
         self.source_files.get(id.index())
     }
-}
 
-/// Orders the code symbols containing one address from most to least
-/// preferred; see [`ModuleImage::symbolize`].
-fn symbol_preference(symbol: &SymbolInfo) -> impl Ord + '_ {
-    let extent = symbol.extent.expect("indexed symbols have extents");
-    (
-        extent.provenance,
-        std::cmp::Reverse(extent.range.start),
-        extent.range.end.get() - extent.range.start.get(),
-        symbol.kind,
-        symbol.binding,
-        !symbol.exported,
-        symbol.name.bytes().take_while(|byte| *byte == b'_').count(),
-        symbol.name.as_ref(),
-        symbol.id,
-    )
+    /// Every named integer constant, for a dump of every answer.
+    #[cfg(feature = "tools")]
+    pub(crate) fn constants_for_dump(&self) -> impl Iterator<Item = (&str, crate::IntegerValue)> {
+        self.declarations().constants()
+    }
+
+    /// Every thread-local variable, for a dump of every answer.
+    #[cfg(feature = "tools")]
+    pub(crate) fn thread_locals_for_dump(
+        &self,
+    ) -> impl Iterator<Item = (&str, std::result::Result<ThreadLocal, Arc<str>>)> {
+        self.facts().thread_locals()
+    }
+
+    /// Every Rust vtable, for a dump of every answer.
+    #[cfg(feature = "tools")]
+    pub(crate) fn vtables_for_dump(&self) -> impl Iterator<Item = (ImageAddress, TypeReference)> {
+        let image = self.id;
+        self.declarations()
+            .vtables()
+            .map(move |(address, id)| (address, TypeReference { image, id }))
+    }
+
+    /// Every Go runtime type descriptor offset a type names, for a dump of
+    /// every answer.
+    #[cfg(feature = "tools")]
+    pub(crate) fn go_runtime_type_offsets_for_dump(&self) -> Vec<u64> {
+        self.types
+            .view()
+            .go_runtime_types()
+            .map(|(offset, _)| offset)
+            .collect()
+    }
 }
 
 /// Collects the addresses debug information and code symbols prove begin
 /// instructions, keeping the strongest evidence for each address.
-fn instruction_starts(metadata: &ModuleMetadata) -> Arc<[(ImageAddress, crate::BoundaryEvidence)]> {
+fn instruction_starts(metadata: &ModuleMetadata) -> Vec<(ImageAddress, crate::BoundaryEvidence)> {
     let mut starts = BTreeMap::new();
     let functions = metadata
         .code_instances
@@ -1521,21 +1619,6 @@ fn instruction_starts(metadata: &ModuleMetadata) -> Arc<[(ImageAddress, crate::B
     starts.into_iter().collect()
 }
 
-/// Orders the data symbols naming one address, preferring the innermost
-/// storage and then the names [`symbol_preference`] prefers.
-fn storage_preference(symbol: &SymbolInfo) -> impl Ord + '_ {
-    let storage = symbol.storage.expect("indexed symbols have storage");
-    (
-        std::cmp::Reverse(storage.start),
-        storage.end.get() - storage.start.get(),
-        symbol.binding,
-        !symbol.exported,
-        symbol.name.bytes().take_while(|byte| *byte == b'_').count(),
-        symbol.name.as_ref(),
-        symbol.id,
-    )
-}
-
 /// Matches an absolute path exactly and a relative path as a suffix of whole
 /// components, ignoring `.` components such as a leading `./`.
 fn path_matches(candidate: &Path, requested: &Path) -> bool {
@@ -1555,6 +1638,7 @@ fn path_matches(candidate: &Path, requested: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EntryProvenance;
     use crate::model::{
         Architecture, BaseType, BaseTypeEncoding, ByteOrder, GlobalVariableType,
         GlobalVariableVisibility, LineSequenceId, PointerWidth, StatementFlags, SymbolBinding,
@@ -1577,6 +1661,14 @@ mod tests {
         )
     }
 
+    fn files(paths: &[&str]) -> crate::image::lines::Files {
+        let mut files = crate::image::lines::Files::default();
+        for path in paths {
+            files.intern(PathBuf::from(path));
+        }
+        files
+    }
+
     fn functions(names: &[&str]) -> Vec<FunctionInfo> {
         names
             .iter()
@@ -1595,8 +1687,13 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn global_indexes_support_exact_qualification_and_structured_ambiguity() {
+    /// An image of two globals named `shared`, in two files: the first of
+    /// type `int`, the second of a type that could not be read.
+    fn two_globals() -> (ModuleImage, TypeInfo) {
+        use crate::image::variables::{
+            DataObject, Global, Metadata, MetadataAbsence, TypeResolution, Variables,
+        };
+
         let int = TypeInfo {
             reference: TypeReference {
                 image: ModuleImageId::new(0),
@@ -1613,44 +1710,84 @@ mod tests {
             }),
             identity: None,
         };
-        let globals = [
-            ("left::shared", "_ZL11left_shared", 0),
-            ("right::shared", "_ZL12right_shared", 1),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(
-            |(id, (qualified_name, linkage_name, file))| GlobalVariableInfo {
-                id: GlobalVariableId::new(u32::try_from(id).expect("small global count")),
-                name: "shared".into(),
-                qualified_name: qualified_name.into(),
-                linkage_name: Some(linkage_name.into()),
-                declaration: Some(SourceLocation {
-                    file: SourceFileId::new(file),
-                    line: LineNumber::new(7).expect("nonzero line"),
-                    column: None,
-                }),
-                type_info: GlobalVariableType::Resolved(int.clone()),
-                visibility: GlobalVariableVisibility::CompilationUnit,
-            },
-        )
-        .collect();
+        let object = |file, type_info| DataObject {
+            debug_info_offset: None,
+            kind: crate::VariableKind::Global,
+            name: "shared".into(),
+            declaration: Some(SourceLocation {
+                file: SourceFileId::new(file),
+                line: LineNumber::new(7).expect("nonzero line"),
+                column: None,
+            }),
+            ranges: Arc::from([]),
+            go_declaration: None,
+            instance: None,
+            lexical_depth: 0,
+            order: u64::from(file),
+            type_info,
+            escaped: None,
+            hidden: false,
+            coroutine: None,
+            value: Metadata::Absent(MetadataAbsence::NoLocation),
+            frame_base: Metadata::Absent(MetadataAbsence::NotApplicable),
+            malformed: None,
+        };
+        let global = |object, qualified_name: &str, linkage_name: &str| Global {
+            object,
+            qualified_name: qualified_name.into(),
+            linkage_name: Some(linkage_name.into()),
+            external: object == 1,
+        };
         let image = test_image(
             1,
             ModuleMetadata {
-                globals,
-                source_files: ["/build/src/left.c", "/build/src/right.c"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(id, path)| SourceFile {
-                        id: SourceFileId::new(u32::try_from(id).expect("small file count")),
-                        path: Arc::new(PathBuf::from(path)),
-                    })
-                    .collect(),
+                types: Arc::from([TypeNode::Resolved(int.clone())]),
+                variables: Variables {
+                    objects: vec![
+                        object(0, TypeResolution::Resolved(TypeId::new(0))),
+                        object(1, TypeResolution::Malformed("no type".into())),
+                    ],
+                    globals: vec![
+                        global(0, "left::shared", "_ZL11left_shared"),
+                        global(1, "right::shared", "_ZL12right_shared"),
+                    ],
+                    ..Variables::default()
+                },
+                files: files(&["/build/src/left.c", "/build/src/right.c"]),
                 ..ModuleMetadata::default()
             },
         );
+        (image, int)
+    }
 
+    /// Globals answer to their names, qualified names, linkage names, and
+    /// qualified names after their files, and read their types and
+    /// visibility from the image.
+    #[test]
+    fn global_indexes_support_exact_qualification_and_structured_ambiguity() {
+        let (image, int) = two_globals();
+        let [left, right] = [0, 1].map(|id| {
+            image
+                .global(GlobalVariableId::new(id))
+                .expect("the global exists")
+        });
+        assert_eq!(left.type_info, GlobalVariableType::Resolved(int));
+        assert_eq!(
+            right.type_info,
+            GlobalVariableType::Malformed(crate::VariableMalformedReason {
+                kind: crate::VariableMalformedKind::InvalidTypeGraph,
+                description: "no type".into(),
+            })
+        );
+        assert_eq!(
+            [left.visibility, right.visibility],
+            [
+                GlobalVariableVisibility::CompilationUnit,
+                GlobalVariableVisibility::External
+            ]
+        );
+        assert!(image.global(GlobalVariableId::new(2)).is_none());
+        assert_eq!(image.globals().len(), 2);
         let selected = |selector| image.global_named(selector).expect(selector).id;
         assert_eq!(selected("left::shared"), GlobalVariableId::new(0));
         assert_eq!(selected("right.c::right::shared"), GlobalVariableId::new(1));
@@ -1702,8 +1839,16 @@ mod tests {
                 ]),
                 ..ModuleMetadata::default()
             },
+        );
+        let image = ModuleImage::bind(
+            &Binding {
+                path: image.path_arc(),
+                debug_path: None,
+                id: image_id,
+            },
+            Arc::clone(image.tables()),
         )
-        .with_id(image_id);
+        .unwrap();
 
         assert_eq!(
             image
@@ -1775,6 +1920,8 @@ mod tests {
             ModuleMetadata {
                 functions: functions(&["physical", "middle", "leaf", "sibling"]),
                 code_instances,
+                // The file the call sites name.
+                files: files(&["/build/src/main.c"]),
                 ..ModuleMetadata::default()
             },
         )
@@ -1904,7 +2051,8 @@ mod tests {
             ModuleMetadata {
                 functions: functions(&["physical", "inline"]),
                 code_instances: vec![physical, inline],
-                statements: vec![
+                files: files(&["/build/src/main.c"]),
+                lines: crate::image::lines::from_statement_rows(&[
                     row(
                         0x14,
                         None,
@@ -1921,7 +2069,7 @@ mod tests {
                     ),
                     row(0x18, Some(source(9)), flags().with_prologue_end(true), 1, 0),
                     row(0x20, None, flags().with_epilogue_begin(true), 1, 1),
-                ],
+                ]),
                 ..ModuleMetadata::default()
             },
         );
@@ -2129,7 +2277,7 @@ mod tests {
     fn symbolized(image: &ModuleImage, address: u64) -> Option<(&str, u64)> {
         image.symbolize(ImageAddress::new(address)).map(|location| {
             (
-                image.symbol(location.symbol).expect("known").name.as_ref(),
+                image.symbol(location.symbol).expect("known").name(),
                 location.offset,
             )
         })

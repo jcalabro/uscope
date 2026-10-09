@@ -22,7 +22,7 @@ use crate::unwind::RegisterFile;
 use crate::{
     CoroutineInfo, EntryProvenance, ExceptionFilter, FunctionInfo, ImageAddress, IntegerValue,
     ModuleImage, RecordMemberLayout, StackSegment, TaskState, ThreadId, ThreadLocal, TypeInfo,
-    TypeKind, TypeNode, TypeReference, VirtualAddress,
+    TypeKind, TypeReference, VirtualAddress,
 };
 
 /// A result with the reasons it may be incomplete, such as a task whose
@@ -51,7 +51,7 @@ pub struct ImageSymbol {
 /// The static facts of the module that carries a runtime, by name.
 pub trait RuntimeImage: std::fmt::Debug {
     /// The producers of the module's debug information.
-    fn producers(&self) -> &[Arc<str>];
+    fn producers(&self) -> Vec<&str>;
     /// The value of a named integer constant.
     fn constant(&self, name: &str) -> Option<IntegerValue>;
     /// A named object or function.
@@ -599,8 +599,8 @@ pub fn detect(
 }
 
 impl RuntimeImage for ModuleImage {
-    fn producers(&self) -> &[Arc<str>] {
-        Self::producers(self)
+    fn producers(&self) -> Vec<&str> {
+        Self::producers(self).collect()
     }
 
     fn constant(&self, name: &str) -> Option<IntegerValue> {
@@ -614,12 +614,12 @@ impl RuntimeImage for ModuleImage {
     fn function_answering(&self, name: &str) -> Option<ImageSymbol> {
         let mut found = self
             .symbols_answering(name)
-            .filter(|symbol| symbol.kind == crate::SymbolKind::Function);
+            .filter(|symbol| symbol.kind() == crate::SymbolKind::Function);
         let symbol = found.next()?;
         found.next().is_none().then_some(ImageSymbol {
-            address: symbol.address,
+            address: symbol.address(),
             size: symbol
-                .extent
+                .extent()
                 .map(|extent| extent.range.end.get() - extent.range.start.get()),
         })
     }
@@ -634,12 +634,12 @@ impl RuntimeImage for ModuleImage {
     fn symbol(&self, name: &str) -> Option<ImageSymbol> {
         let symbol = self.symbol_named(name).ok()?;
         let size = symbol
-            .extent
+            .extent()
             .map(|extent| extent.range)
-            .or(symbol.storage)
+            .or_else(|| symbol.storage())
             .map(|range| range.end.get() - range.start.get());
         Some(ImageSymbol {
-            address: symbol.address,
+            address: symbol.address(),
             size,
         })
     }
@@ -648,16 +648,15 @@ impl RuntimeImage for ModuleImage {
     /// its first instruction.
     fn function_entries(&self, name: &str) -> Vec<ImageAddress> {
         self.functions()
-            .iter()
-            .filter(|function| *function.name == *name)
-            .flat_map(|function| self.instances_for_function(function.id))
-            .filter(|instance| matches!(instance.kind, crate::CodeInstanceKind::OutOfLine))
-            .filter_map(|instance| instance.ranges.iter().map(|range| range.start).min())
+            .filter(|function| *function.name() == *name)
+            .flat_map(|function| self.instances_for_function(function.id()))
+            .filter(|instance| matches!(instance.kind(), crate::CodeInstanceKind::OutOfLine))
+            .filter_map(|instance| instance.ranges().map(|range| range.start).min())
             .collect()
     }
 
     fn function_body(&self, name: &str) -> Option<ImageAddress> {
-        let entry = self.symbol_named(name).ok()?.address;
+        let entry = self.symbol_named(name).ok()?.address();
         let instance = self.locate(entry).physical_instance?;
         self.recommended_entries_for_instance(instance)
             .filter(|body| {
@@ -671,10 +670,7 @@ impl RuntimeImage for ModuleImage {
     }
 
     fn member(&self, type_name: &str, path: &[&str]) -> Option<Member> {
-        let mut ty = self.types().iter().find_map(|node| match node {
-            TypeNode::Resolved(info) if info.name.as_ref() == type_name => Some(info),
-            _ => None,
-        })?;
+        let mut ty = self.types_named_exactly(type_name).next()?;
         let mut offset = 0_u64;
         for name in path {
             let TypeKind::Record { members, .. } = &representation(self, ty)?.kind else {
@@ -758,9 +754,9 @@ impl RuntimeImage for ModuleImage {
         let mut starts = self
             .coroutine_functions(ty.id)
             .into_iter()
-            .flat_map(|function| self.instances_for_function(function.id))
-            .filter(|instance| matches!(instance.kind, crate::CodeInstanceKind::OutOfLine))
-            .filter_map(|instance| instance.ranges.iter().map(|range| range.start).min());
+            .flat_map(|function| self.instances_for_function(function.id()))
+            .filter(|instance| matches!(instance.kind(), crate::CodeInstanceKind::OutOfLine))
+            .filter_map(|instance| instance.ranges().map(|range| range.start).min());
         let first = starts.next()?;
         starts.all(|start| start == first).then_some(first)
     }
@@ -770,8 +766,8 @@ impl RuntimeImage for ModuleImage {
         location
             .physical_instance
             .and_then(|instance| self.code_instance(instance))
-            .and_then(|instance| self.function(instance.function))
-            .map(|function| Arc::clone(&function.name))
+            .and_then(|instance| self.function(instance.function()))
+            .map(|function| Arc::from(function.name()))
             .or_else(|| self.symbolize(address).map(|symbol| symbol.name))
     }
 }

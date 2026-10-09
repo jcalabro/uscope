@@ -176,7 +176,7 @@ impl<'m, M: Machine> ViewMachine<'m, M> {
 }
 
 impl<M: Machine> TypeSource for ViewMachine<'_, M> {
-    fn type_info(&self, ty: TypeReference) -> Option<TypeInfo> {
+    fn type_info(&self, ty: TypeReference) -> Option<&TypeInfo> {
         self.base.type_info(ty)
     }
 
@@ -190,6 +190,10 @@ impl<M: Machine> TypeSource for ViewMachine<'_, M> {
 
     fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
         self.base.c_base_type(ty)
+    }
+
+    fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        self.base.same_type(left, right)
     }
 }
 
@@ -670,10 +674,13 @@ fn function_type<M: Machine>(
     }
     let mut found = Vec::<TypeReference>::new();
     for candidate in candidates {
-        let Some(identity) = machine.type_info(*candidate).and_then(|info| info.identity) else {
+        let Some(identity) = machine
+            .type_info(*candidate)
+            .and_then(|info| info.identity.as_deref())
+        else {
             continue;
         };
-        if super::pattern::matches_with(pattern, &identity, machine, captures.clone()).is_some()
+        if super::pattern::matches_with(pattern, identity, machine, captures.clone()).is_some()
             && !found
                 .iter()
                 .any(|other| machine.same_type(*other, *candidate))

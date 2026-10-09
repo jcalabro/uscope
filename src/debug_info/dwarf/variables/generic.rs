@@ -18,7 +18,7 @@ use super::evaluate::{EvaluateError, FrameBaseCache};
 use super::shape::ValueShape;
 use super::storage;
 use super::types::TypeResolution;
-use super::{DwarfVariableInfo, Metadata, ValueDescription, VariableRuntime};
+use super::{DwarfVariableInfo, VariableRuntime};
 
 /// The global locating the runtime's type descriptors.
 const MODULE_DATA: &str = "runtime.firstmoduledata";
@@ -56,7 +56,7 @@ impl DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> crate::Result<Generic> {
-        let Some(&index) = self.go_dict_indices.get(&type_id) else {
+        let Some(index) = self.type_facts().dictionary_index(type_id) else {
             return Ok(Generic::Plain);
         };
         let shape = match self.type_info(type_id).map(|info| &info.kind) {
@@ -97,9 +97,10 @@ impl DwarfVariableInfo {
         if !(types..end).contains(&descriptor.get()) {
             return Err(ShapeUnresolvedReason::ForeignType.into());
         }
-        let argument = *self
-            .go_runtime_types
-            .get(&(descriptor.get() - types))
+        let argument = self
+            .types
+            .view()
+            .go_runtime_type(descriptor.get() - types)
             .ok_or(ShapeUnresolvedReason::UndescribedType)?;
         // A dictionary read where the function has not stored it yet holds
         // whatever was there; a type laid out unlike the shape is not the
@@ -123,13 +124,11 @@ impl DwarfVariableInfo {
             .function_at(at)
             .ok_or(ShapeUnresolvedReason::NoDictionary)?;
         let dictionary = function
-            .objects
-            .iter()
-            .map(|&index| &self.objects[index])
+            .objects()
             .find(|object| {
-                object.name.as_ref() == ".dict"
-                    && object.instance == instance
-                    && object.ranges.iter().any(|range| range.contains(at))
+                object.name() == ".dict"
+                    && object.instance() == instance
+                    && self.visible_at(*object, at)
             })
             .ok_or(ShapeUnresolvedReason::NoDictionary)?;
         // Optimized Go places its dictionary, for the whole function, in
@@ -137,11 +136,15 @@ impl DwarfVariableInfo {
         // function may never spill it there, and the slot may hold another
         // call's. Unoptimized Go says where it is before and after it
         // spills it.
-        if let Metadata::Value(ValueDescription::Location(location)) = &dictionary.value
-            && location.entries.iter().any(|entry| {
-                entry.range.is_none()
-                    && *entry.expression.bytes == [gimli::constants::DW_OP_call_frame_cfa.0]
-            })
+        if let Some(location) = dictionary.location()
+            && self
+                .locations()
+                .list(location)
+                .entries()
+                .any(|(range, expression)| {
+                    range.is_none()
+                        && expression.bytes() == [gimli::constants::DW_OP_call_frame_cfa.0]
+                })
         {
             return Err(ShapeUnresolvedReason::UnreliableDictionary.into());
         }
@@ -169,18 +172,17 @@ impl DwarfVariableInfo {
             VariableUnavailableReason::OptimizedOut(crate::OptimizedOutReason::NoLocation),
         );
         let module_data = self
-            .globals
-            .iter()
-            .map(|&index| &self.objects[index])
-            .find(|object| object.name.as_ref() == MODULE_DATA)
+            .catalog()
+            .globals()
+            .find(|object| object.name() == MODULE_DATA)
             .ok_or(missing)?;
-        let TypeResolution::Resolved(type_id) = &module_data.type_info else {
+        let TypeResolution::Resolved(type_id) = module_data.type_info() else {
             return Err(ShapeUnresolvedReason::Malformed(
                 "runtime.firstmoduledata has a malformed type".into(),
             )
             .into());
         };
-        let Ok(ValueShape::Record { members, .. }) = self.value_shape(*type_id) else {
+        let Ok(ValueShape::Record { members, .. }) = self.value_shape(type_id) else {
             return Err(ShapeUnresolvedReason::Malformed(
                 "runtime.firstmoduledata is not a structure".into(),
             )

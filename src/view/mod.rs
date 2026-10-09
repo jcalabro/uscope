@@ -372,7 +372,7 @@ pub fn choose_among<S: Scope>(sets: &[&ViewSet], ty: TypeReference, scope: &S) -
 
 /// A type and the types its typedefs and qualifiers stand for, outermost
 /// first, ending at its representation.
-fn wrappers(types: &dyn TypeSource, ty: TypeReference) -> Vec<(TypeReference, TypeInfo)> {
+fn wrappers(types: &dyn TypeSource, ty: TypeReference) -> Vec<(TypeReference, &TypeInfo)> {
     let mut chain = Vec::new();
     let mut current = ty;
     while chain.len() < 64 {

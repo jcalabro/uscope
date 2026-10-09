@@ -408,7 +408,7 @@ impl Presenter<'_> {
         window: Window,
     ) -> Result<Vec<Listed>, ListError> {
         let mut rows = Vec::new();
-        let declared = image.globals().iter().filter(|global| {
+        let declared = image.globals().filter(|global| {
             global
                 .declaration
                 .as_ref()
@@ -431,7 +431,7 @@ impl Presenter<'_> {
                 self.listed(
                     Item {
                         name: &variable.name,
-                        path: global_expression(image, global),
+                        path: global_expression(image, &global),
                         raw: false,
                         type_info: variable.type_info.as_ref(),
                         state: &variable.state,

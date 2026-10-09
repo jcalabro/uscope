@@ -28,7 +28,7 @@ use crate::{
     AddressValue, ByteOrder, CodeInstanceId, DereferenceReference, DereferenceState,
     DereferenceUnavailableReason, Error, ImageAddress, InspectedValue, ModuleId, RecordKind,
     RegisterSnapshot, Result, StackFrameId, TextCompletion, TextSummary, TypeId, TypeInfo,
-    TypeKind, TypeNode, TypeReference, ValueChildren, VariableState, VariableUnavailableReason,
+    TypeKind, TypeReference, ValueChildren, VariableState, VariableUnavailableReason,
     VariableValue, VariableValueSource, VirtualAddress,
 };
 
@@ -314,21 +314,12 @@ impl<P: InspectionOps> Frame<'_, P> {
     /// enumeration's, in the frame's module before others.
     fn lookup_enumerator(&self, name: &str) -> Option<Lookup<StopObject>> {
         for module in self.modules() {
-            let mut found = Vec::new();
-            for node in module.image.types() {
-                let TypeNode::Resolved(info) = node else {
-                    continue;
-                };
-                let TypeKind::Enumeration { enumerators, .. } = &info.kind else {
-                    continue;
-                };
-                for enumerator in enumerators.iter() {
-                    let qualified = format!("{}::{}", info.name, enumerator.name);
-                    if enumerator.name.as_ref() == name || qualified == name {
-                        found.push((qualified, Exact::from(enumerator.value), info.reference));
-                    }
-                }
-            }
+            let mut found = module
+                .image
+                .enumerators_named(name)
+                .into_iter()
+                .map(|(qualified, value, ty)| (qualified, Exact::from(value), ty))
+                .collect::<Vec<_>>();
             found.sort_by(|left, right| left.0.cmp(&right.0));
             found.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
             match found.as_slice() {
@@ -366,8 +357,8 @@ fn object(module: &RuntimeModule, key: ObjectKey, local: bool) -> Lookup<StopObj
 }
 
 impl<P: InspectionOps> TypeSource for Frame<'_, P> {
-    fn type_info(&self, ty: TypeReference) -> Option<TypeInfo> {
-        self.controller.module_of(ty)?.image.type_info(ty).cloned()
+    fn type_info(&self, ty: TypeReference) -> Option<&TypeInfo> {
+        self.controller.module_of(ty)?.image.type_info(ty)
     }
 
     fn pointer_size(&self) -> u8 {
@@ -380,6 +371,14 @@ impl<P: InspectionOps> TypeSource for Frame<'_, P> {
 
     fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
         self.controller.module_image.target().c_base_type(ty)
+    }
+
+    fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        left == right
+            || self
+                .controller
+                .module_of(left)
+                .is_some_and(|module| module.image.same_type(left, right))
     }
 }
 
@@ -783,7 +782,7 @@ impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
 }
 
 impl<P: InspectionOps> TypeSource for StopMachine<'_, '_, P> {
-    fn type_info(&self, ty: TypeReference) -> Option<TypeInfo> {
+    fn type_info(&self, ty: TypeReference) -> Option<&TypeInfo> {
         self.frame.type_info(ty)
     }
 
@@ -797,6 +796,10 @@ impl<P: InspectionOps> TypeSource for StopMachine<'_, '_, P> {
 
     fn c_base_type(&self, ty: crate::CBaseType) -> Option<crate::BaseType> {
         self.frame.c_base_type(ty)
+    }
+
+    fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        self.frame.same_type(left, right)
     }
 }
 
@@ -1111,8 +1114,12 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             let instance = module.image.locate(image_address).physical_instance?;
             let function = module
                 .image
-                .function(module.image.code_instance(instance)?.function)?;
-            Some((module.image.id(), Arc::clone(&function.generics)))
+                .function(module.image.code_instance(instance)?.function())?;
+            let generics = function
+                .generics()
+                .map(|(name, argument)| (Arc::from(name), argument))
+                .collect::<crate::FunctionGenerics>();
+            Some((module.image.id(), generics))
         });
         let Some((image, generics)) = described else {
             return Err(Stop::Refused(Refusal::new(
@@ -1231,7 +1238,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 reason: DereferenceUnavailableReason::UnspecifiedPointee,
             },
             (Some(pointee), 0) => DereferenceState::Unavailable {
-                pointee: self.type_info(pointee).map(Box::new),
+                pointee: self.type_info(pointee).cloned().map(Box::new),
                 reason: DereferenceUnavailableReason::Null,
             },
             (Some(pointee), address) => match self.frame.controller.module_of(pointee) {

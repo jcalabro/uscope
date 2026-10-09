@@ -10,10 +10,12 @@ async fn gcc_o2_entry_policy_does_not_execute_a_real_first_statement() {
         let image = scenario.handle().module_image();
         let function = image.function_named("no_prologue").expect("no_prologue");
         image
-            .instances_for_function(function.id)
-            .find(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+            .instances_for_function(function.id())
+            .find(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine))
             .expect("physical no_prologue")
-            .ranges[0]
+            .ranges()
+            .next()
+            .unwrap()
             .start
     };
     let breakpoint = scenario.add_breakpoint("no_prologue").await;
@@ -39,7 +41,7 @@ async fn gcc_o2_entry_policy_does_not_execute_a_real_first_statement() {
         .module_image()
         .symbol_named("boundary_sink")
         .expect("boundary_sink symbol")
-        .address;
+        .address();
     let sink = relocate_image_address(sink, &location);
     let word = scenario
         .operation(
@@ -371,8 +373,8 @@ async fn stops_in_a_shared_library_show_that_librarys_own_source() {
         .await;
     let function = image.function_named("dso_apply").expect("dso_apply");
     let entry = image
-        .instances_for_function(function.id)
-        .find_map(|instance| instance.breakpoint_entry)
+        .instances_for_function(function.id())
+        .find_map(uscope::CodeInstance::breakpoint_entry)
         .expect("dso_apply entry");
     let address = library
         .module
@@ -430,8 +432,8 @@ async fn inline_function_breakpoints_resolve_every_concrete_instance() {
             let function = image.function_named("leaf").expect("leaf function");
 
             image
-                .instances_for_function(function.id)
-                .map(|instance| instance.id)
+                .instances_for_function(function.id())
+                .map(uscope::CodeInstance::id)
                 .collect::<BTreeSet<_>>()
         };
         let breakpoint = scenario.add_breakpoint("leaf").await;
@@ -525,7 +527,7 @@ async fn inline_breakpoint_hits_select_the_matching_concrete_instance() {
                 .filter(|instance| {
                     image.code_instance(**instance).is_some_and(|instance| {
                         matches!(
-                            &instance.kind,
+                            &instance.kind(),
                             CodeInstanceKind::Inline {
                                 call_site: Some(call_site)
                             } if call_site.line.get() == 30

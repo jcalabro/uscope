@@ -86,7 +86,6 @@ fn argument_names(image: &ModuleImage, identity: &TypeIdentity) -> Vec<String> {
 fn named<'a>(image: &'a ModuleImage, name: &str) -> &'a TypeInfo {
     image
         .types()
-        .iter()
         .find_map(|node| match node {
             uscope::TypeNode::Resolved(info) if info.name.as_ref() == name => Some(info),
             _ => None,

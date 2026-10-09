@@ -1,0 +1,2217 @@
+{
+  "schema": 1,
+  "provenance": {
+    "commit": "9ce5c8f99cc53c9e56618b3f579ffa4ed0508135",
+    "dirty": true,
+    "cpu": "AMD Ryzen 9 9950X 16-Core Processor",
+    "cpus": 32,
+    "kernel": "7.2.5-200.fc44.x86_64",
+    "flake_lock": "7e630b762199ee17",
+    "cargo_lock": "0f29f56635a2243c",
+    "debug_assertions": false,
+    "system_alloc": false,
+    "jobs": null
+  },
+  "programs": [
+    {
+      "name": "golden/containers-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O0",
+      "digest": "8dd06ddb681d7450f139d92d99a85b40",
+      "bytes": 14688,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.330913,
+        0.391797,
+        0.417206,
+        0.867023,
+        9.866417
+      ],
+      "ready_ms_median": 0.417206,
+      "cpu_ms_median": 0.416902,
+      "peak_rss_bytes_median": 17293312,
+      "allocations": 2771,
+      "allocated_bytes": 435716,
+      "peak_heap_growth_bytes": 162504,
+      "retained_heap_bytes": 113902,
+      "instructions": 2172201,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/containers-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O0-nofp",
+      "digest": "c1a222529dfd3f33a86117e29fcc377e",
+      "bytes": 14552,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.449306,
+        0.561287,
+        0.576405,
+        0.587716,
+        0.606011
+      ],
+      "ready_ms_median": 0.576405,
+      "cpu_ms_median": 0.572293,
+      "peak_rss_bytes_median": 17293312,
+      "allocations": 2757,
+      "allocated_bytes": 434518,
+      "peak_heap_growth_bytes": 162105,
+      "retained_heap_bytes": 113639,
+      "instructions": 2166536,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/containers-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O0-pie",
+      "digest": "bb354b0700ff6d6e4affa7acee0c6500",
+      "bytes": 19936,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.5312,
+        0.538935,
+        0.597465,
+        0.710488,
+        0.718442
+      ],
+      "ready_ms_median": 0.597465,
+      "cpu_ms_median": 0.593404,
+      "peak_rss_bytes_median": 17293312,
+      "allocations": 3131,
+      "allocated_bytes": 539194,
+      "peak_heap_growth_bytes": 216704,
+      "retained_heap_bytes": 130190,
+      "instructions": 2509009,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/containers-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O2",
+      "digest": "63fb07d1f4e8a8dba929359bd40ac850",
+      "bytes": 16232,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.578279,
+        0.604418,
+        0.645646,
+        0.661836,
+        0.774498
+      ],
+      "ready_ms_median": 0.645646,
+      "cpu_ms_median": 0.638326,
+      "peak_rss_bytes_median": 17293312,
+      "allocations": 3896,
+      "allocated_bytes": 517820,
+      "peak_heap_growth_bytes": 176522,
+      "retained_heap_bytes": 124776,
+      "instructions": 3102672,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/containers-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O2-nofp",
+      "digest": "1cd1eb575fe41d1df5f64a54dda4267a",
+      "bytes": 16136,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.520019,
+        0.577187,
+        0.614838,
+        0.71159,
+        0.735385
+      ],
+      "ready_ms_median": 0.614838,
+      "cpu_ms_median": 0.60706,
+      "peak_rss_bytes_median": 17293312,
+      "allocations": 3884,
+      "allocated_bytes": 516230,
+      "peak_heap_growth_bytes": 176430,
+      "retained_heap_bytes": 123593,
+      "instructions": 3093974,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/containers-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O0",
+      "digest": "598058d7bd582b9e868b368611207142",
+      "bytes": 18432,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.669511,
+        0.669782,
+        0.70103,
+        0.718643,
+        0.782674
+      ],
+      "ready_ms_median": 0.70103,
+      "cpu_ms_median": 0.696397,
+      "peak_rss_bytes_median": 15183872,
+      "allocations": 10492,
+      "allocated_bytes": 795658,
+      "peak_heap_growth_bytes": 492062,
+      "retained_heap_bytes": 431832,
+      "instructions": 4531589,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/containers-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O0-nofp",
+      "digest": "ce7eeaf97b81728c1aca722e561a3de3",
+      "bytes": 18432,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.656637,
+        0.680101,
+        0.699768,
+        0.701762,
+        0.719755
+      ],
+      "ready_ms_median": 0.699768,
+      "cpu_ms_median": 0.696847,
+      "peak_rss_bytes_median": 15183872,
+      "allocations": 10492,
+      "allocated_bytes": 795556,
+      "peak_heap_growth_bytes": 491960,
+      "retained_heap_bytes": 431730,
+      "instructions": 4518905,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/containers-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O2",
+      "digest": "16278f3521abcdb61de7c34f572913ae",
+      "bytes": 22360,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.784998,
+        0.809594,
+        0.839942,
+        0.904122,
+        0.935091
+      ],
+      "ready_ms_median": 0.839942,
+      "cpu_ms_median": 0.834926,
+      "peak_rss_bytes_median": 17289216,
+      "allocations": 11967,
+      "allocated_bytes": 1010158,
+      "peak_heap_growth_bytes": 575870,
+      "retained_heap_bytes": 481920,
+      "instructions": 5857055,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/containers-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O2-nofp",
+      "digest": "cc9c6ba8ebc6881ae754f044fc033a2a",
+      "bytes": 22352,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.805106,
+        0.832047,
+        0.874286,
+        0.919842,
+        0.977661
+      ],
+      "ready_ms_median": 0.874286,
+      "cpu_ms_median": 0.861747,
+      "peak_rss_bytes_median": 17289216,
+      "allocations": 11971,
+      "allocated_bytes": 1009690,
+      "peak_heap_growth_bytes": 576075,
+      "retained_heap_bytes": 481698,
+      "instructions": 5854548,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/containers-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O2-pie",
+      "digest": "7e009bf7947ac637cd78f30e4014a563",
+      "bytes": 24256,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.792132,
+        0.879115,
+        0.887782,
+        0.968774,
+        1.09932
+      ],
+      "ready_ms_median": 0.887782,
+      "cpu_ms_median": 0.880311,
+      "peak_rss_bytes_median": 17248256,
+      "allocations": 12627,
+      "allocated_bytes": 1100124,
+      "peak_heap_growth_bytes": 596894,
+      "retained_heap_bytes": 503600,
+      "instructions": 6472527,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/data-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O0",
+      "digest": "92b99bdf28ad69cdfd2ac580c78746be",
+      "bytes": 13536,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.356531,
+        0.403981,
+        0.414741,
+        0.486086,
+        0.54146
+      ],
+      "ready_ms_median": 0.414741,
+      "cpu_ms_median": 0.408276,
+      "peak_rss_bytes_median": 15183872,
+      "allocations": 2137,
+      "allocated_bytes": 348168,
+      "peak_heap_growth_bytes": 137960,
+      "retained_heap_bytes": 87792,
+      "instructions": 1667065,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/data-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O0-nofp",
+      "digest": "d65508e1644356fcb8ce761f780ad242",
+      "bytes": 13456,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.325142,
+        0.343446,
+        0.351512,
+        0.404571,
+        0.469064
+      ],
+      "ready_ms_median": 0.351512,
+      "cpu_ms_median": 0.345578,
+      "peak_rss_bytes_median": 15183872,
+      "allocations": 2131,
+      "allocated_bytes": 347855,
+      "peak_heap_growth_bytes": 137738,
+      "retained_heap_bytes": 87650,
+      "instructions": 1669745,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/data-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O0-pie",
+      "digest": "b46cd9013774a816219fda8b4ad2eb63",
+      "bytes": 18712,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.273115,
+        0.275258,
+        0.278594,
+        0.326284,
+        0.389634
+      ],
+      "ready_ms_median": 0.278594,
+      "cpu_ms_median": 0.278372,
+      "peak_rss_bytes_median": 15183872,
+      "allocations": 2494,
+      "allocated_bytes": 407081,
+      "peak_heap_growth_bytes": 156872,
+      "retained_heap_bytes": 103696,
+      "instructions": 1984802,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/data-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O2",
+      "digest": "500c426f7bb161348dc4939ae07268f2",
+      "bytes": 15248,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.409141,
+        0.441261,
+        0.443294,
+        0.474323,
+        0.623614
+      ],
+      "ready_ms_median": 0.443294,
+      "cpu_ms_median": 0.440967,
+      "peak_rss_bytes_median": 17297408,
+      "allocations": 3310,
+      "allocated_bytes": 448641,
+      "peak_heap_growth_bytes": 164060,
+      "retained_heap_bytes": 110356,
+      "instructions": 2618315,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/data-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O2-nofp",
+      "digest": "ed56582892b42a0b98aea4c618e3401d",
+      "bytes": 15152,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.376209,
+        0.422415,
+        0.544906,
+        0.603456,
+        0.603496
+      ],
+      "ready_ms_median": 0.544906,
+      "cpu_ms_median": 0.539983,
+      "peak_rss_bytes_median": 17297408,
+      "allocations": 3296,
+      "allocated_bytes": 447011,
+      "peak_heap_growth_bytes": 163969,
+      "retained_heap_bytes": 109142,
+      "instructions": 2617984,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/data-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O0",
+      "digest": "05311dc83326cf01eaac1c1ec2051e9b",
+      "bytes": 13704,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.582557,
+        0.61075,
+        0.663459,
+        0.663849,
+        0.676334
+      ],
+      "ready_ms_median": 0.663459,
+      "cpu_ms_median": 0.658585,
+      "peak_rss_bytes_median": 15183872,
+      "allocations": 9845,
+      "allocated_bytes": 668833,
+      "peak_heap_growth_bytes": 448546,
+      "retained_heap_bytes": 409064,
+      "instructions": 3993152,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/data-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O0-nofp",
+      "digest": "ff014404c57afde058a9bb785a2dcc84",
+      "bytes": 13624,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.56827,
+        0.643201,
+        0.647439,
+        0.649052,
+        0.669881
+      ],
+      "ready_ms_median": 0.647439,
+      "cpu_ms_median": 0.642906,
+      "peak_rss_bytes_median": 15183872,
+      "allocations": 9845,
+      "allocated_bytes": 668603,
+      "peak_heap_growth_bytes": 448396,
+      "retained_heap_bytes": 408994,
+      "instructions": 3983494,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/data-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O2",
+      "digest": "f75ba8823ef36ca3c5db906088f3b8b1",
+      "bytes": 17120,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.833239,
+        0.83913,
+        0.8656,
+        0.867263,
+        0.942885
+      ],
+      "ready_ms_median": 0.8656,
+      "cpu_ms_median": 0.862157,
+      "peak_rss_bytes_median": 17297408,
+      "allocations": 11289,
+      "allocated_bytes": 897885,
+      "peak_heap_growth_bytes": 539574,
+      "retained_heap_bytes": 460832,
+      "instructions": 5266448,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/data-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O2-nofp",
+      "digest": "5c2b744c4f235d9a11863a330d6e7621",
+      "bytes": 17080,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.700709,
+        0.748259,
+        0.80705,
+        0.853878,
+        0.857605
+      ],
+      "ready_ms_median": 0.80705,
+      "cpu_ms_median": 0.803478,
+      "peak_rss_bytes_median": 17297408,
+      "allocations": 11292,
+      "allocated_bytes": 876689,
+      "peak_heap_growth_bytes": 519267,
+      "retained_heap_bytes": 460506,
+      "instructions": 5262254,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/data-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O2-pie",
+      "digest": "21b103be97401fbc0edc98d2e3dca6d3",
+      "bytes": 22664,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.767996,
+        0.769078,
+        0.839361,
+        0.890647,
+        1.113356
+      ],
+      "ready_ms_median": 0.839361,
+      "cpu_ms_median": 0.831149,
+      "peak_rss_bytes_median": 17289216,
+      "allocations": 11944,
+      "allocated_bytes": 1005386,
+      "peak_heap_growth_bytes": 569850,
+      "retained_heap_bytes": 481024,
+      "instructions": 5875115,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/fork-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O0",
+      "digest": "3137e3167abcb5a7c056d170d88127b5",
+      "bytes": 17760,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.480795,
+        0.54187,
+        0.595481,
+        0.620859,
+        0.640275
+      ],
+      "ready_ms_median": 0.595481,
+      "cpu_ms_median": 0.591538,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 3841,
+      "allocated_bytes": 605586,
+      "peak_heap_growth_bytes": 248968,
+      "retained_heap_bytes": 158605,
+      "instructions": 2983888,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/fork-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O0-nofp",
+      "digest": "c2d4649401d12f8435944d29369f2521",
+      "bytes": 17544,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.558111,
+        0.576014,
+        0.58994,
+        0.757726,
+        0.802861
+      ],
+      "ready_ms_median": 0.58994,
+      "cpu_ms_median": 0.585861,
+      "peak_rss_bytes_median": 17293312,
+      "allocations": 3827,
+      "allocated_bytes": 604761,
+      "peak_heap_growth_bytes": 248386,
+      "retained_heap_bytes": 158239,
+      "instructions": 2982972,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/fork-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O0-pie",
+      "digest": "20bc0b3fae3c6cb171454c9301b2474a",
+      "bytes": 22960,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.487067,
+        0.501554,
+        0.521903,
+        0.665794,
+        0.764389
+      ],
+      "ready_ms_median": 0.521903,
+      "cpu_ms_median": 0.51711,
+      "peak_rss_bytes_median": 17281024,
+      "allocations": 4194,
+      "allocated_bytes": 661835,
+      "peak_heap_growth_bytes": 267256,
+      "retained_heap_bytes": 173861,
+      "instructions": 3315253,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/fork-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O2",
+      "digest": "51c464c6c731defc07562395f58ec4f8",
+      "bytes": 20928,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.616019,
+        0.644584,
+        0.650004,
+        0.761424,
+        0.99305
+      ],
+      "ready_ms_median": 0.650004,
+      "cpu_ms_median": 0.6454,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 5833,
+      "allocated_bytes": 804097,
+      "peak_heap_growth_bytes": 306709,
+      "retained_heap_bytes": 195074,
+      "instructions": 4748454,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/fork-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O2-nofp",
+      "digest": "9ded9bc0a23eb5316c84d12d9d8f268c",
+      "bytes": 20624,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.649273,
+        0.655484,
+        0.693456,
+        0.778696,
+        0.865169
+      ],
+      "ready_ms_median": 0.693456,
+      "cpu_ms_median": 0.69305,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 5791,
+      "allocated_bytes": 796224,
+      "peak_heap_growth_bytes": 306170,
+      "retained_heap_bytes": 192292,
+      "instructions": 4727268,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/fork-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O0",
+      "digest": "280c13f1ee47381ea6a449dcf8f1c46c",
+      "bytes": 18096,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.688596,
+        0.739673,
+        0.804244,
+        0.814103,
+        0.84962
+      ],
+      "ready_ms_median": 0.804244,
+      "cpu_ms_median": 0.783811,
+      "peak_rss_bytes_median": 17313792,
+      "allocations": 11752,
+      "allocated_bytes": 944453,
+      "peak_heap_growth_bytes": 553736,
+      "retained_heap_bytes": 479082,
+      "instructions": 5586360,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/fork-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O0-nofp",
+      "digest": "aef1a1e57dcd969a881f6da6704c2443",
+      "bytes": 17872,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.686683,
+        0.745163,
+        0.754601,
+        0.815716,
+        0.846414
+      ],
+      "ready_ms_median": 0.754601,
+      "cpu_ms_median": 0.750679,
+      "peak_rss_bytes_median": 17313792,
+      "allocations": 11752,
+      "allocated_bytes": 943111,
+      "peak_heap_growth_bytes": 553162,
+      "retained_heap_bytes": 478508,
+      "instructions": 5561060,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/fork-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O2",
+      "digest": "2e4c5270f20b03c7ad455ba3115faed5",
+      "bytes": 24272,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.864808,
+        0.882462,
+        0.930883,
+        0.95084,
+        1.002638
+      ],
+      "ready_ms_median": 0.930883,
+      "cpu_ms_median": 0.926779,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 14212,
+      "allocated_bytes": 1298716,
+      "peak_heap_growth_bytes": 692238,
+      "retained_heap_bytes": 573242,
+      "instructions": 7770529,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/fork-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O2-nofp",
+      "digest": "c3dd8cd5920c6b686e989b9f1c103622",
+      "bytes": 24240,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.941011,
+        1.021193,
+        1.037534,
+        1.06197,
+        1.201943
+      ],
+      "ready_ms_median": 1.037534,
+      "cpu_ms_median": 1.033929,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 14219,
+      "allocated_bytes": 1297747,
+      "peak_heap_growth_bytes": 692579,
+      "retained_heap_bytes": 572884,
+      "instructions": 7760761,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/fork-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O2-pie",
+      "digest": "2d2f432f9295fa9208a7495550fa23fb",
+      "bytes": 29488,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.984805,
+        1.068983,
+        1.109279,
+        1.12556,
+        1.310377
+      ],
+      "ready_ms_median": 1.109279,
+      "cpu_ms_median": 1.105272,
+      "peak_rss_bytes_median": 17289216,
+      "allocations": 14860,
+      "allocated_bytes": 1387870,
+      "peak_heap_growth_bytes": 706314,
+      "retained_heap_bytes": 591634,
+      "instructions": 8361356,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/frames-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O0",
+      "digest": "7cea63a09b45ce0e8c27c52b45be46de",
+      "bytes": 15944,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.441973,
+        0.496545,
+        0.522354,
+        0.523827,
+        0.534607
+      ],
+      "ready_ms_median": 0.522354,
+      "cpu_ms_median": 0.512332,
+      "peak_rss_bytes_median": 17154048,
+      "allocations": 3134,
+      "allocated_bytes": 465913,
+      "peak_heap_growth_bytes": 178100,
+      "retained_heap_bytes": 123382,
+      "instructions": 2376393,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/frames-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O0-nofp",
+      "digest": "3863ee3b80daa20cbbc76faeb2695cda",
+      "bytes": 15792,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.426704,
+        0.432875,
+        0.581354,
+        0.588709,
+        0.588969
+      ],
+      "ready_ms_median": 0.581354,
+      "cpu_ms_median": 0.58107,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 3124,
+      "allocated_bytes": 465327,
+      "peak_heap_growth_bytes": 177686,
+      "retained_heap_bytes": 123120,
+      "instructions": 2374700,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/frames-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O0-pie",
+      "digest": "2b1fa9bcb8e2901dbd8af2d3ce928b87",
+      "bytes": 21256,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.44641,
+        0.455117,
+        0.468242,
+        0.489551,
+        0.6109
+      ],
+      "ready_ms_median": 0.468242,
+      "cpu_ms_median": 0.467998,
+      "peak_rss_bytes_median": 17289216,
+      "allocations": 3497,
+      "allocated_bytes": 521499,
+      "peak_heap_growth_bytes": 196988,
+      "retained_heap_bytes": 139094,
+      "instructions": 2707787,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/frames-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O2",
+      "digest": "b84517c7bca59981b31095d4a056e48b",
+      "bytes": 18272,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.536961,
+        0.558061,
+        0.587155,
+        0.774899,
+        1.015803
+      ],
+      "ready_ms_median": 0.587155,
+      "cpu_ms_median": 0.583575,
+      "peak_rss_bytes_median": 17317888,
+      "allocations": 4541,
+      "allocated_bytes": 585737,
+      "peak_heap_growth_bytes": 204759,
+      "retained_heap_bytes": 150044,
+      "instructions": 3598863,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/frames-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O2-nofp",
+      "digest": "e34c3b3e638aac00d0970bae71c8e707",
+      "bytes": 18088,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.523456,
+        0.527322,
+        0.530268,
+        0.654632,
+        0.671805
+      ],
+      "ready_ms_median": 0.530268,
+      "cpu_ms_median": 0.527189,
+      "peak_rss_bytes_median": 17317888,
+      "allocations": 4517,
+      "allocated_bytes": 582943,
+      "peak_heap_growth_bytes": 204580,
+      "retained_heap_bytes": 148158,
+      "instructions": 3589356,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/frames-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O0",
+      "digest": "770ee325d6339524bae580aa24c65305",
+      "bytes": 16248,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.67412,
+        0.748379,
+        0.800848,
+        0.81268,
+        0.84419
+      ],
+      "ready_ms_median": 0.800848,
+      "cpu_ms_median": 0.795233,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 10972,
+      "allocated_bytes": 824952,
+      "peak_heap_growth_bytes": 511374,
+      "retained_heap_bytes": 442892,
+      "instructions": 4899848,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/frames-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O0-nofp",
+      "digest": "0fcd77969d20513a8cc83fa0d9521d7b",
+      "bytes": 16096,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.662538,
+        0.687735,
+        0.816397,
+        0.830894,
+        1.029288
+      ],
+      "ready_ms_median": 0.816397,
+      "cpu_ms_median": 0.811773,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 10972,
+      "allocated_bytes": 824338,
+      "peak_heap_growth_bytes": 511048,
+      "retained_heap_bytes": 442662,
+      "instructions": 4881242,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/frames-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O2",
+      "digest": "0593d226c4e562b884948c3ad5b26eca",
+      "bytes": 20896,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.831296,
+        0.864368,
+        0.882241,
+        0.906908,
+        0.960048
+      ],
+      "ready_ms_median": 0.882241,
+      "cpu_ms_median": 0.878187,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 12773,
+      "allocated_bytes": 1078553,
+      "peak_heap_growth_bytes": 611166,
+      "retained_heap_bytes": 513084,
+      "instructions": 6503016,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/frames-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O2-nofp",
+      "digest": "4d61c12efe9f38f42f0186bd675929c8",
+      "bytes": 20880,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.735074,
+        0.839741,
+        0.877763,
+        0.926154,
+        1.046541
+      ],
+      "ready_ms_median": 0.877763,
+      "cpu_ms_median": 0.87405,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 12777,
+      "allocated_bytes": 1078421,
+      "peak_heap_growth_bytes": 611240,
+      "retained_heap_bytes": 513118,
+      "instructions": 6500569,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/frames-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O2-pie",
+      "digest": "d1fa37837c94db6181a4b3be61a7f6dd",
+      "bytes": 26320,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.883984,
+        0.91905,
+        0.990565,
+        0.995495,
+        1.096225
+      ],
+      "ready_ms_median": 0.990565,
+      "cpu_ms_median": 0.979958,
+      "peak_rss_bytes_median": 17289216,
+      "allocations": 13426,
+      "allocated_bytes": 1159540,
+      "peak_heap_growth_bytes": 635942,
+      "retained_heap_bytes": 533660,
+      "instructions": 7109454,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/racing-exit-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O0",
+      "digest": "8e9e3b390421bb241f2a6e6e715bf63b",
+      "bytes": 15456,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.415443,
+        0.432845,
+        0.534757,
+        0.566497,
+        0.590712
+      ],
+      "ready_ms_median": 0.534757,
+      "cpu_ms_median": 0.525025,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 2887,
+      "allocated_bytes": 429780,
+      "peak_heap_growth_bytes": 168163,
+      "retained_heap_bytes": 112351,
+      "instructions": 2200142,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/racing-exit-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O0-nofp",
+      "digest": "9899b0b637af9f339c7a331f553271b9",
+      "bytes": 15328,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.477339,
+        0.529316,
+        0.585352,
+        0.633152,
+        0.639384
+      ],
+      "ready_ms_median": 0.585352,
+      "cpu_ms_median": 0.566993,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 2876,
+      "allocated_bytes": 428986,
+      "peak_heap_growth_bytes": 167514,
+      "retained_heap_bytes": 111830,
+      "instructions": 2196408,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/racing-exit-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O0-pie",
+      "digest": "fae7a091ac53b54019b1a5734136d791",
+      "bytes": 20624,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.475876,
+        0.566246,
+        0.56868,
+        0.596923,
+        0.873976
+      ],
+      "ready_ms_median": 0.56868,
+      "cpu_ms_median": 0.568336,
+      "peak_rss_bytes_median": 17289216,
+      "allocations": 3255,
+      "allocated_bytes": 496371,
+      "peak_heap_growth_bytes": 188513,
+      "retained_heap_bytes": 129701,
+      "instructions": 2523336,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/racing-exit-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O2",
+      "digest": "d013493f7848717b063133d38ebf6859",
+      "bytes": 17432,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.566457,
+        0.570824,
+        0.574111,
+        0.69073,
+        0.905635
+      ],
+      "ready_ms_median": 0.574111,
+      "cpu_ms_median": 0.568025,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 4155,
+      "allocated_bytes": 551452,
+      "peak_heap_growth_bytes": 193683,
+      "retained_heap_bytes": 131690,
+      "instructions": 3340760,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/racing-exit-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O2-nofp",
+      "digest": "7665186abc4ccd69939ee6c73de25875",
+      "bytes": 17248,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.517694,
+        0.552941,
+        0.564954,
+        0.572238,
+        0.577628
+      ],
+      "ready_ms_median": 0.564954,
+      "cpu_ms_median": 0.559379,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 4135,
+      "allocated_bytes": 548990,
+      "peak_heap_growth_bytes": 193501,
+      "retained_heap_bytes": 130665,
+      "instructions": 3330298,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/racing-exit-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O0",
+      "digest": "e01605a70d6568a969f61fb7f1a8cda0",
+      "bytes": 15768,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.639845,
+        0.705308,
+        0.707993,
+        0.708785,
+        0.723432
+      ],
+      "ready_ms_median": 0.707993,
+      "cpu_ms_median": 0.703017,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 10665,
+      "allocated_bytes": 772611,
+      "peak_heap_growth_bytes": 482546,
+      "retained_heap_bytes": 434270,
+      "instructions": 4670685,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/racing-exit-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O0-nofp",
+      "digest": "007f7e0a3fc702b2497fff1679f7095e",
+      "bytes": 15616,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.633342,
+        0.634876,
+        0.65307,
+        0.691763,
+        0.756394
+      ],
+      "ready_ms_median": 0.65307,
+      "cpu_ms_median": 0.652855,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 10665,
+      "allocated_bytes": 771997,
+      "peak_heap_growth_bytes": 482219,
+      "retained_heap_bytes": 434039,
+      "instructions": 4651405,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/racing-exit-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O2",
+      "digest": "ad6c27491f1120c14f7e212de75b60e6",
+      "bytes": 19872,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.843849,
+        0.849279,
+        0.901317,
+        0.997659,
+        1.056028
+      ],
+      "ready_ms_median": 0.901317,
+      "cpu_ms_median": 0.898015,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 12368,
+      "allocated_bytes": 1048803,
+      "peak_heap_growth_bytes": 596677,
+      "retained_heap_bytes": 496366,
+      "instructions": 6216095,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/racing-exit-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O2-nofp",
+      "digest": "cd5d4f0d6996d42833687d7d68dd7c41",
+      "bytes": 19840,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.795457,
+        0.954528,
+        0.962632,
+        0.976719,
+        1.027024
+      ],
+      "ready_ms_median": 0.962632,
+      "cpu_ms_median": 0.948308,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 12372,
+      "allocated_bytes": 1048711,
+      "peak_heap_growth_bytes": 596857,
+      "retained_heap_bytes": 496455,
+      "instructions": 6213241,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/racing-exit-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O2-pie",
+      "digest": "dab15e5ef357e24b50f537cd3ee9ae7e",
+      "bytes": 25240,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.798313,
+        0.966249,
+        0.969976,
+        0.975977,
+        1.013599
+      ],
+      "ready_ms_median": 0.969976,
+      "cpu_ms_median": 0.966152,
+      "peak_rss_bytes_median": 17289216,
+      "allocations": 13009,
+      "allocated_bytes": 1127372,
+      "peak_heap_growth_bytes": 619162,
+      "retained_heap_bytes": 516030,
+      "instructions": 6793133,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/stores-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O0",
+      "digest": "1de09a515d9c19aac6f872fe1f03e026",
+      "bytes": 16632,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.442092,
+        0.497376,
+        0.499811,
+        0.501615,
+        0.51542
+      ],
+      "ready_ms_median": 0.499811,
+      "cpu_ms_median": 0.495971,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 3599,
+      "allocated_bytes": 516442,
+      "peak_heap_growth_bytes": 198884,
+      "retained_heap_bytes": 145270,
+      "instructions": 2726747,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/stores-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O0-nofp",
+      "digest": "61ff7a7bd813b2d21c3a69a4ae7112cf",
+      "bytes": 16440,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.457972,
+        0.468983,
+        0.469193,
+        0.509009,
+        0.511052
+      ],
+      "ready_ms_median": 0.469193,
+      "cpu_ms_median": 0.46887,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 3581,
+      "allocated_bytes": 514381,
+      "peak_heap_growth_bytes": 198326,
+      "retained_heap_bytes": 144904,
+      "instructions": 2722148,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/stores-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O0-pie",
+      "digest": "def5a0befcda540fae85188237ebcb73",
+      "bytes": 21808,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.562058,
+        0.59468,
+        0.623484,
+        0.627902,
+        0.629495
+      ],
+      "ready_ms_median": 0.623484,
+      "cpu_ms_median": 0.619141,
+      "peak_rss_bytes_median": 17281024,
+      "allocations": 3955,
+      "allocated_bytes": 625535,
+      "peak_heap_growth_bytes": 251268,
+      "retained_heap_bytes": 159830,
+      "instructions": 3052056,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/stores-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O2",
+      "digest": "b48fe541cfb049784e4e22f29f30d357",
+      "bytes": 18928,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.588568,
+        0.666445,
+        0.689599,
+        0.692725,
+        0.731106
+      ],
+      "ready_ms_median": 0.689599,
+      "cpu_ms_median": 0.685526,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 5029,
+      "allocated_bytes": 662937,
+      "peak_heap_growth_bytes": 244327,
+      "retained_heap_bytes": 169508,
+      "instructions": 3957959,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/stores-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O2-nofp",
+      "digest": "2de1d73bbdd822778def2e5dda2290f5",
+      "bytes": 18744,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.671764,
+        0.699748,
+        0.699968,
+        0.708495,
+        0.73805
+      ],
+      "ready_ms_median": 0.699968,
+      "cpu_ms_median": 0.699742,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 5004,
+      "allocated_bytes": 660051,
+      "peak_heap_growth_bytes": 244148,
+      "retained_heap_bytes": 168070,
+      "instructions": 3948272,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/stores-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O0",
+      "digest": "02a7d2170cb95ef4c4dd04e2a0dde3c1",
+      "bytes": 20224,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.695299,
+        0.715016,
+        0.73267,
+        0.753538,
+        0.782193
+      ],
+      "ready_ms_median": 0.73267,
+      "cpu_ms_median": 0.728557,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 11381,
+      "allocated_bytes": 875372,
+      "peak_heap_growth_bytes": 532270,
+      "retained_heap_bytes": 462564,
+      "instructions": 5203101,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/stores-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O0-nofp",
+      "digest": "4665c3068981753bb93a3565510c1a97",
+      "bytes": 20224,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.680241,
+        0.728411,
+        0.763478,
+        0.76988,
+        0.782333
+      ],
+      "ready_ms_median": 0.763478,
+      "cpu_ms_median": 0.755195,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 11381,
+      "allocated_bytes": 875038,
+      "peak_heap_growth_bytes": 532072,
+      "retained_heap_bytes": 462310,
+      "instructions": 5181725,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/stores-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O2",
+      "digest": "7f60821c3c29faa2d1ff2a54764d882e",
+      "bytes": 25656,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.950119,
+        0.974696,
+        0.974826,
+        0.9823,
+        1.012417
+      ],
+      "ready_ms_median": 0.974826,
+      "cpu_ms_median": 0.97047,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 13253,
+      "allocated_bytes": 1142935,
+      "peak_heap_growth_bytes": 634470,
+      "retained_heap_bytes": 532388,
+      "instructions": 6908061,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/stores-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O2-nofp",
+      "digest": "42752671b806419ec89733ee1426ae80",
+      "bytes": 25616,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.861933,
+        0.901197,
+        0.962322,
+        0.964226,
+        0.980136
+      ],
+      "ready_ms_median": 0.962322,
+      "cpu_ms_median": 0.960241,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 13243,
+      "allocated_bytes": 1140923,
+      "peak_heap_growth_bytes": 633360,
+      "retained_heap_bytes": 531150,
+      "instructions": 6898333,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/stores-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O2-pie",
+      "digest": "e006b4cb6f2661b6ed3f1cf1c82e1f6c",
+      "bytes": 27432,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.949538,
+        1.005533,
+        1.036692,
+        1.052382,
+        1.096725
+      ],
+      "ready_ms_median": 1.036692,
+      "cpu_ms_median": 1.031484,
+      "peak_rss_bytes_median": 17289216,
+      "allocations": 13902,
+      "allocated_bytes": 1215877,
+      "peak_heap_growth_bytes": 656006,
+      "retained_heap_bytes": 553348,
+      "instructions": 7510961,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/straight-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O0",
+      "digest": "7336b10e01ea9d2a9d4fc1d7f654069e",
+      "bytes": 13456,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.346542,
+        0.354968,
+        0.363524,
+        0.411365,
+        0.427114
+      ],
+      "ready_ms_median": 0.363524,
+      "cpu_ms_median": 0.358513,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 1930,
+      "allocated_bytes": 313780,
+      "peak_heap_growth_bytes": 132256,
+      "retained_heap_bytes": 83004,
+      "instructions": 1493832,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/straight-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O0-nofp",
+      "digest": "a0fbd31cb3d24cc0055438384025376b",
+      "bytes": 13352,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.386147,
+        0.391627,
+        0.392139,
+        0.416384,
+        0.426573
+      ],
+      "ready_ms_median": 0.392139,
+      "cpu_ms_median": 0.387908,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 1924,
+      "allocated_bytes": 313402,
+      "peak_heap_growth_bytes": 131994,
+      "retained_heap_bytes": 82846,
+      "instructions": 1492170,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/straight-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O0-pie",
+      "digest": "ee27188bcf9eea3c344c8f71a5721614",
+      "bytes": 18640,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.441482,
+        0.453805,
+        0.516793,
+        0.522203,
+        0.534787
+      ],
+      "ready_ms_median": 0.516793,
+      "cpu_ms_median": 0.516779,
+      "peak_rss_bytes_median": 17293312,
+      "allocations": 2300,
+      "allocated_bytes": 371405,
+      "peak_heap_growth_bytes": 152760,
+      "retained_heap_bytes": 100492,
+      "instructions": 1818083,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/straight-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O2",
+      "digest": "036b91b835fa5bf534fdd2ac7468b6dc",
+      "bytes": 15064,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.454997,
+        0.475796,
+        0.53643,
+        0.574521,
+        0.790128
+      ],
+      "ready_ms_median": 0.53643,
+      "cpu_ms_median": 0.536145,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 3024,
+      "allocated_bytes": 406880,
+      "peak_heap_growth_bytes": 154992,
+      "retained_heap_bytes": 102524,
+      "instructions": 2393790,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/straight-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O2-nofp",
+      "digest": "9923f51d02db5e4fd5662623f3d0e498",
+      "bytes": 14944,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.402909,
+        0.474453,
+        0.500723,
+        0.615088,
+        0.625087
+      ],
+      "ready_ms_median": 0.500723,
+      "cpu_ms_median": 0.500509,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 3008,
+      "allocated_bytes": 405166,
+      "peak_heap_growth_bytes": 154877,
+      "retained_heap_bytes": 101278,
+      "instructions": 2387162,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/straight-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O0",
+      "digest": "ec02964512a99827517067ae4c289090",
+      "bytes": 13568,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.514228,
+        0.553662,
+        0.55793,
+        0.560615,
+        0.582306
+      ],
+      "ready_ms_median": 0.55793,
+      "cpu_ms_median": 0.55452,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 9621,
+      "allocated_bytes": 635701,
+      "peak_heap_growth_bytes": 442386,
+      "retained_heap_bytes": 404896,
+      "instructions": 3809025,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/straight-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O0-nofp",
+      "digest": "8c176c092098c35b9848cf4d14834938",
+      "bytes": 13480,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.507706,
+        0.508037,
+        0.63207,
+        0.648521,
+        0.658449
+      ],
+      "ready_ms_median": 0.63207,
+      "cpu_ms_median": 0.627487,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 9621,
+      "allocated_bytes": 635447,
+      "peak_heap_growth_bytes": 442220,
+      "retained_heap_bytes": 404818,
+      "instructions": 3798122,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/straight-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O2",
+      "digest": "7aeb7d093ce1b7084a5b23990dac46c7",
+      "bytes": 17136,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.743811,
+        0.755392,
+        0.786601,
+        0.820836,
+        0.889174
+      ],
+      "ready_ms_median": 0.786601,
+      "cpu_ms_median": 0.774873,
+      "peak_rss_bytes_median": 17313792,
+      "allocations": 11120,
+      "allocated_bytes": 851135,
+      "peak_heap_growth_bytes": 519486,
+      "retained_heap_bytes": 459840,
+      "instructions": 5122692,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/straight-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O2-nofp",
+      "digest": "42fbd5eb6634beea2c08e6be542c75e6",
+      "bytes": 17104,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.650956,
+        0.681914,
+        0.720576,
+        0.810145,
+        0.824913
+      ],
+      "ready_ms_median": 0.720576,
+      "cpu_ms_median": 0.720261,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 11124,
+      "allocated_bytes": 850443,
+      "peak_heap_growth_bytes": 519667,
+      "retained_heap_bytes": 459522,
+      "instructions": 5112049,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/straight-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O2-pie",
+      "digest": "7224f522cb8a5556c6bc6575da8690ff",
+      "bytes": 22640,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.753949,
+        0.840543,
+        0.934239,
+        0.938086,
+        1.006756
+      ],
+      "ready_ms_median": 0.934239,
+      "cpu_ms_median": 0.929804,
+      "peak_rss_bytes_median": 17289216,
+      "allocations": 11779,
+      "allocated_bytes": 974220,
+      "peak_heap_growth_bytes": 569426,
+      "retained_heap_bytes": 480544,
+      "instructions": 5722134,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/threads-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O0",
+      "digest": "2f31a1ca59debd9a02aec860fa99f3a1",
+      "bytes": 16000,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.485424,
+        0.521432,
+        0.545186,
+        0.560205,
+        0.577107
+      ],
+      "ready_ms_median": 0.545186,
+      "cpu_ms_median": 0.544922,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 3148,
+      "allocated_bytes": 470681,
+      "peak_heap_growth_bytes": 181579,
+      "retained_heap_bytes": 127319,
+      "instructions": 2406821,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/threads-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O0-nofp",
+      "digest": "f5992bbeb690521e41eaba669009145c",
+      "bytes": 15832,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.470756,
+        0.499159,
+        0.503308,
+        0.517625,
+        0.532302
+      ],
+      "ready_ms_median": 0.503308,
+      "cpu_ms_median": 0.499077,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 3136,
+      "allocated_bytes": 470027,
+      "peak_heap_growth_bytes": 181117,
+      "retained_heap_bytes": 127025,
+      "instructions": 2404580,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/threads-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O0-pie",
+      "digest": "801fedb10bcd7dacbf43ba1437f3e669",
+      "bytes": 21192,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.450849,
+        0.597185,
+        0.599559,
+        0.615128,
+        0.623263
+      ],
+      "ready_ms_median": 0.599559,
+      "cpu_ms_median": 0.599234,
+      "peak_rss_bytes_median": 17281024,
+      "allocations": 3501,
+      "allocated_bytes": 567872,
+      "peak_heap_growth_bytes": 234923,
+      "retained_heap_bytes": 142823,
+      "instructions": 2736165,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/threads-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O2",
+      "digest": "9023b9728b0efd1480c82818c1e3c6a1",
+      "bytes": 18592,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.558101,
+        0.603296,
+        0.655565,
+        0.656035,
+        0.713834
+      ],
+      "ready_ms_median": 0.655565,
+      "cpu_ms_median": 0.65088,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 4753,
+      "allocated_bytes": 639159,
+      "peak_heap_growth_bytes": 238391,
+      "retained_heap_bytes": 160182,
+      "instructions": 3857201,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/threads-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O2-nofp",
+      "digest": "5666a93d82ac650ef09ab6fa23be3ec9",
+      "bytes": 18432,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.534677,
+        0.680391,
+        0.712622,
+        0.730155,
+        0.736587
+      ],
+      "ready_ms_median": 0.712622,
+      "cpu_ms_median": 0.712357,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 4733,
+      "allocated_bytes": 636761,
+      "peak_heap_growth_bytes": 238236,
+      "retained_heap_bytes": 159176,
+      "instructions": 3849183,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/threads-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O0",
+      "digest": "277133285f36fc3b14afc835fab0e41f",
+      "bytes": 16376,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.6373,
+        0.659261,
+        0.688717,
+        0.737228,
+        0.793494
+      ],
+      "ready_ms_median": 0.688717,
+      "cpu_ms_median": 0.684776,
+      "peak_rss_bytes_median": 15413248,
+      "allocations": 10955,
+      "allocated_bytes": 832835,
+      "peak_heap_growth_bytes": 514050,
+      "retained_heap_bytes": 448566,
+      "instructions": 4921047,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/threads-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O0-nofp",
+      "digest": "1e80164630d59f5c355d97b514791162",
+      "bytes": 16224,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.591654,
+        0.745103,
+        0.791009,
+        0.809244,
+        0.835704
+      ],
+      "ready_ms_median": 0.791009,
+      "cpu_ms_median": 0.786906,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 10955,
+      "allocated_bytes": 832221,
+      "peak_heap_growth_bytes": 513724,
+      "retained_heap_bytes": 448336,
+      "instructions": 4899886,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/threads-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O2",
+      "digest": "9f429a388bc4cf689d295e4655dd3a03",
+      "bytes": 21448,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.78578,
+        0.847626,
+        0.888312,
+        0.91863,
+        1.010824
+      ],
+      "ready_ms_median": 0.888312,
+      "cpu_ms_median": 0.884058,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 12977,
+      "allocated_bytes": 1110195,
+      "peak_heap_growth_bytes": 616986,
+      "retained_heap_bytes": 518606,
+      "instructions": 6765476,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/threads-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O2-nofp",
+      "digest": "690a07bf5a1bd3aa93829c3f3c72318d",
+      "bytes": 21400,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.794826,
+        0.893181,
+        0.893973,
+        0.900575,
+        0.92442
+      ],
+      "ready_ms_median": 0.893973,
+      "cpu_ms_median": 0.883658,
+      "peak_rss_bytes_median": 17309696,
+      "allocations": 12981,
+      "allocated_bytes": 1109719,
+      "peak_heap_growth_bytes": 616900,
+      "retained_heap_bytes": 518456,
+      "instructions": 6760771,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "golden/threads-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O2-pie",
+      "digest": "1c45240b19b349674f9f44431d53386d",
+      "bytes": 26872,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        0.90796,
+        0.973904,
+        1.004832,
+        1.026873,
+        1.16839
+      ],
+      "ready_ms_median": 1.004832,
+      "cpu_ms_median": 0.979338,
+      "peak_rss_bytes_median": 17293312,
+      "allocations": 13638,
+      "allocated_bytes": 1195299,
+      "peak_heap_growth_bytes": 644522,
+      "retained_heap_bytes": 542086,
+      "instructions": 7357230,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "containers-cpp-gcc-o2",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/containers-cpp-gcc-o2",
+      "digest": "c0fce2463be86d48c43bc0199a0bbc28",
+      "bytes": 2640848,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        50.219716,
+        50.996068,
+        51.000215,
+        53.826747,
+        55.160018
+      ],
+      "ready_ms_median": 51.000215,
+      "cpu_ms_median": 50.855588,
+      "peak_rss_bytes_median": 78094336,
+      "allocations": 621547,
+      "allocated_bytes": 104695360,
+      "peak_heap_growth_bytes": 27081611,
+      "retained_heap_bytes": 16778950,
+      "instructions": 756415723,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "containers-zig-self-hosted",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/containers-zig-self-hosted",
+      "digest": "702db15a07ff0f957d677ab4a2943e1a",
+      "bytes": 12833421,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        72.131753,
+        74.716169,
+        76.164376,
+        77.113532,
+        77.822447
+      ],
+      "ready_ms_median": 76.164376,
+      "cpu_ms_median": 75.929751,
+      "peak_rss_bytes_median": 136896512,
+      "allocations": 760419,
+      "allocated_bytes": 161724086,
+      "peak_heap_growth_bytes": 58950634,
+      "retained_heap_bytes": 33296188,
+      "instructions": 1097691160,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "containers-rust-o0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/containers-rust-o0",
+      "digest": "78978c585e0cd6a19d9bd7022710f30d",
+      "bytes": 7559152,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        156.792686,
+        157.225,
+        158.280557,
+        166.146347,
+        168.358352
+      ],
+      "ready_ms_median": 158.280557,
+      "cpu_ms_median": 157.877584,
+      "peak_rss_bytes_median": 128471040,
+      "allocations": 2165879,
+      "allocated_bytes": 303279848,
+      "peak_heap_growth_bytes": 66471211,
+      "retained_heap_bytes": 41697580,
+      "instructions": 2266231020,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "server-go-o0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/server-go-o0",
+      "digest": "0432c20fd7cf813fce92795671aac7d2",
+      "bytes": 11193862,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        841.070041,
+        847.148045,
+        848.201558,
+        848.581744,
+        849.671396
+      ],
+      "ready_ms_median": 848.201558,
+      "cpu_ms_median": 846.572956,
+      "peak_rss_bytes_median": 235409408,
+      "allocations": 1951113,
+      "allocated_bytes": 878496112,
+      "peak_heap_growth_bytes": 184946503,
+      "retained_heap_bytes": 112052593,
+      "instructions": 14266331458,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "tokio-server-o0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/tokio-server-o0",
+      "digest": "b8c87e479365945bdec5eccdbbe747a4",
+      "bytes": 14979136,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        510.624695,
+        515.414984,
+        516.902074,
+        516.998125,
+        522.039297
+      ],
+      "ready_ms_median": 516.902074,
+      "cpu_ms_median": 515.674615,
+      "peak_rss_bytes_median": 250195968,
+      "allocations": 6421051,
+      "allocated_bytes": 876764823,
+      "peak_heap_growth_bytes": 178149828,
+      "retained_heap_bytes": 110705295,
+      "instructions": 6401867224,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "tokio-values-o0",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/tokio-values-o0",
+      "digest": "1b14bc29838b6bd3772994f5358b90ce",
+      "bytes": 27708624,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        871.00312,
+        871.840586,
+        872.242243,
+        875.099743,
+        881.7103
+      ],
+      "ready_ms_median": 872.242243,
+      "cpu_ms_median": 869.921548,
+      "peak_rss_bytes_median": 386560000,
+      "allocations": 10058627,
+      "allocated_bytes": 1406197158,
+      "peak_heap_growth_bytes": 311466826,
+      "retained_heap_bytes": 192657820,
+      "instructions": 10716627701,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "go-command",
+      "path": "/nix/store/hb8rrii8hgsbqp3zdi56ckadvj9p4dna-go-1.27.1/share/go/bin/go",
+      "digest": "293765a563eac8832b865dc12b6f2e7d",
+      "bytes": 17142061,
+      "outcome": {
+        "Ok": null
+      },
+      "wall_ms": [
+        166.892872,
+        169.312178,
+        172.166933,
+        172.403228,
+        173.281882
+      ],
+      "ready_ms_median": 172.166933,
+      "cpu_ms_median": 171.476851,
+      "peak_rss_bytes_median": 241516544,
+      "allocations": 1564023,
+      "allocated_bytes": 513939650,
+      "peak_heap_growth_bytes": 171154689,
+      "retained_heap_bytes": 115052048,
+      "instructions": 2077179861,
+      "callgrind_instructions": null
+    },
+    {
+      "name": "uscope-large",
+      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/target/bench/large/uscope",
+      "digest": "2ab7f6f5ca1013bbe8a851aa62781a95",
+      "bytes": 454912120,
+      "outcome": {
+        "Err": "debug information error: DWARF data-object catalog exceeds 262144 entries"
+      },
+      "wall_ms": [
+        8328.990562,
+        8332.687603,
+        8382.225104,
+        8406.429917,
+        9121.711038
+      ],
+      "ready_ms_median": 8382.225104,
+      "cpu_ms_median": 8362.309539,
+      "peak_rss_bytes_median": 3831611392,
+      "allocations": 75904439,
+      "allocated_bytes": 13539140240,
+      "peak_heap_growth_bytes": 3778758113,
+      "retained_heap_bytes": 335958,
+      "instructions": 103968725476,
+      "callgrind_instructions": null
+    }
+  ]
+}

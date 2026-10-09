@@ -115,7 +115,7 @@ impl TokioRuntime {
         let mut whole = true;
         let mut total = 0;
         while shard < list.length {
-            let head = match self.shard(stop, runtime, &list, shard) {
+            let (head, changing) = match self.shard(stop, runtime, &list, shard) {
                 Ok((head, locked)) => {
                     if locked {
                         whole = false;
@@ -127,7 +127,7 @@ impl TokioRuntime {
                             .into(),
                         );
                     }
-                    head
+                    (head, locked)
                 }
                 Err(reason) => {
                     whole = false;
@@ -167,6 +167,9 @@ impl TokioRuntime {
                         walked += 1;
                         total += 1;
                     }
+                    // A shard being changed may disagree with itself
+                    // anywhere, which its gap already says.
+                    Err(_) if changing => break,
                     Err(reason) => {
                         whole = false;
                         page.gaps.push(
