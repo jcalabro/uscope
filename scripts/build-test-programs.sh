@@ -470,6 +470,8 @@ derive_split_debug() {
             build-id)
                 id=$(readelf -n "$input" | awk "/Build ID:/ { print \$3 }")
                 [[ -n "$id" ]] || { echo "$input has no build-id" >&2; exit 1; }
+                # A rebuild changes the build-id; drop the last one'"'"'s file.
+                rm -rf "$root/.build-id"
                 mkdir -p "$root/.build-id/${id:0:2}"
                 mv "$output.debug.tmp" "$root/.build-id/${id:0:2}/${id:2}.debug"
                 ;;
@@ -477,7 +479,7 @@ derive_split_debug() {
         mv "$output.tmp" "$output"
     '
     run_cached_build "$input" "$output" \
-        "derivation=split-debug-v1"$'\n'"layout=${layout}"$'\n'"root=${root}" \
+        "derivation=split-debug-v2"$'\n'"layout=${layout}"$'\n'"root=${root}" \
         bash -c "$script" _ "$input" "$output" "$layout" "$root"
 }
 
