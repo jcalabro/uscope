@@ -64,7 +64,7 @@ address_type!(
 );
 
 /// A half-open address range `[start, end)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AddressRange<A> {
     /// The first address included in the range.
     pub start: A,

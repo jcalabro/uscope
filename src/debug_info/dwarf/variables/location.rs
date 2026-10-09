@@ -3,7 +3,6 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use foldhash::{HashMap, HashMapExt};
 use gimli::Reader as _;
 
 use crate::debug_info::dwarf::{DwarfError, Reader, Units};
@@ -15,17 +14,9 @@ use super::{ConstantValue, Metadata, MetadataAbsence, ValueDescription};
 /// How many procedures one expression may call, directly or not.
 const MAX_PROCEDURES: usize = 64;
 
-#[derive(Clone)]
-pub(super) struct Expression {
-    pub(super) bytes: Arc<[u8]>,
-    pub(super) encoding: gimli::Encoding,
-    pub(super) unit: usize,
-    pub(super) indexed_addresses: Arc<HashMap<usize, u64>>,
-    /// The locations of the entries `DW_OP_call2`, `DW_OP_call4`, and
-    /// `DW_OP_call_ref` run, directly or from another such procedure, by
-    /// `.debug_info` offset: `None` for an entry without a location.
-    pub(super) procedures: Arc<HashMap<u64, Option<LocationDescription>>>,
-}
+pub(super) use crate::image::locations::{
+    EvaluationUnit, Expression, LocationList, LocationListId, LocationTables, LocationsBuilder,
+};
 
 /// Operation families that determine where an object's storage lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,79 +28,63 @@ pub(super) enum ExpressionUse {
     Computed,
 }
 
-pub(super) struct EvaluationUnit {
-    pub(super) base_types: HashMap<usize, gimli::ValueType>,
-    pub(super) language: Option<gimli::DwLang>,
-    /// Where the unit begins in `.debug_info`, which its unit-relative
-    /// references are offsets from.
-    pub(super) offset: Option<u64>,
-}
-
-#[derive(Clone)]
-pub(super) struct LocationEntry {
-    pub(super) range: Option<AddressRange<ImageAddress>>,
-    pub(super) expression: Expression,
-}
-
-#[derive(Clone)]
-pub(super) struct LocationDescription {
-    pub(super) entries: Arc<[LocationEntry]>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum LocationSelectionError {
     Unavailable(VariableUnavailableReason),
     Malformed(Arc<str>),
 }
 
-impl LocationDescription {
-    pub(super) fn expression(
-        &self,
-        address: Option<ImageAddress>,
-    ) -> std::result::Result<Option<&Expression>, LocationSelectionError> {
-        // An entry whose range holds the address overrides a default
-        // (range-less) entry; without an address only a default can apply.
-        if let Some(address) = address {
-            let mut specific = self
-                .entries
-                .iter()
-                .filter(|entry| entry.range.is_some_and(|range| range.contains(address)));
-            if let Some(entry) = specific.next() {
-                if specific.next().is_some() {
-                    return Err(LocationSelectionError::Unavailable(
-                        crate::UnsupportedVariableFeature::AlternativeLocations.into(),
-                    ));
-                }
-                return Ok(Some(&entry.expression));
+/// The expression `list` holds at `address`: the one entry whose range
+/// holds it, which overrides a default (range-less) entry; without an
+/// address only a default can apply.
+pub(super) fn select(
+    list: LocationList<'_>,
+    address: Option<ImageAddress>,
+) -> std::result::Result<Option<Expression<'_>>, LocationSelectionError> {
+    if let Some(address) = address {
+        let mut specific = list
+            .entries()
+            .filter(|(range, _)| range.is_some_and(|range| range.contains(address)));
+        if let Some((_, expression)) = specific.next() {
+            if specific.next().is_some() {
+                return Err(LocationSelectionError::Unavailable(
+                    crate::UnsupportedVariableFeature::AlternativeLocations.into(),
+                ));
             }
+            return Ok(Some(expression));
         }
-        let mut defaults = self.entries.iter().filter(|entry| entry.range.is_none());
-        let expression = defaults.next().map(|entry| &entry.expression);
-        if defaults.next().is_some() {
-            return Err(LocationSelectionError::Malformed(
-                "multiple default locations were supplied".into(),
-            ));
-        }
-        if address.is_none() && expression.is_none() && !self.entries.is_empty() {
-            return Err(LocationSelectionError::Unavailable(
-                VariableUnavailableReason::NoInstructionContext,
-            ));
-        }
-        Ok(expression)
     }
+    let mut defaults = list.entries().filter(|(range, _)| range.is_none());
+    let expression = defaults.next().map(|(_, expression)| expression);
+    if defaults.next().is_some() {
+        return Err(LocationSelectionError::Malformed(
+            "multiple default locations were supplied".into(),
+        ));
+    }
+    if address.is_none() && expression.is_none() && !list.is_empty() {
+        return Err(LocationSelectionError::Unavailable(
+            VariableUnavailableReason::NoInstructionContext,
+        ));
+    }
+    Ok(expression)
+}
+
+fn too_large(_: crate::image::locations::TooLarge) -> DwarfError {
+    DwarfError::MalformedVariable("the module's locations do not fit an image".into())
 }
 
 pub(super) fn copy_optional_location(
     dwarf: &gimli::Dwarf<Reader<'_>>,
+    pool: &mut LocationsBuilder,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     value: Option<gimli::AttributeValue<Reader<'_>>>,
     absence: MetadataAbsence,
-) -> Metadata<LocationDescription> {
+) -> Metadata<LocationListId> {
     let Some(value) = value else {
         return Metadata::Absent(absence);
     };
-    match copy_location(dwarf, unit_index, unit, value) {
+    match copy_location(dwarf, pool, unit_index, unit, value) {
         Ok(location) => Metadata::Value(location),
         Err(error) => Metadata::Malformed(error.to_string().into()),
     }
@@ -117,12 +92,13 @@ pub(super) fn copy_optional_location(
 
 pub(super) fn copy_data_object_value(
     dwarf: &gimli::Dwarf<Reader<'_>>,
+    pool: &mut LocationsBuilder,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
 ) -> Metadata<ValueDescription> {
     if let Some(location) = entry.attr_value(gimli::DW_AT_location) {
-        return match copy_location(dwarf, unit_index, unit, location) {
+        return match copy_location(dwarf, pool, unit_index, unit, location) {
             Ok(location) => Metadata::Value(ValueDescription::Location(location)),
             Err(error) => Metadata::Malformed(error.to_string().into()),
         };
@@ -138,18 +114,24 @@ pub(super) fn copy_data_object_value(
 
 pub(super) fn copy_data_object_value_with_origins(
     dwarf: &gimli::Dwarf<Reader<'_>>,
+    pool: &mut LocationsBuilder,
     units: &Units<'_>,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
 ) -> Metadata<ValueDescription> {
-    std::iter::once(copy_data_object_value(dwarf, unit_index, unit, entry))
-        .chain(chain.iter().map(|(origin_unit, origin)| {
-            copy_data_object_value(dwarf, *origin_unit, &units[*origin_unit], origin)
-        }))
-        .find(|value| !matches!(value, Metadata::Absent(_)))
-        .unwrap_or(Metadata::Absent(MetadataAbsence::NoLocation))
+    let value = copy_data_object_value(dwarf, pool, unit_index, unit, entry);
+    if !matches!(value, Metadata::Absent(_)) {
+        return value;
+    }
+    for (origin_unit, origin) in chain {
+        let value = copy_data_object_value(dwarf, pool, *origin_unit, &units[*origin_unit], origin);
+        if !matches!(value, Metadata::Absent(_)) {
+            return value;
+        }
+    }
+    Metadata::Absent(MetadataAbsence::NoLocation)
 }
 
 fn copy_constant(
@@ -176,38 +158,34 @@ fn copy_constant(
 
 fn copy_location(
     dwarf: &gimli::Dwarf<Reader<'_>>,
+    pool: &mut LocationsBuilder,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     value: gimli::AttributeValue<Reader<'_>>,
-) -> std::result::Result<LocationDescription, DwarfError> {
-    copy_location_with(dwarf, unit_index, unit, value, copy_expression)
+) -> std::result::Result<LocationListId, DwarfError> {
+    copy_location_with(dwarf, pool, unit_index, unit, value, copy_expression)
 }
 
 type CopyExpression = fn(
     &gimli::Dwarf<Reader<'_>>,
+    &mut LocationsBuilder,
     usize,
     &gimli::Unit<Reader<'_>>,
     gimli::Expression<Reader<'_>>,
-    gimli::Encoding,
-) -> std::result::Result<Expression, DwarfError>;
+) -> std::result::Result<crate::image::locations::ExpressionId, DwarfError>;
 
 fn copy_location_with(
     dwarf: &gimli::Dwarf<Reader<'_>>,
+    pool: &mut LocationsBuilder,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     value: gimli::AttributeValue<Reader<'_>>,
     copy_expression: CopyExpression,
-) -> std::result::Result<LocationDescription, DwarfError> {
-    let encoding = unit.encoding();
+) -> std::result::Result<LocationListId, DwarfError> {
     // DWARF 2 and 3 encode a single expression as a block.
     if let Some(expression) = value.exprloc_value() {
-        return Ok(LocationDescription {
-            entries: vec![LocationEntry {
-                range: None,
-                expression: copy_expression(dwarf, unit_index, unit, expression, encoding)?,
-            }]
-            .into(),
-        });
+        let expression = copy_expression(dwarf, pool, unit_index, unit, expression)?;
+        return pool.list(&[(None, expression)]).map_err(too_large);
     }
     let mut locations = dwarf
         .attr_locations(unit, value)?
@@ -222,48 +200,46 @@ fn copy_location_with(
             continue;
         };
         if is_default {
-            entries.push(LocationEntry {
-                range: None,
-                expression: copy_expression(dwarf, unit_index, unit, location.data, encoding)?,
-            });
+            entries.push((
+                None,
+                copy_expression(dwarf, pool, unit_index, unit, location.data)?,
+            ));
             continue;
         }
         if location.range.begin > location.range.end {
             return Err(DwarfError::InvalidRange);
         }
         if location.range.begin < location.range.end {
-            entries.push(LocationEntry {
-                range: Some(AddressRange {
+            entries.push((
+                Some(AddressRange {
                     start: ImageAddress::new(location.range.begin),
                     end: ImageAddress::new(location.range.end),
                 }),
-                expression: copy_expression(dwarf, unit_index, unit, location.data, encoding)?,
-            });
+                copy_expression(dwarf, pool, unit_index, unit, location.data)?,
+            ));
         }
     }
-    Ok(LocationDescription {
-        entries: entries.into(),
-    })
+    pool.list(&entries).map_err(too_large)
 }
 
 /// Copies an expression with the procedures it calls, which must be in its
-/// own unit.
+/// own unit. Their indexed addresses are its own too: they run on its
+/// evaluation, which resolves them from its table, and all are in one
+/// unit, whose table they share.
 pub(super) fn copy_expression(
     dwarf: &gimli::Dwarf<Reader<'_>>,
+    pool: &mut LocationsBuilder,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     expression: gimli::Expression<Reader<'_>>,
-    encoding: gimli::Encoding,
-) -> std::result::Result<Expression, DwarfError> {
-    let endian = expression.0.endian();
-    let copied = copy_operations(dwarf, unit_index, unit, expression, encoding)?;
-    let mut pending = calls(unit, &copied, endian)?;
-    if pending.is_empty() {
-        return Ok(copied);
-    }
-    let mut procedures = HashMap::new();
+) -> std::result::Result<crate::image::locations::ExpressionId, DwarfError> {
+    let encoding = unit.encoding();
+    let mut addresses = indexed_addresses(dwarf, unit, &expression)?;
+    let bytes: Cow<'_, [u8]> = expression.0.to_slice()?;
+    let mut pending = calls(unit, &bytes, encoding, expression.0.endian())?;
+    let mut procedures = Vec::<(u64, Option<LocationListId>)>::new();
     while let Some(offset) = pending.pop() {
-        if procedures.contains_key(&offset) {
+        if procedures.iter().any(|(known, _)| *known == offset) {
             continue;
         }
         if procedures.len() == MAX_PROCEDURES {
@@ -281,50 +257,60 @@ pub(super) fn copy_expression(
         let entry = unit.entry(entry_offset)?;
         let location = entry
             .attr_value(gimli::DW_AT_location)
-            .map(|value| copy_location_with(dwarf, unit_index, unit, value, copy_operations))
+            .map(|value| copy_location_with(dwarf, pool, unit_index, unit, value, copy_operations))
             .transpose()?;
-        for called in location.iter().flat_map(|location| location.entries.iter()) {
-            pending.extend(calls(unit, &called.expression, endian)?);
+        if let Some(location) = location {
+            let tables = pool.tables();
+            for (_, called) in tables.list(location).entries() {
+                addresses.extend(called.addresses());
+                pending.extend(calls(
+                    unit,
+                    called.bytes(),
+                    encoding,
+                    expression.0.endian(),
+                )?);
+            }
         }
-        procedures.insert(offset, location);
+        procedures.push((offset, location));
     }
-    Ok(with_procedures(copied, procedures))
-}
-
-/// Gives `expression` the procedures it calls. They run on its evaluation,
-/// which resolves their indexed addresses from its table; all are in one
-/// unit, whose table they share.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "one unit maps each index to one address, so any order fills the table alike"
-)]
-pub(super) fn with_procedures(
-    mut expression: Expression,
-    procedures: HashMap<u64, Option<LocationDescription>>,
-) -> Expression {
-    let mut indexed_addresses = (*expression.indexed_addresses).clone();
-    for called in procedures
-        .values()
-        .flatten()
-        .flat_map(|location| location.entries.iter())
-    {
-        indexed_addresses.extend(called.expression.indexed_addresses.iter());
-    }
-    expression.indexed_addresses = Arc::new(indexed_addresses);
-    expression.procedures = Arc::new(procedures);
-    expression
+    pool.expression(
+        &bytes,
+        u32::try_from(unit_index).map_err(|_| DwarfError::InvalidRange)?,
+        encoding,
+        &addresses,
+        &procedures,
+    )
+    .map_err(too_large)
 }
 
 /// Copies an expression's operations without the procedures it calls.
 fn copy_operations(
     dwarf: &gimli::Dwarf<Reader<'_>>,
+    pool: &mut LocationsBuilder,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     expression: gimli::Expression<Reader<'_>>,
-    encoding: gimli::Encoding,
-) -> std::result::Result<Expression, DwarfError> {
-    let mut indexed_addresses = HashMap::new();
-    let mut operations = expression.operations(encoding);
+) -> std::result::Result<crate::image::locations::ExpressionId, DwarfError> {
+    let addresses = indexed_addresses(dwarf, unit, &expression)?;
+    let bytes: Cow<'_, [u8]> = expression.0.to_slice()?;
+    pool.expression(
+        &bytes,
+        u32::try_from(unit_index).map_err(|_| DwarfError::InvalidRange)?,
+        unit.encoding(),
+        &addresses,
+        &[],
+    )
+    .map_err(too_large)
+}
+
+/// The addresses `.debug_addr` gives the indexes an expression names.
+fn indexed_addresses(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+    expression: &gimli::Expression<Reader<'_>>,
+) -> std::result::Result<Vec<(u64, u64)>, DwarfError> {
+    let mut addresses = Vec::new();
+    let mut operations = expression.operations(unit.encoding());
     while let Some(operation) = operations.next()? {
         let (gimli::Operation::AddressIndex { index } | gimli::Operation::ConstantIndex { index }) =
             operation
@@ -332,26 +318,20 @@ fn copy_operations(
             continue;
         };
         let address = dwarf.address(unit, index)?;
-        indexed_addresses.insert(index.0, address);
+        addresses.push((u64::try_from(index.0).expect("indexes fit u64"), address));
     }
-    let bytes: Cow<'_, [u8]> = expression.0.to_slice()?;
-    Ok(Expression {
-        bytes: Arc::from(bytes.into_owned()),
-        encoding,
-        unit: unit_index,
-        indexed_addresses: Arc::new(indexed_addresses),
-        procedures: Arc::default(),
-    })
+    Ok(addresses)
 }
 
 /// The `.debug_info` offsets of the entries an expression calls.
 fn calls(
     unit: &gimli::Unit<Reader<'_>>,
-    expression: &Expression,
+    bytes: &[u8],
+    encoding: gimli::Encoding,
     endian: gimli::RunTimeEndian,
 ) -> std::result::Result<Vec<u64>, DwarfError> {
-    let reader = gimli::EndianSlice::new(&expression.bytes, endian);
-    let mut operations = gimli::Expression(reader).operations(expression.encoding);
+    let reader = gimli::EndianSlice::new(bytes, endian);
+    let mut operations = gimli::Expression(reader).operations(encoding);
     let mut called = Vec::new();
     while let Some(operation) = operations.next()? {
         let gimli::Operation::Call { offset } = operation else {
@@ -368,48 +348,50 @@ fn calls(
     Ok(called)
 }
 
+/// Records each unit's base types, which typed operations name, in unit
+/// order.
 pub(super) fn load_evaluation_units(
     units: &Units<'_>,
-) -> std::result::Result<Vec<EvaluationUnit>, DwarfError> {
-    units
-        .iter()
-        .map(|unit| {
-            let mut base_types = HashMap::new();
-            let mut language = None;
-            let mut entries = unit.entries();
-            while let Some(entry) = entries.next_dfs()? {
-                if entry.tag() == gimli::DW_TAG_compile_unit {
-                    if let Some(gimli::AttributeValue::Language(value)) =
-                        entry.attr_value(gimli::DW_AT_language)
-                    {
-                        language = Some(value);
-                    }
-                    continue;
+    pool: &mut LocationsBuilder,
+) -> std::result::Result<(), DwarfError> {
+    for unit in units.iter() {
+        let mut recorded = EvaluationUnit {
+            offset: unit
+                .header
+                .debug_info_offset()
+                .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64")),
+            ..EvaluationUnit::default()
+        };
+        let mut entries = unit.entries();
+        while let Some(entry) = entries.next_dfs()? {
+            if entry.tag() == gimli::DW_TAG_compile_unit {
+                if let Some(gimli::AttributeValue::Language(value)) =
+                    entry.attr_value(gimli::DW_AT_language)
+                {
+                    recorded.language = Some(value);
                 }
-                if entry.tag() != gimli::DW_TAG_base_type {
-                    continue;
-                }
-                let ByteSize::Constant(byte_size) = byte_size_attribute(entry) else {
-                    continue;
-                };
-                let Ok(raw_encoding) = base_type_encoding(entry) else {
-                    continue;
-                };
-                let encoding = gimli::DwAte(raw_encoding);
-                if let Some(value_type) = dwarf_value_type(encoding, byte_size) {
-                    base_types.insert(entry.offset().0, value_type);
-                }
+                continue;
             }
-            Ok(EvaluationUnit {
-                base_types,
-                language,
-                offset: unit
-                    .header
-                    .debug_info_offset()
-                    .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64")),
-            })
-        })
-        .collect()
+            if entry.tag() != gimli::DW_TAG_base_type {
+                continue;
+            }
+            let ByteSize::Constant(byte_size) = byte_size_attribute(entry) else {
+                continue;
+            };
+            let Ok(raw_encoding) = base_type_encoding(entry) else {
+                continue;
+            };
+            let encoding = gimli::DwAte(raw_encoding);
+            if let Some(value_type) = dwarf_value_type(encoding, byte_size) {
+                recorded.base_types.push((
+                    u64::try_from(entry.offset().0).expect("DWARF offset fits u64"),
+                    value_type,
+                ));
+            }
+        }
+        pool.unit(&recorded).map_err(too_large)?;
+    }
+    Ok(())
 }
 
 const fn dwarf_value_type(encoding: gimli::DwAte, byte_size: u64) -> Option<gimli::ValueType> {

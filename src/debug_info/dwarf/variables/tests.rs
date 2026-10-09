@@ -29,9 +29,7 @@ use super::inspect::{
     PathStep, ScalarDecodeError, array_byte_offset, evaluate_error_state, implicit_pointer_range,
     static_member_layout_is_valid,
 };
-use super::location::{
-    EvaluationUnit, Expression, LocationDescription, LocationEntry, with_procedures,
-};
+use super::location::{EvaluationUnit, Expression, LocationsBuilder, select};
 use super::pieces::storage_from_pieces;
 use super::shape::{ValueShape, ValueShapeError, value_shape_from};
 use super::types::{
@@ -43,6 +41,7 @@ use super::variant::{
     validate_variant_selections,
 };
 use super::*;
+use crate::image::locations::{ExpressionId, LocationListId};
 use crate::model::ValueStorage;
 
 #[test]
@@ -128,12 +127,14 @@ fn declaration_canonicalization_cannot_launder_a_non_type_reference() {
         value.expect("referencing variable")
     };
     let signatures = HashMap::new();
+    let pool = std::sync::Mutex::default();
     let mut arena = TypeArenaBuilder::new(
         &dwarf,
         &units,
         &signatures,
         ModuleImageId::new(0),
         ByteOrder::Little,
+        &pool,
     );
 
     assert!(matches!(
@@ -366,21 +367,62 @@ impl Runtime {
     }
 }
 
-/// Evaluates an expression with no frame base and an unlimited budget.
-fn run<'a>(
-    expression: &'a Expression,
-    units: &[EvaluationUnit],
-    runtime: &mut Runtime,
-) -> std::result::Result<Vec<gimli::Piece<Reader<'a>>>, EvaluateError> {
-    evaluate(
-        expression,
-        RunTimeEndian::Little,
-        None,
-        &mut FrameBase::Unsupported,
-        units,
-        runtime,
-        &mut InspectionBudget::default(),
-    )
+/// Expressions pooled as loading pools them, in one unit at offset 0x100.
+pub(super) struct Pool(pub(super) LocationsBuilder);
+
+impl Pool {
+    /// A pool whose unit has `base_types`, by unit offset.
+    pub(super) fn new(base_types: impl IntoIterator<Item = (u64, gimli::ValueType)>) -> Self {
+        let mut pool = LocationsBuilder::default();
+        pool.unit(&EvaluationUnit {
+            offset: Some(0x100),
+            language: None,
+            base_types: base_types.into_iter().collect(),
+        })
+        .expect("a unit fits");
+        Self(pool)
+    }
+
+    /// Pools `bytes` with indexed `addresses` and called `procedures`.
+    pub(super) fn with(
+        &mut self,
+        bytes: &[u8],
+        addresses: &[(u64, u64)],
+        procedures: &[(u64, Option<LocationListId>)],
+    ) -> ExpressionId {
+        let encoding = gimli::Encoding {
+            format: gimli::Format::Dwarf32,
+            version: 5,
+            address_size: 8,
+        };
+        self.0
+            .expression(bytes, 0, encoding, addresses, procedures)
+            .expect("an expression fits")
+    }
+
+    pub(super) fn add(&mut self, bytes: &[u8]) -> ExpressionId {
+        self.with(bytes, &[], &[])
+    }
+
+    pub(super) fn get(&self, id: ExpressionId) -> Expression<'_> {
+        self.0.tables().expression(id)
+    }
+
+    /// Evaluates `id` with no frame base and an unlimited budget.
+    fn run(
+        &self,
+        id: ExpressionId,
+        runtime: &mut Runtime,
+    ) -> std::result::Result<Vec<gimli::Piece<Reader<'_>>>, EvaluateError> {
+        evaluate(
+            self.get(id),
+            RunTimeEndian::Little,
+            None,
+            &mut FrameBase::Unsupported,
+            runtime,
+            &mut InspectionBudget::default(),
+        )
+    }
 }
 
 fn reference(id: u32) -> TypeReference {
@@ -424,20 +466,6 @@ fn wrapper_cycle() -> [TypeEntry; 2] {
     ]
 }
 
-pub(super) fn expression(bytes: &[u8]) -> Expression {
-    Expression {
-        bytes: Arc::from(bytes),
-        encoding: gimli::Encoding {
-            format: gimli::Format::Dwarf32,
-            version: 5,
-            address_size: 8,
-        },
-        unit: 0,
-        indexed_addresses: Arc::new(HashMap::new()),
-        procedures: Arc::default(),
-    }
-}
-
 fn scalar_type(encoding: BaseTypeEncoding, byte_size: u64) -> BaseType {
     BaseType {
         name: "test".into(),
@@ -456,26 +484,18 @@ fn target(byte_order: ByteOrder) -> TargetDescription {
     }
 }
 
-fn units(base_types: impl IntoIterator<Item = (usize, gimli::ValueType)>) -> Vec<EvaluationUnit> {
-    vec![EvaluationUnit {
-        base_types: base_types.into_iter().collect(),
-        language: None,
-        offset: Some(0x100),
-    }]
-}
-
 #[test]
 fn malformed_backward_branch_expression_fails_instead_of_hanging() {
+    let mut pool = Pool::new([]);
     let mut runtime = Runtime::new([]);
     // DW_OP_skip with a -3 offset branches back onto itself forever.
-    let looping = expression(&[gimli::DW_OP_skip.0, 0xfd, 0xff]);
+    let looping = pool.add(&[gimli::DW_OP_skip.0, 0xfd, 0xff]);
     let mut budget = InspectionBudget::default();
     let result = evaluate(
-        &looping,
+        pool.get(looping),
         RunTimeEndian::Little,
         None,
         &mut FrameBase::Unsupported,
-        &units([]),
         &mut runtime,
         &mut budget,
     );
@@ -490,20 +510,18 @@ fn malformed_backward_branch_expression_fails_instead_of_hanging() {
 
 #[test]
 fn typed_register_values_are_evaluated_with_the_referenced_base_type() {
+    let mut pool = Pool::new([(0x10, gimli::ValueType::U64)]);
     let mut runtime = Runtime::new([(6, 0x2000)]);
     // DW_OP_regval_type register 6, base type DIE offset 0x10.
-    let typed = expression(&[
+    let typed = pool.add(&[
         gimli::DW_OP_regval_type.0,
         6,
         0x10,
         gimli::DW_OP_stack_value.0,
     ]);
-    let result = run(
-        &typed,
-        &units([(0x10, gimli::ValueType::U64)]),
-        &mut runtime,
-    )
-    .expect("typed register expression");
+    let result = pool
+        .run(typed, &mut runtime)
+        .expect("typed register expression");
     assert!(matches!(
         result.as_slice(),
         [gimli::Piece {
@@ -517,9 +535,12 @@ fn typed_register_values_are_evaluated_with_the_referenced_base_type() {
 
 #[test]
 fn implicit_and_computed_values_materialize_with_source_provenance() {
+    let mut pool = Pool::new([]);
     let mut runtime = Runtime::new([]);
-    let implicit = expression(&[gimli::DW_OP_implicit_value.0, 4, 0xd6, 0xff, 0xff, 0xff]);
-    let pieces = run(&implicit, &units([]), &mut runtime).expect("implicit scalar expression");
+    let implicit = pool.add(&[gimli::DW_OP_implicit_value.0, 4, 0xd6, 0xff, 0xff, 0xff]);
+    let pieces = pool
+        .run(implicit, &mut runtime)
+        .expect("implicit scalar expression");
     let stored = storage_from_pieces(
         &pieces,
         4,
@@ -650,9 +671,12 @@ fn undefined_location_pieces_leave_the_rest_of_a_value_readable() {
 
 #[test]
 fn an_empty_location_expression_describes_an_optimized_out_value() {
+    let mut pool = Pool::new([]);
     let mut runtime = Runtime::new([]);
-    let empty = expression(&[]);
-    let pieces = run(&empty, &units([]), &mut runtime).expect("an empty expression is valid");
+    let empty = pool.add(&[]);
+    let pieces = pool
+        .run(empty, &mut runtime)
+        .expect("an empty expression is valid");
 
     assert_eq!(
         composite(&pieces, 8, &mut runtime).map(drop),
@@ -884,6 +908,7 @@ fn a_bit_field_reads_only_its_own_bits() {
 
 #[test]
 fn entry_value_operands_ask_the_caller_for_what_they_name() {
+    let mut pool = Pool::new([(0x10, gimli::ValueType::I32)]);
     let mut runtime = Runtime::new([]);
     runtime.entry_values = vec![
         (EntryParameter::Register(5), 41),
@@ -900,7 +925,7 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         pieces => panic!("{pieces:?}"),
     };
     // DW_OP_entry_value(DW_OP_reg5) DW_OP_plus_uconst 1 DW_OP_stack_value.
-    let register = expression(&[
+    let register = pool.add(&[
         gimli::DW_OP_entry_value.0,
         1,
         gimli::DW_OP_reg5.0,
@@ -909,11 +934,11 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         gimli::DW_OP_stack_value.0,
     ]);
     assert_eq!(
-        run(&register, &units([]), &mut runtime).map(value),
+        pool.run(register, &mut runtime).map(value),
         Ok(Value::Generic(42))
     );
     // A typed register keeps its type.
-    let typed = expression(&[
+    let typed = pool.add(&[
         gimli::DW_OP_entry_value.0,
         3,
         gimli::DW_OP_regval_type.0,
@@ -921,17 +946,9 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         0x10,
         gimli::DW_OP_stack_value.0,
     ]);
-    assert_eq!(
-        run(
-            &typed,
-            &units([(0x10, gimli::ValueType::I32)]),
-            &mut runtime
-        )
-        .map(value),
-        Ok(Value::I32(41))
-    );
+    assert_eq!(pool.run(typed, &mut runtime).map(value), Ok(Value::I32(41)));
     // DW_OP_bregN 0; DW_OP_deref asks for what the register pointed at.
-    let referent = expression(&[
+    let referent = pool.add(&[
         gimli::DW_OP_entry_value.0,
         3,
         gimli::DW_OP_breg4.0,
@@ -940,11 +957,11 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         gimli::DW_OP_stack_value.0,
     ]);
     assert_eq!(
-        run(&referent, &units([]), &mut runtime).map(value),
+        pool.run(referent, &mut runtime).map(value),
         Ok(Value::Generic(0x20))
     );
     // A parameter reference names its entry by its unit's offset.
-    let parameter = expression(&[
+    let parameter = pool.add(&[
         gimli::DW_OP_GNU_parameter_ref.0,
         0x2a,
         0,
@@ -953,25 +970,25 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         gimli::DW_OP_stack_value.0,
     ]);
     assert_eq!(
-        run(&parameter, &units([]), &mut runtime).map(value),
+        pool.run(parameter, &mut runtime).map(value),
         Ok(Value::Generic(7))
     );
     // What the caller cannot say, the value cannot be.
-    let missing = expression(&[
+    let missing = pool.add(&[
         gimli::DW_OP_entry_value.0,
         1,
         gimli::DW_OP_reg0.0,
         gimli::DW_OP_stack_value.0,
     ]);
     assert_eq!(
-        run(&missing, &units([]), &mut runtime),
+        pool.run(missing, &mut runtime),
         Err(
             VariableUnavailableReason::EntryValue(crate::EntryValueUnavailableReason::NoCaller)
                 .into()
         )
     );
     // Any other operand is a valid expression uscope does not evaluate.
-    let other = expression(&[
+    let other = pool.add(&[
         gimli::DW_OP_entry_value.0,
         2,
         gimli::DW_OP_breg5.0,
@@ -979,55 +996,52 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         gimli::DW_OP_stack_value.0,
     ]);
     assert_eq!(
-        run(&other, &units([]), &mut runtime),
+        pool.run(other, &mut runtime),
         Err(crate::UnsupportedVariableFeature::EntryValue.into())
     );
 }
 
 #[test]
 fn called_procedures_run_on_the_same_stack() {
+    let mut pool = Pool::new([]);
     let mut runtime = Runtime::new([]);
-    let procedure = |expression: Expression| {
-        Some(LocationDescription {
-            entries: vec![LocationEntry {
-                range: None,
-                expression,
-            }]
-            .into(),
-        })
+    let procedure = |pool: &mut Pool, expression| {
+        Some(pool.0.list(&[(None, expression)]).expect("a list fits"))
     };
-    // A procedure resolves an indexed address from its own unit's table.
-    let mut indexed = expression(&[gimli::DW_OP_addrx.0, 0, gimli::DW_OP_plus.0]);
-    indexed.indexed_addresses = Arc::new(HashMap::from_iter([(0, 0x1000)]));
-    let mut caller = with_procedures(
-        expression(&[
-            gimli::DW_OP_lit2.0,
-            gimli::DW_OP_call2.0,
-            0x20,
-            0,
-            gimli::DW_OP_call4.0,
-            0x30,
-            0,
-            0,
-            0,
-            gimli::DW_OP_call2.0,
-            0x40,
-            0,
-            gimli::DW_OP_stack_value.0,
-        ]),
-        // The unit begins at 0x100, so the calls name 0x120, 0x130, and 0x140.
-        HashMap::from_iter([
-            (
-                0x120,
-                procedure(expression(&[gimli::DW_OP_lit3.0, gimli::DW_OP_mul.0])),
-            ),
-            // An entry without a location has no effect.
-            (0x130, None),
-            (0x140, procedure(indexed)),
-        ]),
+    // A procedure resolves an indexed address from its unit's table,
+    // which loading gives the expressions calling it.
+    let indexed = pool.with(
+        &[gimli::DW_OP_addrx.0, 0, gimli::DW_OP_plus.0],
+        &[(0, 0x1000)],
+        &[],
+    );
+    let indexed = procedure(&mut pool, indexed);
+    let tripled = pool.add(&[gimli::DW_OP_lit3.0, gimli::DW_OP_mul.0]);
+    let tripled = procedure(&mut pool, tripled);
+    let bytes = [
+        gimli::DW_OP_lit2.0,
+        gimli::DW_OP_call2.0,
+        0x20,
+        0,
+        gimli::DW_OP_call4.0,
+        0x30,
+        0,
+        0,
+        0,
+        gimli::DW_OP_call2.0,
+        0x40,
+        0,
+        gimli::DW_OP_stack_value.0,
+    ];
+    // The unit begins at 0x100, so the calls name 0x120, 0x130, and 0x140.
+    // An entry without a location has no effect.
+    let caller = pool.with(
+        &bytes,
+        &[(0, 0x1000)],
+        &[(0x120, tripled), (0x130, None), (0x140, indexed)],
     );
     assert!(matches!(
-        run(&caller, &units([]), &mut runtime).as_deref(),
+        pool.run(caller, &mut runtime).as_deref(),
         Ok([gimli::Piece {
             location: Location::Value {
                 value: Value::Generic(0x1006)
@@ -1036,40 +1050,43 @@ fn called_procedures_run_on_the_same_stack() {
         }])
     ));
     // A procedure the expression did not bring is elsewhere.
-    caller.procedures = Arc::default();
+    let alone = pool.add(&bytes);
     assert_eq!(
-        run(&caller, &units([]), &mut runtime),
+        pool.run(alone, &mut runtime),
         Err(crate::UnsupportedVariableFeature::CrossDieEvaluation.into())
     );
 }
 
 #[test]
 fn unimplemented_operations_are_unsupported() {
+    let mut pool = Pool::new([]);
     let mut runtime = Runtime::new([]);
-    let uninitialized = expression(&[gimli::DW_OP_lit0.0, gimli::DW_OP_GNU_uninit.0]);
+    let uninitialized = pool.add(&[gimli::DW_OP_lit0.0, gimli::DW_OP_GNU_uninit.0]);
     assert_eq!(
-        run(&uninitialized, &units([]), &mut runtime),
+        pool.run(uninitialized, &mut runtime),
         Err(crate::UnsupportedVariableFeature::ExpressionOperation.into())
     );
 }
 
 #[test]
 fn missing_base_types_have_a_stable_typed_reason() {
+    let mut pool = Pool::new([]);
     let mut runtime = Runtime::new([(0, 1)]);
-    let missing_type = expression(&[
+    let missing_type = pool.add(&[
         gimli::DW_OP_regval_type.0,
         0,
         0x10,
         gimli::DW_OP_stack_value.0,
     ]);
     assert_eq!(
-        run(&missing_type, &units([]), &mut runtime),
+        pool.run(missing_type, &mut runtime),
         Err(crate::UnsupportedVariableFeature::TypedValue.into())
     );
 }
 
 #[test]
 fn expression_memory_reads_are_strictly_bounded() {
+    let mut pool = Pool::new([]);
     let mut bytes = Vec::new();
     for address in 0_u32..=64 {
         bytes.push(gimli::DW_OP_addr.0);
@@ -1077,18 +1094,17 @@ fn expression_memory_reads_are_strictly_bounded() {
         bytes.extend_from_slice(&[gimli::DW_OP_deref_size.0, 1, gimli::DW_OP_drop.0]);
     }
     bytes.extend_from_slice(&[gimli::DW_OP_lit0.0, gimli::DW_OP_stack_value.0]);
-    let expression = expression(&bytes);
+    let expression = pool.add(&bytes);
     let mut runtime = Runtime {
         memory: Some(Arc::from([0_u8; 16])),
         ..Runtime::new([])
     };
     assert_eq!(
         evaluate(
-            &expression,
+            pool.get(expression),
             RunTimeEndian::Little,
             None,
             &mut FrameBase::Unsupported,
-            &units([]),
             &mut runtime,
             &mut InspectionBudget::new(crate::InspectionLimits {
                 memory_reads: 64,
@@ -1110,13 +1126,15 @@ fn expression_memory_reads_are_strictly_bounded() {
 
 #[test]
 fn operational_memory_failures_escape_the_per_variable_result_lane() {
+    let mut pool = Pool::new([]);
     let mut bytes = vec![gimli::DW_OP_addr.0];
     bytes.extend_from_slice(&0x1000_u64.to_le_bytes());
     bytes.extend_from_slice(&[gimli::DW_OP_deref.0, gimli::DW_OP_stack_value.0]);
     let mut runtime = Runtime::new([]);
 
+    let reads = pool.add(&bytes);
     assert_eq!(
-        run(&expression(&bytes), &units([]), &mut runtime),
+        pool.run(reads, &mut runtime),
         Err(EvaluateError::Fatal("unexpected memory read".into()))
     );
     assert!(matches!(
@@ -1167,10 +1185,11 @@ fn fixed_form_constants_zero_extend_and_signed_forms_sign_extend() {
 
 #[test]
 fn unexecuted_fbreg_branches_do_not_require_a_frame_base() {
+    let mut pool = Pool::new([]);
     let mut runtime = Runtime::new([]);
     // DW_OP_lit1 then DW_OP_bra +2 skips the DW_OP_fbreg on the executed
     // path; the frame base must not be resolved eagerly.
-    let branching = expression(&[
+    let branching = pool.add(&[
         gimli::DW_OP_lit1.0,
         gimli::DW_OP_bra.0,
         0x02,
@@ -1183,15 +1202,15 @@ fn unexecuted_fbreg_branches_do_not_require_a_frame_base() {
     let location = Metadata::Absent(MetadataAbsence::NoFrameBase);
     let mut cache = FrameBaseCache::Empty;
     let pieces = evaluate(
-        &branching,
+        pool.get(branching),
         RunTimeEndian::Little,
         None,
         &mut FrameBase::Lazy(FrameBaseContext {
             location: &location,
+            tables: pool.0.tables(),
             address: Some(ImageAddress::new(0)),
             cache: &mut cache,
         }),
-        &units([]),
         &mut runtime,
         &mut InspectionBudget::default(),
     )
@@ -1212,17 +1231,17 @@ fn unexecuted_fbreg_branches_do_not_require_a_frame_base() {
 
     // The same expression taking the fbreg path surfaces the metadata
     // failure lazily.
-    let taken = expression(&[gimli::DW_OP_fbreg.0, 0x00, gimli::DW_OP_stack_value.0]);
+    let taken = pool.add(&[gimli::DW_OP_fbreg.0, 0x00, gimli::DW_OP_stack_value.0]);
     let result = evaluate(
-        &taken,
+        pool.get(taken),
         RunTimeEndian::Little,
         None,
         &mut FrameBase::Lazy(FrameBaseContext {
             location: &location,
+            tables: pool.0.tables(),
             address: Some(ImageAddress::new(0)),
             cache: &mut cache,
         }),
-        &units([]),
         &mut runtime,
         &mut InspectionBudget::default(),
     );
@@ -1231,74 +1250,36 @@ fn unexecuted_fbreg_branches_do_not_require_a_frame_base() {
 
 #[test]
 fn specific_location_entries_override_default_entries() {
+    let mut pool = Pool::new([]);
     let range = |start: u64, end: u64| {
         Some(AddressRange {
             start: ImageAddress::new(start),
             end: ImageAddress::new(end),
         })
     };
-    let description = LocationDescription {
-        entries: vec![
-            LocationEntry {
-                range: None,
-                expression: expression(&[gimli::DW_OP_reg0.0]),
-            },
-            LocationEntry {
-                range: range(0x100, 0x200),
-                expression: expression(&[gimli::DW_OP_reg1.0]),
-            },
-        ]
-        .into(),
-    };
-
-    let specific = description
-        .expression(Some(ImageAddress::new(0x150)))
-        .expect("specific entry wins inside its range")
-        .expect("an expression is active");
-    assert_eq!(specific.bytes.as_ref(), &[gimli::DW_OP_reg1.0]);
-
-    let fallback = description
-        .expression(Some(ImageAddress::new(0x300)))
-        .expect("default entry applies outside all ranges")
-        .expect("an expression is active");
-    assert_eq!(fallback.bytes.as_ref(), &[gimli::DW_OP_reg0.0]);
-
-    // A range-less default still resolves without an instruction context.
-    let without_context = description
-        .expression(None)
-        .expect("default entry applies without a context")
-        .expect("an expression is active");
-    assert_eq!(without_context.bytes.as_ref(), &[gimli::DW_OP_reg0.0]);
-
-    // A location with only range-gated entries must refuse to guess when no
-    // instruction context is available rather than silently resolving.
-    let ranged_only = LocationDescription {
-        entries: vec![LocationEntry {
-            range: range(0x100, 0x200),
-            expression: expression(&[gimli::DW_OP_reg1.0]),
-        }]
-        .into(),
-    };
-    assert!(ranged_only.expression(None).is_err());
-
-    let overlapping = LocationDescription {
-        entries: vec![
-            LocationEntry {
-                range: range(0x100, 0x200),
-                expression: expression(&[gimli::DW_OP_reg0.0]),
-            },
-            LocationEntry {
-                range: range(0x180, 0x280),
-                expression: expression(&[gimli::DW_OP_reg1.0]),
-            },
-        ]
-        .into(),
-    };
-    assert!(
-        overlapping
-            .expression(Some(ImageAddress::new(0x190)))
-            .is_err()
+    let (reg0, reg1) = (
+        pool.add(&[gimli::DW_OP_reg0.0]),
+        pool.add(&[gimli::DW_OP_reg1.0]),
     );
+    let mut list = |entries: &[_]| pool.0.list(entries).expect("a list fits");
+    let description = list(&[(None, reg0), (range(0x100, 0x200), reg1)]);
+    let ranged_only = list(&[(range(0x100, 0x200), reg1)]);
+    let overlapping = list(&[(range(0x100, 0x200), reg0), (range(0x180, 0x280), reg1)]);
+    let tables = pool.0.tables();
+    let at = |list, address: Option<u64>| {
+        select(tables.list(list), address.map(ImageAddress::new))
+            .map(|expression| expression.map(Expression::id))
+    };
+
+    // A specific entry wins inside its range; the default applies outside
+    // every range and without an instruction context.
+    assert_eq!(at(description, Some(0x150)), Ok(Some(reg1)));
+    assert_eq!(at(description, Some(0x300)), Ok(Some(reg0)));
+    assert_eq!(at(description, None), Ok(Some(reg0)));
+    // A location with only range-gated entries refuses to guess when no
+    // instruction context is available rather than silently resolving.
+    assert!(at(ranged_only, None).is_err());
+    assert!(at(overlapping, Some(0x190)).is_err());
 }
 
 #[test]

@@ -200,7 +200,7 @@ fn types_that_keep_their_provenance_never_merge() {
                         aggregate: TypeId::new(1),
                         child: DynamicAggregateChild::Discriminant,
                     },
-                    super::super::tests::expression(&[0x30]),
+                    crate::image::locations::ExpressionId(0),
                 );
             },
         ),

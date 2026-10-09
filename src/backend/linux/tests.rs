@@ -674,6 +674,10 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
                 files
             },
             lines: crate::image::lines::LineTables::default(),
+            locations: crate::image::locations::LocationsBuilder::default(),
+            variables: crate::image::variables::Variables::default(),
+            calls: crate::image::calls::Calls::default(),
+            type_facts: crate::image::type_facts::TypeFacts::default(),
             unwind: None,
             sections: Vec::new(),
             vtables: Vec::new(),

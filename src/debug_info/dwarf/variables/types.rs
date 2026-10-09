@@ -29,18 +29,15 @@ use super::identity::{
     IdentityParts, ScopePath, ScopeSegment, go_embedded, inline_namespace_path, scope_segment,
     source_language,
 };
-use super::location::{Expression, copy_expression};
+use super::location::copy_expression;
 use super::variant::{
     VariantMetadataBudget, VariantMetadataError, copy_variant_selection,
     validate_variant_selections,
 };
 use super::{MAX_RECORD_CHILDREN, MAX_SYMBOLIC_NAMES, MAX_TYPE_RESOLUTION_DEPTH, MAX_TYPES};
+use crate::image::locations::ExpressionId;
 
-#[derive(Clone)]
-pub(super) enum TypeResolution {
-    Resolved(TypeId),
-    Malformed(Arc<str>),
-}
+pub(super) use crate::image::variables::TypeResolution;
 
 #[derive(Debug, Clone)]
 pub(super) enum TypeEntry {
@@ -69,7 +66,9 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) limit_type: Option<TypeId>,
     /// The shared `void` that qualifiers and typedefs without a target name.
     pub(super) void_type: Option<TypeId>,
-    pub(super) dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
+    pub(super) dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, ExpressionId>,
+    /// Where every location is pooled.
+    pub(super) pool: &'a std::sync::Mutex<super::location::LocationsBuilder>,
     pub(super) record_member_declarations: Vec<AggregateMemberDeclaration>,
     pub(super) symbolic_names: usize,
     /// The scopes enclosing each type DIE that has any.
@@ -93,7 +92,7 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
 /// What the loader keeps of a finished type graph.
 pub(super) struct BuiltTypes {
     pub(super) entries: Vec<TypeEntry>,
-    pub(super) dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
+    pub(super) dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, ExpressionId>,
     pub(super) complex_parts: HashMap<(Arc<str>, u64), TypeId>,
     pub(super) go_dict_indices: HashMap<TypeId, u64>,
     pub(super) passed_by_value: HashMap<TypeId, bool>,
@@ -179,6 +178,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         type_signatures: &'a TypeSignatures,
         image: ModuleImageId,
         byte_order: ByteOrder,
+        pool: &'a std::sync::Mutex<super::location::LocationsBuilder>,
     ) -> Self {
         let mut die_offsets = Vec::with_capacity(units.len());
         let mut unit_languages = Vec::with_capacity(units.len());
@@ -281,6 +281,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             limit_type: None,
             void_type: None,
             dynamic_record_layouts: HashMap::new(),
+            pool,
             record_member_declarations: Vec::new(),
             symbolic_names: 0,
             type_scopes: HashMap::new(),
@@ -2139,7 +2140,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     aggregate,
                     child: DynamicAggregateChild::Discriminant,
                 })
-                .cloned()
+                .copied()
         {
             self.dynamic_record_layouts.insert(
                 DynamicAggregateLayoutKey {
@@ -2280,8 +2281,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             return Ok(());
         };
         let unit = &self.units[unit_index];
-        let expression = copy_expression(self.dwarf, unit_index, unit, expression, unit.encoding())
-            .map_err(malformed)?;
+        let expression = copy_expression(
+            self.dwarf,
+            &mut self.pool.lock().expect("loading does not panic"),
+            unit_index,
+            unit,
+            expression,
+        )
+        .map_err(malformed)?;
         self.dynamic_record_layouts.insert(
             DynamicAggregateLayoutKey {
                 aggregate,

@@ -37,11 +37,12 @@ use crate::{
     TypeNode, VariableKind, VariableMalformedKind, VariableValueSource, VirtualAddress,
 };
 
+use super::DwarfVariableInfo;
 use super::evaluate::EvaluateError;
 use super::generic::Generic;
 use super::inspect::evaluate_error_state;
 use super::types::TypeResolution;
-use super::{CatalogDataObject, DwarfVariableInfo};
+use crate::image::variables::Object;
 
 /// The DWARF numbers of x86-64's integer result registers, in order: rax,
 /// rbx, rcx, rdi, rsi, and r8 through r11.
@@ -64,26 +65,7 @@ const ST0: u16 = 33;
 /// The size of an eightbyte, the unit System V classifies.
 const EIGHTBYTE: u64 = 8;
 
-/// How a function returns its values.
-pub(super) enum ReturnConvention {
-    /// Go's register ABI on x86-64, which the producer names `regabi`.
-    GoRegisters,
-    /// The System V x86-64 convention.
-    SystemV(Box<SystemV>),
-}
-
-/// The one value a function returns by the System V convention.
-pub(super) struct SystemV {
-    /// The function's name, which the value is shown by.
-    pub(super) name: Arc<str>,
-    pub(super) ty: TypeResolution,
-    /// The function's language, which says whether the convention is
-    /// known for aggregates and how C++ passes a class.
-    pub(super) language: SourceLanguage,
-    /// Whether the producer says optimization changed how the function
-    /// returns, so the convention no longer says where its value is.
-    pub(super) rewritten: bool,
-}
+pub(super) use crate::image::variables::{ReturnConvention, SystemV};
 
 /// Where one part of a value is.
 #[derive(Debug, Clone, Copy)]
@@ -135,21 +117,17 @@ impl DwarfVariableInfo {
         let Some(catalog) = self.function_at(function) else {
             return Ok(None);
         };
-        match &catalog.returns {
+        match catalog.returns() {
             Some(ReturnConvention::GoRegisters) => {}
             Some(ReturnConvention::SystemV(returned)) => {
-                return self.system_v_returned(returned, runtime, budget);
+                return self.system_v_returned(&returned, runtime, budget);
             }
             None => return Ok(None),
         }
         let own = |kind: VariableKind| {
-            catalog
-                .objects
-                .iter()
-                .map(|&index| &self.objects[index])
-                .filter(move |object| {
-                    object.kind == kind && object.instance.is_none() && object.lexical_depth == 0
-                })
+            catalog.objects().filter(move |object| {
+                object.kind() == kind && object.instance().is_none() && object.lexical_depth() == 0
+            })
         };
         let results = own(VariableKind::Result).collect::<Vec<_>>();
         // The stack-assigned results follow the stack-assigned arguments,
@@ -168,7 +146,7 @@ impl DwarfVariableInfo {
             ..Assignment::default()
         };
         let mut returned = Vec::with_capacity(results.len());
-        for (index, result) in results.iter().enumerate() {
+        for (index, &result) in results.iter().enumerate() {
             // So does where each result is on every one before it.
             let Some(ty) = type_of(result) else {
                 let missing =
@@ -194,7 +172,7 @@ impl DwarfVariableInfo {
                 Generic::Plain | Generic::Resolved(_) => None,
             };
             returned.push(ReturnedValue {
-                name: Arc::clone(&result.name),
+                name: result.name().into(),
                 ty: Some(ty),
                 value,
                 unresolved_shape,
@@ -204,16 +182,13 @@ impl DwarfVariableInfo {
     }
 
     /// Results none of whose values can be found, for one reason.
-    fn all_missing(
-        results: &[&CatalogDataObject],
-        error: &EvaluateError,
-    ) -> Result<Vec<ReturnedValue>> {
+    fn all_missing(results: &[Object<'_>], error: &EvaluateError) -> Result<Vec<ReturnedValue>> {
         let state = evaluate_error_state(error.clone(), VariableMalformedKind::InvalidTypeGraph)?;
         Ok(results
             .iter()
             .map(|result| ReturnedValue {
-                name: Arc::clone(&result.name),
-                ty: type_of(result),
+                name: result.name().into(),
+                ty: type_of(*result),
                 value: Err(state.clone()),
                 unresolved_shape: None,
             })
@@ -430,7 +405,7 @@ impl DwarfVariableInfo {
             }
             TypeKind::Record { .. } | TypeKind::Union { .. } => match language {
                 SourceLanguage::C => true,
-                SourceLanguage::Cpp => match self.passed_by_value.get(&id) {
+                SourceLanguage::Cpp => match self.type_facts().passed_by_value(id) {
                     Some(true) => true,
                     Some(false) => return Ok(memory),
                     // A class too large for registers is in memory however
@@ -854,15 +829,12 @@ fn placed(unassigned: Unassigned) -> EvaluateError {
 
 /// The type of a parameter or result, unless its debug information is
 /// malformed.
-const fn type_of(object: &CatalogDataObject) -> Option<TypeId> {
-    match (&object.malformed, &object.type_info) {
-        (None, TypeResolution::Resolved(id)) => Some(*id),
-        _ => None,
-    }
+fn type_of(object: Object<'_>) -> Option<TypeId> {
+    object.type_id().filter(|_| object.malformed().is_none())
 }
 
-fn unknown_type(what: &str, object: &CatalogDataObject) -> EvaluateError {
-    format!("the type of {what} {} is unknown", object.name)
+fn unknown_type(what: &str, object: Object<'_>) -> EvaluateError {
+    format!("the type of {what} {} is unknown", object.name())
         .as_str()
         .into()
 }

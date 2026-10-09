@@ -20,6 +20,11 @@ pub struct Measured {
     /// The heap the loaded debug information holds, net of what the load
     /// freed.
     pub retained_heap_bytes: Option<i64>,
+    /// What freeing each part of the loaded debug information returns, in
+    /// order: the variable provider, the unwinder, then the image and what
+    /// they shared with it.
+    #[serde(default)]
+    pub retained_parts: Vec<(String, i64)>,
 }
 
 /// Loads `path` as the debugger loads a module, recording what it costs.
@@ -34,9 +39,27 @@ pub fn measure_load(path: &Path, instructions: bool) -> anyhow::Result<Measured>
     let retained = crate::profile::alloc::totals().since(&before).live_bytes;
     let report = recording.finish();
     let counted = report.summary.allocations.is_some();
+    let mut retained_parts = Vec::new();
+    let outcome = loaded.map(|loaded| {
+        let live = || crate::profile::alloc::totals().live_bytes;
+        let mut freed = |name: &str, part: Box<dyn FnOnce() + '_>| {
+            let held = live();
+            part();
+            retained_parts.push((name.to_owned(), held - live()));
+        };
+        let crate::debug_info::DebugInfo {
+            image,
+            unwind,
+            variables,
+        } = loaded;
+        freed("variables", Box::new(move || drop(variables)));
+        freed("unwind", Box::new(move || drop(unwind)));
+        freed("image", Box::new(move || drop(image)));
+    });
     Ok(Measured {
-        outcome: loaded.map(drop).map_err(|error| error.to_string()),
+        outcome: outcome.map_err(|error| error.to_string()),
         report,
         retained_heap_bytes: counted.then_some(retained),
+        retained_parts: if counted { retained_parts } else { Vec::new() },
     })
 }

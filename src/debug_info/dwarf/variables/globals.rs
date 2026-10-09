@@ -17,7 +17,7 @@ use super::die::{
 };
 use super::location::copy_data_object_value_with_origins;
 use super::types::{TypeArenaBuilder, TypeEntry, TypeResolution};
-use super::{CatalogDataObject, Metadata, MetadataAbsence, ValueDescription, malformed_reason};
+use super::{DataObject, Metadata, MetadataAbsence, ValueDescription, malformed_reason};
 
 #[derive(Clone, Default)]
 pub(super) struct GlobalScope {
@@ -111,10 +111,11 @@ impl DefinitionIndex {
 pub(super) fn load_globals<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
     units: &Units<'data>,
-    objects: &mut Vec<CatalogDataObject>,
+    objects: &mut Vec<DataObject>,
     order: &mut u64,
     files: &mut Files,
     types: &mut TypeArenaBuilder<'_, 'data>,
+    pool: &std::sync::Mutex<super::location::LocationsBuilder>,
 ) -> std::result::Result<(Vec<GlobalVariableInfo>, Vec<usize>), DwarfError> {
     let mut table = ScopeTable {
         scopes: vec![GlobalScope::default()],
@@ -264,8 +265,15 @@ pub(super) fn load_globals<'data>(
             let declaration = declaration_with_origins(dwarf, units, unit, entry, &chain, files);
             let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
             let type_info = types.variable_type(type_unit, type_value);
-            let value =
-                copy_data_object_value_with_origins(dwarf, units, unit_index, unit, entry, &chain);
+            let value = copy_data_object_value_with_origins(
+                dwarf,
+                &mut pool.lock().expect("loading does not panic"),
+                units,
+                unit_index,
+                unit,
+                entry,
+                &chain,
+            );
             let declaration_only = flag_with_origins(entry, &chain, gimli::DW_AT_declaration)
                 .unwrap_or(false)
                 && matches!(value, Metadata::Absent(_));
@@ -287,12 +295,13 @@ pub(super) fn load_globals<'data>(
                 .map(|error| Arc::from(error.to_string()))
                 .or(chain_error)
                 .or(linkage_error);
-            let object = CatalogDataObject {
+            let object = DataObject {
                 debug_info_offset: debug_info_offset(unit, entry),
                 kind: VariableKind::Global,
                 name: Arc::clone(&name),
                 declaration: declaration.as_ref().ok().cloned().flatten(),
                 ranges: Vec::new().into(),
+                go_declaration: None,
                 instance: None,
                 lexical_depth: 0,
                 order: *order,

@@ -14,7 +14,8 @@ use crate::{
     VariableKind,
 };
 
-use super::{CatalogDataObject, MAX_DATA_OBJECTS, Scope};
+use super::{MAX_DATA_OBJECTS, Scope};
+use crate::image::variables::DataObject;
 
 pub(super) const fn check_data_object_capacity(
     count: usize,
@@ -25,9 +26,7 @@ pub(super) const fn check_data_object_capacity(
     Ok(())
 }
 
-pub(super) fn variable_order_key(
-    object: &CatalogDataObject,
-) -> (u8, u8, SourceFileId, u64, u64, u64) {
+pub(super) fn variable_order_key(object: &DataObject) -> (u8, u8, SourceFileId, u64, u64, u64) {
     if matches!(object.kind, VariableKind::Parameter | VariableKind::Result) {
         return (0, 0, SourceFileId::new(0), 0, 0, object.order);
     }

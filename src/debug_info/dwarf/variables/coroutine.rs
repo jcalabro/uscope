@@ -19,12 +19,11 @@ use crate::{
     RecordMemberLayout, Variable, VariableState, VariableUnavailableReason, VariableValueSource,
     VirtualAddress,
 };
-#[cfg(target_arch = "x86_64")]
-use crate::{CodeInstanceInfo, ResumePoints};
 
+use super::DwarfVariableInfo;
 use super::codec::unsigned_value;
 use super::evaluate::FrameBaseCache;
-use super::{CatalogDataObject, CatalogFunction, DwarfVariableInfo};
+use crate::image::variables::{Object, VariableFunction};
 
 /// The await a running async body resumed from.
 pub(super) struct Resumption<'a> {
@@ -37,6 +36,7 @@ pub(super) struct Resumption<'a> {
     /// Where the body runs.
     address: ImageAddress,
     held: &'a BTreeMap<(u64, u64), Arc<[AddressRange<ImageAddress>]>>,
+    locations: super::location::LocationTables<'a>,
 }
 
 impl DwarfVariableInfo {
@@ -45,19 +45,16 @@ impl DwarfVariableInfo {
     /// body's start, or the future cannot be read.
     pub(super) fn resumption(
         &self,
-        function: &CatalogFunction,
+        function: VariableFunction<'_>,
         address: ImageAddress,
         selected: Option<CodeInstanceId>,
         runtime: &mut dyn VariableRuntime,
         frame_base: &mut FrameBaseCache,
         budget: &mut InspectionBudget,
     ) -> Option<Resumption<'_>> {
-        let (future, ty) = function.objects.iter().find_map(|&index| {
-            let object = &self.objects[index];
-            (object.instance == selected
-                && object.ranges.iter().any(|range| range.contains(address)))
-            .then_some(())?;
-            Some((object, object.coroutine?))
+        let (future, ty) = function.objects().find_map(|object| {
+            (object.instance() == selected && self.visible_at(object, address)).then_some(())?;
+            Some((object, object.coroutine()?))
         })?;
         let coroutine = self.coroutines.get(&ty)?;
         let size = self.type_info(ty).ok()?.byte_size?;
@@ -83,6 +80,7 @@ impl DwarfVariableInfo {
             state,
             address,
             held: &self.held,
+            locations: self.locations(),
         })
     }
 
@@ -96,18 +94,16 @@ impl DwarfVariableInfo {
     #[cfg(target_arch = "x86_64")]
     pub(in crate::debug_info) fn note_held(
         &mut self,
-        image: &dyn DispatchImage,
-        instances: &[CodeInstanceInfo],
-        resume_points: &BTreeMap<CodeInstanceId, std::result::Result<ResumePoints, Arc<str>>>,
+        code: &dyn DispatchImage,
+        image: &crate::ModuleImage,
     ) {
         let mut held = BTreeMap::new();
-        for (instance, points) in resume_points {
-            let (Ok(points), Some(instance)) = (points, instances.get(instance.index())) else {
+        for instance in image.code_instances() {
+            let Some(Ok(points)) = image.resume_points(instance.id()) else {
                 continue;
             };
             let Some(function) = instance
-                .ranges
-                .iter()
+                .ranges()
                 .map(|range| range.start)
                 .min()
                 .and_then(|entry| self.function_at(entry))
@@ -115,28 +111,23 @@ impl DwarfVariableInfo {
                 continue;
             };
             for point in points.points.iter() {
-                for &index in &function.objects {
-                    let object = &self.objects[index];
-                    let in_scope = |address: u64| {
-                        object
-                            .ranges
-                            .iter()
-                            .any(|range| range.contains(ImageAddress::new(address)))
-                    };
-                    let Some(offset) = object.debug_info_offset else {
+                for object in function.objects() {
+                    let in_scope =
+                        |address: u64| self.visible_at(object, ImageAddress::new(address));
+                    let Some(offset) = object.debug_info_offset() else {
                         continue;
                     };
-                    if object.instance.is_some() || object.coroutine.is_some() {
+                    if object.instance().is_some() || object.coroutine().is_some() {
                         continue;
                     }
                     // The dispatch leaves for the state outside every
                     // variable's scope.
                     let Some(entered) =
-                        first_beyond(image, point.address, &|address| !in_scope(address))
+                        first_beyond(code, point.address, &|address| !in_scope(address))
                     else {
                         continue;
                     };
-                    if let (reached, true) = flood_all(image, entered, &in_scope) {
+                    if let (reached, true) = flood_all(code, entered, &in_scope) {
                         held.insert((offset, point.state), reached);
                     }
                 }
@@ -149,7 +140,7 @@ impl DwarfVariableInfo {
 impl Resumption<'_> {
     /// Marks `variable` as holding no value when the body last wrote it
     /// before the await it resumed from: see [`Self::stale`].
-    pub(super) fn check(&self, catalog: &CatalogDataObject, variable: &mut Variable) {
+    pub(super) fn check(&self, catalog: Object<'_>, variable: &mut Variable) {
         let (VariableState::Available { source, .. } | VariableState::Invalid { source, .. }) =
             &variable.state
         else {
@@ -172,14 +163,14 @@ impl Resumption<'_> {
     /// whose one location covers the whole function.
     pub(super) fn stale(
         &self,
-        catalog: &CatalogDataObject,
+        catalog: Object<'_>,
         memory: Option<VirtualAddress>,
     ) -> Option<VariableUnavailableReason> {
         // Every poll passes the body its future anew.
-        if catalog.coroutine.is_some() {
+        if catalog.coroutine().is_some() {
             return None;
         }
-        let (Some(resumed), Some(declared)) = (&self.state.location, &catalog.declaration) else {
+        let (Some(resumed), Some(declared)) = (&self.state.location, catalog.declaration()) else {
             return None;
         };
         if declared.file != resumed.file || declared.line >= resumed.line {
@@ -187,7 +178,7 @@ impl Resumption<'_> {
         }
         // Bound anew since the poll resumed, as a loop's variable is.
         if let Some(held) = catalog
-            .debug_info_offset
+            .debug_info_offset()
             .and_then(|offset| self.held.get(&(offset, self.state.value)))
             && !held.iter().any(|range| range.contains(self.address))
         {
@@ -200,13 +191,19 @@ impl Resumption<'_> {
             {
                 let offset = address.get() - self.object.get();
                 !self.state.saved.iter().any(|member| {
-                    member.name.as_deref() == Some(&*catalog.name)
+                    member.name.as_deref() == Some(catalog.name())
                         && member.layout == RecordMemberLayout::ByteOffset(offset)
                 })
             }
             // A location list says where the variable is at each address,
             // which the compiler knows better than this does.
-            _ => catalog.single_location(),
+            _ => catalog.location().is_some_and(|location| {
+                self.locations
+                    .list(location)
+                    .entries()
+                    .map(|(range, _)| range)
+                    .eq([None])
+            }),
         };
         stale.then_some(VariableUnavailableReason::NotSavedAcrossAwait { line: resumed.line })
     }

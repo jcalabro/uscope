@@ -37,6 +37,10 @@ use crate::{
 use super::{
     DieKey, DwarfError, Reader, UnitCatalog, Units, die_code_ranges, die_reference, is_type_unit,
 };
+use crate::image::variables::{
+    Capture, ConstantValue, DataObject, Function, Metadata, MetadataAbsence, Object, ObjectId,
+    ValueDescription, VariableView,
+};
 use die::{
     check_data_object_capacity, copy_name, data_object_scope_ranges, debug_info_offset,
     declaration_with_origins, is_type_scope, origin_chain, strict_flag, string_with_origins,
@@ -48,11 +52,11 @@ pub(in crate::debug_info) use identity::source_language;
 pub(in crate::debug_info) use inspect::{PathStep, array_byte_offset};
 use inspect::{data_object, evaluate_error_state, inspected_value};
 use location::{
-    EvaluationUnit, Expression, LocationDescription, copy_data_object_value,
+    LocationListId, LocationTables, LocationsBuilder, copy_data_object_value,
     copy_optional_location, load_evaluation_units,
 };
 use types::{
-    DynamicAggregateLayoutKey, TypeArenaBuilder, TypeEntry, TypeMetadataEntry, TypeResolution,
+    DynamicAggregateChild, TypeArenaBuilder, TypeEntry, TypeMetadataEntry, TypeResolution,
 };
 
 mod call_sites;
@@ -89,80 +93,16 @@ const MAX_SYMBOLIC_NAMES: usize = 262_144;
 const MAX_AGGREGATE_DEPTH: usize = 64;
 const MAX_DATA_OBJECTS: usize = 262_144;
 
+/// The row `index` numbers, in a table no larger than a module's entries.
+fn row(index: usize) -> u32 {
+    u32::try_from(index).expect("a module's rows fit u32")
+}
+
 const fn malformed_reason(
     kind: VariableMalformedKind,
     description: Arc<str>,
 ) -> VariableMalformedReason {
     VariableMalformedReason { kind, description }
-}
-
-#[derive(Clone)]
-enum Metadata<T> {
-    Value(T),
-    Absent(MetadataAbsence),
-    Malformed(Arc<str>),
-}
-
-#[derive(Clone, Copy)]
-enum MetadataAbsence {
-    NoLocation,
-    NoFrameBase,
-    NotApplicable,
-}
-
-#[derive(Clone)]
-enum ConstantValue {
-    Unsigned(u128),
-    Signed(i128),
-    /// A fixed-width form with implicit zero high bits.
-    Fixed(u128),
-    Bytes(Arc<[u8]>),
-}
-
-#[derive(Clone)]
-enum ValueDescription {
-    Location(LocationDescription),
-    Constant(ConstantValue),
-}
-
-#[derive(Clone)]
-struct CatalogDataObject {
-    debug_info_offset: Option<u64>,
-    kind: VariableKind,
-    name: Arc<str>,
-    declaration: Option<SourceLocation>,
-    ranges: Arc<[AddressRange<ImageAddress>]>,
-    /// The inline instance owning this variable, or `None` for the physical
-    /// frame. Lookup only sees variables of the selected logical frame.
-    instance: Option<CodeInstanceId>,
-    lexical_depth: u32,
-    order: u64,
-    type_info: TypeResolution,
-    /// For a variable Go moved to the heap, which its debug information
-    /// names `&name`, the type of the pointer its location holds; the
-    /// variable is what that points to.
-    escaped: Option<TypeId>,
-    /// Whether the compiler made it for itself, such as Go's `.dict` and
-    /// `#yield1`: listings leave it out, but its name still reaches it.
-    hidden: bool,
-    /// For `$future`, the future rustc passes the body of an async
-    /// function or block, as a pointer it leaves unnamed: its type.
-    coroutine: Option<TypeId>,
-    value: Metadata<ValueDescription>,
-    frame_base: Metadata<LocationDescription>,
-    malformed: Option<Arc<str>>,
-}
-
-impl CatalogDataObject {
-    /// Whether one location describes the object wherever it is in scope,
-    /// rather than a list of locations by address.
-    fn single_location(&self) -> bool {
-        matches!(
-            &self.value,
-            Metadata::Value(ValueDescription::Location(location))
-                if matches!(location.entries.as_ref(), [entry] if entry.range.is_none())
-        )
-    }
 }
 
 /// What kind of Rust scope a scope is.
@@ -196,7 +136,7 @@ impl RustScope {
 struct Scope {
     ranges: Arc<[AddressRange<ImageAddress>]>,
     lexical_depth: u32,
-    frame_base: Metadata<LocationDescription>,
+    frame_base: Metadata<LocationListId>,
     /// True within subprograms and inlined subroutines, whose formal
     /// parameters some producers, such as Zig, nest in lexical blocks.
     routine: bool,
@@ -223,33 +163,6 @@ struct Scope {
     defined: bool,
 }
 
-struct CatalogFunction {
-    ranges: Arc<[AddressRange<ImageAddress>]>,
-    objects: Vec<usize>,
-    /// The name a Go function value calling it shows.
-    name: Option<Arc<str>>,
-    /// The variables a Go closure captured, in its context, or why they
-    /// cannot be known.
-    captures: std::result::Result<Vec<Capture>, Arc<str>>,
-    /// How the function returns its values, when that is known.
-    returns: Option<returns::ReturnConvention>,
-}
-
-/// A `DW_TAG_dwarf_procedure`, which an implicit pointer may point into.
-struct CatalogProcedure {
-    location: Metadata<LocationDescription>,
-}
-
-/// One variable a Go closure captured: a copy of its value, or, when its
-/// name begins with `&`, a pointer to the variable.
-#[derive(Clone)]
-struct Capture {
-    name: Arc<str>,
-    /// Its offset in the closure's context, past the code pointer.
-    offset: u64,
-    type_info: TypeResolution,
-}
-
 /// Go's `DW_AT_go_closure_offset`: where in a closure's context a captured
 /// variable is.
 const DW_AT_GO_CLOSURE_OFFSET: gimli::DwAt = gimli::DwAt(0x2907);
@@ -257,28 +170,9 @@ const DW_AT_GO_CLOSURE_OFFSET: gimli::DwAt = gimli::DwAt(0x2907);
 pub(super) struct DwarfVariableInfo {
     /// The async bodies' futures, by type.
     coroutines: BTreeMap<TypeId, crate::CoroutineInfo>,
-    objects: Arc<[CatalogDataObject]>,
-    functions: Arc<[CatalogFunction]>,
-    address_index: BTreeMap<ImageAddress, Arc<[usize]>>,
-    globals: Arc<[usize]>,
-    evaluation_units: Arc<[EvaluationUnit]>,
     /// The image's types, which [`DwarfVariableInfo::bind_types`] gives
     /// once the image is sealed.
     types: Arc<crate::image::types::TypeTable>,
-    dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
-    /// Go functions by the address their code begins at, which a func
-    /// value holds.
-    go_function_entries: HashMap<ImageAddress, usize>,
-    /// The float type of complex numbers' parts, by the part's name and size.
-    complex_parts: HashMap<(Arc<str>, u64), TypeId>,
-    /// Whether each C++ class whose producer says how calls pass it is
-    /// passed by value.
-    passed_by_value: HashMap<TypeId, bool>,
-    /// Go's type parameters: the dictionary entry each shape typedef names.
-    go_dict_indices: HashMap<TypeId, u64>,
-    objects_by_debug_offset: HashMap<u64, usize>,
-    procedures: HashMap<u64, CatalogProcedure>,
-    call_sites: call_sites::CallSiteCatalog,
     target: TargetDescription,
     endian: RunTimeEndian,
     /// For a variable of an async body, by its entry's offset, and each
@@ -293,6 +187,14 @@ pub(super) struct LoadedVariables {
     pub info: DwarfVariableInfo,
     pub globals: Vec<GlobalVariableInfo>,
     pub types: Arc<[crate::TypeNode]>,
+    /// The data objects and the functions whose frames show them.
+    pub variables: crate::image::variables::Variables,
+    /// The calls the functions make.
+    pub calls: crate::image::calls::Calls,
+    /// What reading values of some types takes beyond their layout.
+    pub type_facts: crate::image::type_facts::TypeFacts,
+    /// Every location the variables and types name.
+    pub locations: LocationsBuilder,
     /// Rust trait objects' vtables, by address, with the concrete type each
     /// is for.
     pub vtables: Vec<(ImageAddress, TypeReference)>,
@@ -431,12 +333,10 @@ fn fused_block_ranges(
 }
 
 /// What the image knows of its code: the instance each function DIE
-/// becomes, and what decides where Go's variables are visible.
+/// becomes.
 #[derive(Clone, Copy)]
 pub(super) struct CodeMetadata<'a> {
     pub(super) instance_ids: &'a HashMap<DieKey, CodeInstanceId>,
-    pub(super) lines: &'a [crate::model::LineEntry],
-    pub(super) instances: &'a [crate::CodeInstanceInfo],
 }
 
 #[expect(
@@ -453,20 +353,28 @@ pub(super) fn load_variable_info<'data>(
 ) -> std::result::Result<LoadedVariables, DwarfError> {
     let units = &catalog.units;
     let instance_ids = code.instance_ids;
-    let lines = visibility::LineIndex::new(code.lines);
-    let inline_calls = visibility::InlineCalls::new(code.instances);
     let mut objects = Vec::new();
     let mut functions = Vec::new();
     let mut calls = call_sites::CallSiteBuilder::default();
-    let mut procedures = HashMap::new();
+    let mut procedures = Vec::new();
     let mut vtables = Vec::new();
-    let mut go_function_entries = HashMap::new();
+    let mut go_function_entries = Vec::new();
     let mut unnamed_parameters = Vec::new();
     let mut abstract_bodies = Vec::new();
     let mut function_generics = BTreeMap::<_, crate::FunctionGenerics>::new();
     let mut order = 0_u64;
     let phase = crate::span!("variables.evaluation_units");
-    let evaluation_units = load_evaluation_units(units)?;
+    // Every location is pooled once, in the tables the image will hold.
+    let pool = std::sync::Mutex::new(LocationsBuilder::default());
+    load_evaluation_units(units, &mut pool.lock().expect("loading does not panic"))?;
+    let languages = (0..units.len())
+        .map(|unit| {
+            pool.lock()
+                .expect("loading does not panic")
+                .tables()
+                .unit_language(u32::try_from(unit).expect("unit counts fit u32"))
+        })
+        .collect::<Vec<_>>();
     drop(phase);
     let phase = crate::span!("variables.type_arena");
     let mut types = TypeArenaBuilder::new(
@@ -475,11 +383,19 @@ pub(super) fn load_variable_info<'data>(
         &catalog.type_signatures,
         image_id,
         target.byte_order,
+        &pool,
     );
     drop(phase);
     let phase = crate::span!("variables.globals");
-    let (mut globals, global_objects) =
-        load_globals(dwarf, units, &mut objects, &mut order, files, &mut types)?;
+    let (mut globals, global_objects) = load_globals(
+        dwarf,
+        units,
+        &mut objects,
+        &mut order,
+        files,
+        &mut types,
+        &pool,
+    )?;
     drop(phase);
 
     let phase = crate::span!("variables.main_walk");
@@ -487,8 +403,8 @@ pub(super) fn load_variable_info<'data>(
         if is_type_unit(unit) {
             continue;
         }
-        let go = evaluation_units[unit_index].language == Some(gimli::DW_LANG_Go);
-        let rust = evaluation_units[unit_index].language == Some(gimli::DW_LANG_Rust);
+        let go = languages[unit_index] == Some(gimli::DW_LANG_Go);
+        let rust = languages[unit_index] == Some(gimli::DW_LANG_Rust);
         // Go names the register ABI its x86-64 code calls with among the
         // flags of each unit's producer, as `go1.27.1; -N -l regabi`.
         let go_registers = go
@@ -501,10 +417,7 @@ pub(super) fn load_variable_info<'data>(
         // Other languages' x86-64 code returns as the System V convention
         // says, or, for the languages that leave theirs unspecified, as it
         // for scalars.
-        let language = source_language(
-            evaluation_units[unit_index].language,
-            types.is_zig(unit_index),
-        );
+        let language = source_language(languages[unit_index], types.is_zig(unit_index));
         let system_v = target.architecture == crate::Architecture::X86_64
             && matches!(
                 language,
@@ -599,10 +512,10 @@ pub(super) fn load_variable_info<'data>(
                             .map(ImageAddress::new)
                             .filter(|address| ranges.iter().any(|range| range.contains(*address)));
                         if let Some(address) = entry_address {
-                            go_function_entries.insert(address, function);
+                            go_function_entries.push((address, row(function)));
                         }
                     }
-                    functions.push(CatalogFunction {
+                    functions.push(Function {
                         ranges: Arc::clone(&ranges),
                         objects: Vec::new(),
                         // An optimized closure's out-of-line code names
@@ -638,6 +551,7 @@ pub(super) fn load_variable_info<'data>(
                     });
                     let frame_base = copy_optional_location(
                         dwarf,
+                        &mut pool.lock().expect("loading does not panic"),
                         unit_index,
                         unit,
                         entry.attr_value(gimli::DW_AT_frame_base),
@@ -789,22 +703,38 @@ pub(super) fn load_variable_info<'data>(
             match entry.tag() {
                 gimli::DW_TAG_call_site | gimli::DW_TAG_GNU_call_site => {
                     if let Some(parent) = parent.as_ref().filter(|parent| parent.defined) {
-                        calls.site(dwarf, units, unit_index, entry, parent.function, depth);
+                        calls.site(
+                            dwarf,
+                            &mut pool.lock().expect("loading does not panic"),
+                            units,
+                            unit_index,
+                            entry,
+                            parent.function,
+                            depth,
+                        );
                     }
                 }
                 gimli::DW_TAG_call_site_parameter | gimli::DW_TAG_GNU_call_site_parameter => {
-                    calls.parameter(dwarf, units, unit_index, entry, depth);
+                    calls.parameter(
+                        dwarf,
+                        &mut pool.lock().expect("loading does not panic"),
+                        units,
+                        unit_index,
+                        entry,
+                        depth,
+                    );
                 }
                 gimli::DW_TAG_dwarf_procedure => {
                     if let Some(offset) = debug_info_offset(unit, entry) {
                         let location = copy_optional_location(
                             dwarf,
+                            &mut pool.lock().expect("loading does not panic"),
                             unit_index,
                             unit,
                             entry.attr_value(gimli::DW_AT_location),
                             MetadataAbsence::NoLocation,
                         );
-                        procedures.insert(offset, CatalogProcedure { location });
+                        procedures.push((offset, location));
                     }
                 }
                 _ => {}
@@ -938,17 +868,14 @@ pub(super) fn load_variable_info<'data>(
                     });
                     let (ranges, scope_error) = data_object_scope_ranges(scope, entry);
                     // A Go local exists from the line after its declaration.
-                    let ranges = match (go, kind, &declaration) {
+                    let go_declaration = match (go, kind, &declaration) {
                         (true, VariableKind::Local, Ok(Some(declared))) => {
-                            visibility::after_declaration(
-                                &ranges,
-                                declared,
-                                &lines,
-                                inline_calls.within(scope.code_instance),
-                            )
-                            .into()
+                            Some(visibility::GoDeclaration {
+                                location: declared.clone(),
+                                instance: scope.code_instance,
+                            })
                         }
-                        _ => ranges,
+                        _ => None,
                     };
                     let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
                     let type_info = types.variable_type(type_unit, type_value);
@@ -1018,13 +945,14 @@ pub(super) fn load_variable_info<'data>(
                         unnamed_parameters.push((instance, *ty, objects.len()));
                     }
                     check_data_object_capacity(objects.len())?;
-                    functions[scope.function].objects.push(objects.len());
-                    objects.push(CatalogDataObject {
+                    functions[scope.function].objects.push(row(objects.len()));
+                    objects.push(DataObject {
                         debug_info_offset: debug_info_offset(unit, entry),
                         kind,
                         name,
                         declaration: declaration.as_ref().ok().cloned().flatten(),
                         ranges,
+                        go_declaration,
                         instance: scope.instance,
                         lexical_depth: scope.lexical_depth,
                         order,
@@ -1032,7 +960,13 @@ pub(super) fn load_variable_info<'data>(
                         escaped,
                         hidden,
                         coroutine: None,
-                        value: copy_data_object_value(dwarf, unit_index, unit, entry),
+                        value: copy_data_object_value(
+                            dwarf,
+                            &mut pool.lock().expect("loading does not panic"),
+                            unit_index,
+                            unit,
+                            entry,
+                        ),
                         frame_base: scope.frame_base.clone(),
                         malformed: declaration
                             .err()
@@ -1067,21 +1001,10 @@ pub(super) fn load_variable_info<'data>(
     for function in &mut functions {
         function
             .objects
-            .sort_by_key(|index| variable_order_key(&objects[*index]));
-    }
-    let mut address_index = BTreeMap::<ImageAddress, Vec<usize>>::new();
-    for (function, metadata) in functions.iter().enumerate() {
-        for range in metadata.ranges.iter() {
-            address_index.entry(range.start).or_default().push(function);
-        }
+            .sort_by_key(|index| variable_order_key(&objects[*index as usize]));
     }
     drop(phase);
     let phase = crate::span!("variables.constants_and_members");
-    let objects_by_debug_offset = objects
-        .iter()
-        .enumerate()
-        .filter_map(|(index, object)| object.debug_info_offset.map(|offset| (offset, index)))
-        .collect();
     let constants = types.named_constants();
     types.populate_go_named_constants();
     types.populate_record_member_declarations(files);
@@ -1172,23 +1095,7 @@ pub(super) fn load_variable_info<'data>(
         function_generics,
         info: DwarfVariableInfo {
             coroutines: running,
-            objects: objects.into(),
-            functions: functions.into(),
-            address_index: address_index
-                .into_iter()
-                .map(|(address, functions)| (address, functions.into()))
-                .collect(),
-            globals: global_objects.into(),
-            evaluation_units: evaluation_units.into(),
             types: Arc::new(crate::image::types::TypeTable::empty()),
-            dynamic_record_layouts: types.dynamic_record_layouts,
-            go_function_entries,
-            complex_parts: types.complex_parts,
-            passed_by_value: types.passed_by_value,
-            go_dict_indices: types.go_dict_indices,
-            objects_by_debug_offset,
-            procedures,
-            call_sites: calls.finish(),
             target,
             endian: match target.byte_order {
                 ByteOrder::Little => RunTimeEndian::Little,
@@ -1198,6 +1105,31 @@ pub(super) fn load_variable_info<'data>(
         },
         globals,
         types: finalized_types,
+        calls: calls.finish(),
+        type_facts: crate::image::type_facts::TypeFacts {
+            dictionary_indices: types.go_dict_indices.into_iter().collect(),
+            passed_by_value: types.passed_by_value.into_iter().collect(),
+            complex_parts: types
+                .complex_parts
+                .into_iter()
+                .map(|((name, size), ty)| (name, size, ty))
+                .collect(),
+            dynamic_layouts: types
+                .dynamic_record_layouts
+                .into_iter()
+                .filter_map(|(key, expression)| {
+                    Some((key.aggregate, layout_child(key.child)?, expression))
+                })
+                .collect(),
+        },
+        variables: crate::image::variables::Variables {
+            objects,
+            functions,
+            globals: global_objects.into_iter().map(row).collect(),
+            go_entries: go_function_entries,
+            procedures,
+        },
+        locations: pool.into_inner().expect("loading does not panic"),
         constants,
         vtables: vtables
             .into_iter()
@@ -1214,12 +1146,24 @@ pub(super) fn load_variable_info<'data>(
     })
 }
 
+/// A child whose place an expression computes, as the image names it;
+/// `None` for one whose index no image row can hold.
+fn layout_child(child: DynamicAggregateChild) -> Option<crate::image::type_facts::LayoutChild> {
+    use crate::image::type_facts::LayoutChild;
+    let index = |index: usize| u32::try_from(index).ok();
+    Some(match child {
+        DynamicAggregateChild::Member(member) => LayoutChild::Member(index(member)?),
+        DynamicAggregateChild::Base(base) => LayoutChild::Base(index(base)?),
+        DynamicAggregateChild::Discriminant => LayoutChild::Discriminant,
+        DynamicAggregateChild::VariantMember { variant, member } => LayoutChild::VariantMember {
+            variant: index(variant)?,
+            member: index(member)?,
+        },
+    })
+}
+
 /// Points the catalog's types where deduplication moved them.
-fn remap_catalog(
-    remap: &dedup::Remap,
-    objects: &mut [CatalogDataObject],
-    functions: &mut [CatalogFunction],
-) {
+fn remap_catalog(remap: &dedup::Remap, objects: &mut [DataObject], functions: &mut [Function]) {
     for object in objects {
         remap.resolution(&mut object.type_info);
         for ty in [&mut object.escaped, &mut object.coroutine]
@@ -1252,8 +1196,8 @@ struct ConcreteRoutine {
 
 /// Where the variables an instance leaves out are added.
 struct AbstractTargets<'a, 'data, 'units> {
-    objects: &'a mut Vec<CatalogDataObject>,
-    functions: &'a mut Vec<CatalogFunction>,
+    objects: &'a mut Vec<DataObject>,
+    functions: &'a mut Vec<Function>,
     order: &'a mut u64,
     types: &'a mut TypeArenaBuilder<'units, 'data>,
     files: &'a mut Files,
@@ -1330,13 +1274,14 @@ fn add_abstract_only_variables<'data>(
         check_data_object_capacity(targets.objects.len())?;
         targets.functions[routine.scope.function]
             .objects
-            .push(targets.objects.len());
-        targets.objects.push(CatalogDataObject {
+            .push(row(targets.objects.len()));
+        targets.objects.push(DataObject {
             debug_info_offset: None,
             kind,
             name,
             declaration,
             ranges: Arc::clone(&routine.scope.ranges),
+            go_declaration: None,
             instance: routine.scope.instance,
             lexical_depth: routine.scope.lexical_depth,
             order: *targets.order,
@@ -1482,19 +1427,15 @@ impl VariableInfo for DwarfVariableInfo {
         let objects = match query {
             VariableQuery::All => self.function_at(address).map_or_else(Vec::new, |function| {
                 function
-                    .objects
-                    .iter()
-                    .map(|&index| &self.objects[index])
+                    .objects()
                     .filter(|object| {
-                        object.instance == selected
-                            && !object.hidden
-                            && object.ranges.iter().any(|range| range.contains(address))
+                        object.instance() == selected
+                            && !object.hidden()
+                            && self.visible_at(*object, address)
                     })
                     .collect()
             }),
-            VariableQuery::Name(name) => {
-                vec![&self.objects[self.visible_object(address, selected, name)?]]
-            }
+            VariableQuery::Name(name) => vec![self.visible_object(address, selected, name)?],
             VariableQuery::Global(global) => {
                 return Err(Error::VariableNotFound(global.variable.to_string()));
             }
@@ -1537,20 +1478,21 @@ impl VariableInfo for DwarfVariableInfo {
         selected: Option<CodeInstanceId>,
         name: &str,
     ) -> Result<ObjectKey> {
-        self.visible_object(address, selected, name).map(ObjectKey)
+        self.visible_object(address, selected, name)
+            .map(|object| ObjectKey(object.id().0 as usize))
     }
 
     fn global_object(&self, id: GlobalVariableId) -> Result<ObjectKey> {
-        self.globals
-            .get(id.index())
-            .map(|&index| ObjectKey(index))
+        self.catalog()
+            .global(id.index())
+            .map(|object| ObjectKey(object.id().0 as usize))
             .ok_or_else(|| Error::VariableNotFound(id.to_string()))
     }
 
     fn object_type(&self, object: ObjectKey) -> std::result::Result<TypeId, Arc<str>> {
-        match &self.objects[object.0].type_info {
-            TypeResolution::Resolved(id) => Ok(*id),
-            TypeResolution::Malformed(description) => Err(Arc::clone(description)),
+        match self.object(object).type_info() {
+            TypeResolution::Resolved(id) => Ok(id),
+            TypeResolution::Malformed(description) => Err(description),
         }
     }
 
@@ -1565,19 +1507,19 @@ impl VariableInfo for DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<Accessed> {
-        let variable = &self.objects[object.0];
+        let variable = self.object(object);
         let mut frame_base = FrameBaseCache::Empty;
-        let ty = match &variable.type_info {
-            TypeResolution::Resolved(id) => *id,
+        let ty = match variable.type_info() {
+            TypeResolution::Resolved(id) => id,
             TypeResolution::Malformed(description) => {
                 return Ok(Err(VariableState::Malformed(malformed_reason(
                     VariableMalformedKind::InvalidTypeGraph,
-                    Arc::clone(description),
+                    description,
                 ))));
             }
         };
         // A generic value has its type argument, laid out as its shape.
-        let ty = match self.generic_type(ty, variable.instance, address, runtime, budget)? {
+        let ty = match self.generic_type(ty, variable.instance(), address, runtime, budget)? {
             generic::Generic::Resolved(argument) => argument,
             generic::Generic::Unresolved(shape, _) => shape,
             generic::Generic::Plain => ty,
@@ -1590,7 +1532,7 @@ impl VariableInfo for DwarfVariableInfo {
                     self.resumption(
                         self.function_at(address)?,
                         address,
-                        variable.instance,
+                        variable.instance(),
                         runtime,
                         &mut frame_base,
                         budget,
@@ -1709,7 +1651,7 @@ impl VariableInfo for DwarfVariableInfo {
     }
 
     fn object_storage(&self, object: ObjectKey) -> ObjectStorage {
-        self.object_storage(&self.objects[object.0])
+        self.object_storage(self.object(object))
     }
 
     fn inspect_global(
@@ -1720,12 +1662,10 @@ impl VariableInfo for DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<Variable> {
-        let global_index = id.index();
-        let object_index = *self
-            .globals
-            .get(global_index)
+        let object = self
+            .catalog()
+            .global(id.index())
             .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
-        let object = &self.objects[object_index];
         if let Err(exhaustion) = budget.consume_variable_value() {
             return Ok(data_object(
                 object,
@@ -1796,8 +1736,51 @@ impl VariableInfo for DwarfVariableInfo {
 
 impl DwarfVariableInfo {
     /// Reads types from `types`, the sealed image's.
-    pub(super) fn bind_types(&mut self, types: Arc<crate::image::types::TypeTable>) {
-        self.types = types;
+    /// Binds the provider to the image loading made of its module, whose
+    /// types and code its answers read.
+    pub(super) fn bind(&mut self, image: &crate::ModuleImage) {
+        self.types = Arc::clone(image.type_table());
+    }
+
+    /// The image's locations, once [`Self::bind`] has given the image.
+    fn locations(&self) -> LocationTables<'_> {
+        LocationTables::new(self.types.tables())
+    }
+
+    /// What reading values of some types takes, once [`Self::bind`] has
+    /// given the image.
+    fn type_facts(&self) -> crate::image::type_facts::TypeFactsView<'_> {
+        crate::image::type_facts::TypeFactsView::new(self.types.tables())
+    }
+
+    /// The image's data objects, once [`Self::bind`] has given the image.
+    fn catalog(&self) -> VariableView<'_> {
+        VariableView::new(self.types.tables())
+    }
+
+    fn object(&self, key: ObjectKey) -> Object<'_> {
+        self.catalog()
+            .object(ObjectId(u32::try_from(key.0).expect("keys name rows")))
+    }
+
+    /// Whether `object` is visible at `address`: in its scope's code and,
+    /// for a Go local, past its declaration.
+    fn visible_at(&self, object: Object<'_>, address: ImageAddress) -> bool {
+        object.in_scope(address)
+            && object.go_declaration().is_none_or(|declared| {
+                visibility::visible_at(self.types.tables(), &declared, address)
+            })
+    }
+
+    /// The code where `object` is visible.
+    fn visible_ranges(&self, object: Object<'_>) -> Arc<[AddressRange<ImageAddress>]> {
+        let ranges = object.ranges().collect::<Vec<_>>();
+        match object.go_declaration() {
+            Some(declared) => {
+                visibility::visible_ranges(self.types.tables(), &ranges, &declared).into()
+            }
+            None => ranges.into(),
+        }
     }
 }
 
@@ -1881,24 +1864,32 @@ pub(super) fn fuzz_expression(data: &[u8]) {
         }
     }
 
-    let expression = Expression {
-        bytes: Arc::from(&data[..data.len().min(MAX_EVALUATION_MEMORY_BYTES)]),
-        encoding: gimli::Encoding {
-            format: gimli::Format::Dwarf32,
-            version: 5,
-            address_size: 8,
-        },
-        unit: 0,
-        indexed_addresses: Arc::new(HashMap::new()),
-        procedures: Arc::default(),
+    let mut pool = LocationsBuilder::default();
+    let encoding = gimli::Encoding {
+        format: gimli::Format::Dwarf32,
+        version: 5,
+        address_size: 8,
+    };
+    let Ok(id) = pool
+        .unit(&location::EvaluationUnit::default())
+        .and_then(|unit| {
+            pool.expression(
+                &data[..data.len().min(MAX_EVALUATION_MEMORY_BYTES)],
+                unit,
+                encoding,
+                &[],
+                &[],
+            )
+        })
+    else {
+        return;
     };
     let mut budget = InspectionBudget::default();
     if let Ok(pieces) = evaluate(
-        &expression,
+        pool.tables().expression(id),
         RunTimeEndian::Little,
         None,
         &mut FrameBase::Unsupported,
-        &[],
         &mut FuzzRuntime,
         &mut budget,
     ) {
