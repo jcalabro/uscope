@@ -501,8 +501,7 @@ fn load_image(
 
     drop(phase);
     let phase = crate::span!("prologues");
-    // The prologue and coroutine analyses below still read rows as
-    // records: an adapter until they read the tables (P4).
+    // The prologue and coroutine analyses below find statements by address.
     let statements = line_tables.statements_by_address();
     super::roles::link_loop_bodies(&mut function_metadata.functions);
     refine_proved_prologue_entries(
