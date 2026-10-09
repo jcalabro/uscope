@@ -43,10 +43,7 @@ fn current() -> Runtime {
 }
 
 /// Runs `body` on a thread of its own, after sending the thread's id.
-fn thread(
-    name: &str,
-    body: impl FnOnce() + Send + 'static,
-) -> (i32, std::thread::JoinHandle<()>) {
+fn thread(name: &str, body: impl FnOnce() + Send + 'static) -> (i32, std::thread::JoinHandle<()>) {
     let (started, tid) = channel::channel();
     let handle = std::thread::Builder::new()
         .name(name.to_owned())
@@ -71,34 +68,48 @@ fn main() {
         async move { notify.notified().await }
     }));
 
+    // Tokio numbers tasks as they are spawned, so each thread spawns its
+    // own before the next starts, and every run numbers them alike.
+    let (spawned, all_spawned) = channel::channel::<()>();
+
     // A current-thread runtime, which its thread blocks on until released.
     let (release_current, released) = oneshot::channel::<()>();
     let (sent, received) = oneshot::channel::<()>();
-    let (current_tid, current_thread) = thread("current", move || {
-        current().block_on(async move {
-            tokio::spawn(parked("current", "oneshot", async move {
-                let _ = received.await;
-            }));
-            tokio::spawn(parked("current", "sleep", sleep()));
-            let _ = released.await;
-        });
+    let (current_tid, current_thread) = thread("current", {
+        let spawned = spawned.clone();
+        move || {
+            current().block_on(async move {
+                tokio::spawn(parked("current", "oneshot", async move {
+                    let _ = received.await;
+                }));
+                tokio::spawn(parked("current", "sleep", sleep()));
+                spawned.send(()).expect("the program waits");
+                let _ = released.await;
+            });
+        }
     });
+    all_spawned.recv().expect("the thread spawns");
 
     // A set of local tasks, which its thread runs on a current-thread
     // runtime until released.
     let (release_local, local_released) = oneshot::channel::<()>();
-    let (local_tid, local_thread) = thread("local", move || {
-        let local = LocalSet::new();
-        local.block_on(&current(), async move {
-            let notify = Arc::new(Notify::new());
-            tokio::task::spawn_local(parked("local", "notify", {
-                let notify = Arc::clone(&notify);
-                async move { notify.notified().await }
-            }));
-            tokio::task::spawn_local(parked("local", "sleep", sleep()));
-            let _ = local_released.await;
-        });
+    let (local_tid, local_thread) = thread("local", {
+        let spawned = spawned.clone();
+        move || {
+            let local = LocalSet::new();
+            local.block_on(&current(), async move {
+                let notify = Arc::new(Notify::new());
+                tokio::task::spawn_local(parked("local", "notify", {
+                    let notify = Arc::clone(&notify);
+                    async move { notify.notified().await }
+                }));
+                tokio::task::spawn_local(parked("local", "sleep", sleep()));
+                spawned.send(()).expect("the program waits");
+                let _ = local_released.await;
+            });
+        }
     });
+    all_spawned.recv().expect("the thread spawns");
 
     // Another, which a thread blocking on the multi-thread runtime runs.
     let (release_shared, shared_released) = oneshot::channel::<()>();
@@ -122,10 +133,12 @@ fn main() {
                     went.send(()).expect("the program waits");
                     truth::end(me);
                 });
+                spawned.send(()).expect("the program waits");
                 let _ = shared_released.await;
             }));
         }
     });
+    all_spawned.recv().expect("the thread spawns");
 
     // A thread of the program's own.
     let (stop_plain, plain_stopped) = channel::channel::<()>();

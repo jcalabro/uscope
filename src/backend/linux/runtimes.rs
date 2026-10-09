@@ -282,7 +282,9 @@ impl<P: InspectionOps> Controller<P> {
 
     fn find_task_sets(&self, inferior: &Inferior, reader: Pid) -> (Vec<u64>, Vec<Arc<str>>) {
         let runtimes = self.runtimes(inferior);
-        let mut sets = std::collections::BTreeSet::new();
+        // In the order of the threads that drive them, not of their
+        // addresses, which change from run to run.
+        let mut sets = Vec::new();
         let mut gaps = Vec::new();
         if runtimes.is_empty() {
             return (Vec::new(), gaps);
@@ -343,11 +345,15 @@ impl<P: InspectionOps> Controller<P> {
                     let set = self.with_runtime_stop(inferior, runtime, reader, |stop| {
                         runtime.model.task_set(stop, future.object, future.ty)
                     });
-                    sets.extend(set);
+                    if let Some(set) = set
+                        && !sets.contains(&set)
+                    {
+                        sets.push(set);
+                    }
                 }
             }
         }
-        (sets.into_iter().collect(), gaps)
+        (sets, gaps)
     }
 
     /// How to ask a runtime about `task`: by its number, and where the
