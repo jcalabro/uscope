@@ -679,7 +679,7 @@ async fn a_debug_file_whose_supplementary_file_is_missing_is_refused_with_its_re
     assert!(path.starts_with(split("altlink-root")), "{path:?}");
     assert_eq!(
         &**reason,
-        "its dwz supplementary file /usr/lib/debug/.dwz/uscope-fixture (build-id 01020304) was \
+        "its dwz supplementary file ../../.dwz/uscope-fixture (build-id 01020304) was \
          not found"
     );
     assert!(matches!(

@@ -367,21 +367,23 @@ derive_foreign_libc() {
         set -euo pipefail
         input="$1"; output="$2"
         # Converts a virtual address to its file offset through the load
-        # segment containing it.
+        # segment containing it. Each awk below reads all its input, printing
+        # only the first match: one that exits early fails the pipeline when
+        # what feeds it is still writing.
         file_offset() {
             readelf -lW "$input" | awk -v address=$(( $1 )) "
-                \$1 == \"LOAD\" && address >= strtonum(\$3) && address < strtonum(\$3) + strtonum(\$5) {
-                    print address - strtonum(\$3) + strtonum(\$2); exit
+                !found && \$1 == \"LOAD\" && address >= strtonum(\$3) && address < strtonum(\$3) + strtonum(\$5) {
+                    print address - strtonum(\$3) + strtonum(\$2); found = 1
                 }"
         }
         byte_at() { od -An -tu1 -j "$1" -N1 "$output" | tr -d " "; }
         put_byte() { printf "\\$(printf %03o "$2")" | dd of="$output" bs=1 seek="$1" conv=notrunc status=none; }
         read -r version_address version_size < <(readelf -W --dyn-syms "$input" \
-            | awk "\$8 ~ /^__nptl_version@/ { print \"0x\" \$2, \$3; exit }")
+            | awk "!found && \$8 ~ /^__nptl_version@/ { print \"0x\" \$2, \$3; found = 1 }")
         version=$(file_offset "$version_address")
         # Section numbers are bracketed and padded, so they are removed first.
         note=$(readelf -SW "$input" | sed "s/^ *\\[ *[0-9]*\\]//" \
-            | awk "\$1 == \".note.gnu.build-id\" { print \"0x\" \$4; exit }")
+            | awk "!found && \$1 == \".note.gnu.build-id\" { print \"0x\" \$4; found = 1 }")
         if [[ -z "$version" || -z "$note" ]]; then
             printf "error: %s has no __nptl_version or build-id note\n" "$input" >&2
             exit 1
@@ -1424,7 +1426,7 @@ altlinked_script='
     rm -rf "$output"
     cp -r "$root" "$output"
     debug=$(find "$output/.build-id" -name "*.debug")
-    printf "/usr/lib/debug/.dwz/uscope-fixture\0\x01\x02\x03\x04" >"$output/altlink"
+    printf "../../.dwz/uscope-fixture\0\x01\x02\x03\x04" >"$output/altlink"
     objcopy --add-section ".gnu_debugaltlink=$output/altlink" "$debug"
     rm "$output/altlink"
     # The build cache counts only an executable output as built.
@@ -1432,7 +1434,7 @@ altlinked_script='
     chmod +x "$output/ready"
 '
 run_cached_build "$output_dir/split/basic-build-id" "$output_dir/split/altlink-root/ready" \
-    "derivation=altlinked-v1" \
+    "derivation=altlinked-v2" \
     bash -c "$altlinked_script" _ "$output_dir/split/debug-root" "$output_dir/split/altlink-root"
 # A C++ program and its library whose debug information shares what they
 # have in common through a dwz supplementary file, as distributions' does,

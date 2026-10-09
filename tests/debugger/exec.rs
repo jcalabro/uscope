@@ -177,7 +177,7 @@ async fn failed_launch(program: &Path) -> Error {
 #[tokio::test]
 async fn a_launch_through_a_process_that_cannot_execute_the_program_fails() {
     // It executes another program, which is killed.
-    let error = failed_launch(Path::new("/bin/true")).await;
+    let error = failed_launch(&Scenario::fixture("basic")).await;
     assert!(
         error.to_string().contains("executed a program other than"),
         "{error}"
