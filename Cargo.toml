@@ -125,7 +125,7 @@ overflow-checks = true
 
 # Generating debuginfo for this crate more than doubles the incremental rebuild
 # after an edit. Dependencies keep theirs since they are rarely rebuilt. Pass
-# `--config 'profile.test.package.uscope.debug=1'` when stepping through a test.
+# `--config 'profile.test.package.uscope.debug=2'` when stepping through a test.
 [profile.test.package.uscope]
 debug = 0
 # The crate has more modules than an incremental build's 256 default codegen
