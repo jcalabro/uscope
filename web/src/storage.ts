@@ -1,9 +1,20 @@
 // Per-browser conveniences kept in localStorage: a chosen name, the theme,
-// recent launches. Storage may be unavailable, so every access is guarded.
+// recent launches; and per-tab ones in sessionStorage, such as a tab's open
+// files. Storage may be unavailable, so every access is guarded.
 
-export function read<T>(key: string, fallback: T, valid: (value: unknown) => value is T): T {
+/** Where a convenience lives: the browser's, or the tab's alone. */
+export type Area = "local" | "session";
+
+const storage = (area: Area) => (area === "local" ? localStorage : sessionStorage);
+
+export function read<T>(
+  key: string,
+  fallback: T,
+  valid: (value: unknown) => value is T,
+  area: Area = "local",
+): T {
   try {
-    const text = localStorage.getItem(key);
+    const text = storage(area).getItem(key);
     if (text === null) {
       return fallback;
     }
@@ -14,9 +25,9 @@ export function read<T>(key: string, fallback: T, valid: (value: unknown) => val
   }
 }
 
-export function write(key: string, value: unknown): void {
+export function write(key: string, value: unknown, area: Area = "local"): void {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    storage(area).setItem(key, JSON.stringify(value));
   } catch {
     // A private window; the convenience is lost, nothing else.
   }

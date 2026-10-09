@@ -100,6 +100,26 @@ export function asked(): void {
   tab.setState((state) => ({ asked: state.asked + 1 }));
 }
 
+/** What a tab keeps of its files across a reload. */
+export interface KeptFiles {
+  files: string[];
+  places: Record<string, string>;
+}
+
+export const isKeptFiles = (value: unknown): value is KeptFiles => {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const { files, places } = value as Record<string, unknown>;
+  return (
+    Array.isArray(files) &&
+    files.every((file) => typeof file === "string") &&
+    typeof places === "object" &&
+    places !== null &&
+    Object.values(places).every((place) => typeof place === "string")
+  );
+};
+
 export function flash(text: string): void {
   tab.setState({ flash: { text, at: Date.now() } });
 }
