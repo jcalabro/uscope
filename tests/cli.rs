@@ -2719,6 +2719,18 @@ fn print_and_p_render_scalars_and_print_lists_every_variable() {
     }
 }
 
+/// A frame with no variables says so, rather than printing nothing.
+#[test]
+fn print_says_when_a_frame_has_no_variables() {
+    for command in ["print", "pp"] {
+        let stdout = batch(
+            &["build/test-programs/fatal-signal"],
+            &["break main", "run", command],
+        );
+        assert!(stdout.contains("no variables in scope"), "{stdout}");
+    }
+}
+
 /// An array of several dimensions prints as rows of rows, as its program
 /// writes it, and a row the elements shown end inside of is closed.
 #[test]

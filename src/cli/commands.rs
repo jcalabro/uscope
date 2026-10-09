@@ -1854,6 +1854,11 @@ impl Cli {
     async fn print_locals(&self, layout: value::Layout) -> Result<String> {
         let renderer = self.renderers.stdout;
         let snapshot = self.debugger.variables().await?;
+        // Say so rather than print nothing, as for a program built without
+        // variable debug information.
+        if snapshot.variables.is_empty() && snapshot.completion.exhaustion().is_none() {
+            return Ok("no variables in scope".to_owned());
+        }
         if !layout.pretty {
             return Ok(value::variables(&snapshot, renderer));
         }
