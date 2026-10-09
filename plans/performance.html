@@ -202,6 +202,7 @@ table.data th { font: 600 11.5px/1.3 var(--sans); text-transform: uppercase; let
 table.data td.n, table.data th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 table.data tr:last-child td { border-bottom: 0; }
 table.data td .sub { display: block; color: var(--ink-3); font-size: 12.5px; }
+#review table.data { min-width: 780px; }
 .bad { color: var(--bad); }
 .good { color: var(--good); }
 figure { margin: 0; display: grid; gap: 10px; min-width: 0; }
@@ -287,6 +288,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
   <nav class="toc" aria-label="Contents">
     <b>Performance</b>
     <a href="#summary">Summary</a>
+    <a href="#review">Review contracts</a>
     <a href="#principles">Principles</a>
     <a href="#baseline">Where we are</a>
     <a href="#causes">Why</a>
@@ -321,7 +323,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       </div>
       <div class="eyebrow">uscope plan</div>
       <h1>Program information at the speed of the machine</h1>
-      <p class="lede">uscope turns a program's debug information into one immutable model that every client shares. Today it builds that model as a graph of millions of small heap objects, on one thread, from seven passes over the input, and throws it away when the process exits. This plan rebuilds it as flat, index-based tables: built in parallel, laid out for the cache, identical in memory and on disk, and measured continuously. The goal is to load every program faster than any other debugger while doing more work than any of them.</p>
+      <p class="lede">uscope turns a program's debug information into one immutable model that every client shares. Today it builds that model as a graph of many small heap objects through repeated serial passes and has no persistent image cache. This plan moves metadata into compact tables, builds them in parallel, and caches their validated bytes. The objective is substantially faster loading and lower memory use while preserving every supported debugger answer.</p>
     </header>
 
     <!-- ================================================================ -->
@@ -333,19 +335,45 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <div class="tile"><span class="v bad">42×</span><span class="l">the cost of decoding every attribute of every DIE once (10.8 ms on one thread, 1.5 ms on eight).</span></div>
         <div class="tile"><span class="v bad">fails</span><span class="l">on uscope's own debug build (162 MiB <code>.debug_info</code>) after 7.4 s and 3.5 GB. gdb loads it in 1.1 s.</span></div>
         <div class="tile"><span class="v bad">6.4 M</span><span class="l">heap allocations and 1.04 GB allocated to load a 15 MB executable; 178 MB live at peak.</span></div>
-        <div class="tile"><span class="v bad">10×</span><span class="l">duplicated types: 60,839 type nodes for 6,073 distinct type names.</span></div>
+        <div class="tile"><span class="v bad">10×</span><span class="l">type nodes per distinct spelling: 60,839 nodes for 6,073 names. This is not a count of equivalent types.</span></div>
         <div class="tile"><span class="v bad">80%</span><span class="l">of the time of the debugger, tokio, and Go test suites is spent loading debug information: 191 s of 237 s.</span></div>
       </div>
       <div class="prose">
         <p>The fix is a different shape for the data, not a faster version of the same code:</p>
         <ol>
-          <li><b>One image, one buffer.</b> Every table is an array of small fixed-size records that refer to each other by <code>u32</code> index. Strings live in one pool, variable-length data in side arrays. No <code>Arc</code>, <code>Box</code>, or pointer inside the model.</li>
-          <li><b>The bytes in memory are the bytes on disk.</b> A header, a directory, and 64-byte aligned tables. Saving is one write; loading is one <code>mmap</code> and one validation pass. The same bytes can cross a socket.</li>
+          <li><b>One canonical payload.</b> Tables contain fixed-size records, typed local indexes, string pools, and side arrays. Ownership handles and session bindings live outside the persisted bytes.</li>
+          <li><b>The bytes in memory are the bytes on disk.</b> A header, a directory, and aligned tables, written with <code>write_all</code>. Owned reads are always supported; a private immutable cache can use a mapped backing after validating it.</li>
           <li><b>Ingest in parallel</b> by compile unit and by section on a bounded pool, then merge in unit order so the image is byte-identical for any number of threads.</li>
-          <li><b>Build each thing once.</b> One fused walk per unit; types deduplicated across units by structure; strings interned; indexes built once, as sorted arrays.</li>
+          <li><b>Build each thing once.</b> One sequential DIE decode per unit followed by explicit resolution passes; conservative type deduplication; pooled strings; persisted indexes.</li>
           <li><b>Never guess.</b> Instrument once and feed every reader: text and JSON reports that people, scripts, and coding agents can diff, Tracy for people at a screen, and deterministic instruction and allocation benchmarks that fail when a change regresses them.</li>
           <li><b>Never do it twice.</b> Images are cached by file identity, so a program uscope has seen loads in milliseconds: every re-run, every shared library, and every test fixture.</li>
         </ol>
+      </div>
+    </section>
+
+    <section id="review">
+      <div class="eyebrow">Review · 2026-10-08</div>
+      <h2>Contracts for implementation</h2>
+      <div class="prose">
+        <p>Reviewed against <code>325df824</code>. Only this plan changed; no implementation phase has started. The original timing tables are historical measurements attributed to <code>d089093</code>, not independently reproduced results. These contracts correct the initial design and are acceptance requirements for the tasks below.</p>
+      </div>
+      <div class="scroller"><table class="data">
+        <thead><tr><th>Contract</th><th>Code and consequence</th><th>Required proof</th></tr></thead>
+        <tbody>
+          <tr><td>R1 · Safe backing</td><td><code>dwarf::load</code> and <code>ExecutableSource</code> currently own bytes. Keep ordinary build outputs owned: a read-only <code>MAP_PRIVATE</code> mapping can change after an external write. A later stat check cannot repair a violated Rust borrowing invariant.</td><td>Mutate and truncate an input during a synchronized read. Bounded retry or a typed changed-input error; no borrowed mapping of the input, signal handler, or silently accepted changed identity.</td></tr>
+          <tr><td>R2 · Complete cache key</td><td><code>DebugFileSearch::find</code> depends on path and search policy; build-id is for debug-file discovery, not content identity. Key the exact selected input bytes plus semantic and layout versions. Keep filesystem observations outside canonical bytes.</td><td>Same build-id/different bytes; changed debug directory; debug file appearing after a miss; changed normalization with unchanged struct layout; identical bytes copied to another inode.</td></tr>
+          <tr><td>R3 · Graph identity</td><td><code>TypeKind</code> is recursive; <code>TypeIdentity</code> includes language, scope, generics, and Go runtime metadata. Layout equality alone does not establish source type identity. Distinct names are not a unique-type census.</td><td>Recursive and mutually recursive types, anonymous namespaces, local types, Go named types versus aliases, two crate versions, incomplete definitions, deliberate fingerprint collisions, and preserved ambiguity.</td></tr>
+          <tr><td>R4 · Exact lines and visibility</td><td><code>dwarf::load_lines</code> preserves sequence ends, gaps, row order, and same-address statement precedence. <code>visibility::after_declaration</code> uses declaration file and inline call site, not just the current row's line.</td><td>Query boundaries and interiors against the old loader; keep all flags, zero-line gaps, duplicate-address rows, overlapping sequences, and the Go visibility test's answers.</td></tr>
+          <tr><td>R5 · Complete static model</td><td><code>model/image.rs</code> also stores vtables, named constants, instruction boundaries, runtime type descriptors, embedded views, provenance and unavailable states. <code>location::Expression</code> needs unit encoding, address bases, procedure references, and typed operands.</td><td>A field/accessor inventory assigning every current datum to a table or an explicitly retained owner before deleting its representation. Cached and cold answers, including failures, agree.</td></tr>
+          <tr><td>R6 · Neutral clients</td><td><code>eval::TypeSource</code> is a neutral trait used by fake targets as well as the debugger. IDs are local to an image; they need a retained owner and session binding. Browser clients do not hold native <code>ModuleImage</code> objects.</td><td>Evaluator boundary test and fake target still work. Old replies retain a resolvable immutable image after unload/restart; DAP/web DTOs stay self-contained unless a separate protocol migration is specified.</td></tr>
+          <tr><td>R7 · Bounded work</td><td>Compact records do not bound decompression, malformed graphs, hash collision chains, validation, trace buffers, or the pool queue. The existing 1 GiB test allocator does not account for mmap RSS.</td><td>Byte/work budgets checked before allocation; cancellation checkpoints; an OS memory cap for corpus runs; jobs=1 does not deadlock; validation cannot recurse without a bound.</td></tr>
+          <tr><td>R8 · Coherent module publication</td><td><code>Controller::refresh_modules</code> reconciles traps, link maps, vDSO and breakpoints before a stop is published. Moving file work to a pool must preserve that transaction and the simulator's deterministic edge.</td><td>Generation-tagged completions, stable module IDs, stale-stop rejection, cancellation on exec/detach/shutdown, and no ptrace from workers. P6's state machine is reviewed before implementation.</td></tr>
+        </tbody>
+      </table></div>
+      <div class="prose">
+        <h3>Review evidence</h3>
+        <p>A scratch copy of <code>server-go-o0</code> stripped with the pinned <code>objcopy --strip-debug</code> kept GNU build-id <code>dbbff3c7c1bd191fece1334076e20c2354173d6a</code> while its SHA-256 changed from <code>e7153049…b1c9519</code> to <code>a482e834…02c4358</code>. A Linux read-only private mapping of a scratch copy reflected a subsequent <code>pwrite</code> immediately. Small counterexamples also confirm that a predecessor search misses an enclosing interval and no numbering makes both edges of <code>Node → Pointer → Node</code> decrease. These experiments establish correctness constraints, not speed measurements.</p>
+        <p>Primary references: <a href="https://docs.rs/memmap2/0.9.11/memmap2/struct.MmapOptions.html">file mapping safety</a>; <a href="https://sourceware.org/binutils/docs/ld/Options.html">GNU ld build-id semantics</a>; <a href="https://docs.rs/zerocopy/0.8.59/zerocopy/trait.FromBytes.html">zerocopy byte validity</a>; <a href="https://dwarfstd.org/doc/DWARF5.pdf">DWARF 5, especially §§2.5, 2.6 and 6.2</a>. Byte validity is only the first layer of image validation; it does not establish valid references or debugger semantics.</p>
       </div>
     </section>
 
@@ -361,14 +389,14 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
 
       <h3>What the hardware charges</h3>
       <div class="prose">
-        <p>An L1 read costs about 4 cycles, L2 about 12, L3 about 44, and RAM about 180. A small <code>malloc</code>/<code>free</code> costs 200–500 cycles and a kernel call over 1,000. Arithmetic is cheaper than a read from L1. In Acton's worked example, a function reading one field from each of two objects spent about ten times as long waiting on memory as computing: it used 4 of each 64 bytes it loaded, "90% waste". Packing the inputs into arrays made it about ten times faster. This machine has 48 KiB of L1d and 1 MiB of L2 per core and 64 MiB of L3: the whole of a well-encoded image for a mid-sized program fits in L3.</p>
+        <p>Pointer chasing, allocation and repeated decoding are plausible costs, but fixed cycle counts do not establish their contribution here. Cache topology, dependent versus independent loads, allocator state and parallel bandwidth all matter; aggregate L3 capacity is not necessarily equally accessible to every core. Use the measured profiles below to select work, and counters to assess a proposed layout.</p>
       </div>
 
       <h3>The rules</h3>
       <div class="cards">
         <article class="card">
           <header><span class="id">P1</span><h4>Know the data, then shape it</h4></header>
-          <p>Design from measured distributions, not from a model of the world. Most functions have no generics; most line rows have no discriminator; most types are duplicates; most locals have one location. "Solve for the most common case first, not the most generic." Each table's encoding cites a measured distribution.</p>
+          <p>Design from measured distributions. Record the frequency of generics, nonzero discriminators, location-list lengths and confirmed duplicate types. Optimize the common shape while preserving a lossless uncommon representation. Each encoding cites its measured distribution.</p>
         </article>
         <article class="card">
           <header><span class="id">P2</span><h4>Where there is one, there are many</h4></header>
@@ -380,7 +408,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         </article>
         <article class="card">
           <header><span class="id">P4</span><h4>Encodings, not one enum for everything</h4></header>
-          <p>A tag byte plus a fixed payload, with variable-length data in a side <code>extra</code> array, instead of an enum sized for its largest variant. Kelley cut Zig's AST from 120 to 15.6 bytes a node and ZIR from 54 to 20.3 bytes an instruction this way, for 22% and 39% less wall time. Flags fold into the tag; rare variants get their own tags.</p>
+          <p>A tag byte plus a fixed payload, with variable-length data in side arrays, can avoid paying for an enum's largest variant on every row. Count the side arrays too, and measure the cost of fetching them. Flags can fold into tags when decoding remains explicit.</p>
         </article>
         <article class="card">
           <header><span class="id">P5</span><h4>Bools and rare fields out of band</h4></header>
@@ -388,7 +416,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         </article>
         <article class="card">
           <header><span class="id">P6</span><h4>Split by access, not by concept</h4></header>
-          <p>Columns that searches scan (names, start addresses) are arrays of their own; fields read together stay together in records of 16 bytes or less. Like Acton's dictionary, keep the keys contiguous and fetch the value once found.</p>
+          <p>Columns that searches scan (names, start addresses) are arrays of their own; fields read together stay together in measured compact records. Keep keys contiguous and fetch the value once found; no arbitrary record-size ceiling overrides semantics.</p>
         </article>
         <article class="card">
           <header><span class="id">P7</span><h4>Do it once, ideally offline</h4></header>
@@ -404,22 +432,19 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         </article>
       </div>
 
-      <h3>What others measured</h3>
+      <h3>Applicable precedents, checked against primary sources</h3>
       <div class="scroller">
         <table class="data">
-          <thead><tr><th>Project</th><th>Technique</th><th>Result</th></tr></thead>
+          <thead><tr><th>Source</th><th>Technique</th><th>Limit of the analogy</th></tr></thead>
           <tbody>
-            <tr><td>Zig tokenizer and parser</td><td>tokens <code>{tag u8, start u32}</code> SoA; AST nodes <code>{tag, main_token, lhs, rhs}</code> plus <code>extra</code></td><td>64 → 5 B per token, 120 → 15.6 B per node; 28% fewer instructions, 22% less wall time</td></tr>
-            <tr><td>Zig ZIR</td><td>four arrays: tags, data, <code>extra</code>, <code>string_bytes</code>; cached with one <code>writev</code>, read with one <code>readv</code>, header keyed by inode, size, and mtime</td><td>54 → 20.3 B per instruction, 39% less wall time; 8.9 M source lines a second on a thread pool, cache writes included</td></tr>
-            <tr><td>Zig InternPool</td><td>every type and value interned to a <code>u32</code>; per-thread append-only lists, lock-free sharded lookup</td><td>equal index ⇔ equal type; a thread id packed into handles later overflowed on 64-thread machines (zig#25297)</td></tr>
-            <tr><td>RAD Debugger RDI</td><td>debug info converted to 42 flat <code>u32</code>-indexed tables, address maps as sorted flat arrays; DWARF split into sub-unit work items, types hashed by content and built leaves first</td><td>8 GB PDB conversion: 11 minutes → 30 s on 64 cores; loading a converted file is "nearly instantaneous"</td></tr>
-            <tr><td>GDB 13–15 cooked index</td><td>parallel scan, names by <code>.debug_str</code> pointer identity, interest decided per abbreviation; later indexed in the background</td><td>about 7× faster indexing; time to prompt 1.2 s → 0.06 s</td></tr>
-            <tr><td>LLDB manual index</td><td>one index per worker thread (not per unit), merged in parallel; rate-limited progress events</td><td>30–60% faster in LLVM 20; a mutex around progress events was the bottleneck; the global string pool's lock is the next</td></tr>
-            <tr><td>LLVM GSYM, Sentry SymCache</td><td>sorted <code>u32</code> address arrays parallel to record offsets, binary-searched in place in a memory-mapped file</td><td>an order of magnitude smaller than the debug files they replace</td></tr>
+            <tr><td><a href="https://raw.githubusercontent.com/ziglang/zig/master/src/InternPool.zig">Zig InternPool</a></td><td>Compact indexed payloads, side data and a decoded key API.</td><td>A compiler controls language identity; a debugger must infer it conservatively from incomplete producer metadata. Do not import equality rules or speedup figures.</td></tr>
+            <tr><td><a href="https://lldb.llvm.org/cpp_reference/ManualDWARFIndex_8cpp_source.html">LLDB manual index</a></td><td>Shared worker pool, per-worker indexes and parallel finalization; cross-unit DIE data stays alive through indexing.</td><td>Supports worker-local scratch and explicit reference lifetimes; does not prove uscope's eager full model fits a name-index budget.</td></tr>
+            <tr><td><a href="https://sourceware.org/gdb/current/onlinedocs/gdb.html/Index-Files.html">GDB index files</a></td><td>Persist indexes to avoid repeated symbol scans.</td><td>Index construction and fully materialized types/locations are different workloads; compare equivalent queries.</td></tr>
+            <tr><td><a href="https://llvm.org/doxygen/GsymReader_8h_source.html">LLVM GSYM reader</a></td><td>Mapped header/address table with byte-order handling; remaining information decoded as needed.</td><td>A symbolication format is not a complete variable/type evaluator. Its layout is useful precedent, not a full schema.</td></tr>
           </tbody>
         </table>
       </div>
-      <div class="callout">Two warnings from the same sources. RAD Debugger's type deduplication by content hash sometimes merges types it should not (raddebugger#959): a hash may find candidates, but only a full comparison may decide two types are equal. LLDB's on-disk index cache reused stale entries when build systems reset modification times: a cache key needs the build-id or a content hash, not just <code>stat</code>.</div>
+      <div class="callout">Source correction: <a href="https://github.com/EpicGames/raddebugger/issues/959">RAD Debugger #959</a> reports missing deduplication, not incorrect merging. It does not establish a safe equality algorithm. Unverified foreign-project speedup figures have been removed; cache identity must use content even when a build-id exists (R2).</div>
     </section>
 
     <!-- ================================================================ -->
@@ -427,7 +452,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <div class="eyebrow">Where we are</div>
       <h2>Measurements</h2>
       <div class="prose">
-        <p>Every number on this page was measured on <code>next</code> at <code>d089093</code> with a release build of uscope unless it says otherwise, on a warm page cache. The <a href="#method">method</a> section says how to reproduce each one. Phase 0 of the plan turns these one-off measurements into a repeatable benchmark.</p>
+        <p>The original author attributed these measurements to <code>next</code> at <code>d089093</code>, release unless stated, with a warm OS page cache. Raw reports and the temporary probes are not checked in, so treat the figures as provisional historical evidence. The 450 ms phase timing, 480 ms process timing, and 237/258 MB RSS come from different runs/configurations and are not interchangeable. P0 archives exact commands, inputs, build settings and raw repetitions, and reconciles them before setting regression baselines.</p>
       </div>
 
       <h3>Loading compared with gdb and lldb</h3>
@@ -525,7 +550,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
             </tbody>
           </table>
         </div>
-        <figcaption>A 120-line prototype over gimli 0.34 with the file memory-mapped, units handed out largest first from an atomic counter. Scaling is linear to the 16 physical cores; SMT adds little. The tokio server stops scaling at 4–8 threads because one unit holds 19% of its DIEs. Decompressing the <code>go</code> command's zlib sections takes 32 ms on one thread, three times its DIE walk, so decompression must be parallel too. Reading a 455 MB file from the page cache takes 120 ms; a 15 MB file, 1.3 ms.</figcaption>
+        <figcaption>Original 120-line gimli prototype, mapped input and largest-unit-first scheduling. This is decoding throughput, not a lower bound proven for the full loader. Unit-size counts alone do not explain its scaling; P0 records per-unit work and reconciles the result. Reported single-thread decompression was 32 ms for the go command; section-level parallelism is bounded by the largest compressed section. Reported warm-cache reads were 120 ms for 455 MB and 1.3 ms for 15 MB. Reproduce before deriving budgets.</figcaption>
       </figure>
 
       <h3>What it costs the test suite</h3>
@@ -608,11 +633,11 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <h2>The image: one buffer of typed tables</h2>
       <div class="prose">
         <p>A loaded module's static metadata becomes an <b>image</b>: one 64-byte aligned byte buffer holding a header, a directory, and a fixed set of tables. Each table is a slice of one <code>#[repr(C)]</code> record type, reached through a typed view; nothing in the buffer is a pointer. The public <code>ModuleImage</code> stays the immutable, shared model the architecture describes; it becomes a cheap handle (<code>Arc</code> of the buffer plus the parsed directory) whose accessors return small borrowed views instead of references to heap records.</p>
-        <p>The image is a pure function of the bytes of the files it was built from and the format version. Nothing session-dependent enters it: source maps, views, settings, and load biases stay outside, as <code>SourcePathMap</code> and <code>LoadedModule</code> already do. That is what makes it cacheable and shareable.</p>
+        <p>The canonical payload is a pure function of selected input bytes, target description and normalization version. <code>ModuleImageId</code>, executable/display paths, filesystem stat tuples, debug-search provenance, source maps, external view settings and load bias live in an outer binding. Internal type edges contain only local <code>TypeId</code>s; accessors add the binding's image ID. Embedded <code>.debug_uscope_views</code> content is input metadata and must remain represented, with any compiled view runtime separately accounted. Cached payloads can be rebound without patching their bytes.</p>
       </div>
       <figure>
         <div class="file" aria-label="Image layout">
-          <div class="hdr"><b>Header</b>magic, version,<br>schema hash, identity</div>
+          <div class="hdr"><b>Header</b>format + normalization,<br>layout, content identity</div>
           <div class="dir"><b>Directory</b>kind, stride,<br>count, offset ×N</div>
           <div><b>strings</b>bytes</div>
           <div><b>extra</b>u32</div>
@@ -629,7 +654,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <div><b>CFI</b></div>
           <div><b>indexes</b></div>
         </div>
-        <figcaption>Every table starts on a 64-byte boundary. The same layout is the in-memory representation, the cache file, and what a client would receive over a socket.</figcaption>
+        <figcaption>Every table starts on a 64-byte boundary. The payload is the in-memory and cache representation. Sending it to remote clients is a separate, deferred protocol design.</figcaption>
       </figure>
 
       <h3>Encoding rules</h3>
@@ -637,17 +662,17 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <table class="data">
           <thead><tr><th>#</th><th>Rule</th><th>Why</th></tr></thead>
           <tbody>
-            <tr><td>E1</td><td>Every reference is a <code>u32</code> index wrapped in a type for its table (<code>FunctionId</code>, <code>TypeId</code>, <code>StrId</code>…). Absent is <code>u32::MAX</code>, behind an <code>Opt&lt;Id&gt;</code> type of the same size.</td><td>4 bytes, no allocation, meaningful on disk; the type system still stops a <code>TypeId</code> being used as a <code>FunctionId</code>. Overflow past 2<sup>32</sup> rows is an explicit load error, never a wrap (zig#25297).</td></tr>
-            <tr><td>E2</td><td>A string is a <code>StrId</code>: a byte offset into the string pool, NUL-terminated. The pool begins with the file's <code>.debug_str</code> and <code>.debug_line_str</code> copied whole, so a DWARF string's id is its section offset plus a base, with no hashing; strings uscope makes (rendered type names, joined paths) are interned after them.</td><td>Interning the strings DWARF already deduplicated costs one <code>memcpy</code>. GDB and LLDB both found string interning to be their indexers' main cost.</td></tr>
+            <tr><td>E1</td><td>Local references are typed <code>u32</code> indexes. <code>u32::MAX</code> is reserved for absence: at most 2<sup>32</sup>−1 rows, with last valid index 2<sup>32</sup>−2. Check every conversion and span sum before allocation.</td><td>IDs also require the owning payload; the type wrapper alone cannot prevent cross-image misuse. Directory offsets and byte lengths use <code>u64</code>, checked against host <code>usize</code>/<code>isize</code> limits.</td></tr>
+            <tr><td>E2</td><td><code>StrId</code> is an offset into NUL-terminated UTF-8 display strings. Reuse valid referenced strings from copied string sections; normalize invalid UTF-8 once with the current lossy semantics, and pool inline/generated strings deterministically. Resolve <code>strx</code> using its unit's bases.</td><td>Raw section bytes may contain invalid UTF-8 and references may point at suffixes. Validate referenced boundaries and termination once per distinct reference, without repeatedly scanning long suffixes. Do not expose arbitrary section bytes as <code>&amp;str</code>; native filesystem path bytes use a distinct representation.</td></tr>
             <tr><td>E3</td><td>A variable-length list is a <code>Span { start: u32, len: u32 }</code> into a side array of its element type, or into the shared <code>extra: [u32]</code> for heterogeneous payloads.</td><td>Zig's <code>extra</code>; one allocation per table instead of one per row.</td></tr>
-            <tr><td>E4</td><td>Addresses are <code>u32</code> offsets from the image's lowest address. An image spanning more than 4 GiB of addresses is an explicit, unsupported state.</td><td>Halves every address column. <code>ImageAddress</code> keeps its meaning; only its storage narrows.</td></tr>
+            <tr><td>E4</td><td>Address columns use an image-selected <code>u32</code> delta encoding when all represented endpoints fit; otherwise use <code>u64</code>. Public <code>ImageAddress</code> remains 64-bit. Filter DWARF tombstones before choosing the base, and check base-plus-delta and half-open range ends.</td><td>No new 4 GiB support regression. Absolute symbols, TLS offsets, section-relative locations and target-width DWARF operands retain their distinct semantics. Prototype wide storage first if two encodings delay correctness.</td></tr>
             <tr><td>E5</td><td>Heterogeneous records are a <code>u8</code> tag column plus a <code>u32</code> data column; the tag says whether the data is inline or an index into <code>extra</code>. Common shapes get their own tags.</td><td>An enum costs its largest variant on every row; an encoding costs each row what it needs.</td></tr>
             <tr><td>E6</td><td>Rare fields live in sparse side tables sorted by row id; flags fold into tags or into a bit column.</td><td>Line discriminators, Rust generics, coroutine links, and bitfield layouts are each on a small minority of rows.</td></tr>
-            <tr><td>E7</td><td>Search keys are columns of their own (name hashes, start addresses); fields read together form records of at most 16 bytes.</td><td>A binary search over a <code>[u32]</code> touches one cache line per step and sixteen keys per line.</td></tr>
-            <tr><td>E8</td><td>Records derive <code>zerocopy</code>'s <code>FromBytes</code>, <code>IntoBytes</code>, <code>Immutable</code>, and <code>KnownLayout</code>, have explicit padding fields, and assert their size at compile time.</td><td>Viewing bytes as records needs no <code>unsafe</code>; a size regression fails the build.</td></tr>
+            <tr><td>E7</td><td>Separate hot search keys from payloads; prefer small records where measurement supports them. Exact-name hash indexes retain collisions and aliases; ordered names/prefix/completion queries need a lexicographic index too.</td><td>There is no universal 16-byte maximum (the proposed function row is 24 bytes). Range containment requires interval metadata, not just sorted starts.</td></tr>
+            <tr><td>E8</td><td>Use fixed little-endian integer fields, <code>#[repr(C)]</code>, explicit zeroed padding and zerocopy derives. Store tags as integers, not Rust enums/bools. Use checked borrowed casts; decoded views validate tags before matching. Assert sizes and offsets.</td><td>Target byte order is separate from format byte order. Owned backing can be a vector of 64-byte aligned, fully initialized blocks viewed safely with zerocopy; <code>Vec&lt;u8&gt;</code> alone does not guarantee alignment.</td></tr>
             <tr><td>E9</td><td>Building writes into per-table arrays; nothing allocates per record.</td><td>6.4 M allocations become a few thousand.</td></tr>
             <tr><td>E10</td><td>Every table declares the tables its references point into, and a validator checks every reference before the image is used.</td><td>An image read from disk is untrusted input; after validation every lookup is an in-bounds index with no <code>unsafe</code>.</td></tr>
-            <tr><td>E11</td><td>Ids are assigned in unit order, then DIE order, never by thread timing or hash order.</td><td>The image is byte-identical for any thread count, which the simulator's cross-process replay requires.</td></tr>
+            <tr><td>E11</td><td>Assign stable IDs by input role, section kind, unit offset and DIE offset; deduplicated rows take the first eligible representative in that order. Give every sort a total tie-breaker, fix hash seeds/algorithms, and zero padding.</td><td>Payload bytes must agree across worker counts, cache misses/hits, executable paths, bindings and fresh processes. Stat tuples and session IDs cannot enter these bytes.</td></tr>
           </tbody>
         </table>
       </div>
@@ -693,7 +718,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
             </div>
           </div>
           <div class="layout">
-            <div class="title">Type <span>proposed: tag 1 B + data 4 B, payload in extra only when needed, for each of ~6,100 unique types</span></div>
+            <div class="title">Type <span>proposed hot columns: tag 1 B + data 4 B; full payload and identities additional; deduplication ratio unmeasured</span></div>
             <div class="bytes" style="width:3.5%; min-width:34px">
               <i style="flex:1">t</i><i style="flex:4">data</i>
             </div>
@@ -706,23 +731,29 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <table class="data">
           <thead><tr><th>Table</th><th>Shape</th><th class="n">tokio server today</th><th class="n">target</th></tr></thead>
           <tbody>
-            <tr><td>Strings</td><td><code>.debug_str</code> and <code>.debug_line_str</code> copied whole, then interned strings uscope makes. Paths stored once per (directory, file) pair, joined lazily.</td><td class="n">538 K allocs</td><td class="n">≤ 5.2 MB, 1 alloc</td></tr>
-            <tr><td>Source files</td><td><code>{dir: StrId, name: StrId}</code>, joined against the unit's comp dir when shown.</td><td class="n">813 × (Arc + PathBuf)</td><td class="n">6.5 KB</td></tr>
-            <tr><td>Line rows</td><td>address column plus 12-byte rows, sorted by address within sequences; a <code>(file, line) → row</code> index replaces <code>statements_by_source_line</code>; <code>LineEntry</code> ranges are derived from adjacent rows, not stored.</td><td class="n">8.9 MB</td><td class="n">1.0 MB</td></tr>
+            <tr><td>Strings</td><td>Copy reusable string sections, normalize referenced display strings per E2, then append pooled generated strings and resolved producer paths. Deterministic section bases and appended-string ordering.</td><td class="n">538 K allocs</td><td class="n">≤ 5.2 MB estimate</td></tr>
+            <tr><td>Source files</td><td>Intern resolved producer paths once at ingestion, preserving <code>source_path</code>'s comp-dir and absolute-path rules and type-unit suffix matching. Source maps and source-content reads remain outside ingestion.</td><td class="n">813 × (Arc + PathBuf)</td><td class="n">measure paths too</td></tr>
+            <tr><td>Line rows</td><td>Address column plus compact rows and sparse wide fields; explicit sequence spans/endpoints and original ordinals. Persist row-selection indexes for address lookup and <code>(file, line)</code> breakpoints, preserving R4.</td><td class="n">8.9 MB</td><td class="n">1.0 MB estimate</td></tr>
             <tr><td>Functions</td><td>24-byte rows; generics and coroutine links sparse; roles in a tag column.</td><td class="n">3.1 MB + 83 K allocs</td><td class="n">0.7 MB</td></tr>
             <tr><td>Code instances</td><td><code>{function, parent, ranges: Span, entry}</code>, call sites in the line-location form, ranges in one <code>[u32; 2]</code> pool.</td><td class="n">2.5 MB + 64 K allocs</td><td class="n">1.0 MB</td></tr>
-            <tr><td>Types</td><td>InternPool-style: tag and data columns, payloads in <code>extra</code>; members, variants, enumerators, and parameters in their own tables; one node per distinct type (§ <a href="#pipeline">ingestion</a>). Names rendered once per unique type; identity is a hash-consed key, so "same type" is id equality.</td><td class="n">8.8 MB + ≥ 2 M allocs</td><td class="n">≤ 0.6 MB</td></tr>
-            <tr><td>Scopes and objects</td><td>scopes <code>{parent, instance, ranges, frame_base}</code>; objects <code>{name, ty, scope, decl_line, location, kind, flags}</code> in 24 bytes. Go visibility stores the declared line and is decided at the stop from the line table, not precomputed per local.</td><td class="n">3.6 MB + ~300 K allocs</td><td class="n">0.5 MB</td></tr>
-            <tr><td>Expressions</td><td>DWARF expression bytes in one pool; location lists as <code>{range, bytes: Span}</code> rows; indexed addresses resolved through the image's <code>.debug_addr</code> copy, not a <code>HashMap</code> per expression.</td><td class="n">≥ 3 allocs each</td><td class="n">≤ 1 MB</td></tr>
+            <tr><td>Types</td><td>Tag/data columns plus full members, bases, variants, discriminants, dimensions, enumerators, parameters, names, sizes, identity/generic metadata, Go attributes, and malformed/opaque states. Separate payload deduplication from semantic equality.</td><td class="n">8.8 MB + ≥ 2 M allocs</td><td class="n">measure before budget</td></tr>
+            <tr><td>Scopes and objects</td><td>Parent/instance/range/frame-base tables; objects retain declaration file and line, type, scope, location/constant, kind and explicit metadata state. Go visibility is an indexed predicate at the queried PC, including inline call sites.</td><td class="n">3.6 MB + ~300 K allocs</td><td class="n">0.5 MB estimate</td></tr>
+            <tr><td>Expressions</td><td>Byte pool plus expression context IDs; unit encoding (DWARF version, format, target address size), <code>addr_base</code>, base-type lookup and procedure-location tables. Location entries distinguish default, ranged and absent, preserving alternative-location errors.</td><td class="n">≥ 3 allocs each</td><td class="n">≤ 1 MB estimate</td></tr>
             <tr><td>Call sites</td><td>rows plus parameter rows by span.</td><td class="n">Vecs per site</td><td class="n">small</td></tr>
             <tr><td>Symbols</td><td><code>{name, addr, size, kind/binding/role}</code> in 16 bytes; GOT slots and PLT as their own tables.</td><td class="n">0.8 MB + 9.4 K allocs</td><td class="n">0.15 MB</td></tr>
             <tr><td>CFI</td><td><code>.eh_frame</code>/<code>.debug_frame</code> bytes plus a sorted FDE start column; Go's pclntab bytes plus its function table.</td><td class="n">copied sections</td><td class="n">same bytes, flat index</td></tr>
-            <tr><td>Indexes</td><td>sorted <code>(hash: u64, id: u32)</code> columns for function, type, global, and symbol names; sorted start-address columns for instances, symbols, sections, and line rows; built once at ingestion, never at load.</td><td class="n">~20 BTreeMap/HashMap</td><td class="n">≤ 2 MB</td></tr>
-            <tr><td><b>Total</b></td><td></td><td class="n"><b>237 MB RSS</b></td><td class="n"><b>≤ 12 MB</b></td></tr>
+            <tr><td>Indexes and remaining metadata</td><td>Name hashes plus lexicographic and selector/identity indexes; flat interval indexes with overlap/tie policies; vtables, constants, Go descriptor lookup, instruction and control boundaries, TLS, coroutine/error tables and embedded view bytes. Count all side arrays and decoded runtime owners.</td><td class="n">maps and derived catalogs</td><td class="n">inventory in P0</td></tr>
+            <tr><td><b>Total</b></td><td>Different metrics: historical process RSS versus provisional payload-only target. Rebudget after the complete inventory.</td><td class="n"><b>237 MB RSS</b></td><td class="n"><b>12 MB aspiration</b></td></tr>
           </tbody>
         </table>
       </div>
       <div class="callout">The targets in this table are estimates from row counts and record sizes, not measurements. Phase 1 measures the first real tables and corrects them.</div>
+      <div class="prose">
+        <h3>Lossless compact fields</h3>
+        <p>The 16-byte line illustration is the common case, not a restriction on valid metadata. <code>LineNumber</code> and <code>ColumnNumber</code> currently hold <code>u64</code>; reserve compact escape values and store wide values in keyed side tables. Preserve missing locations separately from line zero, unknown columns, wide language codes (<code>Other(u16)</code>), discriminator/ISA/op-index, declaration columns, and every flag. No cast may truncate to fit a target size.</p>
+        <p>Keep all row boundaries needed to derive ranges, including compiler-generated gaps and sequence ends that are not public statement rows. Same-address runs retain ordinal order and the current last-statement precedence. A compact range-to-selected-row index is acceptable; eliminating duplicate location records does not require recomputing selection on each query.</p>
+        <p>For Go locals, first test lexical scope membership, then find the directly inlined call in that scope's code instance; use its call-site location, otherwise the line at the PC. Hide a local only when that location is in the declaration's file and its line is ≤ the declaration line. Missing locations and other files stay visible. Apply this predicate in name binding, enumeration, inspection and any API exposing visibility ranges; measure repeated-query costs as well as load time.</p>
+      </div>
     </section>
 
     <!-- ================================================================ -->
@@ -733,11 +764,11 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <p><code>ModuleImage</code> is public API: tests, the CLI, DAP, the web server, the evaluator, views, the runtime models, and the Linux backend call about sixty accessors on it, and integration tests match on <code>TypeKind</code> 28 times. The redesign keeps the accessor names where they still make sense and changes what they return:</p>
         <ul>
           <li><b>Views.</b> <code>image.function(id)</code> returns <code>Function&lt;'_&gt;</code>, a <code>Copy</code> pair of image and id whose methods (<code>name()</code>, <code>declaration()</code>, <code>instances()</code>) read the tables. Iterators yield views. <code>&amp;str</code> borrows from the pool.</li>
-          <li><b>Types as a decoded key.</b> Like Zig's <code>InternPool.Key</code>, <code>image.type_kind(id)</code> decodes the packed encoding into a small borrowed enum for matching; the packed form stays private. Evaluation and formatting take <code>TypeId</code>s and views; <code>TypeSource::type_info()</code> stops returning an owned <code>TypeInfo</code>.</li>
-          <li><b>Ids across the protocol.</b> Replies carry <code>(ModuleImageId, FunctionId)</code> and <code>TypeReference</code> instead of cloned <code>FunctionInfo</code> and <code>TypeInfo</code>; a client resolves them against the image it already holds (web and DAP cache images by module today). Where a reply must be self-contained, it carries the few rendered fields it needs.</li>
+          <li><b>Types as a decoded key.</b> Expose a neutral borrowed type descriptor through object-safe <code>TypeSource</code> methods, backed by image views or by the evaluator's fake target. Member/argument iterators must not require constructing owned slices. Keep <code>src/eval</code> independent of <code>src/image</code>, DWARF and I/O; preserve its boundary test. Resolve the trait/lifetime design in P3.1 before changing all consumers.</li>
+          <li><b>Ownership across the protocol.</b> Borrowed views never cross an asynchronous channel alone. In-process results may carry IDs with an <code>Arc</code> image owner or an immutable snapshot that pins the owner; an ID-only reply is insufficient for an unloaded module or old session. Keep browser/DAP wire DTOs rendered and self-contained. Any wire change needs a separate request/response design, ts-rs regeneration and transcript tests.</li>
           <li><b>One model, not two.</b> <code>DwarfVariableInfo</code>'s catalog, call sites, and location expressions move into the image's tables. What remains of the provider is evaluation code over tables, so the <code>VariableInfo</code> trait's eighteen methods operate on ids into one buffer.</li>
         </ul>
-        <p>This is the largest part of the change by line count, and the most mechanical. Each phase moves one family of tables, its consumers, and the replies that carry it together, so every consumer is touched once and no phase leaves two representations of the same data.</p>
+        <p>Port one family and its consumers together, using temporary adapters where dependencies require them. This is not entirely mechanical: ownership, type equality and partial metadata need explicit compatibility tests. Optimize measured clone costs without forcing a wire-protocol rewrite into the storage migration.</p>
       </div>
     </section>
 
@@ -746,24 +777,27 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <div class="eyebrow">Design</div>
       <h2>Ingestion: every core, deterministic output</h2>
       <div class="pipeline">
-        <div class="stage"><span class="k">S0</span><h4>Open</h4><span class="par serial">one job</span><p>Map the file, parse the ELF header and section table, find the separate debug file, compute the identity, and probe the cache. A hit ends here.</p></div>
+        <div class="stage"><span class="k">S0</span><h4>Resolve inputs</h4><span class="par serial">bounded I/O</span><p>Open descriptors, establish identities, resolve separate-debug policy and probe the selected-input cache key. A hit returns only after validation and session binding; a miss snapshots bytes into owned buffers.</p></div>
         <div class="stage"><span class="k">S1</span><h4>Sections</h4><span class="par">parallel by section</span><p>Decompress compressed sections concurrently; read ELF symbols, dynamic symbols, PLT and GOT; index <code>.eh_frame</code> and <code>.debug_frame</code> FDEs; read <code>.gopclntab</code>; parse unit headers and abbreviations.</p></div>
-        <div class="stage"><span class="k">S2</span><h4>Units</h4><span class="par">parallel by unit, largest first</span><p>One fused walk per unit (or sub-unit range) into a batch of unit-local tables: functions, instances, scopes, objects, raw types with structural fingerprints, line rows, call sites, globals, constants, and the references it could not resolve locally.</p></div>
-        <div class="stage"><span class="k">S3</span><h4>Merge</h4><span class="par">parallel by table, ordered by unit</span><p>Prefix sums over batch sizes assign global ids in unit order. Types are hash-consed across units and confirmed by structural comparison. Cross-unit references resolve through sorted offset tables.</p></div>
-        <div class="stage"><span class="k">S4</span><h4>Analyses</h4><span class="par">parallel by item</span><p>Per unique type: names and identities. Per function: prologue refinement, resume-point decoding, Go frame-pointer analysis. Per coroutine: normalization.</p></div>
-        <div class="stage"><span class="k">S5</span><h4>Indexes and seal</h4><span class="par">parallel by index</span><p>Parallel sorts build every index; tables are laid out at their final offsets; the image is validated and written to the cache in the background.</p></div>
+        <div class="stage"><span class="k">S2</span><h4>Decode</h4><span class="par">parallel by unit, largest first</span><p>One DIE decode per unit into compact raw records, including attributes needed by later analyses. Decode line programs separately. Retain local and cross-unit fixups; do not recursively reconstruct types while walking DIEs.</p></div>
+        <div class="stage"><span class="k">S3</span><h4>Resolve and merge</h4><span class="par">ordered IDs, parallel work</span><p>Assign raw global IDs, resolve references and origin/specification chains, normalize scopes and identities, then conservatively deduplicate with a remap table. Forward and cyclic references remain representable.</p></div>
+        <div class="stage"><span class="k">S4</span><h4>Analyses</h4><span class="par">dependency ordered</span><p>Finalize type names and indexes; refine prologues and Go frames. Normalize coroutine layouts before decoding resume points and held ranges. Preserve dependencies already present in load_image.</p></div>
+        <div class="stage"><span class="k">S5</span><h4>Indexes and seal</h4><span class="par">parallel by index</span><p>Build deterministic indexes, place tables at final offsets and validate. Publish the immutable payload; optionally enqueue a bounded cache write once P5 exists.</p></div>
       </div>
       <div class="prose">
         <h3>Per-unit batches</h3>
-        <p>Stage S2 is where today's seven walks become one. A batch is a pure function of the unit's bytes and read-only global context (sections, the unit offset table, type-unit signatures), so workers share nothing and need no locks; each keeps its own scratch arrays alive across units, as LLDB keeps one index per worker rather than per unit. A batch records its unresolved references (<code>DW_FORM_ref_addr</code>, abstract origins and specifications in other units, type signatures) as <code>(global offset, slot)</code> pairs for S3, which replaces <code>die_reference</code>'s scan of every unit with a binary search over unit start offsets.</p>
+        <p>S2 fuses repeated DIE decoding, not all dependent analyses. Worker-local scratch is reused; completed batches have independent ownership. A fixup key is <code>(input, section, unit, DIE offset, reference kind)</code>, not an unqualified offset: DWARF 4 <code>.debug_types</code>, DWARF 5 type units, local references and type signatures have different namespaces. Resolve global references with a unit interval lookup plus an exact DIE-start lookup; offsets into headers or attributes are errors. Preserve missing/duplicate signatures, origin precedence and cycles, and explicitly unsupported supplementary/split DWARF states. No new producer support is implied by the rewrite.</p>
         <h3>Big units</h3>
-        <p>The tokio server's largest unit holds 19% of its DIEs, which caps per-unit parallelism near 5×. As RAD Debugger does, a unit larger than its share of the work is split at its root DIE's children, found through <code>DW_AT_sibling</code> where the producer emits it and a skip-scan otherwise (decoding alone runs at 19–28 ns per DIE), into ranges processed in parallel and merged in order. This is built only when a trace shows the long pole.</p>
+        <p>The largest unit holds 19% of the tokio server's DIEs, but DIE count is not measured per-unit work. The reported 10.8/1.5 ms speedup already exceeds the simple equal-cost 5.3× bound; P0 must reconcile setup cost and work distribution. Split large units only after a trace establishes a bottleneck. Any split must preserve ancestor scope, namespaces, unit context, forward fixups and deterministic order; validate producer sibling offsets rather than trusting them as job boundaries.</p>
         <h3>Types</h3>
-        <p>Each batch computes a fingerprint for every type it builds, bottom up: tag, name bytes, size, encoding, and for aggregates the members' names, offsets, and member-type fingerprints. A pointer to a named aggregate hashes the target's name and kind rather than its structure, which breaks cycles. S3 groups types across units by fingerprint and keeps one per group, the first in unit order, <em>only after a structural comparison confirms the candidates are equal</em>. Two versions of one crate can share a type name; a hash collision must cost a duplicate, never a wrong answer. Unique types are numbered leaves first, so a type's references point to lower ids, and names and identities are computed once per unique type in S4.</p>
+        <p>First build a complete raw graph with stable IDs and resolve all edges. Preserve incomplete, malformed and opaque nodes. Compute strongly connected components with an iterative algorithm; process their dependency DAG bottom-up, but allow forward/back edges within a component. Final IDs follow first representative order, not an impossible requirement that every edge decrease.</p>
+        <p>Start with conservative deduplication of acyclic nodes. A candidate key covers the complete observable payload and declaration identity: language, qualified/anonymous/local scope, generic values and arguments, qualifiers, sizes, signedness, member/base order and layouts, array bounds, enum origin, variants, address classes, Go runtime attributes and metadata failures. Names and layouts alone never authorize merging nominal types. Where the producer does not establish compatible provenance, retain separate nodes; retaining duplicates is acceptable.</p>
+        <p>For cyclic candidates, either retain them initially or compare whole SCCs using a bounded, memoized, edge-labelled bijection between nodes, including external canonical edges and the same identity eligibility checks. Hashes only choose candidates; compare all relevant fields and edges before committing a remap. Bound comparisons in collision buckets and retain duplicates when the deduplication work budget is exhausted. Use a forced constant fingerprint test to verify this behavior.</p>
+        <p>Keep storage identity and <code>same_type</code> distinct. An interned <code>TypeIdentityId</code> replaces repeated identity strings, but local <code>TypeId</code> equality proves only that two references name the same stored node. Preserve <code>TypeIndex</code>'s aliases, template matching and ambiguity semantics through the neutral lookup API; any correction to current semantic equality gets its own failing behavioral test and change. Record actual merge counts by reason before assigning a size or node-count budget.</p>
         <h3>The pool</h3>
-        <p>One loader pool, separate from tokio's runtime and never the ptrace controller thread, sized <code>min(available_parallelism, 16)</code> by default and set by a <code>[debug_info] jobs</code> setting or <code>USCOPE_JOBS</code>. <code>jobs = 1</code> is a supported mode: benchmarks count instructions in it, and a test asserts it produces the same bytes as any other count. Progress is reported per unit through an atomic counter, never under a lock (LLDB lost up to 55% to a progress mutex).</p>
+        <p>Use one shared dedicated Rayon pool per process, bounded by CPU availability and memory admission, defaulting to at most 16 workers. Configuration precedence is an explicit loader option, <code>USCOPE_JOBS</code>, <code>[debug_info] jobs</code>, then default; reject zero/invalid counts and expose the effective count. Nested section/unit/index work uses this pool, not a pool per module. Bounded job/completion queues and cooperative cancellation prevent unbounded outstanding loads. Network discovery and background disk writes use separate bounded I/O capacity so they cannot occupy all CPU workers. Never block a pool worker waiting on work that only that pool can run; test jobs=1. Rate-limit progress messages and keep counters worker-local. The simulator prepares images outside the world and uses its deterministic loading edge inside it.</p>
         <h3>Memory</h3>
-        <p>Batches live until their merge, so peak memory is about the batches plus the final image. The budget is peak ≤ 2× the final image; past it, S2 merges batches incrementally in unit order instead of all at the end.</p>
+        <p>Peak memory includes owned inputs, decompressed sections, raw batches, fixups, deduplication scratch, sort scratch, final output, allocator retention, and queued cache writes. A ≤2× final-image bound is not justified. P0 measures each component; P1 implements byte admission before decompressing or scheduling a batch and checked output reservations. Cap decompressed sizes and total work, keep recursion limits, and return a typed resource-limit error with phase and requested bytes. Reduce concurrency when memory is tight. Incremental merging alone does not free unresolved graph data; external spilling is deferred unless measurements require a separately specified algorithm. Report heap, mapped bytes and RSS separately.</p>
       </div>
     </section>
 
@@ -772,14 +806,14 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <div class="eyebrow">Design</div>
       <h2>Persistence: the bytes are the format</h2>
       <div class="prose">
-        <p>Because an image is one buffer of plain records, writing it is a single <code>write</code> of the buffer and reading it is a single <code>mmap</code> followed by validation; the tables are then read in place, straight from the page cache. No serialization framework sits in between, and nothing is deserialized.</p>
+        <p>The sealed payload is written directly with <code>write_all</code> (a syscall may write only part). Loading uses an owned aligned buffer or an immutable cache mapping, then validates the entire payload. Validation and the checksum touch the bytes and incur page faults: mmap avoids a copy, not the read or validation cost.</p>
       </div>
       <div class="scroller">
         <table class="data">
           <thead><tr><th>Part</th><th>Contents</th></tr></thead>
           <tbody>
-            <tr><td>Header</td><td>Magic <code>USCOPEIM</code>; format version; a <b>schema hash</b> computed at compile time from every record type's field names, types, offsets, and sizes, so any layout change invalidates old files without anyone remembering to bump a number; byte order and address size; flags.</td></tr>
-            <tr><td>Identity</td><td>For the executable and the separate debug file if one was used: build-id when present, otherwise an XXH3-128 of the contents; size; and the <code>stat</code> fields (<code>dev</code>, <code>ino</code>, <code>size</code>, <code>mtime</code>, <code>ctime</code>) used for the fast path.</td></tr>
+            <tr><td>Header</td><td>Magic <code>USCOPEIM</code>; total length; format version; explicit <b>normalization revision</b>; layout fingerprint generated from a checked-in schema descriptor and verified by size/offset assertions; target architecture/byte order/address size; feature flags and address encoding. Reject incompatible versions.</td></tr>
+            <tr><td>Identity</td><td>Content digests and byte lengths for each input role, including executable and selected separate debug file. Build IDs are optional provenance. Filesystem stat tuples, paths, discovery failures and session IDs belong to the outer cache index/binding, not the payload.</td></tr>
             <tr><td>Directory</td><td>Per table: kind, record stride, count, offset, byte length. Unknown kinds are an error, not skipped.</td></tr>
             <tr><td>Tables</td><td>64-byte aligned, in a fixed order.</td></tr>
             <tr><td>Trailer</td><td>XXH3-64 of everything before it, which catches truncation and corruption before validation runs.</td></tr>
@@ -789,18 +823,22 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <div class="prose">
         <h3>The cache</h3>
         <ul>
-          <li><b>Where.</b> <code>$XDG_CACHE_HOME/uscope/images/</code>, beside the debuginfod cache uscope already keeps, and overridden by <code>USCOPE_CACHE_DIR</code>. Writes are atomic: temporary file, then rename, as <code>separate.rs</code>'s <code>keep</code> does today. Eviction is least-recently-used under a size cap (4 GiB by default).</li>
-          <li><b>Keys.</b> Most of our binaries have no build-id (rustc and Zig fixtures here have none; Go and glibc do), so the key falls back to a content hash: 1 ms for the tokio server and 30 ms for a 455 MB file with <code>xxhsum -H2</code> on one thread. A small index maps <code>(dev, ino, size, mtime, ctime)</code> to the key so an unchanged file is not hashed again. <code>ctime</code> cannot be set by build tools, unlike the <code>mtime</code> that misled LLDB's cache.</li>
-          <li><b>Trust.</b> A cache file is untrusted input: the trailer, the directory, and every reference are validated before use, in parallel, at memory bandwidth. A file that fails is deleted and the image rebuilt, and the report says so. <code>--no-cache</code> and a <code>[debug_info] cache</code> setting turn it off.</li>
-          <li><b>Background write.</b> A cold load returns as soon as the image is sealed; writing the file happens on the pool afterwards.</li>
+          <li><b>Where.</b> Use <code>$XDG_CACHE_HOME/uscope/images/</code> (or the standard home fallback), overridden by <code>USCOPE_CACHE_DIR</code>. Validate ownership and directory permissions before mapping. Write a uniquely created temporary file in that directory, complete and close it, then atomically publish it. Never truncate a published inode. Concurrent writers of the same key are harmless; missing files after eviction are misses. Enforce a default 4 GiB cap, including outstanding writes, with rate-limited approximate LRU metadata outside the immutable image. Unwritable/read-only/full caches degrade to uncached loading with a notice.</li>
+          <li><b>Keys and discovery.</b> Resolve the selected debug-file inputs under current search options before choosing a payload. Hash executable and selected debug-file contents even when build IDs exist; build-id and debuglink still verify pairing using existing rules. Include format and normalization revisions. A persistent stat index is a lookup hint, not proof of equal content; start with content verification on every cross-process hit. Same-process reuse may retain the already owned <code>Program</code> snapshot. Any faster identity path needs a separately stated filesystem trust contract and measured benefit. Recheck negative/unusable debug-file discovery on a later load so a newly installed file or enabled debuginfod takes effect.</li>
+          <li><b>Trust.</b> Validate format and semantics before exposing views. Corruption becomes a reported miss; remove only the exact bad entry observed, not a concurrently replaced good file. A checksum detects accidental damage, not malicious substitution of valid-looking metadata. This is a private local optimization, not an authenticated shared-cache protocol. <code>--no-cache</code> disables reads and writes; library options and isolated test roots provide the same control.</li>
+          <li><b>Background write.</b> A sealed cold result may return before a bounded best-effort write. Deduplicate in-flight writes by key, charge their retained buffers to the memory budget, and cancel queued writes on shutdown. Cache warming and benchmarks explicitly drain writes before measuring a hit; interactive shutdown never waits indefinitely for cache I/O. If the queue is full, skip writing rather than retaining another image.</li>
         </ul>
+        <h3>Validation before publication</h3>
+        <p>Validate the fixed header and actual file length first, with checked arithmetic; then checksum, directory and table contents. Enforce unique required table kinds, exact stride/count/length agreement, alignment, non-overlap with header/directory/trailer, maximum byte and work budgets, valid flags/tags and zero padding. Check every span, string reference, local ID, address range, and parallel-column length. Check sorted indexes and their coverage/correspondence to records, not just whether IDs are in bounds. Validate parent graphs as forests where required; type graphs may cycle. Use iterative bounded algorithms and avoid rescanning a long string for every suffix or a huge collision bucket quadratically. Decode opaque DWARF/CFI through gimli with the existing evaluation limits; structural image validation does not make expression execution trusted.</p>
+        <p>Cache invalidation covers changes to normalization, demangling, type equality, Go/pclntab handling, generated indexes and embedded view semantics even if all field layouts stay identical. Bump the normalization revision deliberately, with a compatibility test and review checklist. A layout fingerprint cannot infer these changes from Rust structs.</p>
         <h3 id="mapping">Mapping files</h3>
-        <p>Cache images and the executables and debug files being ingested are memory-mapped (D3). The <code>unsafe</code> this needs lives in one module, <code>src/image/map.rs</code>, behind one owned type:</p>
+        <p>D3 is revised by R1: map only immutable, privately published cache files; use owned snapshots for ordinary executables/debug files and imported cache files. The backing module exposes one lifetime-bound byte owner:</p>
         <ul>
-          <li><b>One type, two calls.</b> <code>Mapping</code> owns a read-only, private mapping (<code>PROT_READ</code>, <code>MAP_PRIVATE</code>) made through <code>nix::sys::mman</code>, whose <code>mman</code> feature is the only new dependency surface; <code>Drop</code> unmaps it. Those two calls are the module's only <code>unsafe</code> blocks, each with a safety comment that the existing <code>undocumented_unsafe_blocks</code> lint enforces. <code>Mapping</code> hands out <code>&amp;[u8]</code> borrowed from itself, so no view can outlive it; images hold it in an <code>Arc</code>.</li>
-          <li><b>Edge cases are explicit.</b> An empty file is not mapped (a zero-length <code>mmap</code> fails) and gets an empty slice. A file whose size changes between <code>fstat</code> and <code>mmap</code> is an error. Mappings are page aligned, which satisfies the image's 64-byte alignment.</li>
+          <li><b>One owner.</b> Prefer a narrow wrapper around a reviewed mapping crate rather than hand-writing pointer ownership. The unsafe construction requires an explicit immutable-cache capability, not an arbitrary <code>&amp;File</code>. Document thread sharing, maximum slice size, alignment, and destruction. If using nix directly, raw-pointer-to-slice creation and any <code>Send</code>/<code>Sync</code> implementations also require safety arguments; the original claim of only two unsafe calls was incomplete.</li>
+          <li><b>Edge cases are explicit.</b> Empty bytes use an empty owned backing and fail image validation if a header is required. Open then <code>fstat</code> the same descriptor; reject unsupported file types, excessive lengths and alignment errors. Path checks followed by opening a different file are not identity validation. A second stat cannot close a concurrent mutation race.</li>
           <li><b>The safety argument.</b> Rust requires that the bytes behind a <code>&amp;[u8]</code> do not change while it lives, and a mapped file can be changed underneath us. Cache images are ours: a user-owned <code>0700</code> directory, files written whole to a temporary name and renamed into place, never written in place, and evicted by unlinking. Renaming or unlinking leaves an existing mapping reading the old inode. That covers every writer except one that deliberately writes into our cache files.</li>
-          <li><b>Input files are the weaker case.</b> They belong to the user's build, and a tool that rewrites an executable in place, as <code>cp</code> over an existing file does, would change it under the mapping. A truncation reaches the debugger as <code>SIGBUS</code>. Two rules shrink that window to ingestion alone. An input is mapped only while it is ingested; everything needed afterwards, such as the ELF headers that load-bias and link-map code read through <code>ExecutableSource.data</code> today, is copied into the image. And the file's <code>stat</code> identity is checked again once ingestion ends; if it changed, the result is discarded and the file ingested again, so a rewritten input can never produce a silently mixed image.</li>
+          <li><b>Input snapshots.</b> Read from one descriptor into bounded owned storage; compare descriptor metadata before/after reading and retry at most twice before a typed changed-input failure. Parse/hash those owned bytes, never a second path read. This prevents borrowing UB; metadata checks detect ordinary rewrites but do not prove an atomic snapshot against adversarial mutation. Preserve process-executable identity and <code>/proc</code> handling for attach/deleted executables. Do not drop <code>ExecutableSource.data</code> until load bias, link-map, core-dump and simulator consumers have explicit replacements.</li>
+          <li><b>Cache writer boundary.</b> A 0700 directory excludes other users, not the same user. The mmap safety contract assumes all normal cache writers follow immutable publication; deliberately rewriting a live cache inode is outside it. For arbitrary/shared/imported locations where this contract cannot be established, copy into owned storage. Validation alone never establishes immutability.</li>
           <li><b>Kernel hints.</b> <code>madvise</code> with <code>MADV_SEQUENTIAL</code> during validation and <code>MADV_WILLNEED</code> on tables about to be scanned, kept only where the benchmark shows a gain.</li>
         </ul>
         <p>The tests for this module are listed under <a href="#testing">testing</a>; they ship in the same commit as the module.</p>
@@ -808,7 +846,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <ul>
           <li>Re-running uscope on an unchanged program, which is most of a debugging session's restarts, costs a read and a validation.</li>
           <li><code>libc</code>, <code>ld.so</code>, and every other shared library are ingested once per machine, not once per launch.</li>
-          <li>The test suite warms the cache for every fixture when <code>just build-test-programs</code> builds them, into <code>target/image-cache</code>. The 191 s of loading in three suites becomes reads. Cold ingestion stays covered by the equivalence and determinism tests, which always ingest from scratch.</li>
+          <li>A separate cache-warm recipe runs after fixtures and the matching loader are built, using <code>target/image-cache</code>. Do not make fixture compilation depend on the debugger executable (that would create a recipe cycle). Core correctness tests keep an explicit cold lane; cache tests use <code>ScratchDir</code>, never the user's cache.</li>
           <li>The same bytes can go over a socket: a remote <code>uscope web</code> page or a future remote agent could receive the tables, not just answers.</li>
         </ul>
       </div>
@@ -820,11 +858,14 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <h2>Runtime: managing images during a session</h2>
       <div class="prose">
         <ul>
-          <li><b>Shared libraries load on the pool</b>, not one after another on the controller thread. The controller hands the loader every newly mapped module at once and keeps servicing ptrace; any request that needs a module's image waits on that module explicitly, so nothing guesses with missing metadata. Attaching to a process with hundreds of libraries loads them concurrently, mostly from the cache.</li>
-          <li><b>Lookups are searches over columns.</b> Address to instance, function, line row, symbol, or section is a binary search over a sorted <code>[u32]</code>; name to functions, types, or globals is a search over sorted <code>u64</code> hashes followed by a string comparison. If a trace shows these searches costing cache misses, the start columns take an Eytzinger layout; nothing is changed without that trace.</li>
-          <li><b>No clones at a stop.</b> Building a backtrace, formatting locals, and stepping read views; replies carry ids. The <code>--timings</code> report covers the stop path too: time from the stop to the first published snapshot, per request.</li>
+          <li><b>Shared libraries load as a bounded batch.</b> The controller performs all live-process reads, trap reconciliation, link-map/vDSO collection and identity checks. Workers receive owned bytes or identified file descriptors plus policy; they never receive ptrace capability. They return immutable results to the controller's event loop.</li>
+          <li><b>Publish a coherent generation.</b> P6 first implements a metadata barrier while all tracees remain stopped. States are <code>Observed → Loading → Ready | Unavailable | Cancelled</code>; completions name session/exec/mapping generation and deterministic module ordinal. Assign IDs in observation order, not completion order, commit the registry and pending breakpoint resolutions as one controller transaction, then publish the stop. Preserve today's explicit unavailable-module behavior. No partial silent metadata snapshot.</li>
+          <li><b>Keep control responsive.</b> The metadata barrier is an event-loop state, never a blocking receive on the controller. Shutdown/detach/exit and relevant wait events remain serviceable. Bound and defer metadata-dependent requests with their original stop/generation; revalidate before execution, reject stale mutations, and cancel work on exec/session change. Do not resume past unresolved breakpoint/module reconciliation. Optional inspection during loading is deferred until it has a separate public protocol.</li>
+          <li><b>Lookups preserve overlaps.</b> Keep the existing <code>RangeIndex</code> semantics in flat storage: interval augmentation and explicit tie rules for nested/discontiguous instances, overlapping symbols and line sequences. For example, a predecessor search at 30 in ranges [0,100), [10,20) misses the outer range. Require query cost and scan-length benchmarks on heavy overlap; use existing interval indexing or a bounded interval tree, not an unbounded backward scan.</li>
+          <li><b>Less copying at a stop.</b> Backtraces, locals and stepping use views internally; immutable reply owners retain their data. Measure allocations and latency at the stop as well as ingestion. Formatting may still allocate its output.</li>
           <li><b>Memory is accounted.</b> Each image knows its byte size per table; <code>info modules</code> (or a timings field) reports it, and the session's total is a budgeted number.</li>
         </ul>
+        <p>Use an injectable completion source to test out-of-order success/failure, an unload/reload at the same address, exec and cancellation. The simulator prepares real cached images outside its world and delivers modeled completions through its deterministic edge; no clocks, pool threads or filesystem accesses enter a world. Preserve <code>Program</code> reuse, post-mortem sessions and the vDSO bytes path. Any new kernel behavior still requires the repository's conformance probe and rule. P6 is independently mergeable after P5 and requires <code>just stress</code> and <code>just sim 600</code>.</p>
       </div>
     </section>
 
@@ -871,7 +912,10 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <ul>
             <li>An in-crate <code>profile</code> module: <code>span!</code> for phases and units, <code>count!</code> for per-thread integer counters (DIEs, bytes, rows, units, cache hits). It is compiled into every build, debug and release.</li>
             <li>Spans never go around single DIEs or rows: a <code>tracing</code> span costs about 40 ns with a registry, and an enabled per-iteration Tracy zone produced 134 M zones in 2 s. Hot loops bump counters that are flushed once per unit.</li>
-            <li>Per span it can record wall time, thread CPU time (<code>CLOCK_THREAD_CPUTIME_ID</code>), allocations and bytes from a counting wrapper around mimalloc that sees every thread, and peak RSS. Where the kernel allows, it also records user-mode instructions from <code>perf-event</code>, reporting <code>null</code> where it cannot.</li>
+            <li>Measure wall and thread CPU time for synchronous spans; worker metrics sum CPU work, not elapsed time. Peak RSS is process high-water, not a subtractable per-span counter. Attribute allocations explicitly: process totals in an isolated load, optional worker/span counters, live bytes tracked through cross-thread frees and reallocations without allocator recursion. This allocator needs its own narrowly documented unsafe implementation.</li>
+            <li>Instruction counters exclude kernel/hypervisor execution and do not inherit into the debuggee. Scope them to loader workers and report enabled/running time plus unavailable or multiplexed status. Never silently replace an unavailable counter with zero. Use explicit flow/dependency IDs for a critical-path report; nested timing spans alone cannot reconstruct a parallel DAG.</li>
+            <li>Cap trace buffers and dynamic labels; report dropped events. Disabled instrumentation must avoid clocks, allocation and input-dependent formatting. Simulation recording stays outside deterministic world state. Flush reports on both load success and failure, and distinguish foreground load, cache validation and background write time.</li>
+            <li>Keep one global allocator definition per binary. Define feature composition so the existing <code>--all-features</code> gate still compiles: <code>system-alloc</code> selects System over mimalloc, counting wraps the selected allocator, and optional Tracy reporting wraps it once. Compile default/all-feature/release combinations and exercise disabled tracing without profiler threads or sockets; keep pure image Miri tests independent of profiler FFI.</li>
             <li>Sinks are chosen at run time (<code>--timings</code>, the flight recorder in debug builds) or at build time (the <code>tracy</code> feature). Adding a sink never means touching the instrumented code.</li>
           </ul>
         </article>
@@ -887,9 +931,9 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <header><span class="id">M3</span><h3>Deterministic regressions</h3></header>
           <ul>
             <li><code>just bench</code> ingests a pinned corpus: the golden programs, the C++, Go, Zig, and tokio fixtures, and one large program, uscope's own debug build at a pinned commit. It runs each at <code>jobs = 1</code> and at <code>jobs = N</code>.</li>
-            <li>It measures instructions at <code>jobs = 1</code>, which are close to deterministic (a 1 M-iteration test loop read 5,000,082 instructions on both runs), so "is it faster?" becomes a comparison rather than statistics over noisy wall times. It also measures allocation counts, peak heap, image bytes per table, and median wall time with its spread.</li>
-            <li><code>just bench --compare BASE</code> diffs against a git revision's results or a saved file. Plain <code>just bench</code> compares with a checked-in baseline and fails past a tolerance: instructions and allocations ±1%, bytes exact, wall time reported but not gating. A baseline update is a commit of its own, like a golden manifest.</li>
-            <li>It runs in seconds, so it joins <code>just all</code> once it is stable.</li>
+            <li>Run one load per benchmark process, at jobs=1 and N, recording allocations, peak heap/RSS, mapped and retained bytes, per-table sizes, CPU time and wall median/spread. A deterministic toy instruction loop does not prove whole-loader reproducibility: allocator state, hash seeds, CPU dispatch, compiler and dependencies matter. Calibrate noise on the actual corpus and record hardware, flake.lock, Cargo.lock, profile, features and fixture hashes.</li>
+            <li><code>just bench --compare BASE</code> compares saved reports with matching provenance, or builds an explicitly requested revision in an isolated checkout. Gate only calibrated instruction/allocation increases and resource ceilings, not improvements. Hardware perf counts are optional and machine-specific; use a pinned Callgrind lane if deterministic instruction gating is needed. Exact bytes gate determinism for identical inputs/implementation, not all future revisions.</li>
+            <li>Separate a small seconds-long smoke corpus from full large-program/counter/profiler runs. Run all corpus sweeps under <code>scripts/contained.sh</code>. Add only the stable smoke lane to <code>just all</code>; unavailable optional counters report a skip, while a dedicated counter CI job requires them. Baseline changes carry before/after evidence, never silently absorb a regression.</li>
           </ul>
         </article>
         <article class="card">
@@ -904,21 +948,21 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <article class="card">
           <header><span class="id">M5</span><h3>Tracy, for people</h3></header>
           <ul>
-            <li>The <code>tracy</code> Cargo feature makes every <code>span!</code> also a Tracy zone and every counter a plot, through <code>tracy-client =0.18.4</code>, the version that matches nixpkgs' Tracy 0.13.1. Tracy refuses any other client version, and <code>tracy-client</code> 0.19 claims to support the older client library but does not compile against it. A gate check asserts that <code>tracy-client-sys</code> resolves to 0.28.0.</li>
+            <li>The optional <code>tracy</code> feature mirrors spans and counters to Tracy. Treat <code>tracy-client =0.18.4</code>, sys 0.28.0 and viewer 0.13.1 as the original probe's candidate combination, not a permanent compatibility claim. Pin and compile the exact client/sys/viewer tuple in the profile shell and verify a captured trace before accepting it.</li>
             <li>Build it with <code>default-features = false</code> plus <code>enable</code>, <code>ondemand</code>, and <code>only-localhost</code>. Leave out sampling and system tracing, which open inherited perf events that would follow the debuggee. Leave out the crash handler, which installs fatal-signal handlers, and broadcast, which sends UDP announcements.</li>
             <li><code>tracy-alloc</code> wraps mimalloc in <code>ProfiledAllocator</code> to show memory per zone.</li>
             <li>A <code>nix develop .#profile</code> shell adds <code>tracy</code>, <code>samply</code>, <code>hotspot</code>, <code>heaptrack</code>, <code>hyperfine</code>, <code>poop</code>, and KCachegrind, keeping GUI tools out of the default shell.</li>
           </ul>
         </article>
       </div>
-      <div class="callout">OpenTelemetry was considered and rejected: it is built for exporting service traces to a collector, its trace API is still beta in Rust, and it brings no timeline, plot, memory view, or CSV export. puffin is maintained sporadically and framed around game frames. The <code>tracing</code> ecosystem's cost (40 ns a span with a registry, 150 ns through <code>tracing-tracy</code>) buys nothing a small in-crate macro does not.</div>
+      <div class="callout">Keep P0's instrumentation small: phase counters, bounded events and a machine-readable report. Reassess an existing tracing adapter before maintaining a general profiler framework. Nanosecond costs in the original probe are configuration-specific; measure disabled overhead and enabled whole-load overhead. Tracy is optional and follows its <a href="https://docs.rs/tracy-client/0.18.4/tracy_client/">documented feature controls</a>.</div>
     </section>
 
     <!-- ================================================================ -->
     <section id="decisions">
       <div class="eyebrow">Decisions</div>
       <h2>Decided</h2>
-      <div class="prose"><p>Decided 2026-10-08: every recommendation below was accepted except D3, where the cache and input files are memory-mapped from the start rather than later.</p></div>
+      <div class="prose"><p>Design choices revised by this review, 2026-10-08. D3 and D8 correct unsafe/stale-input assumptions in the original draft. These are implementation directions, not a claim that implementation or benchmarks are complete.</p></div>
       <div class="cards">
         <article class="card">
           <header><span class="id">D1</span><h3>Viewing bytes as records</h3></header>
@@ -938,21 +982,21 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <article class="card">
           <header><span class="id">D3</span><h3>Reading files: <code>mmap</code></h3></header>
           <div class="options">
-            <div class="option dec"><span class="tag">Decided</span><b><code>mmap</code> from the start, for cache images and input files</b><span class="why">Zero copy: a cached image is usable as soon as it is validated, with no 120 ms read for a 455 MB file, and processes share one copy in the page cache. It costs one small module of <code>unsafe</code> with a written safety argument and its own tests (§ <a href="#mapping">Mapping files</a>).</span></div>
-            <div class="option alt"><span class="tag">Alt</span><b><code>read</code> into an aligned buffer</b><span class="why">No <code>unsafe</code> and 1.3 ms for 15 MB, but a full copy of every file and no sharing between processes.</span></div>
+            <div class="option dec"><span class="tag">Revised</span><b>Owned input snapshots; immutable cache mmap</b><span class="why">Ordinary build outputs can change in place. Keep them owned; map only cache files satisfying the explicit immutable-writer contract. Both backings use the same validated table views. Include validation and page faults in cached timing.</span></div>
+            <div class="option alt"><span class="tag">Fallback</span><b>Owned aligned cache reads</b><span class="why">Required wherever immutability cannot be established, and used under Miri. Mapping is not a prerequisite for the first table migration.</span></div>
           </div>
         </article>
         <article class="card">
           <header><span class="id">D4</span><h3>Eager or lazy</h3></header>
           <div class="options">
-            <div class="option dec"><span class="tag">Decided</span><b>Eager and complete, made fast and kept</b><span class="why">Build everything for every unit, in parallel, and cache it. One code path, deterministic, and every query answered from tables. Answers that depend on the whole program (types, globals, coroutines) never wait on a lazy unit.</span></div>
-            <div class="option alt"><span class="tag">Alt</span><b>Index eagerly, materialize units lazily</b><span class="why">What gdb and lldb do. It is cheaper for the first load of an enormous program, but it adds a second state to every lookup and makes results depend on which units happened to be loaded. Revisit only if the large-program budget is missed.</span></div>
+            <div class="option dec"><span class="tag">Initial</span><b>Eager normalization within resource budgets</b><span class="why">One sealed image simplifies repeated queries. Preserve explicit partial/unsupported states, bound work, and measure retained data on the large corpus.</span></div>
+            <div class="option alt"><span class="tag">Revisit</span><b>Index eagerly, materialize units lazily</b><span class="why">A valid alternative if eager resource/latency budgets fail. Correct lazy loading need not change answers, but would require explicit completion and ownership rules. Do not weaken correctness to preserve an eager performance target.</span></div>
           </div>
         </article>
         <article class="card">
           <header><span class="id">D5</span><h3>Strings</h3></header>
           <div class="options">
-            <div class="option dec"><span class="tag">Decided</span><b><code>u32</code> offsets, NUL-terminated, <code>.debug_str</code> copied whole</b><span class="why">4 bytes per reference and free interning for DWARF's own strings. Length is a SIMD <code>memchr</code> over short names.</span></div>
+            <div class="option dec"><span class="tag">Decided</span><b><code>u32</code> offsets with validated display strings</b><span class="why">Reuse valid DWARF string bytes, normalize invalid referenced strings once and append generated strings deterministically. NUL scanning must be bounded; measure long-name workloads too.</span></div>
             <div class="option alt"><span class="tag">Alt</span><b><code>(offset, len)</code> spans</b><span class="why">8 bytes per reference to save a <code>memchr</code>.</span></div>
             <div class="option alt"><span class="tag">Alt</span><b>Intern every string by content</b><span class="why">A smaller pool, but hashing every string is what made GDB's and LLDB's indexers slow.</span></div>
           </div>
@@ -967,28 +1011,28 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <article class="card">
           <header><span class="id">D7</span><h3>Instrumentation</h3></header>
           <div class="options">
-            <div class="option dec"><span class="tag">Decided</span><b>An in-crate <code>span!</code>/<code>count!</code> feeding several sinks</b><span class="why">About 1.5 ns when off. Text and JSON reports for agents and scripts, Tracy zones (about 22 ns each) for people, from the same instrumentation; under our control, and compiled into release builds.</span></div>
+            <div class="option dec"><span class="tag">Initial</span><b>A small phase/counter API</b><span class="why">Machine-readable reports first, optional Tracy from the same events. Validate overhead on whole loads; retain a small implementation rather than building a profiling framework.</span></div>
             <div class="option alt"><span class="tag">Alt</span><b>Tracy as the primary tool</b><span class="why">Excellent for a person at a screen. An agent can reach it only through <code>tracy-capture</code> and <code>tracy-csvexport</code>, a live connection, and an exact version pin, which yields aggregates without the timeline that makes Tracy worth using.</span></div>
-            <div class="option alt"><span class="tag">Alt</span><b><code>tracing</code> with subscribers</b><span class="why">About 40–175 ns per span, a dependency stack, and an async span model this code does not need.</span></div>
+            <div class="option alt"><span class="tag">Alt</span><b><code>tracing</code> with subscribers</b><span class="why">Reconsider if an adapter removes enough custom code. Compare configurations and whole-workload cost, not unrelated per-span microbenchmarks.</span></div>
           </div>
         </article>
         <article class="card">
           <header><span class="id">D8</span><h3>Cache keys</h3></header>
           <div class="options">
-            <div class="option dec"><span class="tag">Decided</span><b>Build-id, else XXH3-128 of the contents; <code>stat</code> as a fast path including <code>ctime</code></b><span class="why">Fast, and it catches accidental change. Validation, not the hash, protects against a malformed file.</span></div>
+            <div class="option dec"><span class="tag">Revised</span><b>Content digests plus normalization and format versions</b><span class="why">XXH3-128 is sufficient for accidental collisions in a private local cache; build IDs select debug-file candidates but are not content checksums. Persistent stat records only route lookup. Imported/shared caches need a separate authenticity design.</span></div>
             <div class="option alt"><span class="tag">Alt</span><b>BLAKE3</b><span class="why">Cryptographic strength we do not need, at several times the cost per core.</span></div>
           </div>
         </article>
       </div>
       <div class="prose">
-        <p>One rule in <code>AGENTS.md</code> changes: "Debug-info providers normalize data at the boundary" stays, and gains "into image tables, which are a pure function of the input files". The rule against unsafe code stays, with one named exception: the mapping module of D3, whose two calls are the only <code>unsafe</code> this work adds.</p>
+        <p>Keep provider-specific data at the edge: the container and public views are neutral, while DWARF expressions, CFI, ELF load descriptors and Go pclntab are versioned private provider tables. <code>AGENTS.md</code>'s normalization and evaluator boundaries remain. Narrow unsafe exceptions need their own safety comments: mapping ownership and profiling allocators are separate concerns.</p>
       </div>
     </section>
 
     <!-- ================================================================ -->
     <section id="budgets">
       <div class="eyebrow">Budgets</div>
-      <h2>What "by far the fastest" means in numbers</h2>
+      <h2>Provisional performance targets</h2>
       <div class="scroller">
         <table class="data">
           <thead><tr><th>Measure</th><th class="n">today</th><th class="n">gdb</th><th class="n">target, cold</th><th class="n">target, cached</th></tr></thead>
@@ -1007,7 +1051,8 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         </table>
       </div>
       <div class="prose">
-        <p>These are targets, set from the parse floor measured above. Decoding every attribute of the large program takes 21 ms on 16 threads, and hashing every name takes 45 ms, so 600 ms leaves more than ten times the floor for the real work. Phase 0 re-measures every "today" column with the benchmark, and each phase records what it reached in the tracker.</p>
+        <p>These are stretch targets, not demonstrated feasibility or correctness gates. A bare DIE decode omits I/O, decompression, normalization, identity resolution, graph comparison, indexes and validation. In particular, 12 MB assumes an unproved deduplication ratio and omits some side metadata; total RSS is not directly comparable to payload bytes. P0 defines retained payload, peak transient heap, mapped bytes and whole-process RSS separately and rebaselines the targets with those denominators.</p>
+        <p><b>Measurement contract:</b> report (1) cache-disabled ingestion with a warm OS page cache, (2) a validated persistent-cache hit in a new process, (3) same-process <code>Program</code> reuse, and optionally (4) cold-storage I/O on an isolated machine. Do not drop the host's global page cache. Report loader-only time and process-start-to-ready separately; background cache-write completion is a third measurement. “To prompt” for a batch process must be replaced by an explicit readiness marker and reported separately from exit time. Baseline GDB/LLDB queries do less work; compare common user workflows (first source breakpoint, stack, locals/type query) before claiming superiority.</p>
       </div>
     </section>
 
@@ -1016,14 +1061,14 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <div class="eyebrow">Plan</div>
       <h2>Phases and tracking</h2>
       <div class="prose">
-        <p>The order is chosen to finish the whole rewrite with the least total work, not to deliver partial wins early. Four rules decide it:</p>
+        <p>Each phase is independently reviewable and leaves supported workflows working. Use these rules:</p>
         <ul>
-          <li><b>No work on code that will be deleted.</b> Today's loader gets no fixes, not even the Go pathology. Its replacement is built correctly the first time, and the old loader serves only as the oracle until each family is ported.</li>
-          <li><b>Infrastructure is written once, in its final form.</b> The pool, the per-unit pipeline, the ordered merge, the file format, and the validator arrive with the first tables. No serial loader is ever written to be parallelized later.</li>
-          <li><b>Each consumer is touched once.</b> A table family's phase does all of its work in one pass: its ingestion, its tables, every consumer, the protocol replies that carry it, and the deletion of its old types. No separate "boundary" pass revisits the same code.</li>
-          <li><b>Dependency order.</b> Lines depend on nothing. Functions and symbols need strings and lines. Types need strings. Variables, locations, and coroutines need all three. The cache is wired once nothing of the old model remains.</li>
+          <li><b>Preserve a reference.</b> P0 captures semantic fixtures and a runnable test-only reference loader before removing anything. Do not freeze known bugs into the oracle: a discovered correctness bug gets a failing test and separate correction. Small measured fixes are allowed when they stand on their own.</li>
+          <li><b>Prove a vertical slice.</b> P1 builds the format and validation with lines first, in owned storage and jobs=1, then proves identical parallel output. It does not need a complete general-purpose parallel scheduler or mapper before the first useful slice.</li>
+          <li><b>Explicit adapters.</b> During P1–P3 retain only adapters needed by the legacy variable/coroutine loader. List them and their deletion phase. Test-only duplicate representations are permitted for differential testing; production must not run two full loaders indefinitely.</li>
+          <li><b>Actual dependency order.</b> Lines need unit/file context and executable-range filtering; stripped Go lines need pclntab function completion. Functions contain generic/coroutine links supplied later. Types depend on scopes and origin resolution as well as strings. P4 removes the last adapters only after these cross-family dependencies are ported.</li>
         </ul>
-        <p>The cost of this order: until P4 finishes, both loaders run, so loads and the test suite stay about as slow as today. The big test-time win arrives in P5. Each task lands in commits that keep the full gate green and records its measured result here. Status: <span class="st todo">todo</span> <span class="st doing">doing</span> <span class="st done">done</span>.</p>
+        <p>During migration, report temporary duplicate work and memory separately; keep the 1 GiB test cap. Differential runs can serialize old/new loads and compare compact dumps to avoid holding both graphs at once. New regression tests fail before their fixes; run focused checks while iterating and <code>just all</code> before commits, adding <code>just sim 600</code> for lifecycle/model changes as required. All project commands run through the pinned shell, e.g. <code>just dev --command just all</code>. Status: <span class="st todo">todo</span> <span class="st doing">doing</span> <span class="st done">done</span>.</p>
       </div>
 
       <div class="phase">
@@ -1032,74 +1077,77 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
           <tr><td>P0.1</td><td><code>profile</code> module: <code>span!</code>, <code>count!</code>, per-thread buffers, CPU time, peak RSS, optional <code>perf-event</code> instructions, and pluggable sinks; spans around today's load phases.</td><td><span class="st todo">todo</span></td><td></td></tr>
           <tr><td>P0.2</td><td><code>--timings FILE</code> JSON with counters and Chrome trace events; <code>just timings FILE [FILE]</code> summary, diff, and <code>--threads</code>.</td><td><span class="st todo">todo</span></td><td></td></tr>
-          <tr><td>P0.3</td><td>A counting allocator over mimalloc that sees all threads. Rework <code>loading_a_large_program_allocates_in_proportion_to_its_debug_information</code>, which counts only the calling thread.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P0.3</td><td>Extend <code>tests/support/memory_cap.rs</code>'s thread-local allocation measurements with isolated process/load totals; keep its existing global live-heap cap. Port <code>dwarf::tests::loading_a_large_program_allocates_in_proportion_to_its_debug_information</code> (gofmt o0/o2) to count workers too. Test failed realloc and cross-thread frees.</td><td><span class="st todo">todo</span></td><td></td></tr>
           <tr><td>P0.4</td><td><code>just bench</code> and <code>just bench --compare BASE</code>: the pinned corpus (including a pinned large program), <code>jobs = 1</code> instruction counts, allocations, bytes, wall medians and spread, a checked-in baseline, and tolerances.</td><td><span class="st todo">todo</span></td><td></td></tr>
           <tr><td>P0.5</td><td><code>just profile-instructions</code>, <code>profile-heap</code> (with the <code>system-alloc</code> feature), and <code>profile-counters</code>; <code>perf</code> in the default dev shell.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P0.6</td><td>Inventory <code>ModuleMetadata</code>, every <code>ModuleImage</code> accessor, variable/unwind providers, synthetic constructors, protocol replies and retained executable-byte consumers. Assign each to P1–P4. Freeze a test-only reference loader plus small semantic dumps, including explicit failures, before migration. Pin the large input by binary digest, build recipe, source and lockfiles; do not benchmark the moving development executable as a fixed fixture.</td><td><span class="st todo">todo</span></td><td></td></tr>
         </tbody></table></div>
-        <div class="exit">Exit: the "Where we are" tables regenerate from <code>just bench</code>, <code>--timings</code>, and the recipes; a deliberate slowdown fails the benchmark and shows in <code>--compare</code>.</div>
+        <div class="exit">Exit: archived reproducible baseline reports, complete field/accessor inventory and reference answers; measured noise/tolerances; a deliberate benchmark-only work increase is detected. Reconcile historical process/phase timings and record any unavailable tools without inventing results.</div>
       </div>
 
       <div class="phase">
         <header><span class="pid">P1</span><h3>Foundation and lines</h3><span class="st todo">todo</span></header>
-        <p>The whole machine, end to end, carrying the smallest self-contained data.</p>
+        <p>A small complete storage slice with explicit compatibility adapters.</p>
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
-          <tr><td>P1.1</td><td><code>src/image</code>: typed ids and <code>Opt</code>, <code>Span</code>, <code>StrId</code>, the table container and builder, compile-time size assertions, the header, directory, and trailer, the schema hash, the validator framework, and the writer and reader. Every table is round-tripped through a file in tests from the first commit.</td><td><span class="st todo">todo</span></td><td></td></tr>
-          <tr><td>P1.2</td><td>The mapping module (D3) and its tests (§ <a href="#testing">testing</a>); cache images and input files are mapped, inputs only while they are ingested. Add the <code>miri</code> component to the flake's toolchain (it has only clippy, rust-src, and rustfmt today) and a <code>just miri</code> recipe for the image tests. A fuzz target over image files: corrupted images are rejected, never panic, never read out of bounds.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P1.1</td><td><code>src/image</code>: typed IDs/spans, checked limits, endian-stable records, aligned owner, schema descriptor/layout assertions, explicit normalization revision and bounded validator. Round-trip the first tables with the same writer/reader; keep provider payloads private and the public model neutral.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P1.2</td><td>Owned aligned backing, bounded snapshot reads, and validator tests first; immutable-cache mapping per D3 can follow in this phase or P5. Add a focused Miri recipe/toolchain component if available in the pinned nightly. Fuzz arbitrary owned image bytes under containment; keep mmap lifetime/rename tests native.</td><td><span class="st todo">todo</span></td><td></td></tr>
           <tr><td>P1.3</td><td>The loader pool and <code>jobs</code> setting; S0 and S1 (sections, parallel decompression, unit headers); the S2 per-unit batch and S3 ordered merge skeleton, with cross-unit references through sorted offset tables.</td><td><span class="st todo">todo</span></td><td></td></tr>
-          <tr><td>P1.4</td><td>The equivalence oracle (a canonical dump of what an image answers, old loader against new, over every fixture) and the determinism test (<code>jobs = 1</code> against <code>jobs = 16</code>, twice each, byte-identical).</td><td><span class="st todo">todo</span></td><td></td></tr>
-          <tr><td>P1.5</td><td>Strings (<code>.debug_str</code> copied whole), source files, line rows, sequences, and the address and <code>(file, line)</code> indexes. Port stepping, line breakpoints, frames, and DAP and web sources; delete <code>StatementRow</code>, <code>LineEntry</code>, and <code>LineIndex</code>.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P1.4</td><td>Extend P0's differential harness for migrated lines and file queries. Compare complete semantics at boundaries/interiors and byte determinism at jobs=1, 2 and the configured maximum across fresh processes, paths and image bindings. Add sabotage cases for validator and differential-oracle omissions.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P1.5</td><td>Strings, resolved source paths, lossless lines/sequences and indexes (R4). Port stepping/breakpoints/frame/source consumers. Retain a documented line adapter for the legacy variable loader and stripped Go completion until P2/P4; remove old production line storage only when those callers have migrated.</td><td><span class="st todo">todo</span></td><td></td></tr>
         </tbody></table></div>
-        <div class="exit">Exit: lines come only from the new tables; their measured bytes and times replace this page's estimates before P2 starts.</div>
+        <div class="exit">Exit: public line answers match the reference, malformed/wide/overlapping cases pass, serial and parallel payloads agree; measured bytes and times replace estimates. Remaining adapters and their deletion tasks are recorded.</div>
       </div>
 
       <div class="phase">
         <header><span class="pid">P2</span><h3>Functions, symbols, and code</h3><span class="st todo">todo</span></header>
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
           <tr><td>P2.1</td><td>Functions, code instances, ranges, breakpoint entries, roles, and prologue refinement, from the S2 walk.</td><td><span class="st todo">todo</span></td><td></td></tr>
-          <tr><td>P2.2</td><td>ELF symbols, dynamic symbols, PLT and GOT, sections, thread locals; the CFI index; Go's pclntab and its functions, lines, and frame-pointer analysis. The ELF headers that load-bias and link-map code need move into the image, so <code>ExecutableSource</code> stops keeping the whole executable in memory.</td><td><span class="st todo">todo</span></td><td></td></tr>
-          <tr><td>P2.3</td><td>Port breakpoints, symbolization, stepping, unwinding, the CLI and completion, DAP, and web. Replies carry <code>(ModuleImageId, FunctionId)</code> instead of cloned <code>FunctionInfo</code>. Delete the old function, instance, symbol, and section types.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P2.2</td><td>ELF symbols, PLT/GOT, sections, TLS and provider provenance; CFI bytes/index plus decoding base addresses, address size and Go code ranges; pclntab/stripped-Go completion. Inventory each <code>ExecutableSource.data</code> consumer and replace only metadata-only reads with private ELF descriptors. Retain any bytes still needed by core/simulator paths, and account for them.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P2.3</td><td>Port breakpoints, symbolization, stepping, unwinding, completion and client presentation. Preserve interval, alias and prefix queries and reply ownership. Keep generic/coroutine links and legacy variable adapters explicit until P3/P4; do not delete old types still required by the test-only reference loader.</td><td><span class="st todo">todo</span></td><td></td></tr>
         </tbody></table></div>
-        <div class="exit">Exit: all code metadata comes from the new tables, built in parallel; on 16 cores these phases take ≤ 15 ms for the tokio server.</div>
+        <div class="exit">Exit: migrated code/symbol/CFI answers agree across GCC/Clang, optimized/unoptimized, PIE/non-PIE and stripped Go; interval overlap and alias tests pass; report performance against P0, retaining ≤15 ms as a provisional phase target.</div>
       </div>
 
       <div class="phase">
         <header><span class="pid">P3</span><h3>Types</h3><span class="st todo">todo</span></header>
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
-          <tr><td>P3.1</td><td>The type store: tag and data columns, <code>extra</code> payloads, and member, variant, enumerator, and parameter tables.</td><td><span class="st todo">todo</span></td><td></td></tr>
-          <tr><td>P3.2</td><td>Per-unit fingerprints and cross-unit hash-consing with structural confirmation; leaves-first numbering; names and identities computed once per unique type; name indexes as sorted hashes, built once.</td><td><span class="st todo">todo</span></td><td></td></tr>
-          <tr><td>P3.3</td><td>Port the evaluator, views, presentation, runtime models, and coroutine types to type views and the decoded key. Replies carry <code>TypeReference</code> instead of cloned <code>TypeInfo</code>. Delete <code>TypeNode</code>, <code>TypeInfo</code>, and <code>TypeIndex</code>.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P3.1</td><td>Complete type graph/identity tables from the field inventory, including forward/cyclic edges and unavailable nodes. Prove the neutral object-safe borrowed <code>TypeSource</code> interface against the real and fake targets before broad consumer changes.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P3.2</td><td>SCC analysis, conservative acyclic deduplication and optional bounded cyclic comparison per R3; deterministic remap of every reference. Separate semantic identity lookup from storage identity; preserve aliases and ambiguity. Record retained and merged counts, payload bytes and comparison work.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P3.3</td><td>Port evaluator, views, presentation, runtime models and coroutine type accessors; preserve the evaluator boundary and snapshot owners. Remove legacy type storage only after its variable-loader adapter is replaced. Keep reference semantics independent of the new interner.</td><td><span class="st todo">todo</span></td><td></td></tr>
         </tbody></table></div>
-        <div class="exit">Exit: the tokio server has about 6,100 type nodes, not 60,839; type phases take ≤ 10 ms on 16 cores.</div>
+        <div class="exit">Exit: recursive/nominal/ambiguous types, every TypeKind and identity query pass; no forced merges to reach a count. Report actual deduplication and peak work, then set an evidence-based type budget (the original ≤10 ms target is provisional).</div>
       </div>
 
       <div class="phase">
         <header><span class="pid">P4</span><h3>Variables, locations, and call sites</h3><span class="st todo">todo</span></header>
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
-          <tr><td>P4.1</td><td>Scopes, objects, the expression pool, location lists, frame bases, and globals as tables. Go visibility stores the declared line and is decided at the stop (F6).</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P4.1</td><td>Scopes, objects, complete expression contexts/procedures, default/ranged location lists, frame bases, constants and globals. Implement the exact Go visibility predicate from R4 and route all visibility consumers through it.</td><td><span class="st todo">todo</span></td><td></td></tr>
           <tr><td>P4.2</td><td>Call sites, tail calls, and entry values; coroutines, resume points, and held ranges; the <code>VariableInfo</code> provider evaluates over the tables.</td><td><span class="st todo">todo</span></td><td></td></tr>
-          <tr><td>P4.3</td><td>Port inspection, evaluation, and the runtime models. Replies stop cloning <code>GlobalVariableInfo</code>. Delete <code>DwarfVariableInfo</code>'s heap catalog, the caps that existed only because of it (<code>MAX_DATA_OBJECTS</code>, <code>MAX_SYMBOLIC_NAMES</code>), and the old loader.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P4.3</td><td>Finish the P0 inventory: inspection, runtime models, vtables, constants, packages/producers, embedded views and explicit error/provenance states. Delete production legacy catalogs/adapters. Replace image-wide object/name caps only with tested byte/work budgets, retaining expression and recursion limits; do not merely remove guards.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P4.4</td><td>Run the full differential corpus while the independent reference still exists; archive portable semantic regressions, then remove the test-only reference loader. Confirm no old-loader calls or duplicate production catalogs remain.</td><td><span class="st todo">todo</span></td><td></td></tr>
         </tbody></table></div>
-        <div class="exit">Exit: nothing of the old model remains; uscope's own debug build loads; every cold budget is met or has a trace explaining why not.</div>
+        <div class="exit">Exit: inventory complete, reference equivalence and public scenarios pass, pinned large build loads within the explicit memory cap, full cold report recorded. Missed performance targets require a revised design/budget with evidence, not relaxed correctness or disabled resource guards.</div>
       </div>
 
       <div class="phase">
         <header><span class="pid">P5</span><h3>The cache</h3><span class="st todo">todo</span></header>
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
-          <tr><td>P5.1</td><td>The cache directory, keys, the <code>stat</code> fast path, atomic writes, eviction, settings, <code>--no-cache</code>, and background writes.</td><td><span class="st todo">todo</span></td><td></td></tr>
-          <tr><td>P5.2</td><td>Fixture images warmed by <code>just build-test-programs</code>; tests and the simulator's corpus load through the same path; the oracle's cold loads stay cold.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P5.1</td><td>Content/version keys, discovery policy, immutable publication/mapping, bounded writes/eviction and cache controls per R1/R2. Test failures and concurrent writers/readers in private scratch roots; cold and warm loads must preserve diagnostics and metadata.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P5.2</td><td>Separate cache-warm recipe after fixture/debugger builds, awaited writes, isolated cold/warm test lanes. Simulator corpus preparation may use the cache outside worlds; replay and seed semantics cannot depend on cache hits or worker completion order.</td><td><span class="st todo">todo</span></td><td></td></tr>
           <tr><td>P5.3</td><td>Update <code>AGENTS.md</code> and <code>docs/</code> for the new model.</td><td><span class="st todo">todo</span></td><td></td></tr>
         </tbody></table></div>
-        <div class="exit">Exit: every cached budget is met; loading is ≤ 5% of the test suites' time.</div>
+        <div class="exit">Exit: stale/corrupt/missing/full/read-only/concurrent cache cases pass, identical payloads and answers across bindings, repeated session memory remains bounded. Record cache-hit cost including hashing/validation and suite wall time; ≤5% summed load time remains a provisional goal.</div>
       </div>
 
       <div class="phase">
         <header><span class="pid">P6</span><h3>Runtime</h3><span class="st todo">todo</span></header>
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
-          <tr><td>P6.1</td><td>Modules load on the pool, off the controller thread, in batches; requests wait on the modules they need; lifecycle tests and <code>just stress</code> cover cancellation and cleanup.</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P6.1</td><td>Review and implement R8's generation-tagged metadata barrier and injectable completion source. Cover out-of-order completions, failures, stale requests, exec/unload/reload, attach cancellation and shutdown with public Scenario tests and deterministic simulator scheduling.</td><td><span class="st todo">todo</span></td><td></td></tr>
           <tr><td>P6.2</td><td>Stop-path timing: from a stop to its first snapshot, and per request.</td><td><span class="st todo">todo</span></td><td></td></tr>
           <tr><td>P6.3</td><td>Big-unit splitting, only if a trace shows the long pole.</td><td><span class="st todo">todo</span></td><td></td></tr>
           <tr><td>P6.4</td><td>Lookup layouts (Eytzinger, prefetch), only if counters show search misses.</td><td><span class="st todo">todo</span></td><td></td></tr>
         </tbody></table></div>
+        <div class="exit">Exit: coherent stop/event ordering and prompt cancellation, no worker ptrace calls or surviving inferiors, bounded queues/memory, unchanged deterministic replay; <code>just all</code> and <code>just sim 600</code> pass before merge.</div>
       </div>
 
       <div class="phase">
@@ -1118,21 +1166,22 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <h2>Keeping it correct while it moves</h2>
       <div class="prose">
         <ul>
-          <li><b>Equivalence.</b> Until the old loader is deleted, every fixture is loaded by both loaders and their canonical dumps must match: functions, instances, lines, symbols, types by identity, globals, scopes, and objects. Intended differences, such as duplicate types collapsing, are normalized in the dump, never allowed through as a mismatch.</li>
-          <li><b>Determinism.</b> Images are compared byte for byte across thread counts and across runs. The simulator's fingerprint includes each corpus image's hash, so a change that moves an id is seen at once.</li>
+          <li><b>Equivalence.</b> The independent test-only reference survives until P4.4. Compare all observable fields, error/partial states and query results, not just names or node counts. Canonicalize graph references with cycle-aware stable correspondence; never use the new interner to normalize the oracle's answers. Ignore only documented storage multiplicity, preserving scope/type distinctions, ambiguous candidates, declaration provenance and row ordering. Include queries at boundaries and interiors. Known semantic corrections land with separate failing tests.</li>
+          <li><b>Determinism.</b> Compare canonical payloads across jobs=1/2/max, fresh processes, reordered completion, copied input paths and rebound module IDs. Compare cache hits to cold ingestion. No timing/stat/path metadata enters the payload hash. If the simulator fingerprint gains payload identity, version its fingerprint format explicitly and keep golden executable manifests unchanged.</li>
           <li><b>The unsafe module.</b> The mapping module is tested on its own, before anything depends on it:
             <ul>
-              <li>a mapped file reads exactly what <code>fs::read</code> reads, for sizes 0, 1, a page minus one, a page, a page plus one, and a sparse file larger than 4 GiB;</li>
+              <li>owned/mapped cache bytes agree for sizes 0, 1, a page minus one, a page and a page plus one; wide-offset arithmetic is tested synthetically without allocating gigabytes. Any optional sparse-file native test touches only selected pages under containment;</li>
               <li>a mapping still reads the old contents after its file is replaced by rename, and after it is unlinked, which is what eviction and atomic cache writes rely on;</li>
-              <li>an input rewritten during ingestion is detected by the identity check and ingested again, never returned mixed;</li>
-              <li>truncating a mapped file in a child process and reading past the new end raises <code>SIGBUS</code> in that child, documenting exactly the hazard the safety argument excludes;</li>
+              <li>synchronized ordinary input rewrites/truncation during the owned read produce retry or a changed-input error, never an input-backed borrowed slice; retry exhaustion is explicit;</li>
+              <li>do not deliberately violate Rust reference invariants to test mmap mutation. An optional OS-only child probe can document <code>SIGBUS</code> with core dumps disabled; it is not a safety proof or a correctness test for the production reader;</li>
               <li><code>compile_fail</code> doc tests show that a view cannot outlive its <code>Mapping</code>;</li>
-              <li>every image test runs against both backings, mapped and an owned aligned buffer, and must agree. The owned backing also runs under Miri (<code>just miri</code>), which cannot execute <code>mmap</code> but checks every byte-to-record view and validator path for undefined behavior. The image fuzz target exercises both.</li>
+              <li>run the same validation/view cases on both native backings. Run pure owned-buffer validator/view tests under Miri, excluding ptrace, worker scheduling and filesystem/mapping paths unsupported by that configuration. Fuzz owned bytes; native mapping tests separately establish the backing contract.</li>
             </ul></li>
-          <li><b>Untrusted input.</b> The existing DWARF and ELF fuzz targets drive the new walk. A new target corrupts image files, and the validator must reject them without panicking. Every <code>u32</code> limit has a test that it fails explicitly.</li>
-          <li><b>Behavior.</b> The scenario suites stay the arbiter of what the debugger answers; this work changes how, not what. Lifecycle changes in P6 follow the repository's concurrency rules: cancellation, cleanup, no surviving inferiors, and <code>just stress</code>.</li>
-          <li><b>Resources.</b> Tests run with images from the warmed cache and <code>jobs</code> set low, so sixteen concurrent test processes do not each start sixteen loader threads. The per-process 1 GiB cap stays; the allocation test counts every thread.</li>
-          <li><b>Performance.</b> <code>just bench</code> in <code>just all</code>, with a baseline that moves only in commits of its own.</li>
+          <li><b>Untrusted input.</b> Existing <code>dwarf-expression</code>, <code>elf-symbols</code> and <code>gopclntab</code> fuzzers cover components, not the complete DIE loader. Add a bounded structured ELF/DWARF ingestion target and an image-validator target. Corrupt tags, counts, strides, offsets, spans, indexes, strings, cycles and checksums. Recompute the checksum for semantic corruption cases so they reach the validator. Synthetic limits exercise overflows without enormous allocations. All fuzz/sweep runs use <code>scripts/contained.sh</code>.</li>
+          <li><b>Behavior.</b> Start from <code>tests/debugger/{metadata,identities,debug_files,variables,values,execution,stepping}.rs</code>, Go/tokio suites and the pure Go visibility test. Add only missing semantic cases: wide fields, recursive/nominal types, overlapping ranges, default/alternative locations and multiple expression contexts. Preserve GCC/Clang, optimization, PIE/frame-pointer coverage and synthetic malformed metadata. P6 additionally needs cleanup, cancellation, event/state consistency, <code>just stress</code> and <code>just sim 600</code>.</li>
+          <li><b>Cache.</b> ScratchDir tests cover same-build-id modifications, same-size/mtime rewrites, normalization-version changes, executable relocation, distinct image bindings, separate-debug search changes/appearance, corrupt/truncated images, checksum-valid malformed indexes, symlinks/permissions, concurrent writers, eviction races, full/read-only storage and skipped background writes. Use observable synchronization, never sleeps or negative time-window assertions.</li>
+          <li><b>Resources.</b> Use low loader jobs under nextest and a small parallelism lane. Keep cold correctness and warm-cache tests explicit, the global 1 GiB heap cap intact and OS containment around corpus runs/mappings. Account for all workers and held snapshots, not just the caller's allocations.</li>
+          <li><b>Performance.</b> A calibrated smoke benchmark joins <code>just all</code>; full corpus/profilers are separate. Pin artifact hashes and provenance; review baseline increases with evidence. This documentation-only review does not run or require the implementation gates.</li>
         </ul>
       </div>
     </section>
@@ -1145,11 +1194,11 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <table class="data">
           <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
           <tbody>
-            <tr><td>The rewrite touches most of the crate and its tests.</td><td>Move one table family and its consumers per phase; keep the equivalence oracle green throughout; no phase keeps two representations of the same data.</td></tr>
-            <tr><td>Type deduplication merges types that differ.</td><td>Fingerprints only nominate candidates; structural comparison decides. Fixtures with two versions of one crate and with C++ ODR violations cover it.</td></tr>
-            <tr><td>Stale or corrupt cache files give wrong answers.</td><td>The schema hash covers every layout change; identity uses build-id or a content hash, with <code>ctime</code> in the fast path; the trailer and full validation run on every read; there is an opt-out.</td></tr>
+            <tr><td>The rewrite touches most of the crate and its tests.</td><td>P0's inventory and independent reference, family-by-family adapters with deletion tasks, and full semantic comparisons before reference removal.</td></tr>
+            <tr><td>Type deduplication merges types that differ.</td><td>Nominal eligibility plus complete bounded graph comparison, conservative non-merging on uncertainty, independent equality semantics and forced-collision tests.</td></tr>
+            <tr><td>Stale or corrupt cache files give wrong answers.</td><td>Selected-input content identity, explicit semantic version and layout fingerprint, discovery revalidation, bounded structural/semantic checks and isolated failure tests. No build-id-only acceptance.</td></tr>
             <tr><td>Parallel merge order leaks into ids.</td><td>Ids come only from unit order; the determinism test runs on every fixture.</td></tr>
-            <tr><td>A mapped file changes underneath uscope.</td><td>Cache files are only ever replaced by rename. Inputs are mapped only during ingestion and re-checked by identity afterwards. Truncation during that window can still raise <code>SIGBUS</code>; the tests document the case, and it is the stated limit of the safety argument.</td></tr>
+            <tr><td>A mapped file changes underneath uscope.</td><td>Ordinary inputs are owned snapshots. Map only private cache inodes with an explicit immutable-publication contract; use owned storage otherwise. No retrospective stat check is treated as a Rust safety argument.</td></tr>
             <tr><td>Thread oversubscription in tests and on small machines.</td><td>A bounded pool, a low jobs setting under nextest, and cached fixtures.</td></tr>
             <tr><td><code>u32</code> limits on very large programs.</td><td>Checked when building; an explicit error naming the limit. Byte offsets into the string pool are the first to hit it, as Zig found, and can move to sequential string ids if needed.</td></tr>
             <tr><td>The Tracy client and the Tracy viewer drift apart.</td><td>The client is pinned to the flake's viewer; the gate checks the resolved <code>tracy-client-sys</code> version; they move together.</td></tr>
@@ -1174,7 +1223,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         </article>
         <article class="card">
           <header><span class="id">I3</span><h4>Abbreviation-specialized decoding</h4></header>
-          <p>gimli decodes each attribute generically, at 19–28 ns per DIE. Most abbreviations use only fixed-size forms, so the offsets of the attributes we want can be computed once per abbreviation and the rest skipped, as GDB decides interest per abbreviation. Measure first: it matters only once everything else is near the floor.</p>
+          <p>Profile abbreviation/form distributions before specializing decoding. LEB128, indirect, block and string forms are variable-width, so constant attribute offsets are valid only for a proved fixed-width prefix. Keep gimli as the reference and preserve malformed-input handling; defer a custom decoder until a measured bottleneck justifies it.</p>
         </article>
         <article class="card">
           <header><span class="id">I4</span><h4>Tables in the browser</h4></header>
@@ -1186,7 +1235,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         </article>
         <article class="card">
           <header><span class="id">I6</span><h4>Shared caches</h4></header>
-          <p>Images are content-addressed and self-validating, so a team or CI could share a cache directory, or publish images beside a release's debug files, much as debuginfod serves debug files.</p>
+          <p>A future distribution cache needs authenticated provenance, compatibility policy and an immutable transport/storage contract. A checksum-valid image can still lie about its source. Import into owned storage or a privately published local entry; never assume an arbitrary shared directory satisfies D3.</p>
         </article>
       </div>
     </section>
@@ -1196,13 +1245,13 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <div class="eyebrow">Method</div>
       <h2>How the numbers on this page were measured</h2>
       <div class="prose">
-        <p>All runs were on a warm page cache on the machine in the header. Release builds unless stated. Phase 0 replaces each of these one-off procedures with a repeatable command.</p>
+        <p>Original reported procedures, preserved for provenance; they were not rerun as performance measurements in this review. All reported runs used a warm page cache and release builds unless stated. P0 replaces best-of-three probes with archived repetitions, median/spread and explicit start/ready/exit boundaries. Run project commands in the pinned Nix shell and wide/profile runs under containment.</p>
       </div>
       <div class="scroller">
         <table class="data">
           <thead><tr><th>Measurement</th><th>Procedure</th></tr></thead>
           <tbody>
-            <tr><td>Load times and RSS</td><td>A script runs <code>uscope --batch --no-config PROGRAM</code>, <code>gdb -batch -nx -iex 'set index-cache enabled off' -ex 'info line main'</code>, and <code>lldb -b -x -o 'image lookup -n main'</code> three times each and keeps the fastest, reading wall time, CPU time, and max RSS from <code>wait4</code>.</td></tr>
+            <tr><td>Load times and RSS</td><td>Reported commands: <code>uscope --batch --no-config PROGRAM</code>, <code>gdb -batch -nx -iex 'set index-cache enabled off' -ex 'info line main' PROGRAM</code>, and <code>lldb -b -x -o 'image lookup -n main' PROGRAM</code>; three runs, fastest, wall/CPU/max RSS from <code>wait4</code>. Supply the program to each tool, ensure EOF/quit, check successful query output and disable uncontrolled network/debug-file discovery. Exit timing is not a prompt marker.</td></tr>
             <tr><td>Phase times</td><td>Temporary <code>Instant</code> timers around each phase of <code>load_image</code> and <code>load_variable_info</code>, since reverted.</td></tr>
             <tr><td>Instruction profile</td><td><code>valgrind --tool=callgrind</code> on a release build with <code>debug = "line-tables-only"</code>; <code>callgrind_annotate --inclusive=yes --tree=calling</code>.</td></tr>
             <tr><td>Allocations</td><td><code>valgrind --tool=dhat</code> on a release build with the <code>#[global_allocator]</code> removed, because Valgrind cannot see mimalloc. A script groups blocks by their first uscope frame.</td></tr>
