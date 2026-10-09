@@ -51,6 +51,21 @@
       tokioFixtureCrates = pkgs.rustPlatform.importCargoLock {
         lockFile = ./tests/fixtures/rust/tokio/Cargo.lock;
       };
+      # Tracy's viewer draws with EGL, which off NixOS finds none of the
+      # drivers nixpkgs' libraries look for, so it points the viewer at
+      # nixpkgs' Mesa: AMD and Intel GPUs, or software rendering. Its capture
+      # and export tools draw nothing and run as they are.
+      tracy = pkgs.symlinkJoin {
+        name = "tracy-${pkgs.tracy.version}";
+        paths = [ pkgs.tracy ];
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+        postBuild = ''
+          wrapProgram $out/bin/tracy \
+            --set-default __EGL_VENDOR_LIBRARY_FILENAMES ${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json \
+            --set-default LIBGL_DRIVERS_PATH ${pkgs.mesa}/lib/dri \
+            --set-default GBM_BACKENDS_PATH ${pkgs.mesa}/lib/gbm
+        '';
+      };
       default = pkgs.mkShell {
         NIX_HARDENING_ENABLE = "";
         # glibc's static libraries, which only statically linked fixtures link
