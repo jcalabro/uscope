@@ -457,7 +457,9 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn module_mappings(&self, pid: Pid) -> Result<ProcessMappings> {
         self.assert_owner_thread();
-        process_mappings_in(&read_maps(pid)?)
+        let mut mappings = process_mappings_in(&read_maps(pid)?)?;
+        in_process_root(pid, &mut mappings.files);
+        Ok(mappings)
     }
 
     fn spawn(&self, executable: &Path, options: LaunchOptions) -> Result<Pid> {
@@ -1059,5 +1061,29 @@ pub(super) fn trace_options(exit_kill: bool) -> Options {
         common | Options::PTRACE_O_EXITKILL
     } else {
         common
+    }
+}
+
+/// A process in another mount namespace, as a container's is, names its
+/// files by paths under its own root, where the debugger's own path may be
+/// another file or none. The process's root, seen through `/proc`, holds the
+/// file it mapped, proven by its inode.
+fn in_process_root(pid: Pid, files: &mut [ModuleMapping]) {
+    use std::os::unix::fs::MetadataExt as _;
+    for mapping in files {
+        let same = |path: &Path| fs::metadata(path).is_ok_and(|meta| meta.ino() == mapping.inode);
+        if mapping.deleted || same(&mapping.path) {
+            continue;
+        }
+        let Ok(relative) = mapping.path.strip_prefix("/") else {
+            continue;
+        };
+        let rooted = Path::new("/proc")
+            .join(pid.as_raw().to_string())
+            .join("root")
+            .join(relative);
+        if same(&rooted) {
+            mapping.path = rooted;
+        }
     }
 }

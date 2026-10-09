@@ -37,6 +37,10 @@ pub struct Web {
     child: Option<Child>,
     pub address: SocketAddr,
     pub control_token: String,
+    /// The path the routes lie under: `/`, or `--public-url`'s.
+    pub base: String,
+    /// `--public-url`'s host and origin, which a proxy's requests carry.
+    pub public: Option<(String, String)>,
     transcript: Transcript,
     recording: Option<PathBuf>,
     started: Instant,
@@ -70,6 +74,7 @@ impl Web {
         });
         let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
         let mut link = None;
+        let mut serving = None;
         let mut printed = String::new();
         while link.is_none() {
             printed.clear();
@@ -80,6 +85,9 @@ impl Web {
                     > 0,
                 "uscope web exited before printing its link"
             );
+            if let Some(address) = printed.trim().strip_prefix("uscope web: serving http://") {
+                serving = Some(address.to_owned());
+            }
             link = printed.trim().strip_prefix("open ").map(str::to_owned);
         }
         // Keep draining stdout so the server never blocks writing to it.
@@ -88,21 +96,44 @@ impl Web {
             let _ = stdout.read_to_end(&mut rest);
         });
         let link = link.expect("a link");
-        let rest = link.strip_prefix("http://").expect("an http link");
-        let (address, token) = rest.split_once("/join#").expect("a join link");
+        let serving = serving.expect("the address it serves at");
+        let (front, token) = link.split_once("join#").expect("a join link");
+        let (public, base) = if front == format!("http://{serving}/") {
+            (None, "/".to_owned())
+        } else {
+            let (scheme, rest) = front.split_once("://").expect("a URL");
+            let (host, path) = rest.split_once('/').expect("a path");
+            (
+                Some((host.to_owned(), format!("{scheme}://{host}"))),
+                format!("/{path}"),
+            )
+        };
         Self {
             name: name.to_owned(),
             child: Some(child),
-            address: address.parse().expect("a socket address"),
+            address: serving.parse().expect("a socket address"),
             control_token: token.to_owned(),
+            base,
+            public,
             transcript,
             recording,
             started,
         }
     }
 
+    /// The origin of the server's own pages: its proxy's, when it has one.
     pub fn origin(&self) -> String {
-        format!("http://{}", self.address)
+        self.public.as_ref().map_or_else(
+            || format!("http://{}", self.address),
+            |(_, origin)| origin.clone(),
+        )
+    }
+
+    /// The `Host` its pages' requests carry.
+    pub fn host(&self) -> String {
+        self.public
+            .as_ref()
+            .map_or_else(|| self.address.to_string(), |(host, _)| host.clone())
     }
 
     /// Posts to `/api/login` with these headers, returning the status and
@@ -114,7 +145,8 @@ impl Web {
         host: Option<&str>,
     ) -> (u16, Option<String>) {
         let mut request = format!(
-            "POST /api/login HTTP/1.1\r\nConnection: close\r\nContent-Length: {}\r\n",
+            "POST {}api/login HTTP/1.1\r\nConnection: close\r\nContent-Length: {}\r\n",
+            self.base,
             token.len()
         );
         if let Some(host) = host {
@@ -159,7 +191,7 @@ impl Web {
 
     /// Logs in with `token` as this server's own page would.
     pub fn cookie(&self, token: &str) -> String {
-        let host = self.address.to_string();
+        let host = self.host();
         let (status, cookie) = self.post_login(token, Some(&self.origin()), Some(&host));
         assert_eq!(status, 204, "login with {token}");
         cookie.expect("a cookie")
@@ -168,9 +200,14 @@ impl Web {
     /// A control client, logged in.
     pub async fn control(&self, name: &str) -> Client {
         let cookie = self.cookie(&self.control_token.clone());
-        self.connect(name, Some(&cookie), Some(&self.origin()), None)
-            .await
-            .expect("connect")
+        self.connect(
+            name,
+            Some(&cookie),
+            Some(&self.origin()),
+            Some(&self.host()),
+        )
+        .await
+        .expect("connect")
     }
 
     /// A client with a token another client's `share` made.
@@ -191,7 +228,7 @@ impl Web {
         origin: Option<&str>,
         host: Option<&str>,
     ) -> Result<Client, u16> {
-        let mut request = format!("ws://{}/api/ws", self.address)
+        let mut request = format!("ws://{}{}api/ws", self.address, self.base)
             .into_client_request()
             .expect("a request");
         let headers = request.headers_mut();

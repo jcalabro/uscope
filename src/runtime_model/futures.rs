@@ -1,12 +1,14 @@
 //! A future's chain of awaits, read from memory: from a task's root future
 //! through each coroutine's awaited future to the leaf it waits on.
 //!
-//! The walk names no runtime. It knows the shapes futures take in debug
-//! information: a coroutine, whose state says where it waits and which of
-//! its members it awaits; a pointer to a future, such as a `Box`; a pinned
-//! one, as Rust's `Pin` wraps it; a trait object, whose vtable says what it
-//! holds; and a record whose only member is a coroutine, which can await
-//! nothing but that coroutine. Any other future is a leaf, which the runtime or a view
+//! The walk follows no runtime's scheduling. It knows the shapes futures
+//! take in debug information: a coroutine, whose state says where it waits
+//! and which of its members it awaits; a pointer to a future, such as a
+//! `Box`; a pinned one, as Rust's `Pin` wraps it; a trait object, whose
+//! vtable says what it holds; a record whose only member is a coroutine,
+//! which can await nothing but that coroutine; and the few records known
+//! by name to hold a future beside what is none, such as tracing's
+//! `Instrumented`. Any other future is a leaf, which the runtime or a view
 //! describes. Every way the walk can end is said, never guessed past.
 
 use std::collections::BTreeSet;
@@ -23,6 +25,21 @@ use crate::{
 pub const MAX_DEPTH: usize = 256;
 /// The most wrappers followed to reach a type's representation.
 const MAX_WRAPPERS: usize = 16;
+/// The Rust records that hold a future beside what is no future, by their
+/// path and name, with the member that holds it: the spans tracing keeps
+/// around futures. In a build with `tokio_unstable` and tokio's `tracing`
+/// feature, as `tokio-console` needs, tracing's `Instrumented` wraps every
+/// task tokio spawns, keeping its future in std's `ManuallyDrop` (which
+/// recent releases of Rust lay out around a `MaybeDangling`), and tokio's
+/// `InstrumentedAsyncOp` wraps what its locks, semaphores, and barriers
+/// are awaited through.
+const HOLDERS: [(&[&str], &str, &str); 5] = [
+    (&["tracing", "instrument"], "Instrumented", "inner"),
+    (&["tracing", "instrument"], "WithDispatch", "inner"),
+    (&["core", "mem", "manually_drop"], "ManuallyDrop", "value"),
+    (&["core", "mem", "maybe_dangling"], "MaybeDangling", "__0"),
+    (&["tokio", "util", "trace"], "InstrumentedAsyncOp", "inner"),
+];
 
 /// One future of a chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,8 +180,8 @@ fn follow(
                 };
                 (object, ty) = (object.wrapping_add(offset), pointer);
             }
-            Shape::Wrapper { coroutine, offset } => {
-                (object, ty) = (object.wrapping_add(offset), coroutine);
+            Shape::Wrapper { future, offset } => {
+                (object, ty) = (object.wrapping_add(offset), future);
             }
             Shape::TraitObject { data, vtable } => match held(image, stop, object, data, vtable) {
                 Ok(held) => (object, ty) = held,
@@ -220,11 +237,9 @@ enum Shape {
     },
     /// A trait object: where its data pointer and its vtable lie.
     TraitObject { data: u64, vtable: u64 },
-    /// A record that holds only a coroutine of this type, at this offset.
-    Wrapper {
-        coroutine: TypeReference,
-        offset: u64,
-    },
+    /// A record that holds a future of this type at this offset: one that
+    /// holds only a coroutine, or one of [`HOLDERS`].
+    Wrapper { future: TypeReference, offset: u64 },
     /// Anything else, which is a leaf unless it is a coroutine.
     Other,
 }
@@ -251,6 +266,17 @@ fn representation(
                 ..
             }
             | TypeKind::Reference { target, .. } => Shape::Pointer(*target),
+            TypeKind::Record { members, .. } if holder(info).is_some() => members
+                .iter()
+                .find(|member| member.name.as_deref() == holder(info))
+                .and_then(|member| match member.layout {
+                    RecordMemberLayout::ByteOffset(offset) => Some(Shape::Wrapper {
+                        future: member.type_ref,
+                        offset,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or(Shape::Other),
             TypeKind::Record { members, .. } => {
                 let pinned = is_pin(info);
                 let member = |name: &str| {
@@ -268,7 +294,7 @@ fn representation(
                             if is_coroutine(image, only.type_ref) =>
                         {
                             Shape::Wrapper {
-                                coroutine: only.type_ref,
+                                future: only.type_ref,
                                 offset,
                             }
                         }
@@ -333,6 +359,19 @@ fn is_pin(info: &crate::TypeInfo) -> bool {
         identity.language == SourceLanguage::Rust
             && identity.base.as_ref() == "Pin"
             && identity.path.iter().map(AsRef::as_ref).eq(["core", "pin"])
+    })
+}
+
+/// The member that holds the future, if a type is one of [`HOLDERS`].
+fn holder(info: &crate::TypeInfo) -> Option<&'static str> {
+    let identity = info.identity.as_ref()?;
+    if identity.language != SourceLanguage::Rust {
+        return None;
+    }
+    let path = identity.path.iter().map(AsRef::as_ref);
+    HOLDERS.iter().find_map(|&(within, base, member)| {
+        (identity.base.as_ref() == base && path.clone().eq(within.iter().copied()))
+            .then_some(member)
     })
 }
 

@@ -25,6 +25,8 @@ pub struct Asset {
     pub media_type: &'static str,
     /// Whether the name carries a content hash, so it can be cached forever.
     pub immutable: bool,
+    /// Whether it is the page itself, `index.html`.
+    pub page: bool,
 }
 
 /// Finds the file for a request path. Paths without an extension are the
@@ -49,7 +51,24 @@ pub fn find(path: &str) -> Option<Asset> {
         bytes,
         media_type: media_type(name),
         immutable: name.starts_with("assets/"),
+        page: name == "index.html",
     })
+}
+
+/// The page as served under `base`: the build names its files relative to
+/// the page (`./assets/…`), which a deeper route such as `/s/k7q2/stop/1`
+/// would resolve wrongly, so they are rooted at `base`, and the script finds
+/// `base` in a `uscope-base` meta tag.
+pub fn rooted(page: &[u8], base: &str) -> Vec<u8> {
+    let page = String::from_utf8_lossy(page)
+        .replace("src=\"./", &format!("src=\"{base}"))
+        .replace("href=\"./", &format!("href=\"{base}"));
+    page.replacen(
+        "<head>",
+        &format!("<head>\n    <meta name=\"uscope-base\" content=\"{base}\" />"),
+        1,
+    )
+    .into_bytes()
 }
 
 #[cfg(debug_assertions)]

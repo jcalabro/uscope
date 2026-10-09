@@ -17,10 +17,10 @@ decisions, is [plans/tokio.md](../plans/tokio.md). Go's counterpart is
 Support covers the pinned toolchain from `flake.nix` and tokio 1.52.3 on
 Linux x86-64: unoptimized and optimized builds, the multi-thread and
 current-thread runtimes, `LocalSet`s, several runtimes in one process,
-blocking pools, `tokio_unstable` spawn locations, legacy symbol mangling,
-attaching, and core dumps. Another tokio release is read the same way
-wherever its debug information binds, and every list of its tasks says it
-is unverified.
+blocking pools, `tokio_unstable` spawn locations, tokio's `parking_lot`
+and `tracing` features, legacy symbol mangling, attaching, and core
+dumps. Another tokio release is read the same way wherever its debug
+information binds, and every list of its tasks says it is unverified.
 
 ## What async Rust and tokio demand
 
@@ -57,7 +57,7 @@ Most of uscope does not know tokio exists:
 | Place | What it knows |
 |---|---|
 | `src/debug_info/coroutines.rs`, `src/debug_info/roles.rs` | rustc's coroutine DWARF, normalized to `CoroutineInfo`; resume points; code roles for tokio, `mio`, `core::future` glue, and std's panic machinery |
-| `src/runtime_model/futures.rs` | The future walker: a chain of awaits through coroutines, `Box`, `Pin`, trait objects, and single-coroutine records. It names no runtime |
+| `src/runtime_model/futures.rs` | The future walker: a chain of awaits through coroutines, `Box`, `Pin`, trait objects, single-coroutine records, and the span wrappers tracing and tokio's `tracing` feature put around futures. It follows no runtime's scheduling |
 | `src/runtime_model/tokio` | The runtime at one stop: runtimes, tasks, threads, futures, local sets, task starters |
 | `src/runtime_model/rust` | std's panics, through the `__rustc::rust_panic` hook |
 | `views/tokio.views` | tokio's types: handles, locks, channels, `Notify`, timers, `JoinSet`, sockets and the futures that read and write them |
@@ -207,6 +207,18 @@ the thread runs, which tokio will turn into a `JoinError`.
   saves as zeros; the fixtures remove the guards before dumping a core.
 - Adding a fixture crate changes its lockfile, which rebuilds the vendored
   crates and every tokio fixture.
+- tokio's own `Mutex` wraps std's, or with its `parking_lot` feature, which
+  `full` turns on, parking_lot's beside a `PhantomData` of std's. Each
+  shard's and each blocking pool's lock is bound as whichever the program
+  has: std's futex word is held while nonzero, parking_lot's byte while its
+  low bit is set.
+- With `tokio_unstable` and tokio's `tracing` feature, as `tokio-console`
+  needs, `spawn` wraps each task's future in tracing's `Instrumented`,
+  which holds it in a `ManuallyDrop` beside its span, and tokio wraps what
+  a lock, a semaphore, or a barrier is awaited through in its own
+  `InstrumentedAsyncOp`. The walk passes through each by name, or every
+  such task would be a leaf of tracing's, in no function of the program's,
+  and every such wait a leaf no view describes.
 
 ## Testing
 
@@ -220,7 +232,7 @@ Checkpoints wait until nothing moves, by the runtime's park counts and
 | Fixture | What it forces |
 |---|---|
 | `std-async` | Async functions under a hand-written executor, with no tokio |
-| `workers` | Eight tasks parked at different awaits; also built line-tables-only, stripped, remapped, unstable, and legacy-mangled |
+| `workers` | Eight tasks parked at different awaits; also built line-tables-only, stripped, remapped, unstable, unstable with tracing's spans, with parking_lot's locks, and legacy-mangled |
 | `steps` | Siblings stepping through the same functions across pending awaits, on each runtime, and a task that spawns another |
 | `cancel`, `panics` | Every way a task's future ends early, and every kind of panic |
 | `drivers`, `runtimes` | `block_on` in each form; two runtimes and two local sets in one process |
