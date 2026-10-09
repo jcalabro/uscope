@@ -17,7 +17,7 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -157,6 +157,9 @@ pub struct Session {
     cause: Arc<Mutex<Option<Cause>>>,
     /// Each connection's handles to values it was shown.
     handles: values::Handles,
+    /// Whether a process attached to runs on at once rather than staying
+    /// stopped at the attach.
+    resume_attached: AtomicBool,
 }
 
 struct Target {
@@ -224,7 +227,14 @@ impl Session {
             next_connection: AtomicU32::new(1),
             cause: Arc::default(),
             handles: values::Handles::default(),
+            resume_attached: AtomicBool::new(false),
         })
+    }
+
+    /// Lets every process attached to from now on run on at once: a
+    /// service someone inspects shouldn't wait for a tab to continue it.
+    pub fn resume_attached(&self, resume: bool) {
+        self.resume_attached.store(resume, Ordering::Relaxed);
     }
 
     pub const fn tokens(&self) -> &Tokens {
@@ -1205,6 +1215,7 @@ impl Session {
             }
         };
         let handle = debugger.handle();
+        let attached = matches!(start, Start::Attach(_));
         let (info, launch, run) = describe_target(start, &handle);
         let id =
             random_hex(4).map_err(|error| Failure::new(ErrorKind::Failed, error.to_string()))?;
@@ -1256,6 +1267,22 @@ impl Session {
             readers: Vec::new(),
             name,
         });
+        if attached
+            && self.resume_attached.load(Ordering::Relaxed)
+            && let InferiorState::Stopped {
+                process_id,
+                stop_id,
+                ..
+            } = handle.snapshot().await?.inferior
+        {
+            handle
+                .continue_execution(
+                    stop_id,
+                    ResumeScope::Process(process_id),
+                    ExceptionDisposition::Pass,
+                )
+                .await?;
+        }
         if run && let Some(spec) = launch {
             let (readers, input) = self.launch(&handle, &spec).await?;
             if let Some(target) = target.as_mut() {

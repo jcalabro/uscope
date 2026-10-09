@@ -252,6 +252,29 @@ async fn attaching_from_the_picker_and_ending_leaves_the_process_running() {
 }
 
 #[tokio::test]
+async fn an_attached_process_resumes_at_once_with_resume_and_runs_on_after() {
+    let mut process = ExternalProcess::spawn(&Scenario::fixture("attach"));
+    let pid = process.process_id().get();
+    let web = Web::start("resume", &["--attach", &pid.to_string(), "--resume"]);
+    let mut tab = web.control("tab").await;
+    let running = tab.inferior("running").await;
+    assert_eq!(running["target"]["kind"], "attach");
+    // Not in a tracing stop: blocked on its own read, as before the attach.
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).expect("status");
+    let state = status
+        .lines()
+        .find_map(|line| line.strip_prefix("State:"))
+        .expect("a state")
+        .trim();
+    assert!(!state.starts_with('t'), "{state}");
+    drop(tab);
+    let mut web = web;
+    assert!(web.interrupt().success());
+    process.release();
+    assert_eq!(process.wait().code(), Some(23));
+}
+
+#[tokio::test]
 async fn interrupting_the_server_kills_the_program_it_launched() {
     let program = fixture("spin");
     let mut web = Web::start("shutdown", &["--run", &program]);
