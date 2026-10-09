@@ -878,7 +878,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <div><b>--timings JSON</b>summary, counters,<br>Chrome trace events</div>
           <div><b>Text reports</b><code>just timings</code><br><code>just bench --compare</code></div>
           <div><b>Flight recorder</b>phase marks in<br>debug builds</div>
-          <div><b>Tracy</b>zones, plots, memory<br>(<code>tracy</code> feature)</div>
+          <div><b>Tracy</b>zones, plots, memory, samples<br>(<code>tracy</code> feature)</div>
           <div><b>Perfetto</b>the same JSON in<br>ui.perfetto.dev or SQL</div>
         </div>
         <figcaption>Each output is a sink of the same <code>span!</code> and <code>count!</code> calls. Sinks that are off cost about one predictable branch per span.</figcaption>
@@ -943,7 +943,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <header><span class="id">M5</span><h3>Tracy, for people</h3></header>
           <ul>
             <li>The optional <code>tracy</code> feature mirrors spans and counters to Tracy. Treat <code>tracy-client =0.18.4</code>, sys 0.28.0 and viewer 0.13.1 as the probe's candidate combination, not a permanent compatibility claim. Pin and compile the exact client/sys/viewer tuple in the profile shell and verify a captured trace before accepting it.</li>
-            <li>Build it with <code>default-features = false</code> plus <code>enable</code>, <code>ondemand</code>, and <code>only-localhost</code>. Leave out sampling and system tracing, which open inherited perf events that would follow the debuggee. Leave out the crash handler, which installs fatal-signal handlers, and broadcast, which sends UDP announcements.</li>
+            <li>Build it with <code>default-features = false</code> plus <code>enable</code>, <code>ondemand</code>, and <code>only-localhost</code>, and with <code>system-tracing</code>, <code>sampling</code>, and <code>callstack-inlines</code> for call-stack samples. Their perf events are inherited, so a debuggee started while the viewer is connected is sampled too; that is acceptable in a profiling build and never happens in tests. Leave out the crash handler, which installs fatal-signal handlers, and broadcast, which sends UDP announcements.</li>
             <li><code>tracy-alloc</code> wraps mimalloc in <code>ProfiledAllocator</code> to show memory per zone.</li>
             <li>A <code>nix develop .#profile</code> shell adds <code>tracy</code>, <code>samply</code>, <code>hotspot</code>, <code>heaptrack</code>, <code>hyperfine</code>, <code>poop</code>, and KCachegrind, keeping GUI tools out of the default shell.</li>
           </ul>
