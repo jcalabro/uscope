@@ -6,6 +6,7 @@ use crate::{Error, Result};
 
 mod image;
 
+pub use image::{Binding, seal};
 pub use image::{ModuleImage, ModuleMetadata, PackageInfo, ThreadLocal};
 
 macro_rules! address_type {
@@ -64,7 +65,7 @@ address_type!(
 );
 
 /// A half-open address range `[start, end)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AddressRange<A> {
     /// The first address included in the range.
     pub start: A,
@@ -471,7 +472,7 @@ pub struct RegisterSnapshot {
 }
 
 /// The source-language encoding of a scalar base type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum BaseTypeEncoding {
     Boolean,
@@ -521,7 +522,7 @@ impl BaseType {
 }
 
 /// A resolved scalar type independent of its debug-information encoding.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BaseType {
     /// The source-facing type name.
     pub name: Arc<str>,
@@ -544,7 +545,7 @@ pub enum IntegerValue {
 }
 
 /// Whether symbolic integer names came from a language enumeration or associated constants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EnumerationOrigin {
     /// A source-language enumeration represented by `DW_TAG_enumeration_type`.
@@ -554,7 +555,7 @@ pub enum EnumerationOrigin {
 }
 
 /// One symbolic name and exact value in an enumeration-like type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Enumerator {
     /// The producer/source name.
     pub name: Arc<str>,
@@ -572,7 +573,7 @@ pub struct TypeReference {
 }
 
 /// A source modifier retained as an ordered type-graph node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TypeModifier {
     /// C-family `const` qualification.
@@ -592,7 +593,7 @@ pub enum TypeModifier {
 }
 
 /// The relationship between a named type and its representation target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum NamedTypeRelationship {
     /// A source-language synonym, such as a C or C++ typedef.
@@ -606,7 +607,7 @@ pub enum NamedTypeRelationship {
 }
 
 /// The source-level category represented by a DWARF reference type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ReferenceKind {
     Lvalue,
@@ -614,7 +615,7 @@ pub enum ReferenceKind {
 }
 
 /// The source-level aggregate category represented by a record type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RecordKind {
     Struct,
@@ -622,7 +623,7 @@ pub enum RecordKind {
 }
 
 /// The aggregate storage category that owns a discriminated variant part.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VariantStorageKind {
     Struct,
@@ -631,7 +632,7 @@ pub enum VariantStorageKind {
 }
 
 /// Source visibility attached to a record member or base class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Accessibility {
     Public,
@@ -640,7 +641,7 @@ pub enum Accessibility {
 }
 
 /// A normalized instance-member location within its containing record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RecordMemberLayout {
     /// A byte-aligned constant offset from the containing object.
@@ -657,7 +658,7 @@ pub enum RecordMemberLayout {
 }
 
 /// One instance member in a normalized record type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RecordMember {
     /// The source member name; anonymous members have no name.
     pub name: Option<Arc<str>>,
@@ -675,7 +676,7 @@ pub struct RecordMember {
 }
 
 /// Whether a base-class subobject is virtual.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum BaseClassVirtuality {
     /// An ordinary non-virtual base.
@@ -684,7 +685,7 @@ pub enum BaseClassVirtuality {
 }
 
 /// One base-class subobject in a normalized class type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BaseClass {
     pub type_ref: TypeReference,
     /// Its location within the derived object.
@@ -696,7 +697,7 @@ pub struct BaseClass {
 }
 
 /// One exact or inclusive-range selector for a discriminated variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VariantSelector {
     /// One exact discriminator value.
@@ -711,7 +712,7 @@ pub enum VariantSelector {
 }
 
 /// How a variant is selected by the discriminator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VariantSelection {
     /// The fallback when no explicit selector matches.
@@ -722,7 +723,7 @@ pub enum VariantSelection {
 
 /// A stored discriminator member, a tag type without runtime storage, or
 /// neither.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VariantDiscriminant {
     /// A concrete member whose location supplies the runtime discriminator.
@@ -736,7 +737,7 @@ pub enum VariantDiscriminant {
 }
 
 /// One variant and the components selected with it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Variant {
     /// The variant DIE name, when supplied independently of its components.
     pub name: Option<Arc<str>>,
@@ -747,7 +748,7 @@ pub struct Variant {
 }
 
 /// The normalized shape of a debug type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TypeKind {
     /// A directly encoded scalar base type.
@@ -868,7 +869,7 @@ pub enum TypeKind {
 }
 
 /// One statically known array dimension.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArrayDimension {
     /// The source lower bound.
     pub lower_bound: i128,
@@ -877,7 +878,7 @@ pub struct ArrayDimension {
 }
 
 /// Immutable, normalized metadata for one type-graph node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeInfo {
     /// Stable identity within the owning module image.
     pub reference: TypeReference,
@@ -917,7 +918,7 @@ pub enum SourceLanguage {
 /// their arguments. Identities never depend on how a producer spells a name:
 /// inline namespaces are removed from paths, and arguments refer to types
 /// rather than to their spellings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeIdentity {
     /// The language of the unit that defines the type.
     pub language: SourceLanguage,
@@ -941,7 +942,7 @@ pub struct TypeIdentity {
 }
 
 /// One template or generic argument.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TypeArgument {
     Type(TypeReference),
@@ -953,7 +954,7 @@ pub enum TypeArgument {
 }
 
 /// Where a type identity's arguments came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ArgumentOrigin {
     /// Template parameter entries, or Go's key and element attributes.
@@ -968,7 +969,7 @@ pub enum ArgumentOrigin {
 }
 
 /// What Go records about a type for its runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GoTypeAttributes {
     /// The type's kind, which says what it is whatever it is named.
     pub kind: GoKind,
@@ -1048,7 +1049,7 @@ impl GoKind {
 }
 
 /// One finalized node in an image's immutable normalized type graph.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TypeNode {
     /// A type whose normalized metadata is available.
@@ -2674,6 +2675,13 @@ pub struct TargetDescription {
 }
 
 impl TargetDescription {
+    /// x86-64: little-endian, with 64-bit pointers.
+    pub const X86_64: Self = Self {
+        architecture: Architecture::X86_64,
+        byte_order: ByteOrder::Little,
+        pointer_width: PointerWidth::Bits64,
+    };
+
     /// The target's C base type, as its C compiler lays it out, or `None`
     /// for a target whose C data model uscope does not know.
     #[must_use]
@@ -2881,7 +2889,7 @@ pub struct SourceFile {
 }
 
 /// A location in a source file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceLocation {
     /// The source file containing the location.
     pub file: SourceFileId,

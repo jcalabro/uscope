@@ -13,8 +13,9 @@ mod metadata;
 mod unwind;
 
 pub use metadata::{Catalog, complete as complete_metadata};
-pub use unwind::GoUnwind;
+pub use unwind::{GoUnwind, frame_saves};
 
+use crate::image::unwind::GoTableFacts;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -266,6 +267,8 @@ pub struct GoTable {
     gofunc: Option<usize>,
     numbering: Option<FuncIdNumbering>,
     functions: Vec<GoFunction>,
+    /// What the table was parsed with, which reparses it.
+    facts: GoTableFacts,
 }
 
 fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
@@ -396,7 +399,14 @@ impl GoTable {
         if offsets[0] < HEADER_SIZE || offsets.windows(2).any(|pair| pair[0] > pair[1]) {
             return Err(malformed("the header's table offsets are out of order"));
         }
+        let facts = GoTableFacts {
+            address,
+            text,
+            go_func: gofunc,
+            release: release.map(|release| (release.major, release.minor)),
+        };
         let mut table = Self {
+            facts,
             quantum,
             funcnametab: offsets[0]..offsets[1],
             cutab: offsets[1]..offsets[2],
@@ -507,6 +517,24 @@ impl GoTable {
             npcdata,
             nfuncdata,
         })
+    }
+
+    /// Parses a table an image keeps, as [`Self::parse`] did.
+    pub fn reparse(data: Arc<[u8]>, facts: GoTableFacts) -> Result<Self> {
+        Self::parse(
+            data,
+            facts.address,
+            facts.text,
+            facts.go_func,
+            facts
+                .release
+                .map(|(major, minor)| GoRelease { major, minor }),
+        )
+    }
+
+    /// The table's bytes and what parsing them needs.
+    pub const fn source(&self) -> (&Arc<[u8]>, GoTableFacts) {
+        (&self.data, self.facts)
     }
 
     /// Every function, in address order.
@@ -1188,21 +1216,15 @@ fn fuzz_table(table: &GoTable, code: &[u8]) {
         );
     }
 
-    let (mut functions, mut instances, mut statements, mut lines) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut files = Vec::new();
-    let mut next_sequence = 0;
+    let (mut functions, mut instances) = (Vec::new(), Vec::new());
+    let mut lines = crate::image::lines::LineTables::default();
+    let mut files = crate::image::lines::Files::default();
     let completed = {
         let mut catalog = Catalog {
             functions: &mut functions,
             code_instances: &mut instances,
-            statements: &mut statements,
             lines: &mut lines,
-            next_sequence: &mut next_sequence,
-            source_file: &mut |path| {
-                files.push(path);
-                crate::SourceFileId::new(u32::try_from(files.len() - 1).expect("file count"))
-            },
+            source_file: &mut |path| files.intern(path),
         };
         complete_metadata(table, code, &mut catalog).is_ok()
     };
@@ -1217,7 +1239,17 @@ fn fuzz_table(table: &GoTable, code: &[u8]) {
             );
             assert!(instance.ranges.iter().all(|range| range.start < range.end));
         }
-        assert!(lines.iter().all(|line| line.range.start < line.range.end));
+        // The line tables are valid: they seal into an image.
+        let mut image = crate::image::Builder::new(crate::TargetDescription::X86_64);
+        lines.add_to(&mut image);
+        let mut paths = crate::image::PathsBuilder::default();
+        files
+            .add_to(&mut image, &mut paths)
+            .expect("paths without NULs");
+        image.bytes(crate::image::TableKind::Paths, paths.into_bytes());
+        image
+            .seal(crate::image::Limits::default())
+            .expect("the completed line tables are valid");
     }
 }
 
@@ -1318,10 +1350,9 @@ mod tests {
             let mut compared = 0;
             for instance in image
                 .code_instances()
-                .iter()
-                .filter(|instance| matches!(instance.kind, crate::CodeInstanceKind::OutOfLine))
+                .filter(|instance| matches!(instance.kind(), crate::CodeInstanceKind::OutOfLine))
             {
-                let entry = instance.ranges[0].start.get();
+                let entry = instance.ranges().next().expect("a range").start.get();
                 let Some(function) = table
                     .function_containing(entry)
                     .filter(|function| function.entry == entry && !function.facts.assembly)
@@ -1329,7 +1360,7 @@ mod tests {
                     continue;
                 };
                 let marked = image
-                    .recommended_entries_for_instance(instance.id)
+                    .recommended_entries_for_instance(instance.id())
                     .filter(|entry| entry.provenance == crate::EntryProvenance::Statement)
                     .map(|entry| entry.address.get())
                     .collect::<Vec<_>>();

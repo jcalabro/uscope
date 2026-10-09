@@ -36,28 +36,27 @@ struct Body {
 fn bodies(image: &ModuleImage) -> BTreeMap<ImageAddress, Body> {
     let mut bodies = BTreeMap::new();
     for instance in image.code_instances() {
-        if !matches!(instance.kind, CodeInstanceKind::OutOfLine) {
+        if !matches!(instance.kind(), CodeInstanceKind::OutOfLine) {
             continue;
         }
-        let Some(function) = image.function(instance.function) else {
+        let Some(function) = image.function(instance.function()) else {
             continue;
         };
         let (Some(Ok(points)), Some(Ok(coroutine))) = (
-            image.resume_points(instance.id),
-            function.coroutine.and_then(|ty| image.coroutine(ty)),
+            image.resume_points(instance.id()),
+            function.coroutine().and_then(|ty| image.coroutine(ty)),
         ) else {
             continue;
         };
         let entry = instance
-            .ranges
-            .iter()
+            .ranges()
             .map(|range| range.start)
             .min()
             .expect("a body has code");
         bodies.insert(
             entry,
             Body {
-                name: function.name.to_string(),
+                name: function.name().to_string(),
                 state: (coroutine.state.offset, coroutine.state.size),
                 dispatch: Arc::clone(&points.dispatch),
                 points: points

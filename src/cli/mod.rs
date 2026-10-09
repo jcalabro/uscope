@@ -448,6 +448,8 @@ impl Cli {
     }
 
     async fn run_inputs(&self, args: &Session) -> Result<()> {
+        // The program is loaded and the session can take its first command.
+        uscope::profile::mark("ready");
         self.announce(args)?;
         self.load_views(&self.settings.root, &args.views).await;
         self.apply_signal_settings().await?;

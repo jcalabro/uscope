@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::codec::integer_bit_width;
-use super::types::{TypeMetadataEntry, type_info_from};
+use super::types::{TypeEntries, type_info_from};
 use super::variant::is_single_default_variant;
 use super::{MAX_SCALAR_BYTES, MAX_TYPE_RESOLUTION_DEPTH};
 
@@ -72,8 +72,8 @@ pub(super) enum ValueShape {
 
 /// Strips the aliases and qualifiers around `id` that share their target's
 /// representation, returning the type beneath them.
-pub(super) fn transparent_type_from<T: TypeMetadataEntry>(
-    types: &[T],
+pub(super) fn transparent_type_from(
+    types: &(impl TypeEntries + ?Sized),
     id: TypeId,
 ) -> std::result::Result<(TypeId, &TypeInfo), ValueShapeError> {
     let mut current = id;
@@ -102,8 +102,8 @@ pub(super) fn transparent_type_from<T: TypeMetadataEntry>(
     }
 }
 
-fn transparent_representation<T: TypeMetadataEntry>(
-    types: &[T],
+fn transparent_representation(
+    types: &(impl TypeEntries + ?Sized),
     wrapper: &TypeInfo,
     target: TypeReference,
 ) -> std::result::Result<(), ValueShapeError> {
@@ -179,8 +179,8 @@ pub(super) fn indirection_byte_size(
 /// variant, or the one variant that can hold a value at all, since every
 /// other holds a value of a type with none, such as `Infallible`. Choosing
 /// among several would be a guess, and a sum with no values holds none.
-pub(super) fn tagless_variant<T: TypeMetadataEntry>(
-    types: &[T],
+pub(super) fn tagless_variant(
+    types: &(impl TypeEntries + ?Sized),
     aggregate: TypeId,
 ) -> Option<usize> {
     let Ok((
@@ -223,7 +223,7 @@ pub(super) fn tagless_variant<T: TypeMetadataEntry>(
 /// Whether no value of a type can exist: a sum that stores no tag and none
 /// of whose variants can hold a value, or a record with a member of such a
 /// type. Anything not known to be so is taken to have values.
-fn uninhabited<T: TypeMetadataEntry>(types: &[T], id: TypeId, depth: usize) -> bool {
+fn uninhabited(types: &(impl TypeEntries + ?Sized), id: TypeId, depth: usize) -> bool {
     if depth >= MAX_TYPE_RESOLUTION_DEPTH {
         return false;
     }
@@ -255,8 +255,8 @@ fn uninhabited<T: TypeMetadataEntry>(types: &[T], id: TypeId, depth: usize) -> b
     }
 }
 
-pub(super) fn value_shape_from<T: TypeMetadataEntry>(
-    types: &[T],
+pub(super) fn value_shape_from(
+    types: &(impl TypeEntries + ?Sized),
     id: TypeId,
 ) -> std::result::Result<ValueShape, ValueShapeError> {
     nested_value_shape(types, id, 0)
@@ -268,8 +268,8 @@ pub(super) fn value_shape_from<T: TypeMetadataEntry>(
     clippy::too_many_lines,
     reason = "each normalized type shape has distinct validation"
 )]
-fn nested_value_shape<T: TypeMetadataEntry>(
-    types: &[T],
+fn nested_value_shape(
+    types: &(impl TypeEntries + ?Sized),
     id: TypeId,
     depth: usize,
 ) -> std::result::Result<ValueShape, ValueShapeError> {

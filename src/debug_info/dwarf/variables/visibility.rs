@@ -3,123 +3,160 @@
 //! local would seem to exist before its declaration has run. As Delve
 //! does, a Go local is visible only where the line executing is past the
 //! line declaring it, and a block's code includes its nested blocks'.
+//!
+//! The line executing at an address is the site of the call inlined
+//! directly into the local's scope that contains the address, and
+//! otherwise the line of the code itself. It is asked of the image at the
+//! address queried, so loading computes nothing per local.
 
-use foldhash::{HashMap, HashMapExt};
+use crate::image::Image;
+use crate::image::functions::FunctionView;
+use crate::image::lines::LineView;
+use crate::{AddressRange, CodeInstanceId, CodeInstanceKind, ImageAddress, SourceLocation};
 
-use crate::model::LineEntry;
-use crate::{
-    AddressRange, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, ImageAddress, SourceLocation,
-};
+pub(super) use crate::image::variables::GoDeclaration;
 
-/// The source line each address executes, by address.
-pub(super) struct LineIndex {
-    /// Non-empty line ranges sorted by start.
-    rows: Vec<(AddressRange<ImageAddress>, SourceLocation)>,
+/// Whether a local declared at `declaration` is visible where `line` is
+/// executing: past the declaration's line in its file. Code whose line is
+/// unknown, or in another file, stays visible: hiding it would be a guess.
+pub(super) fn shown(declaration: &SourceLocation, line: Option<&SourceLocation>) -> bool {
+    line.is_none_or(|line| line.file != declaration.file || line.line > declaration.line)
 }
 
-impl LineIndex {
-    pub(super) fn new(lines: &[LineEntry]) -> Self {
-        let mut rows = lines
-            .iter()
-            .filter(|line| line.range.start < line.range.end)
-            .map(|line| (line.range, line.location.clone()))
-            .collect::<Vec<_>>();
-        rows.sort_by_key(|(range, _)| range.start);
-        Self { rows }
-    }
-
-    fn at(&self, address: ImageAddress) -> Option<&SourceLocation> {
-        let after = self
-            .rows
-            .partition_point(|(range, _)| range.start <= address);
-        let (range, location) = self.rows.get(after.checked_sub(1)?)?;
-        range.contains(address).then_some(location)
-    }
-
-    /// The row boundaries within `range`.
-    fn boundaries(&self, range: AddressRange<ImageAddress>) -> impl Iterator<Item = ImageAddress> {
-        let first = self.rows.partition_point(|(row, _)| row.end <= range.start);
-        self.rows[first..]
-            .iter()
-            .take_while(move |(row, _)| row.start < range.end)
-            .flat_map(|(row, _)| [row.start, row.end])
-    }
+/// A call inlined into a scope, which stands for its site.
+pub(super) struct InlinedCall {
+    /// Where it was called from, when that is known.
+    pub(super) site: Option<SourceLocation>,
 }
 
-/// The code of calls inlined into one instance, with each call's location.
-type Calls = Vec<(AddressRange<ImageAddress>, Option<SourceLocation>)>;
+/// What decides which line is executing.
+pub(super) trait Code {
+    /// The first call, in instance order, inlined directly into `parent`
+    /// whose code contains `address`.
+    fn call_at(&self, parent: CodeInstanceId, address: ImageAddress) -> Option<InlinedCall>;
 
-/// The calls inlined directly into each code instance.
-pub(super) struct InlineCalls {
-    calls: HashMap<CodeInstanceId, Calls>,
-}
+    /// The line of the code at `address`.
+    fn line_at(&self, address: ImageAddress) -> Option<SourceLocation>;
 
-impl InlineCalls {
-    pub(super) fn new(instances: &[CodeInstanceInfo]) -> Self {
-        let mut calls = HashMap::<CodeInstanceId, Vec<_>>::new();
-        for instance in instances {
-            let (Some(parent), CodeInstanceKind::Inline { call_site }) =
-                (instance.parent, &instance.kind)
-            else {
-                continue;
-            };
-            let entry = calls.entry(parent).or_default();
-            for range in instance.ranges.iter() {
-                entry.push((*range, call_site.clone()));
-            }
-        }
-        Self { calls }
-    }
-
-    pub(super) fn within(
+    /// The addresses in `range` where the line or the call inlined into
+    /// `parent` may change.
+    fn boundaries(
         &self,
-        instance: Option<CodeInstanceId>,
-    ) -> &[(AddressRange<ImageAddress>, Option<SourceLocation>)] {
-        instance
-            .and_then(|instance| self.calls.get(&instance))
-            .map_or(&[], Vec::as_slice)
+        parent: Option<CodeInstanceId>,
+        range: AddressRange<ImageAddress>,
+    ) -> Vec<ImageAddress>;
+}
+
+/// The line executing at `address` in the scope of `declared`: the site
+/// of the call inlined directly into the scope's instance that contains
+/// the address, and otherwise the line of the code.
+pub(super) fn executing(
+    code: &dyn Code,
+    declared: &GoDeclaration,
+    address: ImageAddress,
+) -> Option<SourceLocation> {
+    declared
+        .instance
+        .and_then(|parent| code.call_at(parent, address))
+        .map_or_else(|| code.line_at(address), |call| call.site)
+}
+
+/// Whether a local declared as `declared` is visible at `address`, which
+/// its scope's code contains.
+pub(super) fn visible_at(code: &dyn Code, declared: &GoDeclaration, address: ImageAddress) -> bool {
+    shown(
+        &declared.location,
+        executing(code, declared, address).as_ref(),
+    )
+}
+
+/// The parts of `ranges` where a local declared as `declared` is visible.
+pub(super) fn visible_ranges(
+    code: &dyn Code,
+    ranges: &[AddressRange<ImageAddress>],
+    declared: &GoDeclaration,
+) -> Vec<AddressRange<ImageAddress>> {
+    let boundaries = ranges
+        .iter()
+        .flat_map(|range| code.boundaries(declared.instance, *range))
+        .collect::<Vec<_>>();
+    segments(ranges, &boundaries, |address| {
+        visible_at(code, declared, address)
+    })
+}
+
+impl Code for Image {
+    fn call_at(&self, parent: CodeInstanceId, address: ImageAddress) -> Option<InlinedCall> {
+        let call = FunctionView::new(self)
+            .instances_containing(address)
+            .filter(|instance| instance.parent() == Some(parent))
+            .min_by_key(|instance| instance.id())?;
+        match call.kind() {
+            CodeInstanceKind::Inline { call_site } => Some(InlinedCall { site: call_site }),
+            CodeInstanceKind::OutOfLine => None,
+        }
+    }
+
+    fn line_at(&self, address: ImageAddress) -> Option<SourceLocation> {
+        LineView::new(self)
+            .line_entry_containing(address)
+            .map(|entry| entry.location)
+    }
+
+    fn boundaries(
+        &self,
+        parent: Option<CodeInstanceId>,
+        range: AddressRange<ImageAddress>,
+    ) -> Vec<ImageAddress> {
+        let lines = LineView::new(self);
+        let mut boundaries = lines
+            .line_entry_containing(range.start)
+            .into_iter()
+            .chain(lines.line_entries_starting_in([range]))
+            .flat_map(|entry| [entry.range.start, entry.range.end])
+            .collect::<Vec<_>>();
+        if let Some(parent) = parent {
+            boundaries.extend(
+                FunctionView::new(self)
+                    .instances()
+                    .filter(|instance| instance.parent() == Some(parent))
+                    .flat_map(crate::image::functions::CodeInstance::ranges)
+                    .flat_map(|call| [call.start, call.end]),
+            );
+        }
+        boundaries
     }
 }
 
-/// The parts of `ranges` where the line executing in the variable's
-/// function is past `declaration`'s: the call's line within a call
-/// inlined there, and otherwise the line of the code itself. Code whose
-/// line is unknown, or in another file, stays visible: hiding it would be
-/// a guess.
-pub(super) fn after_declaration(
+/// The parts of `ranges` where `visible` holds, which may change only at
+/// `boundaries`, merged where they meet.
+pub(super) fn segments(
     ranges: &[AddressRange<ImageAddress>],
-    declaration: &SourceLocation,
-    lines: &LineIndex,
-    calls: &[(AddressRange<ImageAddress>, Option<SourceLocation>)],
+    boundaries: &[ImageAddress],
+    visible: impl Fn(ImageAddress) -> bool,
 ) -> Vec<AddressRange<ImageAddress>> {
-    let mut visible = Vec::<AddressRange<ImageAddress>>::new();
+    let mut visible_ranges = Vec::<AddressRange<ImageAddress>>::new();
     for range in ranges {
-        let mut boundaries = lines
-            .boundaries(*range)
-            .chain(calls.iter().flat_map(|(call, _)| [call.start, call.end]))
+        let mut cuts = boundaries
+            .iter()
+            .copied()
             .filter(|address| range.start < *address && *address < range.end)
             .chain([range.start, range.end])
             .collect::<Vec<_>>();
-        boundaries.sort_unstable();
-        boundaries.dedup();
-        for segment in boundaries.windows(2) {
+        cuts.sort_unstable();
+        cuts.dedup();
+        for segment in cuts.windows(2) {
             let (start, end) = (segment[0], segment[1]);
-            let line = calls
-                .iter()
-                .find(|(call, _)| call.contains(start))
-                .map_or_else(|| lines.at(start), |(_, site)| site.as_ref());
-            let shown = line
-                .is_none_or(|line| line.file != declaration.file || line.line > declaration.line);
-            if !shown {
+            if !visible(start) {
                 continue;
             }
-            match visible.last_mut() {
+            match visible_ranges.last_mut() {
                 Some(last) if last.end == start => last.end = end,
-                _ => visible.push(AddressRange { start, end }),
+                _ => visible_ranges.push(AddressRange { start, end }),
             }
         }
     }
-    visible
+    visible_ranges
 }
 
 /// Ranges merged into the fewest sorted ranges covering them.
@@ -138,52 +175,4 @@ pub(super) fn fused(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{LineNumber, SourceFileId};
-
-    fn range(start: u64, end: u64) -> AddressRange<ImageAddress> {
-        AddressRange {
-            start: ImageAddress::new(start),
-            end: ImageAddress::new(end),
-        }
-    }
-
-    fn at(file: u32, line: u64) -> SourceLocation {
-        SourceLocation {
-            file: SourceFileId::new(file),
-            line: LineNumber::new(line).expect("lines are one-based"),
-            column: None,
-        }
-    }
-
-    #[test]
-    fn a_go_local_is_visible_only_past_its_declarations_line() {
-        let row = |start, end, location| LineEntry {
-            range: range(start, end),
-            location,
-            statement: true,
-        };
-        // Lines 10, 11 (the declaration), 12, a call inlined at line 9, a
-        // row of another file, line 13, and code with no line.
-        let lines = LineIndex::new(&[
-            row(0x10, 0x20, at(0, 10)),
-            row(0x20, 0x30, at(0, 11)),
-            row(0x30, 0x40, at(0, 12)),
-            row(0x40, 0x50, at(1, 70)),
-            row(0x50, 0x60, at(0, 3)),
-            row(0x60, 0x70, at(0, 13)),
-        ]);
-        let calls = [
-            (range(0x40, 0x48), Some(at(0, 9))),
-            (range(0x50, 0x60), Some(at(0, 14))),
-        ];
-        let visible = after_declaration(&[range(0x10, 0x80)], &at(0, 11), &lines, &calls);
-        assert_eq!(
-            visible,
-            [range(0x30, 0x40), range(0x48, 0x80)],
-            "line 12, the other file's row past the call, the call at line \
-             14 though its own code is at line 3, line 13, and code with no line"
-        );
-    }
-}
+mod tests;

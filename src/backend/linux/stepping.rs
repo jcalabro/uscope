@@ -370,11 +370,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                 module
                     .image
                     .functions()
-                    .iter()
-                    .filter(|function| function.role == CodeRole::Panic)
-                    .flat_map(|function| module.image.instances_for_function(function.id))
-                    .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
-                    .filter_map(|instance| instance.ranges.first())
+                    .filter(|function| function.role() == CodeRole::Panic)
+                    .flat_map(|function| module.image.instances_for_function(function.id()))
+                    .filter(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine))
+                    .filter_map(|instance| instance.ranges().next())
                     .filter_map(|range| module.loaded.virtual_address(range.start).ok())
                     .collect::<Vec<_>>()
             })
@@ -913,8 +912,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(caller_instance) = self.module_image.code_instance(caller_instance_id) else {
             return Ok(statements);
         };
-        for line in self.module_image.line_entries() {
-            if !line.statement || !caller_instance.contains(line.range.start) {
+        for line in self.module_image.line_entries_in(caller_instance) {
+            if !line.statement {
                 continue;
             }
             if self
@@ -982,7 +981,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let selected_is_inline = self
             .module_image
             .code_instance(start_instance)
-            .is_some_and(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }));
+            .is_some_and(|instance| matches!(instance.kind(), CodeInstanceKind::Inline { .. }));
         let entered_nested_callee =
             selected_is_inline && current_activation.is_callee_of(activation);
         let guarded_activation = if tail_replacement {
@@ -1345,8 +1344,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         let role = current_instance
             .filter(|instance| described.physical_instance != Some(*instance))
             .and_then(|instance| self.module_image.code_instance(instance))
-            .and_then(|instance| self.module_image.function(instance.function))
-            .map(|function| function.role)
+            .and_then(|instance| self.module_image.function(instance.function()))
+            .map(crate::image::functions::Function::role)
             .or(physical_role);
         if role.is_some_and(|role| passes_over(role, start)) {
             return Ok(false);
@@ -1364,9 +1363,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         // the body.
         let leads_into_body = current_instance
             .and_then(|instance| self.module_image.code_instance(instance))
-            .and_then(|instance| self.module_image.function(instance.function))
-            .filter(|function| function.coroutine.is_some())
-            .and_then(|function| function.declaration.as_ref())
+            .and_then(|instance| self.module_image.function(instance.function()))
+            .filter(|function| function.coroutine().is_some())
+            .and_then(crate::image::functions::Function::declaration)
             .zip(source.as_ref())
             .is_some_and(|(header, at)| header.file == at.file && header.line == at.line);
         if leads_into_body {
@@ -1438,8 +1437,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         let passed = |instance: &CodeInstanceId| {
             self.module_image
                 .code_instance(*instance)
-                .and_then(|instance| self.module_image.function(instance.function))
-                .is_some_and(|function| is_runtime_role(function.role) && !start.enters_runtime)
+                .and_then(|instance| self.module_image.function(instance.function()))
+                .is_some_and(|function| is_runtime_role(function.role()) && !start.enters_runtime)
         };
         let enclosing = match &location.inline_frames {
             InlineFrameLookup::Unique(chain) => {
@@ -1524,7 +1523,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         let selected_is_inline = code_instance
             .and_then(|instance| self.module_image.code_instance(instance))
-            .is_some_and(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }));
+            .is_some_and(|instance| matches!(instance.kind(), CodeInstanceKind::Inline { .. }));
         // An inline instance has no stack return address of its own. Leaving
         // its physical caller's return address as the only reachable plan
         // breakpoint would run the entire containing activation. Instruction
@@ -1640,8 +1639,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(BTreeSet::new());
         };
         let mut statements = BTreeSet::new();
-        for line in self.module_image.line_entries() {
-            if !line.statement || !instance.contains(line.range.start) {
+        for line in self.module_image.line_entries_in(instance) {
+            if !line.statement {
                 continue;
             }
             let location = self.module_image.locate(line.range.start);

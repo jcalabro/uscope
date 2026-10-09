@@ -51,8 +51,7 @@
       tokioFixtureCrates = pkgs.rustPlatform.importCargoLock {
         lockFile = ./tests/fixtures/rust/tokio/Cargo.lock;
       };
-    in {
-      devShells.${system}.default = pkgs.mkShell {
+      default = pkgs.mkShell {
         NIX_HARDENING_ENABLE = "";
         # glibc's static libraries, which only statically linked fixtures link
         # against: on the default search path they would shadow the shared C
@@ -80,6 +79,9 @@
           muslClang
           gdb
           lldb
+          # Profilers for the `just profile-*` recipes.
+          perf
+          valgrind
           goStable
           zig
           pkg-config
@@ -88,6 +90,23 @@
           pnpm
           biome
         ];
+      };
+    in {
+      devShells.${system} = {
+        inherit default;
+        # The default shell with the profilers people read at a screen, kept
+        # out of it for their size: samply, hotspot, heaptrack, hyperfine,
+        # poop, and KCachegrind.
+        profile = default.overrideAttrs (previous: {
+          nativeBuildInputs = previous.nativeBuildInputs ++ (with pkgs; [
+            samply
+            hotspot
+            heaptrack
+            hyperfine
+            poop
+            kdePackages.kcachegrind
+          ]);
+        });
       };
     };
 }

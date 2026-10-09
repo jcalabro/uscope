@@ -8,6 +8,11 @@ macro_rules! record {
     }};
 }
 
+// The library's own tests share support code with the integration tests,
+// which name the library `uscope`.
+#[cfg(test)]
+extern crate self as uscope;
+
 mod backend;
 mod condition;
 mod debug_info;
@@ -18,8 +23,14 @@ mod eval;
 #[cfg(debug_assertions)]
 #[doc(hidden)]
 pub mod flight_recorder;
+pub(crate) mod image;
+pub use image::functions::{CodeInstance, Function};
+pub use image::symbols::Symbol;
+pub mod cache;
 mod inspection;
 pub(crate) mod model;
+pub mod pool;
+pub mod profile;
 mod protocol;
 mod runtime_model;
 #[cfg(any(test, feature = "sim"))]
@@ -28,6 +39,9 @@ pub mod sim;
 mod source_map;
 #[cfg(test)]
 mod test_memory;
+#[cfg(feature = "tools")]
+#[doc(hidden)]
+pub mod tools;
 mod type_identity;
 mod unwind;
 mod view;
@@ -233,6 +247,14 @@ pub fn fuzz_core_dump(data: &[u8]) {
     backend::fuzz_core_dump(data);
 }
 
+/// Exercises image validation, and every lookup in an image it accepts,
+/// for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_image(data: &[u8]) {
+    image::sample::fuzz(data);
+}
+
 /// Exercises debug-register planning invariants for the fuzz harness.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
@@ -342,7 +364,7 @@ pub struct DebuggerHandle {
 /// not read it again.
 #[derive(Clone)]
 pub struct Program {
-    executable: backend::ExecutableSource,
+    executable: backend::Executable,
     debug_info: debug_info::DebugInfo,
 }
 
@@ -362,7 +384,7 @@ impl Program {
             &executable.debug_files,
         )?;
         Ok(Self {
-            executable,
+            executable: executable.described(),
             debug_info,
         })
     }
@@ -1330,13 +1352,13 @@ impl DebuggerHandle {
             // A versioned name's default version is the one the loader binds.
             if let Some(exported) = symbols
                 .iter()
-                .filter(|symbol| symbol.exported)
-                .min_by_key(|symbol| (&*symbol.name != name, !symbol.name.contains("@@")))
+                .filter(|symbol| symbol.exported())
+                .min_by_key(|symbol| (symbol.name() != name, !symbol.name().contains("@@")))
             {
-                return module.virtual_address(exported.address);
+                return module.virtual_address(exported.address());
             }
             for symbol in symbols {
-                found.insert(module.virtual_address(symbol.address)?);
+                found.insert(module.virtual_address(symbol.address())?);
             }
         }
         let mut found = found.into_iter();

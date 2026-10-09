@@ -494,7 +494,6 @@ impl<P: InspectionOps> Controller<P> {
                 module
                     .image
                     .globals()
-                    .iter()
                     .filter(|global| {
                         query.filter.as_ref().is_none_or(|filter| {
                             global.name.contains(filter)
@@ -508,7 +507,7 @@ impl<P: InspectionOps> Controller<P> {
                     .map(|global| LoadedGlobalVariableInfo {
                         module: running.then_some(module.loaded),
                         image: module.image.id(),
-                        variable: global.clone(),
+                        variable: global,
                     })
             })
             .collect::<Vec<_>>();

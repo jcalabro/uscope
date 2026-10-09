@@ -35,23 +35,31 @@ pub struct GoUnwind {
     frame_pointer_saved: Vec<Option<std::ops::Range<u64>>>,
 }
 
+/// Where each function keeps its caller's frame pointer saved, by index,
+/// from every function's prologue in the image's code.
+pub fn frame_saves<'code>(
+    table: &GoTable,
+    code: impl Fn(u64, usize) -> Option<&'code [u8]>,
+) -> Vec<Option<std::ops::Range<u64>>> {
+    table
+        .functions()
+        .iter()
+        .map(|function| {
+            function
+                .is_go()
+                .then(|| table.prologue(function, &code).ok())
+                .flatten()
+                .and_then(|prologue| prologue.frame_pointer_saved)
+        })
+        .collect()
+}
+
 impl GoUnwind {
-    /// Analyzes every function's prologue in the image's code.
-    pub fn new<'code>(
+    /// Unwinds by `table`, with [`frame_saves`]'s answer for it.
+    pub const fn new(
         table: Arc<GoTable>,
-        code: impl Fn(u64, usize) -> Option<&'code [u8]>,
+        frame_pointer_saved: Vec<Option<std::ops::Range<u64>>>,
     ) -> Self {
-        let frame_pointer_saved = table
-            .functions()
-            .iter()
-            .map(|function| {
-                function
-                    .is_go()
-                    .then(|| table.prologue(function, &code).ok())
-                    .flatten()
-                    .and_then(|prologue| prologue.frame_pointer_saved)
-            })
-            .collect();
         Self {
             table,
             frame_pointer_saved,
@@ -168,8 +176,10 @@ impl GoUnwind {
         let Ok(delta) = self.sp_delta(function, address) else {
             return Some(CallerFramePointer::Unknown);
         };
-        let saved = self.frame_pointer_saved[index]
-            .as_ref()
+        let saved = self
+            .frame_pointer_saved
+            .get(index)
+            .and_then(Option::as_ref)
             .is_some_and(|saved| saved.contains(&address));
         Some(if delta >= 8 && saved {
             CallerFramePointer::Saved(VirtualAddress::new(cfa.get() - 16))

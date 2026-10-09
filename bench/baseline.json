@@ -1,0 +1,422 @@
+{
+  "containers-cpp-gcc-o2": {
+    "digest": "c0fce2463be86d48c43bc0199a0bbc28",
+    "allocations": 460689,
+    "callgrind_instructions": null
+  },
+  "containers-rust-o0": {
+    "digest": "78978c585e0cd6a19d9bd7022710f30d",
+    "allocations": 1357710,
+    "callgrind_instructions": null
+  },
+  "containers-zig-self-hosted": {
+    "digest": "702db15a07ff0f957d677ab4a2943e1a",
+    "allocations": 521577,
+    "callgrind_instructions": null
+  },
+  "golden/containers-clang-O0": {
+    "digest": "8dd06ddb681d7450f139d92d99a85b40",
+    "allocations": 2225,
+    "callgrind_instructions": null
+  },
+  "golden/containers-clang-O0-nofp": {
+    "digest": "c1a222529dfd3f33a86117e29fcc377e",
+    "allocations": 2226,
+    "callgrind_instructions": null
+  },
+  "golden/containers-clang-O0-pie": {
+    "digest": "bb354b0700ff6d6e4affa7acee0c6500",
+    "allocations": 2505,
+    "callgrind_instructions": null
+  },
+  "golden/containers-clang-O2": {
+    "digest": "63fb07d1f4e8a8dba929359bd40ac850",
+    "allocations": 3162,
+    "callgrind_instructions": null
+  },
+  "golden/containers-clang-O2-nofp": {
+    "digest": "1cd1eb575fe41d1df5f64a54dda4267a",
+    "allocations": 3162,
+    "callgrind_instructions": null
+  },
+  "golden/containers-gcc-O0": {
+    "digest": "598058d7bd582b9e868b368611207142",
+    "allocations": 9974,
+    "callgrind_instructions": null
+  },
+  "golden/containers-gcc-O0-nofp": {
+    "digest": "ce7eeaf97b81728c1aca722e561a3de3",
+    "allocations": 9974,
+    "callgrind_instructions": null
+  },
+  "golden/containers-gcc-O2": {
+    "digest": "16278f3521abcdb61de7c34f572913ae",
+    "allocations": 11043,
+    "callgrind_instructions": null
+  },
+  "golden/containers-gcc-O2-nofp": {
+    "digest": "cc9c6ba8ebc6881ae754f044fc033a2a",
+    "allocations": 11043,
+    "callgrind_instructions": null
+  },
+  "golden/containers-gcc-O2-pie": {
+    "digest": "7e009bf7947ac637cd78f30e4014a563",
+    "allocations": 11589,
+    "callgrind_instructions": null
+  },
+  "golden/data-clang-O0": {
+    "digest": "92b99bdf28ad69cdfd2ac580c78746be",
+    "allocations": 1845,
+    "callgrind_instructions": null
+  },
+  "golden/data-clang-O0-nofp": {
+    "digest": "d65508e1644356fcb8ce761f780ad242",
+    "allocations": 1845,
+    "callgrind_instructions": null
+  },
+  "golden/data-clang-O0-pie": {
+    "digest": "b46cd9013774a816219fda8b4ad2eb63",
+    "allocations": 2123,
+    "callgrind_instructions": null
+  },
+  "golden/data-clang-O2": {
+    "digest": "500c426f7bb161348dc4939ae07268f2",
+    "allocations": 2771,
+    "callgrind_instructions": null
+  },
+  "golden/data-clang-O2-nofp": {
+    "digest": "ed56582892b42a0b98aea4c618e3401d",
+    "allocations": 2771,
+    "callgrind_instructions": null
+  },
+  "golden/data-gcc-O0": {
+    "digest": "05311dc83326cf01eaac1c1ec2051e9b",
+    "allocations": 9592,
+    "callgrind_instructions": null
+  },
+  "golden/data-gcc-O0-nofp": {
+    "digest": "ff014404c57afde058a9bb785a2dcc84",
+    "allocations": 9592,
+    "callgrind_instructions": null
+  },
+  "golden/data-gcc-O2": {
+    "digest": "f75ba8823ef36ca3c5db906088f3b8b1",
+    "allocations": 10633,
+    "callgrind_instructions": null
+  },
+  "golden/data-gcc-O2-nofp": {
+    "digest": "5c2b744c4f235d9a11863a330d6e7621",
+    "allocations": 10632,
+    "callgrind_instructions": null
+  },
+  "golden/data-gcc-O2-pie": {
+    "digest": "21b103be97401fbc0edc98d2e3dca6d3",
+    "allocations": 11165,
+    "callgrind_instructions": null
+  },
+  "golden/fork-clang-O0": {
+    "digest": "3137e3167abcb5a7c056d170d88127b5",
+    "allocations": 2805,
+    "callgrind_instructions": null
+  },
+  "golden/fork-clang-O0-nofp": {
+    "digest": "c2d4649401d12f8435944d29369f2521",
+    "allocations": 2805,
+    "callgrind_instructions": null
+  },
+  "golden/fork-clang-O0-pie": {
+    "digest": "20bc0b3fae3c6cb171454c9301b2474a",
+    "allocations": 3072,
+    "callgrind_instructions": null
+  },
+  "golden/fork-clang-O2": {
+    "digest": "51c464c6c731defc07562395f58ec4f8",
+    "allocations": 4413,
+    "callgrind_instructions": null
+  },
+  "golden/fork-clang-O2-nofp": {
+    "digest": "9ded9bc0a23eb5316c84d12d9d8f268c",
+    "allocations": 4410,
+    "callgrind_instructions": null
+  },
+  "golden/fork-gcc-O0": {
+    "digest": "280c13f1ee47381ea6a449dcf8f1c46c",
+    "allocations": 10714,
+    "callgrind_instructions": null
+  },
+  "golden/fork-gcc-O0-nofp": {
+    "digest": "aef1a1e57dcd969a881f6da6704c2443",
+    "allocations": 10714,
+    "callgrind_instructions": null
+  },
+  "golden/fork-gcc-O2": {
+    "digest": "2e4c5270f20b03c7ad455ba3115faed5",
+    "allocations": 12360,
+    "callgrind_instructions": null
+  },
+  "golden/fork-gcc-O2-nofp": {
+    "digest": "c3dd8cd5920c6b686e989b9f1c103622",
+    "allocations": 12359,
+    "callgrind_instructions": null
+  },
+  "golden/fork-gcc-O2-pie": {
+    "digest": "2d2f432f9295fa9208a7495550fa23fb",
+    "allocations": 12887,
+    "callgrind_instructions": null
+  },
+  "golden/frames-clang-O0": {
+    "digest": "7cea63a09b45ce0e8c27c52b45be46de",
+    "allocations": 2455,
+    "callgrind_instructions": null
+  },
+  "golden/frames-clang-O0-nofp": {
+    "digest": "3863ee3b80daa20cbbc76faeb2695cda",
+    "allocations": 2459,
+    "callgrind_instructions": null
+  },
+  "golden/frames-clang-O0-pie": {
+    "digest": "2b1fa9bcb8e2901dbd8af2d3ce928b87",
+    "allocations": 2741,
+    "callgrind_instructions": null
+  },
+  "golden/frames-clang-O2": {
+    "digest": "b84517c7bca59981b31095d4a056e48b",
+    "allocations": 3512,
+    "callgrind_instructions": null
+  },
+  "golden/frames-clang-O2-nofp": {
+    "digest": "e34c3b3e638aac00d0970bae71c8e707",
+    "allocations": 3512,
+    "callgrind_instructions": null
+  },
+  "golden/frames-gcc-O0": {
+    "digest": "770ee325d6339524bae580aa24c65305",
+    "allocations": 10298,
+    "callgrind_instructions": null
+  },
+  "golden/frames-gcc-O0-nofp": {
+    "digest": "0fcd77969d20513a8cc83fa0d9521d7b",
+    "allocations": 10300,
+    "callgrind_instructions": null
+  },
+  "golden/frames-gcc-O2": {
+    "digest": "0593d226c4e562b884948c3ad5b26eca",
+    "allocations": 11487,
+    "callgrind_instructions": null
+  },
+  "golden/frames-gcc-O2-nofp": {
+    "digest": "4d61c12efe9f38f42f0186bd675929c8",
+    "allocations": 11487,
+    "callgrind_instructions": null
+  },
+  "golden/frames-gcc-O2-pie": {
+    "digest": "d1fa37837c94db6181a4b3be61a7f6dd",
+    "allocations": 12021,
+    "callgrind_instructions": null
+  },
+  "golden/racing-exit-clang-O0": {
+    "digest": "8e9e3b390421bb241f2a6e6e715bf63b",
+    "allocations": 2283,
+    "callgrind_instructions": null
+  },
+  "golden/racing-exit-clang-O0-nofp": {
+    "digest": "9899b0b637af9f339c7a331f553271b9",
+    "allocations": 2289,
+    "callgrind_instructions": null
+  },
+  "golden/racing-exit-clang-O0-pie": {
+    "digest": "fae7a091ac53b54019b1a5734136d791",
+    "allocations": 2570,
+    "callgrind_instructions": null
+  },
+  "golden/racing-exit-clang-O2": {
+    "digest": "d013493f7848717b063133d38ebf6859",
+    "allocations": 3321,
+    "callgrind_instructions": null
+  },
+  "golden/racing-exit-clang-O2-nofp": {
+    "digest": "7665186abc4ccd69939ee6c73de25875",
+    "allocations": 3320,
+    "callgrind_instructions": null
+  },
+  "golden/racing-exit-gcc-O0": {
+    "digest": "e01605a70d6568a969f61fb7f1a8cda0",
+    "allocations": 10088,
+    "callgrind_instructions": null
+  },
+  "golden/racing-exit-gcc-O0-nofp": {
+    "digest": "007f7e0a3fc702b2497fff1679f7095e",
+    "allocations": 10091,
+    "callgrind_instructions": null
+  },
+  "golden/racing-exit-gcc-O2": {
+    "digest": "ad6c27491f1120c14f7e212de75b60e6",
+    "allocations": 11273,
+    "callgrind_instructions": null
+  },
+  "golden/racing-exit-gcc-O2-nofp": {
+    "digest": "cd5d4f0d6996d42833687d7d68dd7c41",
+    "allocations": 11273,
+    "callgrind_instructions": null
+  },
+  "golden/racing-exit-gcc-O2-pie": {
+    "digest": "dab15e5ef357e24b50f537cd3ee9ae7e",
+    "allocations": 11794,
+    "callgrind_instructions": null
+  },
+  "golden/stores-clang-O0": {
+    "digest": "1de09a515d9c19aac6f872fe1f03e026",
+    "allocations": 2730,
+    "callgrind_instructions": null
+  },
+  "golden/stores-clang-O0-nofp": {
+    "digest": "61ff7a7bd813b2d21c3a69a4ae7112cf",
+    "allocations": 2729,
+    "callgrind_instructions": null
+  },
+  "golden/stores-clang-O0-pie": {
+    "digest": "def5a0befcda540fae85188237ebcb73",
+    "allocations": 3005,
+    "callgrind_instructions": null
+  },
+  "golden/stores-clang-O2": {
+    "digest": "b48fe541cfb049784e4e22f29f30d357",
+    "allocations": 3818,
+    "callgrind_instructions": null
+  },
+  "golden/stores-clang-O2-nofp": {
+    "digest": "2de1d73bbdd822778def2e5dda2290f5",
+    "allocations": 3817,
+    "callgrind_instructions": null
+  },
+  "golden/stores-gcc-O0": {
+    "digest": "02a7d2170cb95ef4c4dd04e2a0dde3c1",
+    "allocations": 10534,
+    "callgrind_instructions": null
+  },
+  "golden/stores-gcc-O0-nofp": {
+    "digest": "4665c3068981753bb93a3565510c1a97",
+    "allocations": 10534,
+    "callgrind_instructions": null
+  },
+  "golden/stores-gcc-O2": {
+    "digest": "7f60821c3c29faa2d1ff2a54764d882e",
+    "allocations": 11776,
+    "callgrind_instructions": null
+  },
+  "golden/stores-gcc-O2-nofp": {
+    "digest": "42752671b806419ec89733ee1426ae80",
+    "allocations": 11775,
+    "callgrind_instructions": null
+  },
+  "golden/stores-gcc-O2-pie": {
+    "digest": "e006b4cb6f2661b6ed3f1cf1c82e1f6c",
+    "allocations": 12304,
+    "callgrind_instructions": null
+  },
+  "golden/straight-clang-O0": {
+    "digest": "7336b10e01ea9d2a9d4fc1d7f654069e",
+    "allocations": 1562,
+    "callgrind_instructions": null
+  },
+  "golden/straight-clang-O0-nofp": {
+    "digest": "a0fbd31cb3d24cc0055438384025376b",
+    "allocations": 1562,
+    "callgrind_instructions": null
+  },
+  "golden/straight-clang-O0-pie": {
+    "digest": "ee27188bcf9eea3c344c8f71a5721614",
+    "allocations": 1846,
+    "callgrind_instructions": null
+  },
+  "golden/straight-clang-O2": {
+    "digest": "036b91b835fa5bf534fdd2ac7468b6dc",
+    "allocations": 2455,
+    "callgrind_instructions": null
+  },
+  "golden/straight-clang-O2-nofp": {
+    "digest": "9923f51d02db5e4fd5662623f3d0e498",
+    "allocations": 2455,
+    "callgrind_instructions": null
+  },
+  "golden/straight-gcc-O0": {
+    "digest": "ec02964512a99827517067ae4c289090",
+    "allocations": 9299,
+    "callgrind_instructions": null
+  },
+  "golden/straight-gcc-O0-nofp": {
+    "digest": "8c176c092098c35b9848cf4d14834938",
+    "allocations": 9302,
+    "callgrind_instructions": null
+  },
+  "golden/straight-gcc-O2": {
+    "digest": "7aeb7d093ce1b7084a5b23990dac46c7",
+    "allocations": 10358,
+    "callgrind_instructions": null
+  },
+  "golden/straight-gcc-O2-nofp": {
+    "digest": "42fbd5eb6634beea2c08e6be542c75e6",
+    "allocations": 10358,
+    "callgrind_instructions": null
+  },
+  "golden/straight-gcc-O2-pie": {
+    "digest": "7224f522cb8a5556c6bc6575da8690ff",
+    "allocations": 10895,
+    "callgrind_instructions": null
+  },
+  "golden/threads-clang-O0": {
+    "digest": "2f31a1ca59debd9a02aec860fa99f3a1",
+    "allocations": 2437,
+    "callgrind_instructions": null
+  },
+  "golden/threads-clang-O0-nofp": {
+    "digest": "f5992bbeb690521e41eaba669009145c",
+    "allocations": 2441,
+    "callgrind_instructions": null
+  },
+  "golden/threads-clang-O0-pie": {
+    "digest": "801fedb10bcd7dacbf43ba1437f3e669",
+    "allocations": 2707,
+    "callgrind_instructions": null
+  },
+  "golden/threads-clang-O2": {
+    "digest": "9023b9728b0efd1480c82818c1e3c6a1",
+    "allocations": 3643,
+    "callgrind_instructions": null
+  },
+  "golden/threads-clang-O2-nofp": {
+    "digest": "5666a93d82ac650ef09ab6fa23be3ec9",
+    "allocations": 3642,
+    "callgrind_instructions": null
+  },
+  "golden/threads-gcc-O0": {
+    "digest": "277133285f36fc3b14afc835fab0e41f",
+    "allocations": 10249,
+    "callgrind_instructions": null
+  },
+  "golden/threads-gcc-O0-nofp": {
+    "digest": "1e80164630d59f5c355d97b514791162",
+    "allocations": 10252,
+    "callgrind_instructions": null
+  },
+  "golden/threads-gcc-O2": {
+    "digest": "9f429a388bc4cf689d295e4655dd3a03",
+    "allocations": 11617,
+    "callgrind_instructions": null
+  },
+  "golden/threads-gcc-O2-nofp": {
+    "digest": "690a07bf5a1bd3aa93829c3f3c72318d",
+    "allocations": 11617,
+    "callgrind_instructions": null
+  },
+  "golden/threads-gcc-O2-pie": {
+    "digest": "1c45240b19b349674f9f44431d53386d",
+    "allocations": 12146,
+    "callgrind_instructions": null
+  },
+  "server-go-o0": {
+    "digest": "0432c20fd7cf813fce92795671aac7d2",
+    "allocations": 883759,
+    "callgrind_instructions": null
+  }
+}

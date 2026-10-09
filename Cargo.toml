@@ -15,6 +15,17 @@ fuzzing = ["object/write"]
 # The deterministic simulator's sweep and replay binary. Its tests run with
 # the library's own.
 sim = []
+# Allocates with the C library's allocator instead of mimalloc, for heap
+# profilers such as Valgrind's that cannot see mimalloc.
+system-alloc = []
+# Developer tools: `uscope-tools` dumps every answer a program's debug
+# information gives, loads programs for benchmarks, and summarizes timings.
+tools = []
+
+[[bin]]
+name = "uscope-tools"
+path = "src/bin/uscope-tools.rs"
+required-features = ["tools"]
 
 [[bin]]
 name = "uscope-sim"
@@ -48,6 +59,7 @@ anyhow = "1.0"
 anstyle = "1.0"
 anstyle-query = "1.1"
 clap = { version = "4.6", features = ["derive", "wrap_help"] }
+memchr = "2.8"
 regex = "1.13"
 rustyline = "18.0"
 rustc_apfloat = "=0.2.3"
@@ -61,14 +73,18 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 toml = "1.1"
 mimalloc = { version = "0.1", default-features = false }
 foldhash = "0.2"
+zerocopy = { version = "0.8", features = ["derive"] }
+rayon = "1.11"
+twox-hash = { version = "2.1", default-features = false, features = ["std", "xxhash3_64", "xxhash3_128"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cpp_demangle = "0.5"
 gimli = "0.34"
 iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "gas", "instr_info", "intel", "std"] }
 lzma-rs = "0.3"
-nix = { version = "0.31", features = ["fs", "personality", "ptrace", "process", "signal", "term", "uio"] }
+nix = { version = "0.31", features = ["fs", "personality", "ptrace", "process", "resource", "signal", "term", "time", "uio"] }
 object = { version = "0.39", features = ["read"] }
+perf-event = "0.4"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 rustc-demangle = "0.1"
 
@@ -93,6 +109,12 @@ object = { version = "0.39", features = ["read", "write"] }
 opt-level = 1
 debug = 1
 lto = "off"
+
+# Profilers read release builds with line tables, which name the functions
+# and lines their costs belong to.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
 
 # Simulation sweeps: optimized, with the debug assertions that keep the
 # flight recorder and internal checks on.

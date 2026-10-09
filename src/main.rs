@@ -11,10 +11,10 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 
-// Reading debug information allocates millions of small blocks, which
-// mimalloc serves far faster than the C library's allocator.
+// Each thread counts its allocations for `--timings`.
 #[global_allocator]
-static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static ALLOCATOR: uscope::profile::alloc::Counting<uscope::profile::alloc::Selected> =
+    uscope::profile::alloc::selected();
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use uscope::Debugger;
 
@@ -182,6 +182,11 @@ struct Args {
     #[arg(long, hide_short_help = true, help_heading = "Debug information")]
     debuginfod: bool,
 
+    /// Read debug information afresh, neither reading nor writing the image
+    /// cache in `USCOPE_CACHE_DIR` or `~/.cache/uscope/images`.
+    #[arg(long, hide_short_help = true, help_heading = "Debug information")]
+    no_cache: bool,
+
     /// Present values with the views in FILE, ahead of the project's, the
     /// user's, the program's own, and the built-in ones. May be repeated;
     /// later files come first.
@@ -231,6 +236,17 @@ struct Args {
     /// The assembly syntax `disassemble` renders, over [disassembly] syntax.
     #[arg(long, value_enum, hide_short_help = true, help_heading = "Display")]
     disassembly_syntax: Option<DisassemblySyntax>,
+
+    /// Write where the session's time and memory went to FILE: JSON with a
+    /// summary, totals per phase, and Chrome trace events, which
+    /// ui.perfetto.dev opens.
+    #[arg(
+        long,
+        value_name = "FILE",
+        hide_short_help = true,
+        help_heading = "Diagnostics"
+    )]
+    timings: Option<PathBuf>,
 
     #[command(subcommand)]
     tool: Option<Tool>,
@@ -319,6 +335,11 @@ fn start_flight_recording() {
 
 async fn async_main() -> ExitCode {
     let args = parse_args();
+    if let Err(error) =
+        uscope::cache::configure(args.no_cache.then_some(uscope::cache::Setting::Off))
+    {
+        eprintln!("warning: {error}; loading debug information without it");
+    }
     match &args.tool {
         Some(Tool::Dap(dap_args)) => {
             let code = match dap::run(dap_args).await {
@@ -365,6 +386,19 @@ async fn async_main() -> ExitCode {
         }
         None => {}
     }
+    let recording = match &args.timings {
+        Some(_) => {
+            match uscope::profile::Recording::start(uscope::profile::Options { instructions: true })
+            {
+                Ok(recording) => Some(recording),
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => None,
+    };
     let early = Renderers::detect(args.color.unwrap_or_default(), args.batch);
     let session = match cli::session::prepare(&args, early.stderr) {
         Ok(session) => session,
@@ -375,7 +409,18 @@ async fn async_main() -> ExitCode {
     };
     let renderers = Renderers::configured(&session.settings, args.batch);
 
-    match run(session, renderers).await {
+    let result = run(session, renderers).await;
+    if let (Some(recording), Some(path)) = (recording, &args.timings)
+        && let Err(error) = std::fs::write(path, recording.finish().to_json())
+    {
+        eprintln!(
+            "{}: cannot write the timings to {}: {error}",
+            renderers.stderr.paint(Role::Error, "error"),
+            path.display()
+        );
+        return ExitCode::FAILURE;
+    }
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         // A closed stdout pipe, such as `uscope ... | head`, is a normal end.
         Err(error) if cli::is_broken_pipe(&error) => ExitCode::SUCCESS,

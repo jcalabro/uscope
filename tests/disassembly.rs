@@ -176,10 +176,9 @@ impl Modules {
         let (record, image) = self.named(file_name);
         let symbol = image
             .symbols()
-            .iter()
-            .find(|symbol| symbol.name.as_ref() == name)
+            .find(|symbol| symbol.name() == name)
             .unwrap_or_else(|| panic!("{file_name} has no symbol {name}"));
-        record.module.load_bias + symbol.address.get()
+        record.module.load_bias + symbol.address().get()
     }
 }
 
@@ -334,8 +333,7 @@ async fn faulted_with_breakpoints(fixture: &str) -> (Scenario, Modules) {
     let (record, image) = modules.named(fixture);
     let starts = image
         .symbols()
-        .iter()
-        .filter_map(|symbol| symbol.extent)
+        .filter_map(uscope::Symbol::extent)
         .map(|extent| extent.range.start.get())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -458,19 +456,16 @@ async fn functions_cover_every_debug_information_range() {
         let mut names = Vec::new();
         for instance in image
             .code_instances()
-            .iter()
-            .filter(|instance| matches!(instance.kind, uscope::CodeInstanceKind::OutOfLine))
+            .filter(|instance| matches!(instance.kind(), uscope::CodeInstanceKind::OutOfLine))
         {
             names.push(
                 image
-                    .function(instance.function)
+                    .function(instance.function())
                     .expect("instance function")
-                    .name
-                    .clone(),
+                    .name(),
             );
             let mut ranges = instance
-                .ranges
-                .iter()
+                .ranges()
                 .map(|range| (range.start.get(), range.end.get()))
                 .collect::<Vec<_>>();
             ranges.sort_unstable();
@@ -483,7 +478,7 @@ async fn functions_cover_every_debug_information_range() {
                     ))),
                 )
                 .await;
-                let context = format!("{fixture}: instance {}", instance.id);
+                let context = format!("{fixture}: instance {}", instance.id());
                 assert_function_blocks(&disassembly, &ranges, bias, &oracle, &context);
                 let DisassemblyView::Function { function, .. } = &disassembly.view else {
                     unreachable!();
@@ -492,7 +487,7 @@ async fn functions_cover_every_debug_information_range() {
                 assert_eq!(
                     function.origin,
                     FunctionOrigin::DebugInfo {
-                        instance: instance.id
+                        instance: instance.id()
                     },
                     "{context}"
                 );
@@ -500,7 +495,7 @@ async fn functions_cover_every_debug_information_range() {
             split += usize::from(ranges.len() > 1);
         }
         assert!(
-            names.iter().any(|name| name.as_ref() == "main"),
+            names.iter().any(|name| &**name == "main"),
             "{fixture}: {names:?}"
         );
         if fixture == "crash-gcc-o2-nopie" {
@@ -559,7 +554,7 @@ async fn functions_known_only_by_symbols_use_their_extents() {
     let oracle = Objdump::read(library);
     let mut origins = BTreeSet::new();
     for symbol in image.symbols() {
-        let Some(extent) = symbol.extent else {
+        let Some(extent) = symbol.extent() else {
             continue;
         };
         let address = VirtualAddress::new(bias + extent.range.start.get());
@@ -574,9 +569,9 @@ async fn functions_known_only_by_symbols_use_their_extents() {
             .expect("code at a symbol is named");
         let named_extent = image
             .symbol(named.symbol)
-            .and_then(|info| info.extent)
+            .and_then(uscope::Symbol::extent)
             .expect("extent");
-        let context = format!("{library}: {}", symbol.name);
+        let context = format!("{library}: {}", symbol.name());
         assert_eq!(
             function.origin,
             FunctionOrigin::Symbol {
@@ -1437,9 +1432,8 @@ async fn indirect_branch_sites(
     let bias = record.module.load_bias;
     let skipped = image
         .symbols()
-        .iter()
-        .filter(|symbol| skipped.contains(&symbol.name.as_ref()))
-        .filter_map(|symbol| symbol.extent)
+        .filter(|symbol| skipped.contains(&symbol.name()))
+        .filter_map(uscope::Symbol::extent)
         .map(|extent| bias + extent.range.start.get()..bias + extent.range.end.get())
         .collect::<Vec<_>>();
     let kept =
@@ -1720,12 +1714,11 @@ async fn a_register_that_a_restarted_system_call_replaces_is_never_used() {
         .expect("image");
     let jump = image
         .symbols()
-        .iter()
-        .find(|symbol| symbol.name.as_ref() == "attach_restart_jump")
+        .find(|symbol| symbol.name() == "attach_restart_jump")
         .expect("the jump is labeled");
     assert_eq!(
         location.address.get(),
-        executable.module.load_bias + jump.address.get()
+        executable.module.load_bias + jump.address().get()
     );
 
     // The kernel will restart the call, which replaces rax, so the jump

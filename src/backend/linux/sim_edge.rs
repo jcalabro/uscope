@@ -546,23 +546,25 @@ impl LinuxTraceOps for SimTrace {
         None
     }
 
-    fn load_module(
+    fn load_modules(
         &self,
-        _path: &Path,
-        _id: crate::ModuleImageId,
+        modules: &[(PathBuf, crate::ModuleImageId)],
         _search: &crate::debug_info::DebugFileSearch,
-    ) -> Result<DebugInfo> {
-        self.gap("loading a library")
+    ) -> Vec<Result<DebugInfo>> {
+        modules
+            .iter()
+            .map(|_| self.gap("loading a library"))
+            .collect()
     }
 
     fn load_bias(
         &self,
         pid: Pid,
         executable: &Path,
-        executable_data: &[u8],
+        image_base: u64,
         identity: FileIdentity,
     ) -> Result<u64> {
-        load_bias_in(&self.maps(pid)?, executable, executable_data, identity)
+        load_bias_in(&self.maps(pid)?, executable, image_base, identity)
     }
 
     fn module_mappings(&self, pid: Pid) -> Result<ProcessMappings> {
@@ -786,7 +788,8 @@ impl SimController {
                 },
                 process_start_time: executable.start_time,
                 debug_files: crate::debug_info::DebugFileSearch::default(),
-            },
+            }
+            .described(),
             parts.debug_info,
             ControllerChannels {
                 sender: sender.clone(),

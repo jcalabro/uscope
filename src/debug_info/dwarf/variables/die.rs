@@ -1,34 +1,23 @@
 //! Reading attributes from DIEs and the origins they inherit from.
 
-use std::path::PathBuf;
+use crate::image::lines::Files;
 use std::sync::Arc;
 
-use foldhash::{HashMap, HashSet, HashSetExt};
+use foldhash::{HashSet, HashSetExt};
 use gimli::Reader as _;
 
 use crate::debug_info::dwarf::{
-    DieKey, DwarfError, Reader, die_reference, is_type_unit, source_file_id, source_path,
-    string_attribute, type_unit_source_file_id,
+    DieKey, DwarfError, Reader, Units, die_reference, is_type_unit, source_path, string_attribute,
 };
 use crate::{
-    AddressRange, ColumnNumber, ImageAddress, LineNumber, SourceFile, SourceFileId, SourceLocation,
+    AddressRange, ColumnNumber, ImageAddress, LineNumber, SourceFileId, SourceLocation,
     VariableKind,
 };
 
-use super::{CatalogDataObject, MAX_DATA_OBJECTS, Scope};
+use super::Scope;
+use crate::image::variables::DataObject;
 
-pub(super) const fn check_data_object_capacity(
-    count: usize,
-) -> std::result::Result<(), DwarfError> {
-    if count >= MAX_DATA_OBJECTS {
-        return Err(DwarfError::DataObjectLimit(MAX_DATA_OBJECTS));
-    }
-    Ok(())
-}
-
-pub(super) fn variable_order_key(
-    object: &CatalogDataObject,
-) -> (u8, u8, SourceFileId, u64, u64, u64) {
+pub(super) fn variable_order_key(object: &DataObject) -> (u8, u8, SourceFileId, u64, u64, u64) {
     if matches!(object.kind, VariableKind::Parameter | VariableKind::Result) {
         return (0, 0, SourceFileId::new(0), 0, 0, object.order);
     }
@@ -127,7 +116,7 @@ const MAX_ZIG_PARENTS: usize = 16;
 /// qualified, or has no parent, ends the chain.
 pub(super) fn zig_qualified_name(
     dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
+    units: &Units<'_>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     name: Arc<str>,
@@ -168,7 +157,7 @@ pub(super) fn zig_qualified_name(
 /// has it.
 pub(super) fn string_with_origins(
     dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
+    units: &Units<'_>,
     unit: &gimli::Unit<Reader<'_>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
@@ -236,7 +225,7 @@ pub(super) fn flag_with_origins(
 /// transitively, rejecting cycles, so concrete inline-instance DIEs can
 /// inherit name, type, and declaration metadata from their origins.
 pub(super) fn origin_chain<'data>(
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
 ) -> std::result::Result<Vec<(usize, gimli::DebuggingInformationEntry<Reader<'data>>)>, DwarfError>
@@ -277,7 +266,7 @@ pub(super) fn checked_reference_chain(
 fn origin_reference(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     unit_index: usize,
-    units: &[gimli::Unit<Reader<'_>>],
+    units: &Units<'_>,
 ) -> std::result::Result<Option<DieKey>, DwarfError> {
     let value = entry
         .attr_value(gimli::DW_AT_abstract_origin)
@@ -298,12 +287,11 @@ pub(super) fn strict_flag(
 
 pub(super) fn declaration_with_origins<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     unit: &gimli::Unit<Reader<'data>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
-    source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+    files: &mut Files,
 ) -> std::result::Result<Option<SourceLocation>, DwarfError> {
     // DWARF inherits declaration attributes individually: each of decl_file,
     // decl_line, and decl_column comes from the first DIE in the chain that
@@ -339,9 +327,9 @@ pub(super) fn declaration_with_origins<'data>(
     };
     let path = source_path(dwarf, file_unit, program.header(), file)?;
     let file = if is_type_unit(file_unit) {
-        type_unit_source_file_id(path, source_files, source_file_ids)
+        files.intern_suffix(path)
     } else {
-        source_file_id(path, source_files, source_file_ids)
+        files.intern(path)
     };
     Ok(Some(SourceLocation {
         file,

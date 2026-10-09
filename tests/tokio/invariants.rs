@@ -293,10 +293,31 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
     let mut scenario = checked("tokio-workers-o0");
     scenario.add_breakpoint("task_reached").await;
     scenario.run_to_stop().await;
-    let stop = read(scenario.handle())
+    // The first task to arrive may stop every thread before any other task
+    // has suspended, so stop at each task's arrival until one has: the
+    // eight tasks all arrive before the program goes on.
+    let suspended_in_async = |stop: &Stop| {
+        stop.suspended.iter().any(|(_, trace)| {
+            trace
+                .frames
+                .iter()
+                .any(|frame| matches!(frame.kind, FrameKind::Async { .. }))
+        })
+    };
+    let mut stop = read(scenario.handle())
         .await
         .expect("the stop")
         .expect("stopped");
+    for _ in 0..8 {
+        if suspended_in_async(&stop) {
+            break;
+        }
+        scenario.resume_to_stop().await;
+        stop = read(scenario.handle())
+            .await
+            .expect("the stop")
+            .expect("stopped");
+    }
     check_stop(&stop).expect("the stop holds");
     let (index, task) = stop
         .threads

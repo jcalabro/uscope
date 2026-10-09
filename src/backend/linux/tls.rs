@@ -54,7 +54,7 @@ pub(super) fn force_glibc_descriptors(forced: bool) {
 
 /// The C library whose structures locate a program's TLS blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CLibrary {
+pub(in crate::backend) enum CLibrary {
     /// Dynamically linked glibc, or any C library not recognized as another,
     /// whose lookups then fail with `libthread_db`'s reason.
     Glibc,
@@ -67,7 +67,7 @@ impl CLibrary {
     /// Recognizes the C library from the executable: a dynamically linked
     /// musl program names musl's loader as its interpreter, and a statically
     /// linked program contains its C library's TLS layout function.
-    pub(super) fn of_executable(data: &[u8]) -> Self {
+    pub(in crate::backend) fn of_executable(data: &[u8]) -> Self {
         let Ok(object) = object::File::parse(data) else {
             return Self::Glibc;
         };

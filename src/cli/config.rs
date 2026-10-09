@@ -260,6 +260,9 @@ pub struct DebugInfo {
     pub directories: Vec<PathBuf>,
     /// Download debug files no directory holds from debuginfod servers.
     pub debuginfod: bool,
+    /// How many threads load debug information, unless `USCOPE_JOBS` says;
+    /// by default, one per CPU up to 16.
+    pub jobs: Option<std::num::NonZeroUsize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]

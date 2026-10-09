@@ -24,10 +24,9 @@ use super::core_files::{ModuleFile, ModuleLocator, hex, open_explicit};
 use super::tls::{self, ProcessServices, TlsModule};
 use super::vdso::{AT_SYSINFO_EHDR, VDSO_NAME, read_memory_image};
 use super::{
-    Controller, ControllerChannels, ExecutableSource, ExpectedStop, FileIdentity, Fxsave, Inferior,
-    InferiorOrigin, InspectionOps, LinuxError, MemoryAccessError, NativeThreadState, PublicStop,
-    Reply, RuntimeModule, SessionLease, TraceThread, allocate_stop_id, backend_error,
-    loader_link_maps,
+    Controller, ControllerChannels, ExpectedStop, FileIdentity, Fxsave, Inferior, InferiorOrigin,
+    InspectionOps, LinuxError, MemoryAccessError, NativeThreadState, PublicStop, Reply,
+    RuntimeModule, SessionLease, TraceThread, allocate_stop_id, backend_error, loader_link_maps,
 };
 use crate::backend::ControllerMessage;
 use crate::protocol::{
@@ -69,12 +68,11 @@ impl ProcessServices for CoreTarget {
             let Some(found) = module
                 .image
                 .symbols()
-                .iter()
-                .find(|candidate| candidate.name.as_ref() == symbol)
+                .find(|candidate| candidate.name() == symbol)
             else {
                 continue;
             };
-            let Some(address) = module.load_bias.checked_add(found.address.get()) else {
+            let Some(address) = module.load_bias.checked_add(found.address().get()) else {
                 continue;
             };
             let preferred = object.is_some_and(|object| {
@@ -744,7 +742,7 @@ pub fn open_core(
     };
     let image = Arc::clone(&main_debug.image);
     let main_loaded = LoadedModule::main(image.id(), main_file.load_bias);
-    let executable = ExecutableSource {
+    let executable = crate::backend::ExecutableSource {
         display_path: Arc::new(main_file.path.clone()),
         identity: FileIdentity {
             inode: main_file.inode,
@@ -753,7 +751,8 @@ pub fn open_core(
         process_start_time: None,
         // Every module a dump has is loaded already.
         debug_files: crate::debug_info::DebugFileSearch::default(),
-    };
+    }
+    .described();
     let (ready_sender, ready) = std::sync::mpsc::sync_channel(1);
     let controller = thread::Builder::new()
         .name(POST_MORTEM_THREAD_NAME.into())
@@ -827,8 +826,8 @@ impl Controller<CoreTarget> {
         // Loader link maps locate each module's TLS block. A dump that lost the
         // loader's state leaves the TLS they name explicitly unavailable instead
         // of failing.
-        let link_maps = loader_link_maps(&self.ptrace, selected, &self.executable_data, main)
-            .unwrap_or_default();
+        let link_maps =
+            loader_link_maps(&self.ptrace, selected, &self.module_image, main).unwrap_or_default();
 
         let main_module = self
             .modules

@@ -148,6 +148,7 @@ pub fn prepare(args: &Args, warnings: Renderer) -> Result<Session> {
         debuginfod: args.debuginfod || debug_info.debuginfod,
         ..uscope::DebugFileOptions::default()
     };
+    uscope::pool::configure(None, debug_info.jobs).context("cannot load debug information")?;
     Ok(Session {
         debug_files,
         settings,

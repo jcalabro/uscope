@@ -274,10 +274,10 @@ pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImag
         "path": record.path.display().to_string(),
     });
     if let Some(image) = image {
-        let debug_information = !image.functions().is_empty();
+        let debug_information = image.functions().len() != 0;
         let status = if debug_information {
             "debug information loaded"
-        } else if !image.symbols().is_empty() {
+        } else if image.symbols().next().is_some() {
             "symbols only, no debug information"
         } else {
             "no symbols"
