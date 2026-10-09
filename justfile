@@ -8,10 +8,8 @@ max_test_threads := "16"
 # Lints the Rust code and runs the complete test suite.
 default: check
 
-# The tests' output streams; the others print when they finish.
-[doc("Checks formatting, runs Clippy, and runs the complete test suite at once.")]
-check:
-    ./scripts/concurrently.sh 'test=just test' 'lint=just lint' 'web-test=just web-test'
+# Checks formatting, runs Clippy, and runs the complete test suite.
+check: lint test web-test
 
 # Runs everything to check before committing.
 all: check web-e2e stress sim
@@ -24,16 +22,10 @@ dev *ARGS="":
 install-vscode-symlink:
     ln -s "$PWD/editors/vscode" ~/.vscode/extensions/uscope.uscope-0.1.0
 
-# Builds the native test fixtures and the simulator's golden programs, at
-# once, without running Rust tests.
-build-test-programs:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ./scripts/golden.sh build &
-    golden=$!
-    trap 'kill "$golden" 2>/dev/null || true' EXIT
+# Builds the native test fixtures and the simulator's golden programs
+# without running Rust tests.
+build-test-programs: golden
     ./scripts/build-test-programs.sh
-    wait "$golden"
 
 # Builds the simulator's golden programs into build/golden, failing unless
 # they match the hashes and behavior their manifests record.
@@ -48,23 +40,14 @@ build *ARGS="": build-test-programs
 run *ARGS: build
     ./target/debug/uscope "$@"
 
-# Development and release builds differ in what the flight recorder
-# compiles. Incremental checking halves the release lint after an edit and
-# leaves release builds as they are. Cargo locks each profile's directory
-# while it builds, so the development lint has a directory of its own and
-# never waits for a test build, nor makes one wait.
-[doc("Checks formatting and runs Clippy on development and release builds at once.")]
+# Checks formatting and runs Clippy on development and release builds, which
+# differ in what the flight recorder compiles. Incremental checking halves the
+# release lint after an edit and leaves release builds as they are.
 lint:
-    ./scripts/concurrently.sh 'fmt=cargo fmt --check' \
-        'clippy=cargo clippy --target-dir target/clippy --all-targets --all-features -- -D warnings' \
-        'clippy-release=CARGO_PROFILE_RELEASE_INCREMENTAL=true cargo clippy --release --all-targets --all-features -- -D warnings' \
-        'fuzz=cargo check --quiet --manifest-path fuzz/Cargo.toml'
-
-# Builds the native test fixtures and the tests that nextest ARGS select at
-# once; neither reads what the other makes.
-[private]
-build-tests *ARGS:
-    ./scripts/concurrently.sh "build=cargo nextest run --no-run $(printf '%q ' "$@")" 'fixtures=just build-test-programs'
+    cargo fmt --check
+    cargo clippy --all-targets --all-features -- -D warnings
+    CARGO_PROFILE_RELEASE_INCREMENTAL=true cargo clippy --release --all-targets --all-features -- -D warnings
+    cargo check --quiet --manifest-path fuzz/Cargo.toml
 
 # Arguments go to nextest, e.g. `just test print_` or `just test --test cli`.
 # Doc tests only run with the full suite. Tests run inside a memory cap, and
@@ -73,8 +56,7 @@ build-tests *ARGS:
 # in any shell. A user's own view files are not the tests', so the user
 # configuration is an empty directory.
 [doc("Builds the native test fixtures and runs the Rust test suite.")]
-test *ARGS:
-    just build-tests "$@"
+test *ARGS: build-test-programs
     test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
 
@@ -84,11 +66,11 @@ test *ARGS:
 # test's flight recording is kept; a later pass of the same test would remove
 # it. Arguments go to nextest, e.g. `just stress 100 -E 'binary(dap)'`.
 [doc("Runs the test suite COUNT times under CPU load.")]
-stress COUNT="10" *ARGS:
+stress COUNT="10" *ARGS: build-test-programs
     #!/usr/bin/env bash
     set -euo pipefail
     # Build before the busy loops start so they slow only the tests.
-    just build-tests "${@:2}"
+    cargo nextest run --no-run
     cpus="$(nproc)"
     burners=()
     trap 'kill "${burners[@]}" 2>/dev/null || true' EXIT
