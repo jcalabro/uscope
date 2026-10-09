@@ -245,7 +245,27 @@ fn source_files(tables: &crate::image::Image) -> Arc<[SourceFile]> {
 }
 
 /// The image of a module's tables.
-fn seal_image(target: TargetDescription, metadata: &ModuleMetadata) -> crate::image::Image {
+/// Seals a module's metadata as an image.
+pub fn seal(
+    target: TargetDescription,
+    address_range: AddressRange<ImageAddress>,
+    mut metadata: ModuleMetadata,
+) -> crate::image::Image {
+    validate_dense_ids(&metadata);
+    metadata.lines.clip_at(&function_starts(&metadata.symbols));
+    let phase = crate::span!("image.seal");
+    let tables = seal_image(target, address_range, &metadata);
+    drop(phase);
+    crate::count!("image_bytes", tables.as_bytes().len());
+    crate::count!("types", metadata.types.len());
+    tables
+}
+
+fn seal_image(
+    target: TargetDescription,
+    address_range: AddressRange<ImageAddress>,
+    metadata: &ModuleMetadata,
+) -> crate::image::Image {
     let mut builder = crate::image::Builder::new(target);
     let mut strings = crate::image::StringsBuilder::default();
     let mut paths = crate::image::PathsBuilder::default();
@@ -265,8 +285,8 @@ fn seal_image(target: TargetDescription, metadata: &ModuleMetadata) -> crate::im
     crate::image::facts::add_to(
         &mut builder,
         &mut strings,
-        &mut paths,
         &crate::image::facts::Facts {
+            address_range,
             symbol_sources: &metadata.symbol_sources,
             thread_local_storage: metadata.thread_local_storage,
             thread_locals: &metadata.thread_locals,
@@ -415,6 +435,16 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
     }
 }
 
+/// What binds an image's bytes to one module of a session: the file it
+/// describes, the separate debug file found for it, and its identifier.
+/// None of it is in the bytes, so one image serves every binding.
+#[derive(Debug, Clone)]
+pub struct Binding {
+    pub path: Arc<PathBuf>,
+    pub debug_path: Option<Arc<PathBuf>>,
+    pub id: ModuleImageId,
+}
+
 /// Immutable, normalized debug metadata for one ELF module image.
 #[derive(Debug)]
 pub struct ModuleImage {
@@ -426,8 +456,6 @@ pub struct ModuleImage {
     sections: Arc<[SectionInfo]>,
     /// The type graph, decoded as it is asked for.
     types: Arc<crate::image::types::TypeTable>,
-    /// The image every type the loader built names, which binding keeps.
-    type_owner: Option<ModuleImageId>,
     source_files: Arc<[SourceFile]>,
     /// Lines, files, symbols, sections, functions, and code, as tables.
     tables: Arc<crate::image::Image>,
@@ -451,58 +479,62 @@ pub struct ModuleImage {
 }
 
 impl ModuleImage {
+    /// Seals `metadata` and binds it to `path` as module 0: for tests and
+    /// fuzzing, which build metadata by hand.
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn new(
         path: PathBuf,
         target: TargetDescription,
         address_range: AddressRange<ImageAddress>,
-        mut metadata: ModuleMetadata,
+        metadata: ModuleMetadata,
     ) -> Self {
-        validate_dense_ids(&metadata);
-        metadata.lines.clip_at(&function_starts(&metadata.symbols));
-        let phase = crate::span!("image.seal");
-        let tables = Arc::new(seal_image(target, &metadata));
-        drop(phase);
-        crate::count!("image_bytes", tables.as_bytes().len());
-        crate::count!("types", metadata.types.len());
-        metadata.lines = crate::image::lines::LineTables::default();
-        let source_files = source_files(&tables);
+        let debug_path = metadata.debug_file.as_ref().map(|file| match file {
+            crate::DebugFile::Used(path) | crate::DebugFile::Unusable { path, .. } => {
+                Arc::clone(path)
+            }
+        });
+        let tables = Arc::new(seal(target, address_range, metadata));
+        Self::bind(
+            &Binding {
+                path: Arc::new(path),
+                debug_path,
+                id: ModuleImageId::new(0),
+            },
+            tables,
+        )
+        .expect("an image binds to the files it was built from")
+    }
 
-        let type_owner = metadata.types.first().map(|node| node.reference().image);
-        let id = ModuleImageId::new(0);
-
-        Self {
+    /// The module that `binding` names, described by `tables`: the image
+    /// the loader sealed for it, or the same bytes read back from a cache.
+    pub(crate) fn bind(
+        binding: &Binding,
+        tables: Arc<crate::image::Image>,
+    ) -> std::result::Result<Self, crate::image::facts::Unbound> {
+        let facts = crate::image::facts::FactsView::new(&tables);
+        let debug_file = facts.debug_file(binding.debug_path.clone())?;
+        Ok(Self {
             symbols_by_last_part: std::sync::OnceLock::new(),
             coroutine_functions: std::sync::OnceLock::new(),
             globals_by_selector: std::sync::OnceLock::new(),
-            id,
-            path: Arc::new(path),
-            target,
-            address_range,
+            id: binding.id,
+            path: Arc::clone(&binding.path),
+            target: tables.target(),
+            address_range: facts.address_range(),
             got_slots: crate::image::symbols::got_slots(&tables).into(),
             sections: crate::image::symbols::sections(&tables).into(),
-            types: Arc::new(crate::image::types::TypeTable::new(Arc::clone(&tables), id)),
-            type_owner,
-            source_files,
+            types: Arc::new(crate::image::types::TypeTable::new(
+                Arc::clone(&tables),
+                binding.id,
+            )),
+            source_files: source_files(&tables),
             resume_code: RangeIndex::new(
                 crate::image::resumes::ResumeView::new(&tables).resume_code(),
             ),
             views: std::sync::OnceLock::new(),
-            debug_file: crate::image::facts::FactsView::new(&tables).debug_file(),
+            debug_file,
             tables,
-        }
-    }
-
-    pub(crate) fn with_id(mut self, id: ModuleImageId) -> Self {
-        assert!(
-            self.type_owner.is_none_or(|owner| owner == id),
-            "every type node is owned by its module image"
-        );
-        self.id = id;
-        self.types = Arc::new(crate::image::types::TypeTable::new(
-            Arc::clone(&self.tables),
-            id,
-        ));
-        self
+        })
     }
 
     /// The separate debug file the image's debug information and symbols
@@ -1807,8 +1839,16 @@ mod tests {
                 ]),
                 ..ModuleMetadata::default()
             },
+        );
+        let image = ModuleImage::bind(
+            &Binding {
+                path: image.path_arc(),
+                debug_path: None,
+                id: image_id,
+            },
+            Arc::clone(image.tables()),
         )
-        .with_id(image_id);
+        .unwrap();
 
         assert_eq!(
             image

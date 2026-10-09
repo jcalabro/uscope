@@ -56,24 +56,34 @@ lint:
 # each test process also caps its own heap (tests/support/memory_cap.rs). `nix develop` turns address
 # randomization off, which setarch turns back on, so tests see what they would
 # in any shell. A user's own view files are not the tests', so the user
-# configuration is an empty directory.
+# configuration is an empty directory. Tests read images the cache-warm recipe
+# wrote; `just stress` loads them afresh.
 [doc("Builds the native test fixtures and runs the Rust test suite.")]
-test *ARGS: build-test-programs
-    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" "$@"
+test *ARGS: cache-warm
+    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; USCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
+
+# Fills the image cache tests read with every fixture's image, built by this
+# checkout's loader: entries name the sources that built them, so an edit
+# leaves the old ones to eviction.
+cache-warm: build-test-programs
+    cargo build --quiet --profile test --features tools --bin uscope-tools
+    ./scripts/contained.sh ./target/debug/uscope-tools --cache target/image-cache warm build/test-programs build/golden
 
 # Builds the tokio fixtures where their sources changed and runs the tokio
 # suite: the quick loop for work on tokio support. Arguments go to nextest,
 # e.g. `just tokio workers::`.
 tokio *ARGS:
     ./scripts/build-test-programs.sh tokio
-    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" --test tokio "$@"
+    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; USCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" --test tokio "$@"
 
 # Races in process control fail far more often when the debugger competes for
 # the CPUs, so this oversubscribes the test threads and keeps busy loops
 # running beside them. It stops at the first failure so that the failing
 # test's flight recording is kept; a later pass of the same test would remove
-# it. Arguments go to nextest, e.g. `just stress 100 -E 'binary(dap)'`.
+# it. It loads debug information afresh, without the image cache, so that the
+# suite also runs against the loader itself. Arguments go to nextest, e.g.
+# `just stress 100 -E 'binary(dap)'`.
 [doc("Runs the test suite COUNT times under CPU load.")]
 stress COUNT="10" *ARGS: build-test-programs
     #!/usr/bin/env bash
@@ -113,7 +123,7 @@ web-test *ARGS: web-deps
 # Firefox. Arguments go to Playwright, e.g. `just web-e2e --project=chromium`.
 web-e2e *ARGS: web build-test-programs
     cargo build --quiet --profile test
-    cd web && ./node_modules/.bin/playwright test "$@"
+    cd web && USCOPE_CACHE_DIR="$PWD/../target/image-cache" ./node_modules/.bin/playwright test "$@"
 
 # Serves PROGRAM on port 7342 with the page from Vite, which reloads on every
 # save: open the join link uscope prints, with 5173 in place of 7342.
@@ -139,13 +149,13 @@ golden-record NAME:
 # and reports each kind of failure with its smallest seed.
 sim SECONDS="30": golden
     cargo build --profile sim --features sim --bin uscope-sim
-    ./scripts/contained.sh ./target/sim/uscope-sim sweep --seconds "$1"
+    USCOPE_CACHE_DIR="$PWD/target/image-cache" ./scripts/contained.sh ./target/sim/uscope-sim sweep --seconds "$1"
 
 # Replays one simulated session and prints its trace. Pass `--at STEP` to
 # stop there and print the state, or the `--fingerprint` a report gave.
 sim-seed SEED *ARGS: golden
     cargo build --profile sim --features sim --bin uscope-sim
-    ./target/sim/uscope-sim replay "$1" "${@:2}"
+    USCOPE_CACHE_DIR="$PWD/target/image-cache" ./target/sim/uscope-sim replay "$1" "${@:2}"
 
 # Summarizes a `--timings` report, or what changed between two:
 # `just timings BASE NEW`. Pass --threads for each thread's work, and --all
@@ -255,4 +265,4 @@ web-shot *PROGRAM: web build-test-programs
 # key:F9 key:F5 wait:Stopped`. See web/e2e/probe.ts for the steps.
 web-probe PROGRAM *STEPS: web
     cargo build --quiet --profile test
-    cd web && node e2e/probe.ts "$(realpath "../$1")" "${@:2}"
+    cd web && USCOPE_CACHE_DIR="$PWD/../target/image-cache" node e2e/probe.ts "$(realpath "../$1")" "${@:2}"

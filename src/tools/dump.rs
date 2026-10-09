@@ -79,9 +79,18 @@ pub fn dump(path: &Path, options: &Options, out: &mut dyn Write) -> anyhow::Resu
         crate::ModuleImageId::new(0),
         &crate::debug_info::DebugFileSearch::default(),
     )?;
+    dump_info(&info, options, out)
+}
+
+/// Dumps the answers of debug information already loaded.
+pub(crate) fn dump_info(
+    info: &crate::debug_info::DebugInfo,
+    options: &Options,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     let names = Names::new(&info.image);
     let mut dump = Dumper {
-        info: Some(&info),
+        info: Some(info),
         image: &info.image,
         names: &names,
         out,

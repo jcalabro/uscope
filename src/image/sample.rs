@@ -341,6 +341,13 @@ pub(super) fn sample_unwind() -> unwind::Unwind {
     }
 }
 
+pub(super) const fn sample_address_range() -> crate::AddressRange<crate::ImageAddress> {
+    crate::AddressRange {
+        start: crate::ImageAddress::new(0x40_0000),
+        end: crate::ImageAddress::new(0x48_0000),
+    }
+}
+
 pub(super) fn sample_sources() -> crate::SymbolTableSources {
     crate::SymbolTableSources {
         static_table: true,
@@ -1154,8 +1161,8 @@ pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, I
     facts::add_to(
         &mut builder,
         &mut strings,
-        &mut paths,
         &facts::Facts {
+            address_range: sample_address_range(),
             symbol_sources: &sample_sources(),
             thread_local_storage: true,
             thread_locals: &sample_thread_locals(),

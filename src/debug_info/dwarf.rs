@@ -14,7 +14,7 @@ use rayon::prelude::*;
 
 use super::{DebugInfo, UnwindInfo};
 use crate::image::lines::{Files, LineTables, Row, StatementsByAddress};
-use crate::model::ModuleMetadata;
+use crate::model::{Binding, ModuleMetadata};
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     AddressRange, Architecture, BreakpointEntry, ByteOrder, CodeInstanceId, CodeInstanceInfo,
@@ -226,9 +226,27 @@ fn load_bytes_on_pool(
     image_id: crate::ModuleImageId,
     search: &super::DebugFileSearch,
 ) -> Result<DebugInfo> {
-    crate::pool::install(|| load_debug_info(path, data, image_id, search, LoadLimits::default()))
-        .map_err(Error::debug_info)?
-        .map_err(Error::debug_info)
+    let cache = crate::cache::current();
+    crate::pool::install(|| {
+        load_debug_info(path, data, image_id, search, LoadLimits::default(), cache)
+    })
+    .map_err(Error::debug_info)?
+    .map(|(info, _)| info)
+    .map_err(Error::debug_info)
+}
+
+/// What a load found in the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CacheOutcome {
+    /// The load had no cache.
+    Off,
+    /// The cache held the image.
+    Hit,
+    /// The cache held no image, so the load built one and wrote it.
+    Miss,
+    /// The cache held an unusable image, which the load removed before
+    /// building and writing another.
+    Corrupt,
 }
 
 /// Loads an image's debug information. A file without DWARF of its own may
@@ -241,13 +259,67 @@ fn load_debug_info(
     image_id: crate::ModuleImageId,
     search: &super::DebugFileSearch,
     limits: LoadLimits,
-) -> std::result::Result<DebugInfo, DwarfError> {
+    cache: Option<&crate::cache::ImageCache>,
+) -> std::result::Result<(DebugInfo, CacheOutcome), DwarfError> {
     let object = object::File::parse(data)?;
     let phase = crate::span!("separate_debug_file");
     let separate = search.find(path, &object);
     drop(phase);
+    let binding = Binding {
+        path: Arc::new(path.to_owned()),
+        debug_path: separate.as_ref().map(|file| Arc::new(file.path.clone())),
+        id: image_id,
+    };
+    let built = |tables| {
+        bind(&binding, Arc::new(tables)).expect("an image binds to the files it was built from")
+    };
+    let Some(cache) = cache else {
+        let tables = seal_debug_info(data, separate.as_ref(), limits)?;
+        return Ok((built(tables), CacheOutcome::Off));
+    };
+    let phase = crate::span!("cache.read");
+    let mut inputs = vec![data];
+    inputs.extend(separate.as_ref().map(|file| file.data.as_slice()));
+    let key = crate::cache::Key::of(&inputs);
+    let outcome = match cache.get(key) {
+        crate::cache::Lookup::Hit { image, stamp } => match bind(&binding, Arc::new(*image)) {
+            Ok(info) => {
+                crate::count!("cache_hits", 1);
+                return Ok((info, CacheOutcome::Hit));
+            }
+            Err(error) => {
+                crate::cache::report(format_args!("{key} for {}: {error}", path.display()));
+                cache.discard(key, &stamp);
+                CacheOutcome::Corrupt
+            }
+        },
+        crate::cache::Lookup::Corrupt(error) => {
+            crate::cache::report(format_args!("{key} for {}: {error}", path.display()));
+            CacheOutcome::Corrupt
+        }
+        crate::cache::Lookup::Miss => CacheOutcome::Miss,
+    };
+    drop(phase);
+    crate::count!("cache_misses", 1);
+    let tables = seal_debug_info(data, separate.as_ref(), limits)?;
+    let phase = crate::span!("cache.write");
+    if let Err(error) = cache.put(key, &tables) {
+        crate::cache::report(format_args!("{error}"));
+    }
+    drop(phase);
+    Ok((built(tables), outcome))
+}
+
+/// Seals an image of a file's debug information, from the separate debug
+/// file `separate` when one was found. One that cannot be loaded leaves the
+/// image as its own file describes it, with the reason recorded.
+fn seal_debug_info(
+    data: &[u8],
+    separate: Option<&super::separate::DebugFile>,
+    limits: LoadLimits,
+) -> std::result::Result<crate::image::Image, DwarfError> {
     let Some(separate) = separate else {
-        return load_image(path, data, image_id, Separate::None, limits);
+        return load_image(data, Separate::None, limits);
     };
     // dwz moves what several debug files share into a supplementary file,
     // whose units and strings the loader does not read.
@@ -257,18 +329,14 @@ fn load_debug_info(
         let reason = "it shares debug information with other files through a dwz supplementary \
                       file (.gnu_debugaltlink), which uscope does not read";
         return load_image(
-            path,
             data,
-            image_id,
             Separate::Unusable(&separate.path, reason.into()),
             limits,
         );
     }
-    load_image(path, data, image_id, Separate::Used(&separate), limits).or_else(|error| {
+    load_image(data, Separate::Used(separate), limits).or_else(|error| {
         load_image(
-            path,
             data,
-            image_id,
             Separate::Unusable(&separate.path, error.to_string().into()),
             limits,
         )
@@ -320,12 +388,10 @@ enum Separate<'a> {
     reason = "one loader assembles every table of an image from its sources"
 )]
 fn load_image(
-    path: &Path,
     data: &[u8],
-    image_id: crate::ModuleImageId,
     separate: Separate<'_>,
     limits: LoadLimits,
-) -> std::result::Result<DebugInfo, DwarfError> {
+) -> std::result::Result<crate::image::Image, DwarfError> {
     let object = object::File::parse(data)?;
     let target = target_description(&object)?;
     let debug_object = match &separate {
@@ -452,7 +518,8 @@ fn load_image(
         &dwarf,
         &catalog,
         target,
-        image_id,
+        // The module's identifier is its binding's, not the image's.
+        crate::ModuleImageId::new(0),
         variables::CodeMetadata {
             instance_ids: &function_metadata.instance_ids,
         },
@@ -526,63 +593,64 @@ fn load_image(
     }
     drop(phase);
     let phase = crate::span!("image_indexes");
-    let image = Arc::new(
-        ModuleImage::new(
-            path.to_owned(),
-            target,
-            image_address_range(&object)?,
-            ModuleMetadata {
-                functions: function_metadata.functions,
-                code_instances: function_metadata.code_instances,
-                symbols: symbols.symbols,
-                symbol_sources: symbols.sources,
-                got_slots: symbols.got_slots,
-                types: variables.types,
-                locations: variables.locations,
-                variables: variables.variables,
-                calls: variables.calls,
-                type_facts: variables.type_facts,
-                resumes: crate::image::resumes::Resumes {
-                    points: resume_points,
-                    held,
-                },
-                declarations: crate::image::declarations::Declarations {
-                    producers: unit_producers(&dwarf, &catalog)?,
-                    ..variables.declarations
-                },
-                packages: go_packages(&dwarf, &catalog)?,
-                files,
-                lines: line_tables,
-                unwind: Some(unwind),
-                sections: super::elf::load_sections(&object),
-                thread_local_storage: super::elf::has_thread_local_storage(&object),
-                thread_locals: super::elf::load_thread_locals(&object),
-                debug_file: match separate {
-                    Separate::None => None,
-                    Separate::Used(file) => {
-                        Some(crate::DebugFile::Used(Arc::new(file.path.clone())))
-                    }
-                    Separate::Unusable(path, reason) => Some(crate::DebugFile::Unusable {
-                        path: Arc::new(path.to_path_buf()),
-                        reason,
-                    }),
-                },
-                embedded_views: embedded_views(dwarf_object)?,
+    let image = crate::model::seal(
+        target,
+        image_address_range(&object)?,
+        ModuleMetadata {
+            functions: function_metadata.functions,
+            code_instances: function_metadata.code_instances,
+            symbols: symbols.symbols,
+            symbol_sources: symbols.sources,
+            got_slots: symbols.got_slots,
+            types: variables.types,
+            locations: variables.locations,
+            variables: variables.variables,
+            calls: variables.calls,
+            type_facts: variables.type_facts,
+            resumes: crate::image::resumes::Resumes {
+                points: resume_points,
+                held,
             },
-        )
-        .with_id(image_id),
+            declarations: crate::image::declarations::Declarations {
+                producers: unit_producers(&dwarf, &catalog)?,
+                ..variables.declarations
+            },
+            packages: go_packages(&dwarf, &catalog)?,
+            files,
+            lines: line_tables,
+            unwind: Some(unwind),
+            sections: super::elf::load_sections(&object),
+            thread_local_storage: super::elf::has_thread_local_storage(&object),
+            thread_locals: super::elf::load_thread_locals(&object),
+            debug_file: match separate {
+                Separate::None => None,
+                Separate::Used(file) => Some(crate::DebugFile::Used(Arc::new(file.path.clone()))),
+                Separate::Unusable(path, reason) => Some(crate::DebugFile::Unusable {
+                    path: Arc::new(path.to_path_buf()),
+                    reason,
+                }),
+            },
+            embedded_views: embedded_views(dwarf_object)?,
+        },
     );
-
     drop(phase);
-    let mut variable_info = variables.info;
-    variable_info.bind(&image);
+    Ok(image)
+}
+
+/// The debug information `tables` describe for the module `binding`
+/// names: what a load sealed, or the same bytes read back from a cache.
+fn bind(
+    binding: &Binding,
+    tables: Arc<crate::image::Image>,
+) -> std::result::Result<DebugInfo, crate::image::facts::Unbound> {
+    let image = Arc::new(ModuleImage::bind(binding, tables)?);
     Ok(DebugInfo {
         unwind: Arc::new(DwarfUnwindInfo {
             tables: Arc::clone(image.tables()),
             go: std::sync::OnceLock::new(),
         }),
+        variables: Arc::new(variables::DwarfVariableInfo::new(&image)),
         image,
-        variables: Arc::new(variable_info),
     })
 }
 
@@ -2653,6 +2721,9 @@ fn target_description(
     })
 }
 
+#[cfg(all(test, feature = "tools"))]
+mod cache_tests;
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -3101,6 +3172,7 @@ mod tests {
                 crate::ModuleImageId::new(0),
                 &super::super::DebugFileSearch::default(),
                 limits,
+                None,
             )
         };
         let small = LoadLimits {

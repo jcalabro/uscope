@@ -189,6 +189,11 @@ struct Args {
     #[arg(long, hide_short_help = true, help_heading = "Debug information")]
     debuginfod: bool,
 
+    /// Read debug information afresh, neither reading nor writing the image
+    /// cache in `USCOPE_CACHE_DIR` or `~/.cache/uscope/images`.
+    #[arg(long, hide_short_help = true, help_heading = "Debug information")]
+    no_cache: bool,
+
     /// Present values with the views in FILE, ahead of the project's, the
     /// user's, the program's own, and the built-in ones. May be repeated;
     /// later files come first.
@@ -337,6 +342,11 @@ fn start_flight_recording() {
 
 async fn async_main() -> ExitCode {
     let args = parse_args();
+    if let Err(error) =
+        uscope::cache::configure(args.no_cache.then_some(uscope::cache::Setting::Off))
+    {
+        eprintln!("warning: {error}; loading debug information without it");
+    }
     match &args.tool {
         Some(Tool::Dap(dap_args)) => {
             let code = match dap::run(dap_args).await {

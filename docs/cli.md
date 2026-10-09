@@ -33,6 +33,7 @@ is described in [dap.md](dap.md), and `uscope views` in [views.md](views.md).
 | `--views FILE` | Load views from `FILE` ahead of the others. Repeatable; later files come first. |
 | `--debug-directory DIR` | Search `DIR` for the separate debug files of stripped modules, ahead of `[debug-info] directories`, `NIX_DEBUG_INFO_DIRS`, and `/usr/lib/debug`. Repeatable. |
 | `--debuginfod` | Download debug files no directory holds from the servers `DEBUGINFOD_URLS` lists, as `[debug-info] debuginfod = true` does. |
+| `--no-cache` | Read debug information afresh, neither reading nor writing the image cache. |
 | `-c, --command FILE` | Run the commands in `FILE`. Repeatable. |
 | `-e, --eval COMMAND` | Run one command, after any `-c` files. Repeatable. |
 | `--batch` | Exit after the commands instead of starting the REPL; with no `-c` or `-e`, read commands from stdin. A failing command ends the session with an error naming its source. |
@@ -837,6 +838,22 @@ otherwise. Every candidate must prove it describes the module, by build-id
 or checksum. A debug file that uses a dwz supplementary file
 (`.gnu_debugaltlink`), as most distributions' do, cannot be read yet: the
 module is described by its own file, and `info modules` says why.
+
+## The image cache
+
+uscope keeps what it reads of each module's debug information in a cache,
+so a program or library it has loaded before loads in milliseconds: every
+restart, and every shared library after the first session that used it. The
+cache is `$XDG_CACHE_HOME/uscope/images` or `~/.cache/uscope/images`, or the
+directory `USCOPE_CACHE_DIR` names, and an empty `USCOPE_CACHE_DIR` or
+`--no-cache` turns it off. An entry names the exact bytes of the module and
+of the separate debug file chosen for it, and the uscope build that wrote
+it, so a rebuilt program, a newly found debug file, or another version of
+uscope never reads a stale one. Every entry is checked before use; a damaged
+one is removed and the module read afresh. Starting uscope evicts the
+entries used longest ago beyond 4 GiB. A cache that cannot be created or
+written leaves sessions uncached, with a warning. The cache is private to
+its user: its checks catch damage, not an entry forged on purpose.
 
 ## Sources
 

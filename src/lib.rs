@@ -26,6 +26,7 @@ pub mod flight_recorder;
 pub(crate) mod image;
 pub use image::functions::{CodeInstance, Function};
 pub use image::symbols::Symbol;
+pub mod cache;
 mod inspection;
 pub(crate) mod model;
 pub mod pool;

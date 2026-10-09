@@ -69,6 +69,16 @@ struct Placed {
     length: usize,
 }
 
+/// What an image's bytes mean beyond the inputs they were built from: the
+/// format, the normalization revision, and every record's layout.
+pub fn revisions() -> [u64; 3] {
+    [
+        format::FORMAT_VERSION.into(),
+        format::NORMALIZATION_REVISION.into(),
+        schema::layout_fingerprint(),
+    ]
+}
+
 /// Validated, immutable tables over owned bytes.
 #[derive(Debug)]
 pub struct Image {
@@ -84,6 +94,13 @@ impl Image {
         let image = Self { bytes, tables };
         validate::contents(&image)?;
         Ok(image)
+    }
+
+    /// The target the image describes.
+    pub fn target(&self) -> crate::TargetDescription {
+        let (header, _) = format::Header::ref_from_prefix(self.as_bytes())
+            .expect("validation checked the header");
+        schema::target_of(header).expect("validation checked the target")
     }
 
     /// The whole image, as a cache writes it.

@@ -6,6 +6,7 @@ use crate::{Error, Result};
 
 mod image;
 
+pub use image::{Binding, seal};
 pub use image::{ModuleImage, ModuleMetadata, PackageInfo, ThreadLocal};
 
 macro_rules! address_type {

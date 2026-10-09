@@ -32,6 +32,10 @@ struct Args {
     /// or one per CPU up to 16.
     #[arg(long, global = true)]
     jobs: Option<std::num::NonZeroUsize>,
+    /// Load through the image cache in DIR; loads are uncached otherwise,
+    /// so that measurements ingest debug information.
+    #[arg(long, global = true, value_name = "DIR")]
+    cache: Option<PathBuf>,
     #[command(subcommand)]
     command: Tool,
 }
@@ -59,6 +63,12 @@ enum Tool {
         /// Count retired instructions with a hardware counter.
         #[arg(long)]
         instructions: bool,
+    },
+    /// Load every program and shared library under PATHS through the image
+    /// cache `--cache` names, so that later loads read it.
+    Warm {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
     },
     /// Summarize a `--timings` report, or the differences between two.
     Timings {
@@ -136,6 +146,10 @@ fn main() -> ExitCode {
 
 fn run(args: Args) -> Result<bool> {
     let jobs = uscope::pool::configure(args.jobs, None)?;
+    uscope::cache::configure(Some(args.cache.clone().map_or(
+        uscope::cache::Setting::Off,
+        uscope::cache::Setting::Directory,
+    )))?;
     match args.command {
         Tool::Dump {
             program,
@@ -167,6 +181,21 @@ fn run(args: Args) -> Result<bool> {
         } => {
             let measured = uscope::tools::measure_load(&program, instructions)?;
             println!("{}", serde_json::to_string(&measured)?);
+            Ok(true)
+        }
+        Tool::Warm { paths } => {
+            if args.cache.is_none() {
+                bail!("warm needs --cache DIR");
+            }
+            let warmed = uscope::tools::warm(&paths)?;
+            for (path, error) in &warmed.failed {
+                println!("{}: {error}", path.display());
+            }
+            println!(
+                "{} modules in the image cache, {} that do not load",
+                warmed.loaded,
+                warmed.failed.len()
+            );
             Ok(true)
         }
         Tool::Timings {

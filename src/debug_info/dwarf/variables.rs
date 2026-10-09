@@ -163,15 +163,13 @@ struct Scope {
 const DW_AT_GO_CLOSURE_OFFSET: gimli::DwAt = gimli::DwAt(0x2907);
 
 pub(super) struct DwarfVariableInfo {
-    /// The image's types, which [`DwarfVariableInfo::bind_types`] gives
-    /// once the image is sealed.
+    /// The image's types, whose tables hold everything else it reads.
     types: Arc<crate::image::types::TypeTable>,
     target: TargetDescription,
     endian: RunTimeEndian,
 }
 
 pub(super) struct LoadedVariables {
-    pub info: DwarfVariableInfo,
     pub types: Arc<[crate::TypeNode]>,
     /// The data objects and the functions whose frames show them.
     pub variables: crate::image::variables::Variables,
@@ -1071,14 +1069,6 @@ pub(super) fn load_variable_info<'data>(
         coroutines,
         coroutine_bodies,
         function_generics,
-        info: DwarfVariableInfo {
-            types: Arc::new(crate::image::types::TypeTable::empty()),
-            target,
-            endian: match target.byte_order {
-                ByteOrder::Little => RunTimeEndian::Little,
-                ByteOrder::Big => RunTimeEndian::Big,
-            },
-        },
         types: finalized_types,
         calls: calls.finish(),
         type_facts: crate::image::type_facts::TypeFacts {
@@ -1711,22 +1701,30 @@ impl DwarfVariableInfo {
     /// Reads types from `types`, the sealed image's.
     /// Binds the provider to the image loading made of its module, whose
     /// types and code its answers read.
-    pub(super) fn bind(&mut self, image: &crate::ModuleImage) {
-        self.types = Arc::clone(image.type_table());
+    /// The variables of `image`.
+    pub(super) fn new(image: &crate::ModuleImage) -> Self {
+        let target = image.target();
+        Self {
+            types: Arc::clone(image.type_table()),
+            target,
+            endian: match target.byte_order {
+                ByteOrder::Little => RunTimeEndian::Little,
+                ByteOrder::Big => RunTimeEndian::Big,
+            },
+        }
     }
 
-    /// The image's locations, once [`Self::bind`] has given the image.
+    /// The image's locations.
     fn locations(&self) -> LocationTables<'_> {
         LocationTables::new(self.types.tables())
     }
 
-    /// What reading values of some types takes, once [`Self::bind`] has
-    /// given the image.
+    /// What reading values of some types takes.
     fn type_facts(&self) -> crate::image::type_facts::TypeFactsView<'_> {
         crate::image::type_facts::TypeFactsView::new(self.types.tables())
     }
 
-    /// The image's data objects, once [`Self::bind`] has given the image.
+    /// The image's resume points and held ranges.
     fn resumes(&self) -> crate::image::resumes::ResumeView<'_> {
         crate::image::resumes::ResumeView::new(self.types.tables())
     }
