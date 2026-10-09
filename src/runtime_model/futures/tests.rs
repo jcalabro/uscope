@@ -29,6 +29,11 @@ const PIN_DYN: u32 = 9;
 const OUTER_BOX: u32 = 10;
 const PIN_OUTER: u32 = 11;
 const WRAPPER: u32 = 12;
+const INSTRUMENTED: u32 = 13;
+const MANUALLY_DROP: u32 = 14;
+const SPAN: u32 = 15;
+const LOOKALIKE: u32 = 16;
+const MAYBE_DANGLING: u32 = 17;
 
 /// Where the awaited future lies in each coroutine.
 const AWAITEE: u64 = 8;
@@ -90,21 +95,31 @@ fn pointer(id: u32, name: &str, target: Option<u32>) -> TypeInfo {
     }
 }
 
-/// Rust's `Pin` around a pointer of type `target`.
-fn pin(id: u32, target: u32) -> TypeInfo {
+/// A Rust record named `base` within `path`.
+fn named(id: u32, path: &[&str], base: &str, members: Vec<RecordMember>) -> TypeInfo {
     TypeInfo {
         identity: Some(Arc::new(TypeIdentity {
             language: SourceLanguage::Rust,
-            path: ["core".into(), "pin".into()].into(),
+            path: path.iter().map(|&part| part.into()).collect(),
             inline_namespaces: Arc::new([]),
-            base: "Pin".into(),
+            base: base.into(),
             arguments: Arc::new([]),
             pack: None,
             origin: ArgumentOrigin::Dwarf,
             go: None,
         })),
-        ..record(id, "Pin<…>", vec![member("pointer", target, 0)])
+        ..record(id, &format!("{base}<…>"), members)
     }
+}
+
+/// Rust's `Pin` around a pointer of type `target`.
+fn pin(id: u32, target: u32) -> TypeInfo {
+    named(
+        id,
+        &["core", "pin"],
+        "Pin",
+        vec![member("pointer", target, 0)],
+    )
 }
 
 fn state(value: u64, kind: CoroutineStateKind, at: u64, awaits: Option<u32>) -> CoroutineState {
@@ -166,6 +181,38 @@ impl Types {
             pointer(OUTER_BOX, "Box<outer>", Some(OUTER)),
             pin(PIN_OUTER, OUTER_BOX),
             record(WRAPPER, "Coop<inner>", vec![member("fut", INNER, 0)]),
+            // tracing's `Instrumented`, its future in a `ManuallyDrop`
+            // beside its span, as recent releases of Rust lay it out, and a
+            // record of the same shape that is not it.
+            named(
+                INSTRUMENTED,
+                &["tracing", "instrument"],
+                "Instrumented",
+                vec![member("inner", MANUALLY_DROP, 0), member("span", SPAN, 8)],
+            ),
+            named(
+                MANUALLY_DROP,
+                &["core", "mem", "manually_drop"],
+                "ManuallyDrop",
+                vec![member("value", MAYBE_DANGLING, 0)],
+            ),
+            record(
+                SPAN,
+                "Span",
+                vec![member("inner", BOX, 0), member("meta", BOX, 8)],
+            ),
+            named(
+                LOOKALIKE,
+                &["lookalike"],
+                "Instrumented",
+                vec![member("inner", MANUALLY_DROP, 0), member("span", SPAN, 8)],
+            ),
+            named(
+                MAYBE_DANGLING,
+                &["core", "mem", "maybe_dangling"],
+                "MaybeDangling",
+                vec![member("__0", PIN, 0)],
+            ),
         ];
         let outer = coroutine(vec![
             state(0, CoroutineStateKind::Unresumed, 10, None),
@@ -177,6 +224,8 @@ impl Types {
             state(6, suspended(3), 15, None),
             state(7, suspended(4), 16, Some(PIN_OUTER)),
             state(8, suspended(5), 17, Some(WRAPPER)),
+            state(10, suspended(6), 18, Some(INSTRUMENTED)),
+            state(11, suspended(7), 18, Some(LOOKALIKE)),
         ]);
         let inner = coroutine(vec![
             state(0, CoroutineStateKind::Unresumed, 20, None),
@@ -383,6 +432,31 @@ fn a_chain_reaches_its_leaf_through_every_kind_of_future() {
             leaf(outer + 2 * AWAITEE, SLEEP),
             coroutine_frame(outer + AWAITEE, INNER, 3, suspended(0), 21),
             coroutine_frame(outer, OUTER, 8, suspended(5), 17),
+        ]
+    );
+
+    // tracing's `Instrumented` is passed through to the future it holds,
+    // here a pinned box in a `ManuallyDrop`'s `MaybeDangling`; a record of the
+    // same shape that is not tracing's is a leaf.
+    memory.byte(outer, 10);
+    memory.word(outer + AWAITEE, boxed);
+    let instrumented = walk_from(&memory, outer, OUTER);
+    assert_eq!(
+        instrumented.frames,
+        [
+            leaf(boxed + AWAITEE, SLEEP),
+            coroutine_frame(boxed, INNER, 3, suspended(0), 21),
+            coroutine_frame(outer, OUTER, 10, suspended(6), 18),
+        ]
+    );
+    assert_eq!(instrumented.end, ChainEnd::Leaf);
+    memory.byte(outer, 11);
+    let lookalike = walk_from(&memory, outer, OUTER);
+    assert_eq!(
+        lookalike.frames,
+        [
+            leaf(outer + AWAITEE, LOOKALIKE),
+            coroutine_frame(outer, OUTER, 11, suspended(7), 18),
         ]
     );
 

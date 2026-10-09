@@ -101,6 +101,12 @@ impl ExternalProcess {
         )
     }
 
+    /// Spawns `command`, which must exec a fixture that prints its
+    /// readiness line, and waits for that line.
+    pub fn spawn_command(command: &mut Command) -> Self {
+        Self::handshake(command)
+    }
+
     fn handshake(command: &mut Command) -> Self {
         let child = command
             .stdin(Stdio::piped())

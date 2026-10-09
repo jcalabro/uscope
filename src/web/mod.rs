@@ -99,10 +99,27 @@ pub struct WebArgs {
     #[arg(long, value_name = "ADDRESS")]
     listen: Option<SocketAddr>,
 
+    /// Serve the page through a reverse proxy at URL, such as
+    /// `https://proxy.example/debug/7/`: every route lies under its path,
+    /// requests may name its host and origin, and links name it. The proxy
+    /// passes `Host` through, and controls who reaches it.
+    #[arg(long, value_name = "URL")]
+    public_url: Option<auth::PublicUrl>,
+
     /// Also accept pages served from ORIGIN, such as the development
     /// server's `http://127.0.0.1:5173`. May be repeated.
     #[arg(long = "allow-origin", value_name = "ORIGIN", hide = true)]
     allow_origins: Vec<String>,
+
+    /// Look up --core's files under DIR, a copy of the dumping machine's
+    /// files, as the terminal's --sysroot does.
+    #[arg(long, value_name = "DIR", requires = "core")]
+    sysroot: Option<PathBuf>,
+
+    /// Search DIR for --core's files missing or different at their recorded
+    /// paths, as the terminal's --module-path does. May be repeated.
+    #[arg(long = "module-path", value_name = "DIR", requires = "core")]
+    module_paths: Vec<PathBuf>,
 
     /// Search DIR for the separate debug files of modules stripped of their
     /// debug information, before the system's directories. May be repeated.
@@ -123,6 +140,7 @@ struct App {
     session: Arc<Session>,
     origins: Origins,
     port: u16,
+    public: Option<auth::PublicUrl>,
 }
 
 impl App {
@@ -149,14 +167,17 @@ impl App {
     }
 
     fn known_host(&self, headers: &HeaderMap) -> bool {
-        let host = headers
+        headers
             .get(header::HOST)
-            .and_then(|value| value.to_str().ok());
-        // An Origin of the host itself always passes for a known host.
-        host.is_some_and(|host| {
-            self.origins
-                .allows(Some(host), Some(&format!("http://{host}")))
-        })
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|host| self.origins.knows(host))
+    }
+
+    /// The path every route lies under.
+    fn base(&self) -> &str {
+        self.public
+            .as_ref()
+            .map_or("/", |public| public.base.as_str())
     }
 }
 
@@ -168,7 +189,11 @@ pub async fn run(args: &WebArgs) -> Result<()> {
     let start = start_from(args);
     let listener = bind(args).await?;
     let address = listener.local_addr().context("the listening address")?;
-    let origins = Origins::new(address, args.allow_origins.clone());
+    let origins = Origins::new(address, args.allow_origins.clone(), args.public_url.clone());
+    let link_base = args.public_url.as_ref().map_or_else(
+        || format!("http://{}/", origins.primary()),
+        auth::PublicUrl::url,
+    );
     let cwd = std::env::current_dir().context("the working directory")?;
     let tokens = Tokens::mint().context("failed to mint access tokens")?;
     let debug_files = uscope::DebugFileOptions {
@@ -176,12 +201,13 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         debuginfod: args.debuginfod,
         ..uscope::DebugFileOptions::default()
     };
-    let session = Session::new(cwd, origins.primary().to_owned(), tokens, debug_files);
+    let session = Session::new(cwd, link_base, tokens, debug_files);
     session.resume_attached(args.resume);
     let app = Arc::new(App {
         session: Arc::clone(&session),
         origins,
         port: address.port(),
+        public: args.public_url.clone(),
     });
 
     // Before any debugger exists: see `terminal`.
@@ -204,6 +230,9 @@ pub async fn run(args: &WebArgs) -> Result<()> {
             "uscope web: serving http://{}",
             app.origins.primary()
         )?;
+        if let Some(public) = &app.public {
+            writeln!(stdout, "pages are served through {}", public.url())?;
+        }
         writeln!(stdout, "open {link}")?;
         writeln!(stdout, "anyone with this link can control the program")?;
         if keys.is_some() {
@@ -225,12 +254,25 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         })
     });
 
-    let router = Router::new()
+    let base = app.base().trim_end_matches('/').to_owned();
+    let root_app = Arc::clone(&app);
+    let api = Router::new()
         .route("/api/ws", get(socket))
         .route("/api/login", post(login))
         .route("/api/check", post(check))
         .fallback(get(page))
         .with_state(app);
+    // Behind a proxy, nothing outside the public URL's path is served.
+    let router = if base.is_empty() {
+        api
+    } else {
+        // nest serves the path without its slash but not with it, which is
+        // the URL itself: its page is the root's.
+        let root = move |headers: HeaderMap| page(State(root_app), headers, Uri::from_static("/"));
+        Router::new()
+            .nest(&base, api)
+            .route(&format!("{base}/"), get(root))
+    };
     let served = tokio::select! {
         served = axum::serve(listener, router) => served.context("the server failed"),
         () = terminated => Ok(()),
@@ -255,6 +297,8 @@ fn start_from(args: &WebArgs) -> Option<Start> {
     if let Some(core) = &args.core {
         let mut options = CoreDumpOptions::new(core.clone());
         options.executable.clone_from(&args.executable);
+        options.sysroot.clone_from(&args.sysroot);
+        options.module_paths.clone_from(&args.module_paths);
         return Some(Start::Core(options));
     }
     let program = args.executable.clone()?;
@@ -312,7 +356,7 @@ async fn login(State(app): State<Arc<App>>, headers: HeaderMap, body: String) ->
     if app.session.tokens().role(body.trim()).is_none() {
         return (StatusCode::FORBIDDEN, "this link is not for this server").into_response();
     }
-    let cookie = auth::set_cookie(app.port, body.trim());
+    let cookie = auth::set_cookie(app.port, body.trim(), app.public.as_ref());
     HeaderValue::from_str(&cookie).map_or_else(
         |_| StatusCode::BAD_REQUEST.into_response(),
         |cookie| (StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response(),
@@ -344,19 +388,28 @@ async fn page(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Resp
     } else {
         "no-cache"
     };
+    // Through a proxy the page may sit in a frame of the proxy's own pages.
+    let csp = if app.public.is_some() {
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+         frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
+    } else {
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+         frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    };
+    let body = if asset.page {
+        assets::rooted(&asset.bytes, app.base())
+    } else {
+        asset.bytes.into_owned()
+    };
     (
         [
             (header::CONTENT_TYPE, asset.media_type),
             (header::CACHE_CONTROL, cache),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::REFERRER_POLICY, "no-referrer"),
-            (
-                header::CONTENT_SECURITY_POLICY,
-                "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
-                 frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
-            ),
+            (header::CONTENT_SECURITY_POLICY, csp),
         ],
-        asset.bytes.into_owned(),
+        body,
     )
         .into_response()
 }

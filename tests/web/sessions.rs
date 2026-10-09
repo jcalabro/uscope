@@ -339,3 +339,73 @@ async fn restart_runs_the_program_again() {
     assert_eq!(kind, "notStopped");
     assert!(exists(pid(&again)));
 }
+
+/// Copies each module the foreign core recorded, as its machine had it, to
+/// where it lies under `root`.
+fn foreign_sysroot(core: &std::path::Path, root: &std::path::Path) {
+    let debugger = uscope::Debugger::open_core(&uscope::CoreDumpOptions {
+        allow_module_mismatch: true,
+        ..uscope::CoreDumpOptions::new(core.to_owned())
+    })
+    .expect("open the foreign core");
+    let info = debugger
+        .handle()
+        .core_dump()
+        .expect("a core session")
+        .clone();
+    for module in info
+        .modules
+        .iter()
+        .filter(|module| module.recorded_path.as_os_str() != crate::support::VDSO)
+    {
+        let recorded = &*module.recorded_path;
+        let source = if recorded
+            .parent()
+            .is_some_and(|directory| directory.ends_with("core-foreign"))
+        {
+            match recorded.file_name().and_then(|name| name.to_str()) {
+                Some("libc.so.6") => Scenario::fixture("libc-foreign.so.6"),
+                Some(name) => Scenario::fixture(name),
+                None => panic!("unnamed module {}", recorded.display()),
+            }
+        } else {
+            recorded.to_owned()
+        };
+        let target = root.join(
+            recorded
+                .strip_prefix("/")
+                .expect("an absolute recorded path"),
+        );
+        std::fs::create_dir_all(target.parent().expect("a parent")).expect("create directories");
+        std::fs::copy(&source, &target).expect("copy a module");
+    }
+    drop(debugger);
+}
+
+#[tokio::test]
+async fn a_core_from_another_machine_opens_with_its_files_from_a_sysroot() {
+    let core = Scenario::fixture("core-foreign/crash.core");
+    let core_path = core.to_str().expect("a UTF-8 path").to_owned();
+    // This machine has another build at the executable's recorded path.
+    let web = Web::start("core-without-sysroot", &["--core", &core_path]);
+    let mut tab = web.control("tab").await;
+    tab.state("the core refused", |state| {
+        state["session"].is_null() && state["busy"].is_null()
+    })
+    .await;
+    drop(tab);
+    drop(web);
+
+    let root = ScratchDir::new("web-core-sysroot");
+    foreign_sysroot(&core, root.path());
+    let sysroot = root.path().to_str().expect("a UTF-8 path").to_owned();
+    let web = Web::start(
+        "core-sysroot",
+        &["--core", &core_path, "--sysroot", &sysroot],
+    );
+    let mut tab = web.control("tab").await;
+    let opened = tab
+        .state("the core opened", |state| state["session"].is_string())
+        .await;
+    assert_eq!(opened["target"]["kind"], "core");
+}

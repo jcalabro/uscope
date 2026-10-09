@@ -314,7 +314,7 @@ impl World {
         let owned = &runtime.owned;
         let (id_at, shards_at, count_at, mask_at) =
             (owned.id, owned.shards, owned.count, owned.mask);
-        let (shard_size, lock_at) = (owned.shard_size, owned.shard_lock);
+        let (shard_size, lock) = (owned.shard_size, owned.shard_lock);
         let arc = self.allocate(4096);
         let handle = arc + data;
         let at = handle + owned_at;
@@ -331,7 +331,7 @@ impl World {
         let mut headers = Vec::new();
         for (index, tasks) in (0..).zip(shards) {
             let shard = array + index * shard_size;
-            self.memory.write(shard + lock_at, 0, 4);
+            self.memory.write(shard + lock.offset, 0, lock.size);
             let cells = tasks
                 .iter()
                 .map(|&(id, state)| self.cell(vtable, id, state, list))
@@ -372,7 +372,7 @@ impl World {
         let room = u64::try_from(queued.len() * 2).expect("a few").max(1);
         let ring = self.allocate(room * size);
         let first = room - 1;
-        self.memory.write(inner + lock, 0, 4);
+        self.memory.write(inner + lock.offset, 0, lock.size);
         self.memory.word(inner + head, first);
         self.memory
             .word(inner + len, u64::try_from(queued.len()).expect("a few"));
@@ -851,6 +851,43 @@ fn a_missing_name_makes_only_what_needs_it_unavailable() {
     ));
 }
 
+/// tokio's locks are std's futex words, held while nonzero, or with its
+/// `parking_lot` feature the `parking_lot` crate's bytes, held while their
+/// low bit is set: one that is free with threads parked on it is not held.
+#[test]
+fn locks_are_held_as_their_mutex_says() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("build/test-programs/tokio-workers-parking-lot");
+    let parking_lot = crate::debug_info::load_module(
+        &path,
+        crate::ModuleImageId::new(0),
+        &crate::debug_info::DebugFileSearch::default(),
+    )
+    .expect("run `just build-test-programs`")
+    .image;
+    let locks = |image: &ModuleImage| {
+        let layout = super::layout::Layout::bind(image);
+        let context = layout.context.expect("CONTEXT binds");
+        let pool = layout.pool.expect("the pool binds");
+        context
+            .runtimes
+            .iter()
+            .map(|(.., runtime)| runtime.owned.shard_lock)
+            .chain([pool.lock])
+            .collect::<Vec<_>>()
+    };
+    for lock in locks(&module()) {
+        assert_eq!((lock.size, lock.held), (4, u64::from(u32::MAX)), "{lock:?}");
+        assert!(lock.is_held(1) && lock.is_held(2), "{lock:?}");
+        assert!(!lock.is_held(0), "{lock:?}");
+    }
+    for lock in locks(&parking_lot) {
+        assert_eq!((lock.size, lock.held), (1, 1), "{lock:?}");
+        assert!(lock.is_held(0b01) && lock.is_held(0b11), "{lock:?}");
+        assert!(!lock.is_held(0b00) && !lock.is_held(0b10), "{lock:?}");
+    }
+}
+
 /// How a test damages one task of a list.
 #[derive(Debug, Clone, Copy)]
 enum Damage {
@@ -1028,7 +1065,7 @@ proptest! {
                     world.memory.word(header + vtable, data);
                     cut = Some((shard, node));
                 }
-                Damage::HeldLock => world.memory.write(shard_at + lock, 1, 4),
+                Damage::HeldLock => world.memory.write(shard_at + lock.offset, 1, lock.size),
                 Damage::WrongCount => {
                     let at = runtime.handle + world.runtime_layout(Flavor::MultiThread).owned.at;
                     world.memory.word(at + count, u64::try_from(total + 1).expect("small"));

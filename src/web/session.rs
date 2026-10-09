@@ -138,8 +138,9 @@ pub struct Session {
     home: Option<PathBuf>,
     /// Where every program's separate debug files are found.
     debug_files: uscope::DebugFileOptions,
-    /// The address links name, such as `127.0.0.1:7341`.
-    address: String,
+    /// What links begin with, such as `http://127.0.0.1:7341/`, or the
+    /// public URL a proxy serves the page at.
+    link_base: String,
     tokens: Tokens,
     default_name: String,
     /// The current debugger; locked across a change of what is debugged, so
@@ -202,7 +203,7 @@ pub struct Joined {
 impl Session {
     pub fn new(
         cwd: PathBuf,
-        address: String,
+        link_base: String,
         tokens: Tokens,
         debug_files: uscope::DebugFileOptions,
     ) -> Arc<Self> {
@@ -216,7 +217,7 @@ impl Session {
             cwd,
             home: std::env::var_os("HOME").map(PathBuf::from),
             debug_files,
-            address,
+            link_base,
             tokens,
             default_name,
             target: tokio::sync::Mutex::new(None),
@@ -252,11 +253,7 @@ impl Session {
         } else {
             format!("?to={}", escape_query(to))
         };
-        format!(
-            "http://{}/join{to}#{}",
-            self.address,
-            self.tokens.token(role)
-        )
+        format!("{}join{to}#{}", self.link_base, self.tokens.token(role))
     }
 
     /// Adds a connection to the presence list.

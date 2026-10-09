@@ -17,6 +17,11 @@ naming them when there are several. `uscope` alone starts the project's launch
 configuration when it has exactly one; see [Settings](#settings). `uscope dap`
 is described in [dap.md](dap.md), and `uscope views` in [views.md](views.md).
 
+A process in a mount namespace of its own, such as a container's, names the
+files it maps by paths inside its own root, which on the debugger's side may
+name other files or none. A module whose path does not name the file the
+process mapped is found under `/proc/PID/root` instead, proven by its inode.
+
 ## Flags
 
 | Flag | |

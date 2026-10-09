@@ -933,18 +933,22 @@ readonly tokio_fixtures_dir="${rust_fixtures_dir}/tokio"
 readonly tokio_target_dir="build/tokio-target"
 readonly tokio_outputs="${output_dir}/.tokio.outputs"
 
-# Builds the workspace's PACKAGES with PROFILE and extra RUSTFLAGS into
-# VARIANT's target directory.
+# Builds the workspace's PACKAGES with PROFILE, extra RUSTFLAGS, and
+# FEATURES, a list of cargo's (or none), into VARIANT's target directory.
 compile_tokio_variant() {
     local variant="$1"
     local profile="$2"
     local flags="$3"
-    shift 3
+    local features="$4"
+    shift 4
     local -a packages=()
     local package
     for package in "$@"; do
         packages+=(--package "$package")
     done
+    if [[ -n "$features" ]]; then
+        packages+=(--features "$features")
+    fi
     printf '[cargo]  tokio fixtures (%s)\n' "$variant"
     CARGO_TARGET_DIR="$tokio_target_dir/$variant" RUSTFLAGS="${RUSTFLAGS-} -D warnings ${flags}" \
         NIX_HARDENING_ENABLE= cargo build --quiet --offline --locked \
@@ -1019,14 +1023,15 @@ build_tokio_fixtures() {
         exit 1
     fi
     build_go_fixture scripts/coroutine-oracle "$coroutine_reducer"
-    # Each variant: its name, profile, extra RUSTFLAGS, and packages.
+    # Each variant: its name, profile, extra RUSTFLAGS, cargo features, and
+    # packages.
     local -a variants=()
     local -a builds=()
     variant() {
         compile_tokio_variant "$@" &
         builds+=($!)
         local name="$1" profile="$2"
-        shift 3
+        shift 4
         variants+=("$name $profile $*")
     }
     # Every fixture, unoptimized and optimized. Unoptimized only: a hundred
@@ -1034,22 +1039,28 @@ build_tokio_fixtures() {
     # the program damages, whose reading the build changes nothing of.
     local -a fixtures=(std-async panics workers server drivers steps cancel shapes values
         runtimes blocking migrate deadlock)
-    variant o0 dev "" "${fixtures[@]}" scale corrupt
-    variant o3 release "" "${fixtures[@]}"
+    variant o0 dev "" "" "${fixtures[@]}" scale corrupt
+    variant o3 release "" "" "${fixtures[@]}"
     # Panics that abort rather than unwind.
-    variant abort abort "" panics
+    variant abort abort "" "" panics
     # Builds that describe less than tokio's types, where the debugger says
     # what it cannot read: lines only, symbols only, and tokio's sources moved
     # where its version cannot be read from their path.
-    variant lines lines "" workers
-    variant stripped stripped "" workers
+    variant lines lines "" "" workers
+    variant stripped stripped "" "" workers
     variant remapped dev \
-        "--remap-path-prefix=${USCOPE_FIXTURE_CRATES}/tokio-1.52.3=/vendor/tokio" workers
+        "--remap-path-prefix=${USCOPE_FIXTURE_CRATES}/tokio-1.52.3=/vendor/tokio" "" workers
     # tokio's unstable features, which record where each task was spawned and
     # give each task's vtable one more offset.
-    variant unstable dev "--cfg tokio_unstable" workers
+    variant unstable dev "--cfg tokio_unstable" "" workers
+    # With tokio's tracing feature too, as tokio-console needs: each task's
+    # future is wrapped in a span.
+    variant traced dev "--cfg tokio_unstable" workers/tracing workers
+    # tokio's locks from parking_lot, whose mutexes are laid out as std's
+    # are not.
+    variant parking-lot dev "" workers/parking-lot workers
     # Symbols mangled as rustc did before v0, which name no generic arguments.
-    variant legacy dev "-Z unstable-options -C symbol-mangling-version=legacy" panics workers
+    variant legacy dev "-Z unstable-options -C symbol-mangling-version=legacy" "" panics workers
     local build failed=0
     for build in "${builds[@]}"; do
         wait "$build" || failed=1

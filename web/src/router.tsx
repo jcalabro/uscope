@@ -8,6 +8,7 @@ import {
   createRouter,
   type RouterHistory,
 } from "@tanstack/react-router";
+import { base } from "./base";
 import { parseSearch, stringifySearch, validateLook } from "./focus";
 import { Picker, pickerSearch } from "./ui/Picker";
 import { Home, Join, SessionPage } from "./ui/pages";
@@ -79,6 +80,7 @@ export function createAppRouter(history?: RouterHistory) {
     routeTree,
     parseSearch,
     stringifySearch,
+    ...(base === "/" ? {} : { basepath: base.slice(0, -1) }),
     ...(history ? { history } : {}),
   });
 }

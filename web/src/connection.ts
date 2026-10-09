@@ -2,6 +2,7 @@
 // server messages turned into model events, and reconnecting after a drop.
 // The transport is injected so tests drive it without a socket.
 
+import { base } from "./base";
 import type { ModelEvent } from "./model";
 import {
   type Method,
@@ -182,7 +183,7 @@ export class Connection {
 /** Connects a browser WebSocket to this page's server. */
 export const browserConnect: Connect = (handlers) => {
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${scheme}//${location.host}/api/ws`);
+  const socket = new WebSocket(`${scheme}//${location.host}${base}api/ws`);
   socket.addEventListener("open", () => handlers.open());
   socket.addEventListener("message", (event) => {
     if (typeof event.data === "string") {
@@ -198,7 +199,7 @@ export const browserConnect: Connect = (handlers) => {
 
 /** Asks the server whether this browser's cookie is good. */
 export const browserAuthorized: Authorized = async () => {
-  const response = await fetch("/api/check", { method: "POST", credentials: "same-origin" });
+  const response = await fetch(`${base}api/check`, { method: "POST", credentials: "same-origin" });
   if (response.status === 204) {
     return true;
   }
@@ -210,7 +211,7 @@ export const browserAuthorized: Authorized = async () => {
 
 /** Trades a join link's token for this server's cookie. */
 export async function login(token: string): Promise<boolean> {
-  const response = await fetch("/api/login", {
+  const response = await fetch(`${base}api/login`, {
     method: "POST",
     credentials: "same-origin",
     body: token,
