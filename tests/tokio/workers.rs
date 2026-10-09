@@ -27,6 +27,9 @@ const LEGACY: &str = "tokio-workers-legacy";
 /// A build with `tokio_unstable`, which records where each task was
 /// spawned, and gives each task's vtable one more offset.
 const UNSTABLE: &str = "tokio-workers-unstable";
+/// A build with `tokio_unstable` and tokio's `tracing` feature, which
+/// wraps each task's future in tracing's `Instrumented`.
+const TRACED: &str = "tokio-workers-traced";
 /// A build whose tokio locks with the `parking_lot` crate, whose mutex is
 /// laid out as std's is not.
 const PARKING_LOT: &str = "tokio-workers-parking-lot";
@@ -320,7 +323,10 @@ impl Truth {
 /// nothing missing, across pages of any size. A build that records where
 /// each task was spawned says so; no other says anything.
 async fn tasks_are_listed_exactly(current: bool) {
-    for fixture in BUILDS.into_iter().chain([LEGACY, UNSTABLE, PARKING_LOT]) {
+    for fixture in BUILDS
+        .into_iter()
+        .chain([LEGACY, UNSTABLE, TRACED, PARKING_LOT])
+    {
         let mut workers = Workers::parked(fixture, current).await;
         let truth = workers.truth();
         assert_eq!(truth.tasks.len(), 8, "{fixture}: {truth:?}");
@@ -343,7 +349,7 @@ async fn tasks_are_listed_exactly(current: bool) {
 
         let image = workers.scenario.handle().module_image();
         let spawned = spawn_lines(&tasks, image);
-        if fixture == UNSTABLE {
+        if [UNSTABLE, TRACED].contains(&fixture) {
             assert_eq!(spawned, truth.spawns(), "{fixture}");
         } else {
             assert!(
@@ -558,7 +564,7 @@ async fn before_any_runtime_there_are_no_tasks() {
 #[tokio::test]
 async fn each_task_began_in_the_function_it_spawned() {
     let header = line("workers/src/main.rs", "async fn top(");
-    for fixture in BUILDS {
+    for fixture in BUILDS.into_iter().chain([TRACED]) {
         for current in [false, true] {
             let workers = Workers::parked(fixture, current).await;
             let truth = workers.truth();
@@ -592,7 +598,7 @@ async fn each_task_began_in_the_function_it_spawned() {
 /// task recorded. A task spawned but never polled is its one function,
 /// at its header.
 async fn suspended_tasks_show_their_awaits(current: bool) {
-    for fixture in BUILDS {
+    for fixture in BUILDS.into_iter().chain([TRACED]) {
         let mut workers = Workers::parked(fixture, current).await;
         let truth = workers.truth();
         let (tasks, _) = workers.tasks(4096).await;
