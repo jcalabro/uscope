@@ -110,7 +110,7 @@ pub struct FileStamp {
 }
 
 impl FileStamp {
-    fn of(metadata: &std::fs::Metadata) -> Self {
+    pub fn of(metadata: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt as _;
         Self {
             device: metadata.dev(),

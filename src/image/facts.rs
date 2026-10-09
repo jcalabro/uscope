@@ -1,20 +1,21 @@
-//! Facts about an image as a whole: which symbol tables it provided, the
-//! separate debug file found for it, and where each thread's copy of its
-//! thread-local variables is.
+//! Facts about an image as a whole: the addresses it spans, which symbol
+//! tables it provided, what became of the separate debug file found for it,
+//! and where each thread's copy of its thread-local variables is.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use zerocopy::little_endian::{U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use super::strings::{PathId, Paths, PathsBuilder, StrId, Strings, StringsBuilder};
+use super::strings::{StrId, Strings, StringsBuilder};
 use super::{Builder, Image, NONE, Record, TableKind};
 use crate::model::ThreadLocal;
-use crate::{DebugFile, EmbeddedSymbolTable, ImageAddress, SymbolTableSources};
+use crate::{AddressRange, DebugFile, EmbeddedSymbolTable, ImageAddress, SymbolTableSources};
 
-/// The image's facts. An image holds at most one; none means every table
-/// is absent and the image has no thread-local storage.
+/// The image's facts. An image holds at most one; none means it spans no
+/// addresses, every table is absent, and it has no thread-local storage.
 #[repr(C)]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
@@ -28,13 +29,15 @@ pub struct FactsRecord {
     pub embedded_table: u8,
     pub runtime_table: u8,
     pub flags: u8,
-    /// The separate debug file's path, and why it could not be used, or
-    /// [`NONE`].
-    pub debug_path: U32,
+    /// Why the separate debug file could not be used, or [`NONE`]. Its
+    /// path is where it was found, which binding the image supplies.
     pub debug_reason: U32,
     /// [`DEBUG_FILE_NONE`], [`DEBUG_FILE_USED`], or
     /// [`DEBUG_FILE_UNUSABLE`].
     pub debug_file: u8,
+    /// The addresses the image's segments span.
+    pub address_start: U64,
+    pub address_end: U64,
 }
 
 impl Record for FactsRecord {
@@ -85,33 +88,36 @@ pub const PLACE_UNKNOWN: u8 = 2;
 #[error("the image's facts do not fit an image")]
 pub struct TooLarge;
 
+/// Why an image cannot be bound: it was built with a separate debug file
+/// and binding names none, or the other way round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the image was built with another separate debug file")]
+pub struct Unbound;
+
 /// What [`add_to`] encodes.
 #[derive(Debug)]
 pub struct Facts<'a> {
+    pub address_range: AddressRange<ImageAddress>,
     pub symbol_sources: &'a SymbolTableSources,
     pub thread_local_storage: bool,
     pub thread_locals: &'a BTreeMap<Arc<str>, Result<ThreadLocal, Arc<str>>>,
+    /// The separate debug file found for the image, whose path is left to
+    /// binding.
     pub debug_file: Option<&'a DebugFile>,
 }
 
-/// Adds `facts` to `builder`, pooling names and reasons in `strings` and
-/// paths in `paths`.
+/// Adds `facts` to `builder`, pooling names and reasons in `strings`.
 pub fn add_to(
     builder: &mut Builder,
     strings: &mut StringsBuilder,
-    paths: &mut PathsBuilder,
     facts: &Facts<'_>,
 ) -> Result<(), TooLarge> {
-    let (debug_file, debug_path, debug_reason) = match facts.debug_file {
-        None => (DEBUG_FILE_NONE, NONE, NONE),
-        Some(DebugFile::Used(path)) => {
-            (DEBUG_FILE_USED, paths.intern(path).ok_or(TooLarge)?.0, NONE)
+    let (debug_file, debug_reason) = match facts.debug_file {
+        None => (DEBUG_FILE_NONE, NONE),
+        Some(DebugFile::Used(_)) => (DEBUG_FILE_USED, NONE),
+        Some(DebugFile::Unusable { reason, .. }) => {
+            (DEBUG_FILE_UNUSABLE, strings.push(reason).ok_or(TooLarge)?.0)
         }
-        Some(DebugFile::Unusable { path, reason }) => (
-            DEBUG_FILE_UNUSABLE,
-            paths.intern(path).ok_or(TooLarge)?.0,
-            strings.push(reason).ok_or(TooLarge)?.0,
-        ),
     };
     let mut push = |text: &str| strings.push(text).map(|id| id.0).ok_or(TooLarge);
     let mut table = |table: &EmbeddedSymbolTable| -> Result<(u8, u32), TooLarge> {
@@ -140,9 +146,10 @@ pub fn add_to(
         embedded_table,
         runtime_table,
         flags,
-        debug_path: debug_path.into(),
         debug_reason: debug_reason.into(),
         debug_file,
+        address_start: facts.address_range.start.get().into(),
+        address_end: facts.address_range.end.get().into(),
     };
     // A map's order is its names' byte order, which lookups search.
     let thread_locals = facts
@@ -170,7 +177,6 @@ pub fn add_to(
 #[derive(Debug, Clone, Copy)]
 pub struct FactsView<'a> {
     strings: Strings<'a>,
-    paths: Paths<'a>,
     record: Option<&'a FactsRecord>,
     thread_locals: &'a [ThreadLocalRecord],
 }
@@ -179,7 +185,6 @@ impl<'a> FactsView<'a> {
     pub fn new(image: &'a Image) -> Self {
         Self {
             strings: image.strings(),
-            paths: Paths(image.bytes(TableKind::Paths)),
             record: image.table::<FactsRecord>().first(),
             thread_locals: image.table(),
         }
@@ -187,6 +192,17 @@ impl<'a> FactsView<'a> {
 
     fn flag(self, flag: u8) -> bool {
         self.record.is_some_and(|record| record.flags & flag != 0)
+    }
+
+    /// The addresses the image's segments span.
+    pub fn address_range(self) -> AddressRange<ImageAddress> {
+        let (start, end) = self.record.map_or((0, 0), |record| {
+            (record.address_start.get(), record.address_end.get())
+        });
+        AddressRange {
+            start: ImageAddress::new(start),
+            end: ImageAddress::new(end),
+        }
     }
 
     pub fn symbol_sources(self) -> SymbolTableSources {
@@ -208,24 +224,24 @@ impl<'a> FactsView<'a> {
         }
     }
 
-    /// The separate debug file found for the image, whether it was used
-    /// or could not be.
-    pub fn debug_file(self) -> Option<DebugFile> {
-        let record = self.record?;
-        let path = || {
-            Arc::new(
-                self.paths
-                    .get(PathId(record.debug_path.get()))
-                    .to_path_buf(),
-            )
-        };
-        match record.debug_file {
-            DEBUG_FILE_USED => Some(DebugFile::Used(path())),
-            DEBUG_FILE_UNUSABLE => Some(DebugFile::Unusable {
-                path: path(),
-                reason: self.strings.get(StrId(record.debug_reason.get())).into(),
-            }),
-            _ => None,
+    /// The separate debug file found for the image at `path`, whether it
+    /// was used or could not be; an error when the image was built with a
+    /// debug file and `path` names none, or the other way round.
+    pub fn debug_file(self, path: Option<Arc<PathBuf>>) -> Result<Option<DebugFile>, Unbound> {
+        let found = self
+            .record
+            .map_or(DEBUG_FILE_NONE, |record| record.debug_file);
+        match (found, path) {
+            (DEBUG_FILE_NONE, None) => Ok(None),
+            (DEBUG_FILE_USED, Some(path)) => Ok(Some(DebugFile::Used(path))),
+            (DEBUG_FILE_UNUSABLE, Some(path)) => Ok(Some(DebugFile::Unusable {
+                path,
+                reason: self
+                    .strings
+                    .get(StrId(self.record.ok_or(Unbound)?.debug_reason.get()))
+                    .into(),
+            })),
+            _ => Err(Unbound),
         }
     }
 
@@ -270,16 +286,11 @@ impl<'a> FactsView<'a> {
 /// Checks the facts and thread-local variables.
 pub(super) fn validate(image: &Image) -> Result<(), String> {
     let strings = image.strings();
-    let paths = image.bytes(TableKind::Paths);
     let records = image.table::<FactsRecord>();
-    let debug_file = |record: &FactsRecord| {
-        let path = || super::strings::valid_reference(paths, record.debug_path.get(), false);
-        match record.debug_file {
-            DEBUG_FILE_NONE => record.debug_path.get() == NONE && record.debug_reason.get() == NONE,
-            DEBUG_FILE_USED => path() && record.debug_reason.get() == NONE,
-            DEBUG_FILE_UNUSABLE => path() && strings.contains(StrId(record.debug_reason.get())),
-            _ => false,
-        }
+    let debug_file = |record: &FactsRecord| match record.debug_file {
+        DEBUG_FILE_NONE | DEBUG_FILE_USED => record.debug_reason.get() == NONE,
+        DEBUG_FILE_UNUSABLE => strings.contains(StrId(record.debug_reason.get())),
+        _ => false,
     };
     let reason = |state: u8, reason: U32| match state {
         TABLE_ABSENT | TABLE_LOADED => reason.get() == NONE,
@@ -292,6 +303,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
                 || !reason(record.embedded_table, record.embedded_reason)
                 || !reason(record.runtime_table, record.runtime_reason)
                 || !debug_file(record)
+                || record.address_start.get() > record.address_end.get()
         })
     {
         return Err("the image's facts are malformed".into());

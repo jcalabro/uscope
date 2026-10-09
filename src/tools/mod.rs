@@ -1,10 +1,12 @@
 //! Developer tools behind `uscope-tools`: a canonical dump of every answer
-//! a program's debug information gives, and one measured load for
-//! benchmarks.
+//! a program's debug information gives, one measured load for benchmarks,
+//! and filling the image cache.
 
 pub mod dump;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use rayon::prelude::*;
 
 use serde::{Deserialize, Serialize};
 
@@ -62,4 +64,64 @@ pub fn measure_load(path: &Path, instructions: bool) -> anyhow::Result<Measured>
         retained_heap_bytes: counted.then_some(retained),
         retained_parts: if counted { retained_parts } else { Vec::new() },
     })
+}
+
+/// What [`warm`] did.
+#[derive(Debug, Default)]
+pub struct Warmed {
+    /// How many modules loaded.
+    pub loaded: usize,
+    /// The modules that did not, and why.
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+/// Loads every program and shared library under `paths`, in parallel, as
+/// the debugger would, so that the process's image cache holds them.
+pub fn warm(paths: &[PathBuf]) -> anyhow::Result<Warmed> {
+    let mut modules = Vec::new();
+    for path in paths {
+        collect_modules(path, &mut modules)?;
+    }
+    modules.sort();
+    let search = crate::debug_info::DebugFileSearch::new(&crate::DebugFileOptions::default());
+    let loads = crate::pool::install(|| {
+        modules
+            .par_iter()
+            .map(|path| {
+                crate::debug_info::load_module(path, crate::ModuleImageId::new(0), &search)
+                    .map(drop)
+                    .map_err(|error| (path.clone(), error.to_string()))
+            })
+            .collect::<Vec<_>>()
+    })?;
+    let mut warmed = Warmed::default();
+    for load in loads {
+        match load {
+            Ok(()) => warmed.loaded += 1,
+            Err(failure) => warmed.failed.push(failure),
+        }
+    }
+    Ok(warmed)
+}
+
+/// Adds `path`, or every file under it, that is an ELF program or shared
+/// library: not a relocatable object or a core dump.
+fn collect_modules(path: &Path, modules: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            collect_modules(&entry?.path(), modules)?;
+        }
+        return Ok(());
+    }
+    if !metadata.is_file() {
+        return Ok(());
+    }
+    let mut header = [0_u8; 18];
+    let read = std::io::Read::read_exact(&mut std::fs::File::open(path)?, &mut header);
+    // ET_EXEC and ET_DYN, little-endian.
+    if read.is_ok() && header.starts_with(b"\x7fELF") && matches!(header[16..18], [2 | 3, 0]) {
+        modules.push(path.to_owned());
+    }
+    Ok(())
 }

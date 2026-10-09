@@ -1356,14 +1356,6 @@ pub struct TypeTable {
 }
 
 impl TypeTable {
-    /// A table of no types.
-    pub fn empty() -> Self {
-        let image = Builder::new(crate::TargetDescription::X86_64)
-            .seal(super::Limits::default())
-            .expect("an empty image is valid");
-        Self::new(Arc::new(image), ModuleImageId::new(0))
-    }
-
     /// The types of `image`, whose references name image `id`.
     pub fn new(image: Arc<Image>, id: ModuleImageId) -> Self {
         let count = TypeView::new(&image).len();

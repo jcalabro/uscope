@@ -19,9 +19,9 @@ use super::packages::{PackageRecord, PackageView, PackagedRecord};
 use super::resumes::{HeldRecord, ResumePointRecord, ResumeRecord};
 use super::sample::{
     ENCODING, SAMPLE_PACKAGES, TARGET, read_everything, read_locations, reseal, sample,
-    sample_functions, sample_got, sample_instances, sample_locations, sample_packaged, sample_rows,
-    sample_sections, sample_sources, sample_symbols, sample_thread_locals, sample_types,
-    sample_unwind, seal,
+    sample_address_range, sample_functions, sample_got, sample_instances, sample_locations,
+    sample_packaged, sample_rows, sample_sections, sample_sources, sample_symbols,
+    sample_thread_locals, sample_types, sample_unwind, seal,
 };
 use super::symbols::{GotRecord, SectionRecord, SymbolRecord, SymbolView};
 use super::type_facts::{ComplexPartRecord, DynamicLayoutRecord, TypeFactRecord};
@@ -201,9 +201,10 @@ fn the_schema_is_the_records_layout() {
             embedded_table,
             runtime_table,
             flags,
-            debug_path,
             debug_reason,
-            debug_file
+            debug_file,
+            address_start,
+            address_end
         ]
     );
     check!(
@@ -540,7 +541,7 @@ fn the_schema_is_the_records_layout() {
     // A change to any record changes this; bump the format with it.
     assert_eq!(
         schema::layout_fingerprint(),
-        0xc28c_cfe4_f08d_d25a,
+        0xbf8b_b88f_b759_a836,
         "the layout changed:\n{}",
         schema::schema_text()
     );
@@ -1851,13 +1852,18 @@ fn facts_read_back_with_thread_locals_by_name() {
     }
     assert_eq!(view.thread_local("count"), None);
     assert_eq!(view.thread_local("zzz"), None);
+    assert_eq!(view.address_range(), sample_address_range());
+    // The debug file's path is where binding found it, and binding must
+    // name one when the image was built with one.
+    let path = std::sync::Arc::new(std::path::PathBuf::from("/elsewhere/a.debug"));
     assert_eq!(
-        view.debug_file(),
-        Some(crate::DebugFile::Unusable {
-            path: std::sync::Arc::new("/usr/lib/debug/.build-id/ab/cdef.debug".into()),
+        view.debug_file(Some(path.clone())),
+        Ok(Some(crate::DebugFile::Unusable {
+            path,
             reason: "its build id differs".into(),
-        })
+        }))
     );
+    assert_eq!(view.debug_file(None), Err(super::facts::Unbound));
     assert_eq!(image.bytes(TableKind::EmbeddedViews), b"views");
 }
 
@@ -1902,16 +1908,13 @@ fn validation_rejects_facts_that_disagree() {
             "facts are malformed",
         ),
         (
-            "no debug file's path",
-            facts(|f| {
-                f[0].debug_file = super::facts::DEBUG_FILE_NONE;
-                f[0].debug_reason = NONE.into();
-            }),
+            "no debug file's reason",
+            facts(|f| f[0].debug_file = super::facts::DEBUG_FILE_NONE),
             "facts are malformed",
         ),
         (
-            "a debug file's path past the pool",
-            facts(|f| f[0].debug_path = 0xffff_fff0.into()),
+            "an address range that ends before it starts",
+            facts(|f| f[0].address_start = (f[0].address_end.get() + 1).into()),
             "facts are malformed",
         ),
         (

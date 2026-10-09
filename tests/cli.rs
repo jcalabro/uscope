@@ -4786,3 +4786,59 @@ fn backtraces_show_the_functions_that_left_by_tail_calls() {
     );
     assert!(errors.is_empty(), "{errors}");
 }
+
+/// A session reads and writes the image cache `USCOPE_CACHE_DIR` names,
+/// unless `--no-cache` says not to; a cache it cannot use leaves it
+/// uncached, with a warning.
+#[test]
+fn sessions_cache_images_unless_told_not_to() {
+    let directory = support::ScratchDir::new("cli-image-cache");
+    let entries = |cache: &std::path::Path| {
+        std::fs::read_dir(cache).map_or(0, |entries| {
+            entries
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".image")
+                })
+                .count()
+        })
+    };
+    let session = |cache: &std::path::Path, arguments: &[&str]| {
+        let mut all = vec!["--batch", "--eval", "break main"];
+        all.extend_from_slice(arguments);
+        all.push(BASIC);
+        uscope_command()
+            .env("USCOPE_CACHE_DIR", cache)
+            .args(&all)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .stdin(Stdio::null())
+            .output()
+            .expect("run uscope")
+    };
+
+    let off = directory.path().join("off");
+    let stdout = assert_success(session(&off, &["--no-cache"]));
+    assert!(stdout.contains("breakpoint 1"), "{stdout}");
+    assert!(!off.exists(), "an uncached session makes no cache");
+
+    let on = directory.path().join("on");
+    assert_success(session(&on, &[]));
+    assert_eq!(entries(&on), 1, "the program's image");
+    let stdout = assert_success(session(&on, &[]));
+    assert!(stdout.contains("breakpoint 1"), "{stdout}");
+    assert_eq!(entries(&on), 1, "read again, not written again");
+
+    let file = directory.path().join("file");
+    std::fs::write(&file, b"").unwrap();
+    let output = session(&file.join("images"), &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.contains("warning: cannot use the image cache"),
+        "{stderr}"
+    );
+    assert!(assert_success(output).contains("breakpoint 1"));
+}
