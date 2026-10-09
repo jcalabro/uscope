@@ -206,3 +206,22 @@ test("a reload keeps the tab's files, and where each was shown", async ({ page, 
   await tab("stdio.h").click();
   await expect(page).toHaveURL(/[?&]src=[^&]*stdio\.h:50(&|$)/);
 });
+
+test("closing the last file drops it from the address", async ({ page, uscope }) => {
+  await join(page, uscope.link);
+  await stopInHandleRequest(page);
+  const files = page.getByRole("navigation", { name: "Open files" });
+  await page.keyboard.press("Control+p");
+  await search(page).fill("stdio.h");
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/[?&]src=[^&]*stdio\.h/);
+  await files.getByRole("button", { name: "Close kvstore.c" }).click();
+  await files.getByRole("button", { name: "Close stdio.h" }).click();
+
+  await expect(page).not.toHaveURL(/[?&]src=/);
+  await expect(page.getByText("No file open.")).toBeVisible();
+  await expect(files.getByRole("button", { name: /^Close / })).toHaveCount(0);
+  // Its frame still opens its file again.
+  await page.getByTestId("stack").getByRole("button").first().click();
+  await expect(page.locator(".cm-pc-line")).toContainText("int status = 0;");
+});
