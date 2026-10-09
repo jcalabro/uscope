@@ -949,6 +949,7 @@ pub(super) fn fuzz(data: &[u8]) {
             types: Arc::default(),
             files: crate::image::lines::Files::default(),
             lines: crate::image::lines::LineTables::default(),
+            unwind: None,
             sections: load_sections(&object),
             vtables: Vec::new(),
             coroutines: std::collections::BTreeMap::new(),
@@ -1000,7 +1001,7 @@ fn fuzz_lookups(image: &crate::ModuleImage, symbols: &[SymbolInfo], data: &[u8])
         let found = image
             .symbol(found.symbol)
             .expect("found symbols are cataloged");
-        let extent = found.extent.expect("found symbols name code");
+        let extent = found.extent().expect("found symbols name code");
         assert!(extent.range.contains(address));
         for other in containing {
             let other = other.extent.expect("containing");
@@ -1039,9 +1040,8 @@ fn assert_description(image: &crate::ModuleImage, symbols: &[SymbolInfo], addres
     };
     match &description.symbol {
         Some(symbol) if code.is_none() => {
-            assert!(names(
-                image.symbol(symbol.symbol).expect("cataloged symbol")
-            ));
+            let symbol = image.symbol(symbol.symbol).expect("cataloged symbol");
+            assert!(names(&symbol.info()));
         }
         Some(symbol) => assert_eq!(Some(symbol), code.as_ref()),
         None => assert!(code.is_none() && !symbols.iter().any(names)),

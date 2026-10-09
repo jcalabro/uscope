@@ -5,12 +5,23 @@ use std::path::PathBuf;
 
 use zerocopy::IntoBytes as _;
 
+use super::facts::{self, FactsView};
 use super::format::Trailer;
+use super::functions::{self, FunctionView};
 use super::lines::{
     self, FileRecord, LineExtra, LineRange, LineRow, LineSequence, LineTables, Row, RowAddress,
 };
-use super::{Builder, Image, ImageError, Limits, PathId, Paths, TableKind};
-use crate::{AddressRange, ImageAddress, SourceFileId};
+use super::packages::{self, PackageView};
+use super::symbols::{self, SymbolView};
+use super::unwind::{self, UnwindView};
+use super::{Builder, Image, ImageError, Limits, PathId, Paths, StringsBuilder, TableKind};
+use crate::{
+    AddressRange, BoundaryEvidence, BreakpointEntry, CodeInstanceId, CodeInstanceInfo,
+    CodeInstanceKind, CodeRole, ColumnNumber, EntryProvenance, FunctionId, FunctionInfo, GotSlot,
+    GotTarget, ImageAddress, LineNumber, SectionId, SectionInfo, SourceFileId, SourceLanguage,
+    SourceLocation, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo,
+    SymbolKind, TypeId,
+};
 
 pub(super) const TARGET: crate::TargetDescription = crate::TargetDescription::X86_64;
 
@@ -108,10 +119,301 @@ pub(super) fn sample() -> (LineTables, lines::Files) {
     (tables, files)
 }
 
+/// Symbols of every shape: code that overlaps, declared and inferred,
+/// sized and unsized data, and a symbol that names neither.
+pub(super) fn sample_symbols() -> Vec<SymbolInfo> {
+    let symbol = |id, name: &str, address, kind| SymbolInfo {
+        id: SymbolId::new(id),
+        name: name.into(),
+        address: ImageAddress::new(address),
+        kind,
+        binding: SymbolBinding::Global,
+        exported: false,
+        extent: None,
+        storage: None,
+        role: CodeRole::Ordinary,
+    };
+    let code = |range, provenance| Some(SymbolExtent { range, provenance });
+    vec![
+        SymbolInfo {
+            exported: true,
+            extent: code(range(0x1000, 0x1010), SymbolExtentProvenance::Declared),
+            ..symbol(0, "main", 0x1000, SymbolKind::Function)
+        },
+        SymbolInfo {
+            binding: SymbolBinding::Local,
+            role: CodeRole::Wrapper,
+            extent: code(range(0x1008, 0x1020), SymbolExtentProvenance::Inferred),
+            ..symbol(1, "helper", 0x1008, SymbolKind::IndirectFunction)
+        },
+        SymbolInfo {
+            binding: SymbolBinding::Weak,
+            storage: Some(range(0x3000, 0x3008)),
+            ..symbol(2, "counter", 0x3000, SymbolKind::Data)
+        },
+        SymbolInfo {
+            storage: Some(range(0x3010, 0x3010)),
+            ..symbol(3, "counter", 0x3010, SymbolKind::Data)
+        },
+        symbol(4, "memcpy@GLIBC_2.2.5", 0x1000, SymbolKind::Unknown),
+    ]
+}
+
+pub(super) fn sample_sections() -> Vec<SectionInfo> {
+    let section = |id, name: &str, range, executable| SectionInfo {
+        id: SectionId::new(id),
+        name: name.into(),
+        range,
+        executable,
+        writable: !executable,
+    };
+    vec![
+        section(0, ".text", range(0x1000, 0x2000), true),
+        section(1, ".data", range(0x3000, 0x3100), false),
+    ]
+}
+
+pub(super) fn sample_got() -> Vec<GotSlot> {
+    vec![
+        GotSlot {
+            address: ImageAddress::new(0x3100),
+            target: GotTarget::Import("puts".into()),
+        },
+        GotSlot {
+            address: ImageAddress::new(0x3108),
+            target: GotTarget::Indirect(ImageAddress::new(0x1008)),
+        },
+    ]
+}
+
+/// Functions of every shape: generic, enclosed, coroutine-running, of
+/// another language, without code, and inlined.
+pub(super) fn sample_functions() -> Vec<FunctionInfo> {
+    let function = |id, name: &str| FunctionInfo {
+        id: FunctionId::new(id),
+        name: name.into(),
+        linkage_name: None,
+        declaration: None,
+        language: SourceLanguage::C,
+        role: CodeRole::Ordinary,
+        enclosing: None,
+        coroutine: None,
+        generics: std::sync::Arc::from([]),
+    };
+    vec![
+        FunctionInfo {
+            linkage_name: Some("_Z4mainv".into()),
+            declaration: Some(SourceLocation {
+                file: SourceFileId::new(0),
+                line: LineNumber::new(u64::from(u32::MAX) + 3).unwrap(),
+                column: ColumnNumber::new(7),
+            }),
+            language: SourceLanguage::Rust,
+            coroutine: Some(TypeId::new(4)),
+            generics: [("T".into(), TypeId::new(2)), ("U".into(), TypeId::new(3))].into(),
+            ..function(0, "main")
+        },
+        FunctionInfo {
+            language: SourceLanguage::Other(0x8001),
+            role: CodeRole::Wrapper,
+            enclosing: Some(FunctionId::new(0)),
+            ..function(1, "helper")
+        },
+        function(2, "declared"),
+        function(3, "main"),
+    ]
+}
+
+/// Instances of every shape: physical with two ranges, the same range
+/// twice, and an inline expansion with a call site and without.
+pub(super) fn sample_instances() -> Vec<CodeInstanceInfo> {
+    let entry = |address, provenance| {
+        Some(BreakpointEntry {
+            address: ImageAddress::new(address),
+            provenance,
+        })
+    };
+    vec![
+        CodeInstanceInfo {
+            id: CodeInstanceId::new(0),
+            function: FunctionId::new(0),
+            parent: None,
+            kind: CodeInstanceKind::OutOfLine,
+            ranges: [range(0x1000, 0x1010), range(0x2000, 0x2008)].into(),
+            breakpoint_entry: entry(0x1000, EntryProvenance::Explicit),
+        },
+        CodeInstanceInfo {
+            id: CodeInstanceId::new(1),
+            function: FunctionId::new(1),
+            parent: Some(CodeInstanceId::new(0)),
+            kind: CodeInstanceKind::Inline {
+                call_site: Some(SourceLocation {
+                    file: SourceFileId::new(1),
+                    line: LineNumber::new(9).unwrap(),
+                    column: None,
+                }),
+            },
+            ranges: [range(0x1004, 0x1008), range(0x1004, 0x1008)].into(),
+            breakpoint_entry: entry(0x1004, EntryProvenance::RangeStart),
+        },
+        CodeInstanceInfo {
+            id: CodeInstanceId::new(2),
+            function: FunctionId::new(3),
+            parent: None,
+            kind: CodeInstanceKind::Inline { call_site: None },
+            ranges: [range(0x3000, 0x3004)].into(),
+            breakpoint_entry: None,
+        },
+        CodeInstanceInfo {
+            id: CodeInstanceId::new(3),
+            function: FunctionId::new(0),
+            parent: None,
+            kind: CodeInstanceKind::OutOfLine,
+            ranges: [range(0x4000, 0x4010)].into(),
+            breakpoint_entry: entry(0x4008, EntryProvenance::CoroutineBody),
+        },
+    ]
+}
+
+pub(super) fn sample_starts() -> Vec<(ImageAddress, BoundaryEvidence)> {
+    vec![
+        (ImageAddress::new(0x1000), BoundaryEvidence::FunctionRange),
+        (ImageAddress::new(0x2000), BoundaryEvidence::SectionStart),
+    ]
+}
+
+/// Call-frame sections of arbitrary bytes with overlapping entries and a
+/// malformed one, and Go's table.
+pub(super) fn sample_unwind() -> unwind::Unwind {
+    let index = |entries: &[(u64, u64, u32)], first_error: Option<(u64, &str)>| unwind::FdeIndex {
+        entries: super::index::intervals(
+            entries
+                .iter()
+                .map(|&(start, end, offset)| (range(start, end), offset)),
+        ),
+        first_error: first_error.map(|(offset, text)| (offset, text.to_owned())),
+    };
+    unwind::Unwind {
+        eh_frame: (0..64).collect::<Vec<u8>>().into(),
+        debug_frame: (0..32).collect::<Vec<u8>>().into(),
+        eh_frame_index: index(
+            &[
+                (0x1000, 0x1100, 8),
+                (0x1080, 0x1200, 24),
+                (0x1400, 0x1500, 48),
+            ],
+            Some((40, "a CIE is malformed")),
+        ),
+        debug_frame_index: index(&[(0x2000, 0x2100, 0)], None),
+        bases: unwind::Bases {
+            eh_frame: Some(0x9000),
+            text: Some(0x1000),
+            got: None,
+        },
+        big_endian: false,
+        address_size: 8,
+        go_code: vec![range(0x3000, 0x3100), range(0x3200, 0x3300)],
+        go: Some(unwind::GoTableData {
+            bytes: (0..16).collect::<Vec<u8>>().into(),
+            facts: unwind::GoTableFacts {
+                address: 0x8000,
+                text: 0x1000,
+                go_func: Some(0x8800),
+                release: Some((1, 25)),
+            },
+            frame_saves: vec![Some(0x3004..0x30f0), None],
+        }),
+    }
+}
+
+pub(super) fn sample_sources() -> crate::SymbolTableSources {
+    crate::SymbolTableSources {
+        static_table: true,
+        dynamic_table: false,
+        embedded_table: crate::EmbeddedSymbolTable::Unusable {
+            reason: "the table is truncated".into(),
+        },
+        runtime_function_table: crate::EmbeddedSymbolTable::Loaded,
+    }
+}
+
+pub(super) fn sample_thread_locals()
+-> std::collections::BTreeMap<std::sync::Arc<str>, Result<crate::ThreadLocal, std::sync::Arc<str>>>
+{
+    [
+        ("counter", Ok(crate::ThreadLocal::Offset(-16))),
+        (
+            "library_state",
+            Ok(crate::ThreadLocal::Slot(ImageAddress::new(0x5000))),
+        ),
+        ("lost", Err("no code reads it".into())),
+    ]
+    .into_iter()
+    .map(|(name, place)| (name.into(), place))
+    .collect()
+}
+
+/// Packages, one named twice, whose last name counts.
+pub(super) const SAMPLE_PACKAGES: [(&str, &str); 3] = [
+    ("main", "first"),
+    ("example.com/m/stack", "stack"),
+    ("main", "main"),
+];
+
+/// Two of the sample functions' packages and local names, which are the
+/// same.
+pub(super) fn sample_packaged() -> Vec<Option<(&'static str, String)>> {
+    vec![
+        None,
+        Some(("example.com/m/stack", "Push".to_owned())),
+        None,
+        Some(("main", "Push".to_owned())),
+    ]
+}
+
 pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, ImageError> {
     let mut builder = Builder::new(TARGET);
     tables.add_to(&mut builder);
     files.add_to(&mut builder).unwrap();
+    let mut strings = StringsBuilder::default();
+    symbols::add_to(
+        &mut builder,
+        &mut strings,
+        &sample_symbols(),
+        &sample_sections(),
+        &sample_got(),
+    )
+    .unwrap();
+    functions::add_to(
+        &mut builder,
+        &mut strings,
+        &functions::Code {
+            functions: &sample_functions(),
+            instances: &sample_instances(),
+            prologue_ends: &tables.prologue_ends(),
+            instruction_starts: &sample_starts(),
+        },
+    )
+    .unwrap();
+    unwind::add_to(&mut builder, &mut strings, &sample_unwind()).unwrap();
+    packages::add_to(
+        &mut builder,
+        &mut strings,
+        SAMPLE_PACKAGES,
+        &sample_packaged(),
+    )
+    .unwrap();
+    facts::add_to(
+        &mut builder,
+        &mut strings,
+        &facts::Facts {
+            symbol_sources: &sample_sources(),
+            thread_local_storage: true,
+            thread_locals: &sample_thread_locals(),
+        },
+    )
+    .unwrap();
+    builder.bytes(TableKind::Strings, strings.into_bytes());
     builder.seal(Limits::default())
 }
 
@@ -138,6 +440,64 @@ pub(super) fn read_everything(image: &Image) -> u64 {
     let paths = Paths(image.bytes(TableKind::Paths));
     for file in image.table::<FileRecord>() {
         read += paths.get(PathId(file.path.get())).as_os_str().len() as u64;
+    }
+    let view = SymbolView::new(image);
+    for symbol in view.all() {
+        let info = symbol.info();
+        read += view.named(&info.name).count() as u64;
+        for address in [info.address.get(), symbol.range_end().get()] {
+            let address = ImageAddress::new(address);
+            read += u64::from(view.code_at(address).is_some());
+            read += u64::from(view.data_at(address).is_some());
+        }
+        read += u64::from(symbol.answers_to("main"));
+    }
+    read += symbols::sections(image).len() as u64;
+    read += symbols::got_slots(image).len() as u64;
+    let view = FunctionView::new(image);
+    for function in view.functions() {
+        let info = function.info();
+        read += view.named(&info.name).count() as u64;
+        read += function
+            .instances()
+            .map(|instance| instance.info().ranges.len() as u64)
+            .sum::<u64>();
+    }
+    for instance in view.instances() {
+        let info = instance.info();
+        read += instance.recommended_entries().count() as u64;
+        for range in info.ranges.iter() {
+            read += view.instances_containing(range.start).count() as u64;
+            read += view.instruction_starts(*range).count() as u64;
+        }
+    }
+    let view = UnwindView::new(image);
+    for lookup in [view.eh_frame_index(), view.debug_frame_index()] {
+        for interval in lookup.entries {
+            for address in [interval.start.get(), interval.end.get() - 1] {
+                read += u64::from(lookup.lookup(address).is_ok());
+            }
+        }
+    }
+    read += (view.eh_frame().len() + view.debug_frame().len()) as u64;
+    read += u64::from(view.is_go_code(ImageAddress::new(0x3000)));
+    read += view.frame_saves().flatten().count() as u64;
+    if let Some((bytes, _)) = view.go() {
+        read += bytes.len() as u64;
+    }
+    let view = PackageView::new(image);
+    for index in 0..image.table::<packages::PackagedRecord>().len() {
+        let function = FunctionId::new(u32::try_from(index).unwrap());
+        if let Some((package, local)) = view.packaged_name(function) {
+            read += view.with_local_name(local).count() as u64;
+            read += u64::from(view.package_name(package).is_some());
+        }
+    }
+    let view = FactsView::new(image);
+    read += u64::from(view.thread_local_storage());
+    read += u64::from(view.symbol_sources().static_table);
+    for (name, _) in view.thread_locals() {
+        read += u64::from(view.thread_local(name).is_some());
     }
     read
 }

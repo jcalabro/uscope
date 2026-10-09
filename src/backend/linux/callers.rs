@@ -360,9 +360,9 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             && self.controller.modules.values().any(|other| {
                 other.loaded.id != module
                     && other.image.symbols_named(name).any(|symbol| {
-                        symbol.exported
-                            && symbol.binding != SymbolBinding::Local
-                            && symbol.kind != SymbolKind::Data
+                        symbol.exported()
+                            && symbol.binding() != SymbolBinding::Local
+                            && symbol.kind() != SymbolKind::Data
                     })
             })
     }
@@ -392,10 +392,11 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
         let mut found = None;
         for module in self.controller.modules.values() {
             for symbol in module.image.symbols_named(name) {
-                if symbol.binding == SymbolBinding::Local || symbol.kind != SymbolKind::Function {
+                if symbol.binding() == SymbolBinding::Local || symbol.kind() != SymbolKind::Function
+                {
                     continue;
                 }
-                let address = module.loaded.virtual_address(symbol.address).ok()?;
+                let address = module.loaded.virtual_address(symbol.address()).ok()?;
                 if found.is_some_and(|found| found != address) {
                     return None;
                 }

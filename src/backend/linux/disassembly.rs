@@ -103,20 +103,19 @@ fn function_ranges(
         .physical_instance
         .and_then(|id| image.code_instance(id));
     if let Some(instance) = instance
-        && let Some(function) = image.function(instance.function)
+        && let Some(function) = image.function(instance.function())
     {
         let mut ranges = instance
-            .ranges
-            .iter()
-            .map(|range| to_virtual(*range))
+            .ranges()
+            .map(to_virtual)
             .collect::<Result<Vec<_>>>()?;
         ranges.sort_by_key(|range| (range.start, range.end));
         return Ok((
             DisassembledFunction {
                 module: module.loaded.id,
-                name: function.name.clone(),
+                name: function.name().into(),
                 origin: FunctionOrigin::DebugInfo {
-                    instance: instance.id,
+                    instance: instance.id(),
                 },
             },
             ranges,
@@ -126,7 +125,7 @@ fn function_ranges(
     let symbol = image.symbolize(image_address).ok_or_else(not_found)?;
     let extent = image
         .symbol(symbol.symbol)
-        .and_then(|info| info.extent)
+        .and_then(crate::image::symbols::Symbol::extent)
         .expect("a code symbol has an extent");
     Ok((
         DisassembledFunction {

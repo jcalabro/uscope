@@ -667,8 +667,14 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
             got_slots: Vec::new(),
             globals: Vec::new(),
             types: Arc::default(),
-            files: crate::image::lines::Files::default(),
+            files: {
+                // The file the call sites name.
+                let mut files = crate::image::lines::Files::default();
+                files.intern(PathBuf::from("/test/inline.c"));
+                files
+            },
             lines: crate::image::lines::LineTables::default(),
+            unwind: None,
             sections: Vec::new(),
             vtables: Vec::new(),
             coroutines: std::collections::BTreeMap::new(),
@@ -1162,7 +1168,7 @@ impl LinuxTraceOps for FakeTrace {
         &self,
         _pid: Pid,
         _executable: &Path,
-        _executable_data: &[u8],
+        _image_base: u64,
         _identity: FileIdentity,
     ) -> Result<u64> {
         Ok(0)
@@ -1554,13 +1560,14 @@ fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness
     let (events, event_receiver) = broadcast::channel(256);
     let mut controller = Controller::new(
         SessionLease::detached(),
-        ExecutableSource {
+        crate::backend::ExecutableSource {
             display_path: Arc::new(PathBuf::from("/test/watch")),
             data: sectionless_elf(),
             identity: FileIdentity { inode: 0 },
             process_start_time: None,
             debug_files: crate::debug_info::DebugFileSearch::default(),
-        },
+        }
+        .described(),
         DebugInfo {
             image: Arc::clone(image),
             unwind: Arc::new(UnusedUnwindInfo),
@@ -6107,7 +6114,7 @@ fn glibc_signal_trampoline_expressions_find_the_kernels_saved_registers() {
         .symbols_named("__restore_rt")
         .next()
         .expect("glibc's signal trampoline")
-        .address;
+        .address();
 
     // A handler's frame returned into the trampoline, whose stack holds the
     // ucontext; each saved register gets a value of its own.

@@ -1034,7 +1034,6 @@ fn resolve_in_image(
             for address in addresses {
                 let code_instances = image
                     .code_instances()
-                    .iter()
                     .filter(|instance| instance.contains(address))
                     .collect::<Vec<_>>();
                 let innermost = code_instances
@@ -1042,9 +1041,9 @@ fn resolve_in_image(
                     .find(|instance| {
                         !code_instances
                             .iter()
-                            .any(|other| other.parent == Some(instance.id))
+                            .any(|other| other.parent() == Some(instance.id()))
                     })
-                    .map(|instance| instance.id);
+                    .map(|instance| instance.id());
                 // The line is the innermost instance's code, so a stop there
                 // presents that instance's frame.
                 if innermost.is_none_or(|instance| seen.insert(instance)) {
@@ -1069,16 +1068,16 @@ fn symbol_locations(
     let mut entries = BTreeSet::new();
     let mut indirect = false;
     for symbol in image.symbols_answering(name) {
-        if symbol.extent.is_none() {
+        if symbol.extent().is_none() {
             continue;
         }
-        match symbol.kind {
+        match symbol.kind() {
             crate::SymbolKind::Function => {
-                entries.insert(symbol.address);
+                entries.insert(symbol.address());
             }
             crate::SymbolKind::IndirectFunction => {
                 indirect = true;
-                entries.extend(chosen(symbol.address));
+                entries.extend(chosen(symbol.address()));
             }
             crate::SymbolKind::Data | crate::SymbolKind::Unknown => {}
         }
@@ -1096,16 +1095,16 @@ fn symbol_locations(
 /// where an instance's code begins after its prologue.
 fn function_locations<'a>(
     image: &crate::ModuleImage,
-    functions: impl IntoIterator<Item = &'a crate::FunctionInfo>,
+    functions: impl IntoIterator<Item = crate::Function<'a>>,
 ) -> Result<Vec<(crate::ImageAddress, Arc<[crate::CodeInstanceId]>)>> {
     let mut instances = Vec::new();
     for function in functions {
-        instances.extend(image.instances_for_function(function.id));
+        instances.extend(function.instances());
     }
     if instances.is_empty()
         || instances.iter().any(|instance| {
             image
-                .recommended_entries_for_instance(instance.id)
+                .recommended_entries_for_instance(instance.id())
                 .next()
                 .is_none()
         })
@@ -1114,11 +1113,11 @@ fn function_locations<'a>(
     }
     let mut by_address = BTreeMap::<_, Vec<_>>::new();
     for instance in instances {
-        for entry in image.recommended_entries_for_instance(instance.id) {
+        for entry in image.recommended_entries_for_instance(instance.id()) {
             by_address
                 .entry(entry.address)
                 .or_default()
-                .push(instance.id);
+                .push(instance.id());
         }
     }
     Ok(by_address

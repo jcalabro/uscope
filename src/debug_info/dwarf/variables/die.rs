@@ -7,7 +7,7 @@ use foldhash::{HashSet, HashSetExt};
 use gimli::Reader as _;
 
 use crate::debug_info::dwarf::{
-    DieKey, DwarfError, Reader, die_reference, is_type_unit, source_path, string_attribute,
+    DieKey, DwarfError, Reader, Units, die_reference, is_type_unit, source_path, string_attribute,
 };
 use crate::{
     AddressRange, ColumnNumber, ImageAddress, LineNumber, SourceFileId, SourceLocation,
@@ -126,7 +126,7 @@ const MAX_ZIG_PARENTS: usize = 16;
 /// qualified, or has no parent, ends the chain.
 pub(super) fn zig_qualified_name(
     dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
+    units: &Units<'_>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     name: Arc<str>,
@@ -167,7 +167,7 @@ pub(super) fn zig_qualified_name(
 /// has it.
 pub(super) fn string_with_origins(
     dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
+    units: &Units<'_>,
     unit: &gimli::Unit<Reader<'_>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
@@ -235,7 +235,7 @@ pub(super) fn flag_with_origins(
 /// transitively, rejecting cycles, so concrete inline-instance DIEs can
 /// inherit name, type, and declaration metadata from their origins.
 pub(super) fn origin_chain<'data>(
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
 ) -> std::result::Result<Vec<(usize, gimli::DebuggingInformationEntry<Reader<'data>>)>, DwarfError>
@@ -276,7 +276,7 @@ pub(super) fn checked_reference_chain(
 fn origin_reference(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     unit_index: usize,
-    units: &[gimli::Unit<Reader<'_>>],
+    units: &Units<'_>,
 ) -> std::result::Result<Option<DieKey>, DwarfError> {
     let value = entry
         .attr_value(gimli::DW_AT_abstract_origin)
@@ -297,7 +297,7 @@ pub(super) fn strict_flag(
 
 pub(super) fn declaration_with_origins<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     unit: &gimli::Unit<Reader<'data>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],

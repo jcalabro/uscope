@@ -26,8 +26,8 @@ pub struct FileIdentity {
     pub inode: u64,
 }
 
-/// An executable's contents and identity, read once when a session starts.
-#[derive(Clone)]
+/// An executable's contents and identity, read once when a session starts
+/// and kept only until its debug information is read.
 pub struct ExecutableSource {
     pub display_path: Arc<PathBuf>,
     pub data: Arc<[u8]>,
@@ -37,6 +37,32 @@ pub struct ExecutableSource {
     pub process_start_time: Option<u64>,
     /// Where the session finds separate debug files.
     pub debug_files: crate::debug_info::DebugFileSearch,
+}
+
+impl ExecutableSource {
+    /// What a session keeps of the executable: its identity and the facts
+    /// process control needs, but none of its bytes.
+    pub fn described(self) -> Executable {
+        Executable {
+            c_library: linux::CLibrary::of_executable(&self.data),
+            display_path: self.display_path,
+            identity: self.identity,
+            process_start_time: self.process_start_time,
+            debug_files: self.debug_files,
+        }
+    }
+}
+
+/// What a session keeps of its executable once its debug information is
+/// read.
+#[derive(Clone)]
+pub struct Executable {
+    pub display_path: Arc<PathBuf>,
+    pub identity: FileIdentity,
+    pub process_start_time: Option<u64>,
+    pub debug_files: crate::debug_info::DebugFileSearch,
+    /// The C library the executable runs on, whose structures locate TLS.
+    c_library: linux::CLibrary,
 }
 
 pub fn executable_source(path: &Path) -> Result<ExecutableSource> {
@@ -187,7 +213,7 @@ impl From<broadcast::Sender<DebuggerEvent>> for EventSender {
 
 /// Starts the controller for a live session of `executable`.
 pub fn spawn_controller(
-    executable: ExecutableSource,
+    executable: Executable,
     debug_info: DebugInfo,
     channels: ControllerChannels,
 ) -> Result<JoinHandle<()>> {

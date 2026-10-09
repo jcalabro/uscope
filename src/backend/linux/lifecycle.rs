@@ -341,7 +341,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.ptrace.load_bias(
             pid,
             &self.executable,
-            &self.executable_data,
+            self.module_image.address_range().start.get(),
             self.executable_identity,
         )
     }

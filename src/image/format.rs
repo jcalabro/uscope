@@ -94,11 +94,72 @@ pub enum TableKind {
     /// NUL-terminated filesystem paths, which [`super::PathId`] names by
     /// offset: bytes, which need not be UTF-8.
     Paths = 10,
+    /// Linker symbols.
+    Symbols = 11,
+    /// Symbols by name.
+    SymbolNames = 12,
+    /// The code symbols' extents, for lookups by address.
+    SymbolExtents = 13,
+    /// The data symbols' storage, for lookups by address.
+    SymbolStorage = 14,
+    /// Unsized data symbols, each by its one-byte address.
+    UnsizedData = 15,
+    /// Allocated sections.
+    Sections = 16,
+    /// The sections, for lookups by address.
+    SectionRanges = 17,
+    /// The GOT slots the loader fills.
+    GotSlots = 18,
+    /// Source-level functions.
+    Functions = 19,
+    /// Functions by name.
+    FunctionNames = 20,
+    /// Generic functions' type arguments.
+    Generics = 21,
+    /// Each function's instances, function by function.
+    FunctionInstances = 22,
+    /// Code instances.
+    CodeInstances = 23,
+    /// The instances' address ranges, instance by instance.
+    InstanceRanges = 24,
+    /// The instances' ranges, for lookups by address.
+    CodeRanges = 25,
+    /// Where function breakpoints on each instance stop.
+    RecommendedEntries = 26,
+    /// Where instructions are known to begin, by address.
+    InstructionStarts = 27,
+    /// Facts about the call-frame sections and Go's table.
+    Unwind = 28,
+    /// `.eh_frame`'s bytes.
+    EhFrame = 29,
+    /// `.debug_frame`'s bytes.
+    DebugFrame = 30,
+    /// `.eh_frame`'s entries, for lookups by address.
+    EhFrameIndex = 31,
+    /// `.debug_frame`'s entries, for lookups by address.
+    DebugFrameIndex = 32,
+    /// Code the Go toolchain compiled, for lookups by address.
+    GoCode = 33,
+    /// Go's function table's bytes.
+    GoTable = 34,
+    /// Where each Go function keeps its caller's frame pointer saved.
+    GoFrameSaves = 35,
+    /// Which symbol tables the image provided, and whether it has
+    /// thread-local storage.
+    Facts = 36,
+    /// Thread-local variables, by name.
+    ThreadLocals = 37,
+    /// Packages, by path.
+    Packages = 38,
+    /// Each function's package and local name.
+    PackagedNames = 39,
+    /// Functions by their local names within their packages.
+    LocalNames = 40,
 }
 
 impl TableKind {
     /// Every kind, in the order tables are laid out.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 40] = [
         Self::Strings,
         Self::Files,
         Self::LineAddresses,
@@ -109,6 +170,36 @@ impl TableKind {
         Self::StatementIndex,
         Self::ControlBoundaries,
         Self::Paths,
+        Self::Symbols,
+        Self::SymbolNames,
+        Self::SymbolExtents,
+        Self::SymbolStorage,
+        Self::UnsizedData,
+        Self::Sections,
+        Self::SectionRanges,
+        Self::GotSlots,
+        Self::Functions,
+        Self::FunctionNames,
+        Self::Generics,
+        Self::FunctionInstances,
+        Self::CodeInstances,
+        Self::InstanceRanges,
+        Self::CodeRanges,
+        Self::RecommendedEntries,
+        Self::InstructionStarts,
+        Self::Unwind,
+        Self::EhFrame,
+        Self::DebugFrame,
+        Self::EhFrameIndex,
+        Self::DebugFrameIndex,
+        Self::GoCode,
+        Self::GoTable,
+        Self::GoFrameSaves,
+        Self::Facts,
+        Self::ThreadLocals,
+        Self::Packages,
+        Self::PackagedNames,
+        Self::LocalNames,
     ];
 
     pub const COUNT: usize = Self::ALL.len();

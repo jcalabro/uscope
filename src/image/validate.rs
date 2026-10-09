@@ -188,7 +188,12 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
     tables.sequences()?;
     tables.ranges()?;
     tables.statements(image.table())?;
-    tables.boundaries(image.table())
+    tables.boundaries(image.table())?;
+    super::symbols::validate(image).map_err(malformed)?;
+    super::functions::validate(image).map_err(malformed)?;
+    super::unwind::validate(image).map_err(malformed)?;
+    super::facts::validate(image).map_err(malformed)?;
+    super::packages::validate(image).map_err(malformed)
 }
 
 /// The line tables, checked against each other and their indexes. Each

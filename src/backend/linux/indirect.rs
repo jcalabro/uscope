@@ -97,9 +97,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                         .image
                         .symbols_answering(name)
                         .filter(|symbol| {
-                            symbol.kind == SymbolKind::IndirectFunction && symbol.extent.is_some()
+                            symbol.kind() == SymbolKind::IndirectFunction
+                                && symbol.extent().is_some()
                         })
-                        .map(|symbol| (module, symbol.address))
+                        .map(|symbol| (module, symbol.address()))
                         .filter(|resolver| !inferior.indirect.chosen.contains_key(resolver)),
                 );
             }
@@ -127,9 +128,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             let names = defining
                 .image
                 .symbols()
-                .iter()
-                .filter(|symbol| symbol.address == resolver && symbol.exported)
-                .map(crate::SymbolInfo::unversioned_name)
+                .filter(|symbol| symbol.address() == resolver && symbol.exported())
+                .map(crate::image::symbols::Symbol::unversioned_name)
                 .collect::<BTreeSet<_>>();
             // A slot of the module's own that the resolver fills, or one
             // of any module's that imports the function by name.

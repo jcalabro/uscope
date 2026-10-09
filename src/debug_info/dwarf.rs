@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use foldhash::{HashMap, HashMapExt};
 use gimli::{
     BaseAddresses, CfaRule, ColumnType, DebugFrame, DwarfSections, EhFrame, Encoding, EndianSlice,
     EvaluationResult, Location, RegisterRule, RunTimeEndian, UnwindContext, UnwindExpression,
@@ -65,9 +65,50 @@ type Reader<'data> = EndianSlice<'data, RunTimeEndian>;
 type TypeSignatures = HashMap<gimli::DebugTypeSignature, DieKey>;
 
 struct UnitCatalog<'data> {
-    units: Vec<gimli::Unit<Reader<'data>>>,
+    units: Units<'data>,
     type_signatures: TypeSignatures,
     code: CodeRanges,
+}
+
+/// An image's units, with where each `.debug_info` unit lies, so that a
+/// reference across units finds its unit by a binary search.
+struct Units<'data> {
+    units: Vec<gimli::Unit<Reader<'data>>>,
+    /// The `.debug_info` offset of each unit there and its index, by
+    /// offset. DWARF 4's type units are in `.debug_types`, which
+    /// `.debug_info` references never name.
+    starts: Vec<(usize, usize)>,
+}
+
+impl<'data> Units<'data> {
+    fn new(units: Vec<gimli::Unit<Reader<'data>>>) -> Self {
+        let mut starts = units
+            .iter()
+            .enumerate()
+            .filter_map(|(index, unit)| Some((unit.header.debug_info_offset()?.0, index)))
+            .collect::<Vec<_>>();
+        starts.sort_unstable();
+        Self { units, starts }
+    }
+
+    /// The unit whose DIEs `offset` lies among, and the offset within it.
+    fn containing(&self, offset: gimli::DebugInfoOffset) -> Option<DieKey> {
+        let after = self.starts.partition_point(|(start, _)| *start <= offset.0);
+        let (_, unit) = *self.starts.get(after.checked_sub(1)?)?;
+        let within = offset.to_unit_offset(&self.units[unit].header)?;
+        Some(DieKey {
+            unit,
+            offset: within.0,
+        })
+    }
+}
+
+impl<'data> std::ops::Deref for Units<'data> {
+    type Target = [gimli::Unit<Reader<'data>>];
+
+    fn deref(&self) -> &Self::Target {
+        &self.units
+    }
 }
 
 /// The executable address ranges of an image.
@@ -137,21 +178,13 @@ pub(super) fn fuzz_expression(data: &[u8]) {
     variables::fuzz_expression(data);
 }
 
+/// Unwinds by the call-frame sections and Go's table an image keeps.
 struct DwarfUnwindInfo {
-    eh_frame: Arc<[u8]>,
-    debug_frame: Arc<[u8]>,
-    eh_frame_index: FdeIndex,
-    debug_frame_index: FdeIndex,
-    endian: RunTimeEndian,
-    address_size: u8,
-    bases: BaseAddresses,
-    /// Code the Go toolchain compiled, sorted by start address. Go's calling
-    /// convention lets a callee overwrite registers the System V ABI
-    /// preserves.
-    go_code: Vec<AddressRange<ImageAddress>>,
+    tables: Arc<crate::image::Image>,
     /// Go's function table, which unwinds Go code no call-frame information
-    /// describes and says where Go frames saved the frame pointer.
-    go: Option<Arc<super::gopclntab::GoUnwind>>,
+    /// describes and says where Go frames saved the frame pointer, parsed
+    /// on the first unwind that needs it.
+    go: std::sync::OnceLock<Option<super::gopclntab::GoUnwind>>,
 }
 
 pub fn load(
@@ -240,7 +273,7 @@ fn load_sections<'data>(
         wanted.push(id);
         Ok::<_, DwarfError>(())
     })?;
-    let mut loaded = wanted
+    let loaded = wanted
         .into_par_iter()
         .map(|id| {
             let data = match object.section_by_name(id.name()) {
@@ -249,7 +282,8 @@ fn load_sections<'data>(
             };
             Ok((id, data))
         })
-        .collect::<std::result::Result<HashMap<_, _>, DwarfError>>()?;
+        .collect::<Vec<std::result::Result<_, DwarfError>>>();
+    let mut loaded = first_error(loaded)?.into_iter().collect::<HashMap<_, _>>();
     DwarfSections::load(|id| Ok::<_, DwarfError>(loaded.remove(&id).unwrap_or(Cow::Borrowed(&[]))))
 }
 
@@ -302,13 +336,15 @@ fn load_image(
     }
     // Each unit's abbreviations, root DIE, and line program header, in
     // parallel and in order.
-    let units = headers
-        .into_par_iter()
-        .map(|header| dwarf.unit(header))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let units = first_error(
+        headers
+            .into_par_iter()
+            .map(|header| dwarf.unit(header))
+            .collect(),
+    )?;
     let catalog = UnitCatalog {
         type_signatures: type_signature_index(&units)?,
-        units,
+        units: Units::new(units),
         code: CodeRanges(super::elf::executable_ranges(&object)),
     };
     crate::count!("units", catalog.units.len());
@@ -337,9 +373,10 @@ fn load_image(
             let mut files = Files::default();
             let mut tables = LineTables::default();
             load_lines(&dwarf, unit, &catalog.code, &mut files, &mut tables)?;
-            Ok((files, tables))
+            Ok::<_, DwarfError>((files, tables))
         })
-        .collect::<std::result::Result<Vec<_>, DwarfError>>()?;
+        .collect::<Vec<_>>();
+    let unit_lines = first_error(unit_lines)?;
     for (unit_files, tables) in unit_lines {
         let ids = unit_files
             .paths()
@@ -448,16 +485,15 @@ fn load_image(
     drop(phase);
     let phase = crate::span!("unwind_and_symbols");
     let go_code = go_code_ranges(&dwarf, &catalog)?;
-    let go_unwind = go_table
-        .as_ref()
-        .map(|table| Arc::new(super::gopclntab::GoUnwind::new(Arc::clone(table), code)));
-    let unwind = Arc::new(load_unwind_info(
-        &object,
-        debug_object.as_ref(),
-        target,
-        go_code,
-        go_unwind,
-    )?);
+    let go = go_table.as_ref().map(|table| {
+        let (bytes, facts) = table.source();
+        crate::image::unwind::GoTableData {
+            bytes: Arc::clone(bytes),
+            facts,
+            frame_saves: super::gopclntab::frame_saves(table, code),
+        }
+    });
+    let unwind = load_unwind_info(&object, debug_object.as_ref(), target, go_code, go)?;
     let mut symbols =
         super::elf::load_symbols(&object, debug_object.as_ref(), &unwind.function_ranges());
     symbols.sources.runtime_function_table = runtime_function_table;
@@ -487,6 +523,7 @@ fn load_image(
                 packages: go_packages(&dwarf, &catalog)?,
                 files,
                 lines: line_tables,
+                unwind: Some(unwind),
                 sections: super::elf::load_sections(&object),
                 thread_local_storage: super::elf::has_thread_local_storage(&object),
                 thread_locals: super::elf::load_thread_locals(&object),
@@ -506,8 +543,11 @@ fn load_image(
 
     drop(phase);
     Ok(DebugInfo {
+        unwind: Arc::new(DwarfUnwindInfo {
+            tables: Arc::clone(image.tables()),
+            go: std::sync::OnceLock::new(),
+        }),
         image,
-        unwind,
         variables: Arc::new(variables.info),
     })
 }
@@ -533,7 +573,7 @@ fn unit_producers<'data>(
     catalog: &UnitCatalog<'data>,
 ) -> std::result::Result<Vec<Arc<str>>, DwarfError> {
     let mut producers = Vec::<Arc<str>>::new();
-    for unit in &catalog.units {
+    for unit in catalog.units.iter() {
         let mut entries = unit.entries();
         let Some(root) = entries.next_dfs()? else {
             continue;
@@ -629,6 +669,12 @@ fn go_code_ranges<'data>(
     Ok(merged)
 }
 
+/// The results' values, or the first one's error: what a serial run
+/// would have stopped at, whichever order parallel work finished in.
+fn first_error<T, E>(results: Vec<std::result::Result<T, E>>) -> std::result::Result<Vec<T>, E> {
+    results.into_iter().collect()
+}
+
 fn type_signature_index(
     units: &[gimli::Unit<Reader<'_>>],
 ) -> std::result::Result<TypeSignatures, DwarfError> {
@@ -699,8 +745,8 @@ fn load_unwind_info(
     debug_object: Option<&object::File<'_>>,
     target: TargetDescription,
     go_code: Vec<AddressRange<ImageAddress>>,
-    go: Option<Arc<super::gopclntab::GoUnwind>>,
-) -> std::result::Result<DwarfUnwindInfo, DwarfError> {
+    go: Option<crate::image::unwind::GoTableData>,
+) -> std::result::Result<crate::image::unwind::Unwind, DwarfError> {
     let data_in = |object: &object::File<'_>, name| -> std::result::Result<Arc<[u8]>, DwarfError> {
         Ok(object
             .section_by_name(name)
@@ -720,128 +766,157 @@ fn load_unwind_info(
         },
         frame => frame,
     };
-    let mut bases = BaseAddresses::default();
-    if let Some(section) = object.section_by_name(".eh_frame") {
-        bases = bases.set_eh_frame(section.address());
-    }
-    if let Some(section) = object.section_by_name(".text") {
-        bases = bases.set_text(section.address());
-    }
-    if let Some(section) = object.section_by_name(".got") {
-        bases = bases.set_got(section.address());
-    }
-
-    let mut unwind = DwarfUnwindInfo {
+    let address = |name| {
+        object
+            .section_by_name(name)
+            .map(|section| section.address())
+    };
+    let mut unwind = crate::image::unwind::Unwind {
         eh_frame: section_data(".eh_frame")?,
         debug_frame,
-        eh_frame_index: FdeIndex::default(),
-        debug_frame_index: FdeIndex::default(),
-        endian: match target.byte_order {
-            ByteOrder::Little => RunTimeEndian::Little,
-            ByteOrder::Big => RunTimeEndian::Big,
+        bases: crate::image::unwind::Bases {
+            eh_frame: address(".eh_frame"),
+            text: address(".text"),
+            got: address(".got"),
         },
+        big_endian: target.byte_order == ByteOrder::Big,
         address_size: target.pointer_width.bytes(),
-        bases,
         go_code,
         go,
+        ..Default::default()
     };
-    unwind.eh_frame_index = FdeIndex::new(&unwind.eh_frame(), &unwind.bases);
-    unwind.debug_frame_index = FdeIndex::new(&unwind.debug_frame(), &unwind.bases);
+    let sections = UnwindSections::of(&unwind);
+    let indexes = (
+        fde_index(&sections.eh_frame(), &sections.bases),
+        fde_index(&sections.debug_frame(), &sections.bases),
+    );
+    (unwind.eh_frame_index, unwind.debug_frame_index) = indexes;
     Ok(unwind)
 }
 
-/// The frame description entries of one call-frame section, indexed once by
-/// address so that finding an address's entry is a binary search rather
+/// The call-frame sections as gimli reads them.
+struct UnwindSections<'data> {
+    eh_frame: &'data [u8],
+    debug_frame: &'data [u8],
+    endian: RunTimeEndian,
+    address_size: u8,
+    bases: BaseAddresses,
+}
+
+impl<'data> UnwindSections<'data> {
+    fn of(unwind: &'data crate::image::unwind::Unwind) -> Self {
+        Self::new(
+            &unwind.eh_frame,
+            &unwind.debug_frame,
+            unwind.big_endian,
+            unwind.address_size,
+            unwind.bases,
+        )
+    }
+
+    fn in_image(view: crate::image::unwind::UnwindView<'data>) -> Self {
+        Self::new(
+            view.eh_frame(),
+            view.debug_frame(),
+            view.big_endian(),
+            view.address_size(),
+            crate::image::unwind::Bases {
+                eh_frame: view.eh_frame_base(),
+                text: view.text_base(),
+                got: view.got_base(),
+            },
+        )
+    }
+
+    fn new(
+        eh_frame: &'data [u8],
+        debug_frame: &'data [u8],
+        big_endian: bool,
+        address_size: u8,
+        bases: crate::image::unwind::Bases,
+    ) -> Self {
+        let mut gimli_bases = BaseAddresses::default();
+        if let Some(address) = bases.eh_frame {
+            gimli_bases = gimli_bases.set_eh_frame(address);
+        }
+        if let Some(address) = bases.text {
+            gimli_bases = gimli_bases.set_text(address);
+        }
+        if let Some(address) = bases.got {
+            gimli_bases = gimli_bases.set_got(address);
+        }
+        Self {
+            eh_frame,
+            debug_frame,
+            endian: if big_endian {
+                RunTimeEndian::Big
+            } else {
+                RunTimeEndian::Little
+            },
+            address_size,
+            bases: gimli_bases,
+        }
+    }
+
+    fn eh_frame(&self) -> EhFrame<Reader<'data>> {
+        let mut section = EhFrame::new(self.eh_frame, self.endian);
+        section.set_address_size(self.address_size);
+        section
+    }
+
+    fn debug_frame(&self) -> DebugFrame<Reader<'data>> {
+        let mut section = DebugFrame::new(self.debug_frame, self.endian);
+        section.set_address_size(self.address_size);
+        section
+    }
+}
+
+/// Indexes the frame description entries of one call-frame section by
+/// address, so that finding an address's entry is a binary search rather
 /// than a walk of the section. Lookups agree exactly with gimli's walk
 /// (`UnwindSection::fde_for_address`), which returns the first entry in
-/// section order that contains the address, or the first error before it.
-#[derive(Debug, Default)]
-struct FdeIndex {
-    /// Every entry that parses and covers some code, sorted by start.
-    entries: Vec<IndexedFde>,
-    /// The greatest end among `entries[..=i]`, which bounds how far back a
-    /// lookup must look when entries overlap.
-    reach: Vec<u64>,
-    /// The section offset of the first entry that fails to parse, or
-    /// `usize::MAX` when the section itself is malformed and enumeration
-    /// stops, with the error. A walk of the section stops there.
-    first_error: Option<(usize, gimli::Error)>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct IndexedFde {
-    start: u64,
-    end: u64,
-    offset: usize,
-}
-
-impl FdeIndex {
-    fn new<'data, S>(section: &S, bases: &BaseAddresses) -> Self
-    where
-        S: UnwindSection<Reader<'data>>,
-    {
-        let mut index = Self::default();
-        let mut entries = section.entries(bases);
-        loop {
-            let partial = match entries.next() {
-                Ok(Some(gimli::CieOrFde::Fde(partial))) => partial,
-                Ok(Some(gimli::CieOrFde::Cie(_))) => continue,
-                Ok(None) => break,
-                Err(error) => {
-                    index.first_error.get_or_insert((usize::MAX, error));
-                    break;
-                }
-            };
-            match partial.parse(S::cie_from_offset) {
-                Ok(fde) if fde.initial_address() < fde.end_address() => {
-                    index.entries.push(IndexedFde {
-                        start: fde.initial_address(),
-                        end: fde.end_address(),
-                        offset: fde.offset(),
-                    });
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    index
-                        .first_error
-                        .get_or_insert_with(|| (partial.offset(), error));
-                }
+/// section order that contains the address, or the first error before it:
+/// the index keeps the offset of the first entry that fails to parse, or
+/// [`WHOLE_SECTION`](crate::image::unwind::WHOLE_SECTION) when the section
+/// itself is malformed and enumeration stops.
+fn fde_index<'data, S>(section: &S, bases: &BaseAddresses) -> crate::image::unwind::FdeIndex
+where
+    S: UnwindSection<Reader<'data>>,
+{
+    let mut first_error = None;
+    let mut entries = Vec::new();
+    let mut walk = section.entries(bases);
+    loop {
+        let partial = match walk.next() {
+            Ok(Some(gimli::CieOrFde::Fde(partial))) => partial,
+            Ok(Some(gimli::CieOrFde::Cie(_))) => continue,
+            Ok(None) => break,
+            Err(error) => {
+                first_error.get_or_insert((crate::image::unwind::WHOLE_SECTION, error));
+                break;
+            }
+        };
+        match partial.parse(S::cie_from_offset) {
+            Ok(fde) => entries.push((
+                AddressRange {
+                    start: ImageAddress::new(fde.initial_address()),
+                    end: ImageAddress::new(fde.end_address()),
+                },
+                // A section too large for the image fails when sealed.
+                u32::try_from(fde.offset()).unwrap_or(u32::MAX),
+            )),
+            Err(error) => {
+                first_error.get_or_insert_with(|| (partial.offset() as u64, error));
             }
         }
-        index
-            .entries
-            .sort_unstable_by_key(|fde| (fde.start, fde.offset));
-        index.reach = index
-            .entries
-            .iter()
-            .scan(0, |reach, fde| {
-                *reach = fde.end.max(*reach);
-                Some(*reach)
-            })
-            .collect();
-        index
     }
-
-    /// The section offset of the entry describing `address`.
-    fn lookup(&self, address: u64) -> gimli::Result<usize> {
-        let after = self.entries.partition_point(|fde| fde.start <= address);
-        let first = (0..after)
-            .rev()
-            .take_while(|&index| self.reach[index] > address)
-            .map(|index| self.entries[index])
-            .filter(|fde| address < fde.end)
-            .map(|fde| fde.offset)
-            .min();
-        match (first, self.first_error) {
-            (Some(offset), Some((error_offset, _))) if offset < error_offset => Ok(offset),
-            (Some(offset), None) => Ok(offset),
-            (_, Some((_, error))) => Err(error),
-            (None, None) => Err(gimli::Error::NoUnwindInfoForAddress),
-        }
+    crate::image::unwind::FdeIndex {
+        entries: crate::image::index::intervals(entries),
+        first_error: first_error.map(|(offset, error)| (offset, error.to_string())),
     }
 }
 
-impl DwarfUnwindInfo {
+impl crate::image::unwind::Unwind {
     /// Returns the code range of every function the call-frame information
     /// describes. Enumeration stops at the first malformed entry, so the
     /// result is evidence of function boundaries rather than a complete map.
@@ -851,31 +926,38 @@ impl DwarfUnwindInfo {
             .iter()
             .chain(&self.debug_frame_index.entries)
             .map(|fde| AddressRange {
-                start: ImageAddress::new(fde.start),
-                end: ImageAddress::new(fde.end),
+                start: ImageAddress::new(fde.start.get()),
+                end: ImageAddress::new(fde.end.get()),
             })
             .collect()
     }
+}
 
-    fn eh_frame(&self) -> EhFrame<Reader<'_>> {
-        let mut section = EhFrame::new(&self.eh_frame, self.endian);
-        section.set_address_size(self.address_size);
-        section
+impl DwarfUnwindInfo {
+    fn view(&self) -> crate::image::unwind::UnwindView<'_> {
+        crate::image::unwind::UnwindView::new(&self.tables)
     }
 
-    fn debug_frame(&self) -> DebugFrame<Reader<'_>> {
-        let mut section = DebugFrame::new(&self.debug_frame, self.endian);
-        section.set_address_size(self.address_size);
-        section
+    fn go(&self) -> Option<&super::gopclntab::GoUnwind> {
+        self.go
+            .get_or_init(|| {
+                let view = self.view();
+                let (bytes, facts) = view.go()?;
+                // The loader parsed these same bytes.
+                let table = super::gopclntab::GoTable::reparse(bytes.into(), facts).ok()?;
+                Some(super::gopclntab::GoUnwind::new(
+                    Arc::new(table),
+                    view.frame_saves().collect(),
+                ))
+            })
+            .as_ref()
     }
 
     /// Returns the registers the function at `address` may overwrite
-    /// without saving them, by the calling convention it follows.
+    /// without saving them, by the calling convention it follows. Go's
+    /// lets a callee overwrite registers the System V ABI preserves.
     fn call_clobbered_registers(&self, address: ImageAddress) -> &'static [u16] {
-        let after = self.go_code.partition_point(|range| range.start <= address);
-        if after > 0 && self.go_code[after - 1].contains(address)
-            || self.go.as_ref().is_some_and(|go| go.is_go(address.get()))
-        {
+        if self.view().is_go_code(address) || self.go().is_some_and(|go| go.is_go(address.get())) {
             &X86_64_GO_CALL_CLOBBERED_REGISTERS
         } else {
             &X86_64_SYSV_CALL_CLOBBERED_REGISTERS
@@ -890,10 +972,12 @@ impl UnwindInfo for DwarfUnwindInfo {
         registers: &RegisterFile,
         memory: &mut dyn MemoryReader,
     ) -> std::result::Result<VirtualAddress, UnwindTermination> {
+        let view = self.view();
+        let sections = UnwindSections::in_image(view);
         let result = cfa_from_section(
-            &self.eh_frame(),
-            &self.eh_frame_index,
-            &self.bases,
+            &sections.eh_frame(),
+            view.eh_frame_index(),
+            &sections.bases,
             address,
             registers,
             memory,
@@ -902,9 +986,9 @@ impl UnwindInfo for DwarfUnwindInfo {
             return result;
         }
         let result = cfa_from_section(
-            &self.debug_frame(),
-            &self.debug_frame_index,
-            &self.bases,
+            &sections.debug_frame(),
+            view.debug_frame_index(),
+            &sections.bases,
             address,
             registers,
             memory,
@@ -912,8 +996,7 @@ impl UnwindInfo for DwarfUnwindInfo {
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
-        self.go
-            .as_ref()
+        self.go()
             .and_then(|go| go.cfa(address.get(), registers))
             .unwrap_or(result)
     }
@@ -924,11 +1007,13 @@ impl UnwindInfo for DwarfUnwindInfo {
         registers: &RegisterFile,
         memory: &mut dyn MemoryReader,
     ) -> std::result::Result<UnwindStep, UnwindTermination> {
+        let view = self.view();
+        let sections = UnwindSections::in_image(view);
         let clobbered = self.call_clobbered_registers(address);
         let result = unwind_from_section(
-            &self.eh_frame(),
-            &self.eh_frame_index,
-            &self.bases,
+            &sections.eh_frame(),
+            view.eh_frame_index(),
+            &sections.bases,
             address,
             registers,
             clobbered,
@@ -936,9 +1021,9 @@ impl UnwindInfo for DwarfUnwindInfo {
         );
         let result = if matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             unwind_from_section(
-                &self.debug_frame(),
-                &self.debug_frame_index,
-                &self.bases,
+                &sections.debug_frame(),
+                view.debug_frame_index(),
+                &sections.bases,
                 address,
                 registers,
                 clobbered,
@@ -947,7 +1032,7 @@ impl UnwindInfo for DwarfUnwindInfo {
         } else {
             result
         };
-        let Some(go) = &self.go else {
+        let Some(go) = self.go() else {
             return result;
         };
         let result = match result {
@@ -965,7 +1050,7 @@ impl UnwindInfo for DwarfUnwindInfo {
 
 fn cfa_from_section<'data, S>(
     section: &S,
-    index: &FdeIndex,
+    index: crate::image::unwind::FdeLookup<'_>,
     bases: &BaseAddresses,
     address: ImageAddress,
     registers: &RegisterFile,
@@ -982,7 +1067,7 @@ where
 /// The call-frame row in effect at `address`, and the entry holding it.
 fn unwind_row<'data, 'context, S>(
     section: &S,
-    index: &FdeIndex,
+    index: crate::image::unwind::FdeLookup<'_>,
     bases: &BaseAddresses,
     address: ImageAddress,
     context: &'context mut UnwindContext<usize>,
@@ -996,9 +1081,18 @@ fn unwind_row<'data, 'context, S>(
 where
     S: UnwindSection<Reader<'data>>,
 {
-    let fde = index
-        .lookup(address.get())
-        .and_then(|offset| section.fde_from_offset(bases, offset.into(), S::cie_from_offset))
+    let offset = index.lookup(address.get()).map_err(|miss| match miss {
+        crate::image::unwind::FdeMiss::NoEntry => UnwindTermination::NoUnwindInfo {
+            address: VirtualAddress::new(address.get()),
+        },
+        crate::image::unwind::FdeMiss::Malformed(description) => {
+            UnwindTermination::CorruptUnwindInfo {
+                description: description.into(),
+            }
+        }
+    })?;
+    let fde = section
+        .fde_from_offset(bases, offset.into(), S::cie_from_offset)
         .map_err(|error| cfi_error(error, address))?;
     let row = fde
         .unwind_info_for_address(section, bases, context, address.get())
@@ -1008,7 +1102,7 @@ where
 
 fn unwind_from_section<'data, S>(
     section: &S,
-    index: &FdeIndex,
+    index: crate::image::unwind::FdeLookup<'_>,
     bases: &BaseAddresses,
     address: ImageAddress,
     registers: &RegisterFile,
@@ -1368,101 +1462,84 @@ struct FunctionMetadata {
     instance_ids: HashMap<DieKey, CodeInstanceId>,
 }
 
-fn load_function_metadata(
-    dwarf: &gimli::Dwarf<Reader<'_>>,
-    catalog: &UnitCatalog<'_>,
+fn load_function_metadata<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    catalog: &UnitCatalog<'data>,
     go_table: Option<&super::gopclntab::GoTable>,
     files: &mut Files,
 ) -> std::result::Result<FunctionMetadata, DwarfError> {
+    let phase = crate::span!("functions.collect");
     let (raw, futures) = collect_function_dies(dwarf, catalog, files)?;
-    let by_key: HashMap<_, _> = raw
-        .iter()
-        .enumerate()
-        .map(|(index, function)| (function.key, index))
-        .collect();
-    let mut functions = Vec::new();
-    let mut trampolines = Vec::new();
-    let mut function_ids = HashMap::new();
+    crate::count!("function_dies", raw.len());
+    drop(phase);
+    let _phase = crate::span!("functions.resolve");
+    // Each function's definition: where its origin and specification
+    // chains end, as an index into `raw`.
+    let definitions = first_error(
+        raw.par_iter()
+            .map(|function| definition_of(function.key, &raw))
+            .collect(),
+    )?;
     // The definitions code belongs to. Clang also emits subprograms with
     // no code and no name, only to scope a function's local types.
-    let mut concrete = HashSet::new();
-    for function in raw.iter().filter(|function| !function.ranges.is_empty()) {
-        concrete.insert(definition_key(function.key, &raw, &by_key)?);
-    }
-
-    for function in &raw {
-        let definition = definition_key(function.key, &raw, &by_key)?;
-
-        if function_ids.contains_key(&definition) {
-            continue;
+    let mut concrete = vec![false; raw.len()];
+    for (function, definition) in raw.iter().zip(&definitions) {
+        if !function.ranges.is_empty() {
+            concrete[*definition] = true;
         }
-        let origin = &raw[by_key[&definition]];
-        let linkage_name = origin.linkage_name.clone();
-        // Clang names the thunks a multiply inherited virtual function
-        // needs only by their linkage names.
-        let name = function_name(origin);
-        let Some(name) = name else {
-            if concrete.contains(&definition) {
+    }
+    // Each definition once, in the order DIEs first name it.
+    let mut seen = vec![false; raw.len()];
+    let order = definitions
+        .iter()
+        .copied()
+        .filter(|definition| !std::mem::replace(&mut seen[*definition], true))
+        .collect::<Vec<_>>();
+    let named = order
+        .par_iter()
+        .map(|definition| {
+            let origin = &raw[*definition];
+            // Clang names the thunks a multiply inherited virtual function
+            // needs only by their linkage names.
+            function_name(origin).map(|name| {
+                let role = origin_role(origin, &name, &futures);
+                (name, role)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut functions = Vec::new();
+    let mut trampolines = Vec::new();
+    let mut function_ids = vec![None; raw.len()];
+    for (definition, named) in order.into_iter().zip(named) {
+        let Some((name, role)) = named else {
+            if concrete[definition] {
                 return Err(DwarfError::MissingFunctionName);
             }
             continue;
         };
-        let declaration = origin.declaration.clone();
+        let origin = &raw[definition];
         let id = FunctionId::new(
             u32::try_from(functions.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
         );
-        let role = origin_role(origin, &name, &futures);
         trampolines.push(origin.trampoline);
-
         functions.push(FunctionInfo {
             id,
             name,
-            linkage_name,
-            declaration,
+            linkage_name: origin.linkage_name.clone(),
+            declaration: origin.declaration.clone(),
             language: origin.language,
             role,
             enclosing: None,
             coroutine: None,
             generics: Arc::from([]),
         });
-        function_ids.insert(definition, id);
+        function_ids[definition] = Some(id);
     }
 
-    let mut code_instances = Vec::new();
-    let mut instance_ids = HashMap::new();
-
-    for function in &raw {
-        if function.ranges.is_empty() {
-            continue;
-        }
-        let definition = definition_key(function.key, &raw, &by_key)?;
-        let id = CodeInstanceId::new(
-            u32::try_from(code_instances.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
-        );
-        let parent = if function.kind == RawFunctionKind::Inline {
-            containing_instance(function.parent, &raw, &by_key, &instance_ids)
-        } else {
-            None
-        };
-
-        code_instances.push(CodeInstanceInfo {
-            id,
-            function: *function_ids
-                .get(&definition)
-                .expect("definition has a function ID"),
-            parent,
-            kind: match function.kind {
-                RawFunctionKind::Subprogram => CodeInstanceKind::OutOfLine,
-                RawFunctionKind::Inline => CodeInstanceKind::Inline {
-                    call_site: function.call_site.clone(),
-                },
-            },
-            ranges: function.ranges.clone().into(),
-            breakpoint_entry: breakpoint_entry(function),
-        });
-        instance_ids.insert(function.key, id);
-    }
-
+    let (code_instances, instance_ids) = code_instances(&raw, &definitions, &function_ids)?;
+    crate::count!("functions", functions.len());
+    crate::count!("code_instances", code_instances.len());
+    let roles = crate::span!("functions.go_roles");
     assign_go_function_roles(
         &mut functions,
         &trampolines,
@@ -1470,11 +1547,61 @@ fn load_function_metadata(
         &code_instances,
         go_table,
     );
+    drop(roles);
     Ok(FunctionMetadata {
         functions,
         code_instances,
         instance_ids,
     })
+}
+
+/// Each function DIE with code as an instance, numbered in DIE order, of
+/// its definition's function; and the instance each such DIE is.
+fn code_instances(
+    raw: &RawFunctions,
+    definitions: &[usize],
+    function_ids: &[Option<FunctionId>],
+) -> std::result::Result<(Vec<CodeInstanceInfo>, HashMap<DieKey, CodeInstanceId>), DwarfError> {
+    let mut instances = vec![None; raw.len()];
+    let mut instance_ids = HashMap::new();
+    let mut count = 0;
+    for (index, function) in raw.iter().enumerate() {
+        if !function.ranges.is_empty() {
+            let id = CodeInstanceId::new(
+                u32::try_from(count).map_err(|_| gimli::Error::UnsupportedOffset)?,
+            );
+            instances[index] = Some(id);
+            instance_ids.insert(function.key, id);
+            count += 1;
+        }
+    }
+    let code_instances = raw
+        .par_iter()
+        .zip(&instances)
+        .zip(definitions)
+        .filter_map(|((function, id), definition)| {
+            Some(CodeInstanceInfo {
+                id: (*id)?,
+                function: function_ids[*definition].expect("definition has a function ID"),
+                parent: match function.kind {
+                    RawFunctionKind::Inline => {
+                        containing_instance(function.parent, raw, &instances)
+                    }
+                    RawFunctionKind::Subprogram => None,
+                },
+                kind: match function.kind {
+                    RawFunctionKind::Subprogram => CodeInstanceKind::OutOfLine,
+                    RawFunctionKind::Inline => CodeInstanceKind::Inline {
+                        call_site: function.call_site.clone(),
+                    },
+                },
+                ranges: function.ranges.clone().into(),
+                breakpoint_entry: breakpoint_entry(function),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok((code_instances, instance_ids))
 }
 
 /// What a function is to unwinding and stepping.
@@ -1508,8 +1635,7 @@ fn function_name(function: &RawFunction) -> Option<Arc<str>> {
     });
     match (&name, &function.namespace) {
         (Some(raw), Some(namespace)) if function.language == SourceLanguage::Rust => {
-            let path = namespace.split("::").map(Arc::from).collect::<Vec<_>>();
-            super::coroutines::body_name(raw, &path).or(name)
+            super::coroutines::body_name(raw, namespace).or(name)
         }
         _ => name,
     }
@@ -1604,127 +1730,271 @@ fn assign_go_function_roles(
     }
 }
 
-fn collect_function_dies(
-    dwarf: &gimli::Dwarf<Reader<'_>>,
-    catalog: &UnitCatalog<'_>,
-    files: &mut Files,
-) -> std::result::Result<(Vec<RawFunction>, Futures), DwarfError> {
-    let units = catalog.units.as_slice();
-    let mut functions = Vec::new();
-    let mut futures = Futures::new();
-
-    for (unit_index, unit) in units.iter().enumerate() {
-        if is_type_unit(unit) {
-            continue;
-        }
-        let language = unit_language(dwarf, unit)?;
-        let mut entries = unit.entries();
-        let mut scopes = Vec::<Option<DieKey>>::new();
-        // The namespace path each depth is within.
-        let mut namespaces = Vec::<Option<Arc<str>>>::new();
-
-        while let Some(entry) = entries.next_dfs()? {
-            let depth =
-                usize::try_from(entry.depth()).map_err(|_| DwarfError::InvalidEntryDepth)?;
-            scopes.truncate(depth);
-            namespaces.truncate(depth);
-            let parent = scopes.iter().rev().find_map(|key| *key);
-            let namespace = namespaces.last().cloned().flatten();
-            namespaces.push(namespace_within(dwarf, unit, entry, namespace.as_ref())?);
-            let kind = match entry.tag() {
-                gimli::DW_TAG_subprogram => Some(RawFunctionKind::Subprogram),
-                gimli::DW_TAG_inlined_subroutine => Some(RawFunctionKind::Inline),
-                _ => None,
-            };
-            let key = DieKey {
-                unit: unit_index,
-                offset: entry.offset().0,
-            };
-            if language == SourceLanguage::Rust
-                && let Some(function) = future_of(dwarf, unit, entry, namespace.as_deref())?
-            {
-                futures.insert(key, function);
-            }
-
-            if let Some(kind) = kind {
-                let concrete_ranges = die_code_ranges(dwarf, unit, entry, &catalog.code)?;
-                functions.push(RawFunction {
-                    key,
-                    language,
-                    kind,
-                    parent,
-                    abstract_origin: die_reference(
-                        entry.attr_value(gimli::DW_AT_abstract_origin),
-                        unit_index,
-                        units,
-                    )?,
-                    specification: die_reference(
-                        entry.attr_value(gimli::DW_AT_specification),
-                        unit_index,
-                        units,
-                    )?,
-                    name: string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?,
-                    linkage_name: string_attribute(dwarf, unit, entry, gimli::DW_AT_linkage_name)?,
-                    trampoline: entry
-                        .attr_value(gimli::DW_AT_trampoline)
-                        .is_some_and(|value| value != gimli::AttributeValue::Flag(false)),
-                    declaration: entry_source_location(
-                        dwarf,
-                        unit,
-                        entry,
-                        gimli::DW_AT_decl_file,
-                        gimli::DW_AT_decl_line,
-                        gimli::DW_AT_decl_column,
-                        files,
-                    )?,
-                    call_site: entry_source_location(
-                        dwarf,
-                        unit,
-                        entry,
-                        gimli::DW_AT_call_file,
-                        gimli::DW_AT_call_line,
-                        gimli::DW_AT_call_column,
-                        files,
-                    )?,
-                    ranges: concrete_ranges,
-                    entry: entry
-                        .attr(gimli::DW_AT_entry_pc)
-                        .map(|attribute| dwarf.attr_address(unit, attribute.value()))
-                        .transpose()?
-                        .flatten()
-                        .map(ImageAddress::new),
-                    namespace,
-                    returns: die_reference(entry.attr_value(gimli::DW_AT_type), unit_index, units)?,
-                });
-                scopes.push(Some(key));
-            } else {
-                scopes.push(None);
-            }
-        }
-    }
-
-    Ok((functions, futures))
+/// One unit's function DIEs, decoded on a worker of its own, with the
+/// files they name numbered within the unit.
+#[derive(Default)]
+struct UnitFunctions {
+    functions: Vec<RawFunction>,
+    futures: Futures,
+    files: UnitFiles,
 }
 
-/// The namespace path a DIE's children are within: its own name appended
-/// to `namespace` when it is a namespace.
-fn namespace_within(
-    dwarf: &gimli::Dwarf<Reader<'_>>,
-    unit: &gimli::Unit<Reader<'_>>,
-    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
-    namespace: Option<&Arc<str>>,
-) -> std::result::Result<Option<Arc<str>>, DwarfError> {
-    if entry.tag() != gimli::DW_TAG_namespace {
-        return Ok(namespace.cloned());
+/// The files one unit's DIEs name, each path resolved once.
+#[derive(Default)]
+struct UnitFiles {
+    files: Files,
+    /// The file each of the line program's file indexes names.
+    by_index: HashMap<u64, Option<crate::SourceFileId>>,
+}
+
+/// Every unit's function DIEs, in DIE order: by unit, then by offset.
+/// Each unit's stay where its worker decoded them, and an index counts
+/// through them all.
+struct RawFunctions {
+    units: Vec<Vec<RawFunction>>,
+    /// The index of each unit's first function, and then of the end.
+    starts: Vec<usize>,
+}
+
+impl RawFunctions {
+    fn len(&self) -> usize {
+        self.starts.last().copied().unwrap_or(0)
     }
-    Ok(
-        string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?.map(|name| {
-            namespace.map_or_else(
-                || Arc::clone(&name),
-                |path| format!("{path}::{name}").into(),
-            )
-        }),
-    )
+
+    fn iter(&self) -> impl Iterator<Item = &RawFunction> {
+        self.units.iter().flatten()
+    }
+
+    fn par_iter(&self) -> impl IndexedParallelIterator<Item = &RawFunction> {
+        (0..self.len()).into_par_iter().map(|index| &self[index])
+    }
+
+    /// Where `key`'s function is.
+    fn at(&self, key: DieKey) -> std::result::Result<usize, DwarfError> {
+        self.units
+            .get(key.unit)
+            .and_then(|unit| {
+                unit.binary_search_by_key(&key.offset, |function| function.key.offset)
+                    .ok()
+            })
+            .map(|index| self.starts[key.unit] + index)
+            .ok_or(DwarfError::ReferencedFunctionMissing {
+                unit: key.unit,
+                offset: key.offset,
+            })
+    }
+}
+
+impl std::ops::Index<usize> for RawFunctions {
+    type Output = RawFunction;
+
+    fn index(&self, index: usize) -> &RawFunction {
+        let unit = self.starts.partition_point(|start| *start <= index) - 1;
+        &self.units[unit][index - self.starts[unit]]
+    }
+}
+
+/// Every unit's function DIEs, decoded in parallel, with the files they
+/// name numbered as one walk of every unit in order would number them.
+fn collect_function_dies<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    catalog: &UnitCatalog<'data>,
+    files: &mut Files,
+) -> std::result::Result<(RawFunctions, Futures), DwarfError> {
+    let batches = first_error(
+        (0..catalog.units.len())
+            .into_par_iter()
+            .map(|unit| collect_unit_functions(dwarf, catalog, unit))
+            .collect(),
+    )?;
+    let _merge = crate::span!("functions.merge");
+    let mut futures = Futures::new();
+    let mut starts = vec![0];
+    let mut renumbered = Vec::with_capacity(batches.len());
+    for batch in batches {
+        let ids = batch
+            .files
+            .files
+            .paths()
+            .iter()
+            .map(|path| files.intern(path.clone()))
+            .collect::<Vec<_>>();
+        starts.push(starts.last().copied().unwrap_or(0) + batch.functions.len());
+        futures.extend(batch.futures);
+        renumbered.push((batch.functions, ids));
+    }
+    let units = renumbered
+        .into_par_iter()
+        .map(|(mut functions, ids)| {
+            for function in &mut functions {
+                for location in [&mut function.declaration, &mut function.call_site]
+                    .into_iter()
+                    .flatten()
+                {
+                    location.file = ids[location.file.index()];
+                }
+            }
+            functions
+        })
+        .collect();
+    Ok((RawFunctions { units, starts }, futures))
+}
+
+/// One unit's function DIEs, and the coroutine types of its `async fn`s.
+fn collect_unit_functions<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    catalog: &UnitCatalog<'data>,
+    unit_index: usize,
+) -> std::result::Result<UnitFunctions, DwarfError> {
+    let units = &catalog.units;
+    let unit = &units[unit_index];
+    let mut batch = UnitFunctions::default();
+    if is_type_unit(unit) {
+        return Ok(batch);
+    }
+    let language = unit_language(dwarf, unit)?;
+    // Only these DIEs are read; every other one's attributes are skipped.
+    let wanted = |tag| match tag {
+        gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine | gimli::DW_TAG_namespace => {
+            true
+        }
+        gimli::DW_TAG_structure_type => language == SourceLanguage::Rust,
+        _ => false,
+    };
+    let mut entries = unit.entries_raw(None)?;
+    let mut entry = gimli::DebuggingInformationEntry::null();
+    // What the DIEs at each depth are within: the nearest function, and
+    // the namespace path, an index into `paths`.
+    let mut levels = Vec::<(Option<DieKey>, Option<usize>)>::new();
+    let mut paths = Vec::<Arc<str>>::new();
+
+    while !entries.is_empty() {
+        let depth = entries.next_depth();
+        let mut next = entries.clone();
+        // Null entries end children, and pad the unit after its root's.
+        let Some(abbreviation) = next.read_abbreviation()? else {
+            entries = next;
+            continue;
+        };
+        let depth = usize::try_from(depth).map_err(|_| DwarfError::InvalidEntryDepth)?;
+        levels.truncate(depth);
+        let (parent, namespace) = levels.last().copied().unwrap_or_default();
+        if !wanted(abbreviation.tag()) {
+            next.skip_attributes(abbreviation.attributes())?;
+            entries = next;
+            levels.push((parent, namespace));
+            continue;
+        }
+        entries.read_entry(&mut entry)?;
+        let entry = &entry;
+        let kind = match entry.tag() {
+            gimli::DW_TAG_subprogram => Some(RawFunctionKind::Subprogram),
+            gimli::DW_TAG_inlined_subroutine => Some(RawFunctionKind::Inline),
+            _ => None,
+        };
+        let key = DieKey {
+            unit: unit_index,
+            offset: entry.offset().0,
+        };
+        // A namespace's children are within its path; an unnamed one's
+        // within none.
+        let inner = if entry.tag() == gimli::DW_TAG_namespace {
+            string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?.map(|name| {
+                paths.push(match namespace {
+                    Some(outer) => format!("{}::{name}", paths[outer]).into(),
+                    None => name,
+                });
+                paths.len() - 1
+            })
+        } else {
+            namespace
+        };
+        levels.push((if kind.is_some() { Some(key) } else { parent }, inner));
+        let namespace = namespace.map(|index| &paths[index]);
+        if language == SourceLanguage::Rust
+            && let Some(function) = future_of(dwarf, unit, entry, namespace.map(|path| &**path))?
+        {
+            batch.futures.insert(key, function);
+        }
+
+        let Some(kind) = kind else {
+            continue;
+        };
+        batch.functions.push(raw_function(
+            dwarf,
+            catalog,
+            entry,
+            (key, kind, parent, language),
+            namespace.cloned(),
+            &mut batch.files,
+        )?);
+    }
+    Ok(batch)
+}
+
+/// What a function DIE says of its function.
+fn raw_function<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    catalog: &UnitCatalog<'data>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    (key, kind, parent, language): (DieKey, RawFunctionKind, Option<DieKey>, SourceLanguage),
+    namespace: Option<Arc<str>>,
+    files: &mut UnitFiles,
+) -> std::result::Result<RawFunction, DwarfError> {
+    let units = &catalog.units;
+    let unit = &units[key.unit];
+    Ok(RawFunction {
+        key,
+        language,
+        kind,
+        parent,
+        abstract_origin: die_reference(
+            entry.attr_value(gimli::DW_AT_abstract_origin),
+            key.unit,
+            units,
+        )?,
+        specification: die_reference(
+            entry.attr_value(gimli::DW_AT_specification),
+            key.unit,
+            units,
+        )?,
+        name: string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?,
+        linkage_name: string_attribute(dwarf, unit, entry, gimli::DW_AT_linkage_name)?,
+        trampoline: entry
+            .attr_value(gimli::DW_AT_trampoline)
+            .is_some_and(|value| value != gimli::AttributeValue::Flag(false)),
+        declaration: entry_source_location(
+            dwarf,
+            unit,
+            entry,
+            [
+                gimli::DW_AT_decl_file,
+                gimli::DW_AT_decl_line,
+                gimli::DW_AT_decl_column,
+            ],
+            files,
+        )?,
+        call_site: entry_source_location(
+            dwarf,
+            unit,
+            entry,
+            [
+                gimli::DW_AT_call_file,
+                gimli::DW_AT_call_line,
+                gimli::DW_AT_call_column,
+            ],
+            files,
+        )?,
+        ranges: die_code_ranges(dwarf, unit, entry, &catalog.code)?,
+        entry: entry
+            .attr(gimli::DW_AT_entry_pc)
+            .map(|attribute| dwarf.attr_address(unit, attribute.value()))
+            .transpose()?
+            .flatten()
+            .map(ImageAddress::new),
+        namespace,
+        returns: die_reference(entry.attr_value(gimli::DW_AT_type), key.unit, units)?,
+    })
 }
 
 /// The coroutine type of each `async fn`, and that function's name.
@@ -1741,8 +2011,11 @@ fn future_of(
     if entry.tag() != gimli::DW_TAG_structure_type {
         return Ok(None);
     }
-    let name = string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?;
-    Ok((name.as_deref().and_then(super::coroutines::coroutine_kind)
+    let Some(name) = entry.attr_value(gimli::DW_AT_name) else {
+        return Ok(None);
+    };
+    let name = dwarf.attr_string(unit, name)?;
+    Ok((super::coroutines::coroutine_kind(&text(name))
         == Some(crate::CoroutineKind::AsyncFunction))
     .then(|| namespace.and_then(|namespace| namespace.rsplit("::").next()))
     .flatten()
@@ -1778,13 +2051,20 @@ fn string_attribute(
         .map(|value| dwarf.attr_string(unit, value))
         .transpose()
         .map_err(DwarfError::from)
-        .map(|value| value.map(|value| Arc::<str>::from(value.to_string_lossy().as_ref())))
+        .map(|value| value.map(|value| Arc::<str>::from(text(value).as_ref())))
+}
+
+/// A DWARF string as text, replacing what is not UTF-8. Checking that it
+/// is first is far faster than gimli's lossy conversion of valid text.
+fn text(value: Reader<'_>) -> Cow<'_, str> {
+    std::str::from_utf8(value.slice())
+        .map_or_else(|_| String::from_utf8_lossy(value.slice()), Cow::Borrowed)
 }
 
 fn die_reference(
     value: Option<gimli::AttributeValue<Reader<'_>>>,
     unit_index: usize,
-    units: &[gimli::Unit<Reader<'_>>],
+    units: &Units<'_>,
 ) -> std::result::Result<Option<DieKey>, DwarfError> {
     let Some(value) = value else {
         return Ok(None);
@@ -1796,16 +2076,7 @@ fn die_reference(
             offset: offset.0,
         })),
         gimli::AttributeValue::DebugInfoRef(offset) => units
-            .iter()
-            .enumerate()
-            .find_map(|(unit, candidate)| {
-                offset
-                    .to_unit_offset(&candidate.header)
-                    .map(|offset| DieKey {
-                        unit,
-                        offset: offset.0,
-                    })
-            })
+            .containing(offset)
             .map(Some)
             .ok_or(DwarfError::ReferenceOutsideUnits(offset.0)),
         gimli::AttributeValue::DebugInfoRefSup(_) => {
@@ -1818,7 +2089,7 @@ fn die_reference(
 fn die_reference_with_signatures(
     value: Option<gimli::AttributeValue<Reader<'_>>>,
     unit_index: usize,
-    units: &[gimli::Unit<Reader<'_>>],
+    units: &Units<'_>,
     signatures: &TypeSignatures,
 ) -> std::result::Result<Option<DieKey>, DwarfError> {
     match value {
@@ -1831,61 +2102,44 @@ fn die_reference_with_signatures(
     }
 }
 
-fn definition_key(
-    start: DieKey,
-    raw: &[RawFunction],
-    by_key: &HashMap<DieKey, usize>,
-) -> std::result::Result<DieKey, DwarfError> {
-    let mut key = start;
-    let mut visited = HashSet::new();
-
-    loop {
-        if !visited.insert(key) {
-            return Err(DwarfError::ReferenceCycle);
-        }
-        let function = by_key.get(&key).and_then(|index| raw.get(*index)).ok_or(
-            DwarfError::ReferencedFunctionMissing {
-                unit: key.unit,
-                offset: key.offset,
-            },
-        )?;
+/// Where the function `start` names is defined: the end of its origin and
+/// specification chain, as an index into `raw`.
+fn definition_of(start: DieKey, raw: &RawFunctions) -> std::result::Result<usize, DwarfError> {
+    let mut index = raw.at(start)?;
+    // A chain longer than the functions repeats one.
+    for _ in 0..=raw.len() {
+        let function = &raw[index];
         let Some(next) = function.abstract_origin.or(function.specification) else {
-            return Ok(key);
+            return Ok(index);
         };
-        key = next;
+        index = raw.at(next)?;
     }
+    Err(DwarfError::ReferenceCycle)
 }
 
+/// The nearest code instance enclosing the DIE `key`.
 fn containing_instance(
     mut key: Option<DieKey>,
-    raw: &[RawFunction],
-    by_key: &HashMap<DieKey, usize>,
-    instances: &HashMap<DieKey, CodeInstanceId>,
+    raw: &RawFunctions,
+    instances: &[Option<CodeInstanceId>],
 ) -> Option<CodeInstanceId> {
     while let Some(current) = key {
-        if let Some(instance) = instances.get(&current) {
-            return Some(*instance);
+        let index = raw.at(current).ok()?;
+        if let Some(instance) = instances[index] {
+            return Some(instance);
         }
-        key = raw
-            .get(*by_key.get(&current)?)
-            .and_then(|function| function.parent);
+        key = raw[index].parent;
     }
-
     None
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the three DWARF source attributes and shared interning state form one operation"
-)]
+/// The source location a DIE's file, line, and column attributes name.
 fn entry_source_location(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit: &gimli::Unit<Reader<'_>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
-    file_attribute: gimli::DwAt,
-    line_attribute: gimli::DwAt,
-    column_attribute: gimli::DwAt,
-    files: &mut Files,
+    [file_attribute, line_attribute, column_attribute]: [gimli::DwAt; 3],
+    files: &mut UnitFiles,
 ) -> std::result::Result<Option<SourceLocation>, DwarfError> {
     let Some(file_index) = entry
         .attr(file_attribute)
@@ -1900,16 +2154,28 @@ fn entry_source_location(
     else {
         return Ok(None);
     };
-    let Some(program) = unit.line_program.as_ref() else {
+    let file = if let Some(file) = files.by_index.get(&file_index) {
+        *file
+    } else {
+        let header = unit
+            .line_program
+            .as_ref()
+            .map(gimli::IncompleteLineProgram::header);
+        let named = header.and_then(|header| Some((header, header.file(file_index)?)));
+        let file = match named {
+            Some((header, file)) => {
+                Some(files.files.intern(source_path(dwarf, unit, header, file)?))
+            }
+            None => None,
+        };
+        files.by_index.insert(file_index, file);
+        file
+    };
+    let Some(file) = file else {
         return Ok(None);
     };
-    let Some(file) = program.header().file(file_index) else {
-        return Ok(None);
-    };
-    let path = source_path(dwarf, unit, program.header(), file)?;
-
     Ok(Some(SourceLocation {
-        file: files.intern(path),
+        file,
         line,
         column: entry
             .attr(column_attribute)
@@ -2014,10 +2280,7 @@ fn source_path(
     header: &gimli::LineProgramHeader<Reader<'_>>,
     file: &gimli::FileEntry<Reader<'_>>,
 ) -> std::result::Result<PathBuf, DwarfError> {
-    let file_name = dwarf
-        .attr_string(unit, file.path_name())?
-        .to_string_lossy()
-        .into_owned();
+    let file_name = text(dwarf.attr_string(unit, file.path_name())?).into_owned();
     let file_name = PathBuf::from(file_name);
     if file_name.is_absolute() {
         return Ok(file_name);
@@ -2027,11 +2290,10 @@ fn source_path(
         .directory(header)
         .map(|directory| dwarf.attr_string(unit, directory))
         .transpose()?
-        .map(|directory| PathBuf::from(directory.to_string_lossy().into_owned()));
+        .map(|directory| PathBuf::from(text(directory).into_owned()));
     let compilation_directory = unit
         .comp_dir
-        .as_ref()
-        .map(|directory| PathBuf::from(directory.to_string_lossy().into_owned()));
+        .map(|directory| PathBuf::from(text(directory).into_owned()));
     let mut path = PathBuf::new();
 
     if let Some(directory) = directory {
@@ -2416,7 +2678,7 @@ mod tests {
             offset: 0x40,
         };
         let signatures = HashMap::from_iter([(signature, key)]);
-        let units = Vec::<gimli::Unit<Reader<'_>>>::new();
+        let units = Units::new(Vec::new());
 
         assert_eq!(
             die_reference_with_signatures(
@@ -2751,31 +3013,39 @@ mod tests {
         ));
     }
 
-    /// Checks that looking an address up in an [`FdeIndex`] finds the entry
-    /// gimli's walk of the whole section finds, or fails as it does, at
-    /// every entry's edges and at `extra`.
+    /// Checks that looking an address up in a section's index finds the
+    /// entry gimli's walk of the whole section finds, or fails as it does,
+    /// at every entry's edges and at `extra`.
     fn check_fde_index<'data, S: UnwindSection<Reader<'data>>>(
         section: &S,
         bases: &BaseAddresses,
-        index: &FdeIndex,
+        index: crate::image::unwind::FdeLookup<'_>,
         extra: &[u64],
     ) {
+        use crate::image::unwind::FdeMiss;
+
         let mut probes = vec![0, u64::MAX];
         probes.extend(extra);
-        for fde in &index.entries {
-            probes.extend([fde.start.wrapping_sub(1), fde.start, fde.start + 1]);
-            probes.extend([fde.end - 1, fde.end]);
+        for fde in index.entries {
+            let (start, end) = (fde.start.get(), fde.end.get());
+            probes.extend([start.wrapping_sub(1), start, start + 1, end - 1, end]);
         }
         for address in probes {
             let walk = section
                 .fde_for_address(bases, address, S::cie_from_offset)
-                .map(|fde| fde.offset());
-            assert_eq!(index.lookup(address), walk, "address {address:#x}");
+                .map(|fde| fde.offset())
+                .map_err(|error| {
+                    (error != gimli::Error::NoUnwindInfoForAddress).then(|| error.to_string())
+                });
+            let indexed = index.lookup(address).map_err(|miss| match miss {
+                FdeMiss::NoEntry => None,
+                FdeMiss::Malformed(error) => Some(error.to_owned()),
+            });
+            assert_eq!(indexed, walk, "address {address:#x}");
         }
     }
 
-    /// Loading on one worker, two, or eight builds byte-identical line
-    /// tables, and the same answers from every other table.
+    /// Loading on one worker, two, or eight builds a byte-identical image.
     #[test]
     fn every_number_of_workers_loads_the_same_image() {
         for fixture in [
@@ -2802,16 +3072,10 @@ mod tests {
                         )
                     })
                     .expect("load the fixture");
-                let image = info.image;
-                (
-                    image.line_image_bytes().to_vec(),
-                    image.source_files().to_vec(),
-                    format!("{:?}", image.functions()),
-                    format!("{:?}", image.code_instances()),
-                )
+                info.image.image_bytes().to_vec()
             };
             let serial = load(1);
-            assert!(!serial.0.is_empty() && !serial.1.is_empty(), "{fixture}");
+            assert!(!serial.is_empty(), "{fixture}");
             for jobs in [2, 8] {
                 assert!(
                     load(jobs) == serial,
@@ -2822,7 +3086,7 @@ mod tests {
     }
 
     /// FDE lookups in real images agree with a walk of the section, and so
-    /// do lookups in a section cut short mid-entry.
+    /// do lookups in a section cut short mid-entry, and in the loaded image.
     #[test]
     fn indexed_fde_lookups_match_a_walk_of_real_sections() {
         let mut indexed = 0;
@@ -2835,19 +3099,39 @@ mod tests {
             let object = object::File::parse(&*data).expect("ELF");
             let target = target_description(&object).expect("target");
             let unwind = load_unwind_info(&object, None, target, Vec::new(), None).expect("CFI");
+            let sections = UnwindSections::of(&unwind);
             check_fde_index(
-                &unwind.eh_frame(),
-                &unwind.bases,
-                &unwind.eh_frame_index,
+                &sections.eh_frame(),
+                &sections.bases,
+                unwind.eh_frame_index.lookup(),
                 &[],
             );
             check_fde_index(
-                &unwind.debug_frame(),
-                &unwind.bases,
-                &unwind.debug_frame_index,
+                &sections.debug_frame(),
+                &sections.bases,
+                unwind.debug_frame_index.lookup(),
                 &[],
             );
             indexed += unwind.eh_frame_index.entries.len() + unwind.debug_frame_index.entries.len();
+
+            // The loaded image keeps the same sections and indexes.
+            let info = load_bytes(
+                &path,
+                &data,
+                crate::ModuleImageId::new(0),
+                &super::super::DebugFileSearch::default(),
+            )
+            .expect("load the fixture");
+            let view = crate::image::unwind::UnwindView::new(info.image.tables());
+            let kept = UnwindSections::in_image(view);
+            check_fde_index(&kept.eh_frame(), &kept.bases, view.eh_frame_index(), &[]);
+            check_fde_index(
+                &kept.debug_frame(),
+                &kept.bases,
+                view.debug_frame_index(),
+                &[],
+            );
+            assert_eq!(view.eh_frame_index().entries, unwind.eh_frame_index.entries);
 
             // Cut short mid-entry, a section's walk fails where it ends.
             let probes: Vec<u64> = unwind
@@ -2864,12 +3148,12 @@ mod tests {
                 &unwind.debug_frame[..unwind.debug_frame.len() / 2],
                 RunTimeEndian::Little,
             );
-            let index = FdeIndex::new(&eh_frame, &unwind.bases);
+            let index = fde_index(&eh_frame, &sections.bases);
             truncations += usize::from(index.first_error.is_some());
-            check_fde_index(&eh_frame, &unwind.bases, &index, &probes);
-            let index = FdeIndex::new(&debug_frame, &unwind.bases);
+            check_fde_index(&eh_frame, &sections.bases, index.lookup(), &probes);
+            let index = fde_index(&debug_frame, &sections.bases);
             truncations += usize::from(index.first_error.is_some());
-            check_fde_index(&debug_frame, &unwind.bases, &index, &probes);
+            check_fde_index(&debug_frame, &sections.bases, index.lookup(), &probes);
         }
         assert!(indexed > 1000, "the fixtures describe {indexed} functions");
         assert!(
@@ -2912,20 +3196,29 @@ mod tests {
         let mut bytes = written.0.into_vec();
         let bases = BaseAddresses::default();
         let section = DebugFrame::new(&bytes, RunTimeEndian::Little);
-        let index = FdeIndex::new(&section, &bases);
+        let index = fde_index(&section, &bases);
         assert_eq!(index.entries.len(), 5);
-        check_fde_index(&section, &bases, &index, &[0x1050, 0x1150, 0x1fff]);
+        check_fde_index(&section, &bases, index.lookup(), &[0x1050, 0x1150, 0x1fff]);
 
         // An entry whose CIE pointer leads nowhere stops the walk there, so
         // later entries never match.
-        let mut offsets: Vec<usize> = index.entries.iter().map(|fde| fde.offset).collect();
+        let mut offsets: Vec<usize> = index
+            .entries
+            .iter()
+            .map(|fde| fde.value.get() as usize)
+            .collect();
         offsets.sort_unstable();
         let second = offsets[1];
         bytes[second + 4..second + 8].copy_from_slice(&0x7fff_0000_u32.to_le_bytes());
         let section = DebugFrame::new(&bytes, RunTimeEndian::Little);
-        let index = FdeIndex::new(&section, &bases);
+        let index = fde_index(&section, &bases);
         assert!(index.first_error.is_some());
-        check_fde_index(&section, &bases, &index, &[0x1050, 0x1150, 0x1fff, 0x3050]);
+        check_fde_index(
+            &section,
+            &bases,
+            index.lookup(),
+            &[0x1050, 0x1150, 0x1fff, 0x3050],
+        );
     }
 
     /// Loading a large real program, gofmt, does work in proportion to its

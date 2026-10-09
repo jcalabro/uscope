@@ -1111,8 +1111,12 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             let instance = module.image.locate(image_address).physical_instance?;
             let function = module
                 .image
-                .function(module.image.code_instance(instance)?.function)?;
-            Some((module.image.id(), Arc::clone(&function.generics)))
+                .function(module.image.code_instance(instance)?.function())?;
+            let generics = function
+                .generics()
+                .map(|(name, argument)| (Arc::from(name), argument))
+                .collect::<crate::FunctionGenerics>();
+            Some((module.image.id(), generics))
         });
         let Some((image, generics)) = described else {
             return Err(Stop::Refused(Refusal::new(

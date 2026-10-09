@@ -24,6 +24,8 @@ mod eval;
 #[doc(hidden)]
 pub mod flight_recorder;
 pub(crate) mod image;
+pub use image::functions::{CodeInstance, Function};
+pub use image::symbols::Symbol;
 mod inspection;
 pub(crate) mod model;
 pub mod pool;
@@ -361,7 +363,7 @@ pub struct DebuggerHandle {
 /// not read it again.
 #[derive(Clone)]
 pub struct Program {
-    executable: backend::ExecutableSource,
+    executable: backend::Executable,
     debug_info: debug_info::DebugInfo,
 }
 
@@ -381,7 +383,7 @@ impl Program {
             &executable.debug_files,
         )?;
         Ok(Self {
-            executable,
+            executable: executable.described(),
             debug_info,
         })
     }
@@ -1349,13 +1351,13 @@ impl DebuggerHandle {
             // A versioned name's default version is the one the loader binds.
             if let Some(exported) = symbols
                 .iter()
-                .filter(|symbol| symbol.exported)
-                .min_by_key(|symbol| (&*symbol.name != name, !symbol.name.contains("@@")))
+                .filter(|symbol| symbol.exported())
+                .min_by_key(|symbol| (symbol.name() != name, !symbol.name().contains("@@")))
             {
-                return module.virtual_address(exported.address);
+                return module.virtual_address(exported.address());
             }
             for symbol in symbols {
-                found.insert(module.virtual_address(symbol.address)?);
+                found.insert(module.virtual_address(symbol.address())?);
             }
         }
         let mut found = found.into_iter();

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use gimli::{Location, Value};
 
-use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, die_reference};
+use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, Units, die_reference};
 use crate::debug_info::{
     CallSite, CallSiteId, CallTarget, EntryParameter, TailCallChain, TailJump, VariableRuntime,
     VariableRuntimeError,
@@ -99,7 +99,7 @@ impl CallSiteBuilder {
     pub(super) fn function<'data>(
         &mut self,
         dwarf: &gimli::Dwarf<Reader<'data>>,
-        units: &[gimli::Unit<Reader<'data>>],
+        units: &Units<'data>,
         unit_index: usize,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         ranges: &[AddressRange<ImageAddress>],
@@ -155,7 +155,7 @@ impl CallSiteBuilder {
     pub(super) fn site<'data>(
         &mut self,
         dwarf: &gimli::Dwarf<Reader<'data>>,
-        units: &[gimli::Unit<Reader<'data>>],
+        units: &Units<'data>,
         unit_index: usize,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         function: usize,
@@ -196,7 +196,7 @@ impl CallSiteBuilder {
     pub(super) fn parameter(
         &mut self,
         dwarf: &gimli::Dwarf<Reader<'_>>,
-        units: &[gimli::Unit<Reader<'_>>],
+        units: &Units<'_>,
         unit_index: usize,
         entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
         depth: usize,
@@ -293,7 +293,7 @@ fn tail_jump(call: Option<ImageAddress>, after: Option<ImageAddress>) -> Option<
 
 fn site_attributes<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'data>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -358,7 +358,7 @@ fn site_attributes<'data>(
 
 fn site_parameter(
     dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
+    units: &Units<'_>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
 ) -> Result<SiteParameter, DwarfError> {
@@ -411,7 +411,7 @@ fn site_parameter(
 /// its name.
 fn linkage_name<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
 ) -> Result<Option<Arc<str>>, DwarfError> {
@@ -433,7 +433,7 @@ fn linkage_name<'data>(
 /// The linkage name of a function other units may call.
 fn external_name<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
 ) -> Option<Arc<str>> {

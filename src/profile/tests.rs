@@ -139,7 +139,7 @@ mod allocator {
 
     use std::alloc::{GlobalAlloc, Layout, System};
 
-    use crate::profile::alloc::{Counting, start_totals, stop_totals, totals};
+    use crate::profile::alloc::{Counting, PEAK_GRANULARITY, start_totals, stop_totals, totals};
 
     /// Allocates from the system, but refuses to grow any block.
     struct NoGrowth;
@@ -165,7 +165,9 @@ mod allocator {
     #[test]
     fn totals_follow_blocks_across_threads_and_failed_growth() {
         let allocator = Counting::new(NoGrowth);
-        let layout = Layout::from_size_align(4096, 8).expect("a layout");
+        // A block that moves the peak, which threads report in steps.
+        let size = usize::try_from(PEAK_GRANULARITY).expect("a small size");
+        let layout = Layout::from_size_align(size, 8).expect("a layout");
         start_totals();
         let before = totals();
         // SAFETY: the layout is non-zero; the block is freed below.
@@ -173,10 +175,10 @@ mod allocator {
         assert!(!block.is_null());
         let grown = totals().since(&before);
         assert_eq!(grown.allocated.blocks, 1);
-        assert_eq!(grown.allocated.bytes, 4096);
+        assert_eq!(grown.allocated.bytes, PEAK_GRANULARITY.unsigned_abs());
 
         // SAFETY: the block came from `allocator` with `layout`.
-        let refused = unsafe { allocator.realloc(block, layout, 8192) };
+        let refused = unsafe { allocator.realloc(block, layout, 2 * size) };
         assert!(refused.is_null());
         assert_eq!(
             totals().since(&before).allocated,
@@ -209,7 +211,10 @@ mod allocator {
             (mid, after)
         });
         stop_totals();
-        assert_eq!(after.live_bytes - mid.live_bytes, -4096);
-        assert!(after.since(&before).peak_bytes >= 4096, "{after:?}");
+        assert_eq!(after.live_bytes - mid.live_bytes, -PEAK_GRANULARITY);
+        assert!(
+            after.since(&before).peak_bytes >= PEAK_GRANULARITY,
+            "{after:?}"
+        );
     }
 }

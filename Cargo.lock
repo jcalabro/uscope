@@ -1942,6 +1942,7 @@ dependencies = [
  "iced-x86",
  "jsonschema",
  "lzma-rs",
+ "memchr",
  "mimalloc",
  "nix 0.31.3",
  "object",

@@ -161,11 +161,11 @@ impl Cli {
         let mut globals = std::collections::BTreeSet::new();
         for image in self.loaded_images().await {
             for function in image.functions() {
-                functions.insert(function.name.to_string());
+                functions.insert(function.name().to_string());
             }
             for symbol in image.symbols() {
-                if symbol.kind == uscope::SymbolKind::Function && symbol.extent.is_some() {
-                    functions.insert(symbol.name.to_string());
+                if symbol.kind() == uscope::SymbolKind::Function && symbol.extent().is_some() {
+                    functions.insert(symbol.name().to_string());
                 }
             }
             for file in image.source_files() {

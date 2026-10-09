@@ -6,7 +6,7 @@ use std::sync::Arc;
 use foldhash::{HashMap, HashMapExt};
 use gimli::Reader as _;
 
-use crate::debug_info::dwarf::{DwarfError, Reader};
+use crate::debug_info::dwarf::{DwarfError, Reader, Units};
 use crate::{AddressRange, ImageAddress, VariableUnavailableReason};
 
 use super::die::{ByteSize, base_type_encoding, byte_size_attribute};
@@ -138,7 +138,7 @@ pub(super) fn copy_data_object_value(
 
 pub(super) fn copy_data_object_value_with_origins(
     dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
+    units: &Units<'_>,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
@@ -369,7 +369,7 @@ fn calls(
 }
 
 pub(super) fn load_evaluation_units(
-    units: &[gimli::Unit<Reader<'_>>],
+    units: &Units<'_>,
 ) -> std::result::Result<Vec<EvaluationUnit>, DwarfError> {
     units
         .iter()

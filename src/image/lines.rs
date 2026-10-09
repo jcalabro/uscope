@@ -240,6 +240,16 @@ fn index(count: usize) -> Result<u32, TooManyRows> {
 }
 
 impl LineTables {
+    /// Where public rows end prologues, in row order.
+    pub fn prologue_ends(&self) -> Vec<ImageAddress> {
+        self.rows
+            .iter()
+            .zip(&self.addresses)
+            .filter(|(row, _)| is_public(row) && row.flags & row_flags::PROLOGUE_END != 0)
+            .map(|(_, address)| ImageAddress::new(address.address.get()))
+            .collect()
+    }
+
     /// Starts a sequence; rows pushed until the next start belong to it.
     pub fn begin_sequence(&mut self) -> Result<(), TooManyRows> {
         let first = index(self.rows.len())?;
@@ -752,22 +762,6 @@ impl<'a> LineView<'a> {
         statement_rows(self.addresses, self.rows, self.extras, self.sequences)
     }
 
-    /// Every public row's flags, address, and index, in order, without
-    /// decoding locations.
-    pub fn public_rows(self) -> impl Iterator<Item = (usize, ImageAddress, u8)> + 'a {
-        self.rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| is_public(row))
-            .map(move |(index, row)| {
-                (
-                    index,
-                    ImageAddress::new(self.addresses[index].address.get()),
-                    row.flags,
-                )
-            })
-    }
-
     /// The line ranges at `indexes`, in line-program order.
     fn entries_in_order(
         self,
@@ -812,7 +806,7 @@ impl<'a> LineView<'a> {
     /// order.
     pub fn line_entries_starting_in(
         self,
-        within: &[AddressRange<ImageAddress>],
+        within: impl IntoIterator<Item = AddressRange<ImageAddress>>,
     ) -> impl Iterator<Item = crate::model::LineEntry> + 'a {
         let mut indexes = Vec::new();
         for range in within {

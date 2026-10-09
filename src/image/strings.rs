@@ -1,13 +1,66 @@
 //! Pools of NUL-terminated strings, named by offset.
 //!
-//! The string pool holds display strings, which are UTF-8; [`PathId`]s
-//! name filesystem paths, whose bytes need not be. Each pool is validated once
+//! [`StrId`]s name display strings, which are UTF-8; [`PathId`]s name
+//! filesystem paths, whose bytes need not be. Each pool is validated once
 //! as a whole, so a reference is valid when it starts a string or lies on
 //! a character boundary within one: a suffix of a valid string is valid.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
+
+/// A display string, by its offset in the string pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StrId(pub u32);
+
+/// Display strings being pooled, each where it is first pushed.
+#[derive(Debug, Default)]
+pub struct StringsBuilder {
+    bytes: Vec<u8>,
+}
+
+impl StringsBuilder {
+    /// The pool's name for `text`, or `None` when it holds a NUL or the
+    /// pool is full.
+    pub fn push(&mut self, text: &str) -> Option<StrId> {
+        if text.as_bytes().contains(&0) {
+            return None;
+        }
+        let id = StrId(u32::try_from(self.bytes.len()).ok()?);
+        self.bytes.extend_from_slice(text.as_bytes());
+        self.bytes.push(0);
+        u32::try_from(self.bytes.len()).ok()?;
+        Some(id)
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+/// The string pool of a validated image, or of a builder.
+#[derive(Debug, Clone, Copy)]
+pub struct Strings<'a>(pub &'a [u8]);
+
+impl<'a> Strings<'a> {
+    /// The string `id` names. Validation checked that it is terminated
+    /// UTF-8.
+    pub fn get(self, id: StrId) -> &'a str {
+        std::str::from_utf8(self.bytes(id)).expect("validation checked every string is UTF-8")
+    }
+
+    /// The bytes of the string `id` names, without its NUL.
+    pub fn bytes(self, id: StrId) -> &'a [u8] {
+        let rest = &self.0[id.0 as usize..];
+        let end = memchr::memchr(0, rest).expect("validation checked every string is terminated");
+        &rest[..end]
+    }
+
+    /// Whether `id` names a string of the pool.
+    pub fn contains(self, id: StrId) -> bool {
+        valid_reference(self.0, id.0, true)
+    }
+}
 
 /// A filesystem path, by its offset in the path pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -53,10 +106,7 @@ impl<'a> Paths<'a> {
     pub fn get(self, id: PathId) -> &'a Path {
         let start = id.0 as usize;
         let rest = &self.0[start..];
-        let end = rest
-            .iter()
-            .position(|byte| *byte == 0)
-            .expect("validation checked every path is terminated");
+        let end = memchr::memchr(0, rest).expect("validation checked every path is terminated");
         Path::new(OsStr::from_bytes(&rest[..end]))
     }
 }

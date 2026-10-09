@@ -115,7 +115,7 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         &self,
         pid: Pid,
         executable: &Path,
-        executable_data: &[u8],
+        image_base: u64,
         identity: FileIdentity,
     ) -> Result<u64>;
     fn module_mappings(&self, _pid: Pid) -> Result<ProcessMappings> {
@@ -448,11 +448,11 @@ impl LinuxTraceOps for LinuxPtrace {
         &self,
         pid: Pid,
         executable: &Path,
-        executable_data: &[u8],
+        image_base: u64,
         identity: FileIdentity,
     ) -> Result<u64> {
         self.assert_owner_thread();
-        load_bias(pid, executable, executable_data, identity)
+        load_bias(pid, executable, image_base, identity)
     }
 
     fn module_mappings(&self, pid: Pid) -> Result<ProcessMappings> {

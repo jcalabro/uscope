@@ -137,7 +137,7 @@ pub async fn sources(images: &Images) -> SourceFiles {
         let main = ["main", "main.main"]
             .into_iter()
             .find_map(|name| image.function_named(name).ok())?;
-        let declared = main.declaration.as_ref()?;
+        let declared = main.declaration()?;
         Some(SourceLine {
             path: image.source_file(declared.file)?.path.display().to_string(),
             line: declared.line.get(),
@@ -168,11 +168,22 @@ pub async fn functions(images: &Images, query: &FunctionQuery) -> Functions {
     let mut candidates = Vec::new();
     let mut lower = String::new();
     for (module, image) in images.iter().enumerate() {
-        for (index, function) in image.functions().iter().enumerate() {
+        for function in image.functions() {
             lower.clear();
-            lower.extend(function.name.chars().map(|char| char.to_ascii_lowercase()));
+            lower.extend(
+                function
+                    .name()
+                    .chars()
+                    .map(|char| char.to_ascii_lowercase()),
+            );
             if let Some(rank) = rank(&lower, &wanted) {
-                candidates.push((rank, function.name.len(), &function.name, module, index));
+                candidates.push((
+                    rank,
+                    function.name().len(),
+                    function.name(),
+                    module,
+                    function.id(),
+                ));
             }
         }
     }
@@ -189,16 +200,17 @@ pub async fn functions(images: &Images, query: &FunctionQuery) -> Functions {
         if position == keep {
             candidates[keep..].sort_unstable();
         }
-        let (_, _, _, module, index) = candidates[position];
+        let (_, _, _, module, id) = candidates[position];
         let image = &images[module];
-        let function = &image.functions()[index];
-        let declared = function.declaration.as_ref();
+        let function = image.function(id).expect("a candidate's function");
+        let declared = function.declaration();
         let described = FunctionMatch {
-            name: function.name.to_string(),
+            name: function.name().to_string(),
             path: declared
+                .as_ref()
                 .and_then(|declared| image.source_file(declared.file))
                 .map(|file| file.path.display().to_string()),
-            line: declared.map(|declared| declared.line.get()),
+            line: declared.as_ref().map(|declared| declared.line.get()),
         };
         // Declarations repeat a function in each unit that names it.
         if found.contains(&described) {

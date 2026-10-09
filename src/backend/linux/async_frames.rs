@@ -630,7 +630,7 @@ fn async_frame(
             state, location, ..
         } => {
             let functions = image.coroutine_functions(frame.ty.id);
-            let function = functions.first().map(|function| (*function).clone());
+            let function = functions.first().map(|function| function.info());
             let role = function
                 .as_ref()
                 .map_or(CodeRole::Ordinary, |function| function.role);
@@ -677,17 +677,17 @@ fn async_frame(
 /// `state`, when the debugger decoded its dispatch.
 pub(super) fn resume_address(
     image: &ModuleImage,
-    functions: &[&crate::FunctionInfo],
+    functions: &[crate::Function<'_>],
     state: u64,
 ) -> Option<ImageAddress> {
     let mut instances = functions
         .iter()
-        .flat_map(|function| image.instances_for_function(function.id))
-        .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine));
+        .flat_map(|function| function.instances())
+        .filter(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine));
     let instance = instances.next()?;
     if instances.next().is_some() {
         return None;
     }
-    let points = image.resume_points(instance.id)?.ok()?;
+    let points = image.resume_points(instance.id())?.ok()?;
     Some(points.point(state)?.address)
 }

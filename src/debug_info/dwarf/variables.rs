@@ -35,7 +35,7 @@ use crate::{
 };
 
 use super::{
-    DieKey, DwarfError, Reader, UnitCatalog, die_code_ranges, die_reference, is_type_unit,
+    DieKey, DwarfError, Reader, UnitCatalog, Units, die_code_ranges, die_reference, is_type_unit,
 };
 use die::{
     check_data_object_capacity, copy_name, data_object_scope_ranges, debug_info_offset,
@@ -178,7 +178,7 @@ impl RustScope {
     /// The scope of a subprogram or inline instance of a Rust unit.
     fn routine<'data>(
         dwarf: &gimli::Dwarf<Reader<'data>>,
-        units: &[gimli::Unit<Reader<'data>>],
+        units: &Units<'data>,
         unit_index: usize,
         unit: &gimli::Unit<Reader<'data>>,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -325,7 +325,7 @@ fn unit_producer(
 /// type, named for it, unless it returns nothing.
 fn system_v_returns<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'data>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -360,7 +360,7 @@ fn system_v_returns<'data>(
 /// The file declaring a function or inlined call's function, if known.
 fn declared_file<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
     files: &mut Files,
@@ -451,7 +451,7 @@ pub(super) fn load_variable_info<'data>(
     code: CodeMetadata<'_>,
     files: &mut Files,
 ) -> std::result::Result<LoadedVariables, DwarfError> {
-    let units = catalog.units.as_slice();
+    let units = &catalog.units;
     let instance_ids = code.instance_ids;
     let lines = visibility::LineIndex::new(code.lines);
     let inline_calls = visibility::InlineCalls::new(code.instances);
@@ -1235,7 +1235,7 @@ struct AbstractTargets<'a, 'data, 'units> {
 /// none has no code, so its variables are nowhere in scope.
 fn add_abstract_only_variables<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     routine: &ConcreteRoutine,
     targets: &mut AbstractTargets<'_, 'data, '_>,
 ) -> std::result::Result<(), DwarfError> {
@@ -1321,7 +1321,7 @@ fn add_abstract_only_variables<'data>(
 /// as `__awaitee`, which a concrete copy of the block may leave out.
 fn origin_awaitee<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
 ) -> Option<crate::LineNumber> {
@@ -1357,7 +1357,7 @@ fn origin_awaitee<'data>(
 /// fn`, by its name or its abstract origin's.
 fn async_fn_body<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'data>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,

@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 
-use crate::debug_info::dwarf::{DieKey, Reader, TypeSignatures, die_reference_with_signatures};
+use crate::debug_info::dwarf::{
+    DieKey, Reader, TypeSignatures, Units, die_reference_with_signatures,
+};
 use crate::model::ArrayDimension;
 use crate::{
     Accessibility, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, ByteOrder,
@@ -49,7 +51,7 @@ pub(super) enum TypeEntry {
 
 pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) dwarf: &'a gimli::Dwarf<Reader<'data>>,
-    pub(super) units: &'a [gimli::Unit<Reader<'data>>],
+    pub(super) units: &'a Units<'data>,
     pub(super) type_signatures: &'a TypeSignatures,
     pub(super) image: ModuleImageId,
     pub(super) by_die: HashMap<DieKey, TypeId>,
@@ -164,7 +166,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     )]
     pub(super) fn new(
         dwarf: &'a gimli::Dwarf<Reader<'data>>,
-        units: &'a [gimli::Unit<Reader<'data>>],
+        units: &'a Units<'data>,
         type_signatures: &'a TypeSignatures,
         image: ModuleImageId,
         byte_order: ByteOrder,
@@ -359,7 +361,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         unit_index: usize,
         offset: gimli::UnitOffset,
     ) -> std::result::Result<Children<'a, 'data>, Arc<str>> {
-        let units: &'a [gimli::Unit<Reader<'data>>] = self.units;
+        let units: &'a Units<'data> = self.units;
         let unit = units.get(unit_index).ok_or("DIE unit is unavailable")?;
         Ok(Children {
             cursor: unit.entries_at_offset(offset).map_err(malformed)?,
@@ -498,7 +500,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     /// Builds the type at a DIE that [`Self::canonical_type_key`] validated
     /// as a type DIE.
     fn build(&mut self, key: DieKey, id: TypeId) -> Built {
-        let units: &'a [gimli::Unit<Reader<'data>>] = self.units;
+        let units: &'a Units<'data> = self.units;
         let unit = units
             .get(key.unit)
             .ok_or("type reference is outside loaded units")?;
@@ -2157,7 +2159,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         record_kind: RecordKind,
         what: &str,
     ) -> std::result::Result<RecordMember, Arc<str>> {
-        let units: &'a [gimli::Unit<Reader<'data>>] = self.units;
+        let units: &'a Units<'data> = self.units;
         let chain = origin_chain(units, unit_index, child).map_err(malformed)?;
         let (owner, value) = type_with_origins(unit_index, child, &chain);
         let target = self
