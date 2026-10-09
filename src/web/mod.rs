@@ -104,6 +104,16 @@ pub struct WebArgs {
     #[arg(long = "allow-origin", value_name = "ORIGIN", hide = true)]
     allow_origins: Vec<String>,
 
+    /// Look up --core's files under DIR, a copy of the dumping machine's
+    /// files, as the terminal's --sysroot does.
+    #[arg(long, value_name = "DIR", requires = "core")]
+    sysroot: Option<PathBuf>,
+
+    /// Search DIR for --core's files missing or different at their recorded
+    /// paths, as the terminal's --module-path does. May be repeated.
+    #[arg(long = "module-path", value_name = "DIR", requires = "core")]
+    module_paths: Vec<PathBuf>,
+
     /// Search DIR for the separate debug files of modules stripped of their
     /// debug information, before the system's directories. May be repeated.
     #[arg(long = "debug-directory", value_name = "DIR")]
@@ -279,6 +289,8 @@ fn start_from(args: &WebArgs) -> Option<Start> {
     if let Some(core) = &args.core {
         let mut options = CoreDumpOptions::new(core.clone());
         options.executable.clone_from(&args.executable);
+        options.sysroot.clone_from(&args.sysroot);
+        options.module_paths.clone_from(&args.module_paths);
         return Some(Start::Core(options));
     }
     let program = args.executable.clone()?;
