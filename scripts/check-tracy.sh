@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Fails unless the Tracy client that uscope's `tracy` feature builds is the
-# version of the viewer `nix develop .#profile` provides: a Tracy viewer reads
+# version of the viewer the development shell provides: a Tracy viewer reads
 # only what a client of its own release sends.
 set -euo pipefail
 
-: "${TRACY_VERSION:?run this in nix develop .#profile, which provides the viewer}"
+: "${TRACY_VERSION:?run this in the development shell, which provides the viewer}"
 manifest="$(cargo metadata --format-version 1 --features tracy |
     grep -o '"manifest_path":"[^"]*/tracy-client-sys-[^"/]*/Cargo.toml"' |
     head -n 1 | cut -d '"' -f 4)"

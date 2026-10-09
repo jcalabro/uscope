@@ -22,8 +22,8 @@ system-alloc = []
 # information gives, loads programs for benchmarks, and summarizes timings.
 tools = []
 # Mirrors every span and counter to a Tracy viewer on this machine, which
-# connects on demand: build in `nix develop .#profile`, whose viewer speaks
-# the client's protocol (`just tracy-check`).
+# connects on demand: the shell's `tracy` speaks the client's protocol
+# (`just tracy-check`).
 tracy = ["dep:tracy-client"]
 # Also reports every allocation to Tracy, for its memory view.
 tracy-alloc = ["tracy"]

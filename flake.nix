@@ -65,6 +65,9 @@
         PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
         PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
         PLAYWRIGHT_DRIVER_VERSION = pkgs.playwright-driver.version;
+        # The Tracy viewer's version, which the `tracy` feature's client must
+        # match (`just tracy-check`).
+        TRACY_VERSION = pkgs.tracy.version;
         RUSTFLAGS = "-C link-arg=-fuse-ld=mold -C link-arg=-Wl,--dynamic-linker=${pkgs.glibc}/lib/ld-linux-x86-64.so.2";
         packages = with pkgs; [
           rust
@@ -79,9 +82,11 @@
           muslClang
           gdb
           lldb
-          # Profilers for the `just profile-*` recipes.
+          # Profilers for the `just profile-*` recipes, and Tracy's viewer
+          # and capture tools for `tracy` builds.
           perf
           valgrind
+          tracy
           goStable
           zig
           pkg-config
@@ -95,12 +100,10 @@
       devShells.${system} = {
         inherit default;
         # The default shell with the profilers people read at a screen, kept
-        # out of it for their size: Tracy, whose version the `tracy` feature's
-        # client must match (`just tracy-check`), samply, hotspot, heaptrack,
+        # out of it for their size: samply, hotspot, heaptrack,
         # hyperfine, poop, and KCachegrind.
         profile = default.overrideAttrs (previous: {
           nativeBuildInputs = previous.nativeBuildInputs ++ (with pkgs; [
-            tracy
             samply
             hotspot
             heaptrack
@@ -108,7 +111,6 @@
             poop
             kdePackages.kcachegrind
           ]);
-          TRACY_VERSION = pkgs.tracy.version;
         });
       };
     };
