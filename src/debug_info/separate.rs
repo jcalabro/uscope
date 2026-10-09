@@ -9,6 +9,15 @@
 //! debuginfod's cache, which gdb and other clients share. Every candidate
 //! must prove it describes the module, by build-id or checksum. Only a
 //! session that enables debuginfod asks a server.
+//!
+//! dwz moves the debug information several files share into a supplementary
+//! file, which each names by `.gnu_debugaltlink`, a path and the build-id
+//! the file must have, or by DWARF 5's `.debug_sup`, a path and a checksum
+//! the file's own `.debug_sup` records. It is found as gdb finds it: at that
+//! path, relative to the real directory of the file naming it; by its
+//! identifier under each debug directory's `.build-id`; under each debug
+//! directory's `.dwz` when the path lies under one; and from a debuginfod
+//! server.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -41,6 +50,15 @@ pub struct DebugFileSearch {
 pub struct DebugFile {
     pub path: PathBuf,
     pub data: Vec<u8>,
+}
+
+/// The dwz supplementary file some debug information shares.
+pub enum Supplementary {
+    /// The debug information names none.
+    None,
+    Found(DebugFile),
+    /// One is named but cannot be read, for the reason given.
+    Missing(String),
 }
 
 impl DebugFileSearch {
@@ -85,17 +103,8 @@ impl DebugFileSearch {
         }
         let build_id = object.build_id().ok().flatten().filter(|id| id.len() > 1);
         let describes = |data: &[u8]| debug_file_of(object, data, build_id, None);
-        if let Some(id) = build_id {
-            let hex = hex(id);
-            for directory in &self.directories {
-                let candidate = directory
-                    .join(".build-id")
-                    .join(&hex[..2])
-                    .join(format!("{}.debug", &hex[2..]));
-                if let Some(file) = read_if(&candidate, describes) {
-                    return Some(file);
-                }
-            }
+        if let Some(file) = build_id.and_then(|id| self.by_build_id(id, describes)) {
+            return Some(file);
         }
         if let Ok(Some((name, checksum))) = object.gnu_debuglink() {
             let name = Path::new(OsStr::from_bytes(name));
@@ -122,17 +131,94 @@ impl DebugFileSearch {
                 }
             }
         }
-        build_id.and_then(|id| self.download(object, id))
+        build_id.and_then(|id| self.download(id, describes))
     }
 
-    /// Asks the debuginfod servers for a build-id's debug file, which is
-    /// first looked for in the cache, and kept there once downloaded.
-    fn download(&self, object: &object::File<'_>, build_id: &[u8]) -> Option<DebugFile> {
+    /// The dwz supplementary file whose debug information the file at
+    /// `path`, `object`, shares.
+    pub fn supplementary(&self, path: &Path, object: &object::File<'_>) -> Supplementary {
+        let link = match supplementary_link(object) {
+            Ok(Some(link)) => link,
+            Ok(None) => return Supplementary::None,
+            Err(reason) => return Supplementary::Missing(reason),
+        };
+        let name = Path::new(OsStr::from_bytes(&link.name));
+        let build_id = link.id.as_slice();
+        let named = if link.standard {
+            format!(
+                "its supplementary file {} (checksum {})",
+                name.display(),
+                hex(build_id)
+            )
+        } else {
+            format!(
+                "its dwz supplementary file {} (build-id {})",
+                name.display(),
+                hex(build_id)
+            )
+        };
+        if build_id.len() < 2 {
+            return Supplementary::Missing(format!("{named} has no identifier to check"));
+        }
+        let describes = |data: &[u8]| supplementary_file_of(object, data, &link);
+        let named_path = if name.as_os_str().is_empty() {
+            None
+        } else if name.is_absolute() {
+            Some(name.to_path_buf())
+        } else {
+            // Beside the real file: a build-id entry links to it from
+            // elsewhere.
+            fs::canonicalize(path)
+                .ok()
+                .and_then(|path| Some(path.parent()?.join(name)))
+        };
+        let found = named_path
+            .and_then(|path| read_if(&path, describes))
+            .or_else(|| self.by_build_id(build_id, describes))
+            .or_else(|| {
+                // A distribution's path, as `/usr/lib/debug/.dwz/NAME`, under
+                // each debug directory.
+                let within = name.to_str()?.split_once("/.dwz/")?.1;
+                self.directories
+                    .iter()
+                    .find_map(|directory| read_if(&directory.join(".dwz").join(within), describes))
+            })
+            .or_else(|| self.download(build_id, describes));
+        found.map_or_else(
+            || Supplementary::Missing(format!("{named} was not found")),
+            Supplementary::Found,
+        )
+    }
+
+    /// The file a build-id names under the debug directories that
+    /// `describes` accepts.
+    fn by_build_id(
+        &self,
+        build_id: &[u8],
+        describes: impl Fn(&[u8]) -> bool + Copy,
+    ) -> Option<DebugFile> {
+        let hex = hex(build_id);
+        self.directories.iter().find_map(|directory| {
+            let candidate = directory
+                .join(".build-id")
+                .join(&hex[..2])
+                .join(format!("{}.debug", &hex[2..]));
+            read_if(&candidate, describes)
+        })
+    }
+
+    /// Asks the debuginfod servers for a build-id's debug file that
+    /// `describes` accepts, which is first looked for in the cache, and kept
+    /// there once downloaded.
+    fn download(
+        &self,
+        build_id: &[u8],
+        describes: impl Fn(&[u8]) -> bool + Copy,
+    ) -> Option<DebugFile> {
         if self.servers.is_empty() {
             return None;
         }
         let hex = hex(build_id);
-        let describes = |data: &[u8]| debug_file_of(object, data, Some(build_id), None);
         let cached = self
             .cache
             .as_ref()
@@ -227,6 +313,121 @@ fn debug_file_of(
     };
     debug.architecture() == object.architecture()
         && build_id.is_none_or(|id| debug.build_id().ok().flatten() == Some(id))
+}
+
+/// How DWARF names its supplementary file: by a path and the identifier
+/// the file must have.
+struct SupplementaryLink {
+    name: Vec<u8>,
+    id: Vec<u8>,
+    /// Whether DWARF 5's `.debug_sup` names it, by a checksum the file's
+    /// own `.debug_sup` records, rather than `.gnu_debugaltlink` by its
+    /// build-id.
+    standard: bool,
+}
+
+/// The supplementary file `object`'s DWARF names, if any: by
+/// `.gnu_debugaltlink`, else by `.debug_sup`, as gdb looks for them.
+fn supplementary_link(object: &object::File<'_>) -> Result<Option<SupplementaryLink>, String> {
+    if let Some((name, id)) = object
+        .gnu_debugaltlink()
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(Some(SupplementaryLink {
+            name: name.to_vec(),
+            id: id.to_vec(),
+            standard: false,
+        }));
+    }
+    // A supplementary file names none.
+    Ok(debug_sup(object)?
+        .filter(|sup| !sup.supplementary)
+        .map(|sup| SupplementaryLink {
+            name: sup.name,
+            id: sup.checksum,
+            standard: true,
+        }))
+}
+
+/// A `.debug_sup` section (DWARF 5, section 7.3.6).
+struct DebugSup {
+    /// Whether the file holding it is itself a supplementary file.
+    supplementary: bool,
+    /// The supplementary file's name, empty in a supplementary file.
+    name: Vec<u8>,
+    /// What identifies the supplementary file.
+    checksum: Vec<u8>,
+}
+
+/// The object's `.debug_sup`, if it has one.
+fn debug_sup(object: &object::File<'_>) -> Result<Option<DebugSup>, String> {
+    use gimli::Reader as _;
+    // By its exact name: looking one up by name that is missing builds the
+    // name of its `.zdebug` form, an allocation in every load.
+    let Some(section) = object
+        .sections()
+        .find(|section| section.name_bytes() == Ok(b".debug_sup"))
+    else {
+        return Ok(None);
+    };
+    let malformed = |error: &dyn std::fmt::Display| format!("its .debug_sup is malformed: {error}");
+    let data = section
+        .uncompressed_data()
+        .map_err(|error| malformed(&error))?;
+    let endian = if object.is_little_endian() {
+        gimli::RunTimeEndian::Little
+    } else {
+        gimli::RunTimeEndian::Big
+    };
+    let mut reader = gimli::EndianSlice::new(&data, endian);
+    let read = |reader: &mut gimli::EndianSlice<'_, gimli::RunTimeEndian>| {
+        let version = reader.read_u16()?;
+        let supplementary = reader.read_u8()?;
+        let name = reader.read_null_terminated_slice()?;
+        let length = reader.read_uleb128()?;
+        let checksum =
+            reader.split(usize::try_from(length).map_err(|_| gimli::Error::BadUnsignedLeb128)?)?;
+        Ok::<_, gimli::Error>((
+            version,
+            supplementary,
+            name.slice().to_vec(),
+            checksum.slice().to_vec(),
+        ))
+    };
+    let (version, supplementary, name, checksum) =
+        read(&mut reader).map_err(|error| malformed(&error))?;
+    if version != 5 {
+        return Err(format!(
+            "its .debug_sup has version {version}, which uscope does not read"
+        ));
+    }
+    Ok(Some(DebugSup {
+        supplementary: supplementary != 0,
+        name,
+        checksum,
+    }))
+}
+
+/// Whether `data` is the supplementary file `link` names for `object`: an
+/// object for its architecture with the build-id `.gnu_debugaltlink`
+/// records, or, for `.debug_sup`, a supplementary file whose own
+/// `.debug_sup` records the same checksum or whose build-id it is.
+fn supplementary_file_of(object: &object::File<'_>, data: &[u8], link: &SupplementaryLink) -> bool {
+    let Ok(candidate) = object::File::parse(data) else {
+        return false;
+    };
+    if candidate.architecture() != object.architecture() {
+        return false;
+    }
+    let build_id = candidate.build_id().ok().flatten();
+    if !link.standard {
+        return build_id == Some(link.id.as_slice());
+    }
+    build_id == Some(link.id.as_slice())
+        || debug_sup(&candidate)
+            .ok()
+            .flatten()
+            .is_some_and(|sup| sup.supplementary && sup.checksum == link.id)
 }
 
 /// Whether an object has DWARF of its own, rather than only the empty

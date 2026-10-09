@@ -7,7 +7,7 @@ use std::sync::Arc;
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use gimli::{Location, Value};
 
-use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, Units, die_reference};
+use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, Units, die_reference, unit_dwarf};
 use crate::debug_info::{
     CallSite, CallSiteId, CallTarget, EntryParameter, TailCallChain, TailJump, VariableRuntime,
     VariableRuntimeError,
@@ -275,7 +275,9 @@ fn site_attributes<'data>(
             .iter()
             .find_map(|attribute| entry.attr_value(*attribute))
         {
-            Some(value) => Ok(dwarf.attr_address(unit, value)?.map(ImageAddress::new)),
+            Some(value) => Ok(unit_dwarf(dwarf, unit)
+                .attr_address(unit, value)?
+                .map(ImageAddress::new)),
             None => Ok(None),
         }
     };
@@ -374,11 +376,7 @@ fn site_parameter(
         unit_index,
         units,
     )?
-    .and_then(|key| {
-        gimli::UnitOffset(key.offset)
-            .to_debug_info_offset(&units[key.unit].header)
-            .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64"))
-    });
+    .and_then(|key| units.debug_info_offset(key));
     Ok(SiteParameter {
         register,
         parameter,

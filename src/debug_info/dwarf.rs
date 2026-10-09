@@ -12,6 +12,7 @@ use gimli::{
 use object::{Object, ObjectSection, ObjectSegment};
 use rayon::prelude::*;
 
+use super::separate::Supplementary;
 use super::{DebugInfo, UnwindInfo};
 use crate::image::lines::{Files, LineTables, Row, StatementsByAddress};
 use crate::model::{Binding, ModuleMetadata};
@@ -33,8 +34,12 @@ enum DwarfError {
     Dwarf(#[from] gimli::Error),
     #[error("unsupported target architecture: {0:?}")]
     UnsupportedArchitecture(object::Architecture),
-    #[error("unsupported supplementary DWARF reference")]
+    #[error("DWARF references a supplementary file that was not read")]
     UnsupportedSupplementaryReference,
+    #[error("DWARF reference {0:#x} is outside every unit of the supplementary file")]
+    SupplementaryReferenceOutsideUnits(usize),
+    #[error("{0}")]
+    Supplementary(String),
     #[error(transparent)]
     LineTables(#[from] crate::image::lines::TooManyRows),
     #[error("DWARF entry depth cannot be represented")]
@@ -78,36 +83,363 @@ struct UnitCatalog<'data> {
 }
 
 /// An image's units, with where each `.debug_info` unit lies, so that a
-/// reference across units finds its unit by a binary search.
+/// reference across units finds its unit by a binary search. A dwz
+/// supplementary file's units follow the file's own.
+#[expect(
+    clippy::struct_field_names,
+    reason = "the units are what the catalog lists"
+)]
 struct Units<'data> {
     units: Vec<gimli::Unit<Reader<'data>>>,
-    /// The `.debug_info` offset of each unit there and its index, by
-    /// offset. DWARF 4's type units are in `.debug_types`, which
+    /// The `.debug_info` offset of each of the file's own units and its
+    /// index, by offset. DWARF 4's type units are in `.debug_types`, which
     /// `.debug_info` references never name.
     starts: Vec<(usize, usize)>,
+    /// The same for the supplementary file's units.
+    supplementary_starts: Vec<(usize, usize)>,
+    /// The index of the supplementary file's first unit.
+    first_supplementary: usize,
+    /// The language each unit without its own takes from the units that
+    /// refer to it, when they agree; empty when no unit is partial.
+    inherited_languages: Vec<Option<gimli::DwLang>>,
+}
+
+/// A DIE reference that leaves its unit: to a `.debug_info` offset in the
+/// unit's own file, or in the supplementary file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Outward {
+    Own(gimli::DebugInfoOffset),
+    Supplementary(gimli::DebugInfoOffset),
 }
 
 impl<'data> Units<'data> {
+    #[cfg(test)]
     fn new(units: Vec<gimli::Unit<Reader<'data>>>) -> Self {
-        let mut starts = units
-            .iter()
-            .enumerate()
-            .filter_map(|(index, unit)| Some((unit.header.debug_info_offset()?.0, index)))
-            .collect::<Vec<_>>();
-        starts.sort_unstable();
-        Self { units, starts }
+        Self::catalog(units, 0)
     }
 
-    /// The unit whose DIEs `offset` lies among, and the offset within it.
-    fn containing(&self, offset: gimli::DebugInfoOffset) -> Option<DieKey> {
-        let after = self.starts.partition_point(|(start, _)| *start <= offset.0);
-        let (_, unit) = *self.starts.get(after.checked_sub(1)?)?;
+    /// A file's units, then the units of its dwz supplementary file that
+    /// they reach: through the references their DIEs make, and the
+    /// references those units make in turn. A supplementary file serves
+    /// every file of a package, most of which the file never uses.
+    ///
+    /// dwz moves what units share into partial units. A partial unit
+    /// without a compilation directory or a language takes those of the
+    /// units referring to it, when they agree: dwz merges what names a file
+    /// by a relative path only among units that share their directory.
+    fn load(
+        dwarf: &gimli::Dwarf<Reader<'data>>,
+        mut units: Vec<gimli::Unit<Reader<'data>>>,
+    ) -> std::result::Result<Self, DwarfError> {
+        let partial = units.iter().any(is_partial_unit);
+        let Some(supplementary) = dwarf.sup() else {
+            if !partial {
+                let count = units.len();
+                return Ok(Self::catalog(units, count));
+            }
+            let outward = first_error(units.par_iter().map(outward_references).collect())?;
+            let count = units.len();
+            let mut this = Self::catalog(units, count);
+            this.inherit(&outward);
+            return Ok(this);
+        };
+        let mut headers = Vec::new();
+        let mut unit_headers = supplementary.units();
+        while let Some(header) = unit_headers.next()? {
+            headers.push(header);
+        }
+        // Where each supplementary unit lies, in offset order.
+        let header_at = |offset: gimli::DebugInfoOffset| {
+            let after = headers.partition_point(|header| {
+                header
+                    .debug_info_offset()
+                    .is_some_and(|start| start.0 <= offset.0)
+            });
+            let index = after.checked_sub(1)?;
+            let header = &headers[index];
+            let start = header.debug_info_offset()?.0;
+            (offset.0 - start < header.length_including_self()).then_some(index)
+        };
+        let mut outward = first_error(units.par_iter().map(outward_references).collect())?;
+        let mut reached = vec![false; headers.len()];
+        let mut wave = Vec::new();
+        let mut reach =
+            |references: &[Outward], within_supplementary: bool, wave: &mut Vec<usize>| {
+                for reference in references {
+                    let offset = match *reference {
+                        Outward::Supplementary(offset) => offset,
+                        Outward::Own(offset) if within_supplementary => offset,
+                        Outward::Own(_) => continue,
+                    };
+                    if let Some(index) = header_at(offset)
+                        && !std::mem::replace(&mut reached[index], true)
+                    {
+                        wave.push(index);
+                    }
+                }
+            };
+        for references in &outward {
+            reach(references, false, &mut wave);
+        }
+        let mut supplementary_units = Vec::new();
+        while !wave.is_empty() {
+            let loaded = first_error(
+                std::mem::take(&mut wave)
+                    .into_par_iter()
+                    .map(|index| {
+                        let unit = supplementary.unit(headers[index])?;
+                        let references = outward_references(&unit)?;
+                        Ok::<_, DwarfError>((index, unit, references))
+                    })
+                    .collect(),
+            )?;
+            for (index, unit, references) in loaded {
+                reach(&references, true, &mut wave);
+                supplementary_units.push((index, unit, references));
+            }
+        }
+        supplementary_units.sort_unstable_by_key(|(index, ..)| *index);
+        let first_supplementary = units.len();
+        for (_, unit, references) in supplementary_units {
+            units.push(unit);
+            // The supplementary file's references stay within it, and name
+            // nothing in another file.
+            outward.push(
+                references
+                    .into_iter()
+                    .filter_map(|reference| match reference {
+                        Outward::Own(offset) => Some(Outward::Supplementary(offset)),
+                        Outward::Supplementary(_) => None,
+                    })
+                    .collect(),
+            );
+        }
+        let mut this = Self::catalog(units, first_supplementary);
+        this.inherit(&outward);
+        Ok(this)
+    }
+
+    /// The units of a file followed by those of its supplementary file,
+    /// which begin at `first_supplementary`.
+    fn catalog(units: Vec<gimli::Unit<Reader<'data>>>, first_supplementary: usize) -> Self {
+        let starts_of = |units: &[gimli::Unit<Reader<'data>>], first: usize| {
+            let mut starts = units
+                .iter()
+                .enumerate()
+                .filter_map(|(index, unit)| {
+                    Some((unit.header.debug_info_offset()?.0, first + index))
+                })
+                .collect::<Vec<_>>();
+            starts.sort_unstable();
+            starts
+        };
+        Self {
+            starts: starts_of(&units[..first_supplementary], 0),
+            supplementary_starts: starts_of(&units[first_supplementary..], first_supplementary),
+            units,
+            first_supplementary,
+            inherited_languages: Vec::new(),
+        }
+    }
+
+    /// Gives each unit without a compilation directory or language those
+    /// of the units referring to it, given each unit's `outward`
+    /// references, in which a supplementary unit's name only its own file,
+    /// when they agree. Units take them in rounds outward from
+    /// the units that have their own, each from referrers settled in
+    /// earlier rounds.
+    fn inherit(&mut self, outward: &[Vec<Outward>]) {
+        let count = self.units.len();
+        let mut referrers = vec![Vec::new(); count];
+        for (referrer, references) in outward.iter().enumerate() {
+            for &reference in references {
+                let target = match reference {
+                    Outward::Own(offset) => self.containing(offset, false),
+                    Outward::Supplementary(offset) => self.containing(offset, true),
+                };
+                if let Some(target) = target
+                    && target.unit != referrer
+                    && referrers[target.unit].last() != Some(&referrer)
+                {
+                    referrers[target.unit].push(referrer);
+                }
+            }
+        }
+        let mut languages = self
+            .units
+            .iter()
+            .map(|unit| {
+                let mut entries = unit.entries();
+                match entries
+                    .next_dfs()
+                    .ok()
+                    .flatten()?
+                    .attr_value(gimli::DW_AT_language)
+                {
+                    Some(gimli::AttributeValue::Language(language)) => Some(language),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut inherited = vec![None; count];
+        let mut language_settled = languages.iter().map(Option::is_some).collect::<Vec<_>>();
+        let mut directory_settled = self
+            .units
+            .iter()
+            .map(|unit| unit.comp_dir.is_some())
+            .collect::<Vec<_>>();
+        loop {
+            let mut round = Vec::new();
+            for unit in 0..count {
+                let settled =
+                    |settled: &[bool]| referrers[unit].iter().any(|&referrer| settled[referrer]);
+                let language = (!language_settled[unit] && settled(&language_settled)).then(|| {
+                    agreed(
+                        referrers[unit]
+                            .iter()
+                            .filter(|&&referrer| language_settled[referrer])
+                            .map(|&referrer| languages[referrer]),
+                    )
+                });
+                let directory =
+                    (!directory_settled[unit] && settled(&directory_settled)).then(|| {
+                        agreed(
+                            referrers[unit]
+                                .iter()
+                                .filter(|&&referrer| directory_settled[referrer])
+                                .map(|&referrer| self.units[referrer].comp_dir),
+                        )
+                    });
+                if language.is_some() || directory.is_some() {
+                    round.push((unit, language, directory));
+                }
+            }
+            if round.is_empty() {
+                break;
+            }
+            for (unit, language, directory) in round {
+                if let Some(language) = language {
+                    languages[unit] = language;
+                    inherited[unit] = language;
+                    language_settled[unit] = true;
+                }
+                if let Some(directory) = directory {
+                    self.units[unit].comp_dir = directory;
+                    directory_settled[unit] = true;
+                }
+            }
+        }
+        self.inherited_languages = inherited;
+    }
+
+    /// The unit whose DIEs `offset` lies among, in the supplementary file's
+    /// `.debug_info` or the file's own, and the offset within it.
+    fn containing(&self, offset: gimli::DebugInfoOffset, supplementary: bool) -> Option<DieKey> {
+        let starts = if supplementary {
+            &self.supplementary_starts
+        } else {
+            &self.starts
+        };
+        let after = starts.partition_point(|(start, _)| *start <= offset.0);
+        let (_, unit) = *starts.get(after.checked_sub(1)?)?;
         let within = offset.to_unit_offset(&self.units[unit].header)?;
         Some(DieKey {
             unit,
             offset: within.0,
         })
     }
+
+    /// Whether the unit at `index` is the supplementary file's.
+    const fn is_supplementary(&self, index: usize) -> bool {
+        index >= self.first_supplementary
+    }
+
+    /// The language the unit at `index` takes from the units referring to
+    /// it, having none of its own.
+    fn inherited_language(&self, index: usize) -> Option<gimli::DwLang> {
+        self.inherited_languages.get(index).copied().flatten()
+    }
+
+    /// The `.debug_info` offset of the DIE `key`, which expressions and
+    /// call sites name DIEs by. The supplementary file's DIEs have none:
+    /// their offsets are in another section.
+    fn debug_info_offset(&self, key: DieKey) -> Option<u64> {
+        if self.is_supplementary(key.unit) {
+            return None;
+        }
+        gimli::UnitOffset(key.offset)
+            .to_debug_info_offset(&self.units[key.unit].header)
+            .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64"))
+    }
+}
+
+/// Whether dwz made the unit to hold what other units share, by its root's
+/// tag alone, whose attributes every load reads later.
+fn is_partial_unit(unit: &gimli::Unit<Reader<'_>>) -> bool {
+    matches!(unit.header.type_(), gimli::UnitType::Partial)
+        || unit
+            .entries_raw(None)
+            .and_then(|mut entries| entries.read_abbreviation())
+            .ok()
+            .flatten()
+            .is_some_and(|root| root.tag() == gimli::DW_TAG_partial_unit)
+}
+
+/// The references a unit's DIEs make outside it, each once, in order.
+fn outward_references(
+    unit: &gimli::Unit<Reader<'_>>,
+) -> std::result::Result<Vec<Outward>, DwarfError> {
+    let mut references = Vec::new();
+    let mut entries = unit.entries();
+    while let Some(entry) = entries.next_dfs()? {
+        references.extend(
+            entry
+                .attrs()
+                .iter()
+                .filter_map(|attribute| match attribute.value() {
+                    gimli::AttributeValue::DebugInfoRef(offset) => Some(Outward::Own(offset)),
+                    gimli::AttributeValue::DebugInfoRefSup(offset) => {
+                        Some(Outward::Supplementary(offset))
+                    }
+                    _ => None,
+                }),
+        );
+    }
+    references.sort_unstable();
+    references.dedup();
+    Ok(references)
+}
+
+/// The DWARF whose sections a unit's attributes name: the supplementary
+/// file's for a unit that file holds, else the file's own. A unit holds
+/// its DIEs' bytes, which lie in one file's `.debug_info`.
+fn unit_dwarf<'a, 'data>(
+    dwarf: &'a gimli::Dwarf<Reader<'data>>,
+    unit: &gimli::Unit<Reader<'data>>,
+) -> &'a gimli::Dwarf<Reader<'data>> {
+    use gimli::Section as _;
+    let Some(supplementary) = dwarf.sup() else {
+        return dwarf;
+    };
+    let section = supplementary.debug_info.reader().slice().as_ptr_range();
+    let held = unit
+        .header
+        .range_from(unit.header.root_offset()..)
+        .is_ok_and(|entries| section.contains(&entries.slice().as_ptr()));
+    if held { supplementary } else { dwarf }
+}
+
+/// The value every one of `values` that has one agrees on.
+fn agreed<T: PartialEq>(values: impl Iterator<Item = Option<T>>) -> Option<T> {
+    let mut agreed = None;
+    for value in values.flatten() {
+        match &agreed {
+            None => agreed = Some(value),
+            Some(known) if *known == value => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
 }
 
 impl<'data> std::ops::Deref for Units<'data> {
@@ -148,18 +480,18 @@ fn die_code_ranges<'data>(
 ) -> std::result::Result<Vec<AddressRange<ImageAddress>>, DwarfError> {
     let mut ranges = Vec::new();
     if entry.attr_value(gimli::DW_AT_ranges).is_some() {
-        let mut list = dwarf.die_ranges(unit, entry)?;
+        let mut list = unit_dwarf(dwarf, unit).die_ranges(unit, entry)?;
         while let Some(range) = list.next()? {
             ranges.push((range.begin, Some(range.end)));
         }
     } else if let (Some(low), Some(high)) = (
         entry.attr_value(gimli::DW_AT_low_pc),
         entry.attr_value(gimli::DW_AT_high_pc),
-    ) && let Some(begin) = dwarf.attr_address(unit, low)?
+    ) && let Some(begin) = unit_dwarf(dwarf, unit).attr_address(unit, low)?
     {
         // A constant high_pc is an offset from low_pc. gimli would add it
         // unchecked, which overflows for a tombstone low_pc.
-        let end = dwarf
+        let end = unit_dwarf(dwarf, unit)
             .attr_address(unit, high)?
             .or_else(|| high.udata_value().and_then(|size| begin.checked_add(size)));
         ranges.push((begin, end));
@@ -264,7 +596,19 @@ fn load_debug_info(
     let object = object::File::parse(data)?;
     let phase = crate::span!("separate_debug_file");
     let separate = search.find(path, &object);
+    // The supplementary file is named by whichever file holds the DWARF.
+    let supplementary = separate.as_ref().map_or_else(
+        || search.supplementary(path, &object),
+        |file| {
+            object::File::parse(file.data.as_slice()).map_or(Supplementary::None, |debug| {
+                search.supplementary(&file.path, &debug)
+            })
+        },
+    );
     drop(phase);
+    if let (None, Supplementary::Missing(reason)) = (&separate, &supplementary) {
+        return Err(DwarfError::Supplementary(reason.clone()));
+    }
     let binding = Binding {
         path: Arc::new(path.to_owned()),
         debug_path: separate.as_ref().map(|file| Arc::new(file.path.clone())),
@@ -274,12 +618,15 @@ fn load_debug_info(
         bind(&binding, Arc::new(tables)).expect("an image binds to the files it was built from")
     };
     let Some(cache) = cache else {
-        let tables = seal_debug_info(data, separate.as_ref(), limits)?;
+        let tables = seal_debug_info(data, separate.as_ref(), &supplementary, limits)?;
         return Ok((built(tables), CacheOutcome::Off));
     };
     let phase = crate::span!("cache.read");
     let mut inputs = vec![data];
     inputs.extend(separate.as_ref().map(|file| file.data.as_slice()));
+    if let Supplementary::Found(file) = &supplementary {
+        inputs.push(file.data.as_slice());
+    }
     let key = crate::cache::Key::of(&inputs);
     let outcome = match cache.get(key) {
         crate::cache::Lookup::Hit { image, stamp } => match bind(&binding, Arc::new(*image)) {
@@ -301,7 +648,7 @@ fn load_debug_info(
     };
     drop(phase);
     crate::count!("cache_misses", 1);
-    let tables = seal_debug_info(data, separate.as_ref(), limits)?;
+    let tables = seal_debug_info(data, separate.as_ref(), &supplementary, limits)?;
     let phase = crate::span!("cache.write");
     if let Err(error) = cache.put(key, &tables) {
         crate::cache::report(format_args!("{error}"));
@@ -311,33 +658,37 @@ fn load_debug_info(
 }
 
 /// Seals an image of a file's debug information, from the separate debug
-/// file `separate` when one was found. One that cannot be loaded leaves the
-/// image as its own file describes it, with the reason recorded.
+/// file `separate` when one was found, with the dwz supplementary file its
+/// DWARF shares. A separate debug file that cannot be loaded, or whose
+/// supplementary file was not found, leaves the image as its own file
+/// describes it, with the reason recorded.
 fn seal_debug_info(
     data: &[u8],
     separate: Option<&super::separate::DebugFile>,
+    supplementary: &Supplementary,
     limits: LoadLimits,
 ) -> std::result::Result<crate::image::Image, DwarfError> {
-    let Some(separate) = separate else {
-        return load_image(data, Separate::None, limits);
+    let supplementary = match supplementary {
+        Supplementary::Found(file) => Some(file),
+        Supplementary::None => None,
+        Supplementary::Missing(reason) => {
+            let separate = separate.expect("a file's own DWARF needs its supplementary file");
+            return load_image(
+                data,
+                Separate::Unusable(&separate.path, reason.as_str().into()),
+                None,
+                limits,
+            );
+        }
     };
-    // dwz moves what several debug files share into a supplementary file,
-    // whose units and strings the loader does not read.
-    if object::File::parse(separate.data.as_slice())
-        .is_ok_and(|debug| debug.section_by_name(".gnu_debugaltlink").is_some())
-    {
-        let reason = "it shares debug information with other files through a dwz supplementary \
-                      file (.gnu_debugaltlink), which uscope does not read";
-        return load_image(
-            data,
-            Separate::Unusable(&separate.path, reason.into()),
-            limits,
-        );
-    }
-    load_image(data, Separate::Used(separate), limits).or_else(|error| {
+    let Some(separate) = separate else {
+        return load_image(data, Separate::None, supplementary, limits);
+    };
+    load_image(data, Separate::Used(separate), supplementary, limits).or_else(|error| {
         load_image(
             data,
             Separate::Unusable(&separate.path, error.to_string().into()),
+            None,
             limits,
         )
     })
@@ -390,6 +741,7 @@ enum Separate<'a> {
 fn load_image(
     data: &[u8],
     separate: Separate<'_>,
+    supplementary: Option<&super::separate::DebugFile>,
     limits: LoadLimits,
 ) -> std::result::Result<crate::image::Image, DwarfError> {
     let object = object::File::parse(data)?;
@@ -399,9 +751,27 @@ fn load_image(
         Separate::None | Separate::Unusable(..) => None,
     };
     let dwarf_object = debug_object.as_ref().unwrap_or(&object);
+    let supplementary_object = supplementary
+        .map(|file| object::File::parse(file.data.as_slice()))
+        .transpose()?;
 
     let phase = crate::span!("sections");
-    let (sections, input) = load_sections(dwarf_object)?;
+    let (sections, mut input) = load_sections(dwarf_object)?;
+    let supplementary_sections = supplementary_object
+        .as_ref()
+        .map(|supplementary| {
+            if supplementary.is_little_endian() != object.is_little_endian() {
+                return Err(DwarfError::Supplementary(
+                    "its dwz supplementary file has another byte order".to_owned(),
+                ));
+            }
+            load_sections(supplementary)
+        })
+        .transpose()?
+        .map(|(sections, bytes)| {
+            input += bytes;
+            sections
+        });
     crate::count!("debug_bytes", input);
 
     let endian = if object.is_little_endian() {
@@ -410,7 +780,9 @@ fn load_image(
         RunTimeEndian::Big
     };
 
-    let dwarf = sections.borrow(|section| EndianSlice::new(section, endian));
+    let dwarf = sections.borrow_with_sup(supplementary_sections.as_ref(), |section| {
+        EndianSlice::new(section, endian)
+    });
     let mut files = Files::default();
     let mut line_tables = LineTables::default();
     let mut headers = Vec::new();
@@ -430,9 +802,10 @@ fn load_image(
             .map(|header| dwarf.unit(header))
             .collect(),
     )?;
+    let units = Units::load(&dwarf, units)?;
     let catalog = UnitCatalog {
         type_signatures: type_signature_index(&units)?,
-        units: Units::new(units),
+        units,
         code: CodeRanges(super::elf::executable_ranges(&object)),
     };
     crate::count!("units", catalog.units.len());
@@ -1946,7 +2319,7 @@ fn collect_unit_functions<'data>(
     if is_type_unit(unit) {
         return Ok(batch);
     }
-    let language = unit_language(dwarf, unit)?;
+    let language = unit_language(dwarf, units, unit_index)?;
     // Only these DIEs are read; every other one's attributes are skipped.
     let wanted = |tag| match tag {
         gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine | gimli::DW_TAG_namespace => {
@@ -2082,7 +2455,7 @@ fn raw_function<'data>(
         ranges: die_code_ranges(dwarf, unit, entry, &catalog.code)?,
         entry: entry
             .attr(gimli::DW_AT_entry_pc)
-            .map(|attribute| dwarf.attr_address(unit, attribute.value()))
+            .map(|attribute| unit_dwarf(dwarf, unit).attr_address(unit, attribute.value()))
             .transpose()?
             .flatten()
             .map(ImageAddress::new),
@@ -2108,7 +2481,7 @@ fn future_of(
     let Some(name) = entry.attr_value(gimli::DW_AT_name) else {
         return Ok(None);
     };
-    let name = dwarf.attr_string(unit, name)?;
+    let name = unit_dwarf(dwarf, unit).attr_string(unit, name)?;
     Ok((super::coroutines::coroutine_kind(&text(name))
         == Some(crate::CoroutineKind::AsyncFunction))
     .then(|| namespace.and_then(|namespace| namespace.rsplit("::").next()))
@@ -2116,18 +2489,20 @@ fn future_of(
     .map(Arc::from))
 }
 
-/// The language a unit is written in, by its root DIE.
+/// The language a unit is written in, by its root DIE or its importers.
 fn unit_language(
     dwarf: &gimli::Dwarf<Reader<'_>>,
-    unit: &gimli::Unit<Reader<'_>>,
+    units: &Units<'_>,
+    unit_index: usize,
 ) -> std::result::Result<SourceLanguage, DwarfError> {
+    let unit = &units[unit_index];
     let mut entries = unit.entries();
     let Some(root) = entries.next_dfs()? else {
         return Ok(SourceLanguage::Unknown);
     };
     let language = match root.attr_value(gimli::DW_AT_language) {
         Some(gimli::AttributeValue::Language(language)) => Some(language),
-        _ => None,
+        _ => units.inherited_language(unit_index),
     };
     let zig = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?
         .is_some_and(|producer| producer.starts_with("zig "));
@@ -2142,7 +2517,7 @@ fn string_attribute(
 ) -> std::result::Result<Option<Arc<str>>, DwarfError> {
     entry
         .attr_value(attribute)
-        .map(|value| dwarf.attr_string(unit, value))
+        .map(|value| unit_dwarf(dwarf, unit).attr_string(unit, value))
         .transpose()
         .map_err(DwarfError::from)
         .map(|value| value.map(|value| Arc::<str>::from(text(value).as_ref())))
@@ -2169,12 +2544,19 @@ fn die_reference(
             unit: unit_index,
             offset: offset.0,
         })),
+        // A supplementary file's references stay within it.
         gimli::AttributeValue::DebugInfoRef(offset) => units
-            .containing(offset)
+            .containing(offset, units.is_supplementary(unit_index))
             .map(Some)
             .ok_or(DwarfError::ReferenceOutsideUnits(offset.0)),
-        gimli::AttributeValue::DebugInfoRefSup(_) => {
-            Err(DwarfError::UnsupportedSupplementaryReference)
+        gimli::AttributeValue::DebugInfoRefSup(offset) => {
+            if units.is_supplementary(unit_index) || units.supplementary_starts.is_empty() {
+                return Err(DwarfError::UnsupportedSupplementaryReference);
+            }
+            units
+                .containing(offset, true)
+                .map(Some)
+                .ok_or(DwarfError::SupplementaryReferenceOutsideUnits(offset.0))
         }
         _ => Err(DwarfError::UnsupportedReferenceForm),
     }
@@ -2374,6 +2756,7 @@ fn source_path(
     header: &gimli::LineProgramHeader<Reader<'_>>,
     file: &gimli::FileEntry<Reader<'_>>,
 ) -> std::result::Result<PathBuf, DwarfError> {
+    let dwarf = unit_dwarf(dwarf, unit);
     let file_name = text(dwarf.attr_string(unit, file.path_name())?).into_owned();
     let file_name = PathBuf::from(file_name);
     if file_name.is_absolute() {

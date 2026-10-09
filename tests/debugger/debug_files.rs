@@ -1,6 +1,7 @@
 //! Debug information in separate files, as distributions ship it: found by
 //! `.gnu_debuglink`, by build-id under a debug directory, or downloaded
-//! from a debuginfod server.
+//! from a debuginfod server, sharing what a package's files have in common
+//! through a dwz supplementary file.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::TcpListener;
@@ -177,6 +178,11 @@ struct Server {
 
 impl Server {
     fn start(id: String, body: Vec<u8>) -> Self {
+        Self::serving(vec![(id, body)])
+    }
+
+    /// A server that answers for each build-id with its file.
+    fn serving(files: Vec<(String, Vec<u8>)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a port");
         let url = format!("http://{}", listener.local_addr().expect("an address"));
         let requests = Arc::new(AtomicUsize::new(0));
@@ -196,20 +202,27 @@ impl Server {
                 while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
                     line.clear();
                 }
-                let wanted = format!("GET /buildid/{id}/debuginfo ");
-                let response = if request.starts_with(&wanted) {
-                    counted.fetch_add(1, Ordering::SeqCst);
-                    let mut response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    )
-                    .into_bytes();
-                    response.extend_from_slice(&body);
-                    response
-                } else {
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                        .to_vec()
-                };
+                let body = files.iter().find_map(|(id, body)| {
+                    request
+                        .starts_with(&format!("GET /buildid/{id}/debuginfo "))
+                        .then_some(body)
+                });
+                let response = body.map_or_else(
+                    || {
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_vec()
+                    },
+                    |body| {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let mut response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes();
+                        response.extend_from_slice(body);
+                        response
+                    },
+                );
                 let _ = stream.write_all(&response);
             }
         });
@@ -258,11 +271,400 @@ async fn debuginfod_downloads_debug_files_into_its_cache() {
     assert_eq!(wrong.requests.load(Ordering::SeqCst), 1);
 }
 
-/// A debug file that shares its debug information through a dwz
-/// supplementary file, as distributions' do, is refused with its reason,
-/// and the program is described as its own file describes it.
+fn dwz(name: &str) -> PathBuf {
+    Scenario::fixture(&format!("dwz/{name}"))
+}
+
+/// The debug directory the distribution-style shapes debug files are filed
+/// under, with the supplementary file they share in its `.dwz`.
+fn dwz_debug_root() -> PathBuf {
+    dwz("gcc-o2/debug-root")
+}
+
+/// The build-id `path` records, in hexadecimal.
+fn build_id(path: &Path) -> String {
+    let data = fs::read(path).expect("read the file");
+    let object = object::File::parse(data.as_slice()).expect("an object file");
+    object::Object::build_id(&object)
+        .expect("readable notes")
+        .expect("a build-id")
+        .iter()
+        .fold(String::new(), |mut text, byte| {
+            use std::fmt::Write as _;
+            write!(text, "{byte:02x}").expect("writing to a String cannot fail");
+            text
+        })
+}
+
+/// The debug file a build-id names under `root`.
+fn filed(root: &Path, id: &str) -> PathBuf {
+    root.join(".build-id")
+        .join(&id[..2])
+        .join(format!("{}.debug", &id[2..]))
+}
+
+/// What a module's debug information says, as text naming nothing a load
+/// chooses: its functions, global variables, types, and line rows, with
+/// the source files they name.
+fn described(image: &ModuleImage) -> BTreeSet<String> {
+    let place = |location: Option<SourceLocation>| {
+        location.map_or_else(String::new, |location| {
+            let file = image.source_file(location.file).expect("a source file");
+            format!(
+                "{}:{:?}:{:?}",
+                file.path.display(),
+                location.line,
+                location.column
+            )
+        })
+    };
+    let mut described = BTreeSet::new();
+    for function in image.functions() {
+        described.insert(format!(
+            "function {} {:?} {:?} at {}",
+            function.name(),
+            function.linkage_name(),
+            function.language(),
+            place(function.declaration())
+        ));
+    }
+    for global in image.globals() {
+        let ty = match &global.type_info {
+            uscope::GlobalVariableType::Resolved(info) => info.name.to_string(),
+            other => format!("{other:?}"),
+        };
+        // An unnamed global, as a string literal, is named by where its
+        // DIE lies, which dwz moves.
+        let name = if global.qualified_name.starts_with("<anonymous global at ") {
+            "<anonymous global>"
+        } else {
+            &global.qualified_name
+        };
+        described.insert(format!(
+            "global {name} {:?} {ty} at {}",
+            global.linkage_name,
+            place(global.declaration.clone())
+        ));
+    }
+    for node in image.types() {
+        described.insert(match node {
+            uscope::TypeNode::Resolved(info) => {
+                let kind = format!("{:?}", info.kind);
+                let kind = kind.split([' ', '(', '{']).next().unwrap_or_default();
+                format!("type {} {:?} {kind}", info.name, info.byte_size)
+            }
+            malformed => format!("{malformed:?}"),
+        });
+    }
+    for row in image.statement_rows() {
+        described.insert(format!(
+            "row {:#x} {} {} {:?}",
+            row.address.get(),
+            place(row.location),
+            row.discriminator,
+            row.flags
+        ));
+    }
+    described
+}
+
+/// dwz changes where debug information is kept, never what it says: with
+/// each compiler, the program and its library describe the same
+/// functions, variables, types, and lines, naming the same files, whether
+/// or not their DWARF shares what they have in common through a
+/// supplementary file, named by `.gnu_debugaltlink` or DWARF 5's
+/// `.debug_sup`.
 #[tokio::test]
-async fn a_debug_file_needing_a_supplementary_file_is_refused_with_its_reason() {
+async fn sharing_through_a_supplementary_file_changes_nothing_the_debug_information_says() {
+    for variant in ["gcc-o0", "gcc-o2", "clang-o2"] {
+        for (module, layout) in [
+            ("shapes", "dwz"),
+            ("libshapes.so", "dwz"),
+            ("shapes", "dwarf5"),
+            ("libshapes.so", "dwarf5"),
+        ] {
+            // One process debugs one session at a time.
+            let load = async |layout: &str| {
+                let path = dwz(&format!("{variant}/{layout}/{module}"));
+                let scenario = Scenario::new(format!("{variant}-{layout}-{module}"), path);
+                let described = described(scenario.handle().module_image());
+                scenario.shutdown().await;
+                described
+            };
+            let expected = load("plain").await;
+            let found = load(layout).await;
+            assert!(
+                expected.iter().any(|line| line.contains("/shapes.h:")),
+                "{variant} {module} describes what its header shares"
+            );
+            assert!(
+                expected == found,
+                "{variant} {layout} {module} differs\nonly without dwz: {:#?}\nonly with dwz: {:#?}",
+                expected.difference(&found).collect::<Vec<_>>(),
+                found.difference(&expected).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// The function and source file of each frame of a stop's backtrace.
+async fn frame_places(scenario: &Scenario) -> Vec<(String, String)> {
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let mut places = Vec::new();
+    for frame in trace.frames.iter() {
+        let (Some(function), Some(source), Some(module)) =
+            (&frame.function, &frame.source, frame.module)
+        else {
+            continue;
+        };
+        let image = scenario
+            .operation(
+                "module image",
+                scenario.handle().loaded_module_image(module),
+            )
+            .await;
+        let file = image.source_file(source.file).expect("a source file");
+        places.push((
+            function.name.to_string(),
+            file.path
+                .file_name()
+                .expect("a file name")
+                .to_string_lossy()
+                .into_owned(),
+        ));
+    }
+    places
+}
+
+async fn evaluated(scenario: &Scenario, text: &str) -> uscope::VariableValue {
+    let expression =
+        uscope::Expression::parse(text).unwrap_or_else(|error| panic!("`{text}`: {error}"));
+    match scenario
+        .operation(text, scenario.handle().evaluate(&expression))
+        .await
+    {
+        uscope::Evaluation::Value { value, .. } => available_value(&value.state).clone(),
+        other => panic!("`{text}` is not a value: {other:?}"),
+    }
+}
+
+/// A distribution's program and library, stripped, whose debug files are
+/// filed by build-id and share what they have in common through a dwz
+/// supplementary file beside them: the shared types, the functions inlined
+/// into both, and the declarations of their variables, which name the
+/// header by its path relative to the units that use them.
+#[tokio::test]
+async fn debug_files_read_what_they_share_from_their_supplementary_file() {
+    let program = dwz("gcc-o2/split/shapes");
+    let library = dwz("gcc-o2/split/libshapes.so");
+    let options = DebugFileOptions {
+        directories: vec![dwz_debug_root()],
+        ..DebugFileOptions::default()
+    };
+    let mut scenario = Scenario::with_debug_files("dwz", &program, &options);
+    let image = Arc::clone(scenario.handle().module_image());
+    assert_eq!(
+        image.debug_file().map(|path| path.as_path()),
+        Some(filed(&dwz_debug_root(), &build_id(&program)).as_path())
+    );
+    let breakpoint = pending_function(&scenario, "shapes::measure").await;
+    let reason = scenario.run_to_stop().await;
+    let StopReason::Breakpoint { hits, .. } = &reason else {
+        panic!("stopped for {reason:?}");
+    };
+    assert_eq!(hits[0].breakpoint, breakpoint.id);
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let library_image = scenario
+        .operation(
+            "library image",
+            scenario
+                .handle()
+                .loaded_module_image(trace.frames[0].module.expect("a module")),
+        )
+        .await;
+    assert_eq!(
+        library_image.debug_file().map(|path| path.as_path()),
+        Some(filed(&dwz_debug_root(), &build_id(&library)).as_path())
+    );
+    // The library's types are the supplementary file's.
+    assert!(matches!(
+        evaluated(&scenario, "shape.opposite_.y").await,
+        uscope::VariableValue::Scalar(ScalarValue::Signed(4))
+    ));
+    assert!(matches!(
+        evaluated(&scenario, "shapes::shapes_measured").await,
+        uscope::VariableValue::Scalar(ScalarValue::Signed(0))
+    ));
+
+    // `width` and `Span::length`, inlined into `area`, are declared only in
+    // the supplementary file.
+    let width = source_line("tests/fixtures/cpp/shapes/shapes.h", "shapes: width");
+    scenario
+        .add_source_breakpoint("tests/fixtures/cpp/shapes/shapes.h", width)
+        .await;
+    scenario.resume_to_stop().await;
+    let places = frame_places(&scenario).await;
+    let named = |function: &str, file: &str| (function.to_owned(), file.to_owned());
+    assert_eq!(
+        places[..4],
+        [
+            named("length", "shapes.h"),
+            named("width", "shapes.h"),
+            named("area", "geometry.cpp"),
+            named("measure", "library.cpp"),
+        ],
+        "{places:?}"
+    );
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    scenario
+        .operation(
+            "select width",
+            scenario.handle().select_frame(trace.frames[1].id),
+        )
+        .await;
+    let variables = scenario
+        .operation("variables", scenario.handle().variables())
+        .await;
+    let across = variables
+        .variables
+        .iter()
+        .find(|variable| &*variable.name == "across")
+        .unwrap_or_else(|| panic!("no `across` in {:?}", variables.variables));
+    assert_eq!(
+        across.type_info.as_ref().map(|info| &*info.name),
+        Some("Span<int>")
+    );
+    let module_image = scenario
+        .operation(
+            "module image",
+            scenario
+                .handle()
+                .loaded_module_image(trace.frames[1].module.expect("a module")),
+        )
+        .await;
+    let declaration = across.declaration.as_ref().expect("a declaration");
+    assert_eq!(
+        module_image
+            .source_file(declaration.file)
+            .map(|file| file.path.as_path()),
+        Some(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/cpp/shapes/shapes.h")
+                .as_path()
+        )
+    );
+    scenario.shutdown().await;
+}
+
+/// The supplementary file is found where its debug files name it, by
+/// build-id under a debug directory, or downloaded, and proves it is the
+/// one they name by its build-id. Without it a debug file is refused with
+/// its reason, and its program is described as its own file describes it.
+#[tokio::test]
+async fn a_supplementary_file_must_be_the_one_its_debug_files_name() {
+    let program = dwz("gcc-o2/split/shapes");
+    let supplementary = dwz_debug_root().join(".dwz/shapes");
+    let program_id = build_id(&program);
+    let debug_file = filed(&dwz_debug_root(), &program_id);
+    let scratch = ScratchDir::new("dwz-supplementary");
+    // The program's debug file, filed by itself, its supplementary file
+    // where it names it replaced by another build's.
+    let root = scratch.path().join("root");
+    let copied = filed(&root, &program_id);
+    fs::create_dir_all(copied.parent().expect("a directory")).expect("the build-id directory");
+    fs::copy(&debug_file, &copied).expect("copy the debug file");
+    fs::create_dir_all(root.join(".dwz")).expect("the .dwz directory");
+    fs::copy(dwz("clang-o2/dwz/.dwz/shapes"), root.join(".dwz/shapes"))
+        .expect("copy another supplementary file");
+    let refused = |scenario: &Scenario| {
+        let image = scenario.handle().module_image();
+        assert_eq!(image.functions().len(), 0);
+        let Some(uscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file() else {
+            panic!("{:?}", image.separate_debug_file());
+        };
+        assert_eq!(path.as_path(), copied.as_path());
+        assert!(
+            reason.starts_with("its dwz supplementary file ../../.dwz/shapes (build-id ")
+                && reason.ends_with(") was not found"),
+            "{reason}"
+        );
+    };
+    let options = |directories: Vec<PathBuf>| DebugFileOptions {
+        directories,
+        ..DebugFileOptions::default()
+    };
+    let scenario =
+        Scenario::with_debug_files("dwz-misnamed", &program, &options(vec![root.clone()]));
+    refused(&scenario);
+    scenario.shutdown().await;
+
+    // Filed by its build-id under another debug directory.
+    let other = scratch.path().join("other");
+    let filed_supplementary = filed(&other, &build_id(&supplementary));
+    fs::create_dir_all(filed_supplementary.parent().expect("a directory"))
+        .expect("the build-id directory");
+    fs::copy(&supplementary, &filed_supplementary).expect("copy the supplementary file");
+    let scenario = Scenario::with_debug_files(
+        "dwz-by-build-id",
+        &program,
+        &options(vec![root.clone(), other]),
+    );
+    let image = scenario.handle().module_image();
+    assert_eq!(
+        image.debug_file().map(|path| path.as_path()),
+        Some(copied.as_path())
+    );
+    assert!(image.functions().any(|function| function.name() == "area"));
+    scenario.shutdown().await;
+
+    // Downloaded, with the debug file, and kept in debuginfod's cache.
+    let cache = ScratchDir::new("dwz-debuginfod-cache");
+    let server = Server::serving(vec![
+        (
+            program_id.clone(),
+            fs::read(&debug_file).expect("the debug file"),
+        ),
+        (
+            build_id(&supplementary),
+            fs::read(&supplementary).expect("the supplementary file"),
+        ),
+    ]);
+    let downloading = DebugFileOptions {
+        debuginfod: true,
+        debuginfod_urls: Some(vec![server.url.clone()]),
+        debuginfod_cache: Some(cache.path().to_path_buf()),
+        ..DebugFileOptions::default()
+    };
+    let scenario = Scenario::with_debug_files("dwz-debuginfod", &program, &downloading);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+    let image = scenario.handle().module_image();
+    assert!(image.functions().any(|function| function.name() == "area"));
+    assert_eq!(
+        fs::read(
+            cache
+                .path()
+                .join(build_id(&supplementary))
+                .join("debuginfo")
+        )
+        .expect("the cached supplementary file"),
+        fs::read(&supplementary).expect("the supplementary file")
+    );
+    scenario.shutdown().await;
+}
+
+/// A debug file naming a supplementary file that no directory holds, as
+/// one from a distribution whose `.dwz` files are not installed, is
+/// refused with its reason, and the program is described as its own file
+/// describes it. A program whose own DWARF needs one cannot be described
+/// without it, and says why.
+#[tokio::test]
+async fn a_debug_file_whose_supplementary_file_is_missing_is_refused_with_its_reason() {
     let options = DebugFileOptions {
         directories: vec![split("altlink-root")],
         ..DebugFileOptions::default()
@@ -275,10 +677,91 @@ async fn a_debug_file_needing_a_supplementary_file_is_refused_with_its_reason() 
         panic!("{:?}", image.separate_debug_file());
     };
     assert!(path.starts_with(split("altlink-root")), "{path:?}");
-    assert!(reason.contains("dwz supplementary file"), "{reason}");
+    assert_eq!(
+        &**reason,
+        "its dwz supplementary file /usr/lib/debug/.dwz/uscope-fixture (build-id 01020304) was \
+         not found"
+    );
     assert!(matches!(
         scenario.run_to_stop().await,
         StopReason::Exited(_)
     ));
+    scenario.shutdown().await;
+
+    let scratch = ScratchDir::new("dwz-own-missing");
+    let program = scratch.path().join("shapes");
+    fs::copy(dwz("gcc-o0/dwz/shapes"), &program).expect("copy the program");
+    let error = Debugger::new(&program)
+        .err()
+        .expect("a program missing its supplementary file")
+        .to_string();
+    assert!(
+        error.contains("its dwz supplementary file .dwz/shapes (build-id ")
+            && error.ends_with(") was not found"),
+        "{error}"
+    );
+}
+
+/// The checksum a `.debug_sup` records: after its version, flag, and name,
+/// a length and that many bytes.
+fn debug_sup_checksum(path: &Path) -> String {
+    let data = fs::read(path).expect("read the file");
+    let object = object::File::parse(data.as_slice()).expect("an object file");
+    let section = object::Object::section_by_name(&object, ".debug_sup").expect("a .debug_sup");
+    let bytes = object::ObjectSection::data(&section).expect("its bytes");
+    let name = bytes[3..]
+        .iter()
+        .position(|&byte| byte == 0)
+        .expect("a name")
+        + 3;
+    let length = usize::from(bytes[name + 1]);
+    assert!(length < 0x80, "a one-byte length");
+    bytes[name + 2..name + 2 + length]
+        .iter()
+        .fold(String::new(), |mut text, byte| {
+            use std::fmt::Write as _;
+            write!(text, "{byte:02x}").expect("writing to a String cannot fail");
+            text
+        })
+}
+
+/// DWARF 5's `.debug_sup` names a supplementary file by a checksum, which
+/// the file, having no build-id of its own, records in its own
+/// `.debug_sup`: another build's file at the path named is refused, and
+/// the one filed by its checksum under a debug directory is read.
+#[tokio::test]
+async fn a_debug_sup_names_its_supplementary_file_by_checksum() {
+    let scratch = ScratchDir::new("debug-sup");
+    let program = scratch.path().join("shapes");
+    fs::copy(dwz("gcc-o2/dwarf5/shapes"), &program).expect("copy the program");
+    fs::create_dir(scratch.path().join(".dwz")).expect("the .dwz directory");
+    fs::copy(
+        dwz("clang-o2/dwarf5/.dwz/shapes"),
+        scratch.path().join(".dwz/shapes"),
+    )
+    .expect("copy another build's supplementary file");
+    let checksum = debug_sup_checksum(&program);
+    let error = Debugger::new(&program)
+        .err()
+        .expect("a program without its supplementary file")
+        .to_string();
+    assert!(
+        error.ends_with(&format!(
+            "its supplementary file .dwz/shapes (checksum {checksum}) was not found"
+        )),
+        "{error}"
+    );
+
+    let root = scratch.path().join("root");
+    let filed = filed(&root, &checksum);
+    fs::create_dir_all(filed.parent().expect("a directory")).expect("the build-id directory");
+    fs::copy(dwz("gcc-o2/dwarf5/.dwz/shapes"), &filed).expect("file the supplementary file");
+    let options = DebugFileOptions {
+        directories: vec![root],
+        ..DebugFileOptions::default()
+    };
+    let scenario = Scenario::with_debug_files("debug-sup", &program, &options);
+    let image = scenario.handle().module_image();
+    assert!(image.functions().any(|function| function.name() == "area"));
     scenario.shutdown().await;
 }

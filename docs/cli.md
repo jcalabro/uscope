@@ -840,9 +840,18 @@ then `/usr/lib/debug`. With `--debuginfod`, a file no directory holds is
 downloaded from the debuginfod servers `DEBUGINFOD_URLS` lists and kept in
 debuginfod's cache, which other debuggers share; no server is asked
 otherwise. Every candidate must prove it describes the module, by build-id
-or checksum. A debug file that uses a dwz supplementary file
-(`.gnu_debugaltlink`), as most distributions' do, cannot be read yet: the
-module is described by its own file, and `info modules` says why.
+or checksum.
+
+Most distributions' debug files share what a package's files have in common
+through a dwz supplementary file, which each names by `.gnu_debugaltlink`
+and its build-id, or by DWARF 5's `.debug_sup` and a checksum. It is found
+as gdb finds it: at the path the debug file records, relative to the debug
+file's real location; by that identifier under a debug directory's
+`.build-id`; under a debug directory's `.dwz`; and, with `--debuginfod`,
+from the servers. It must have the build-id, or record the checksum, that
+the debug file names. Only
+what the module uses is read from it. Without it a debug file cannot be
+read: the module is described by its own file, and `info modules` says why.
 
 ## The image cache
 
@@ -851,8 +860,9 @@ so a program or library it has loaded before loads in milliseconds: every
 restart, and every shared library after the first session that used it. The
 cache is `$XDG_CACHE_HOME/uscope/images` or `~/.cache/uscope/images`, or the
 directory `USCOPE_CACHE_DIR` names, and an empty `USCOPE_CACHE_DIR` or
-`--no-cache` turns it off. An entry names the exact bytes of the module and
-of the separate debug file chosen for it, and the uscope build that wrote
+`--no-cache` turns it off. An entry names the exact bytes of the module, of
+the separate debug file chosen for it, and of the supplementary file its
+debug information shares, and the uscope build that wrote
 it, so a rebuilt program, a newly found debug file, or another version of
 uscope never reads a stale one. Every entry is checked before use; a damaged
 one is removed and the module read afresh. Starting uscope evicts the

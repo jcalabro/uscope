@@ -196,13 +196,14 @@ pub(super) fn type_with_origins<'data>(
 
 /// A DIE's offset in `.debug_info`, which implicit pointers name it by.
 pub(super) fn debug_info_offset(
-    unit: &gimli::Unit<Reader<'_>>,
+    units: &Units<'_>,
+    unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
 ) -> Option<u64> {
-    entry
-        .offset()
-        .to_debug_info_offset(&unit.header)
-        .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64"))
+    units.debug_info_offset(DieKey {
+        unit: unit_index,
+        offset: entry.offset().0,
+    })
 }
 
 pub(super) fn flag_with_origins(

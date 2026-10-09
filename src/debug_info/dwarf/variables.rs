@@ -36,6 +36,7 @@ use crate::{
 
 use super::{
     DieKey, DwarfError, Reader, UnitCatalog, Units, die_code_ranges, die_reference, is_type_unit,
+    unit_dwarf,
 };
 use crate::image::variables::{
     Capture, ConstantValue, DataObject, Function, Metadata, MetadataAbsence, Object, ObjectId,
@@ -491,7 +492,7 @@ pub(super) fn load_variable_info<'data>(
                         // A func value holds the address its code begins at.
                         let entry_address = entry
                             .attr_value(gimli::DW_AT_low_pc)
-                            .map(|value| dwarf.attr_address(unit, value))
+                            .map(|value| unit_dwarf(dwarf, unit).attr_address(unit, value))
                             .transpose()?
                             .flatten()
                             .map(ImageAddress::new)
@@ -710,7 +711,7 @@ pub(super) fn load_variable_info<'data>(
                     );
                 }
                 gimli::DW_TAG_dwarf_procedure => {
-                    if let Some(offset) = debug_info_offset(unit, entry) {
+                    if let Some(offset) = debug_info_offset(units, unit_index, entry) {
                         let location = copy_optional_location(
                             dwarf,
                             &mut pool.lock().expect("loading does not panic"),
@@ -934,7 +935,7 @@ pub(super) fn load_variable_info<'data>(
                         .charge("data objects", size_of::<DataObject>())?;
                     functions[scope.function].objects.push(row(objects.len()));
                     objects.push(DataObject {
-                        debug_info_offset: debug_info_offset(unit, entry),
+                        debug_info_offset: debug_info_offset(units, unit_index, entry),
                         kind,
                         name,
                         declaration: declaration.as_ref().ok().cloned().flatten(),
@@ -1334,7 +1335,7 @@ fn string_attribute_of<'data>(
 ) -> std::result::Result<Option<Arc<str>>, DwarfError> {
     entry
         .attr_value(gimli::DW_AT_name)
-        .map(|value| dwarf.attr_string(unit, value))
+        .map(|value| unit_dwarf(dwarf, unit).attr_string(unit, value))
         .transpose()
         .map_err(DwarfError::from)
         .map(|value| value.map(|value| Arc::<str>::from(value.to_string_lossy().as_ref())))
@@ -1360,7 +1361,9 @@ fn rust_vtable<'data>(
     let mut operations = expression.operations(unit.encoding());
     let address = match operations.next().ok()?? {
         gimli::Operation::Address { address } => address,
-        gimli::Operation::AddressIndex { index } => dwarf.address(unit, index).ok()?,
+        gimli::Operation::AddressIndex { index } => {
+            unit_dwarf(dwarf, unit).address(unit, index).ok()?
+        }
         _ => return None,
     };
     if operations.next().ok()?.is_some() {
