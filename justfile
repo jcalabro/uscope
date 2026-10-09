@@ -195,7 +195,7 @@ bench-large:
 
 # The reference answers the rewrite of program information keeps: the dump
 # tool built from the commit that pinned it, before the rewrite began.
-reference_commit := ""
+reference_commit := "855e023de6265652a11cd4c241088f473a1403d6"
 
 # Builds the reference binary from `reference_commit` in a worktree.
 reference:
