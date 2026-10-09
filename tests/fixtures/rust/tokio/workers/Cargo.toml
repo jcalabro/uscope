@@ -15,3 +15,5 @@ parking-lot = ["tokio/parking_lot"]
 # With tokio_unstable, each task's future wrapped in a tracing span, as
 # tokio-console needs.
 tracing = ["tokio/tracing"]
+# Some tasks' futures wrapped as programs wrap what they spawn.
+wrapped = []

@@ -902,7 +902,8 @@ fn may_hold_set(image: &dyn RuntimeImage, ty: crate::TypeReference) -> bool {
                 let Some(pointee) = image.type_info(*target) else {
                     continue;
                 };
-                if pointee.name.starts_with("dyn core::future::future::Future")
+                if super::futures::trait_object(&pointee.name)
+                    .is_some_and(|name| name.starts_with("dyn core::future::future::Future"))
                     || local_type(pointee) == Some("LocalSet")
                 {
                     return true;

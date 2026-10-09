@@ -1059,6 +1059,8 @@ build_tokio_fixtures() {
     # tokio's locks from parking_lot, whose mutexes are laid out as std's
     # are not.
     variant parking-lot dev "" workers/parking-lot workers
+    # Some tasks' futures wrapped as programs wrap what they spawn.
+    variant wrapped dev "" workers/wrapped workers
     # Symbols mangled as rustc did before v0, which name no generic arguments.
     variant legacy dev "-Z unstable-options -C symbol-mangling-version=legacy" "" panics workers
     local build failed=0

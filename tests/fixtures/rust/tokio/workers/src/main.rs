@@ -8,6 +8,8 @@
 //!
 //! Each line that spawns a task is marked with the task's tag, for a
 //! build with `tokio_unstable`, which records where each task was spawned.
+//! In the `wrapped` build, some tasks' futures are wrapped as programs
+//! wrap what they spawn (see `wrap`).
 //!
 //! Beside them, the blocking pool runs one closure, which waits, and has
 //! another queued behind it. On the current-thread runtime, the main
@@ -100,6 +102,28 @@ async fn top(wait: Wait) -> u32 {
     got + u32::try_from(top_local % 3).unwrap_or(0)
 }
 
+/// How some tasks' futures are spawned. In the `wrapped` build: the
+/// sleeper's boxed as a trait object, as code that spawns futures of
+/// several types holds them. In every other build, as they are.
+#[cfg(feature = "wrapped")]
+mod wrap {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    pub fn boxed(
+        future: impl Future<Output = u32> + Send + 'static,
+    ) -> Pin<Box<dyn Future<Output = u32> + Send>> {
+        Box::pin(future)
+    }
+}
+
+#[cfg(not(feature = "wrapped"))]
+mod wrap {
+    pub const fn boxed<F>(future: F) -> F {
+        future
+    }
+}
+
 /// Spawns every task, waits until each is parked and nothing runs, and
 /// stops at the checkpoint; then releases them and joins them.
 async fn run(handle: Option<tokio::runtime::Handle>) {
@@ -113,7 +137,7 @@ async fn run(handle: Option<tokio::runtime::Handle>) {
 
     let channel = tokio::spawn(top(Wait::Channel(receiver))); // SPAWN: channel
     let mut tasks = vec![
-        tokio::spawn(top(Wait::Sleep)),                     // SPAWN: sleep
+        tokio::spawn(wrap::boxed(top(Wait::Sleep))),        // SPAWN: sleep
         tokio::spawn(top(Wait::Lock(mutex))),               // SPAWN: lock
         tokio::spawn(top(Wait::Join(channel))),             // SPAWN: join
         tokio::spawn(top(Wait::Notified(notify.clone()))),  // SPAWN: notify
