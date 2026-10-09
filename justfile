@@ -62,6 +62,13 @@ test *ARGS: build-test-programs
     test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
 
+# Builds the tokio fixtures where their sources changed and runs the tokio
+# suite: the quick loop for work on tokio support. Arguments go to nextest,
+# e.g. `just tokio workers::`.
+tokio *ARGS:
+    ./scripts/build-test-programs.sh tokio
+    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --test-threads "$test_threads" --test tokio "$@"
+
 # Races in process control fail far more often when the debugger competes for
 # the CPUs, so this oversubscribes the test threads and keeps busy loops
 # running beside them. It stops at the first failure so that the failing
