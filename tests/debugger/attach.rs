@@ -248,6 +248,69 @@ async fn attach_reads_an_unlinked_executable_through_proc() {
     assert_eq!(exit_code(child), Some(23));
 }
 
+/// The C library a running fixture maps, by the path it maps it from.
+fn c_library_of(process: ProcessId) -> std::path::PathBuf {
+    let maps = fs::read_to_string(format!("/proc/{}/maps", process.get())).expect("fixture maps");
+    maps.lines()
+        .filter_map(|line| line.split_whitespace().nth(5))
+        .find(|path| path.ends_with("/libc.so.6"))
+        .map(std::path::PathBuf::from)
+        .expect("the fixture maps a C library")
+}
+
+/// A process in a mount namespace of its own, as a container's is, names its
+/// files by paths that name other files, or none, outside it. Its C library
+/// is still found, under its root as `/proc` shows it, so backtraces and
+/// thread-local storage go through it.
+#[tokio::test]
+async fn attach_finds_the_libraries_of_a_process_in_another_mount_namespace() {
+    let fixture = Scenario::fixture("attach");
+    let mut plain = support::ExternalProcess::spawn(&fixture);
+    let library = c_library_of(plain.process_id());
+    plain.release();
+    assert_eq!(exit_code(plain), Some(23));
+
+    // Inside the namespace, the library's path names a copy: same bytes,
+    // another inode.
+    let directory = support::ScratchDir::new("attach-mount-namespace");
+    let copy = directory.path().join("libc.so.6");
+    fs::copy(&library, &copy).expect("copy the C library");
+    let mut child = support::ExternalProcess::spawn_command(
+        std::process::Command::new("unshare")
+            .args(["--user", "--map-root-user", "--mount", "sh", "-c"])
+            .arg(r#"mount --bind "$1" "$2" && exec "$3""#)
+            .arg("sh")
+            .arg(&copy)
+            .arg(&library)
+            .arg(&fixture),
+    );
+    let process = child.process_id();
+    assert_eq!(c_library_of(process), library);
+
+    let debugger = child.attach().await;
+    let handle = debugger.handle();
+    let rooted = std::path::Path::new(&format!("/proc/{}/root", process.get()))
+        .join(library.strip_prefix("/").expect("an absolute path"));
+    let modules = handle.loaded_modules().await.expect("attached modules");
+    assert!(
+        modules.modules.iter().any(|module| *module.path == rooted),
+        "no module at {}: {:?}",
+        rooted.display(),
+        modules
+            .modules
+            .iter()
+            .map(|module| module.path.display().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    child.release();
+    debugger
+        .shutdown()
+        .await
+        .expect("detach the namespaced fixture");
+    assert_eq!(exit_code(child), Some(23));
+}
+
 #[tokio::test]
 async fn invalid_or_missing_attach_targets_fail_without_starting_a_session() {
     assert!(matches!(
