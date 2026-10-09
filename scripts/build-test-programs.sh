@@ -1053,6 +1053,9 @@ build_tokio_fixtures() {
     # tokio's unstable features, which record where each task was spawned and
     # give each task's vtable one more offset.
     variant unstable dev "--cfg tokio_unstable" "" workers
+    # With tokio's tracing feature too, as tokio-console needs: each task's
+    # future is wrapped in a span.
+    variant traced dev "--cfg tokio_unstable" workers/tracing workers
     # tokio's locks from parking_lot, whose mutexes are laid out as std's
     # are not.
     variant parking-lot dev "" workers/parking-lot workers
