@@ -186,3 +186,23 @@ test("a file's tab shows where it was, and the frame's file follows the frame", 
   await files.getByRole("button", { name: "stdio.h", exact: true }).click();
   await expect(page).toHaveURL(/[?&]src=[^&]*stdio\.h:50(&|$)/);
 });
+
+test("a reload keeps the tab's files, and where each was shown", async ({ page, uscope }) => {
+  await join(page, uscope.link);
+  const files = page.getByRole("navigation", { name: "Open files" });
+  const tab = (name: string) => files.getByRole("button", { name, exact: true });
+  await page.keyboard.press("Control+g");
+  await search(page).fill("stdio.h:50");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Control+p");
+  await search(page).fill("pthread.h");
+  await page.keyboard.press("Enter");
+  await expect(tab("pthread.h")).toHaveAttribute("aria-current", "page");
+
+  await page.reload();
+  await expect(tab("pthread.h")).toHaveAttribute("aria-current", "page");
+  await expect(files.getByRole("button", { name: /^Close / })).toHaveText(["×", "×", "×"]);
+  await expect(files).toContainText("kvstore.c");
+  await tab("stdio.h").click();
+  await expect(page).toHaveURL(/[?&]src=[^&]*stdio\.h:50(&|$)/);
+});

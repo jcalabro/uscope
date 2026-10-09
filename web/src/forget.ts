@@ -8,7 +8,8 @@ import { clearConsole } from "./console";
 import { type Cache, cache } from "./data";
 import { latestStop } from "./follow";
 import type { Model } from "./model";
-import { initialTab, tab } from "./tab";
+import { read, write } from "./storage";
+import { initialTab, isKeptFiles, type KeptFiles, tab } from "./tab";
 import { type Recall, recall } from "./tree";
 
 interface Marks {
@@ -68,17 +69,37 @@ export function forget(before: Marks, after: Marks, answers: Cache, values: Reca
   return false;
 }
 
-/** Forgets as `store`'s model changes, until the returned function is called. */
+/** Where a tab keeps a session's open files, which outlive a reload. */
+const keptFiles = (session: string) => `uscope-files-${session}`;
+
+/**
+ * Forgets as `store`'s model changes, until the returned function is called,
+ * and keeps the tab's open files for its session.
+ */
 export function forgetting(store: StoreApi<Model>): () => void {
   let before = marks(store.getState());
-  return store.subscribe((model) => {
+  const forgets = store.subscribe((model) => {
     const after = marks(model);
     if (forget(before, after, cache, recall)) {
       // Another program's files, places, and values are not this one's.
-      const { files, places, cursor, shown, editing, pinned, frames } = initialTab;
+      const { cursor, shown, editing, pinned, frames } = initialTab;
+      const empty: KeptFiles = { files: initialTab.files, places: initialTab.places };
+      const { files, places } = after.session
+        ? read(keptFiles(after.session), empty, isKeptFiles, "session")
+        : empty;
       tab.setState({ files, places, cursor, shown, editing, pinned, frames });
       clearConsole();
     }
     before = after;
   });
+  const keeps = tab.subscribe(({ files, places }, previous) => {
+    const session = store.getState().state?.session;
+    if (session && (files !== previous.files || places !== previous.places)) {
+      write(keptFiles(session), { files, places }, "session");
+    }
+  });
+  return () => {
+    forgets();
+    keeps();
+  };
 }
