@@ -87,6 +87,9 @@
           # Shares fixtures' debug information through supplementary files,
           # as distributions do.
           dwz
+          # The memory cap tests run under asks the user's systemd for a scope.
+          systemd
+          git
           # Profilers for the `just profile-*` recipes.
           perf
           valgrind

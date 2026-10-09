@@ -64,13 +64,18 @@ pub enum Supplementary {
 impl DebugFileSearch {
     /// The search the options ask for, with the system's debug directories
     /// after theirs and debuginfod's settings from the environment where
-    /// the options leave them out.
+    /// the options leave them out. Under nextest the search is the options'
+    /// alone: a test reads none of the machine's debug files, servers, or
+    /// debuginfod's cache.
     pub fn new(options: &DebugFileOptions) -> Self {
+        let machine = std::env::var_os("NEXTEST_RUN_ID").is_none();
         let mut directories = options.directories.clone();
-        if let Some(listed) = std::env::var_os("NIX_DEBUG_INFO_DIRS") {
-            directories.extend(std::env::split_paths(&listed));
+        if machine {
+            if let Some(listed) = std::env::var_os("NIX_DEBUG_INFO_DIRS") {
+                directories.extend(std::env::split_paths(&listed));
+            }
+            directories.push(PathBuf::from(SYSTEM_DEBUG_DIRECTORY));
         }
-        directories.push(PathBuf::from(SYSTEM_DEBUG_DIRECTORY));
         let mut seen = std::collections::BTreeSet::new();
         directories.retain(|directory| {
             !directory.as_os_str().is_empty() && seen.insert(directory.clone())
@@ -78,6 +83,8 @@ impl DebugFileSearch {
         let servers = if options.debuginfod {
             options.debuginfod_urls.clone().unwrap_or_else(|| {
                 std::env::var("DEBUGINFOD_URLS")
+                    .ok()
+                    .filter(|_| machine)
                     .map(|urls| urls.split_whitespace().map(str::to_owned).collect())
                     .unwrap_or_default()
             })
@@ -91,7 +98,10 @@ impl DebugFileSearch {
         Self {
             directories,
             servers,
-            cache: options.debuginfod_cache.clone().or_else(default_cache),
+            cache: options
+                .debuginfod_cache
+                .clone()
+                .or_else(|| default_cache().filter(|_| machine)),
             timeout: Some(timeout),
         }
     }

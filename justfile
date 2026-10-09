@@ -1,4 +1,10 @@
-set shell := ["bash", "-euo", "pipefail", "-c"]
+# Every recipe runs in the pinned Nix shell, entered unless it already runs
+# there, so that no build or test finds the host's tools or settings. The
+# few recipes that drive programs of the host's say so.
+# Bash runs with --norc: entering the shell starts it at the first shell
+# level, where Nix's bash reads ~/.bashrc whenever its input is a socket.
+set shell := ["scripts/hermetic.sh", "bash", "--norc", "-euo", "pipefail", "-c"]
+set script-interpreter := ["scripts/hermetic.sh", "bash", "--norc", "-euo", "pipefail"]
 set positional-arguments := true
 
 # Process-isolated debugger tests also create controller, waiter, and inferior
@@ -14,11 +20,14 @@ check: lint test web-test
 # Runs everything to check before committing.
 all: check web-e2e stress sim bench-smoke
 
-# Enters the Nix development shell.
+# Enters the pinned Nix development shell, or runs a command in it, with
+# nothing of the host's environment but the user and their terminal.
+[script("bash", "-euo", "pipefail")]
 dev *ARGS="":
     exec ./scripts/dev.sh "$@"
 
 # Installs the vscode extension as a symlink for fast local development.
+[script("bash")]
 install-vscode-symlink:
     ln -s "$PWD/editors/vscode" ~/.vscode/extensions/uscope.uscope-0.1.0
 
@@ -90,9 +99,8 @@ tokio *ARGS:
 # suite also runs against the loader itself. Arguments go to nextest, e.g.
 # `just stress 100 -E 'binary(dap)'`.
 [doc("Runs the test suite COUNT times under CPU load.")]
+[script]
 stress COUNT="10" *ARGS: build-test-programs
-    #!/usr/bin/env bash
-    set -euo pipefail
     # Build before the busy loops start so they slow only the tests.
     cargo nextest run --features tools --no-run
     cpus="$(nproc)"
@@ -103,9 +111,8 @@ stress COUNT="10" *ARGS: build-test-programs
 
 # Attaches uscope to a tokio server under load for MINUTES, inspecting and
 # re-attaching it over and over, with every invariant checked at every stop.
+[script]
 soak MINUTES="10": build-test-programs
-    #!/usr/bin/env bash
-    set -euo pipefail
     cargo nextest run --features tools --no-run
     USCOPE_SOAK_SECONDS="$(( $1 * 60 ))" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --profile soak --no-capture --run-ignored only --test tokio -E 'test(=soak::soak)'
 
@@ -132,9 +139,8 @@ web-e2e *ARGS: web build-test-programs
 
 # Serves PROGRAM on port 7342 with the page from Vite, which reloads on every
 # save: open the join link uscope prints, with 5173 in place of 7342.
+[script]
 web-dev *ARGS: web-deps
-    #!/usr/bin/env bash
-    set -euo pipefail
     cargo build --quiet --profile test
     ./target/debug/uscope web --port 7342 --allow-origin http://127.0.0.1:5173 "$@" &
     trap 'kill %1 2>/dev/null || true' EXIT
@@ -193,9 +199,8 @@ bench-smoke *ARGS: build-test-programs
 # bytes do not depend on the checkout. Fails unless they match the digest.
 large_commit := "d089093868eba621d618c059b9bb7374dd61c9fe"
 large_digest := "db849566d2cc0547bdb9c209da44075a9b6dd1b14b45b1814cadfce8ae44e480"
+[script]
 bench-large:
-    #!/usr/bin/env bash
-    set -euo pipefail
     dir="$PWD/target/bench/large"
     [[ -d "$dir/src" ]] || git worktree add --quiet --detach "$dir/src" {{large_commit}}
     git -C "$dir/src" checkout --quiet --detach {{large_commit}}
@@ -210,9 +215,8 @@ bench-large:
 
 # Prints where loading PROGRAM spends its instructions: Callgrind's
 # inclusive costs, trimmed to uscope's functions.
+[script]
 profile-instructions PROGRAM:
-    #!/usr/bin/env bash
-    set -euo pipefail
     cargo build --quiet --profile profiling --features tools --bin uscope-tools
     out="$(mktemp)"
     trap 'rm -f "$out"' EXIT
@@ -222,9 +226,8 @@ profile-instructions PROGRAM:
 # Prints which uscope functions allocate when loading PROGRAM, by blocks
 # and by bytes live at the heap's peak, under DHAT with the C library's
 # allocator, which Valgrind can see.
+[script]
 profile-heap PROGRAM:
-    #!/usr/bin/env bash
-    set -euo pipefail
     cargo build --quiet --profile profiling --features tools,system-alloc --bin uscope-tools
     out="$(mktemp)"
     trap 'rm -f "$out"' EXIT
@@ -247,13 +250,17 @@ fuzz TARGET *ARGS="":
 
 # Drives the DAP adapter from a real VS Code window, as a user would, and
 # records each session's traffic in DIR. Needs a display. Recording into
-# tests/dap/traffic refreshes the traffic the DAP tests replay.
+# tests/dap/traffic refreshes the traffic the DAP tests replay. VS Code is
+# the host's.
+[script("bash", "-euo", "pipefail")]
 uat-vscode DIR="target/uat": build
     PATH="$PWD/target/debug:$PATH" editors/vscode/test/run.sh "$1"
     sed -i "s#$PWD#\${root}#g" "$1"/vscode-*.log
 
 # Drives the DAP adapter from nvim-dap in a headless Neovim and records each
-# session's traffic in DIR. NVIM_DAP is an nvim-dap checkout.
+# session's traffic in DIR. NVIM_DAP is an nvim-dap checkout. Neovim is the
+# host's.
+[script("bash", "-euo", "pipefail")]
 uat-nvim NVIM_DAP DIR="target/uat": build
     rm -f "$2"/nvim-*.log
     PATH="$PWD/target/debug:$PATH" nvim --headless --clean -l editors/nvim/uat.lua "$1" "$PWD" "$2"

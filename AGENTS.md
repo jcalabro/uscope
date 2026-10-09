@@ -83,6 +83,18 @@ Run all project commands inside the pinned Nix environment. Do not run `cargo`,
 non-interactive use, wrap the command with `just dev --command`, for example
 `just dev --command just`.
 
+Builds and tests are hermetic: they depend on nothing of the host's but the
+kernel, the user's systemd, and the files a test makes. `just dev` is a pure
+shell (`nix develop --ignore-env`) that keeps only the variables
+`scripts/dev.sh` lists, and the justfile runs every recipe through
+`scripts/hermetic.sh`, which enters that shell unless it already runs there,
+so a recipe started from a direnv shell is just as hermetic. Every tool a
+build, fixture, or test runs comes from the flake: add a missing one there
+rather than finding it on the host. Fixtures and tests name no host path,
+and under nextest the debugger searches none of the machine's debug files,
+as it uses no image cache. Only recipes that drive a program of the host's,
+such as VS Code, opt out, and say so.
+
 From the nix environment (activated via direnv), run the complete local gate (default recipe):
 
 ```sh

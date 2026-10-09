@@ -4673,7 +4673,7 @@ fn info_modules_names_separate_debug_files_and_why_one_is_unusable() {
             "symbols",
             "basic-build-id",
             "\n  cannot use the debug file ",
-            ": its dwz supplementary file /usr/lib/debug/.dwz/uscope-fixture (build-id 01020304) \
+            ": its dwz supplementary file ../../.dwz/uscope-fixture (build-id 01020304) \
              was not found",
         ],
     );
