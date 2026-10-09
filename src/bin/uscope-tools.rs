@@ -129,7 +129,6 @@ enum Corpus {
 }
 
 fn main() -> ExitCode {
-    uscope::profile::wait_for_viewer();
     match run(Args::parse()) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
