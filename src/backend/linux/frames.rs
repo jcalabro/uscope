@@ -15,11 +15,11 @@ use crate::unwind::{
     collect_frames,
 };
 use crate::{
-    AddressDescription, Backtrace, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo,
-    CodeInstanceKind, CodeRole, Error, ExecutionContext, ExecutionLocation, FrameKind,
-    ImageAddress, ImageLocation, InlineFrameLookup, LoadedModule, ModuleAddress, ModuleId,
-    ModuleImage, Result, SourceLocation, StackFrame, StackFrameId, StackSegment, TypeReference,
-    UnwindTermination, VariableUnavailableReason, VirtualAddress,
+    AddressDescription, Backtrace, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceKind,
+    CodeRole, Error, ExecutionContext, ExecutionLocation, FrameKind, ImageAddress, ImageLocation,
+    InlineFrameLookup, LoadedModule, ModuleAddress, ModuleId, ModuleImage, Result, SourceLocation,
+    StackFrame, StackFrameId, StackSegment, TypeReference, UnwindTermination,
+    VariableUnavailableReason, VirtualAddress,
 };
 
 use super::activation::{StackPosition, StackView};
@@ -827,12 +827,7 @@ pub(super) fn default_inline_visible_count(
         .position(|instance| {
             module_image
                 .code_instance(*instance)
-                .is_some_and(|instance| {
-                    instance
-                        .ranges
-                        .iter()
-                        .any(|range| range.start == image_address)
-                })
+                .is_some_and(|instance| instance.ranges().any(|range| range.start == image_address))
         })
         .map_or(inline_chain.len(), |index| {
             // `position` is a zero-based frame index; presentation uses a
@@ -899,8 +894,8 @@ pub(super) fn apply_presentation(
         .or(location.physical_instance);
     location.function = selected_instance
         .and_then(|instance| module_image.code_instance(instance))
-        .and_then(|instance| module_image.function(instance.function))
-        .cloned();
+        .and_then(|instance| module_image.function(instance.function()))
+        .map(crate::Function::info);
     location.source = visible_source(module_image, location, &chain.instances, visible);
 
     Ok(())
@@ -957,9 +952,9 @@ fn visible_source(
 }
 
 /// Where an inline instance was called from.
-fn call_site(instance: &CodeInstanceInfo) -> Option<SourceLocation> {
-    match &instance.kind {
-        CodeInstanceKind::Inline { call_site } => call_site.clone(),
+fn call_site(instance: crate::CodeInstance<'_>) -> Option<SourceLocation> {
+    match instance.kind() {
+        CodeInstanceKind::Inline { call_site } => call_site,
         CodeInstanceKind::OutOfLine => None,
     }
 }
@@ -1159,7 +1154,9 @@ fn push_code_frames(
             let instance = module_image
                 .code_instance(instance_id)
                 .expect("inline chain references a known instance");
-            let function = module_image.function(instance.function).cloned();
+            let function = module_image
+                .function(instance.function())
+                .map(crate::Function::info);
             let level = u32::try_from(frames.len()).expect("frame count fits in u32");
             let role = function
                 .as_ref()
@@ -1171,7 +1168,7 @@ fn push_code_frames(
                 module,
                 Some(instruction),
                 FrameMetadata {
-                    code_instance: Some(instance.id),
+                    code_instance: Some(instance.id()),
                     function,
                     source,
                     symbol: None,
@@ -1189,8 +1186,8 @@ fn push_code_frames(
         .physical_instance
         .and_then(|instance| module_image.code_instance(instance));
     let function = physical_instance
-        .and_then(|instance| module_image.function(instance.function))
-        .cloned();
+        .and_then(|instance| module_image.function(instance.function()))
+        .map(crate::Function::info);
     let level = u32::try_from(frames.len()).expect("frame count fits in u32");
 
     frames.push(StackFrame::from_parts(
@@ -1199,7 +1196,7 @@ fn push_code_frames(
         module,
         Some(instruction),
         FrameMetadata {
-            code_instance: physical_instance.map(|instance| instance.id),
+            code_instance: physical_instance.map(crate::image::functions::CodeInstance::id),
             function,
             source: physical_source,
             // A caller is looked up just before its return address, but

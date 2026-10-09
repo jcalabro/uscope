@@ -114,7 +114,7 @@ fn declaration_canonicalization_cannot_launder_a_non_type_reference() {
         .next()
         .expect("read unit header")
         .expect("one test unit");
-    let units = vec![dwarf.unit(header).expect("read test unit")];
+    let units = super::super::Units::new(vec![dwarf.unit(header).expect("read test unit")]);
     let type_value = {
         let mut entries = units[0].entries();
         let mut value = None;

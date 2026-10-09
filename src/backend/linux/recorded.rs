@@ -232,10 +232,10 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
         &self,
         pid: Pid,
         executable: &Path,
-        executable_data: &[u8],
+        image_base: u64,
         identity: FileIdentity,
     ) -> Result<u64> {
-        let bias = self.0.load_bias(pid, executable, executable_data, identity);
+        let bias = self.0.load_bias(pid, executable, image_base, identity);
         match &bias {
             Ok(bias) => record!("load bias of {pid} -> {bias:#x}"),
             Err(error) => record!("load bias of {pid} -> error {error:?}"),

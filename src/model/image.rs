@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::image::functions::{CodeInstance, Function, FunctionView};
 use crate::image::lines::LineView;
+use crate::image::symbols::{Symbol, SymbolView};
 use crate::{Error, Result};
 
 mod locations;
@@ -14,12 +16,12 @@ pub use locations::PackageInfo;
 
 use super::{
     AddressRange, BreakpointEntry, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole,
-    EntryProvenance, FunctionId, FunctionInfo, GlobalVariableId, GlobalVariableInfo, GotSlot,
-    ImageAddress, ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup,
-    LineEntry, LineNumber, ModuleImageId, SectionId, SectionInfo, SectionLocation, SourceFile,
-    SourceFileId, SourceLanguage, SourceLocation, StatementRow, SymbolExtentProvenance, SymbolId,
-    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TypeId,
-    TypeInfo, TypeNode, TypeReference,
+    FunctionId, FunctionInfo, GlobalVariableId, GlobalVariableInfo, GotSlot, ImageAddress,
+    ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup, LineEntry, LineNumber,
+    ModuleImageId, SectionId, SectionInfo, SectionLocation, SourceFile, SourceFileId,
+    SourceLanguage, SourceLocation, StatementRow, SymbolExtentProvenance, SymbolId, SymbolInfo,
+    SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TypeId, TypeInfo, TypeNode,
+    TypeReference,
 };
 
 #[derive(Default)]
@@ -36,6 +38,8 @@ pub struct ModuleMetadata {
     pub files: crate::image::lines::Files,
     /// Every line-program row and the code each line describes.
     pub lines: crate::image::lines::LineTables,
+    /// The call-frame sections and Go's table, as unwinding reads them.
+    pub unwind: Option<crate::image::unwind::Unwind>,
     pub sections: Vec<SectionInfo>,
     /// Rust trait objects' vtables, by address, with the concrete type each
     /// is for.
@@ -184,56 +188,6 @@ fn global_selectors(metadata: &ModuleMetadata) -> Vec<(Arc<str>, GlobalVariableI
     selectors
 }
 
-/// The entries of each code instance: every distinct `prologue_end` address
-/// within an out-of-line instance, or otherwise its own breakpoint entry.
-fn recommended_entries(
-    metadata: &ModuleMetadata,
-    lines: LineView<'_>,
-    code_range_index: &RangeIndex<CodeInstanceId>,
-) -> BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>> {
-    let mut prologue_ends = BTreeMap::<CodeInstanceId, Vec<BreakpointEntry>>::new();
-    for address in lines
-        .public_rows()
-        .filter(|(_, _, flags)| flags & crate::image::lines::row_flags::PROLOGUE_END != 0)
-        .map(|(_, address, _)| address)
-    {
-        for id in code_range_index.containing(address) {
-            if !matches!(
-                metadata.code_instances[id.index()].kind,
-                CodeInstanceKind::OutOfLine
-            ) {
-                continue;
-            }
-            let entries = prologue_ends.entry(id).or_default();
-            if !entries.iter().any(|entry| entry.address == address) {
-                entries.push(BreakpointEntry {
-                    address,
-                    provenance: EntryProvenance::Statement,
-                });
-            }
-        }
-    }
-    metadata
-        .code_instances
-        .iter()
-        .filter_map(|instance| {
-            // A coroutine's body begins past its dispatch, wherever its
-            // prologue ends.
-            let entries = match (
-                prologue_ends.remove(&instance.id),
-                instance.breakpoint_entry,
-            ) {
-                (_, Some(entry)) if entry.provenance == EntryProvenance::CoroutineBody => {
-                    vec![entry]
-                }
-                (Some(entries), _) => entries,
-                (None, entry) => vec![entry?],
-            };
-            Some((instance.id, entries.into()))
-        })
-        .collect()
-}
-
 /// Where each function symbol with an extent begins, in order.
 fn function_starts(symbols: &[SymbolInfo]) -> Vec<ImageAddress> {
     let mut starts = symbols
@@ -264,20 +218,62 @@ fn source_files(tables: &crate::image::Image) -> Arc<[SourceFile]> {
         .collect()
 }
 
-/// The image of a module's files and lines.
-fn line_image(
-    target: TargetDescription,
-    files: &crate::image::lines::Files,
-    lines: &crate::image::lines::LineTables,
-) -> crate::image::Image {
+/// The image of a module's tables.
+fn seal_image(target: TargetDescription, metadata: &ModuleMetadata) -> crate::image::Image {
     let mut builder = crate::image::Builder::new(target);
-    lines.add_to(&mut builder);
-    files
+    let mut strings = crate::image::StringsBuilder::default();
+    metadata.lines.add_to(&mut builder);
+    metadata
+        .files
         .add_to(&mut builder)
         .expect("source paths come from NUL-terminated strings");
+    crate::image::symbols::add_to(
+        &mut builder,
+        &mut strings,
+        &metadata.symbols,
+        &metadata.sections,
+        &metadata.got_slots,
+    )
+    .expect("names come from NUL-terminated strings");
+    crate::image::facts::add_to(
+        &mut builder,
+        &mut strings,
+        &crate::image::facts::Facts {
+            symbol_sources: &metadata.symbol_sources,
+            thread_local_storage: metadata.thread_local_storage,
+            thread_locals: &metadata.thread_locals,
+        },
+    )
+    .expect("the loader's facts fit an image");
+    crate::image::packages::add_to(
+        &mut builder,
+        &mut strings,
+        metadata
+            .packages
+            .iter()
+            .map(|package| (&*package.path, &*package.name)),
+        &locations::packaged_names(&metadata.functions, &metadata.packages),
+    )
+    .expect("the loader's packages fit an image");
+    crate::image::functions::add_to(
+        &mut builder,
+        &mut strings,
+        &crate::image::functions::Code {
+            functions: &metadata.functions,
+            instances: &metadata.code_instances,
+            prologue_ends: &metadata.lines.prologue_ends(),
+            instruction_starts: &instruction_starts(metadata),
+        },
+    )
+    .expect("the loader's functions fit an image");
+    if let Some(unwind) = &metadata.unwind {
+        crate::image::unwind::add_to(&mut builder, &mut strings, unwind)
+            .expect("the loader's call-frame information fits an image");
+    }
+    builder.bytes(crate::image::TableKind::Strings, strings.into_bytes());
     builder
         .seal(crate::image::Limits::default())
-        .expect("the loader's line tables are valid")
+        .expect("the loader's tables are valid")
 }
 
 fn validate_dense_ids(metadata: &ModuleMetadata) {
@@ -347,22 +343,13 @@ pub struct ModuleImage {
     path: Arc<PathBuf>,
     target: TargetDescription,
     address_range: AddressRange<ImageAddress>,
-    functions: Arc<[FunctionInfo]>,
-    code_instances: Arc<[CodeInstanceInfo]>,
-    symbols: Arc<[SymbolInfo]>,
-    symbol_sources: SymbolTableSources,
     got_slots: Arc<[GotSlot]>,
     sections: Arc<[SectionInfo]>,
-    thread_local_storage: bool,
     globals: Arc<[GlobalVariableInfo]>,
     types: Arc<[TypeNode]>,
     source_files: Arc<[SourceFile]>,
-    /// Lines and files, as tables.
+    /// Lines, files, symbols, sections, functions, and code, as tables.
     tables: Arc<crate::image::Image>,
-    functions_by_name: BTreeMap<Arc<str>, Arc<[FunctionId]>>,
-    /// Functions by their names within the packages defining them.
-    function_names: locations::FunctionNames,
-    symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
     /// Symbols by the last part of each name they answer to, built on the
     /// first search for one, since it demangles every symbol.
     symbols_by_last_part: std::sync::OnceLock<HashMap<Box<str>, Vec<SymbolId>>>,
@@ -370,16 +357,6 @@ pub struct ModuleImage {
     /// built on the first search for one.
     coroutine_functions: std::sync::OnceLock<HashMap<Arc<str>, Vec<FunctionId>>>,
     globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
-    instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
-    recommended_entries_by_instance: BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>>,
-    code_range_index: RangeIndex<CodeInstanceId>,
-    symbol_range_index: RangeIndex<SymbolId>,
-    storage_range_index: RangeIndex<SymbolId>,
-    /// Unsized data symbols, each indexed by its one-byte address.
-    unsized_data_index: RangeIndex<SymbolId>,
-    section_range_index: RangeIndex<SectionId>,
-    /// Known instruction starts in address order, one per address.
-    instruction_starts: Arc<[(ImageAddress, crate::BoundaryEvidence)]>,
     type_index: crate::type_identity::TypeIndex,
     /// Rust trait objects' vtables, with the concrete type each is for.
     vtables: std::collections::BTreeMap<ImageAddress, TypeReference>,
@@ -390,7 +367,6 @@ pub struct ModuleImage {
     resume_code: RangeIndex<CodeInstanceId>,
     constants: BTreeMap<Arc<str>, crate::IntegerValue>,
     producers: Arc<[Arc<str>]>,
-    thread_locals: BTreeMap<Arc<str>, std::result::Result<ThreadLocal, Arc<str>>>,
     /// The index in `types` of the first type each Go runtime type
     /// descriptor offset names.
     go_runtime_types: std::collections::BTreeMap<u64, usize>,
@@ -420,7 +396,6 @@ fn go_runtime_types(types: &[TypeNode]) -> std::collections::BTreeMap<u64, usize
 }
 
 impl ModuleImage {
-    #[expect(clippy::too_many_lines, reason = "one constructor builds every index")]
     pub(crate) fn new(
         path: PathBuf,
         target: TargetDescription,
@@ -429,49 +404,14 @@ impl ModuleImage {
     ) -> Self {
         validate_dense_ids(&metadata);
         metadata.lines.clip_at(&function_starts(&metadata.symbols));
-        let tables = Arc::new(line_image(target, &metadata.files, &metadata.lines));
-        crate::count!("line_image_bytes", tables.as_bytes().len());
+        let phase = crate::span!("image.seal");
+        let tables = Arc::new(seal_image(target, &metadata));
+        drop(phase);
+        crate::count!("image_bytes", tables.as_bytes().len());
         metadata.lines = crate::image::lines::LineTables::default();
-        let lines = LineView::new(&tables);
         let source_files = source_files(&tables);
-        let code_range_index =
-            RangeIndex::new(metadata.code_instances.iter().flat_map(|instance| {
-                instance
-                    .ranges
-                    .iter()
-                    .copied()
-                    .map(|range| (range, instance.id))
-            }));
-        let symbol_range_index = RangeIndex::new(
-            metadata
-                .symbols
-                .iter()
-                .filter_map(|symbol| Some((symbol.extent?.range, symbol.id))),
-        );
-        let storage_range_index = RangeIndex::new(
-            metadata
-                .symbols
-                .iter()
-                .filter_map(|symbol| Some((symbol.storage?, symbol.id))),
-        );
-        let unsized_data_index = RangeIndex::new(metadata.symbols.iter().filter_map(|symbol| {
-            let storage = symbol.storage?;
-            (storage.start == storage.end).then_some((
-                AddressRange {
-                    start: storage.start,
-                    end: ImageAddress::new(storage.start.get().checked_add(1)?),
-                },
-                symbol.id,
-            ))
-        }));
-        let instruction_starts = instruction_starts(&metadata);
-        let section_range_index = RangeIndex::new(
-            metadata
-                .sections
-                .iter()
-                .map(|section| (section.range, section.id)),
-        );
 
+        let phase = crate::span!("image.type_index");
         let type_index = crate::type_identity::TypeIndex::build(
             metadata
                 .types
@@ -484,55 +424,22 @@ impl ModuleImage {
                 TypeNode::Malformed { .. } => None,
             },
         );
+        drop(phase);
+        let globals_by_selector = grouped_index(global_selectors(&metadata));
 
         Self {
-            functions_by_name: grouped_index(
-                metadata
-                    .functions
-                    .iter()
-                    .map(|function| (Arc::clone(&function.name), function.id)),
-            ),
-            function_names: locations::FunctionNames::new(&metadata.functions, &metadata.packages),
-            symbols_by_name: grouped_index(
-                metadata
-                    .symbols
-                    .iter()
-                    .map(|symbol| (Arc::clone(&symbol.name), symbol.id)),
-            ),
             symbols_by_last_part: std::sync::OnceLock::new(),
             coroutine_functions: std::sync::OnceLock::new(),
-            globals_by_selector: grouped_index(global_selectors(&metadata)),
-            instances_by_function: grouped_index(
-                metadata
-                    .code_instances
-                    .iter()
-                    .map(|instance| (instance.function, instance.id)),
-            ),
-            recommended_entries_by_instance: recommended_entries(
-                &metadata,
-                lines,
-                &code_range_index,
-            ),
+            globals_by_selector,
             id: ModuleImageId::new(0),
             path: Arc::new(path),
             target,
             address_range,
-            functions: metadata.functions.into(),
-            code_instances: metadata.code_instances.into(),
-            symbols: metadata.symbols.into(),
-            symbol_sources: metadata.symbol_sources,
-            got_slots: metadata.got_slots.into(),
-            sections: metadata.sections.into(),
-            thread_local_storage: metadata.thread_local_storage,
+            got_slots: crate::image::symbols::got_slots(&tables).into(),
+            sections: crate::image::symbols::sections(&tables).into(),
             globals: metadata.globals.into(),
             types: Arc::clone(&metadata.types),
             source_files,
-            code_range_index,
-            symbol_range_index,
-            storage_range_index,
-            unsized_data_index,
-            section_range_index,
-            instruction_starts,
             type_index,
             vtables: metadata.vtables.iter().copied().collect(),
             coroutines: std::mem::take(&mut metadata.coroutines),
@@ -557,7 +464,6 @@ impl ModuleImage {
             resume_points: std::mem::take(&mut metadata.resume_points),
             constants: std::mem::take(&mut metadata.constants),
             producers: std::mem::take(&mut metadata.producers).into(),
-            thread_locals: std::mem::take(&mut metadata.thread_locals),
             go_runtime_types: go_runtime_types(&metadata.types),
             views: crate::view::ViewSet::empty(),
             tables,
@@ -657,34 +563,41 @@ impl ModuleImage {
     }
 
     /// Returns all functions described by this image.
-    #[must_use]
-    pub fn functions(&self) -> &[FunctionInfo] {
-        &self.functions
+    pub fn functions(&self) -> impl ExactSizeIterator<Item = Function<'_>> + DoubleEndedIterator {
+        self.function_view().functions()
     }
 
     /// Looks up a source-level function by identifier.
     #[must_use]
-    pub fn function(&self, id: FunctionId) -> Option<&FunctionInfo> {
-        self.functions.get(id.index())
+    pub fn function(&self, id: FunctionId) -> Option<Function<'_>> {
+        self.function_view().function(id)
     }
 
     /// Returns all concrete code instances described by this image.
-    #[must_use]
-    pub fn code_instances(&self) -> &[CodeInstanceInfo] {
-        &self.code_instances
+    pub fn code_instances(
+        &self,
+    ) -> impl ExactSizeIterator<Item = CodeInstance<'_>> + DoubleEndedIterator {
+        self.function_view().instances()
+    }
+
+    fn function_view(&self) -> FunctionView<'_> {
+        FunctionView::new(&self.tables)
+    }
+
+    fn symbol_view(&self) -> SymbolView<'_> {
+        SymbolView::new(&self.tables)
     }
 
     /// Returns all linker symbols described by this image, ordered by
     /// address and then name.
-    #[must_use]
-    pub fn symbols(&self) -> &[SymbolInfo] {
-        &self.symbols
+    pub fn symbols(&self) -> impl ExactSizeIterator<Item = Symbol<'_>> + DoubleEndedIterator {
+        self.symbol_view().all()
     }
 
     /// Looks up a linker symbol by identifier.
     #[must_use]
-    pub fn symbol(&self, id: SymbolId) -> Option<&SymbolInfo> {
-        self.symbols.get(id.index())
+    pub fn symbol(&self, id: SymbolId) -> Option<Symbol<'_>> {
+        self.symbol_view().get(id)
     }
 
     /// Returns the image's allocated sections, ordered by address.
@@ -702,29 +615,35 @@ impl ModuleImage {
     /// Whether each thread gets its own copy of a block of the module's
     /// storage, such as an ELF `PT_TLS` segment describes.
     #[must_use]
-    pub const fn has_thread_local_storage(&self) -> bool {
-        self.thread_local_storage
+    pub fn has_thread_local_storage(&self) -> bool {
+        self.facts().thread_local_storage()
+    }
+
+    fn facts(&self) -> crate::image::facts::FactsView<'_> {
+        crate::image::facts::FactsView::new(&self.tables)
     }
 
     /// Finds the allocated section containing an image address. Should
     /// malformed sections overlap, the innermost one wins.
     fn section_containing(&self, address: ImageAddress) -> Option<&SectionInfo> {
-        self.section_range_index
-            .containing(address)
-            .filter_map(|id| self.section(id))
-            .min_by_key(|section| {
-                (
-                    std::cmp::Reverse(section.range.start),
-                    section.range.end,
-                    section.id,
-                )
-            })
+        crate::image::index::containing(
+            self.tables.shared(crate::image::TableKind::SectionRanges),
+            address,
+        )
+        .filter_map(|id| self.section(SectionId::new(id)))
+        .min_by_key(|section| {
+            (
+                std::cmp::Reverse(section.range.start),
+                section.range.end,
+                section.id,
+            )
+        })
     }
 
     /// Returns which symbol tables this image provided.
     #[must_use]
-    pub const fn symbol_sources(&self) -> &SymbolTableSources {
-        &self.symbol_sources
+    pub fn symbol_sources(&self) -> SymbolTableSources {
+        self.facts().symbol_sources()
     }
 
     /// Finds the code symbol whose extent contains an image address.
@@ -737,18 +656,14 @@ impl ModuleImage {
     /// contains has no symbol; the nearest preceding symbol is never guessed.
     #[must_use]
     pub fn symbolize(&self, address: ImageAddress) -> Option<SymbolLocation> {
-        let symbol = self
-            .symbol_range_index
-            .containing(address)
-            .filter_map(|id| self.symbol(id))
-            .min_by_key(|symbol| symbol_preference(symbol))?;
-        let extent = symbol.extent.expect("indexed symbols have extents");
+        let symbol = self.symbol_view().code_at(address)?;
+        let extent = symbol.extent().expect("indexed symbols have extents");
 
         Some(SymbolLocation {
-            symbol: symbol.id,
-            name: Arc::clone(&symbol.name),
-            kind: symbol.kind,
-            offset: address.get() - symbol.address.get(),
+            symbol: symbol.id(),
+            name: symbol.name().into(),
+            kind: symbol.kind(),
+            offset: address.get() - symbol.address().get(),
             provenance: extent.provenance,
         })
     }
@@ -759,24 +674,14 @@ impl ModuleImage {
     /// unsized data symbol at exactly that address. An address inside no
     /// declared storage is never attributed to the nearest preceding object.
     fn symbolize_data(&self, address: ImageAddress) -> Option<SymbolLocation> {
-        let symbol = self
-            .storage_range_index
-            .containing(address)
-            .filter_map(|id| self.symbol(id))
-            .min_by_key(|symbol| storage_preference(symbol))
-            .or_else(|| {
-                self.unsized_data_index
-                    .containing(address)
-                    .filter_map(|id| self.symbol(id))
-                    .min_by_key(|symbol| storage_preference(symbol))
-            })?;
-        let storage = symbol.storage.expect("indexed symbols have storage");
+        let symbol = self.symbol_view().data_at(address)?;
+        let storage = symbol.storage().expect("indexed symbols have storage");
 
         Some(SymbolLocation {
-            symbol: symbol.id,
-            name: Arc::clone(&symbol.name),
-            kind: symbol.kind,
-            offset: address.get() - symbol.address.get(),
+            symbol: symbol.id(),
+            name: symbol.name().into(),
+            kind: symbol.kind(),
+            offset: address.get() - symbol.address().get(),
             provenance: if storage.start < storage.end {
                 SymbolExtentProvenance::Declared
             } else {
@@ -794,13 +699,7 @@ impl ModuleImage {
         &self,
         range: AddressRange<ImageAddress>,
     ) -> impl Iterator<Item = (ImageAddress, crate::BoundaryEvidence)> + '_ {
-        let first = self
-            .instruction_starts
-            .partition_point(|(address, _)| *address < range.start);
-        self.instruction_starts[first..]
-            .iter()
-            .take_while(move |(address, _)| *address < range.end)
-            .copied()
+        self.function_view().instruction_starts(range)
     }
 
     /// Returns the source line containing an image address, when the line
@@ -835,7 +734,7 @@ impl ModuleImage {
     /// why that is unknown; `None` when the image defines none by the name.
     #[must_use]
     pub fn thread_local(&self, name: &str) -> Option<std::result::Result<ThreadLocal, Arc<str>>> {
-        self.thread_locals.get(name).cloned()
+        self.facts().thread_local(name)
     }
 
     /// Where each thread's copy is of the one thread-local variable whose
@@ -848,7 +747,7 @@ impl ModuleImage {
         scope: &str,
         name: &str,
     ) -> Option<std::result::Result<ThreadLocal, Arc<str>>> {
-        let mut found = self.thread_locals.iter().filter(|(symbol, _)| {
+        let mut found = self.facts().thread_locals().filter(|(symbol, _)| {
             symbol.contains(name)
                 && crate::demangle::demangle(symbol).is_some_and(|demangled| {
                     demangled
@@ -863,7 +762,7 @@ impl ModuleImage {
         Some(if found.next().is_some() {
             Err(format!("several thread-local variables are named {name} within {scope}").into())
         } else {
-            place.clone()
+            place
         })
     }
 
@@ -945,13 +844,16 @@ impl ModuleImage {
     /// The functions that run the coroutine of type `ty`, or any type the
     /// same as it.
     #[must_use]
-    pub fn coroutine_functions(&self, ty: TypeId) -> Vec<&FunctionInfo> {
+    pub fn coroutine_functions(&self, ty: TypeId) -> Vec<Function<'_>> {
         let key = |id| self.type_key(TypeReference { image: self.id, id });
         let index = self.coroutine_functions.get_or_init(|| {
             let mut index = HashMap::<Arc<str>, Vec<FunctionId>>::new();
-            for function in self.functions.iter() {
-                if let Some(key) = function.coroutine.and_then(key) {
-                    index.entry(Arc::clone(key)).or_default().push(function.id);
+            for function in self.functions() {
+                if let Some(key) = function.coroutine().and_then(key) {
+                    index
+                        .entry(Arc::clone(key))
+                        .or_default()
+                        .push(function.id());
                 }
             }
             index
@@ -997,11 +899,11 @@ impl ModuleImage {
     pub fn vtable_class(&self, address: ImageAddress) -> Option<(String, ImageAddress)> {
         let location = self.symbolize_data(address)?;
         let symbol = self.symbol(location.symbol)?;
-        let name = crate::demangle::demangle(&symbol.name)?;
+        let name = crate::demangle::demangle(symbol.name())?;
         let class = name
             .strip_prefix("vtable for ")
             .or_else(|| name.strip_prefix("{vtable(")?.strip_suffix(")}"))?;
-        Some((class.to_owned(), symbol.address))
+        Some((class.to_owned(), symbol.address()))
     }
 
     /// The type Go's runtime describes at `offset` from `runtime.types`, as
@@ -1096,9 +998,14 @@ impl ModuleImage {
         }
     }
 
-    /// The bytes of the image's line and file tables.
+    /// The image's tables.
+    pub(crate) const fn tables(&self) -> &Arc<crate::image::Image> {
+        &self.tables
+    }
+
+    /// The bytes of the image's tables.
     #[cfg(test)]
-    pub(crate) fn line_image_bytes(&self) -> &[u8] {
+    pub(crate) fn image_bytes(&self) -> &[u8] {
         self.tables.as_bytes()
     }
 
@@ -1131,11 +1038,9 @@ impl ModuleImage {
         &self,
         instance: CodeInstanceId,
     ) -> impl Iterator<Item = BreakpointEntry> + '_ {
-        self.recommended_entries_by_instance
-            .get(&instance)
+        self.code_instance(instance)
             .into_iter()
-            .flat_map(|entries| entries.iter())
-            .copied()
+            .flat_map(CodeInstance::recommended_entries)
     }
 
     #[cfg(feature = "tools")]
@@ -1146,9 +1051,9 @@ impl ModuleImage {
     /// The line ranges that start in `instance`'s code, in order.
     pub(crate) fn line_entries_in(
         &self,
-        instance: &CodeInstanceInfo,
+        instance: CodeInstance<'_>,
     ) -> impl Iterator<Item = LineEntry> + '_ {
-        self.lines().line_entries_starting_in(&instance.ranges)
+        self.lines().line_entries_starting_in(instance.ranges())
     }
 
     pub(crate) fn line_entry_containing(&self, address: ImageAddress) -> Option<LineEntry> {
@@ -1157,20 +1062,34 @@ impl ModuleImage {
 
     /// Looks up a concrete code instance by identifier.
     #[must_use]
-    pub fn code_instance(&self, id: CodeInstanceId) -> Option<&CodeInstanceInfo> {
-        self.code_instances.get(id.index())
+    pub fn code_instance(&self, id: CodeInstanceId) -> Option<CodeInstance<'_>> {
+        self.function_view().instance(id)
     }
 
     /// Returns the concrete instances of one source-level function.
     pub fn instances_for_function(
         &self,
         function: FunctionId,
-    ) -> impl Iterator<Item = &CodeInstanceInfo> {
-        self.instances_by_function
-            .get(&function)
+    ) -> impl Iterator<Item = CodeInstance<'_>> {
+        self.function(function)
             .into_iter()
-            .flat_map(|instances| instances.iter())
-            .filter_map(|instance| self.code_instance(*instance))
+            .flat_map(Function::instances)
+    }
+
+    /// The instances whose code contains `address`.
+    fn instances_containing(
+        &self,
+        address: ImageAddress,
+    ) -> impl Iterator<Item = CodeInstance<'_>> {
+        self.function_view().instances_containing(address)
+    }
+
+    /// The physical instance whose code contains `address`, the first of
+    /// several.
+    fn physical_instance(&self, address: ImageAddress) -> Option<CodeInstance<'_>> {
+        self.instances_containing(address)
+            .filter(|instance| instance.is_out_of_line())
+            .min_by_key(|instance| instance.id())
     }
 
     /// Returns image addresses associated with one source line.
@@ -1247,18 +1166,14 @@ impl ModuleImage {
         }
         let lines = self.lines();
         let before = lines.statements(file, 1..=line.get());
-        let encloses_request = |instance: &CodeInstanceInfo| {
+        let encloses_request = |instance: CodeInstance<'_>| {
             before
                 .iter()
                 .any(|key| instance.contains(lines.address(key.row.get())))
         };
         self.statement_addresses(file, next)
-            .flat_map(|address| {
-                self.code_range_index
-                    .containing(address)
-                    .filter_map(|instance| self.code_instance(instance))
-            })
-            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+            .flat_map(|address| self.instances_containing(address))
+            .filter(|instance| instance.is_out_of_line())
             .any(encloses_request)
             .then_some(next)
     }
@@ -1267,15 +1182,15 @@ impl ModuleImage {
     ///
     /// Only functions with code compete: a compile unit that merely calls
     /// a function defined in another one may describe it by a declaration.
-    pub fn function_named(&self, name: &str) -> Result<&FunctionInfo> {
+    pub fn function_named(&self, name: &str) -> Result<Function<'_>> {
         let named = self.functions_named(name).collect::<Vec<_>>();
         let defined = named
             .iter()
             .copied()
-            .filter(|function| self.instances_for_function(function.id).next().is_some())
+            .filter(|function| function.instances().next().is_some())
             .collect::<Vec<_>>();
         match (defined.as_slice(), named.as_slice()) {
-            ([function], _) | ([], [function]) => Ok(function),
+            ([function], _) | ([], [function]) => Ok(*function),
             (_, []) => Err(Error::FunctionNotFound(name.to_owned())),
             _ => Err(Error::DuplicateFunction(name.to_owned())),
         }
@@ -1283,42 +1198,31 @@ impl ModuleImage {
 
     /// Returns every function with the supplied source-level name, such as
     /// C++ overloads and same-named static functions of different files.
-    pub fn functions_named(&self, name: &str) -> impl Iterator<Item = &FunctionInfo> {
-        self.functions_by_name
-            .get(name)
-            .into_iter()
-            .flat_map(|functions| functions.iter())
-            .map(|function| {
-                self.function(*function)
-                    .expect("name index references a function")
-            })
+    pub fn functions_named<'a>(&'a self, name: &str) -> impl Iterator<Item = Function<'a>> + 'a {
+        self.function_view().named(name)
     }
 
     /// Every linker symbol with the supplied name.
-    pub fn symbols_named(&self, name: &str) -> impl Iterator<Item = &SymbolInfo> {
-        self.symbols_by_name
-            .get(name)
-            .into_iter()
-            .flat_map(|symbols| symbols.iter())
-            .filter_map(|symbol| self.symbol(*symbol))
+    pub fn symbols_named<'a>(&'a self, name: &str) -> impl Iterator<Item = Symbol<'a>> + 'a {
+        self.symbol_view().named(name)
     }
 
-    /// Every symbol that answers to a name as [`SymbolInfo::answers_to`]
+    /// Every symbol that answers to a name as [`Symbol::answers_to`]
     /// reads it.
-    pub fn symbols_answering<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a SymbolInfo> {
+    pub fn symbols_answering<'a>(&'a self, name: &'a str) -> impl Iterator<Item = Symbol<'a>> {
         let index = self.symbols_by_last_part.get_or_init(|| {
             let mut index = HashMap::<Box<str>, Vec<SymbolId>>::new();
-            for symbol in self.symbols.iter() {
-                let demangled = crate::demangle::demangle(&symbol.name);
+            for symbol in self.symbols() {
+                let demangled = crate::demangle::demangle(symbol.name());
                 let parts = [
-                    Some(&*symbol.name),
+                    Some(symbol.name()),
                     Some(symbol.unversioned_name()),
                     demangled.as_deref().map(crate::demangle::last_part),
                 ];
                 for part in parts.into_iter().flatten() {
                     let ids = index.entry(part.into()).or_default();
-                    if ids.last() != Some(&symbol.id) {
-                        ids.push(symbol.id);
+                    if ids.last() != Some(&symbol.id()) {
+                        ids.push(symbol.id());
                     }
                 }
             }
@@ -1354,18 +1258,15 @@ impl ModuleImage {
     }
 
     /// Finds the single linker symbol with the supplied name.
-    pub fn symbol_named(&self, name: &str) -> Result<&SymbolInfo> {
-        let matches = self
-            .symbols_by_name
-            .get(name)
+    pub fn symbol_named(&self, name: &str) -> Result<Symbol<'_>> {
+        let mut matches = self.symbols_named(name);
+        let symbol = matches
+            .next()
             .ok_or_else(|| Error::SymbolNotFound(name.to_owned()))?;
-        let [symbol] = matches.as_ref() else {
+        if matches.next().is_some() {
             return Err(Error::DuplicateSymbol(name.to_owned()));
-        };
-
-        Ok(self
-            .symbol(*symbol)
-            .expect("name index references a symbol"))
+        }
+        Ok(symbol)
     }
 
     /// What the code at an image address is to unwinding and stepping: the
@@ -1373,41 +1274,31 @@ impl ModuleImage {
     /// symbol naming it, or else ordinary code.
     #[must_use]
     pub fn code_role(&self, address: ImageAddress) -> CodeRole {
-        let physical = self
-            .code_range_index
-            .containing(address)
-            .filter_map(|instance| self.code_instance(instance))
-            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
-            .min_by_key(|instance| instance.id);
-        if let Some(function) = physical.and_then(|instance| self.function(instance.function)) {
-            return function.role;
+        let physical = self.physical_instance(address);
+        if let Some(function) = physical.and_then(|instance| self.function(instance.function())) {
+            return function.role();
         }
         self.symbolize(address)
             .and_then(|location| self.symbol(location.symbol))
-            .map_or(CodeRole::Ordinary, |symbol| symbol.role)
+            .map_or(CodeRole::Ordinary, Symbol::role)
     }
 
     /// Resolves an image address to its available function and source metadata.
     #[must_use]
     pub fn locate(&self, address: ImageAddress) -> ImageLocation {
-        let physical = self
-            .code_range_index
-            .containing(address)
-            .filter_map(|instance| self.code_instance(instance))
-            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
-            .min_by_key(|instance| instance.id);
-        let inline_frames = self.inline_frames(address, physical.map(|instance| instance.id));
+        let physical = self.physical_instance(address);
+        let inline_frames = self.inline_frames(address, physical.map(CodeInstance::id));
         let logical_instance = match &inline_frames {
             InlineFrameLookup::Unique(chain) => chain.instances.last().copied(),
             InlineFrameLookup::None | InlineFrameLookup::Ambiguous(_) => None,
         };
         let function_id = logical_instance
             .and_then(|instance| self.code_instance(instance))
-            .map(|instance| instance.function)
-            .or_else(|| physical.map(|instance| instance.function));
+            .or(physical)
+            .map(CodeInstance::function);
         let function = function_id
             .and_then(|function_id| self.function(function_id))
-            .cloned();
+            .map(Function::info);
         let source = self
             .line_entry_containing(address)
             .map(|entry| entry.location);
@@ -1415,7 +1306,7 @@ impl ModuleImage {
         ImageLocation {
             address,
             function,
-            physical_instance: physical.map(|instance| instance.id),
+            physical_instance: physical.map(CodeInstance::id),
             inline_frames,
             source,
             symbol: self.symbolize(address),
@@ -1429,18 +1320,13 @@ impl ModuleImage {
     ) -> InlineFrameLookup {
         let mut chains = Vec::new();
 
-        for instance in self
-            .code_range_index
-            .containing(address)
-            .filter_map(|instance| self.code_instance(instance))
-            .filter(|instance| {
-                matches!(
-                    instance.kind,
-                    CodeInstanceKind::Inline { call_site: Some(_) }
-                )
-            })
-        {
-            if let Some(chain) = self.inline_chain(instance.id, address, physical)
+        for instance in self.instances_containing(address).filter(|instance| {
+            matches!(
+                instance.kind(),
+                CodeInstanceKind::Inline { call_site: Some(_) }
+            )
+        }) {
+            if let Some(chain) = self.inline_chain(instance.id(), address, physical)
                 && !chains.contains(&chain)
             {
                 chains.push(chain);
@@ -1481,17 +1367,17 @@ impl ModuleImage {
             if !current.contains(address) {
                 return None;
             }
-            match &current.kind {
-                CodeInstanceKind::Inline { call_site: Some(_) } => chain.push(current.id),
+            match current.kind() {
+                CodeInstanceKind::Inline { call_site: Some(_) } => chain.push(current.id()),
                 CodeInstanceKind::Inline { call_site: None } => return None,
                 CodeInstanceKind::OutOfLine => {
-                    if Some(current.id) != physical {
+                    if Some(current.id()) != physical {
                         return None;
                     }
                     break;
                 }
             }
-            instance = current.parent?;
+            instance = current.parent()?;
         }
 
         chain.reverse();
@@ -1516,8 +1402,8 @@ impl ModuleImage {
     #[cfg(feature = "tools")]
     pub(crate) fn thread_locals_for_dump(
         &self,
-    ) -> impl Iterator<Item = (&Arc<str>, &std::result::Result<ThreadLocal, Arc<str>>)> {
-        self.thread_locals.iter()
+    ) -> impl Iterator<Item = (&str, std::result::Result<ThreadLocal, Arc<str>>)> {
+        self.facts().thread_locals()
     }
 
     /// Every Rust vtable, for a dump of every answer.
@@ -1534,26 +1420,9 @@ impl ModuleImage {
     }
 }
 
-/// Orders the code symbols containing one address from most to least
-/// preferred; see [`ModuleImage::symbolize`].
-fn symbol_preference(symbol: &SymbolInfo) -> impl Ord + '_ {
-    let extent = symbol.extent.expect("indexed symbols have extents");
-    (
-        extent.provenance,
-        std::cmp::Reverse(extent.range.start),
-        extent.range.end.get() - extent.range.start.get(),
-        symbol.kind,
-        symbol.binding,
-        !symbol.exported,
-        symbol.name.bytes().take_while(|byte| *byte == b'_').count(),
-        symbol.name.as_ref(),
-        symbol.id,
-    )
-}
-
 /// Collects the addresses debug information and code symbols prove begin
 /// instructions, keeping the strongest evidence for each address.
-fn instruction_starts(metadata: &ModuleMetadata) -> Arc<[(ImageAddress, crate::BoundaryEvidence)]> {
+fn instruction_starts(metadata: &ModuleMetadata) -> Vec<(ImageAddress, crate::BoundaryEvidence)> {
     let mut starts = BTreeMap::new();
     let functions = metadata
         .code_instances
@@ -1580,21 +1449,6 @@ fn instruction_starts(metadata: &ModuleMetadata) -> Arc<[(ImageAddress, crate::B
     starts.into_iter().collect()
 }
 
-/// Orders the data symbols naming one address, preferring the innermost
-/// storage and then the names [`symbol_preference`] prefers.
-fn storage_preference(symbol: &SymbolInfo) -> impl Ord + '_ {
-    let storage = symbol.storage.expect("indexed symbols have storage");
-    (
-        std::cmp::Reverse(storage.start),
-        storage.end.get() - storage.start.get(),
-        symbol.binding,
-        !symbol.exported,
-        symbol.name.bytes().take_while(|byte| *byte == b'_').count(),
-        symbol.name.as_ref(),
-        symbol.id,
-    )
-}
-
 /// Matches an absolute path exactly and a relative path as a suffix of whole
 /// components, ignoring `.` components such as a leading `./`.
 fn path_matches(candidate: &Path, requested: &Path) -> bool {
@@ -1614,6 +1468,7 @@ fn path_matches(candidate: &Path, requested: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EntryProvenance;
     use crate::model::{
         Architecture, BaseType, BaseTypeEncoding, ByteOrder, GlobalVariableType,
         GlobalVariableVisibility, LineSequenceId, PointerWidth, StatementFlags, SymbolBinding,
@@ -1835,6 +1690,8 @@ mod tests {
             ModuleMetadata {
                 functions: functions(&["physical", "middle", "leaf", "sibling"]),
                 code_instances,
+                // The file the call sites name.
+                files: files(&["/build/src/main.c"]),
                 ..ModuleMetadata::default()
             },
         )
@@ -2190,7 +2047,7 @@ mod tests {
     fn symbolized(image: &ModuleImage, address: u64) -> Option<(&str, u64)> {
         image.symbolize(ImageAddress::new(address)).map(|location| {
             (
-                image.symbol(location.symbol).expect("known").name.as_ref(),
+                image.symbol(location.symbol).expect("known").name(),
                 location.offset,
             )
         })

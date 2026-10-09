@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use foldhash::HashMap;
 
-use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, is_type_unit};
+use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, Units, is_type_unit};
 use crate::{
     GlobalVariableId, GlobalVariableInfo, GlobalVariableType, GlobalVariableVisibility,
     VariableKind, VariableMalformedKind,
@@ -110,7 +110,7 @@ impl DefinitionIndex {
 )]
 pub(super) fn load_globals<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    units: &Units<'data>,
     objects: &mut Vec<CatalogDataObject>,
     order: &mut u64,
     files: &mut Files,
@@ -123,7 +123,7 @@ pub(super) fn load_globals<'data>(
 
     // Pass one records lexical ownership for every DIE. A later definition
     // may point backward to a declaration nested in a namespace or class.
-    for unit in units {
+    for unit in units.iter() {
         let mut unit_scopes = UnitScopes::default();
         if !is_type_unit(unit) {
             let mut entries = unit.entries();

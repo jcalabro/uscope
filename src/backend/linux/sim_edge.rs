@@ -559,10 +559,10 @@ impl LinuxTraceOps for SimTrace {
         &self,
         pid: Pid,
         executable: &Path,
-        executable_data: &[u8],
+        image_base: u64,
         identity: FileIdentity,
     ) -> Result<u64> {
-        load_bias_in(&self.maps(pid)?, executable, executable_data, identity)
+        load_bias_in(&self.maps(pid)?, executable, image_base, identity)
     }
 
     fn module_mappings(&self, pid: Pid) -> Result<ProcessMappings> {
@@ -786,7 +786,8 @@ impl SimController {
                 },
                 process_start_time: executable.start_time,
                 debug_files: crate::debug_info::DebugFileSearch::default(),
-            },
+            }
+            .described(),
             parts.debug_info,
             ControllerChannels {
                 sender: sender.clone(),

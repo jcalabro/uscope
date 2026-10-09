@@ -12,10 +12,16 @@
 //! debugger reads stays in the provider.
 
 pub mod backing;
+pub mod facts;
 mod format;
+pub mod functions;
+pub mod index;
 pub mod lines;
+pub mod packages;
 mod schema;
 mod strings;
+pub mod symbols;
+pub mod unwind;
 mod validate;
 
 #[cfg(any(test, feature = "fuzzing"))]
@@ -27,7 +33,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 pub use backing::AlignedBytes;
 pub use format::TableKind;
-pub use strings::{PathId, Paths, PathsBuilder};
+pub use strings::{PathId, Paths, PathsBuilder, Strings, StringsBuilder};
 pub use validate::{ImageError, Limits};
 
 use format::{DirectoryEntry, Header, Trailer};
@@ -41,6 +47,12 @@ pub const MAX_ROWS: u64 = NONE as u64;
 /// One record type: the table it fills.
 pub trait Record: FromBytes + IntoBytes + KnownLayout + Immutable + Unaligned {
     const KIND: TableKind;
+}
+
+/// A record type several tables hold, such as an index's entries.
+pub trait SharedRecord: FromBytes + IntoBytes + KnownLayout + Immutable + Unaligned {
+    /// The record's name in the schema.
+    const NAME: &'static str;
 }
 
 /// Where one table is in an image.
@@ -81,6 +93,26 @@ impl Image {
             .expect("validation checked every table's length and stride")
     }
 
+    /// The rows of the table of `kind`, which holds `T`s: empty when the
+    /// image has none.
+    pub fn shared<T: SharedRecord>(&self, kind: TableKind) -> &[T] {
+        assert_eq!(
+            schema::record(kind),
+            T::NAME,
+            "{kind:?} holds another record"
+        );
+        let Some(placed) = self.tables[kind.index()] else {
+            return &[];
+        };
+        <[T]>::ref_from_bytes(&self.bytes[placed.offset..placed.offset + placed.length])
+            .expect("validation checked every table's length and stride")
+    }
+
+    /// The string pool.
+    pub fn strings(&self) -> Strings<'_> {
+        Strings(self.bytes(TableKind::Strings))
+    }
+
     /// The bytes of a byte table, such as the string pool.
     pub fn bytes(&self, kind: TableKind) -> &[u8] {
         self.tables[kind.index()].map_or(&[], |placed| {
@@ -112,6 +144,20 @@ impl Builder {
                 rows.len(),
                 rows.as_bytes().to_vec(),
             );
+        }
+        self
+    }
+
+    /// Adds the table of `kind`, which holds `T`s. Empty tables are left
+    /// out.
+    pub fn shared<T: SharedRecord>(&mut self, kind: TableKind, rows: &[T]) -> &mut Self {
+        assert_eq!(
+            schema::record(kind),
+            T::NAME,
+            "{kind:?} holds another record"
+        );
+        if !rows.is_empty() {
+            self.add(kind, size_of::<T>(), rows.len(), rows.as_bytes().to_vec());
         }
         self
     }

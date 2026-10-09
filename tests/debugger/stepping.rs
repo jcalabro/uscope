@@ -1623,15 +1623,14 @@ async fn stop_at_getpid_system_call(scenario: &mut Scenario) -> VirtualAddress {
         .await;
     let getpid = image
         .symbols()
-        .iter()
-        .find(|symbol| symbol.name.as_ref() == "getpid")
+        .find(|symbol| symbol.name() == "getpid")
         .expect("libc defines getpid");
     let disassembly = scenario
         .operation(
             "disassemble getpid",
             scenario.handle().disassemble(uscope::DisassemblyQuery {
                 range: uscope::DisassemblyRange::Function(VirtualAddress::new(
-                    libc.module.load_bias + getpid.address.get(),
+                    libc.module.load_bias + getpid.address().get(),
                 )),
                 syntax: uscope::AssemblySyntax::Intel,
             }),
@@ -2029,7 +2028,7 @@ fn fixture_symbol_address(
         .module_image()
         .symbol_named(symbol)
         .unwrap_or_else(|error| panic!("missing fixture symbol {symbol}: {error}"))
-        .address;
+        .address();
     relocate_image_address(address, location)
 }
 
@@ -2151,8 +2150,8 @@ fn epilogue_markers(scenario: &Scenario, function: &str) -> BTreeSet<uscope::Ima
     let image = scenario.handle().module_image();
     let function = image.function_named(function).expect("marked function");
     let instance = image
-        .instances_for_function(function.id)
-        .find(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+        .instances_for_function(function.id())
+        .find(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine))
         .expect("physical marked function");
     image
         .statement_rows()

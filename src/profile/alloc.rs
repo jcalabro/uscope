@@ -1,15 +1,15 @@
 //! Counts allocations for profiles and tests.
 //!
 //! A binary that wants its allocations reported installs [`Counting`]
-//! around the allocator it uses; each thread then counts its own blocks,
-//! and while a recording or a test measures totals, the process counts
-//! every thread's blocks and the most its heap grew.
+//! around the allocator it uses. Each thread counts its own blocks where
+//! every thread can sum them, and while a recording or a test measures
+//! totals, the most the heap grew.
 
 #![allow(unsafe_code, reason = "a global allocator is an unsafe trait")]
 
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 /// What has been allocated: by one thread, or by every thread.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -31,14 +31,15 @@ impl Allocated {
     }
 }
 
-/// Every thread's allocations while totals are counted.
+/// Every thread's allocations.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Totals {
     pub allocated: Allocated,
-    /// How much the heap grew, net of blocks freed, since counting began:
-    /// negative when more was freed than allocated.
+    /// How much the heap grew, net of blocks freed, since the process
+    /// began.
     pub live_bytes: i64,
-    /// The most the heap had grown since counting began.
+    /// The most the heap had grown, while a measurement tracked it, to
+    /// within [`PEAK_GRANULARITY`] for each thread.
     pub peak_bytes: i64,
 }
 
@@ -54,25 +55,76 @@ impl Totals {
     }
 }
 
-thread_local! {
-    static THREAD: Cell<Allocated> = const { Cell::new(Allocated { blocks: 0, bytes: 0 }) };
+/// What one thread has counted, in its own cell.
+#[derive(Clone, Copy)]
+struct ThreadCounts {
+    allocated: Allocated,
+    /// Bytes this thread allocated less those it freed; negative when it
+    /// freed others' blocks.
+    live: i64,
+    /// Growth not yet added to the process's peak counter.
+    pending: i64,
+    /// This thread's slot, plus one; zero until its first count.
+    slot: usize,
 }
+
+thread_local! {
+    static THREAD: Cell<ThreadCounts> = const {
+        Cell::new(ThreadCounts {
+            allocated: Allocated { blocks: 0, bytes: 0 },
+            live: 0,
+            pending: 0,
+            slot: 0,
+        })
+    };
+}
+
+/// One thread's counts where every thread can read them, alone on its
+/// cache line so that no other thread's writes contend with its own.
+#[repr(align(64))]
+struct Slot {
+    blocks: AtomicU64,
+    bytes: AtomicU64,
+    live: AtomicI64,
+}
+
+impl Slot {
+    const fn new() -> Self {
+        Self {
+            blocks: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            live: AtomicI64::new(0),
+        }
+    }
+}
+
+const SLOTS: usize = 256;
+/// A slot for each of the first threads to count, which each stores its
+/// own totals; every later thread adds to the last, shared one.
+static COUNTS: [Slot; SLOTS] = [const { Slot::new() }; SLOTS];
+static NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
+
+/// How far a thread's heap may grow or shrink before it adds the change to
+/// the process's peak counter. The peak is exact to within this much for
+/// each thread, and threads rarely contend on the counter.
+pub const PEAK_GRANULARITY: i64 = 64 << 10;
 
 /// Whether some binary counts its allocations with [`Counting`].
 static INSTALLED: AtomicBool = AtomicBool::new(false);
-/// How many measurements want totals; counting them costs every thread
-/// shared atomics, so they are counted only while wanted.
+/// How many measurements want the peak; tracking it costs threads a shared
+/// counter, so it is tracked only while wanted.
 static TOTALS_WANTED: AtomicU64 = AtomicU64::new(0);
-static TOTAL_BLOCKS: AtomicU64 = AtomicU64::new(0);
-static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
-static LIVE: AtomicI64 = AtomicI64::new(0);
+/// The heap's growth as threads have reported it, and its most.
+static REPORTED: AtomicI64 = AtomicI64::new(0);
 static PEAK: AtomicI64 = AtomicI64::new(0);
 
 /// What this thread has allocated since it began, or zero when no
 /// [`Counting`] allocator is installed.
 #[must_use]
 pub fn thread_allocated() -> Allocated {
-    THREAD.try_with(Cell::get).unwrap_or_default()
+    THREAD
+        .try_with(|counts| counts.get().allocated)
+        .unwrap_or_default()
 }
 
 /// Whether allocations are counted at all.
@@ -81,67 +133,108 @@ pub fn installed() -> bool {
     INSTALLED.load(Ordering::Relaxed)
 }
 
-/// Starts counting every thread's allocations, until a matching
-/// [`stop_totals`]. Measurements may nest.
+/// Starts tracking the heap's peak, until a matching [`stop_totals`].
+/// Measurements may nest.
 pub fn start_totals() {
     if TOTALS_WANTED.fetch_add(1, Ordering::AcqRel) == 0 {
-        PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
+        reset_peak();
     }
 }
 
-/// Stops one measurement's counting of totals.
+/// Stops one measurement's tracking of the peak.
 pub fn stop_totals() {
     let _ = TOTALS_WANTED.try_update(Ordering::AcqRel, Ordering::Relaxed, |wanted| {
         wanted.checked_sub(1)
     });
 }
 
-/// Every thread's allocations so far, while totals are counted.
+/// Every thread's allocations so far, and the heap's peak while tracked.
 #[must_use]
 pub fn totals() -> Totals {
-    Totals {
-        allocated: Allocated {
-            blocks: TOTAL_BLOCKS.load(Ordering::Relaxed),
-            bytes: TOTAL_BYTES.load(Ordering::Relaxed),
-        },
-        live_bytes: LIVE.load(Ordering::Relaxed),
-        peak_bytes: PEAK.load(Ordering::Relaxed),
+    let mut totals = Totals::default();
+    for slot in &COUNTS {
+        totals.allocated.blocks += slot.blocks.load(Ordering::Relaxed);
+        totals.allocated.bytes += slot.bytes.load(Ordering::Relaxed);
+        totals.live_bytes += slot.live.load(Ordering::Relaxed);
     }
+    totals.peak_bytes = PEAK.load(Ordering::Relaxed).max(totals.live_bytes);
+    totals
 }
 
 /// Resets the peak to the heap's current growth, so that a measurement
 /// sees only its own peak.
 pub fn reset_peak() {
-    PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
+    let live = COUNTS
+        .iter()
+        .map(|slot| slot.live.load(Ordering::Relaxed))
+        .sum();
+    REPORTED.store(live, Ordering::Relaxed);
+    PEAK.store(live, Ordering::Relaxed);
+}
+
+/// Counts `bytes` allocated, in a new block when `new_block`, or `bytes`
+/// freed when negative.
+#[inline]
+fn count(bytes: i64, new_block: bool) {
+    let _ = THREAD.try_with(|cell| {
+        let mut counts = cell.get();
+        if bytes > 0 {
+            counts.allocated.blocks += u64::from(new_block);
+            counts.allocated.bytes += bytes.unsigned_abs();
+        }
+        counts.live += bytes;
+        if counts.slot == 0 {
+            counts.slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed).min(SLOTS - 1) + 1;
+        }
+        let slot = &COUNTS[counts.slot - 1];
+        if counts.slot < SLOTS {
+            // Only this thread writes its slot.
+            slot.blocks
+                .store(counts.allocated.blocks, Ordering::Relaxed);
+            slot.bytes.store(counts.allocated.bytes, Ordering::Relaxed);
+            slot.live.store(counts.live, Ordering::Relaxed);
+        } else {
+            if bytes > 0 {
+                slot.blocks
+                    .fetch_add(u64::from(new_block), Ordering::Relaxed);
+                slot.bytes
+                    .fetch_add(bytes.unsigned_abs(), Ordering::Relaxed);
+            }
+            slot.live.fetch_add(bytes, Ordering::Relaxed);
+        }
+        if TOTALS_WANTED.load(Ordering::Relaxed) != 0 {
+            counts.pending += bytes;
+            if counts.pending.abs() >= PEAK_GRANULARITY {
+                let reported = REPORTED
+                    .fetch_add(counts.pending, Ordering::Relaxed)
+                    .saturating_add(counts.pending);
+                PEAK.fetch_max(reported, Ordering::Relaxed);
+                counts.pending = 0;
+            }
+        }
+        cell.set(counts);
+    });
 }
 
 /// Counts a new block of `bytes`.
 #[inline]
 fn grew(bytes: usize, new_block: bool) {
-    let bytes = bytes as u64;
-    let _ = THREAD.try_with(|allocated| {
-        let before = allocated.get();
-        allocated.set(Allocated {
-            blocks: before.blocks + u64::from(new_block),
-            bytes: before.bytes + bytes,
-        });
-    });
-    if TOTALS_WANTED.load(Ordering::Relaxed) != 0 {
-        TOTAL_BLOCKS.fetch_add(u64::from(new_block), Ordering::Relaxed);
-        TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed);
-        let delta = i64::try_from(bytes).unwrap_or(i64::MAX);
-        let live = LIVE
-            .fetch_add(delta, Ordering::Relaxed)
-            .saturating_add(delta);
-        PEAK.fetch_max(live, Ordering::Relaxed);
-    }
+    count(i64::try_from(bytes).unwrap_or(i64::MAX), new_block);
 }
 
 /// Counts `bytes` freed.
 #[inline]
 fn shrank(bytes: usize) {
-    if TOTALS_WANTED.load(Ordering::Relaxed) != 0 {
-        LIVE.fetch_sub(i64::try_from(bytes).unwrap_or(i64::MAX), Ordering::Relaxed);
+    count(-i64::try_from(bytes).unwrap_or(i64::MAX), false);
+}
+
+/// Notes that a [`Counting`] allocator serves the process. Only the first
+/// allocation stores, since a store to the shared flag on every one would
+/// contend between threads.
+#[inline]
+fn installing() {
+    if !INSTALLED.load(Ordering::Relaxed) {
+        INSTALLED.store(true, Ordering::Relaxed);
     }
 }
 
@@ -166,7 +259,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         // SAFETY: the caller's layout satisfies `alloc`'s requirements.
         let block = unsafe { self.inner.alloc(layout) };
         if !block.is_null() {
-            INSTALLED.store(true, Ordering::Relaxed);
+            installing();
             grew(layout.size(), true);
         }
         block
@@ -176,7 +269,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         // SAFETY: the caller's layout satisfies `alloc_zeroed`'s requirements.
         let block = unsafe { self.inner.alloc_zeroed(layout) };
         if !block.is_null() {
-            INSTALLED.store(true, Ordering::Relaxed);
+            installing();
             grew(layout.size(), true);
         }
         block

@@ -18,8 +18,8 @@ use crate::debug_info::{DebugInfo, VariableContext, VariableRuntime, VariableRun
 use crate::inspection::InspectionBudget;
 use crate::unwind::{MemoryReader, RegisterFile};
 use crate::{
-    AddressRange, CodeInstanceInfo, CodeInstanceKind, ImageAddress, LineNumber, ModuleImage,
-    TypeKind, TypeNode, TypeReference, VariableQuery, VariableUnavailableReason, VirtualAddress,
+    AddressRange, CodeInstanceKind, ImageAddress, LineNumber, ModuleImage, TypeKind, TypeNode,
+    TypeReference, VariableQuery, VariableUnavailableReason, VirtualAddress,
 };
 
 /// The parts of a dump, each printed under its own heading.
@@ -140,30 +140,28 @@ impl Names {
         };
         let functions = image
             .functions()
-            .iter()
             .map(|function| {
                 format!(
                     "{}|{}|{}",
-                    function.name,
-                    function.linkage_name.as_deref().unwrap_or(""),
-                    location(&function.declaration)
+                    function.name(),
+                    function.linkage_name().unwrap_or(""),
+                    location(&function.declaration())
                 )
             })
             .collect::<Vec<_>>();
         let instances = image
             .code_instances()
-            .iter()
             .map(|instance| {
                 format!(
                     "{}@{}{}",
                     functions
-                        .get(instance.function.index())
+                        .get(instance.function().index())
                         .map_or("?", String::as_str),
-                    instance.ranges.first().map_or_else(
+                    instance.ranges().next().map_or_else(
                         || "none".to_owned(),
                         |range| format!("{:#x}", range.start.get())
                     ),
-                    match instance.kind {
+                    match instance.kind() {
                         CodeInstanceKind::OutOfLine => "",
                         CodeInstanceKind::Inline { .. } => "/inline",
                     }
@@ -172,8 +170,7 @@ impl Names {
             .collect();
         let symbols = image
             .symbols()
-            .iter()
-            .map(|symbol| format!("{}@{:#x}", symbol.name, symbol.address.get()))
+            .map(|symbol| format!("{}@{:#x}", symbol.name(), symbol.address().get()))
             .collect();
         let globals = image
             .globals()
@@ -350,7 +347,7 @@ impl<'a> Dumper<'a> {
             "thread_local_storage {}",
             image.has_thread_local_storage()
         ))?;
-        self.line(&names.debug(image.symbol_sources()))?;
+        self.line(&names.debug(&image.symbol_sources()))?;
         self.line(&format!(
             "debug_file {:?}",
             image.separate_debug_file().map(|file| match file {
@@ -402,7 +399,7 @@ impl<'a> Dumper<'a> {
         let names = self.names;
         self.heading("symbols")?;
         for symbol in image.symbols() {
-            self.line(&names.debug(symbol))?;
+            self.line(&names.debug(&symbol))?;
         }
         self.heading("got slots")?;
         for slot in image.got_slots() {
@@ -433,11 +430,11 @@ impl<'a> Dumper<'a> {
         self.heading("functions")?;
         let mut lines = Vec::new();
         for function in image.functions() {
-            let mut text = names.debug(function);
-            let _ = write!(text, " package {:?}", image.function_package(function.id));
+            let mut text = names.debug(&function);
+            let _ = write!(text, " package {:?}", image.function_package(function.id()));
             let mut instances = image
-                .instances_for_function(function.id)
-                .map(|instance| names.instances[instance.id.index()].clone())
+                .instances_for_function(function.id())
+                .map(|instance| names.instances[instance.id().index()].clone())
                 .collect::<Vec<_>>();
             instances.sort_unstable();
             for instance in instances {
@@ -449,25 +446,24 @@ impl<'a> Dumper<'a> {
         self.heading("code instances")?;
         let lines = image
             .code_instances()
-            .iter()
             .map(|instance| self.instance(instance))
             .collect();
         self.sorted(lines)
     }
 
-    fn instance(&self, instance: &CodeInstanceInfo) -> String {
+    fn instance(&self, instance: crate::CodeInstance<'_>) -> String {
         let names = self.names;
         let mut text = format!(
             "{} {}",
-            names.instances[instance.id.index()],
-            names.debug(instance)
+            names.instances[instance.id().index()],
+            names.debug(&instance)
         );
         let entries = self
             .image
-            .recommended_entries_for_instance(instance.id)
+            .recommended_entries_for_instance(instance.id())
             .collect::<Vec<_>>();
         let _ = write!(text, " entries {entries:?}");
-        if let Some(points) = self.image.resume_points(instance.id) {
+        if let Some(points) = self.image.resume_points(instance.id()) {
             let _ = write!(text, " resume {}", names.debug(&points));
         }
         text
@@ -501,7 +497,7 @@ impl<'a> Dumper<'a> {
                             let mut functions = image
                                 .coroutine_functions(info.reference.id)
                                 .iter()
-                                .map(|function| names.functions[function.id.index()].clone())
+                                .map(|function| names.functions[function.id().index()].clone())
                                 .collect::<Vec<_>>();
                             functions.sort_unstable();
                             format!("coroutine {} run by {functions:?}", names.debug(&coroutine))
@@ -584,15 +580,15 @@ impl<'a> Dumper<'a> {
             range(entry.range);
         }
         for instance in image.code_instances() {
-            for each in instance.ranges.iter() {
-                range(*each);
+            for each in instance.ranges() {
+                range(each);
             }
         }
         for symbol in image.symbols() {
-            if let Some(extent) = symbol.extent {
+            if let Some(extent) = symbol.extent() {
                 range(extent.range);
             }
-            if let Some(storage) = symbol.storage {
+            if let Some(storage) = symbol.storage() {
                 range(storage);
             }
         }
@@ -755,15 +751,15 @@ impl<'a> Dumper<'a> {
         self.heading("function names")?;
         let mut function_names = BTreeSet::new();
         for function in image.functions() {
-            function_names.insert(function.name.to_string());
-            if let Some(linkage) = &function.linkage_name {
+            function_names.insert(function.name().to_string());
+            if let Some(linkage) = &function.linkage_name() {
                 function_names.insert(linkage.to_string());
             }
-            if let Some(package) = image.function_package(function.id) {
-                if let Some(local) = function.name.strip_prefix(&format!("{package}.")) {
+            if let Some(package) = image.function_package(function.id()) {
+                if let Some(local) = function.name().strip_prefix(&format!("{package}.")) {
                     function_names.insert(local.to_owned());
                 }
-                if let Some((_, last)) = function.name.rsplit_once('.') {
+                if let Some((_, last)) = function.name().rsplit_once('.') {
                     function_names.insert(last.to_owned());
                 }
             }
@@ -772,11 +768,11 @@ impl<'a> Dumper<'a> {
         for name in &function_names {
             let single = image
                 .function_named(name)
-                .map(|function| names.functions[function.id.index()].clone())
+                .map(|function| names.functions[function.id().index()].clone())
                 .map_err(|error| error.to_string());
             let mut all = image
                 .functions_named(name)
-                .map(|function| names.functions[function.id.index()].clone())
+                .map(|function| names.functions[function.id().index()].clone())
                 .collect::<Vec<_>>();
             all.sort_unstable();
             let located = image
@@ -784,7 +780,7 @@ impl<'a> Dumper<'a> {
                 .map(|found| {
                     let mut found = found
                         .iter()
-                        .map(|function| names.functions[function.id.index()].clone())
+                        .map(|function| names.functions[function.id().index()].clone())
                         .collect::<Vec<_>>();
                     found.sort_unstable();
                     found
@@ -799,7 +795,7 @@ impl<'a> Dumper<'a> {
         self.heading("symbol names")?;
         let mut symbol_names = BTreeSet::new();
         for symbol in image.symbols() {
-            symbol_names.insert(symbol.name.to_string());
+            symbol_names.insert(symbol.name().to_string());
             symbol_names.insert(symbol.unversioned_name().to_owned());
             if let Some(demangled) = symbol.demangled_name() {
                 symbol_names.insert(crate::demangle::last_part(&demangled).to_owned());
@@ -814,16 +810,16 @@ impl<'a> Dumper<'a> {
         for name in &symbol_names {
             let single = image
                 .symbol_named(name)
-                .map(|symbol| names.symbols[symbol.id.index()].clone())
+                .map(|symbol| names.symbols[symbol.id().index()].clone())
                 .map_err(|error| error.to_string());
             let mut exact = image
                 .symbols_named(name)
-                .map(|symbol| names.symbols[symbol.id.index()].clone())
+                .map(|symbol| names.symbols[symbol.id().index()].clone())
                 .collect::<Vec<_>>();
             exact.sort_unstable();
             let mut answering = image
                 .symbols_answering(name)
-                .map(|symbol| names.symbols[symbol.id.index()].clone())
+                .map(|symbol| names.symbols[symbol.id().index()].clone())
                 .collect::<Vec<_>>();
             answering.sort_unstable();
             lines.push(format!(
@@ -887,21 +883,21 @@ impl<'a> Dumper<'a> {
         let mut lines = Vec::new();
         let statements = image.statement_rows().collect::<Vec<_>>();
         for instance in image.code_instances() {
-            let selected = match instance.kind {
+            let selected = match instance.kind() {
                 CodeInstanceKind::OutOfLine => None,
-                CodeInstanceKind::Inline { .. } => Some(instance.id),
+                CodeInstanceKind::Inline { .. } => Some(instance.id()),
             };
             let mut addresses = BTreeSet::new();
-            if let Some(entry) = instance.breakpoint_entry {
+            if let Some(entry) = instance.breakpoint_entry() {
                 addresses.insert(entry.address.get());
             }
-            for range in instance.ranges.iter() {
+            for range in instance.ranges() {
                 if range.start < range.end {
                     addresses.insert(range.start.get());
                     addresses.insert(range.end.get() - 1);
                 }
             }
-            let rows = instance.ranges.first().map_or(&[][..], |range| {
+            let rows = instance.ranges().next().map_or(&[][..], |range| {
                 let rows = statements.as_slice();
                 let first = rows.partition_point(|row| row.address < range.start);
                 let rest = &rows[first.min(rows.len())..];
@@ -915,7 +911,7 @@ impl<'a> Dumper<'a> {
                 .collect::<Vec<_>>();
             statement_addresses.dedup();
             addresses.extend(statement_addresses.into_iter().take(per_instance));
-            let mut text = names.instances[instance.id.index()].clone();
+            let mut text = names.instances[instance.id().index()].clone();
             let mut previous = String::new();
             for address in addresses {
                 let at = ImageAddress::new(address);
@@ -969,8 +965,8 @@ impl<'a> Dumper<'a> {
         self.heading("unwind")?;
         let mut addresses = BTreeSet::new();
         for instance in image.code_instances() {
-            if matches!(instance.kind, CodeInstanceKind::OutOfLine) {
-                for range in instance.ranges.iter() {
+            if matches!(instance.kind(), CodeInstanceKind::OutOfLine) {
+                for range in instance.ranges() {
                     if range.start < range.end {
                         addresses.extend([
                             range.start.get(),
@@ -982,7 +978,7 @@ impl<'a> Dumper<'a> {
             }
         }
         for symbol in image.symbols() {
-            if let Some(extent) = symbol.extent {
+            if let Some(extent) = symbol.extent() {
                 addresses.extend([extent.range.start.get(), extent.range.end.get() - 1]);
             }
         }

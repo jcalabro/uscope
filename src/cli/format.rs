@@ -1286,8 +1286,8 @@ pub fn modules(modules: &[ModuleRow], renderer: Renderer) -> String {
             (None, Some(_)) => "?".to_owned(),
         };
         let described = match &module.image {
-            Some(image) if !image.functions().is_empty() => "debug",
-            Some(image) if !image.symbols().is_empty() => "symbols",
+            Some(image) if image.functions().len() != 0 => "debug",
+            Some(image) if image.symbols().next().is_some() => "symbols",
             _ => "none",
         };
         lines.push(format!(

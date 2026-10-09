@@ -217,12 +217,11 @@ impl World {
         let module = module();
         let polls = module
             .symbols()
-            .iter()
             .filter_map(|symbol| {
-                let name = crate::demangle::demangle(&symbol.name)?;
+                let name = crate::demangle::demangle(symbol.name())?;
                 name.starts_with(POLL).then(|| {
                     let launch = super::LAUNCH.iter().any(|launch| name.contains(launch));
-                    (launch, symbol.address.get())
+                    (launch, symbol.address().get())
                 })
             })
             .collect::<Vec<_>>();

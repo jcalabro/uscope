@@ -48,7 +48,7 @@ use crate::{
     StackFrameId, ThreadId as DebugThreadId, UnwindTermination, VirtualAddress,
 };
 
-use super::{ControllerChannels, ControllerMessage, EventSender, ExecutableSource, FileIdentity};
+use super::{ControllerChannels, ControllerMessage, EventSender, Executable, FileIdentity};
 use activation::{Activation, StackPosition};
 use classify::{is_stopping_signal, is_superseded};
 use debug_registers::DebugRegisterPlan;
@@ -56,7 +56,8 @@ use memory::MemoryAccessError;
 use modules::{ModuleMapping, loader_link_maps, mapped_module_load_bias, module_mappings};
 use native::{InspectionOps, LinuxPtrace, LinuxTraceOps, is_vanished_tracee};
 use registers::Fxsave;
-use tls::{CLibrary, TlsModule};
+pub(super) use tls::CLibrary;
+use tls::TlsModule;
 
 mod activation;
 mod async_frames;
@@ -1165,7 +1166,6 @@ enum LinuxError {
 struct Controller<P: InspectionOps> {
     _lease: SessionLease,
     executable: Arc<PathBuf>,
-    executable_data: Arc<[u8]>,
     executable_identity: FileIdentity,
     /// The C library the executable runs on, whose structures locate TLS.
     c_library: CLibrary,
@@ -1252,7 +1252,7 @@ enum Start {
 }
 
 pub fn spawn_controller(
-    executable: ExecutableSource,
+    executable: Executable,
     debug_info: DebugInfo,
     channels: ControllerChannels,
 ) -> Result<JoinHandle<()>> {
@@ -1274,7 +1274,7 @@ pub fn spawn_controller(
 impl<P: InspectionOps> Controller<P> {
     fn new(
         lease: SessionLease,
-        executable: ExecutableSource,
+        executable: Executable,
         debug_info: DebugInfo,
         channels: ControllerChannels,
         ptrace: P,
@@ -1294,8 +1294,7 @@ impl<P: InspectionOps> Controller<P> {
         Self {
             _lease: lease,
             executable: executable.display_path,
-            c_library: CLibrary::of_executable(&executable.data),
-            executable_data: executable.data,
+            c_library: executable.c_library,
             executable_identity: executable.identity,
             expected_process_start_time: executable.process_start_time,
             debug_files: executable.debug_files,

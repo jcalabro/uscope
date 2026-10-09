@@ -168,7 +168,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let inline = start
             .code_instance
             .and_then(|instance| self.module_image.code_instance(instance))
-            .is_some_and(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }));
+            .is_some_and(|instance| matches!(instance.kind(), CodeInstanceKind::Inline { .. }));
         let (future, inlined) = if inline {
             self.inlined_body(pid, start)?
         } else {
@@ -206,9 +206,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     ) -> Option<(RunningFuture, Option<Inlined>)> {
         let instance = start.code_instance?;
         let info = self.module_image.code_instance(instance)?;
-        let function = info.function;
-        if !matches!(info.kind, CodeInstanceKind::Inline { .. })
-            || self.module_image.function(function)?.coroutine.is_none()
+        let function = info.function();
+        if !matches!(info.kind(), CodeInstanceKind::Inline { .. })
+            || self.module_image.function(function)?.coroutine().is_none()
         {
             return None;
         }
@@ -234,8 +234,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             .filter(|outer| {
                 self.module_image
                     .code_instance(*outer)
-                    .and_then(|outer| self.module_image.function(outer.function))
-                    .is_some_and(|function| function.coroutine.is_some())
+                    .and_then(|outer| self.module_image.function(outer.function()))
+                    .is_some_and(|function| function.coroutine().is_some())
             })
             .collect::<Vec<_>>();
         for outer in awaiters {
@@ -293,8 +293,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         let header = self
             .module_image
             .code_instance(instance)
-            .and_then(|instance| self.module_image.function(instance.function))
-            .and_then(|function| function.declaration.clone());
+            .and_then(|instance| self.module_image.function(instance.function()))
+            .and_then(crate::image::functions::Function::declaration);
         self.statements_of(instance, header.as_ref())
     }
 
@@ -339,7 +339,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .image
                     .coroutine_functions(frame.ty.id)
                     .iter()
-                    .any(|candidate| candidate.id == function)
+                    .any(|candidate| candidate.id() == function)
             })
             .count()
             > 1
@@ -441,7 +441,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .module_image
             .coroutine_functions(future.ty.id)
             .first()
-            .and_then(|function| function.coroutine)
+            .and_then(|function| function.coroutine())
             .map_or(future.ty, |id| TypeReference {
                 image: future.ty.image,
                 id,
@@ -474,14 +474,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.module_image
                 .coroutine_functions(stack.futures[index].ty.id)
                 .iter()
-                .map(|function| function.id)
+                .map(|function| function.id())
                 .collect::<Vec<_>>()
         };
         let out_of_line = |functions: &[FunctionId]| {
             functions
                 .iter()
                 .flat_map(|function| self.module_image.instances_for_function(*function))
-                .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+                .filter(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine))
                 .collect::<Vec<_>>()
         };
         // The innermost future out from the selected one whose function
@@ -496,14 +496,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .iter()
                 .flat_map(|function| self.module_image.instances_for_function(*function))
                 .filter(|instance| {
-                    matches!(instance.kind, CodeInstanceKind::Inline { .. })
-                        && instance.ranges.first().is_some_and(|range| {
+                    matches!(instance.kind(), CodeInstanceKind::Inline { .. })
+                        && instance.ranges().next().is_some_and(|range| {
                             physical
                                 .iter()
                                 .any(|physical| physical.contains(range.start))
                         })
                 })
-                .map(|instance| instance.id)
+                .map(crate::image::functions::CodeInstance::id)
                 .collect::<BTreeSet<_>>()
         };
         let selected_functions = functions_of(selected);
@@ -518,7 +518,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 continue;
             };
             let outers = if index == running {
-                physical.iter().map(|instance| instance.id).collect()
+                physical.iter().map(|instance| instance.id()).collect()
             } else {
                 inlined_in(&functions_of(index))
             };
@@ -563,8 +563,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         let coroutine = self
             .module_image
             .code_instance(instance)
-            .and_then(|instance| self.module_image.function(instance.function))?
-            .coroutine?;
+            .and_then(|instance| self.module_image.function(instance.function()))?
+            .coroutine()?;
         let code = Some((inferior.loaded_module.id, address));
         let modules = self.unwind_modules(inferior);
         let resolved = ResolvedFrame {
@@ -955,22 +955,21 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         name.push_str(&identity.1);
         name.push('>');
-        let entry = |instance: &crate::CodeInstanceInfo| {
+        let entry = |instance: crate::CodeInstance<'_>| {
             instance
-                .breakpoint_entry
+                .breakpoint_entry()
                 .map(|entry| entry.address)
-                .or_else(|| instance.ranges.iter().map(|range| range.start).min())
+                .or_else(|| instance.ranges().map(|range| range.start).min())
                 .and_then(|address| module.loaded.virtual_address(address).ok())
         };
         // Each codegen unit may have a copy of its own.
         for function in module
             .image
             .functions()
-            .iter()
-            .filter(|function| *function.name == *name)
+            .filter(|function| *function.name() == *name)
         {
-            for instance in module.image.instances_for_function(function.id) {
-                let copies = if matches!(instance.kind, crate::CodeInstanceKind::OutOfLine) {
+            for instance in module.image.instances_for_function(function.id()) {
+                let copies = if matches!(instance.kind(), crate::CodeInstanceKind::OutOfLine) {
                     &mut named
                 } else {
                     &mut inlined
@@ -1008,12 +1007,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             let instance = self
                 .module_image
                 .code_instance(location.physical_instance?)?;
-            self.module_image.function(instance.function)
+            self.module_image.function(instance.function())
         };
         let dropper = (0..stack.frames.len())
-            .find(|&level| physical(level).is_none_or(|function| !is_drop_glue(&function.name)))
+            .find(|&level| physical(level).is_none_or(|function| !is_drop_glue(function.name())))
             .filter(|&level| {
-                physical(level).is_some_and(|function| function.role == crate::CodeRole::Ordinary)
+                physical(level).is_some_and(|function| function.role() == crate::CodeRole::Ordinary)
             });
         let Some(dropper) = dropper else {
             // No code of the program's drops it: its task was cancelled,
@@ -1189,8 +1188,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.image_location(frame.context.instruction)
                 .and_then(|location| location.physical_instance)
                 .and_then(|instance| self.module_image.code_instance(instance))
-                .and_then(|instance| self.module_image.function(instance.function))
-                .is_none_or(|function| function.coroutine.is_none())
+                .and_then(|instance| self.module_image.function(instance.function()))
+                .is_none_or(|function| function.coroutine().is_none())
         })
     }
 

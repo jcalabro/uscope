@@ -127,11 +127,11 @@ impl<P: InspectionOps> Controller<P> {
                     .locate(returning.function)
                     .physical_instance
                     .and_then(|instance| module.image.code_instance(instance))
-                    .and_then(|instance| module.image.function(instance.function))
-                    .filter(|function| function.coroutine.is_some())
+                    .and_then(|instance| module.image.function(instance.function()))
+                    .filter(|function| function.coroutine().is_some())
                 {
                     for value in &mut values {
-                        value.name = Arc::clone(&function.name);
+                        value.name = Arc::from(function.name());
                     }
                 }
                 Some(Returned {

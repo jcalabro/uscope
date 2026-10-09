@@ -486,8 +486,8 @@ pub async fn modules(handle: &DebuggerHandle, images: &Images) -> Result<Vec<Mod
             start: range.map(|range| hex(range.start.get().wrapping_add(bias))),
             end: range.map(|range| hex(range.end.get().wrapping_add(bias))),
             symbols: match &image {
-                Some(image) if !image.functions().is_empty() => "debug",
-                Some(image) if !image.symbols().is_empty() => "symbols",
+                Some(image) if image.functions().len() != 0 => "debug",
+                Some(image) if image.symbols().next().is_some() => "symbols",
                 _ => "none",
             }
             .to_owned(),

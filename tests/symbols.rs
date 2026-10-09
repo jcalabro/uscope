@@ -7,8 +7,8 @@ use std::sync::Arc;
 use support::Scenario;
 use uscope::{
     Backtrace, CoreDumpOptions, CoreModuleState, EmbeddedSymbolTable, Error, ImageAddress,
-    LoadedModuleSnapshot, ModuleIdentity, ModuleImage, StackFrame, StopReason, SymbolBinding,
-    SymbolExtentProvenance, SymbolInfo, SymbolKind, SymbolLocation, UnwindTermination,
+    LoadedModuleSnapshot, ModuleIdentity, ModuleImage, StackFrame, StopReason, Symbol,
+    SymbolBinding, SymbolExtentProvenance, SymbolKind, SymbolLocation, UnwindTermination,
     VirtualAddress,
 };
 
@@ -145,16 +145,15 @@ impl Modules {
     }
 }
 
-fn symbol_named<'a>(image: &'a ModuleImage, name: &str) -> &'a SymbolInfo {
+fn symbol_named<'a>(image: &'a ModuleImage, name: &str) -> Symbol<'a> {
     let matches = image
         .symbols()
-        .iter()
-        .filter(|symbol| symbol.name.as_ref() == name)
+        .filter(|symbol| symbol.name() == name)
         .collect::<Vec<_>>();
     let [symbol] = matches.as_slice() else {
         panic!("expected one symbol named {name}, found {matches:#?}");
     };
-    symbol
+    *symbol
 }
 
 fn frame_symbol<'a>(frame: &'a StackFrame, context: &str) -> &'a SymbolLocation {
@@ -181,19 +180,19 @@ fn assert_frame_symbols_are_consistent(trace: &Backtrace, modules: &Modules, con
         let info = image
             .symbol(symbol.symbol)
             .unwrap_or_else(|| panic!("{context}: unknown symbol {symbol:?}"));
-        assert_eq!(info.name, symbol.name, "{context}");
+        assert_eq!(info.name(), &*symbol.name, "{context}");
         let image_instruction = frame
             .instruction
             .expect("a thread's frame has an instruction")
             .get()
             - modules.bias(module);
         assert_eq!(
-            image_instruction - info.address.get(),
+            image_instruction - info.address().get(),
             symbol.offset,
             "{context}: frame #{}",
             frame.level
         );
-        let extent = info.extent.expect("a frame symbol names code");
+        let extent = info.extent().expect("a frame symbol names code");
         assert_eq!(extent.provenance, symbol.provenance, "{context}");
         let lookup = if frame.level == 0 {
             image_instruction
@@ -309,8 +308,8 @@ fn assert_library_layout(
     let context = context.to_owned();
     let caller = symbol_named(image, "asm_noreturn_caller");
     let after = symbol_named(image, "asm_after_noreturn");
-    let caller_extent = caller.extent.expect("sized caller").range;
-    assert_eq!(caller_extent.end, after.address, "{context}");
+    let caller_extent = caller.extent().expect("sized caller").range;
+    assert_eq!(caller_extent.end, after.address(), "{context}");
     assert_eq!(
         frame_symbol(noreturn, &context).offset,
         caller_extent.end.get() - caller_extent.start.get(),
@@ -320,12 +319,12 @@ fn assert_library_layout(
     // The chain continues from the call after the nested symbol ends.
     let outer = &trace.frames[position("asm_nested_outer")];
     let inner = symbol_named(image, "asm_nested_inner")
-        .extent
+        .extent()
         .expect("sized inner")
         .range;
     let outer_offset = frame_symbol(outer, &context).offset;
     assert!(
-        outer_offset > inner.end.get() - symbol_named(image, "asm_nested_outer").address.get(),
+        outer_offset > inner.end.get() - symbol_named(image, "asm_nested_outer").address().get(),
         "{context}: {outer_offset:#x}"
     );
 
@@ -334,11 +333,10 @@ fn assert_library_layout(
     let alias = symbol_named(image, "asm_alias_global");
     let mut aliases = image
         .symbols()
-        .iter()
-        .filter(|symbol| symbol.address == alias.address)
+        .filter(|symbol| symbol.address() == alias.address())
         .map(|symbol| {
-            assert_eq!(symbol.extent, alias.extent, "{context}");
-            (symbol.name.as_ref(), symbol.binding)
+            assert_eq!(symbol.extent(), alias.extent(), "{context}");
+            (symbol.name(), symbol.binding())
         })
         .collect::<Vec<_>>();
     aliases.sort_unstable();
@@ -357,17 +355,17 @@ fn assert_library_layout(
     // that shares its extent.
     let resolver = symbol_named(image, "asm_resolver_impl");
     let indirect = symbol_named(image, "asm_indirect");
-    assert_eq!(indirect.kind, SymbolKind::IndirectFunction, "{context}");
-    assert_eq!(resolver.kind, SymbolKind::Function, "{context}");
-    assert_eq!(indirect.extent, resolver.extent, "{context}");
+    assert_eq!(indirect.kind(), SymbolKind::IndirectFunction, "{context}");
+    assert_eq!(resolver.kind(), SymbolKind::Function, "{context}");
+    assert_eq!(indirect.extent(), resolver.extent(), "{context}");
 
     // An unsized symbol with its own call-frame entry ends with that entry.
     let oracle = Oracle::read(&[library]);
     let unsized_symbol = symbol_named(image, "asm_unsized");
-    let unsized_extent = unsized_symbol.extent.expect("code");
+    let unsized_extent = unsized_symbol.extent().expect("code");
     assert_eq!(
         unsized_extent.range.end.get(),
-        oracle.unwind_end_at(unsized_symbol.address.get()),
+        oracle.unwind_end_at(unsized_symbol.address().get()),
         "{context}"
     );
     assert_eq!(unsized_extent.provenance, SymbolExtentProvenance::Inferred);
@@ -375,19 +373,20 @@ fn assert_library_layout(
     // Without one, it ends where the next function begins. Once stripping
     // removes that function's symbol, only its call-frame entry bounds it.
     let leaf_extent = symbol_named(image, "asm_unsized_leaf")
-        .extent
+        .extent()
         .expect("code");
     let next_function = if library == "libelf-symbols-stripped.so" {
         assert!(
             !image
                 .symbols()
-                .iter()
-                .any(|symbol| symbol.name.as_ref() == "asm_local_after_unsized"),
+                .any(|symbol| symbol.name() == "asm_local_after_unsized"),
             "{context}"
         );
         Oracle::read(&["libelf-symbols-stripped.so.full"]).address_of("asm_local_after_unsized")
     } else {
-        symbol_named(image, "asm_local_after_unsized").address.get()
+        symbol_named(image, "asm_local_after_unsized")
+            .address()
+            .get()
     };
     assert_eq!(leaf_extent.range.end.get(), next_function, "{context}");
     assert_eq!(leaf_extent.provenance, SymbolExtentProvenance::Inferred);
@@ -638,11 +637,10 @@ fn assert_agrees_with_gdb(trace: &Backtrace, modules: &Modules, gdb: &[GdbFrame]
         assert!(
             image
                 .symbols()
-                .iter()
-                .any(|alias| alias.name.as_ref() == gdb.name && alias.address == chosen.address),
+                .any(|alias| alias.name() == gdb.name && alias.address() == chosen.address()),
             "{context}: gdb's {} is not an alias of {}",
             gdb.name,
-            chosen.name
+            chosen.name()
         );
     }
 }
@@ -998,8 +996,7 @@ fn assert_catalog_matches_oracle(image: &ModuleImage, oracle: &Oracle, context: 
     }
     let catalog = image
         .symbols()
-        .iter()
-        .map(|symbol| ((symbol.name.to_string(), symbol.address.get()), symbol))
+        .map(|symbol| ((symbol.name().to_string(), symbol.address().get()), symbol))
         .collect::<BTreeMap<_, _>>();
     let invented = catalog
         .keys()
@@ -1016,14 +1013,12 @@ fn assert_catalog_matches_oracle(image: &ModuleImage, oracle: &Oracle, context: 
     for (key, entries) in &admitted {
         let symbol = catalog[key];
         assert!(
-            entries
-                .iter()
-                .any(|entry| entry.kind == Some(symbol.kind)
-                    && entry.binding == Some(symbol.binding)),
+            entries.iter().any(|entry| entry.kind == Some(symbol.kind())
+                && entry.binding == Some(symbol.binding())),
             "{context}: {symbol:?} vs {entries:?}"
         );
         assert_eq!(
-            symbol.exported,
+            symbol.exported(),
             entries.iter().any(|entry| entry.dynamic),
             "{context}: {symbol:?}"
         );
@@ -1073,7 +1068,7 @@ fn assert_sections_match_oracle(image: &ModuleImage, oracle: &OracleFile, contex
 /// non-thread-local sections name storage, sized as declared or empty.
 fn assert_data_storage_matches_oracle(
     oracle: &Oracle,
-    catalog: &BTreeMap<(String, u64), &SymbolInfo>,
+    catalog: &BTreeMap<(String, u64), Symbol<'_>>,
     context: &str,
 ) {
     let mut expected = BTreeMap::new();
@@ -1098,7 +1093,7 @@ fn assert_data_storage_matches_oracle(
     let (mut sized, mut unsized_count) = (0_usize, 0_usize);
     for (key, symbol) in catalog {
         let storage = symbol
-            .storage
+            .storage()
             .map(|range| (range.start.get(), range.end.get()));
         match expected.get(key) {
             Some(expected) => assert_eq!(storage, *expected, "{context}: {symbol:?}"),
@@ -1123,7 +1118,7 @@ fn assert_data_storage_matches_oracle(
 fn assert_code_extents_match_oracle(
     image: &ModuleImage,
     oracle: &Oracle,
-    catalog: &BTreeMap<(String, u64), &SymbolInfo>,
+    catalog: &BTreeMap<(String, u64), Symbol<'_>>,
     context: &str,
 ) {
     // The start of every code symbol in each executable section bounds the
@@ -1163,18 +1158,18 @@ fn assert_code_extents_match_oracle(
     let mut inferred = 0_usize;
     for (key, symbol) in catalog {
         let Some(&(oracle_symbol, _, section_end)) = code_by_key.get(key) else {
-            assert!(symbol.extent.is_none(), "{context}: {symbol:?}");
+            assert!(symbol.extent().is_none(), "{context}: {symbol:?}");
             continue;
         };
         let extent = symbol
-            .extent
+            .extent()
             .unwrap_or_else(|| panic!("{context}: code symbol without extent {symbol:?}"));
-        assert_eq!(extent.range.start, symbol.address, "{context}");
+        assert_eq!(extent.range.start, symbol.address(), "{context}");
         if oracle_symbol.size == 0 {
             // The first evidence of other code: the next code symbol, the next
             // call-frame entry, the end of an entry beginning at the symbol,
             // or the section end.
-            let address = symbol.address.get();
+            let address = symbol.address().get();
             let end = code_starts
                 .range(address + 1..)
                 .next()
@@ -1208,7 +1203,7 @@ fn assert_code_extents_match_oracle(
                 .symbolize(address)
                 .unwrap_or_else(|| panic!("{context}: {address:#x} in {symbol:?} is unnamed"));
             let found = image.symbol(found.symbol).expect("catalog symbol");
-            let found_extent = found.extent.expect("code").range;
+            let found_extent = found.extent().expect("code").range;
             assert!(
                 found_extent.contains(address)
                     && found_extent.start >= extent.range.start
@@ -1219,7 +1214,10 @@ fn assert_code_extents_match_oracle(
         }
         if let Some(after) = image.symbolize(extent.range.end) {
             let after = image.symbol(after.symbol).expect("catalog symbol");
-            assert_ne!(after.extent.map(|extent| extent.range), Some(extent.range));
+            assert_ne!(
+                after.extent().map(|extent| extent.range),
+                Some(extent.range)
+            );
         }
         checked += 1;
     }
@@ -1577,10 +1575,10 @@ async fn assert_module_descriptions(
                 assert!(
                     expected
                         .data
-                        .contains(&(symbol.name.to_string(), info.address.get())),
+                        .contains(&(symbol.name.to_string(), info.address().get())),
                     "{context}: {symbol:?} is not among {expected:?}"
                 );
-                assert_eq!(symbol.offset, probe - info.address.get(), "{context}");
+                assert_eq!(symbol.offset, probe - info.address().get(), "{context}");
                 assert_eq!(
                     symbol.provenance,
                     if expected.unsized_data {
@@ -1612,7 +1610,7 @@ async fn assert_data_object_descriptions(
 
     let describe = async |file_name: &str, name: &str, offset: u64| {
         let (module, image) = modules.named(file_name);
-        let address = modules.bias(module) + symbol_named(image, name).address.get() + offset;
+        let address = modules.bias(module) + symbol_named(image, name).address().get() + offset;
         let description = scenario
             .operation(
                 "describe address",

@@ -997,23 +997,23 @@ impl Cli {
         let mut names = std::collections::BTreeSet::new();
         for image in self.loaded_images().await {
             for function in image.functions() {
-                if image.instances_for_function(function.id).next().is_some()
-                    && regex.is_match(&function.name)
+                if image.instances_for_function(function.id()).next().is_some()
+                    && regex.is_match(function.name())
                 {
-                    names.insert(function.name.to_string());
+                    names.insert(function.name().to_string());
                 }
             }
             // Code without debug information is named by its symbol.
             for symbol in image.symbols() {
                 let shown = symbol
                     .demangled_name()
-                    .unwrap_or_else(|| symbol.name.to_string());
-                if symbol.kind == uscope::SymbolKind::Function
-                    && symbol.extent.is_some()
-                    && image.locate(symbol.address).function.is_none()
+                    .unwrap_or_else(|| symbol.name().to_string());
+                if symbol.kind() == uscope::SymbolKind::Function
+                    && symbol.extent().is_some()
+                    && image.locate(symbol.address()).function.is_none()
                     && regex.is_match(&shown)
                 {
-                    names.insert(symbol.name.to_string());
+                    names.insert(symbol.name().to_string());
                 }
             }
         }
@@ -1078,17 +1078,12 @@ impl Cli {
             uscope::Error::FunctionNotFound(name) => {
                 let images = self.loaded_images().await;
                 let names = images.iter().flat_map(|image| {
-                    image
-                        .functions()
-                        .iter()
-                        .map(|function| function.name.as_ref())
-                        .chain(
-                            image
-                                .symbols()
-                                .iter()
-                                .filter(|symbol| symbol.kind == uscope::SymbolKind::Function)
-                                .map(|symbol| symbol.name.as_ref()),
-                        )
+                    image.functions().map(uscope::Function::name).chain(
+                        image
+                            .symbols()
+                            .filter(|symbol| symbol.kind() == uscope::SymbolKind::Function)
+                            .map(uscope::Symbol::name),
+                    )
                 });
                 super::suggest::did_you_mean(name, names)
             }
@@ -1211,9 +1206,14 @@ impl Cli {
         };
         placed.function = inline
             .and_then(|instance| image.code_instance(instance))
-            .and_then(|instance| image.function(instance.function))
-            .or(located.function.as_ref())
-            .map(|function| std::sync::Arc::clone(&function.name))
+            .and_then(|instance| image.function(instance.function()))
+            .map(|function| std::sync::Arc::from(function.name()))
+            .or_else(|| {
+                located
+                    .function
+                    .as_ref()
+                    .map(|function| std::sync::Arc::clone(&function.name))
+            })
             // Code no debug information describes is named by its symbol.
             .or_else(|| {
                 let symbol = image.symbolize(address)?;
