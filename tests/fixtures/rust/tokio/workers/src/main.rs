@@ -104,22 +104,53 @@ async fn top(wait: Wait) -> u32 {
 
 /// How some tasks' futures are spawned. In the `wrapped` build: the
 /// sleeper's boxed as a trait object, as code that spawns futures of
-/// several types holds them. In every other build, as they are.
+/// several types holds them; the notified task's in a task-local scope;
+/// and the oneshot's catching its panic, through the futures crate's
+/// `catch_unwind` and `map`. In every other build, as they are.
 #[cfg(feature = "wrapped")]
 mod wrap {
     use std::future::Future;
+    use std::panic::AssertUnwindSafe;
     use std::pin::Pin;
+
+    use futures_util::FutureExt;
+
+    tokio::task_local! {
+        static DOING: &'static str;
+    }
 
     pub fn boxed(
         future: impl Future<Output = u32> + Send + 'static,
     ) -> Pin<Box<dyn Future<Output = u32> + Send>> {
         Box::pin(future)
     }
+
+    pub fn scoped(
+        future: impl Future<Output = u32> + Send + 'static,
+    ) -> impl Future<Output = u32> + Send + 'static {
+        DOING.scope("notified", future)
+    }
+
+    pub fn caught(
+        future: impl Future<Output = u32> + Send + 'static,
+    ) -> impl Future<Output = u32> + Send + 'static {
+        AssertUnwindSafe(future)
+            .catch_unwind()
+            .map(|ended| ended.unwrap_or(0))
+    }
 }
 
 #[cfg(not(feature = "wrapped"))]
 mod wrap {
     pub const fn boxed<F>(future: F) -> F {
+        future
+    }
+
+    pub const fn scoped<F>(future: F) -> F {
+        future
+    }
+
+    pub const fn caught<F>(future: F) -> F {
         future
     }
 }
@@ -137,12 +168,12 @@ async fn run(handle: Option<tokio::runtime::Handle>) {
 
     let channel = tokio::spawn(top(Wait::Channel(receiver))); // SPAWN: channel
     let mut tasks = vec![
-        tokio::spawn(wrap::boxed(top(Wait::Sleep))),        // SPAWN: sleep
-        tokio::spawn(top(Wait::Lock(mutex))),               // SPAWN: lock
-        tokio::spawn(top(Wait::Join(channel))),             // SPAWN: join
-        tokio::spawn(top(Wait::Notified(notify.clone()))),  // SPAWN: notify
-        tokio::spawn(top(Wait::Oneshot(oneshot_receiver))), // SPAWN: oneshot
-        tokio::spawn(top(Wait::Barrier(barrier.clone()))),  // SPAWN: barrier
+        tokio::spawn(wrap::boxed(top(Wait::Sleep))), // SPAWN: sleep
+        tokio::spawn(top(Wait::Lock(mutex))), // SPAWN: lock
+        tokio::spawn(top(Wait::Join(channel))), // SPAWN: join
+        tokio::spawn(wrap::scoped(top(Wait::Notified(notify.clone())))), // SPAWN: notify
+        tokio::spawn(wrap::caught(top(Wait::Oneshot(oneshot_receiver)))), // SPAWN: oneshot
+        tokio::spawn(top(Wait::Barrier(barrier.clone()))), // SPAWN: barrier
         tokio::spawn(top(Wait::Permit(semaphore.clone()))), // SPAWN: permit
     ];
 

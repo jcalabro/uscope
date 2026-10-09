@@ -210,6 +210,11 @@ pub struct SumVariant {
     pub payload: Field,
 }
 
+/// Whether a value of `ty` is of a sum type, such as a Rust `enum`.
+pub fn is_sum(image: &dyn RuntimeImage, ty: TypeReference) -> bool {
+    representation(image, ty).is_some_and(|info| matches!(info.kind, TypeKind::Variant { .. }))
+}
+
 /// How the sum type `ty` selects its variants.
 pub fn sum(image: &dyn RuntimeImage, ty: TypeReference) -> Result<Sum, Missing> {
     let info =
