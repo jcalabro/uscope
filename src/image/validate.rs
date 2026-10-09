@@ -33,6 +33,9 @@ pub enum ImageError {
     Malformed(String),
 }
 
+/// Checks one family of tables.
+type Validation = fn(&Image) -> Result<(), String>;
+
 fn malformed(text: impl Into<String>) -> ImageError {
     ImageError::Malformed(text.into())
 }
@@ -176,6 +179,7 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
     {
         return Err(malformed("a file names no path"));
     }
+    let phase = crate::span!("validate.lines");
     let tables = Lines {
         addresses: image.table(),
         rows: image.table(),
@@ -189,11 +193,20 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
     tables.ranges()?;
     tables.statements(image.table())?;
     tables.boundaries(image.table())?;
-    super::symbols::validate(image).map_err(malformed)?;
-    super::functions::validate(image).map_err(malformed)?;
-    super::unwind::validate(image).map_err(malformed)?;
-    super::facts::validate(image).map_err(malformed)?;
-    super::packages::validate(image).map_err(malformed)
+    drop(phase);
+    let families: [(&str, Validation); 6] = [
+        ("validate.symbols", super::symbols::validate),
+        ("validate.functions", super::functions::validate),
+        ("validate.unwind", super::unwind::validate),
+        ("validate.facts", super::facts::validate),
+        ("validate.packages", super::packages::validate),
+        ("validate.types", super::types::validate),
+    ];
+    for (name, validate) in families {
+        let _phase = crate::profile::span(name, None, None);
+        validate(image).map_err(malformed)?;
+    }
+    Ok(())
 }
 
 /// The line tables, checked against each other and their indexes. Each

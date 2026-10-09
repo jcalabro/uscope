@@ -155,11 +155,43 @@ pub enum TableKind {
     PackagedNames = 39,
     /// Functions by their local names within their packages.
     LocalNames = 40,
+    /// Types.
+    Types = 41,
+    /// Record, union, and variant members.
+    TypeMembers = 42,
+    /// Base classes.
+    TypeBases = 43,
+    /// Variants of variant types.
+    TypeVariants = 44,
+    /// The values that select variants.
+    TypeSelectors = 45,
+    /// Enumerators.
+    TypeEnumerators = 46,
+    /// Array dimensions.
+    TypeDimensions = 47,
+    /// Signatures' parameter types.
+    TypeParameters = 48,
+    /// Named types' identities.
+    TypeIdentities = 49,
+    /// Identities' scopes, as strings.
+    IdentityStrings = 50,
+    /// Identities' template and generic arguments.
+    TypeArguments = 51,
+    /// Types by name.
+    TypeNames = 52,
+    /// Types by their identity's base.
+    TypeBaseNames = 53,
+    /// Each type's identity class.
+    TypeClasses = 54,
+    /// Enumerations by their enumerators' names.
+    EnumeratorNames = 55,
+    /// Types by Go runtime type descriptor.
+    GoRuntimeTypes = 56,
 }
 
 impl TableKind {
     /// Every kind, in the order tables are laid out.
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 56] = [
         Self::Strings,
         Self::Files,
         Self::LineAddresses,
@@ -200,6 +232,22 @@ impl TableKind {
         Self::Packages,
         Self::PackagedNames,
         Self::LocalNames,
+        Self::Types,
+        Self::TypeMembers,
+        Self::TypeBases,
+        Self::TypeVariants,
+        Self::TypeSelectors,
+        Self::TypeEnumerators,
+        Self::TypeDimensions,
+        Self::TypeParameters,
+        Self::TypeIdentities,
+        Self::IdentityStrings,
+        Self::TypeArguments,
+        Self::TypeNames,
+        Self::TypeBaseNames,
+        Self::TypeClasses,
+        Self::EnumeratorNames,
+        Self::GoRuntimeTypes,
     ];
 
     pub const COUNT: usize = Self::ALL.len();

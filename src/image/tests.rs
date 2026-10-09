@@ -13,9 +13,14 @@ use super::packages::{PackageRecord, PackageView, PackagedRecord};
 use super::sample::{
     SAMPLE_PACKAGES, TARGET, read_everything, reseal, sample, sample_functions, sample_got,
     sample_instances, sample_packaged, sample_rows, sample_sections, sample_sources,
-    sample_symbols, sample_thread_locals, sample_unwind, seal,
+    sample_symbols, sample_thread_locals, sample_types, sample_unwind, seal,
 };
 use super::symbols::{GotRecord, SectionRecord, SymbolRecord, SymbolView};
+use super::types::{
+    ArgumentRecord, BaseRecord, DimensionRecord, EnumeratorRecord, IdentityRecord, Item,
+    MemberRecord, RuntimeTypeRecord, SelectorRecord, TypeRecord, TypeTable, TypeView,
+    VariantRecord,
+};
 use super::unwind::{FdeMiss, FrameSaveRecord, UnwindRecord, UnwindView, unwind_flags};
 use super::*;
 use crate::{
@@ -191,6 +196,119 @@ fn the_schema_is_the_records_layout() {
         [name, value, reason, place]
     );
     check!(TableKind::Packages, PackageRecord, [path, name]);
+    check!(
+        TableKind::Types,
+        TypeRecord,
+        [
+            name,
+            text,
+            base_name,
+            identity,
+            target,
+            first,
+            count,
+            bases,
+            base_count,
+            variants,
+            variant_count,
+            discriminant,
+            byte_size,
+            value,
+            bit_size,
+            flags,
+            kind,
+            detail
+        ]
+    );
+    check!(
+        TableKind::TypeMembers,
+        MemberRecord,
+        [
+            name,
+            ty,
+            offset,
+            bit_size,
+            declaration.file,
+            declaration.line,
+            declaration.column,
+            layout,
+            accessibility,
+            flags
+        ]
+    );
+    check!(
+        TableKind::TypeBases,
+        BaseRecord,
+        [ty, offset, bit_size, layout, accessibility, virtual_base]
+    );
+    check!(
+        TableKind::TypeVariants,
+        VariantRecord,
+        [
+            name,
+            selectors,
+            selector_count,
+            members,
+            member_count,
+            default
+        ]
+    );
+    check!(
+        TableKind::TypeSelectors,
+        SelectorRecord,
+        [low.bits, low.signed, high.bits, high.signed, range]
+    );
+    check!(
+        TableKind::TypeEnumerators,
+        EnumeratorRecord,
+        [name, value.bits, value.signed]
+    );
+    check!(
+        TableKind::TypeDimensions,
+        DimensionRecord,
+        [lower_bound, count]
+    );
+    check!(
+        TableKind::TypeIdentities,
+        IdentityRecord,
+        [
+            path,
+            path_count,
+            inline,
+            inline_count,
+            base,
+            arguments,
+            argument_count,
+            pack,
+            runtime_type,
+            other_language,
+            language,
+            origin,
+            go_kind,
+            flags
+        ]
+    );
+    check!(
+        TableKind::TypeArguments,
+        ArgumentRecord,
+        [value.bits, value.signed, reference, kind]
+    );
+    check!(TableKind::GoRuntimeTypes, RuntimeTypeRecord, [offset, ty]);
+    for kind in [
+        TableKind::TypeParameters,
+        TableKind::IdentityStrings,
+        TableKind::TypeClasses,
+    ] {
+        assert_eq!(schema::record(kind), "Item");
+        check!(kind, Item, [value]);
+    }
+    for kind in [
+        TableKind::TypeNames,
+        TableKind::TypeBaseNames,
+        TableKind::EnumeratorNames,
+    ] {
+        assert_eq!(schema::record(kind), "NameEntry");
+    }
     check!(TableKind::PackagedNames, PackagedRecord, [package, local]);
     assert_eq!(schema::record(TableKind::FunctionNames), "NameEntry");
     assert_eq!(schema::record(TableKind::LocalNames), "NameEntry");
@@ -214,7 +332,7 @@ fn the_schema_is_the_records_layout() {
     // A change to any record changes this; bump the format with it.
     assert_eq!(
         schema::layout_fingerprint(),
-        0xbbf0_54ff_3271_8bea,
+        0x96b3_6b54_1c77_6aea,
         "the layout changed:\n{}",
         schema::schema_text()
     );
@@ -1070,6 +1188,357 @@ fn validation_rejects_unwinding_tables_that_disagree() {
             "a range never saved",
             saves(|s| s[1].end = 4.into()),
             "frame save is malformed",
+        ),
+    ];
+    for (name, error, expected) in cases {
+        assert!(
+            matches!(&error, Err(ImageError::Malformed(why)) if why.contains(expected)),
+            "{name}: {error:?}"
+        );
+    }
+}
+
+/// Strings whose hashes collide are pooled apart, each once.
+#[test]
+fn a_pool_keeps_strings_whose_hashes_collide() {
+    let mut pool = super::strings::StringsBuilder::default();
+    let first = pool.push_hashed("first", 7).unwrap();
+    let second = pool.push_hashed("second", 7).unwrap();
+    let third = pool.push_hashed("third", 7).unwrap();
+    assert_eq!(
+        [
+            pool.push_hashed("third", 7),
+            pool.push_hashed("first", 7),
+            pool.push_hashed("second", 7),
+        ],
+        [Some(third), Some(first), Some(second)]
+    );
+    let bytes = pool.into_bytes();
+    let strings = super::strings::Strings(&bytes);
+    assert_eq!(
+        [first, second, third].map(|id| strings.get(id)),
+        ["first", "second", "third"]
+    );
+    assert_eq!(bytes.len(), "first second third ".len());
+}
+
+/// Two names of one record whose hashes collide are both kept and both
+/// found.
+#[test]
+fn a_name_index_keeps_every_name_whose_hash_collides() {
+    let mut seen = std::collections::HashMap::new();
+    let (first, second) = (0..)
+        .map(|number| format!("n{number}"))
+        .find_map(|name| {
+            seen.insert(index::hash(name.as_bytes()), name.clone())
+                .map(|other| (other, name))
+        })
+        .unwrap();
+    let mut strings = StringsBuilder::default();
+    let ids = [
+        strings.push(&first).unwrap(),
+        strings.push(&second).unwrap(),
+    ];
+    let names = index::names([(first.as_str(), ids[0], 7), (second.as_str(), ids[1], 7)]);
+    let pool = strings.into_bytes();
+    let strings = Strings(&pool);
+    assert_eq!(names.len(), 2);
+    assert!(index::valid_names(&strings, &names, 8));
+    for name in [&first, &second] {
+        assert_eq!(index::named(strings, &names, name).collect::<Vec<_>>(), [7]);
+    }
+}
+
+#[test]
+fn types_read_back_with_their_indexes() {
+    let (tables, files) = sample();
+    let image = std::sync::Arc::new(reopen(seal(&tables, &files).unwrap().as_bytes()).unwrap());
+    let (nodes, classes) = sample_types();
+    let table = TypeTable::new(std::sync::Arc::clone(&image), crate::ModuleImageId::new(0));
+    assert_eq!(table.nodes().cloned().collect::<Vec<_>>(), nodes);
+    let view = TypeView::new(&image);
+    let ids = |found: Vec<crate::TypeId>| {
+        found
+            .into_iter()
+            .map(crate::TypeId::get)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(view.named("int *").collect()), [1, 19]);
+    assert!(view.named("the type's size is negative").next().is_none());
+    assert_eq!(ids(view.with_base("Point").collect()), [2]);
+    // C's own spelling of a base type finds it too.
+    assert_eq!(ids(view.with_base("short").collect()), [18]);
+    assert_eq!(ids(view.with_enumerator("Red").collect()), [4]);
+    assert!(view.with_enumerator("Blue").next().is_none());
+    assert_eq!(view.go_runtime_type(0x100), Some(crate::TypeId::new(4)));
+    assert_eq!(view.go_runtime_type(0x101), None);
+    for (index, class) in classes.iter().enumerate() {
+        assert_eq!(
+            view.class(crate::TypeId::new(u32::try_from(index).unwrap())),
+            Some(*class)
+        );
+    }
+    // A type decodes once, and only when asked for.
+    let other = TypeTable::new(image, crate::ModuleImageId::new(7));
+    let first = other.node(crate::TypeId::new(2)).unwrap();
+    assert_eq!(first.reference().image, crate::ModuleImageId::new(7));
+    assert!(std::ptr::eq(
+        first,
+        other.node(crate::TypeId::new(2)).unwrap()
+    ));
+    assert!(other.node(crate::TypeId::new(20)).is_none());
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "one case for each check")]
+fn validation_rejects_types_that_disagree() {
+    use super::types::{kinds, type_flags};
+    let ty = |change: fn(&mut [TypeRecord])| tampered(TableKind::Types, change);
+    let member = |change: fn(&mut [MemberRecord])| tampered(TableKind::TypeMembers, change);
+    let identity = |change: fn(&mut [IdentityRecord])| tampered(TableKind::TypeIdentities, change);
+    let argument = |change: fn(&mut [ArgumentRecord])| tampered(TableKind::TypeArguments, change);
+    let item = |kind, change: fn(&mut [Item])| tampered(kind, change);
+    let name = |kind, change: fn(&mut [NameEntry])| tampered(kind, change);
+    let cases = [
+        (
+            "an unknown kind",
+            ty(|t| t[0].kind = 16),
+            "a type is malformed",
+        ),
+        (
+            "a name past the pool",
+            ty(|t| t[0].name = 9999.into()),
+            "a type is malformed",
+        ),
+        (
+            "an unknown encoding",
+            ty(|t| t[0].detail = 7),
+            "a type is malformed",
+        ),
+        (
+            "a flag of another kind",
+            ty(|t| t[0].flags = 0x41.into()),
+            "a type is malformed",
+        ),
+        (
+            "a size without its flag",
+            ty(|t| t[10].byte_size = 1.into()),
+            "a type is malformed",
+        ),
+        (
+            "a bit size without its flag",
+            ty(|t| t[0].bit_size = 1.into()),
+            "a type is malformed",
+        ),
+        (
+            "a target past the types",
+            ty(|t| t[1].target = 20.into()),
+            "a type is malformed",
+        ),
+        (
+            "a reference without a target",
+            ty(|t| t[15].target = NONE.into()),
+            "a type is malformed",
+        ),
+        (
+            "a pointer's list",
+            ty(|t| t[1].count = 1.into()),
+            "a type is malformed",
+        ),
+        (
+            "a malformed type's identity",
+            ty(|t| t[14].identity = 0.into()),
+            "a type is malformed",
+        ),
+        (
+            "members out of order",
+            ty(|t| t[2].first = 1.into()),
+            "a type is malformed",
+        ),
+        (
+            "a member claimed twice",
+            ty(|t| t[7].first = t[2].first),
+            "a type is malformed",
+        ),
+        (
+            "a stored and tagged discriminant",
+            ty(|t| t[3].flags = (t[3].flags.get() | type_flags::TAG_TYPE).into()),
+            "a type is malformed",
+        ),
+        (
+            "a discriminant before the variants' members",
+            ty(|t| t[3].discriminant = t[3].first),
+            "a type is malformed",
+        ),
+        (
+            "an opaque type without text",
+            ty(|t| t[13].text = NONE.into()),
+            "a type is malformed",
+        ),
+        (
+            "an identity out of order",
+            ty(|t| t.swap(2, 3)),
+            "a type is malformed",
+        ),
+        (
+            "a list longer than its types say",
+            ty(|t| t[12].count = 1.into()),
+            "lists do not match",
+        ),
+        (
+            "a union read as a record",
+            ty(|t| t[7].kind = kinds::RECORD),
+            "a type is malformed",
+        ),
+        (
+            "an unknown layout",
+            member(|m| m[0].layout = 3),
+            "member, base",
+        ),
+        (
+            "a byte offset's bit size",
+            member(|m| m[0].bit_size = 1.into()),
+            "member, base",
+        ),
+        (
+            "a member of no type",
+            member(|m| m[0].ty = 20.into()),
+            "member, base",
+        ),
+        (
+            "an unknown accessibility",
+            member(|m| m[0].accessibility = 3),
+            "member, base",
+        ),
+        (
+            "a declaration on line zero",
+            member(|m| m[0].declaration.line = 0.into()),
+            "member, base",
+        ),
+        (
+            "an unknown selector",
+            tampered(TableKind::TypeSelectors, |s: &mut [SelectorRecord]| {
+                s[0].range = 2;
+            }),
+            "member, base",
+        ),
+        (
+            "a value's high end",
+            tampered(TableKind::TypeSelectors, |s: &mut [SelectorRecord]| {
+                s[0].high.signed = 1;
+            }),
+            "member, base",
+        ),
+        (
+            "a default variant's selectors",
+            tampered(TableKind::TypeVariants, |v: &mut [VariantRecord]| {
+                v[0].default = 1;
+            }),
+            "a type is malformed",
+        ),
+        (
+            "an integer of unknown sign",
+            tampered(
+                TableKind::TypeEnumerators,
+                |e: &mut [EnumeratorRecord]| {
+                    e[0].value.signed = 2;
+                },
+            ),
+            "member, base",
+        ),
+        (
+            "a parameter of no type",
+            item(TableKind::TypeParameters, |p| p[0].value = 20.into()),
+            "member, base",
+        ),
+        (
+            "an unknown language",
+            identity(|i| i[0].language = 9),
+            "identity is malformed",
+        ),
+        (
+            "a pack past the arguments",
+            identity(|i| i[1].pack = 4.into()),
+            "identity is malformed",
+        ),
+        (
+            "an unknown origin",
+            identity(|i| i[0].origin = 3),
+            "identity is malformed",
+        ),
+        (
+            "a runtime type outside Go",
+            identity(|i| i[0].runtime_type = 1.into()),
+            "identity is malformed",
+        ),
+        (
+            "a Go kind outside Go",
+            identity(|i| i[0].go_kind = 1),
+            "identity is malformed",
+        ),
+        (
+            "segments out of order",
+            identity(|i| i[1].inline = i[1].path),
+            "identity is malformed",
+        ),
+        (
+            "an unknown argument",
+            argument(|a| a[0].kind = 3),
+            "segments or arguments",
+        ),
+        (
+            "a type argument's value",
+            argument(|a| a[0].value.bits = 1.into()),
+            "segments or arguments",
+        ),
+        (
+            "a value argument's text",
+            argument(|a| a[1].reference = 0.into()),
+            "segments or arguments",
+        ),
+        (
+            "a generic of no type",
+            tampered(TableKind::Generics, |g: &mut [GenericRecord]| {
+                g[0].argument = 20.into();
+            }),
+            "names a type the image lacks",
+        ),
+        (
+            "a coroutine of no type",
+            tampered(TableKind::Functions, |f: &mut [FunctionRecord]| {
+                f[0].coroutine = 20.into();
+            }),
+            "names a type the image lacks",
+        ),
+        (
+            "a name for another type",
+            name(TableKind::TypeNames, |n| n[0].value = 14.into()),
+            "type name index",
+        ),
+        (
+            "a base for another type",
+            name(TableKind::TypeBaseNames, |n| n[0].value = 1.into()),
+            "base index",
+        ),
+        (
+            "classes out of order",
+            item(TableKind::TypeClasses, |c| c.swap(0, 1)),
+            "classes are malformed",
+        ),
+        (
+            "an enumerator of another type",
+            name(TableKind::EnumeratorNames, |n| n[0].value = 0.into()),
+            "enumerator index",
+        ),
+        (
+            "a later type for a descriptor",
+            tampered(
+                TableKind::GoRuntimeTypes,
+                |r: &mut [RuntimeTypeRecord]| {
+                    r[0].ty = 9.into();
+                },
+            ),
+            "runtime type index",
         ),
     ];
     for (name, error, expected) in cases {

@@ -947,8 +947,8 @@ impl World {
 }
 
 impl TypeSource for World {
-    fn type_info(&self, ty: TypeReference) -> Option<TypeInfo> {
-        (ty.image == IMAGE).then(|| self.info(ty).clone())
+    fn type_info(&self, ty: TypeReference) -> Option<&TypeInfo> {
+        (ty.image == IMAGE).then(|| self.info(ty))
     }
 
     fn pointer_size(&self) -> u8 {

@@ -175,8 +175,8 @@ struct ModuleScope<'a, P: InspectionOps> {
 }
 
 impl<P: InspectionOps> TypeSource for ModuleScope<'_, P> {
-    fn type_info(&self, ty: TypeReference) -> Option<TypeInfo> {
-        self.controller.module_of(ty)?.image.type_info(ty).cloned()
+    fn type_info(&self, ty: TypeReference) -> Option<&TypeInfo> {
+        self.controller.module_of(ty)?.image.type_info(ty)
     }
 
     fn pointer_size(&self) -> u8 {
@@ -418,8 +418,8 @@ impl<P: InspectionOps> Controller<P> {
                 if !sets.iter().any(|set| set.names(identity))
                     || module
                         .image
-                        .type_key(info.reference)
-                        .is_some_and(|key| !seen.insert(Arc::clone(key)))
+                        .type_class(info.reference)
+                        .is_some_and(|class| !seen.insert(class))
                 {
                     continue;
                 }
@@ -793,7 +793,7 @@ impl Dynamic {
 
 /// A type and the types its typedefs and qualifiers stand for, outermost
 /// first.
-fn typedef_chain(types: &dyn TypeSource, ty: TypeReference) -> Vec<TypeInfo> {
+fn typedef_chain(types: &dyn TypeSource, ty: TypeReference) -> Vec<&TypeInfo> {
     let mut chain = Vec::new();
     let mut current = Some(ty);
     while let Some(ty) = current.filter(|_| chain.len() < 64) {
@@ -1682,7 +1682,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                     .map_or_else(|| "<unknown type>".to_owned(), |info| info.name.to_string());
                 let go = self
                     .type_info(ty)
-                    .and_then(|info| info.identity)
+                    .and_then(|info| info.identity.as_deref())
                     .is_some_and(|identity| identity.language == crate::SourceLanguage::Go);
                 let pointee = if go {
                     self.pointee_summary(&presented.state)?

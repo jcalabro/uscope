@@ -898,7 +898,6 @@ fn a_futures_type_says_whether_it_may_run_a_set() {
     let named = |wanted: &dyn Fn(&TypeInfo) -> bool| {
         image
             .types()
-            .iter()
             .filter_map(|node| match node {
                 crate::TypeNode::Resolved(info) if wanted(info) => Some(info.reference),
                 _ => None,
@@ -960,6 +959,35 @@ fn a_futures_type_says_whether_it_may_run_a_set() {
 fn shared_world() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     &LOCK
+}
+
+/// A shard whose lock is held may be read mid-change, so links that
+/// disagree there are the change the shard's gap reports, not damage.
+#[test]
+fn a_shard_being_changed_is_one_gap_however_its_links_disagree() {
+    let _serial = shared_world().lock();
+    let mut world = World::new(&[]);
+    let runtime = world.runtime(Flavor::MultiThread, 9, &[vec![(1, 0), (2, 0), (3, 0)]]);
+    world.thread(1, Some(&runtime), false, None);
+    let tasks = world.model.layout.tasks.as_ref().expect("Header binds");
+    let prev = tasks.prev;
+    let owned = &world.runtime_layout(Flavor::MultiThread).owned;
+    let lock = owned.shard_lock;
+    world.memory.write(runtime.shards + lock, 1, 4);
+    // A task being linked in front of the second has not yet been linked
+    // back to.
+    let second = runtime.headers[0][1];
+    world.memory.word(second + TRAILER + prev, second + 0x1000);
+    let (listed, gaps) = world.tasks(4096, true);
+    assert_eq!(
+        listed.iter().map(|task| task.number).collect::<Vec<_>>(),
+        [1]
+    );
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(
+        gaps[0].contains("was being changed at the stop"),
+        "{gaps:?}"
+    );
 }
 
 proptest! {

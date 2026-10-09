@@ -542,13 +542,15 @@ fn load_image(
     );
 
     drop(phase);
+    let mut variable_info = variables.info;
+    variable_info.bind_types(Arc::clone(image.type_table()));
     Ok(DebugInfo {
         unwind: Arc::new(DwarfUnwindInfo {
             tables: Arc::clone(image.tables()),
             go: std::sync::OnceLock::new(),
         }),
         image,
-        variables: Arc::new(variables.info),
+        variables: Arc::new(variable_info),
     })
 }
 

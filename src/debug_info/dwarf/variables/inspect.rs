@@ -485,14 +485,14 @@ impl DwarfVariableInfo {
     }
 
     pub(super) fn type_info(&self, id: TypeId) -> std::result::Result<&TypeInfo, Arc<str>> {
-        type_info_from(&self.types, id)
+        type_info_from(&*self.types, id)
     }
 
     pub(super) fn value_shape(
         &self,
         id: TypeId,
     ) -> std::result::Result<ValueShape, ValueShapeError> {
-        value_shape_from(&self.types, id)
+        value_shape_from(&*self.types, id)
     }
 
     pub(super) fn function_at(&self, address: ImageAddress) -> Option<&CatalogFunction> {
@@ -517,7 +517,7 @@ impl DwarfVariableInfo {
         &self,
         id: TypeId,
     ) -> std::result::Result<(TypeId, &TypeInfo), ValueShapeError> {
-        transparent_type_from(&self.types, id)
+        transparent_type_from(&*self.types, id)
     }
 
     /// Whether a type is a function's, whose values are code.
@@ -1593,7 +1593,7 @@ impl DwarfVariableInfo {
         let VariantDiscriminant::Stored(member) = discriminant else {
             // Without stored discriminator bytes, only a variant known to be
             // the only one that can hold a value is active.
-            return tagless_variant(&self.types, aggregate)
+            return tagless_variant(&*self.types, aggregate)
                 .map(|index| (None, Some(index)))
                 .ok_or_else(|| {
                     EvaluateError::Unavailable(

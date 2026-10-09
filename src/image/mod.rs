@@ -21,6 +21,7 @@ pub mod packages;
 mod schema;
 mod strings;
 pub mod symbols;
+pub mod types;
 pub mod unwind;
 mod validate;
 

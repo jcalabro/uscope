@@ -92,9 +92,10 @@ pub(super) fn valid_intervals(intervals: &[Interval], values: usize) -> bool {
     })
 }
 
-/// One name of a record. An index orders them by the name's hash and
-/// then the record, so that building one sorts numbers, and finding a
-/// name compares its bytes only where the hash matches.
+/// One name of a record. An index orders them by the name's hash, then
+/// the record, then where the pool keeps the name, so that building one
+/// sorts numbers, and finding a name compares its bytes only where the
+/// hash matches.
 #[repr(C)]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
@@ -111,12 +112,14 @@ impl SharedRecord for NameEntry {
 
 /// The hash a name index orders a name by.
 #[expect(clippy::cast_possible_truncation, reason = "the index keeps 32 bits")]
-fn hash(name: &[u8]) -> u32 {
+pub(super) fn hash(name: &[u8]) -> u32 {
     twox_hash::XxHash3_64::oneshot(name) as u32
 }
 
-const fn key(entry: &NameEntry) -> (u32, u32) {
-    (entry.hash.get(), entry.value.get())
+/// An entry's place: by hash, then record, then name, so that two names
+/// of one record whose hashes collide are both kept.
+const fn key(entry: &NameEntry) -> (u32, u32, u32) {
+    (entry.hash.get(), entry.value.get(), entry.name.get())
 }
 
 /// The name index of `entries`, each a name, where the pool holds it, and

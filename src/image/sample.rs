@@ -13,6 +13,7 @@ use super::lines::{
 };
 use super::packages::{self, PackageView};
 use super::symbols::{self, SymbolView};
+use super::types::{self, TypeView};
 use super::unwind::{self, UnwindView};
 use super::{Builder, Image, ImageError, Limits, PathId, Paths, StringsBuilder, TableKind};
 use crate::{
@@ -371,6 +372,354 @@ pub(super) fn sample_packaged() -> Vec<Option<(&'static str, String)>> {
     ]
 }
 
+/// Types of every kind and shape, each at its identifier's index, and
+/// their identity classes: the last type is the same as the second.
+#[expect(clippy::too_many_lines, reason = "one type of each kind and shape")]
+pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
+    use crate::{
+        Accessibility, ArgumentOrigin, ArrayDimension, BaseClass, BaseClassVirtuality, BaseType,
+        BaseTypeEncoding, EnumerationOrigin, Enumerator, GoKind, GoTypeAttributes, IntegerValue,
+        ModuleImageId, NamedTypeRelationship, RecordKind, RecordMember, RecordMemberLayout,
+        ReferenceKind, TypeArgument, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode,
+        TypeReference, Variant, VariantDiscriminant, VariantSelection, VariantSelector,
+        VariantStorageKind,
+    };
+    let reference = |id| TypeReference {
+        image: ModuleImageId::new(0),
+        id: TypeId::new(id),
+    };
+    let identity = |language, path: &[&str], base: &str| TypeIdentity {
+        language,
+        path: path.iter().map(|segment| (*segment).into()).collect(),
+        inline_namespaces: [].into(),
+        base: base.into(),
+        arguments: [].into(),
+        pack: None,
+        origin: ArgumentOrigin::None,
+        go: None,
+    };
+    let member = |name: Option<&str>, ty, layout| RecordMember {
+        name: name.map(Into::into),
+        type_ref: reference(ty),
+        layout,
+        accessibility: Accessibility::Public,
+        artificial: false,
+        embedded: false,
+        declaration: None,
+    };
+    let int = BaseType {
+        name: "int".into(),
+        base_name: "int".into(),
+        encoding: BaseTypeEncoding::Signed,
+        byte_size: 4,
+        bit_size: None,
+    };
+    let kinds: Vec<(&str, Option<u64>, TypeKind, Option<TypeIdentity>)> = vec![
+        (
+            "int",
+            Some(4),
+            TypeKind::Base(int),
+            Some(identity(SourceLanguage::C, &[], "int")),
+        ),
+        (
+            "int *",
+            Some(8),
+            TypeKind::Pointer {
+                target: Some(reference(0)),
+                address_class: 0,
+            },
+            None,
+        ),
+        (
+            "geo::Point<int, -3, N>",
+            Some(16),
+            TypeKind::Record {
+                kind: RecordKind::Class,
+                members: [
+                    RecordMember {
+                        declaration: Some(SourceLocation {
+                            file: SourceFileId::new(0),
+                            line: LineNumber::new(3).unwrap(),
+                            column: ColumnNumber::new(5),
+                        }),
+                        accessibility: Accessibility::Private,
+                        ..member(Some("x"), 0, RecordMemberLayout::ByteOffset(0))
+                    },
+                    RecordMember {
+                        artificial: true,
+                        ..member(
+                            Some("y"),
+                            0,
+                            RecordMemberLayout::BitRange {
+                                bit_offset: 32,
+                                bit_size: 16,
+                            },
+                        )
+                    },
+                    RecordMember {
+                        embedded: true,
+                        ..member(None, 1, RecordMemberLayout::Runtime)
+                    },
+                ]
+                .into(),
+                bases: [BaseClass {
+                    type_ref: reference(3),
+                    layout: RecordMemberLayout::ByteOffset(8),
+                    accessibility: Accessibility::Protected,
+                    virtuality: BaseClassVirtuality::Virtual,
+                }]
+                .into(),
+                incomplete: false,
+            },
+            Some(TypeIdentity {
+                inline_namespaces: ["__1".into()].into(),
+                arguments: [
+                    TypeArgument::Type(reference(0)),
+                    TypeArgument::Value(IntegerValue::Signed(-3)),
+                    TypeArgument::Unknown("N".into()),
+                ]
+                .into(),
+                pack: Some(1),
+                origin: ArgumentOrigin::Dwarf,
+                ..identity(SourceLanguage::Cpp, &["geo", "__1"], "Point")
+            }),
+        ),
+        (
+            "shapes::Shape",
+            Some(8),
+            TypeKind::Variant {
+                storage: VariantStorageKind::Struct,
+                common_members: [member(Some("tag"), 0, RecordMemberLayout::ByteOffset(0))].into(),
+                bases: [].into(),
+                discriminant: Box::new(VariantDiscriminant::Stored(member(
+                    Some("tag"),
+                    0,
+                    RecordMemberLayout::ByteOffset(0),
+                ))),
+                variants: [
+                    Variant {
+                        name: Some("Circle".into()),
+                        selection: VariantSelection::Selectors(
+                            [
+                                VariantSelector::Value(IntegerValue::Unsigned(u128::MAX)),
+                                VariantSelector::Range {
+                                    low: IntegerValue::Signed(i128::MIN),
+                                    high: IntegerValue::Signed(5),
+                                },
+                            ]
+                            .into(),
+                        ),
+                        members: [member(Some("r"), 0, RecordMemberLayout::ByteOffset(4))].into(),
+                    },
+                    Variant {
+                        name: None,
+                        selection: VariantSelection::Default,
+                        members: [].into(),
+                    },
+                ]
+                .into(),
+                incomplete: false,
+            },
+            Some(identity(SourceLanguage::Rust, &["shapes"], "Shape")),
+        ),
+        (
+            "main.Color",
+            Some(4),
+            TypeKind::Enumeration {
+                representation: BaseType {
+                    name: "main.Color".into(),
+                    base_name: "unsigned int".into(),
+                    encoding: BaseTypeEncoding::Unsigned,
+                    byte_size: 4,
+                    bit_size: Some(3),
+                },
+                underlying: Some(reference(0)),
+                enumerators: [("Red", 0), ("Green", 1), ("Red", 2)]
+                    .into_iter()
+                    .map(|(name, value)| Enumerator {
+                        name: name.into(),
+                        value: IntegerValue::Unsigned(value),
+                    })
+                    .collect(),
+                origin: EnumerationOrigin::NamedConstants,
+                scoped: true,
+            },
+            Some(TypeIdentity {
+                go: Some(GoTypeAttributes {
+                    kind: GoKind::Uint,
+                    runtime_type: Some(0x100),
+                }),
+                ..identity(SourceLanguage::Go, &["main"], "Color")
+            }),
+        ),
+        (
+            "[3][4]int",
+            Some(48),
+            TypeKind::Array {
+                element: reference(0),
+                dimensions: [
+                    ArrayDimension {
+                        lower_bound: -1,
+                        count: 3,
+                    },
+                    ArrayDimension {
+                        lower_bound: i128::MAX,
+                        count: 4,
+                    },
+                ]
+                .into(),
+            },
+            None,
+        ),
+        (
+            "[]int",
+            Some(24),
+            TypeKind::Slice {
+                element: reference(0),
+                has_capacity: true,
+                text: false,
+            },
+            None,
+        ),
+        (
+            "union U",
+            None,
+            TypeKind::Union {
+                members: [
+                    member(Some("a"), 0, RecordMemberLayout::ByteOffset(0)),
+                    member(Some("b"), 1, RecordMemberLayout::ByteOffset(0)),
+                ]
+                .into(),
+                incomplete: true,
+            },
+            None,
+        ),
+        (
+            "const int",
+            Some(4),
+            TypeKind::Modified {
+                modifier: TypeModifier::Const,
+                target: reference(0),
+            },
+            None,
+        ),
+        (
+            "main.Alias",
+            Some(4),
+            TypeKind::Named {
+                target: Some(reference(4)),
+                relationship: NamedTypeRelationship::Distinct,
+            },
+            Some(TypeIdentity {
+                go: Some(GoTypeAttributes {
+                    kind: GoKind::Other(99),
+                    runtime_type: Some(0x100),
+                }),
+                ..identity(SourceLanguage::Go, &["main"], "Alias")
+            }),
+        ),
+        ("void", None, TypeKind::Unspecified, None),
+        ("func()", Some(8), TypeKind::Function, None),
+        (
+            "int (int, int *, ...)",
+            None,
+            TypeKind::Signature {
+                returns: Some(reference(0)),
+                parameters: [reference(0), reference(1)].into(),
+                variadic: true,
+                prototyped: true,
+            },
+            None,
+        ),
+        (
+            "member pointer",
+            Some(16),
+            TypeKind::Opaque {
+                description: "DW_TAG_ptr_to_member_type".into(),
+            },
+            None,
+        ),
+        ("", None, TypeKind::Unspecified, None),
+        (
+            "Point &&",
+            Some(8),
+            TypeKind::Reference {
+                kind: ReferenceKind::Rvalue,
+                target: reference(2),
+                address_class: 1,
+            },
+            None,
+        ),
+        (
+            "Tagged",
+            Some(4),
+            TypeKind::Variant {
+                storage: VariantStorageKind::Union,
+                common_members: [].into(),
+                bases: [].into(),
+                discriminant: Box::new(VariantDiscriminant::TagType(reference(0))),
+                variants: [].into(),
+                incomplete: true,
+            },
+            None,
+        ),
+        (
+            "Never",
+            Some(0),
+            TypeKind::Variant {
+                storage: VariantStorageKind::Class,
+                common_members: [].into(),
+                bases: [].into(),
+                discriminant: Box::new(VariantDiscriminant::Absent),
+                variants: [].into(),
+                incomplete: false,
+            },
+            None,
+        ),
+        (
+            "short int",
+            Some(2),
+            TypeKind::Base(BaseType {
+                name: "short int".into(),
+                base_name: "short int".into(),
+                encoding: BaseTypeEncoding::Signed,
+                byte_size: 2,
+                bit_size: None,
+            }),
+            Some(identity(SourceLanguage::C, &[], "short int")),
+        ),
+        (
+            "int *",
+            Some(8),
+            TypeKind::Pointer {
+                target: Some(reference(0)),
+                address_class: 0,
+            },
+            None,
+        ),
+    ];
+    let mut nodes = kinds
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, byte_size, kind, identity))| {
+            TypeNode::Resolved(TypeInfo {
+                reference: reference(u32::try_from(index).unwrap()),
+                name: name.into(),
+                byte_size,
+                kind,
+                identity: identity.map(std::sync::Arc::new),
+            })
+        })
+        .collect::<Vec<_>>();
+    nodes[14] = TypeNode::Malformed {
+        reference: reference(14),
+        description: "the type's size is negative".into(),
+    };
+    let mut classes = (0..u32::try_from(nodes.len()).unwrap()).collect::<Vec<_>>();
+    *classes.last_mut().unwrap() = 1;
+    (nodes, classes)
+}
+
 pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, ImageError> {
     let mut builder = Builder::new(TARGET);
     tables.add_to(&mut builder);
@@ -396,6 +745,16 @@ pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, I
     )
     .unwrap();
     unwind::add_to(&mut builder, &mut strings, &sample_unwind()).unwrap();
+    let (nodes, classes) = sample_types();
+    types::add_to(
+        &mut builder,
+        &mut strings,
+        &types::Types {
+            nodes: &nodes,
+            classes: &classes,
+        },
+    )
+    .unwrap();
     packages::add_to(
         &mut builder,
         &mut strings,
@@ -485,6 +844,23 @@ pub(super) fn read_everything(image: &Image) -> u64 {
     if let Some((bytes, _)) = view.go() {
         read += bytes.len() as u64;
     }
+    let view = TypeView::new(image);
+    for index in 0..view.len() {
+        let id = TypeId::new(u32::try_from(index).unwrap());
+        if let Some(crate::TypeNode::Resolved(info)) = view.node(crate::ModuleImageId::new(0), id) {
+            read += view.named(&info.name).count() as u64;
+            read += u64::from(view.class(id).is_some());
+            if let Some(identity) = &info.identity {
+                read += view.with_base(&identity.base).count() as u64;
+            }
+            if let crate::TypeKind::Enumeration { enumerators, .. } = &info.kind {
+                for enumerator in enumerators.iter() {
+                    read += view.with_enumerator(&enumerator.name).count() as u64;
+                }
+            }
+        }
+    }
+    read += u64::from(view.go_runtime_type(0x100).is_some());
     let view = PackageView::new(image);
     for index in 0..image.table::<packages::PackagedRecord>().len() {
         let function = FunctionId::new(u32::try_from(index).unwrap());

@@ -189,13 +189,21 @@ impl Names {
             .map(|section| format!("{}@{:#x}", section.name, section.range.start.get()))
             .collect();
         let key_index = Regex::new(r"#\d+").expect("a pattern");
-        let types = image
-            .types()
+        let nodes = image.types().collect::<Vec<_>>();
+        let type_keys = crate::type_identity::TypeIndex::build(
+            nodes.first().map(|node| node.reference().image),
+            nodes.len(),
+            |index| match nodes[index] {
+                TypeNode::Resolved(info) => Some(info),
+                TypeNode::Malformed { .. } => None,
+            },
+        );
+        let types = nodes
             .iter()
             .map(|node| match node {
                 TypeNode::Resolved(info) => {
-                    let key = image
-                        .type_key(info.reference)
+                    let key = type_keys
+                        .key(info.reference)
                         .map_or_else(String::new, |key| {
                             key_index.replace_all(key, "#").into_owned()
                         });
