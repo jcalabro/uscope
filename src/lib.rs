@@ -8,6 +8,11 @@ macro_rules! record {
     }};
 }
 
+// The library's own tests share support code with the integration tests,
+// which name the library `uscope`.
+#[cfg(test)]
+extern crate self as uscope;
+
 mod backend;
 mod condition;
 mod debug_info;
@@ -20,6 +25,7 @@ mod eval;
 pub mod flight_recorder;
 mod inspection;
 pub(crate) mod model;
+pub mod profile;
 mod protocol;
 mod runtime_model;
 #[cfg(any(test, feature = "sim"))]
@@ -28,6 +34,9 @@ pub mod sim;
 mod source_map;
 #[cfg(test)]
 mod test_memory;
+#[cfg(feature = "tools")]
+#[doc(hidden)]
+pub mod tools;
 mod type_identity;
 mod unwind;
 mod view;

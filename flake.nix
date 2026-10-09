@@ -80,6 +80,9 @@
           muslClang
           gdb
           lldb
+          # Profilers for the `just profile-*` recipes.
+          perf
+          valgrind
           goStable
           zig
           pkg-config
