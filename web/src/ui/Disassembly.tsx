@@ -6,13 +6,13 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRequest } from "../data";
-import { formatPlace, type Look, showingSource, stringifySearch } from "../focus";
+import { type Look, stringifySearch } from "../focus";
 import { controls } from "../model";
 import type { Breakpoint, Disassembled, Instruction, SourceLine, Syntax } from "../protocol";
 import { isString, read, write } from "../storage";
 import { useConnection, useModel } from "../store";
 import { flash } from "../tab";
-import { useLinkPaths, useLook } from "./navigation";
+import { useLook, useShowSource } from "./navigation";
 import { fileName } from "./paths";
 import { hidden } from "./Values";
 import { useFocus } from "./Workspace";
@@ -227,8 +227,7 @@ function Row({
 
 /** The source line instructions after it were compiled from. */
 function SourceHead({ source }: { source: SourceLine }) {
-  const look = useLook();
-  const paths = useLinkPaths();
+  const showSource = useShowSource();
   const text = useRequest("source", { path: source.path }).data;
   const line = text?.path === source.path ? text.text.split("\n")[source.line - 1] : undefined;
   const place = `${fileName(source.path)}:${source.line}`;
@@ -237,16 +236,7 @@ function SourceHead({ source }: { source: SourceLine }) {
       type="button"
       className="asm-source"
       aria-label={`Show the source at ${place}`}
-      onClick={() =>
-        look(
-          (current) =>
-            showingSource(
-              current,
-              formatPlace({ path: paths.link(source.path), line: source.line, end: source.line }),
-            ),
-          { replace: false },
-        )
-      }
+      onClick={() => showSource(source.path, source.line)}
     >
       <span className="asm-place">{place}</span>
       <span className="asm-line">{line?.trim()}</span>

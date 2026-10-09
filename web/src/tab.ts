@@ -22,8 +22,14 @@ export interface TabState {
   editing: number | null;
   /** A short message, such as that a link was copied. */
   flash: { text: string; at: number } | null;
-  /** Files opened in this tab, most recent last. */
+  /** Files opened in this tab, in their tabs' order. */
   files: string[];
+  /** Where each open file was last shown, as a `src` place, the file shown
+   * longest ago first. */
+  places: Record<string, string>;
+  /** Counts requests to show code, so a closed file opens again when asked
+   * for even at the place it was closed. */
+  asked: number;
   /** The palette, open at everything, at files, at a line, or at the calls
    * of the shown thread's line to step into. */
   palette: "all" | "files" | "line" | "calls" | null;
@@ -42,6 +48,8 @@ export const initialTab: TabState = {
   editing: null,
   flash: null,
   files: [],
+  places: {},
+  asked: 0,
   palette: null,
   help: false,
 };
@@ -55,17 +63,41 @@ export function useTab<T>(select: (state: TabState) => T): T {
 /** The most files a tab keeps open. */
 const FILES = 8;
 
+/** Opens a file, closing the one shown longest ago to make room. */
 export function openFile(path: string): void {
   tab.setState((state) => {
     if (state.files.includes(path)) {
       return state;
     }
-    return { files: [...state.files, path].slice(-FILES) };
+    const files = [...state.files, path];
+    if (files.length <= FILES) {
+      return { files };
+    }
+    const oldest =
+      Object.keys(state.places).find((file) => file !== path && files.includes(file)) ?? files[0];
+    const { [oldest ?? ""]: _, ...places } = state.places;
+    return { files: files.filter((file) => file !== oldest), places };
+  });
+}
+
+/** Remembers where an open file is shown, as the file shown most recently. */
+export function shownAt(path: string, place: string): void {
+  tab.setState((state) => {
+    const { [path]: _, ...places } = state.places;
+    return { places: { ...places, [path]: place } };
   });
 }
 
 export function closeFile(path: string): void {
-  tab.setState((state) => ({ files: state.files.filter((file) => file !== path) }));
+  tab.setState((state) => {
+    const { [path]: _, ...places } = state.places;
+    return { files: state.files.filter((file) => file !== path), places };
+  });
+}
+
+/** Notes a request to show code, which opens its file even if closed. */
+export function asked(): void {
+  tab.setState((state) => ({ asked: state.asked + 1 }));
 }
 
 export function flash(text: string): void {

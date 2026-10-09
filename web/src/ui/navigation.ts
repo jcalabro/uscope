@@ -4,11 +4,28 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import { useRequest } from "../data";
-import { type At, followedLook, type Look, linkPath, recordedPath, taskSegment } from "../focus";
+import {
+  type At,
+  followedLook,
+  formatPlace,
+  type Look,
+  linkPath,
+  recordedPath,
+  showingSource,
+  taskSegment,
+} from "../focus";
 import { useModel } from "../store";
+import { asked } from "../tab";
 import { useFocus } from "./Workspace";
 
-export type Go = (at: At | null, look?: Look, options?: { replace?: boolean }) => void;
+/** How to move: `replace` the address, or `ask` for the code shown, which
+ * opens its file even if closed, as moving to a frame always does. */
+export interface Moving {
+  replace?: boolean;
+  ask?: boolean;
+}
+
+export type Go = (at: At | null, look?: Look, options?: Moving) => void;
 
 /** Goes to a stop, thread or task, and frame, or to the session itself. */
 export function useGo(): Go {
@@ -19,47 +36,64 @@ export function useGo(): Go {
       // A new frame shows its own code unless the caller says what to show.
       const search = look ?? followedLook(current);
       const replace = options?.replace ?? false;
-      if (at === null) {
-        void navigate({ to: "/s/$session", params: { session }, search, replace });
-        return;
+      const going =
+        at === null
+          ? navigate({ to: "/s/$session", params: { session }, search, replace })
+          : at.task
+            ? navigate({
+                to: "/s/$session/stop/$stop/task/$task/f/$frame",
+                params: {
+                  session,
+                  stop: String(at.stop),
+                  task: taskSegment(at.task),
+                  frame: String(at.frame),
+                },
+                search,
+                replace,
+              })
+            : navigate({
+                to: "/s/$session/stop/$stop/t/$thread/f/$frame",
+                params: {
+                  session,
+                  stop: String(at.stop),
+                  thread: String(at.thread),
+                  frame: String(at.frame),
+                },
+                search,
+                replace,
+              });
+      // Once the address names it, the code shown opens its file again.
+      if (!look || options?.ask) {
+        void going.then(asked);
       }
-      if (at.task) {
-        void navigate({
-          to: "/s/$session/stop/$stop/task/$task/f/$frame",
-          params: {
-            session,
-            stop: String(at.stop),
-            task: taskSegment(at.task),
-            frame: String(at.frame),
-          },
-          search,
-          replace,
-        });
-        return;
-      }
-      void navigate({
-        to: "/s/$session/stop/$stop/t/$thread/f/$frame",
-        params: {
-          session,
-          stop: String(at.stop),
-          thread: String(at.thread),
-          frame: String(at.frame),
-        },
-        search,
-        replace,
-      });
     },
     [navigate, session, current],
   );
 }
 
 /** Changes how the tab looks at its focus, keeping the focus. */
-export function useLook(): (change: (look: Look) => Look, options?: { replace?: boolean }) => void {
+export function useLook(): (change: (look: Look) => Look, options?: Moving) => void {
   const go = useGo();
   const { at, look } = useFocus();
   return useCallback(
-    (change, options) => go(at, change(look), { replace: options?.replace ?? true }),
+    (change, options) => go(at, change(look), { ...options, replace: options?.replace ?? true }),
     [go, at, look],
+  );
+}
+
+/** Shows a recorded source path's lines, opening its file even if closed. */
+export function useShowSource(): (path: string, line: number, end?: number) => void {
+  const look = useLook();
+  const paths = useLinkPaths();
+  return useCallback(
+    (path, line, end) => {
+      look(
+        (current) =>
+          showingSource(current, formatPlace({ path: paths.link(path), line, end: end ?? line })),
+        { replace: false, ask: true },
+      );
+    },
+    [look, paths],
   );
 }
 

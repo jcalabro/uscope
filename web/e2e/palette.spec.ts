@@ -108,7 +108,9 @@ test("closing the file shown shows its neighbor, and a middle click closes a tab
 
   await files.getByRole("button", { name: "Close pthread.h" }).click();
   await expect(tab("pthread.h")).toHaveCount(0);
-  await expect(page).toHaveURL(/[?&]src=[^&]*kvstore\.c:1(&|$)/);
+  // The program's own file follows the focus again.
+  await expect(page).not.toHaveURL(/[?&]src=/);
+  await expect(tab("kvstore.c")).toHaveAttribute("aria-current", "page");
 
   // The last file closed leaves nothing shown.
   await files.getByRole("button", { name: "Close kvstore.c" }).click();
@@ -131,4 +133,56 @@ test("a new stop opens its file again, even on the line it was closed at", async
   await expect(page.getByTestId("stops")).toContainText("#3");
   await expect(files.getByRole("button", { name: "kvstore.c", exact: true })).toBeVisible();
   await expect(page.locator(".cm-pc-line")).toContainText("int status = 0;");
+});
+
+test("a closed file opens again when asked for at the place it was closed", async ({
+  page,
+  uscope,
+}) => {
+  await join(page, uscope.link);
+  await stopInHandleRequest(page);
+  const files = page.getByRole("navigation", { name: "Open files" });
+  const closed = async () => {
+    await files.getByRole("button", { name: "Close kvstore.c" }).click();
+    await expect(page.getByText("No file open.")).toBeVisible();
+  };
+  const reopened = () =>
+    expect(page.locator(".cm-line", { hasText: "int status = 0;" })).toBeVisible();
+
+  await closed();
+  await page.getByTestId("stack").getByRole("button").first().click();
+  await reopened();
+
+  await closed();
+  await page
+    .getByTestId("breakpoints")
+    .getByRole("button", { name: /kvstore\.c:92/ })
+    .click();
+  await reopened();
+
+  await closed();
+  await page.keyboard.press("Control+p");
+  await search(page).fill("kvstore.c");
+  await page.keyboard.press("Enter");
+  await expect(files.getByRole("button", { name: "kvstore.c", exact: true })).toBeVisible();
+});
+
+test("a file's tab shows where it was, and the frame's file follows the frame", async ({
+  page,
+  uscope,
+}) => {
+  await join(page, uscope.link);
+  await stopInHandleRequest(page);
+  const files = page.getByRole("navigation", { name: "Open files" });
+  await page.keyboard.press("Control+g");
+  await search(page).fill("stdio.h:50");
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/[?&]src=[^&]*stdio\.h:50(&|$)/);
+
+  await files.getByRole("button", { name: "kvstore.c", exact: true }).click();
+  await expect(page).not.toHaveURL(/[?&]src=/);
+  await expect(page.locator(".cm-pc-line")).toContainText("int status = 0;");
+
+  await files.getByRole("button", { name: "stdio.h", exact: true }).click();
+  await expect(page).toHaveURL(/[?&]src=[^&]*stdio\.h:50(&|$)/);
 });

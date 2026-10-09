@@ -75,8 +75,8 @@ export function forgetting(store: StoreApi<Model>): () => void {
     const after = marks(model);
     if (forget(before, after, cache, recall)) {
       // Another program's files, places, and values are not this one's.
-      const { files, cursor, shown, editing, pinned, frames } = initialTab;
-      tab.setState({ files, cursor, shown, editing, pinned, frames });
+      const { files, places, cursor, shown, editing, pinned, frames } = initialTab;
+      tab.setState({ files, places, cursor, shown, editing, pinned, frames });
       clearConsole();
     }
     before = after;

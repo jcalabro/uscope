@@ -1,10 +1,9 @@
 import { useState } from "react";
-import { formatPlace, showingSource } from "../focus";
 import { controls } from "../model";
 import type { Breakpoint, WatchAccess, Watchpoint } from "../protocol";
 import { useConnection, useModel } from "../store";
 import { tab, useTab } from "../tab";
-import { useLinkPaths, useLook } from "./navigation";
+import { useShowSource } from "./navigation";
 import { fileName } from "./paths";
 import { useFocus } from "./Workspace";
 
@@ -80,8 +79,7 @@ function Row({
   edit(): void;
 }) {
   const connection = useConnection();
-  const look = useLook();
-  const paths = useLinkPaths();
+  const showSource = useShowSource();
   const [error, setError] = useState<string | null>(null);
   const place = breakpoint.places[0];
   const pending = breakpoint.places.length === 0;
@@ -113,22 +111,7 @@ function Row({
                   .join("\n")
           }
           disabled={!place?.path}
-          onClick={() =>
-            place?.path &&
-            place.line &&
-            look(
-              (current) =>
-                showingSource(
-                  current,
-                  formatPlace({
-                    path: paths.link(place.path ?? ""),
-                    line: place.line ?? 1,
-                    end: place.line ?? 1,
-                  }),
-                ),
-              { replace: false },
-            )
-          }
+          onClick={() => place?.path && place.line && showSource(place.path, place.line)}
         >
           {placeLabel(breakpoint)}
         </button>
