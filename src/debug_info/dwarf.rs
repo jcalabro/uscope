@@ -13,14 +13,14 @@ use object::{Object, ObjectSection, ObjectSegment};
 use rayon::prelude::*;
 
 use super::{DebugInfo, UnwindInfo};
-use crate::image::lines::{Files, LineTables, Row};
+use crate::image::lines::{Files, LineTables, Row, StatementsByAddress};
 use crate::model::ModuleMetadata;
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     AddressRange, Architecture, BreakpointEntry, ByteOrder, CodeInstanceId, CodeInstanceInfo,
     CodeInstanceKind, ColumnNumber, EmbeddedSymbolTable, EntryProvenance, Error, FunctionId,
     FunctionInfo, ImageAddress, LineNumber, ModuleImage, PointerWidth, Result, SourceLanguage,
-    SourceLocation, StatementRow, TargetDescription, UnwindTermination, VirtualAddress,
+    SourceLocation, TargetDescription, UnwindTermination, VirtualAddress,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -55,8 +55,15 @@ enum DwarfError {
     ReferenceCycle,
     #[error("malformed variable type metadata: {0}")]
     MalformedVariable(Arc<str>),
-    #[error("DWARF data-object catalog exceeds {0} entries")]
-    DataObjectLimit(usize),
+    #[error(
+        "the debug information needs more than its load budget of {limit} bytes: {what} asked \
+         for {requested} more"
+    )]
+    Budget {
+        what: &'static str,
+        limit: u64,
+        requested: u64,
+    },
     #[error("concrete function has no source-level name")]
     MissingFunctionName,
 }
@@ -169,6 +176,8 @@ fn die_code_ranges<'data>(
         .collect())
 }
 
+mod budget;
+use budget::LoadLimits;
 mod variables;
 
 pub(in crate::debug_info) use variables::{PathStep, array_byte_offset};
@@ -194,7 +203,7 @@ pub fn load(
 ) -> Result<DebugInfo> {
     let _load = crate::span!("load", "{}", path.display());
     let phase = crate::span!("read");
-    let data: Arc<[u8]> = crate::image::backing::read_input(path)?.0.into();
+    let (data, _) = crate::image::backing::read_input(path)?;
     crate::count!("input_bytes", data.len());
     drop(phase);
     load_bytes_on_pool(path, &data, image_id, search)
@@ -217,7 +226,7 @@ fn load_bytes_on_pool(
     image_id: crate::ModuleImageId,
     search: &super::DebugFileSearch,
 ) -> Result<DebugInfo> {
-    crate::pool::install(|| load_debug_info(path, data, image_id, search))
+    crate::pool::install(|| load_debug_info(path, data, image_id, search, LoadLimits::default()))
         .map_err(Error::debug_info)?
         .map_err(Error::debug_info)
 }
@@ -231,13 +240,14 @@ fn load_debug_info(
     data: &[u8],
     image_id: crate::ModuleImageId,
     search: &super::DebugFileSearch,
+    limits: LoadLimits,
 ) -> std::result::Result<DebugInfo, DwarfError> {
     let object = object::File::parse(data)?;
     let phase = crate::span!("separate_debug_file");
     let separate = search.find(path, &object);
     drop(phase);
     let Some(separate) = separate else {
-        return load_image(path, data, image_id, Separate::None);
+        return load_image(path, data, image_id, Separate::None, limits);
     };
     // dwz moves what several debug files share into a supplementary file,
     // whose units and strings the loader does not read.
@@ -251,22 +261,27 @@ fn load_debug_info(
             data,
             image_id,
             Separate::Unusable(&separate.path, reason.into()),
+            limits,
         );
     }
-    load_image(path, data, image_id, Separate::Used(&separate)).or_else(|error| {
+    load_image(path, data, image_id, Separate::Used(&separate), limits).or_else(|error| {
         load_image(
             path,
             data,
             image_id,
             Separate::Unusable(&separate.path, error.to_string().into()),
+            limits,
         )
     })
 }
 
+type Sections<'data> = DwarfSections<Cow<'data, [u8]>>;
+
 /// An object's DWARF sections, those compressed decompressed in parallel.
+/// Also returns their uncompressed bytes, which the load's budget follows.
 fn load_sections<'data>(
     object: &object::File<'data>,
-) -> std::result::Result<DwarfSections<Cow<'data, [u8]>>, DwarfError> {
+) -> std::result::Result<(Sections<'data>, u64), DwarfError> {
     // gimli names the sections it reads by asking for each in turn.
     let mut wanted = Vec::new();
     DwarfSections::load(|id| {
@@ -283,8 +298,13 @@ fn load_sections<'data>(
             Ok((id, data))
         })
         .collect::<Vec<std::result::Result<_, DwarfError>>>();
-    let mut loaded = first_error(loaded)?.into_iter().collect::<HashMap<_, _>>();
-    DwarfSections::load(|id| Ok::<_, DwarfError>(loaded.remove(&id).unwrap_or(Cow::Borrowed(&[]))))
+    let loaded = first_error(loaded)?;
+    let input = loaded.iter().map(|(_, data)| data.len() as u64).sum();
+    let mut loaded = loaded.into_iter().collect::<HashMap<_, _>>();
+    let sections = DwarfSections::load(|id| {
+        Ok::<_, DwarfError>(loaded.remove(&id).unwrap_or(Cow::Borrowed(&[])))
+    })?;
+    Ok((sections, input))
 }
 
 /// What a separate debug file contributes to an image.
@@ -304,6 +324,7 @@ fn load_image(
     data: &[u8],
     image_id: crate::ModuleImageId,
     separate: Separate<'_>,
+    limits: LoadLimits,
 ) -> std::result::Result<DebugInfo, DwarfError> {
     let object = object::File::parse(data)?;
     let target = target_description(&object)?;
@@ -314,7 +335,8 @@ fn load_image(
     let dwarf_object = debug_object.as_ref().unwrap_or(&object);
 
     let phase = crate::span!("sections");
-    let sections = load_sections(dwarf_object)?;
+    let (sections, input) = load_sections(dwarf_object)?;
+    crate::count!("debug_bytes", input);
 
     let endian = if object.is_little_endian() {
         RunTimeEndian::Little
@@ -415,7 +437,7 @@ fn load_image(
     let phase = crate::span!("prologues");
     // The prologue and coroutine analyses below still read rows as
     // records: an adapter until they read the tables (P4).
-    let statements = line_tables.statement_rows();
+    let statements = line_tables.statements_by_address();
     super::roles::link_loop_bodies(&mut function_metadata.functions);
     refine_proved_prologue_entries(
         &object,
@@ -435,6 +457,7 @@ fn load_image(
             instance_ids: &function_metadata.instance_ids,
         },
         &mut files,
+        limits.budget(input),
     )?;
     for (instance, generics) in std::mem::take(&mut variables.function_generics) {
         if let Some(function) = function_metadata
@@ -468,11 +491,21 @@ fn load_image(
             &coroutines,
         )
     } else {
-        BTreeMap::new()
+        Vec::new()
     };
     #[cfg(not(target_arch = "x86_64"))]
-    let resume_points = BTreeMap::new();
+    let resume_points = Vec::new();
     drop(statements);
+    // Which variables an await holds is asked of the module's code.
+    #[cfg(target_arch = "x86_64")]
+    let held = variables::coroutine::held_ranges(
+        &ObjectCode(&object),
+        &variables.variables,
+        &function_metadata.code_instances,
+        &resume_points,
+    );
+    #[cfg(not(target_arch = "x86_64"))]
+    let held = Vec::new();
     drop(phase);
     let phase = crate::span!("unwind_and_symbols");
     let go_code = go_code_ranges(&dwarf, &catalog)?;
@@ -504,17 +537,19 @@ fn load_image(
                 symbols: symbols.symbols,
                 symbol_sources: symbols.sources,
                 got_slots: symbols.got_slots,
-                globals: variables.globals,
                 types: variables.types,
                 locations: variables.locations,
                 variables: variables.variables,
                 calls: variables.calls,
                 type_facts: variables.type_facts,
-                vtables: variables.vtables,
-                coroutines,
-                resume_points,
-                constants: variables.constants,
-                producers: unit_producers(&dwarf, &catalog)?,
+                resumes: crate::image::resumes::Resumes {
+                    points: resume_points,
+                    held,
+                },
+                declarations: crate::image::declarations::Declarations {
+                    producers: unit_producers(&dwarf, &catalog)?,
+                    ..variables.declarations
+                },
                 packages: go_packages(&dwarf, &catalog)?,
                 files,
                 lines: line_tables,
@@ -522,26 +557,25 @@ fn load_image(
                 sections: super::elf::load_sections(&object),
                 thread_local_storage: super::elf::has_thread_local_storage(&object),
                 thread_locals: super::elf::load_thread_locals(&object),
+                debug_file: match separate {
+                    Separate::None => None,
+                    Separate::Used(file) => {
+                        Some(crate::DebugFile::Used(Arc::new(file.path.clone())))
+                    }
+                    Separate::Unusable(path, reason) => Some(crate::DebugFile::Unusable {
+                        path: Arc::new(path.to_path_buf()),
+                        reason,
+                    }),
+                },
+                embedded_views: embedded_views(dwarf_object)?,
             },
         )
-        .with_id(image_id)
-        .with_views(embedded_views(path, dwarf_object)?)
-        .with_debug_file(match separate {
-            Separate::None => None,
-            Separate::Used(file) => Some(crate::DebugFile::Used(Arc::new(file.path.clone()))),
-            Separate::Unusable(path, reason) => Some(crate::DebugFile::Unusable {
-                path: Arc::new(path.to_path_buf()),
-                reason,
-            }),
-        }),
+        .with_id(image_id),
     );
 
     drop(phase);
     let mut variable_info = variables.info;
     variable_info.bind(&image);
-    // Which variables an await holds is asked of the image's code.
-    #[cfg(target_arch = "x86_64")]
-    variable_info.note_held(&ObjectCode(&object), &image);
     Ok(DebugInfo {
         unwind: Arc::new(DwarfUnwindInfo {
             tables: Arc::clone(image.tables()),
@@ -552,22 +586,17 @@ fn load_image(
     })
 }
 
-/// The views a module carries for its own types, named after its file.
-fn embedded_views(
-    path: &Path,
-    object: &object::File<'_>,
-) -> std::result::Result<Arc<crate::view::ViewSet>, DwarfError> {
-    let Some(section) = object.section_by_name(crate::view::embedded::SECTION) else {
-        return Ok(crate::view::ViewSet::empty());
-    };
-    let bytes = section.uncompressed_data()?;
-    let module = path
-        .file_name()
-        .map_or_else(|| "module".into(), |name| name.to_string_lossy());
-    Ok(Arc::new(crate::view::embedded::view_set(&module, &bytes)))
+/// The bytes of the views a module carries for its own types.
+fn embedded_views(object: &object::File<'_>) -> std::result::Result<Vec<u8>, DwarfError> {
+    Ok(object
+        .section_by_name(crate::view::embedded::SECTION)
+        .map(|section| section.uncompressed_data())
+        .transpose()?
+        .map(std::borrow::Cow::into_owned)
+        .unwrap_or_default())
 }
 
-/// The distinct producers the units name, in the order first named.
+/// The producers the units name, in unit order.
 fn unit_producers<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
     catalog: &UnitCatalog<'data>,
@@ -578,9 +607,7 @@ fn unit_producers<'data>(
         let Some(root) = entries.next_dfs()? else {
             continue;
         };
-        if let Some(producer) = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?
-            && !producers.contains(&producer)
-        {
+        if let Some(producer) = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)? {
             producers.push(producer);
         }
     }
@@ -2338,21 +2365,19 @@ fn close_line_range(
 fn refine_proved_prologue_entries(
     object: &object::File<'_>,
     target: TargetDescription,
-    statements: &[StatementRow],
+    rows: &StatementsByAddress<'_>,
     instances: &mut [CodeInstanceInfo],
 ) {
     if target.architecture != Architecture::X86_64 {
         return;
     }
-    let rows = StatementIndex::new(statements);
 
     for instance in instances {
         if !matches!(instance.kind, CodeInstanceKind::OutOfLine)
-            || instance.ranges.iter().any(|range| {
-                rows.within(*range)
-                    .iter()
-                    .any(|row| row.flags.prologue_end())
-            })
+            || instance
+                .ranges
+                .iter()
+                .any(|range| rows.within(*range).any(|row| row.flags.prologue_end()))
         {
             continue;
         }
@@ -2366,8 +2391,7 @@ fn refine_proved_prologue_entries(
         else {
             continue;
         };
-        let Some(candidate) = first_distinct_source_statement(&rows, *entry_range, raw_entry)
-        else {
+        let Some(candidate) = first_distinct_source_statement(rows, *entry_range, raw_entry) else {
             continue;
         };
         let Some(bytes) = code_bytes(object, raw_entry.get(), candidate.get()) else {
@@ -2428,14 +2452,16 @@ impl super::dispatch::DispatchImage for ObjectCode<'_, '_> {
 #[cfg(target_arch = "x86_64")]
 fn decode_resume_points(
     object: &object::File<'_>,
-    statements: &[StatementRow],
+    rows: &StatementsByAddress<'_>,
     functions: &[FunctionInfo],
     instances: &mut [CodeInstanceInfo],
     coroutines: &BTreeMap<crate::TypeId, std::result::Result<crate::CoroutineInfo, Arc<str>>>,
-) -> BTreeMap<CodeInstanceId, std::result::Result<crate::ResumePoints, Arc<str>>> {
+) -> Vec<(
+    CodeInstanceId,
+    std::result::Result<crate::ResumePoints, Arc<str>>,
+)> {
     let image = ObjectCode(object);
-    let rows = StatementIndex::new(statements);
-    let mut decoded = BTreeMap::new();
+    let mut decoded = Vec::new();
     for instance in instances.iter_mut() {
         let function = &functions[instance.function.index()];
         let Some(Ok(coroutine)) = function.coroutine.and_then(|ty| coroutines.get(&ty)) else {
@@ -2539,39 +2565,13 @@ fn decode_resume_points(
                 points
             },
         );
-        decoded.insert(instance.id, points);
+        decoded.push((instance.id, points));
     }
     decoded
 }
 
-/// Statement rows sorted by address, keeping line-program order among rows
-/// at one address.
-struct StatementIndex<'a>(Vec<&'a StatementRow>);
-
-impl<'a> StatementIndex<'a> {
-    fn new(statements: &'a [StatementRow]) -> Self {
-        let mut rows = statements.iter().collect::<Vec<_>>();
-        rows.sort_by_key(|row| row.address);
-        Self(rows)
-    }
-
-    /// The line of the row whose code holds `address`: the last row at or
-    /// before it, unless that row has no line.
-    fn line_at(&self, address: ImageAddress) -> Option<LineNumber> {
-        let after = self.0.partition_point(|row| row.address <= address);
-        let row = self.0.get(after.checked_sub(1)?)?;
-        row.location.as_ref().map(|location| location.line)
-    }
-
-    fn within(&self, range: AddressRange<ImageAddress>) -> &[&'a StatementRow] {
-        let start = self.0.partition_point(|row| row.address < range.start);
-        let end = self.0.partition_point(|row| row.address < range.end);
-        &self.0[start..end.max(start)]
-    }
-}
-
 fn first_distinct_source_statement(
-    rows: &StatementIndex<'_>,
+    rows: &StatementsByAddress<'_>,
     range: AddressRange<ImageAddress>,
     raw_entry: ImageAddress,
 ) -> Option<ImageAddress> {
@@ -2585,7 +2585,6 @@ fn first_distinct_source_statement(
             start: raw_entry,
             end: entry_end,
         })
-        .iter()
         .filter(|row| row.location.is_some());
     let entry_row = entry_rows.next_back()?;
     if entry_rows.any(|row| row.sequence != entry_row.sequence) {
@@ -2599,7 +2598,6 @@ fn first_distinct_source_statement(
         start: entry_end,
         end: range.end,
     })
-    .iter()
     .filter(|row| row.sequence == entry_row.sequence && row.flags.is_statement())
     .find(|row| {
         row.location.as_ref().is_some_and(|location| {
@@ -2667,7 +2665,7 @@ mod tests {
     use gimli::{Encoding, Format, LineEncoding, LittleEndian, Register};
 
     use super::*;
-    use crate::{LineSequenceId, SourceFileId, StatementFlags};
+    use crate::{LineSequenceId, SourceFileId, StatementFlags, StatementRow};
     use std::fs;
 
     #[test]
@@ -2856,9 +2854,13 @@ mod tests {
                 Some(0x120),
             ),
         ] {
+            // A line program keeps each sequence's rows together.
+            let mut rows = rows;
+            rows.sort_by_key(|row| (row.sequence, row.ordinal));
+            let tables = crate::image::lines::from_statement_rows(&rows);
             assert_eq!(
                 first_distinct_source_statement(
-                    &StatementIndex::new(&rows),
+                    &tables.statements_by_address(),
                     AddressRange {
                         start: ImageAddress::new(0x100),
                         end: ImageAddress::new(0x130),
@@ -3083,6 +3085,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Debug information that would build more than its budget fails with
+    /// the budget's error, naming what asked, and loads with the default.
+    #[test]
+    fn a_load_past_its_budget_fails_naming_what_asked() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("build/test-programs/containers-rust-o2");
+        let data = fs::read(&path).expect("run `just build-test-programs`");
+        let load = |limits| {
+            load_debug_info(
+                &path,
+                &data,
+                crate::ModuleImageId::new(0),
+                &super::super::DebugFileSearch::default(),
+                limits,
+            )
+        };
+        let small = LoadLimits {
+            per_input_byte: 0,
+            floor: 64 << 10,
+        };
+        match load(small) {
+            Err(DwarfError::Budget { what, limit, .. }) => {
+                assert!(
+                    ["types", "data objects", "symbolic names"].contains(&what),
+                    "{what}"
+                );
+                assert_eq!(limit, 64 << 10);
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        load(LoadLimits::default()).expect("the default budget affords the program");
     }
 
     /// FDE lookups in real images agree with a walk of the section, and so

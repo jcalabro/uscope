@@ -485,10 +485,21 @@ impl TypeIndex {
         count: usize,
         info: impl Fn(usize) -> Option<&'a TypeInfo>,
     ) -> Self {
+        Self::build_searching(image, count, |_| true, info)
+    }
+
+    /// Indexes `count` types, which `info` reaches by index, keying every
+    /// one but letting names find only those `searchable` accepts.
+    pub fn build_searching<'a>(
+        image: Option<ModuleImageId>,
+        count: usize,
+        searchable: impl Fn(usize) -> bool,
+        info: impl Fn(usize) -> Option<&'a TypeInfo>,
+    ) -> Self {
         let mut by_base = HashMap::<Arc<str>, Vec<TypeId>>::new();
         let mut by_name = HashMap::<Arc<str>, Vec<TypeId>>::new();
         for index in 0..count {
-            let Some(type_info) = info(index) else {
+            let Some(type_info) = info(index).filter(|_| searchable(index)) else {
                 continue;
             };
             let id = type_info.reference.id;

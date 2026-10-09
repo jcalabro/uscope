@@ -1,5 +1,6 @@
-//! Facts about an image as a whole: which symbol tables it provided, and
-//! where each thread's copy of its thread-local variables is.
+//! Facts about an image as a whole: which symbol tables it provided, the
+//! separate debug file found for it, and where each thread's copy of its
+//! thread-local variables is.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -7,10 +8,10 @@ use std::sync::Arc;
 use zerocopy::little_endian::{U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use super::strings::{StrId, Strings, StringsBuilder};
+use super::strings::{PathId, Paths, PathsBuilder, StrId, Strings, StringsBuilder};
 use super::{Builder, Image, NONE, Record, TableKind};
 use crate::model::ThreadLocal;
-use crate::{EmbeddedSymbolTable, ImageAddress, SymbolTableSources};
+use crate::{DebugFile, EmbeddedSymbolTable, ImageAddress, SymbolTableSources};
 
 /// The image's facts. An image holds at most one; none means every table
 /// is absent and the image has no thread-local storage.
@@ -27,6 +28,13 @@ pub struct FactsRecord {
     pub embedded_table: u8,
     pub runtime_table: u8,
     pub flags: u8,
+    /// The separate debug file's path, and why it could not be used, or
+    /// [`NONE`].
+    pub debug_path: U32,
+    pub debug_reason: U32,
+    /// [`DEBUG_FILE_NONE`], [`DEBUG_FILE_USED`], or
+    /// [`DEBUG_FILE_UNUSABLE`].
+    pub debug_file: u8,
 }
 
 impl Record for FactsRecord {
@@ -36,6 +44,10 @@ impl Record for FactsRecord {
 pub const TABLE_ABSENT: u8 = 0;
 pub const TABLE_LOADED: u8 = 1;
 pub const TABLE_UNUSABLE: u8 = 2;
+
+pub const DEBUG_FILE_NONE: u8 = 0;
+pub const DEBUG_FILE_USED: u8 = 1;
+pub const DEBUG_FILE_UNUSABLE: u8 = 2;
 
 /// [`FactsRecord::flags`].
 pub mod fact_flags {
@@ -79,14 +91,28 @@ pub struct Facts<'a> {
     pub symbol_sources: &'a SymbolTableSources,
     pub thread_local_storage: bool,
     pub thread_locals: &'a BTreeMap<Arc<str>, Result<ThreadLocal, Arc<str>>>,
+    pub debug_file: Option<&'a DebugFile>,
 }
 
-/// Adds `facts` to `builder`, pooling names and reasons in `strings`.
+/// Adds `facts` to `builder`, pooling names and reasons in `strings` and
+/// paths in `paths`.
 pub fn add_to(
     builder: &mut Builder,
     strings: &mut StringsBuilder,
+    paths: &mut PathsBuilder,
     facts: &Facts<'_>,
 ) -> Result<(), TooLarge> {
+    let (debug_file, debug_path, debug_reason) = match facts.debug_file {
+        None => (DEBUG_FILE_NONE, NONE, NONE),
+        Some(DebugFile::Used(path)) => {
+            (DEBUG_FILE_USED, paths.intern(path).ok_or(TooLarge)?.0, NONE)
+        }
+        Some(DebugFile::Unusable { path, reason }) => (
+            DEBUG_FILE_UNUSABLE,
+            paths.intern(path).ok_or(TooLarge)?.0,
+            strings.push(reason).ok_or(TooLarge)?.0,
+        ),
+    };
     let mut push = |text: &str| strings.push(text).map(|id| id.0).ok_or(TooLarge);
     let mut table = |table: &EmbeddedSymbolTable| -> Result<(u8, u32), TooLarge> {
         Ok(match table {
@@ -114,6 +140,9 @@ pub fn add_to(
         embedded_table,
         runtime_table,
         flags,
+        debug_path: debug_path.into(),
+        debug_reason: debug_reason.into(),
+        debug_file,
     };
     // A map's order is its names' byte order, which lookups search.
     let thread_locals = facts
@@ -141,6 +170,7 @@ pub fn add_to(
 #[derive(Debug, Clone, Copy)]
 pub struct FactsView<'a> {
     strings: Strings<'a>,
+    paths: Paths<'a>,
     record: Option<&'a FactsRecord>,
     thread_locals: &'a [ThreadLocalRecord],
 }
@@ -149,6 +179,7 @@ impl<'a> FactsView<'a> {
     pub fn new(image: &'a Image) -> Self {
         Self {
             strings: image.strings(),
+            paths: Paths(image.bytes(TableKind::Paths)),
             record: image.table::<FactsRecord>().first(),
             thread_locals: image.table(),
         }
@@ -174,6 +205,27 @@ impl<'a> FactsView<'a> {
             dynamic_table: self.flag(fact_flags::DYNAMIC_TABLE),
             embedded_table: table(record.embedded_table, record.embedded_reason),
             runtime_function_table: table(record.runtime_table, record.runtime_reason),
+        }
+    }
+
+    /// The separate debug file found for the image, whether it was used
+    /// or could not be.
+    pub fn debug_file(self) -> Option<DebugFile> {
+        let record = self.record?;
+        let path = || {
+            Arc::new(
+                self.paths
+                    .get(PathId(record.debug_path.get()))
+                    .to_path_buf(),
+            )
+        };
+        match record.debug_file {
+            DEBUG_FILE_USED => Some(DebugFile::Used(path())),
+            DEBUG_FILE_UNUSABLE => Some(DebugFile::Unusable {
+                path: path(),
+                reason: self.strings.get(StrId(record.debug_reason.get())).into(),
+            }),
+            _ => None,
         }
     }
 
@@ -218,7 +270,17 @@ impl<'a> FactsView<'a> {
 /// Checks the facts and thread-local variables.
 pub(super) fn validate(image: &Image) -> Result<(), String> {
     let strings = image.strings();
+    let paths = image.bytes(TableKind::Paths);
     let records = image.table::<FactsRecord>();
+    let debug_file = |record: &FactsRecord| {
+        let path = || super::strings::valid_reference(paths, record.debug_path.get(), false);
+        match record.debug_file {
+            DEBUG_FILE_NONE => record.debug_path.get() == NONE && record.debug_reason.get() == NONE,
+            DEBUG_FILE_USED => path() && record.debug_reason.get() == NONE,
+            DEBUG_FILE_UNUSABLE => path() && strings.contains(StrId(record.debug_reason.get())),
+            _ => false,
+        }
+    };
     let reason = |state: u8, reason: U32| match state {
         TABLE_ABSENT | TABLE_LOADED => reason.get() == NONE,
         TABLE_UNUSABLE => strings.contains(StrId(reason.get())),
@@ -229,6 +291,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
             record.flags & !fact_flags::ALL != 0
                 || !reason(record.embedded_table, record.embedded_reason)
                 || !reason(record.runtime_table, record.runtime_reason)
+                || !debug_file(record)
         })
     {
         return Err("the image's facts are malformed".into());

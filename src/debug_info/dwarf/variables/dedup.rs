@@ -74,14 +74,22 @@ impl BuiltTypes {
         &mut self,
         hasher: &H,
     ) -> Option<Remap> {
-        let signatures = {
-            let _phase = crate::span!("types.deduplicate.signatures");
-            self.signatures()
-        };
-        let classes = {
-            let _phase = crate::span!("types.deduplicate.refine");
-            refine(signatures, hasher)?
-        };
+        let mut classes = self.classes(hasher);
+        let pending = std::mem::take(&mut self.pending_arguments);
+        if !pending.is_empty() {
+            // Types of one class are alike to every name, so matching names
+            // against the first of each finds what matching them all would.
+            // Resolving can make types equal that were not, so the classes
+            // are found again.
+            super::identity::resolve_parsed_arguments(
+                &mut self.entries,
+                self.image,
+                &pending,
+                classes.as_deref(),
+            );
+            classes = self.classes(hasher);
+        }
+        let classes = classes?;
         let mut new_of_class = vec![u32::MAX; classes.len()];
         let mut retained = 0_u32;
         let mut kept = vec![false; classes.len()];
@@ -110,6 +118,16 @@ impl BuiltTypes {
         let _phase = crate::span!("types.deduplicate.apply");
         self.apply(&remap, &kept);
         Some(remap)
+    }
+
+    /// Each type's class, as [`refine`] finds them.
+    fn classes<H: std::hash::BuildHasher + Clone + Sync>(&self, hasher: &H) -> Option<Vec<u32>> {
+        let signatures = {
+            let _phase = crate::span!("types.deduplicate.signatures");
+            self.signatures()
+        };
+        let _phase = crate::span!("types.deduplicate.refine");
+        refine(signatures, hasher)
     }
 
     /// Each type's own fields, with every reference zeroed, and the

@@ -135,6 +135,7 @@ fn declaration_canonicalization_cannot_launder_a_non_type_reference() {
         ModuleImageId::new(0),
         ByteOrder::Little,
         &pool,
+        crate::debug_info::dwarf::budget::LoadLimits::default().budget(0),
     );
 
     assert!(matches!(

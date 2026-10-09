@@ -52,21 +52,46 @@ pub fn normalize(types: &[TypeNode]) -> BTreeMap<TypeId, Result<CoroutineInfo, A
         Some(TypeNode::Resolved(info)) => Some(info),
         _ => None,
     };
-    types
-        .iter()
-        .filter_map(|node| match node {
-            TypeNode::Resolved(info)
-                if matches!(
-                    info.kind,
-                    TypeKind::Record { .. } | TypeKind::Variant { .. }
-                ) =>
-            {
-                let kind = coroutine_kind(&info.name)?;
-                Some((info.reference.id, coroutine(info, kind, &by_id)))
-            }
-            TypeNode::Resolved(_) | TypeNode::Malformed { .. } => None,
+    found(types.iter().map(|node| node.reference().id), &by_id)
+}
+
+/// Every coroutine of `table`, as [`normalize`] finds them, decoding only
+/// the types named as coroutines and those their states hold.
+pub fn in_table(
+    table: &crate::image::types::TypeTable,
+) -> BTreeMap<TypeId, Result<CoroutineInfo, Arc<str>>> {
+    let by_id = |id: TypeId| {
+        table.info(crate::TypeReference {
+            image: table.image(),
+            id,
         })
-        .collect()
+    };
+    found(
+        table
+            .view()
+            .aggregates_named(|name| coroutine_kind(name).is_some()),
+        &by_id,
+    )
+}
+
+/// The records and variants among `ids` that their names say are
+/// coroutines, with what each is.
+fn found<'a>(
+    ids: impl Iterator<Item = TypeId>,
+    types: &impl Fn(TypeId) -> Option<&'a TypeInfo>,
+) -> BTreeMap<TypeId, Result<CoroutineInfo, Arc<str>>> {
+    ids.filter_map(|id| {
+        let info = types(id)?;
+        if !matches!(
+            info.kind,
+            TypeKind::Record { .. } | TypeKind::Variant { .. }
+        ) {
+            return None;
+        }
+        let kind = coroutine_kind(&info.name)?;
+        Some((id, coroutine(info, kind, types)))
+    })
+    .collect()
 }
 
 fn coroutine<'a>(

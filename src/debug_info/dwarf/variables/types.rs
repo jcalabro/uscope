@@ -34,7 +34,7 @@ use super::variant::{
     VariantMetadataBudget, VariantMetadataError, copy_variant_selection,
     validate_variant_selections,
 };
-use super::{MAX_RECORD_CHILDREN, MAX_SYMBOLIC_NAMES, MAX_TYPE_RESOLUTION_DEPTH, MAX_TYPES};
+use super::{MAX_RECORD_CHILDREN, MAX_TYPE_RESOLUTION_DEPTH};
 use crate::image::locations::ExpressionId;
 
 pub(super) use crate::image::variables::TypeResolution;
@@ -61,6 +61,9 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) unit_languages: Vec<Option<gimli::DwLang>>,
     pub(super) zig_units: Vec<bool>,
     pub(super) explicit_names: HashSet<TypeId>,
+    /// The arguments identities spell by name, which resolve once every
+    /// identity exists.
+    pub(super) pending_arguments: Vec<super::identity::PendingArguments>,
     pub(super) resolution_depth: usize,
     pub(super) byte_order: ByteOrder,
     pub(super) limit_type: Option<TypeId>,
@@ -70,7 +73,8 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     /// Where every location is pooled.
     pub(super) pool: &'a std::sync::Mutex<super::location::LocationsBuilder>,
     pub(super) record_member_declarations: Vec<AggregateMemberDeclaration>,
-    pub(super) symbolic_names: usize,
+    /// What the records the loader builds may still cost.
+    pub(super) budget: crate::debug_info::dwarf::budget::Meter,
     /// The scopes enclosing each type DIE that has any.
     pub(super) type_scopes: HashMap<DieKey, ScopePath>,
     /// The declaration each out-of-line type definition completes.
@@ -96,6 +100,10 @@ pub(super) struct BuiltTypes {
     pub(super) complex_parts: HashMap<(Arc<str>, u64), TypeId>,
     pub(super) go_dict_indices: HashMap<TypeId, u64>,
     pub(super) passed_by_value: HashMap<TypeId, bool>,
+    pub(super) image: ModuleImageId,
+    /// The arguments identities spell by name, which deduplication
+    /// resolves.
+    pub(super) pending_arguments: Vec<super::identity::PendingArguments>,
 }
 
 #[derive(Clone, Copy)]
@@ -179,6 +187,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         image: ModuleImageId,
         byte_order: ByteOrder,
         pool: &'a std::sync::Mutex<super::location::LocationsBuilder>,
+        budget: crate::debug_info::dwarf::budget::Meter,
     ) -> Self {
         let mut die_offsets = Vec::with_capacity(units.len());
         let mut unit_languages = Vec::with_capacity(units.len());
@@ -276,6 +285,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             unit_languages,
             zig_units,
             explicit_names: HashSet::new(),
+            pending_arguments: Vec::new(),
             resolution_depth: 0,
             byte_order,
             limit_type: None,
@@ -283,7 +293,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             dynamic_record_layouts: HashMap::new(),
             pool,
             record_member_declarations: Vec::new(),
-            symbolic_names: 0,
+            budget,
             type_scopes: HashMap::new(),
             definition_declarations,
             identity_parts: HashMap::new(),
@@ -408,7 +418,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             self.by_die.insert(key, id);
             return id;
         }
-        if self.entries.len() >= MAX_TYPES {
+        if self.budget.charge("types", size_of::<TypeEntry>()).is_err() {
             return self.type_limit(key);
         }
         let id = self.next_id();
@@ -1026,7 +1036,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 )
                 .into());
             }
-            if enumerators.len() >= MAX_RECORD_CHILDREN || self.symbolic_names >= MAX_SYMBOLIC_NAMES
+            if enumerators.len() >= MAX_RECORD_CHILDREN
+                || self
+                    .budget
+                    .charge("symbolic names", size_of::<Enumerator>())
+                    .is_err()
             {
                 return Ok(opaque(
                     reference,
@@ -1035,7 +1049,6 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     "enumerator metadata exceeds its resource limit",
                 ));
             }
-            self.symbolic_names += 1;
             let enumerator_name = copy_name(self.dwarf, unit, &child)
                 .map_err(malformed)?
                 .ok_or("enumerator has no name")?;
@@ -1192,11 +1205,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                             })
                             .map(|value| Enumerator { name, value })
                     });
-                let symbolic_limit =
-                    enumerator.is_ok() && self.symbolic_names >= MAX_SYMBOLIC_NAMES;
-                if enumerator.is_ok() && !symbolic_limit {
-                    self.symbolic_names += 1;
-                }
+                let symbolic_limit = enumerator.is_ok()
+                    && self
+                        .budget
+                        .charge("symbolic names", size_of::<Enumerator>())
+                        .is_err();
                 let collection = constants
                     .entry(target)
                     .or_insert_with(|| NamedConstantCollection::Enumerators(Vec::new()));
@@ -1258,74 +1271,58 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
     }
 
+    /// Gives each aggregate's members their declarations, or makes an
+    /// aggregate malformed when one of its members' cannot be read.
     pub(super) fn populate_record_member_declarations(&mut self, files: &mut Files) {
-        for metadata in self.record_member_declarations.clone() {
-            let record = metadata.aggregate;
-            let key = metadata.die;
-            let declaration = (|| -> std::result::Result<Option<SourceLocation>, Arc<str>> {
-                let unit = self
-                    .units
-                    .get(key.unit)
-                    .ok_or_else(|| Arc::from("record member unit is unavailable"))?;
-                let entry = unit
-                    .entry(gimli::UnitOffset(key.offset))
-                    .map_err(|error| Arc::from(error.to_string()))?;
-                let chain = origin_chain(self.units, key.unit, &entry)
-                    .map_err(|error| Arc::from(error.to_string()))?;
-                declaration_with_origins(self.dwarf, self.units, unit, &entry, &chain, files)
-                    .map_err(|error| Arc::from(error.to_string()))
-            })();
-            let declaration = match declaration {
-                Ok(declaration) => declaration,
-                Err(reason) => {
-                    self.entries[record.index()] = TypeEntry::Malformed(reason);
-                    continue;
-                }
-            };
-            let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(record.index()) else {
+        let pending = std::mem::take(&mut self.record_member_declarations);
+        // Read in the order noted, which is the order files are interned.
+        let declarations = pending
+            .iter()
+            .map(|metadata| self.member_declaration(metadata.die, files))
+            .collect::<Vec<_>>();
+        let mut order = (0..pending.len()).collect::<Vec<_>>();
+        order.sort_by_key(|index| pending[*index].aggregate);
+        for members in
+            order.chunk_by(|left, right| pending[*left].aggregate == pending[*right].aggregate)
+        {
+            let record = pending[members[0]].aggregate;
+            if let Some(Err(reason)) = members
+                .iter()
+                .map(|index| &declarations[*index])
+                .find(|declaration| declaration.is_err())
+            {
+                self.entries[record.index()] = TypeEntry::Malformed(Arc::clone(reason));
                 continue;
-            };
-            match (&mut info.kind, metadata.member) {
-                (
-                    TypeKind::Record { members, .. }
-                    | TypeKind::Union { members, .. }
-                    | TypeKind::Variant {
-                        common_members: members,
-                        ..
-                    },
-                    AggregateMemberPath::Direct(member),
-                ) => {
-                    let mut updated = members.to_vec();
-                    if let Some(member) = updated.get_mut(member) {
-                        member.declaration = declaration;
-                        *members = updated.into();
-                    }
-                }
-                (TypeKind::Variant { discriminant, .. }, AggregateMemberPath::Discriminant) => {
-                    match discriminant.as_mut() {
-                        VariantDiscriminant::Stored(member) => {
-                            member.declaration = declaration;
-                        }
-                        VariantDiscriminant::TagType(_) | VariantDiscriminant::Absent => {}
-                    }
-                }
-                (
-                    TypeKind::Variant { variants, .. },
-                    AggregateMemberPath::Variant { variant, member },
-                ) => {
-                    let mut updated_variants = variants.to_vec();
-                    if let Some(variant) = updated_variants.get_mut(variant) {
-                        let mut updated_members = variant.members.to_vec();
-                        if let Some(member) = updated_members.get_mut(member) {
-                            member.declaration = declaration;
-                            variant.members = updated_members.into();
-                            *variants = updated_variants.into();
-                        }
-                    }
-                }
-                _ => {}
+            }
+            if let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(record.index()) {
+                declare_members(
+                    &mut info.kind,
+                    members.iter().map(|index| {
+                        let declaration = declarations[*index].as_ref().ok().cloned().flatten();
+                        (pending[*index].member, declaration)
+                    }),
+                );
             }
         }
+    }
+
+    /// Where the member whose DIE is `key` is declared.
+    fn member_declaration(
+        &self,
+        key: DieKey,
+        files: &mut Files,
+    ) -> std::result::Result<Option<SourceLocation>, Arc<str>> {
+        let unit = self
+            .units
+            .get(key.unit)
+            .ok_or_else(|| Arc::from("record member unit is unavailable"))?;
+        let entry = unit
+            .entry(gimli::UnitOffset(key.offset))
+            .map_err(|error| Arc::from(error.to_string()))?;
+        let chain = origin_chain(self.units, key.unit, &entry)
+            .map_err(|error| Arc::from(error.to_string()))?;
+        declaration_with_origins(self.dwarf, self.units, unit, &entry, &chain, files)
+            .map_err(|error| Arc::from(error.to_string()))
     }
 
     fn target_name(&self, target: TypeReference) -> Arc<str> {
@@ -1382,6 +1379,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             complex_parts: self.complex_parts,
             go_dict_indices: self.go_dict_indices,
             passed_by_value: self.passed_by_value,
+            image: self.image,
+            pending_arguments: self.pending_arguments,
         }
     }
 
@@ -1426,7 +1425,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
         for part in parts {
             let key = (Arc::clone(&part.base_name), part.byte_size);
-            if self.complex_parts.contains_key(&key) || self.entries.len() >= MAX_TYPES {
+            if self.complex_parts.contains_key(&key)
+                || self.budget.charge("types", size_of::<TypeEntry>()).is_err()
+            {
                 continue;
             }
             let reference = TypeReference {
@@ -3420,6 +3421,68 @@ type Built = std::result::Result<TypeEntry, Arc<str>>;
 
 fn malformed(error: impl std::fmt::Display) -> Arc<str> {
     error.to_string().into()
+}
+
+/// Gives the members `declarations` names their declarations, copying each
+/// list of `kind`'s once.
+fn declare_members(
+    kind: &mut TypeKind,
+    declarations: impl Iterator<Item = (AggregateMemberPath, Option<SourceLocation>)> + Clone,
+) {
+    match kind {
+        TypeKind::Record { members, .. }
+        | TypeKind::Union { members, .. }
+        | TypeKind::Variant {
+            common_members: members,
+            ..
+        } if declarations
+            .clone()
+            .any(|(path, _)| matches!(path, AggregateMemberPath::Direct(_))) =>
+        {
+            let mut updated = members.to_vec();
+            for (path, declaration) in declarations.clone() {
+                if let AggregateMemberPath::Direct(member) = path
+                    && let Some(member) = updated.get_mut(member)
+                {
+                    member.declaration = declaration;
+                }
+            }
+            *members = updated.into();
+        }
+        _ => {}
+    }
+    let TypeKind::Variant {
+        discriminant,
+        variants,
+        ..
+    } = kind
+    else {
+        return;
+    };
+    let mut updated_variants: Option<Vec<Variant>> = None;
+    for (path, declaration) in declarations {
+        match path {
+            AggregateMemberPath::Discriminant => {
+                if let VariantDiscriminant::Stored(member) = discriminant.as_mut() {
+                    member.declaration = declaration;
+                }
+            }
+            AggregateMemberPath::Variant { variant, member } => {
+                let updated = updated_variants.get_or_insert_with(|| variants.to_vec());
+                if let Some(variant) = updated.get_mut(variant) {
+                    let mut members = variant.members.to_vec();
+                    if let Some(member) = members.get_mut(member) {
+                        member.declaration = declaration;
+                        variant.members = members.into();
+                    }
+                }
+            }
+            AggregateMemberPath::Direct(_) => {}
+        }
+    }
+    if let Some(updated) = updated_variants {
+        *variants = updated.into();
+    }
 }
 
 /// A type with no identity yet.

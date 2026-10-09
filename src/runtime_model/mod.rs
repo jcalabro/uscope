@@ -51,7 +51,7 @@ pub struct ImageSymbol {
 /// The static facts of the module that carries a runtime, by name.
 pub trait RuntimeImage: std::fmt::Debug {
     /// The producers of the module's debug information.
-    fn producers(&self) -> &[Arc<str>];
+    fn producers(&self) -> Vec<&str>;
     /// The value of a named integer constant.
     fn constant(&self, name: &str) -> Option<IntegerValue>;
     /// A named object or function.
@@ -599,8 +599,8 @@ pub fn detect(
 }
 
 impl RuntimeImage for ModuleImage {
-    fn producers(&self) -> &[Arc<str>] {
-        Self::producers(self)
+    fn producers(&self) -> Vec<&str> {
+        Self::producers(self).collect()
     }
 
     fn constant(&self, name: &str) -> Option<IntegerValue> {

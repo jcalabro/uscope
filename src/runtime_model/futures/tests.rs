@@ -190,8 +190,8 @@ impl Types {
 }
 
 impl RuntimeImage for Types {
-    fn producers(&self) -> &[Arc<str>] {
-        &[]
+    fn producers(&self) -> Vec<&str> {
+        Vec::new()
     }
 
     fn constant(&self, _name: &str) -> Option<IntegerValue> {

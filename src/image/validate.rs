@@ -194,7 +194,7 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
     tables.statements(image.table())?;
     tables.boundaries(image.table())?;
     drop(phase);
-    let families: [(&str, Validation); 10] = [
+    let families: [(&str, Validation); 12] = [
         ("validate.symbols", super::symbols::validate),
         ("validate.functions", super::functions::validate),
         ("validate.unwind", super::unwind::validate),
@@ -205,6 +205,8 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
         ("validate.variables", super::variables::validate),
         ("validate.calls", super::calls::validate),
         ("validate.type_facts", super::type_facts::validate),
+        ("validate.resumes", super::resumes::validate),
+        ("validate.declarations", super::declarations::validate),
     ];
     for (name, validate) in families {
         let _phase = crate::profile::span(name, None, None);

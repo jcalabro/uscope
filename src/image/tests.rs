@@ -1,4 +1,5 @@
 use super::calls::{CallSiteRecord, CallingFunctionRecord, SiteParameterRecord};
+use super::declarations::{NamedConstantRecord, VtableRecord};
 use super::facts::{FactsRecord, FactsView, ThreadLocalRecord};
 use super::format::Header;
 use super::functions::{
@@ -15,6 +16,7 @@ use super::locations::{
     LocationEntryRecord, LocationListRecord, ProcedureRecord,
 };
 use super::packages::{PackageRecord, PackageView, PackagedRecord};
+use super::resumes::{HeldRecord, ResumePointRecord, ResumeRecord};
 use super::sample::{
     ENCODING, SAMPLE_PACKAGES, TARGET, read_everything, read_locations, reseal, sample,
     sample_functions, sample_got, sample_instances, sample_locations, sample_packaged, sample_rows,
@@ -30,8 +32,8 @@ use super::types::{
 };
 use super::unwind::{FdeMiss, FrameSaveRecord, UnwindRecord, UnwindView, unwind_flags};
 use super::variables::{
-    CaptureRecord, CodeRange, ConstantRecord, DwarfProcedureRecord, FunctionStartRecord, Keyed,
-    ObjectRecord, ScopeRecord, VariableFunctionRecord,
+    CaptureRecord, CodeRange, ConstantRecord, DwarfProcedureRecord, FunctionStartRecord,
+    GlobalRecord, Keyed, ObjectRecord, ScopeRecord, VariableFunctionRecord,
 };
 use super::*;
 use crate::{
@@ -198,7 +200,10 @@ fn the_schema_is_the_records_layout() {
             runtime_reason,
             embedded_table,
             runtime_table,
-            flags
+            flags,
+            debug_path,
+            debug_reason,
+            debug_file
         ]
     );
     check!(
@@ -452,6 +457,40 @@ fn the_schema_is_the_records_layout() {
         DynamicLayoutRecord,
         [aggregate, first, second, expression, kind]
     );
+    check!(TableKind::ResumeRanges, CodeRange, [start, end]);
+    check!(
+        TableKind::NamedConstants,
+        NamedConstantRecord,
+        [name, value, signed]
+    );
+    check!(TableKind::Vtables, VtableRecord, [address, ty]);
+    check!(
+        TableKind::Globals,
+        GlobalRecord,
+        [object, qualified_name, linkage_name, external]
+    );
+    check!(
+        TableKind::Resumes,
+        ResumeRecord,
+        [
+            instance,
+            dispatch,
+            dispatch_count,
+            points,
+            point_count,
+            malformed
+        ]
+    );
+    check!(
+        TableKind::ResumePoints,
+        ResumePointRecord,
+        [state, address, resumption, resumption_count]
+    );
+    check!(
+        TableKind::Held,
+        HeldRecord,
+        [offset, state, ranges, range_count]
+    );
     for kind in [
         TableKind::GoEntries,
         TableKind::ObjectOffsets,
@@ -465,8 +504,8 @@ fn the_schema_is_the_records_layout() {
         TableKind::IdentityStrings,
         TableKind::TypeClasses,
         TableKind::FunctionObjects,
-        TableKind::Globals,
         TableKind::TailCalls,
+        TableKind::Producers,
     ] {
         assert_eq!(schema::record(kind), "Item");
         check!(kind, Item, [value]);
@@ -501,7 +540,7 @@ fn the_schema_is_the_records_layout() {
     // A change to any record changes this; bump the format with it.
     assert_eq!(
         schema::layout_fingerprint(),
-        0x7748_7ed2_92f4_b5fe,
+        0xc28c_cfe4_f08d_d25a,
         "the layout changed:\n{}",
         schema::schema_text()
     );
@@ -1812,6 +1851,14 @@ fn facts_read_back_with_thread_locals_by_name() {
     }
     assert_eq!(view.thread_local("count"), None);
     assert_eq!(view.thread_local("zzz"), None);
+    assert_eq!(
+        view.debug_file(),
+        Some(crate::DebugFile::Unusable {
+            path: std::sync::Arc::new("/usr/lib/debug/.build-id/ab/cdef.debug".into()),
+            reason: "its build id differs".into(),
+        })
+    );
+    assert_eq!(image.bytes(TableKind::EmbeddedViews), b"views");
 }
 
 #[test]
@@ -1837,6 +1884,34 @@ fn validation_rejects_facts_that_disagree() {
         (
             "an unusable table without a reason",
             facts(|f| f[0].embedded_reason = NONE.into()),
+            "facts are malformed",
+        ),
+        (
+            "an unknown debug file state",
+            facts(|f| f[0].debug_file = 3),
+            "facts are malformed",
+        ),
+        (
+            "an unusable debug file without a reason",
+            facts(|f| f[0].debug_reason = NONE.into()),
+            "facts are malformed",
+        ),
+        (
+            "a used debug file's reason",
+            facts(|f| f[0].debug_file = super::facts::DEBUG_FILE_USED),
+            "facts are malformed",
+        ),
+        (
+            "no debug file's path",
+            facts(|f| {
+                f[0].debug_file = super::facts::DEBUG_FILE_NONE;
+                f[0].debug_reason = NONE.into();
+            }),
+            "facts are malformed",
+        ),
+        (
+            "a debug file's path past the pool",
+            facts(|f| f[0].debug_path = 0xffff_fff0.into()),
             "facts are malformed",
         ),
         (
@@ -2404,14 +2479,11 @@ proptest::proptest! {
                 starts.entry(range.start.get()).or_default().push(index);
             }
         }
+        let input = Variables { functions: functions.clone(), ..Variables::default() };
+        let index = input.function_index().unwrap();
         let mut builder = Builder::new(TARGET);
         let mut strings = StringsBuilder::default();
-        add_to(
-            &mut builder,
-            &mut strings,
-            &Variables { functions: functions.clone(), ..Variables::default() },
-        )
-        .unwrap();
+        add_to(&mut builder, &mut strings, &input).unwrap();
         builder.bytes(TableKind::Strings, strings.into_bytes());
         let image = builder.seal(Limits::default()).unwrap();
         let view = VariableView::new(&image);
@@ -2430,8 +2502,37 @@ proptest::proptest! {
                 .function_at(ImageAddress::new(address))
                 .map(|function| function.id().0 as usize);
             proptest::prop_assert_eq!(found, expected, "at {:#x}", address);
+            // The loader finds functions as the image does, before sealing.
+            let before = index.function_at(ImageAddress::new(address));
+            proptest::prop_assert!(
+                match (before, expected) {
+                    (Some(before), Some(found)) => std::ptr::eq(before, std::ptr::from_ref(&input.functions[found])),
+                    (before, found) => before.is_none() && found.is_none(),
+                },
+                "before sealing, at {:#x}",
+                address
+            );
         }
     }
+}
+
+/// A global reads back its object and the names it answers to beyond the
+/// object's.
+#[test]
+fn globals_read_back_with_their_names() {
+    use super::variables::{ObjectId, VariableView};
+
+    let (tables, files) = sample();
+    let image = reopen(seal(&tables, &files).unwrap().as_bytes()).unwrap();
+    let view = VariableView::new(&image);
+    assert_eq!(view.global_count(), 1);
+    let global = view.global_entry(0).unwrap();
+    assert_eq!(global.object.id(), ObjectId(2));
+    assert_eq!(
+        (global.qualified_name, global.linkage_name, global.external),
+        ("ns::g", Some("_ZN2ns1gE"), true)
+    );
+    assert!(view.global_entry(1).is_none());
 }
 
 #[test]
@@ -2450,6 +2551,7 @@ fn validation_rejects_variables_that_disagree() {
         |change: fn(&mut [FunctionStartRecord])| tampered(TableKind::FunctionStarts, change);
     let keyed = |kind, change: fn(&mut [Keyed])| tampered(kind, change);
     let item = |kind, change: fn(&mut [Item])| tampered(kind, change);
+    let global = |change: fn(&mut [GlobalRecord])| tampered(TableKind::Globals, change);
     let procedure =
         |change: fn(&mut [DwarfProcedureRecord])| tampered(TableKind::DwarfProcedures, change);
     let cases = [
@@ -2596,8 +2698,23 @@ fn validation_rejects_variables_that_disagree() {
         ),
         (
             "an unknown global",
-            item(TableKind::Globals, |i| i[0].value = 7.into()),
-            "no data object",
+            global(|g| g[0].object = 7.into()),
+            "global",
+        ),
+        (
+            "a global's qualified name",
+            global(|g| g[0].qualified_name = 0xffff_fff0.into()),
+            "global",
+        ),
+        (
+            "a global's linkage name",
+            global(|g| g[0].linkage_name = 0xffff_fff0.into()),
+            "global",
+        ),
+        (
+            "a global's visibility",
+            global(|g| g[0].external = 2),
+            "global",
         ),
         (
             "objects past the list",
@@ -3043,6 +3160,272 @@ fn validation_rejects_type_facts_that_disagree() {
         assert!(
             matches!(&error, Err(ImageError::Malformed(why)) if why.contains(expected)),
             "{name}: {error:?}"
+        );
+    }
+}
+
+/// Constants by name and vtables by address read back the last value given
+/// for each, and producers once each in the order first named.
+#[test]
+fn declarations_read_back_by_name_and_address() {
+    use super::declarations::DeclarationView;
+    use crate::IntegerValue::{Signed, Unsigned};
+
+    let (tables, files) = sample();
+    let image = reopen(seal(&tables, &files).unwrap().as_bytes()).unwrap();
+    let view = DeclarationView::new(&image);
+    assert_eq!(view.constant("runtime._Grunning"), Some(Signed(-1)));
+    assert_eq!(view.constant("max"), Some(Unsigned(u128::MAX)));
+    assert_eq!(view.constant("min"), Some(Signed(i128::MIN)));
+    assert_eq!(view.constant("runtime"), None);
+    assert!(
+        view.constants()
+            .map(|(name, _)| name)
+            .eq(["max", "min", "runtime._Grunning"])
+    );
+    let vtable = |address| {
+        view.vtable(ImageAddress::new(address))
+            .map(crate::TypeId::get)
+    };
+    assert_eq!(
+        [0x5000, 0x6000, 0x5001].map(vtable),
+        [Some(1), Some(0), None]
+    );
+    assert_eq!(view.vtables().len(), 2);
+    assert!(view.producers().eq(["rustc", "clang"]));
+}
+
+#[test]
+fn validation_rejects_declarations_that_disagree() {
+    let constant =
+        |change: fn(&mut [NamedConstantRecord])| tampered(TableKind::NamedConstants, change);
+    let vtable = |change: fn(&mut [VtableRecord])| tampered(TableKind::Vtables, change);
+    let producer = |change: fn(&mut [Item])| tampered(TableKind::Producers, change);
+    let cases = [
+        (
+            "constants out of order",
+            constant(|c| c.swap(0, 1)),
+            "named constant",
+        ),
+        (
+            "a name twice",
+            constant(|c| c[1].name = c[0].name),
+            "named constant",
+        ),
+        (
+            "a constant's name",
+            constant(|c| c[0].name = 0xffff_fff0.into()),
+            "named constant",
+        ),
+        ("a sign", constant(|c| c[0].signed = 2), "named constant"),
+        ("vtables out of order", vtable(|v| v.swap(0, 1)), "vtable"),
+        (
+            "a vtable of no type",
+            vtable(|v| v[0].ty = 999.into()),
+            "vtable",
+        ),
+        ("a producer twice", producer(|p| p[1] = p[0]), "producer"),
+        (
+            "a producer's name",
+            producer(|p| p[0].value = 0xffff_fff0.into()),
+            "producer",
+        ),
+    ];
+    for (name, error, expected) in cases {
+        assert!(
+            matches!(&error, Err(ImageError::Malformed(why)) if why.contains(expected)),
+            "{name}: {error:?}"
+        );
+    }
+}
+
+/// Resume points read back as the loader decoded them, by instance, and
+/// held ranges by entry and state, the later of two for a key.
+#[test]
+fn resumes_read_back_by_instance_and_state() {
+    use super::resumes::ResumeView;
+    use super::sample::sample_resumes;
+
+    let (tables, files) = sample();
+    let image = reopen(seal(&tables, &files).unwrap().as_bytes()).unwrap();
+    let view = ResumeView::new(&image);
+    let given = sample_resumes();
+    let instance = CodeInstanceId::new;
+    assert_eq!(
+        view.resume_points(instance(0)),
+        Some(given.points[1].1.clone())
+    );
+    assert_eq!(
+        view.resume_points(instance(3)),
+        Some(Err("an indirect dispatch".into()))
+    );
+    assert_eq!(view.resume_points(instance(1)), None);
+    assert_eq!(view.resume_points(instance(9)), None);
+    assert_eq!(
+        view.resume_code()
+            .map(|(code, instance)| (code.start.get(), code.end.get(), instance.get()))
+            .collect::<Vec<_>>(),
+        [
+            (0x1000, 0x1002, 0),
+            (0x1002, 0x1004, 0),
+            (0x1008, 0x100c, 0),
+            (0x2000, 0x2004, 0)
+        ],
+        "empty code is left out, and an undecodable instance has none"
+    );
+    let held = |offset, state| {
+        view.held(offset, state).map(|held| {
+            held.map(|code| (code.start.get(), code.end.get()))
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(held(0x40, 3), Some(vec![(0x100c, 0x1010)]));
+    assert_eq!(
+        held(0x40, 4),
+        Some(vec![(0x100c, 0x1010), (0x2000, 0x2008)])
+    );
+    assert_eq!(held(0x20, 3), Some(vec![]));
+    assert_eq!(held(0x20, 4), None);
+    assert_eq!(held(0x40, 0), None);
+}
+
+#[test]
+fn validation_rejects_resumes_that_disagree() {
+    use super::variables::CodeRange;
+
+    let resume = |change: fn(&mut [ResumeRecord])| tampered(TableKind::Resumes, change);
+    let point = |change: fn(&mut [ResumePointRecord])| tampered(TableKind::ResumePoints, change);
+    let held = |change: fn(&mut [HeldRecord])| tampered(TableKind::Held, change);
+    let cases = [
+        (
+            "instances out of order",
+            resume(|r| r.swap(0, 1)),
+            "resume points",
+        ),
+        (
+            "an instance of no code",
+            resume(|r| r[1].instance = 99.into()),
+            "resume points",
+        ),
+        (
+            "points past the table",
+            resume(|r| r[0].point_count = 4.into()),
+            "resume points",
+        ),
+        (
+            "dispatch past the ranges",
+            resume(|r| r[0].dispatch = 0xffff_fff0.into()),
+            "resume points",
+        ),
+        (
+            "a reason of no string",
+            resume(|r| r[1].malformed = 0xffff_fff0.into()),
+            "resume points",
+        ),
+        (
+            "an undecodable instance's points",
+            resume(|r| r[1].point_count = 1.into()),
+            "resume points",
+        ),
+        (
+            "a resumption past the ranges",
+            point(|p| p[1].resumption_count = 99.into()),
+            "resume point is",
+        ),
+        ("held out of order", held(|h| h.swap(0, 1)), "held range"),
+        ("a key twice", held(|h| h[1] = h[0]), "held range"),
+        (
+            "held past the ranges",
+            held(|h| h[2].ranges = 99.into()),
+            "held range",
+        ),
+    ];
+    for (name, error, expected) in cases {
+        assert!(
+            matches!(&error, Err(ImageError::Malformed(why)) if why.contains(expected)),
+            "{name}: {error:?}"
+        );
+    }
+    // The ranges themselves are any addresses.
+    tampered(TableKind::ResumeRanges, |r: &mut [CodeRange]| {
+        r[0].end = 0.into();
+    })
+    .unwrap();
+}
+
+/// A table finds the coroutines its types hold as the loader does from the
+/// whole graph, decoding only types named as coroutines: a record or a
+/// variant so named is one, readable or not, and a pointer or a malformed
+/// type so named is not.
+#[test]
+fn a_type_table_finds_the_coroutines_the_graph_holds() {
+    use std::sync::Arc;
+
+    use crate::{ModuleImageId, RecordKind, TypeId, TypeInfo, TypeKind, TypeNode, TypeReference};
+
+    let image = ModuleImageId::new(0);
+    let reference = |id| TypeReference {
+        image,
+        id: TypeId::new(id),
+    };
+    let node = |id, name: &str, kind| {
+        TypeNode::Resolved(TypeInfo {
+            reference: reference(id),
+            name: name.into(),
+            byte_size: Some(8),
+            kind,
+            identity: None,
+        })
+    };
+    let record = TypeKind::Record {
+        kind: RecordKind::Struct,
+        members: [].into(),
+        bases: [].into(),
+        incomplete: false,
+    };
+    let nodes = vec![
+        node(0, "{async_fn_env#0}", record.clone()),
+        node(
+            1,
+            "{async_block_env#1}",
+            TypeKind::Pointer {
+                target: Some(reference(0)),
+                address_class: 0,
+            },
+        ),
+        TypeNode::Malformed {
+            reference: reference(2),
+            description: "{async_fn_env#2}".into(),
+        },
+        node(3, "plain", record.clone()),
+        node(4, "{async_closure_env#0}", record),
+    ];
+    let mut builder = Builder::new(TARGET);
+    let mut strings = StringsBuilder::default();
+    super::types::add_to(
+        &mut builder,
+        &mut strings,
+        &super::types::Types {
+            nodes: &nodes,
+            classes: &[0, 1, 2, 3, 4],
+        },
+    )
+    .unwrap();
+    builder.bytes(TableKind::Strings, strings.into_bytes());
+    let table = TypeTable::new(Arc::new(builder.seal(Limits::default()).unwrap()), image);
+    let expected = crate::debug_info::coroutines::normalize(&nodes);
+    assert_eq!(
+        expected.keys().copied().collect::<Vec<_>>(),
+        [TypeId::new(0), TypeId::new(4)]
+    );
+    for id in 0..5 {
+        let id = TypeId::new(id);
+        assert_eq!(
+            table
+                .coroutine(id)
+                .map(|found| found.cloned().map_err(Arc::clone)),
+            expected.get(&id).cloned(),
+            "{id:?}"
         );
     }
 }

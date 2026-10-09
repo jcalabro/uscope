@@ -398,11 +398,33 @@ impl LineTables {
         decode_row(&self.addresses, &self.rows, &self.extras, index)
     }
 
-    /// Every public statement row, decoded: the adapter for the parts of
-    /// the loader that still read rows as records, until they read these
-    /// tables.
+    /// Every public statement row, decoded, in order.
+    #[cfg(test)]
     pub fn statement_rows(&self) -> Vec<StatementRow> {
         statement_rows(&self.addresses, &self.rows, &self.extras, &self.sequences).collect()
+    }
+
+    /// The public statement rows by address, which the loader's analyses
+    /// of code read before the tables are sealed.
+    pub fn statements_by_address(&self) -> StatementsByAddress<'_> {
+        let mut order = self
+            .sequences
+            .iter()
+            .enumerate()
+            .flat_map(|(sequence, run)| {
+                let first = run.first.get();
+                let sequence = u32::try_from(sequence).expect("sequence indexes fit u32");
+                (first..first + run.rows.get())
+                    .filter(|index| is_public(&self.rows[*index as usize]))
+                    .map(move |index| (index, sequence))
+            })
+            .collect::<Vec<_>>();
+        // Stable, so rows at one address keep line-program order.
+        order.sort_by_key(|(index, _)| self.addresses[*index as usize].address.get());
+        StatementsByAddress {
+            tables: self,
+            order,
+        }
     }
 
     /// Every line range, decoded, in order.
@@ -412,6 +434,59 @@ impl LineTables {
             .iter()
             .map(|range| line_entry(&self.addresses, &self.rows, &self.extras, range))
             .collect()
+    }
+}
+
+/// The public statement rows of [`LineTables`] by address, keeping
+/// line-program order among rows at one address, each decoded when asked.
+#[derive(Debug)]
+pub struct StatementsByAddress<'a> {
+    tables: &'a LineTables,
+    /// Each public row's index and its sequence's.
+    order: Vec<(u32, u32)>,
+}
+
+impl StatementsByAddress<'_> {
+    fn address(&self, (index, _): (u32, u32)) -> ImageAddress {
+        ImageAddress::new(self.tables.addresses[index as usize].address.get())
+    }
+
+    fn row(&self, (index, sequence): (u32, u32)) -> StatementRow {
+        let tables = self.tables;
+        let row = decode_row(
+            &tables.addresses,
+            &tables.rows,
+            &tables.extras,
+            index as usize,
+        );
+        let ordinal = index - tables.sequences[sequence as usize].first.get();
+        statement_row(&row, sequence, ordinal)
+    }
+
+    /// The line of the row whose code holds `address`: the last row at or
+    /// before it, unless that row has no line.
+    pub fn line_at(&self, address: ImageAddress) -> Option<crate::LineNumber> {
+        let after = self
+            .order
+            .partition_point(|at| self.address(*at) <= address);
+        let row = self.row(*self.order.get(after.checked_sub(1)?)?);
+        row.location.map(|location| location.line)
+    }
+
+    /// The rows in `range`, by address.
+    pub fn within(
+        &self,
+        range: AddressRange<ImageAddress>,
+    ) -> impl DoubleEndedIterator<Item = StatementRow> + '_ {
+        let start = self
+            .order
+            .partition_point(|at| self.address(*at) < range.start);
+        let end = self
+            .order
+            .partition_point(|at| self.address(*at) < range.end);
+        self.order[start..end.max(start)]
+            .iter()
+            .map(|at| self.row(*at))
     }
 }
 
@@ -692,10 +767,13 @@ impl LineTables {
 }
 
 impl Files {
-    /// Adds the files and their paths to `builder`, or `None` when a path
-    /// contains a NUL or the paths do not fit.
-    pub fn add_to(&self, builder: &mut super::Builder) -> Option<()> {
-        let mut paths = super::PathsBuilder::default();
+    /// Adds the files to `builder` and their paths to `paths`, or `None`
+    /// when a path contains a NUL or the paths do not fit.
+    pub fn add_to(
+        &self,
+        builder: &mut super::Builder,
+        paths: &mut super::PathsBuilder,
+    ) -> Option<()> {
         let records = self
             .paths
             .iter()
@@ -705,9 +783,7 @@ impl Files {
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        builder
-            .table(&records)
-            .bytes(TableKind::Paths, paths.into_bytes());
+        builder.table(&records);
         Some(())
     }
 }

@@ -13,6 +13,7 @@
 
 pub mod backing;
 pub mod calls;
+pub mod declarations;
 pub mod facts;
 mod format;
 pub mod functions;
@@ -20,6 +21,7 @@ pub mod index;
 pub mod lines;
 pub mod locations;
 pub mod packages;
+pub mod resumes;
 mod schema;
 mod strings;
 pub mod symbols;

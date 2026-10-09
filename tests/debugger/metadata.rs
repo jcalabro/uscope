@@ -163,7 +163,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         for name in ["counted_global", "packed_global"] {
             let global = image
                 .globals()
-                .iter()
                 .find(|global| global.name.as_ref() == name)
                 .unwrap_or_else(|| panic!("{fixture}: missing global {name}"));
             let uscope::GlobalVariableType::Resolved(info) = &global.type_info else {
@@ -184,7 +183,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         let global_type = |name: &str| {
             let global = image
                 .globals()
-                .iter()
                 .find(|global| global.name.as_ref() == name)
                 .unwrap_or_else(|| panic!("{fixture}: missing global {name}"));
             match &global.type_info {
@@ -274,10 +272,9 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     );
     assert!(
         go.producers()
-            .iter()
             .any(|producer| producer.starts_with("Go cmd/compile go1.27.")),
         "{:?}",
-        go.producers()
+        go.producers().collect::<Vec<_>>()
     );
     assert_eq!(
         images["variables-gcc-o0"].constant("runtime._Grunning"),
