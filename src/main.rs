@@ -11,10 +11,17 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 
-// Reading debug information allocates millions of small blocks, which
-// mimalloc serves far faster than the C library's allocator.
+// Reading debug information allocates many small blocks, which mimalloc
+// serves far faster than the C library's allocator. Heap profilers that
+// cannot see mimalloc build with the `system-alloc` feature instead. Each
+// thread counts its allocations for `--timings`.
+#[cfg(not(feature = "system-alloc"))]
+type Allocator = mimalloc::MiMalloc;
+#[cfg(feature = "system-alloc")]
+type Allocator = std::alloc::System;
 #[global_allocator]
-static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static ALLOCATOR: uscope::profile::alloc::Counting<Allocator> =
+    uscope::profile::alloc::Counting::new(Allocator {});
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use uscope::Debugger;
 
@@ -232,6 +239,17 @@ struct Args {
     #[arg(long, value_enum, hide_short_help = true, help_heading = "Display")]
     disassembly_syntax: Option<DisassemblySyntax>,
 
+    /// Write where the session's time and memory went to FILE: JSON with a
+    /// summary, totals per phase, and Chrome trace events, which
+    /// ui.perfetto.dev opens.
+    #[arg(
+        long,
+        value_name = "FILE",
+        hide_short_help = true,
+        help_heading = "Diagnostics"
+    )]
+    timings: Option<PathBuf>,
+
     #[command(subcommand)]
     tool: Option<Tool>,
 }
@@ -365,6 +383,19 @@ async fn async_main() -> ExitCode {
         }
         None => {}
     }
+    let recording = match &args.timings {
+        Some(_) => {
+            match uscope::profile::Recording::start(uscope::profile::Options { instructions: true })
+            {
+                Ok(recording) => Some(recording),
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => None,
+    };
     let early = Renderers::detect(args.color.unwrap_or_default(), args.batch);
     let session = match cli::session::prepare(&args, early.stderr) {
         Ok(session) => session,
@@ -375,7 +406,18 @@ async fn async_main() -> ExitCode {
     };
     let renderers = Renderers::configured(&session.settings, args.batch);
 
-    match run(session, renderers).await {
+    let result = run(session, renderers).await;
+    if let (Some(recording), Some(path)) = (recording, &args.timings)
+        && let Err(error) = std::fs::write(path, recording.finish().to_json())
+    {
+        eprintln!(
+            "{}: cannot write the timings to {}: {error}",
+            renderers.stderr.paint(Role::Error, "error"),
+            path.display()
+        );
+        return ExitCode::FAILURE;
+    }
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         // A closed stdout pipe, such as `uscope ... | head`, is a normal end.
         Err(error) if cli::is_broken_pipe(&error) => ExitCode::SUCCESS,

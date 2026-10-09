@@ -475,7 +475,10 @@ pub(super) fn load_variable_info<'data>(
     let mut abstract_bodies = Vec::new();
     let mut function_generics = BTreeMap::new();
     let mut order = 0_u64;
+    let phase = crate::span!("variables.evaluation_units");
     let evaluation_units = load_evaluation_units(units)?;
+    drop(phase);
+    let phase = crate::span!("variables.type_arena");
     let mut types = TypeArenaBuilder::new(
         dwarf,
         units,
@@ -483,6 +486,8 @@ pub(super) fn load_variable_info<'data>(
         image_id,
         target.byte_order,
     );
+    drop(phase);
+    let phase = crate::span!("variables.globals");
     let (mut globals, global_objects) = load_globals(
         dwarf,
         units,
@@ -492,7 +497,9 @@ pub(super) fn load_variable_info<'data>(
         source_file_ids,
         &mut types,
     )?;
+    drop(phase);
 
+    let phase = crate::span!("variables.main_walk");
     for (unit_index, unit) in units.iter().enumerate() {
         if is_type_unit(unit) {
             continue;
@@ -1107,6 +1114,8 @@ pub(super) fn load_variable_info<'data>(
             address_index.entry(range.start).or_default().push(function);
         }
     }
+    drop(phase);
+    let phase = crate::span!("variables.constants_and_members");
     let objects_by_debug_offset = objects
         .iter()
         .enumerate()
@@ -1115,7 +1124,11 @@ pub(super) fn load_variable_info<'data>(
     let constants = types.named_constants();
     types.populate_go_named_constants();
     types.populate_record_member_declarations(source_files, source_file_ids);
+    drop(phase);
+    let phase = crate::span!("variables.finalize_types");
     types.finalize_type_graph();
+    drop(phase);
+    let _phase = crate::span!("variables.catalog");
     assert_eq!(
         globals.len(),
         global_objects.len(),

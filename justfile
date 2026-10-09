@@ -12,7 +12,7 @@ default: check
 check: lint test web-test
 
 # Runs everything to check before committing.
-all: check web-e2e stress sim
+all: check web-e2e stress sim bench-smoke
 
 # Enters the Nix development shell.
 dev *ARGS="":
@@ -146,6 +146,102 @@ sim SECONDS="30": golden
 sim-seed SEED *ARGS: golden
     cargo build --profile sim --features sim --bin uscope-sim
     ./target/sim/uscope-sim replay "$1" "${@:2}"
+
+# Summarizes a `--timings` report, or what changed between two:
+# `just timings BASE NEW`. Pass --threads for each thread's work, and --all
+# for every phase.
+timings *ARGS:
+    cargo run --quiet --profile test --features tools --bin uscope-tools -- timings "$@"
+
+# Prints every answer PROGRAM's debug information gives, in a canonical form
+# that compares with `diff`. Pass --sections to dump only some.
+dump PROGRAM *ARGS:
+    cargo run --quiet --profile test --features tools --bin uscope-tools -- dump "$@"
+
+# Loads every program of the pinned corpus in processes of their own and
+# reports what each load costs. Pass --out FILE to save the report and
+# --compare BASE to compare it with a saved one; `just bench-large` builds
+# the large program first.
+bench *ARGS: build-test-programs
+    cargo build --quiet --release --features tools --bin uscope-tools
+    ./scripts/contained.sh ./target/release/uscope-tools bench "$@"
+
+# The seconds-long benchmark `just all` runs: it fails when loading the
+# small programs allocates more than bench/baseline.json records. Record a
+# deliberate change with `just bench-smoke --record bench/baseline.json`.
+bench-smoke *ARGS: build-test-programs
+    cargo build --quiet --profile test --features tools --bin uscope-tools
+    ./scripts/contained.sh ./target/debug/uscope-tools bench --corpus smoke --repeat 1 --check bench/baseline.json "$@"
+
+# Builds the full benchmark's large program: uscope's own development build
+# at a pinned commit, in a worktree, with its paths remapped so that its
+# bytes do not depend on the checkout. Fails unless they match the digest.
+large_commit := "d089093868eba621d618c059b9bb7374dd61c9fe"
+large_digest := "db849566d2cc0547bdb9c209da44075a9b6dd1b14b45b1814cadfce8ae44e480"
+bench-large:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="$PWD/target/bench/large"
+    [[ -d "$dir/src" ]] || git worktree add --quiet --detach "$dir/src" {{large_commit}}
+    git -C "$dir/src" checkout --quiet --detach {{large_commit}}
+    (cd "$dir/src" && RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$dir/src=/uscope" CARGO_TARGET_DIR="$dir/target" cargo build --quiet --bin uscope)
+    cp "$dir/target/debug/uscope" "$dir/uscope"
+    digest="$(sha256sum "$dir/uscope" | cut -d' ' -f1)"
+    if [[ -n "{{large_digest}}" && "$digest" != "{{large_digest}}" ]]; then
+        echo "error: the large program's digest is $digest, not {{large_digest}}" >&2
+        exit 1
+    fi
+    echo "$dir/uscope $digest"
+
+# The reference answers the rewrite of program information keeps: the dump
+# tool built from the commit that pinned it, before the rewrite began.
+reference_commit := ""
+
+# Builds the reference binary from `reference_commit` in a worktree.
+reference:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [[ -n "{{reference_commit}}" ]] || { echo "error: no reference commit is pinned" >&2; exit 1; }
+    dir="$PWD/target/reference"
+    [[ -d "$dir/src" ]] || git worktree add --quiet --detach "$dir/src" {{reference_commit}}
+    git -C "$dir/src" checkout --quiet --detach {{reference_commit}}
+    (cd "$dir/src" && CARGO_TARGET_DIR="$dir/target" cargo build --quiet --profile test --features tools --bin uscope-tools)
+    cp "$dir/target/debug/uscope-tools" "$dir/uscope-tools"
+
+# Compares this checkout's dumps with the reference binary's, for PROGRAMS
+# or the differential corpus: `just differential -- --sections lines`.
+differential *ARGS: build-test-programs
+    cargo build --quiet --profile test --features tools --bin uscope-tools
+    ./scripts/contained.sh ./scripts/differential.sh "$@"
+
+# Prints where loading PROGRAM spends its instructions: Callgrind's
+# inclusive costs, trimmed to uscope's functions.
+profile-instructions PROGRAM:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --quiet --profile profiling --features tools --bin uscope-tools
+    out="$(mktemp)"
+    trap 'rm -f "$out"' EXIT
+    valgrind --tool=callgrind --callgrind-out-file="$out" ./target/profiling/uscope-tools load "$1" >/dev/null 2>&1
+    callgrind_annotate --inclusive=yes "$out" | grep -E 'PROGRAM TOTALS|uscope' | head -80
+
+# Prints which uscope functions allocate when loading PROGRAM, by blocks
+# and by bytes live at the heap's peak, under DHAT with the C library's
+# allocator, which Valgrind can see.
+profile-heap PROGRAM:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --quiet --profile profiling --features tools,system-alloc --bin uscope-tools
+    out="$(mktemp)"
+    trap 'rm -f "$out"' EXIT
+    valgrind --tool=dhat --dhat-out-file="$out" ./target/profiling/uscope-tools load "$1" >/dev/null 2>&1
+    ./target/profiling/uscope-tools heap "$out"
+
+# Counts user-mode instructions, cycles, and cache and branch misses while
+# loading PROGRAM.
+profile-counters PROGRAM:
+    cargo build --quiet --profile profiling --features tools --bin uscope-tools
+    perf stat -e instructions:u,cycles:u,cache-references:u,cache-misses:u,branch-misses:u ./target/profiling/uscope-tools load "$1" >/dev/null
 
 # Runs one fuzz target: expression-parse, dwarf-expression, core-dump, dispatch,
 # elf-symbols, gopclntab, disassembly, debug-register-plan, dap-transport,

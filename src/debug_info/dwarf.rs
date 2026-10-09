@@ -157,7 +157,11 @@ pub fn load(
     image_id: crate::ModuleImageId,
     search: &super::DebugFileSearch,
 ) -> Result<DebugInfo> {
+    let _load = crate::span!("load", "{}", path.display());
+    let phase = crate::span!("read");
     let data: Arc<[u8]> = fs::read(path)?.into();
+    crate::count!("input_bytes", data.len());
+    drop(phase);
     load_debug_info(path, &data, image_id, search).map_err(Error::debug_info)
 }
 
@@ -167,6 +171,7 @@ pub fn load_bytes(
     image_id: crate::ModuleImageId,
     search: &super::DebugFileSearch,
 ) -> Result<DebugInfo> {
+    let _load = crate::span!("load", "{}", path.display());
     load_debug_info(path, data, image_id, search).map_err(Error::debug_info)
 }
 
@@ -181,7 +186,10 @@ fn load_debug_info(
     search: &super::DebugFileSearch,
 ) -> std::result::Result<DebugInfo, DwarfError> {
     let object = object::File::parse(data)?;
-    let Some(separate) = search.find(path, &object) else {
+    let phase = crate::span!("separate_debug_file");
+    let separate = search.find(path, &object);
+    drop(phase);
+    let Some(separate) = separate else {
         return load_image(path, data, image_id, Separate::None);
     };
     // dwz moves what several debug files share into a supplementary file,
@@ -234,6 +242,7 @@ fn load_image(
     };
     let dwarf_object = debug_object.as_ref().unwrap_or(&object);
 
+    let phase = crate::span!("sections");
     let sections = DwarfSections::load(
         |id: SectionId| -> std::result::Result<Cow<'_, [u8]>, DwarfError> {
             match dwarf_object.section_by_name(id.name()) {
@@ -270,6 +279,8 @@ fn load_image(
         units,
         code: CodeRanges(super::elf::executable_ranges(&object)),
     };
+    crate::count!("units", catalog.units.len());
+    drop(phase);
 
     // Go's own function table, which the runtime reads and stripping keeps.
     let (mut go_table, mut runtime_function_table) = match super::gopclntab::load(&object) {
@@ -277,6 +288,7 @@ fn load_image(
         Ok(None) => (None, EmbeddedSymbolTable::Absent),
         Err(error) => (None, unusable_table(&error)),
     };
+    let phase = crate::span!("functions");
     let mut function_metadata = load_function_metadata(
         &dwarf,
         &catalog,
@@ -285,6 +297,8 @@ fn load_image(
         &mut source_file_ids,
     )?;
 
+    drop(phase);
+    let phase = crate::span!("lines");
     for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
         load_lines(
             &dwarf,
@@ -298,8 +312,12 @@ fn load_image(
         )?;
     }
 
+    crate::count!("line_rows", statements.len());
+    drop(phase);
+
     // Code no DWARF describes, such as a stripped image's, gets functions
     // and lines from the function table.
+    let phase = crate::span!("go_completion");
     let code = |address: u64, length: usize| {
         code_bytes(&object, address, address.checked_add(length as u64)?)
     };
@@ -323,6 +341,8 @@ fn load_image(
         go_table = None;
     }
 
+    drop(phase);
+    let phase = crate::span!("prologues");
     super::roles::link_loop_bodies(&mut function_metadata.functions);
     refine_proved_prologue_entries(
         &object,
@@ -331,6 +351,8 @@ fn load_image(
         &mut function_metadata.code_instances,
     );
 
+    drop(phase);
+    let phase = crate::span!("variables");
     let mut variables = variables::load_variable_info(
         &dwarf,
         &catalog,
@@ -353,6 +375,8 @@ fn load_image(
             function_metadata.functions[function.index()].generics = generics;
         }
     }
+    drop(phase);
+    let phase = crate::span!("resume_points");
     let coroutines = std::mem::take(&mut variables.coroutines);
     for (instance, ty) in &variables.coroutine_bodies {
         if let Some(Ok(_)) = coroutines.get(ty)
@@ -384,6 +408,8 @@ fn load_image(
     );
     #[cfg(not(target_arch = "x86_64"))]
     let resume_points = BTreeMap::new();
+    drop(phase);
+    let phase = crate::span!("unwind_and_symbols");
     let go_code = go_code_ranges(&dwarf, &catalog)?;
     let go_unwind = go_table
         .as_ref()
@@ -401,6 +427,8 @@ fn load_image(
     if let Some(table) = &go_table {
         assign_go_symbol_roles(table, &mut symbols.symbols);
     }
+    drop(phase);
+    let phase = crate::span!("image_indexes");
     let image = Arc::new(
         ModuleImage::new(
             path.to_owned(),
@@ -440,6 +468,7 @@ fn load_image(
         }),
     );
 
+    drop(phase);
     Ok(DebugInfo {
         image,
         unwind,
@@ -2925,7 +2954,7 @@ mod tests {
     /// gofmt's; the bounds are half again as much.
     #[test]
     fn loading_a_large_program_allocates_in_proportion_to_its_debug_information() {
-        use crate::test_memory::memory_cap::allocated;
+        use crate::test_memory::memory_cap::{start_totals, stop_totals, totals};
         use object::{Object, ObjectSection};
 
         for fixture in ["gofmt-go-o0", "gofmt-go-o2"] {
@@ -2939,7 +2968,10 @@ mod tests {
                 .filter(|section| section.name().is_ok_and(|name| name.starts_with(".debug_")))
                 .map(|section| section.uncompressed_data().expect("a section").len() as u64)
                 .sum::<u64>();
-            let before = allocated();
+            // Totals count every thread's blocks, so that work spread
+            // over worker threads counts too.
+            start_totals();
+            let before = totals();
             let info = load_bytes(
                 &path,
                 &data,
@@ -2947,9 +2979,9 @@ mod tests {
                 &super::super::DebugFileSearch::default(),
             )
             .expect("load");
-            let after = allocated();
-            let blocks = after.blocks - before.blocks;
-            let bytes = after.bytes - before.bytes;
+            let used = totals().since(&before).allocated;
+            stop_totals();
+            let (blocks, bytes) = (used.blocks, used.bytes);
             assert!(info.image.functions().len() > 4000, "{fixture}");
             let work = format!("{fixture}: {debug} debug bytes: {blocks} blocks, {bytes} bytes");
             assert!(blocks <= debug * 7 / 10, "{work}");

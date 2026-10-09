@@ -1473,6 +1473,35 @@ impl ModuleImage {
     pub fn source_file(&self, id: SourceFileId) -> Option<&SourceFile> {
         self.source_files.get(id.index())
     }
+
+    /// Every named integer constant, for a dump of every answer.
+    #[cfg(feature = "tools")]
+    pub(crate) fn constants_for_dump(
+        &self,
+    ) -> impl Iterator<Item = (&Arc<str>, &crate::IntegerValue)> {
+        self.constants.iter()
+    }
+
+    /// Every thread-local variable, for a dump of every answer.
+    #[cfg(feature = "tools")]
+    pub(crate) fn thread_locals_for_dump(
+        &self,
+    ) -> impl Iterator<Item = (&Arc<str>, &std::result::Result<ThreadLocal, Arc<str>>)> {
+        self.thread_locals.iter()
+    }
+
+    /// Every Rust vtable, for a dump of every answer.
+    #[cfg(feature = "tools")]
+    pub(crate) fn vtables_for_dump(&self) -> impl Iterator<Item = (ImageAddress, TypeReference)> {
+        self.vtables.iter().map(|(address, ty)| (*address, *ty))
+    }
+
+    /// Every Go runtime type descriptor offset a type names, for a dump of
+    /// every answer.
+    #[cfg(feature = "tools")]
+    pub(crate) fn go_runtime_type_offsets_for_dump(&self) -> Vec<u64> {
+        self.go_runtime_types.keys().copied().collect()
+    }
 }
 
 /// Orders the code symbols containing one address from most to least
