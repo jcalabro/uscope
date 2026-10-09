@@ -385,9 +385,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             ));
         }
         let own = self.named_by_body(&stack.futures[selected]);
-        let (future, inlined, waiting) = match self.resume_point(reader, own) {
-            Some(resumes) => (own, None, BTreeSet::from([resumes])),
-            None => self.suspended_inline_body(&stack, selected)?,
+        // The function may run out of line in one place and be inlined in
+        // another, as an optimized build may make of a function some code
+        // awaits and some polls, and either may be the copy that resumes
+        // it: the step waits in both.
+        let inline = self.suspended_inline_body(&stack, selected);
+        let (future, inlined, waiting) = match (self.resume_point(reader, own), inline) {
+            (Some(resumes), Ok((future, inlined, mut statements))) => {
+                statements.insert(resumes);
+                (future, inlined, statements)
+            }
+            (Some(resumes), Err(_)) => (own, None, BTreeSet::from([resumes])),
+            (None, inline) => inline?,
         };
         let (drop_glue, inlined_drops) = self.drop_glue(future.ty);
         let task_entries = self.task_entries(reader, task);
@@ -1249,6 +1258,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             return Ok(true);
         }
+        // A step that waits in both copies of a function, out of line and
+        // inlined, goes on from its resume point as from any out of line.
+        let awaiting = match &awaiting.inlined {
+            Some(inlined) if !inlined.statements.contains(&address) => AwaitStep {
+                inlined: None,
+                ..awaiting
+            },
+            _ => awaiting,
+        };
         let ours = self.resumes_step(pid, address, owner, &awaiting);
         if !ours {
             self.pass_by(pid, address)?;

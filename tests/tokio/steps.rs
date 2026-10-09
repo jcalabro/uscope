@@ -14,7 +14,12 @@ use crate::stops::{integer, line, place};
 use crate::support::Scenario;
 use crate::workers::tasks;
 
-const BUILDS: [&str; 2] = ["tokio-steps-o0", "tokio-steps-o3"];
+const BUILDS: [&str; 4] = [
+    "tokio-steps-o0",
+    "tokio-steps-o3",
+    "tokio-steps-1.52-o0",
+    "tokio-steps-1.52-o3",
+];
 const SOURCE: &str = "steps/src/main.rs";
 
 /// Whether a build is optimized, which may keep no value of a variable,

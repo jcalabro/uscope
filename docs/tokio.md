@@ -14,13 +14,14 @@ record, with the experiments and the survey of other debuggers behind these
 decisions, is [plans/tokio.md](../plans/tokio.md). Go's counterpart is
 [go.md](go.md), whose seams this work reused.
 
-Support covers the pinned toolchain from `flake.nix` and tokio 1.52.3 on
-Linux x86-64: unoptimized and optimized builds, the multi-thread and
-current-thread runtimes, `LocalSet`s, several runtimes in one process,
-blocking pools, `tokio_unstable` spawn locations, tokio's `parking_lot`
-and `tracing` features, legacy symbol mangling, attaching, and core
-dumps. Another tokio release is read the same way wherever its debug
-information binds, and every list of its tasks says it is unverified.
+Support covers the pinned toolchain from `flake.nix` and tokio 1.52.3 and
+1.53.2 on Linux x86-64: unoptimized and optimized builds, each fixture
+built with both releases, the multi-thread and current-thread runtimes,
+`LocalSet`s, several runtimes in one process, blocking pools,
+`tokio_unstable` spawn locations, tokio's `parking_lot` and `tracing`
+features, legacy symbol mangling, attaching, and core dumps. Another
+tokio release is read as 1.53 wherever its debug information binds, and
+every list of its tasks says it is unverified.
 
 ## What async Rust and tokio demand
 

@@ -15,7 +15,12 @@ use crate::stops::line;
 use crate::support::{Scenario, ScratchDir};
 use crate::workers::{activities, tasks};
 
-const BUILDS: [&str; 2] = ["tokio-blocking-o0", "tokio-blocking-o3"];
+const BUILDS: [&str; 4] = [
+    "tokio-blocking-o0",
+    "tokio-blocking-o3",
+    "tokio-blocking-1.52-o0",
+    "tokio-blocking-1.52-o3",
+];
 const SOURCE: &str = "blocking/src/main.rs";
 
 /// What the program reported at its checkpoint.

@@ -57,8 +57,8 @@ struct Image {
     source: Option<&'static str>,
 }
 
-/// Where the release the model was verified against keeps its sources.
-const VERIFIED_SOURCE: &str = "/crates/tokio-1.52.3/src/runtime/task/raw.rs";
+/// Where a release the model was verified against keeps its sources.
+const VERIFIED_SOURCE: &str = "/crates/tokio-1.53.2/src/runtime/task/raw.rs";
 
 impl RuntimeImage for Image {
     fn producers(&self) -> Vec<&str> {
@@ -755,19 +755,27 @@ fn addresses_at_the_end_of_memory_are_reported_not_followed() {
     assert!(gaps.iter().any(|gap| gap.contains("queue")), "{gaps:?}");
 }
 
-/// A release other than the one verified is read wherever its layout
-/// binds, and every page says it is unverified; sources whose path names
-/// no release say the version is unknown. Neither is taken for granted.
+/// A release other than those verified is read wherever its layout binds,
+/// as the newest of them, and every page says it is unverified; sources
+/// whose path names no release say the version is unknown. Neither is
+/// taken for granted, and each verified release is.
 #[test]
 fn every_page_says_when_the_version_is_unverified_or_unknown() {
-    let unknown = "tokio's version is unknown; its runtime is read as tokio 1.52's";
+    let unknown = "tokio's version is unknown; its runtime is read as tokio 1.53's";
     for (source, gap) in [
         (
-            Some("/crates/tokio-1.53.0/src/runtime/task/raw.rs"),
-            "tokio 1.53.0 is unverified; its runtime is read as tokio 1.52's",
+            Some("/crates/tokio-1.54.0/src/runtime/task/raw.rs"),
+            Some("tokio 1.54.0 is unverified; its runtime is read as tokio 1.53's"),
         ),
-        (Some("/vendor/tokio/src/runtime/task/raw.rs"), unknown),
-        (None, unknown),
+        (
+            Some("/crates/tokio-1.51.0/src/runtime/task/raw.rs"),
+            Some("tokio 1.51.0 is unverified; its runtime is read as tokio 1.53's"),
+        ),
+        (Some("/vendor/tokio/src/runtime/task/raw.rs"), Some(unknown)),
+        (None, Some(unknown)),
+        (Some("/crates/tokio-1.52.3/src/runtime/task/raw.rs"), None),
+        (Some("/crates/tokio-1.53.1/src/runtime/task/raw.rs"), None),
+        (Some(VERIFIED_SOURCE), None),
     ] {
         let mut world = World::with_source(&[], source);
         let runtime = world.runtime(
@@ -779,7 +787,8 @@ fn every_page_says_when_the_version_is_unverified_or_unknown() {
         let (tasks, gaps) = world.tasks(1, true);
         let numbers = tasks.iter().map(|task| task.number).collect::<Vec<_>>();
         assert_eq!(numbers, [2, 4, 1], "{source:?}");
-        assert_eq!(gaps, vec![gap.to_owned(); 3], "{source:?}");
+        let expected = gap.map(|gap| vec![gap.to_owned(); 3]).unwrap_or_default();
+        assert_eq!(gaps, expected, "{source:?}");
     }
 }
 
