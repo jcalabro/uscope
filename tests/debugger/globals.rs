@@ -123,7 +123,6 @@ async fn global_catalogs_normalize_qualification_and_optimized_storage_and_list_
         let global = handle
             .module_image()
             .globals()
-            .iter()
             .find(|global| matches!(global.name.as_ref(), "OPTIMIZED_AWAY" | "root_constant"))
             .unwrap_or_else(|| panic!("{fixture} missing optimized global"));
         assert!(matches!(
@@ -914,21 +913,16 @@ pub async fn tls_location_both_ways(scenario: &Scenario, name: &str) -> (u64, i1
     thread_library
 }
 
-fn catalog_global<'a>(
-    image: &'a ModuleImage,
-    qualified_name: &str,
-) -> &'a uscope::GlobalVariableInfo {
+fn catalog_global(image: &ModuleImage, qualified_name: &str) -> uscope::GlobalVariableInfo {
     image
         .globals()
-        .iter()
         .find(|global| global.qualified_name.as_ref() == qualified_name)
         .unwrap_or_else(|| {
             panic!(
                 "missing global {qualified_name}; catalog: {:?}",
                 image
                     .globals()
-                    .iter()
-                    .map(|global| global.qualified_name.as_ref())
+                    .map(|global| global.qualified_name)
                     .collect::<Vec<_>>()
             )
         })

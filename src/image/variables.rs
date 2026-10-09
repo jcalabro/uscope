@@ -147,13 +147,26 @@ pub struct Function {
     pub returns: Option<ReturnConvention>,
 }
 
+/// One global, as [`add_to`] takes it. Its object gives its name,
+/// declaration, and type.
+#[derive(Debug, Clone)]
+pub struct Global {
+    pub object: u32,
+    /// The producer-normalized source qualification.
+    pub qualified_name: Arc<str>,
+    /// The linker identity, when the debug information gives one.
+    pub linkage_name: Option<Arc<str>>,
+    /// Whether the producer marks it as visible outside its unit.
+    pub external: bool,
+}
+
 /// What [`add_to`] encodes.
 #[derive(Debug, Default)]
 pub struct Variables {
     pub objects: Vec<DataObject>,
     pub functions: Vec<Function>,
-    /// The objects of the module's globals, in global order.
-    pub globals: Vec<u32>,
+    /// The module's globals, in global order.
+    pub globals: Vec<Global>,
     /// Go functions by the address their code begins at, which a func
     /// value holds.
     pub go_entries: Vec<(ImageAddress, u32)>,
@@ -175,13 +188,43 @@ impl Record for CodeRange {
     const KIND: TableKind = TableKind::ScopeRanges;
 }
 
+impl SharedRecord for CodeRange {
+    const NAME: &'static str = "CodeRange";
+}
+
 impl CodeRange {
-    const fn get(&self) -> AddressRange<ImageAddress> {
+    pub(super) const fn get(&self) -> AddressRange<ImageAddress> {
         AddressRange {
             start: ImageAddress::new(self.start.get()),
             end: ImageAddress::new(self.end.get()),
         }
     }
+}
+
+/// A global: its object, and the names it answers to beyond the object's.
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
+pub struct GlobalRecord {
+    pub object: U32,
+    pub qualified_name: U32,
+    /// The linkage name, or [`NONE`].
+    pub linkage_name: U32,
+    pub external: u8,
+}
+
+impl Record for GlobalRecord {
+    const KIND: TableKind = TableKind::Globals;
+}
+
+/// A global of an image.
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalEntry<'a> {
+    pub object: Object<'a>,
+    pub qualified_name: &'a str,
+    pub linkage_name: Option<&'a str>,
+    pub external: bool,
 }
 
 /// The code, instance, and frame base the objects of one scope share.
@@ -615,10 +658,18 @@ pub fn add_to(
     let globals = variables
         .globals
         .iter()
-        .map(|object| Item {
-            value: (*object).into(),
+        .map(|global| {
+            Ok(GlobalRecord {
+                object: global.object.into(),
+                qualified_name: text(strings, &global.qualified_name)?,
+                linkage_name: match &global.linkage_name {
+                    Some(name) => text(strings, name)?,
+                    None => NONE.into(),
+                },
+                external: u8::from(global.external),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, TooMany>>()?;
     builder
         .table(&encoder.ranges)
         .table(&encoder.scopes)
@@ -632,7 +683,7 @@ pub fn add_to(
         .shared(TableKind::GoEntries, &go_entries)
         .shared(TableKind::ObjectOffsets, &offsets)
         .table(&procedures)
-        .shared(TableKind::Globals, &globals);
+        .table(&globals);
     Ok(())
 }
 
@@ -745,6 +796,66 @@ fn function_starts(functions: &[Function]) -> Result<Vec<FunctionStartRecord>, T
         .collect())
 }
 
+/// Of the functions whose code begins as `starts` say, the one `contains`
+/// finds holding `address`: among those beginning at the same address,
+/// the first; otherwise the one beginning nearest before it. A function is
+/// found by any of its ranges, which may overlap another's.
+fn function_at(
+    starts: &[FunctionStartRecord],
+    address: ImageAddress,
+    contains: impl Fn(u32) -> bool,
+) -> Option<u32> {
+    let address = address.get();
+    let mut group_end = starts.partition_point(|start| start.start.get() <= address);
+    while group_end > 0 {
+        let start = starts[group_end - 1].start.get();
+        let group_start = starts[..group_end].partition_point(|row| row.start.get() < start);
+        if let Some(found) = starts[group_start..group_end]
+            .iter()
+            .map(|row| row.function.get())
+            .find(|function| contains(*function))
+        {
+            return Some(found);
+        }
+        if group_start == 0 || starts[group_start - 1].prefix_max_end.get() <= address {
+            return None;
+        }
+        group_end = group_start;
+    }
+    None
+}
+
+/// The functions of a [`Variables`] input by the code they hold, found as
+/// an image's [`VariableView::function_at`] finds them.
+#[derive(Debug)]
+pub struct FunctionIndex<'a> {
+    functions: &'a [Function],
+    starts: Vec<FunctionStartRecord>,
+}
+
+impl Variables {
+    /// An index of the functions by the code they hold.
+    pub fn function_index(&self) -> Result<FunctionIndex<'_>, TooMany> {
+        Ok(FunctionIndex {
+            functions: &self.functions,
+            starts: function_starts(&self.functions)?,
+        })
+    }
+}
+
+impl<'a> FunctionIndex<'a> {
+    /// The function holding `address`.
+    pub fn function_at(&self, address: ImageAddress) -> Option<&'a Function> {
+        let holds = |id: u32| {
+            self.functions[id as usize]
+                .ranges
+                .iter()
+                .any(|range| range.contains(address))
+        };
+        function_at(&self.starts, address, holds).map(|id| &self.functions[id as usize])
+    }
+}
+
 /// An index of `pairs` by key, in which a later pair for a key replaces
 /// an earlier one, as a map's would.
 fn keyed(pairs: impl Iterator<Item = (u64, u32)>) -> Vec<Keyed> {
@@ -844,7 +955,7 @@ pub struct VariableView<'a> {
     go_entries: &'a [Keyed],
     offsets: &'a [Keyed],
     procedures: &'a [DwarfProcedureRecord],
-    globals: &'a [Item],
+    globals: &'a [GlobalRecord],
 }
 
 fn find(index: &[Keyed], key: u64) -> Option<u32> {
@@ -870,7 +981,7 @@ impl<'a> VariableView<'a> {
             go_entries: image.shared(TableKind::GoEntries),
             offsets: image.shared(TableKind::ObjectOffsets),
             procedures: image.table(),
-            globals: image.shared(TableKind::Globals),
+            globals: image.table(),
         }
     }
 
@@ -898,28 +1009,10 @@ impl<'a> VariableView<'a> {
     /// code beginning last at or before it whose code contains it, the
     /// first. A function whose own ranges overlap is found by any of them.
     pub fn function_at(self, address: ImageAddress) -> Option<VariableFunction<'a>> {
-        let address = address.get();
-        let end = self
-            .starts
-            .partition_point(|start| start.start.get() <= address);
-        let mut group_end = end;
-        while group_end > 0 {
-            let start = self.starts[group_end - 1].start.get();
-            let group_start =
-                self.starts[..group_end].partition_point(|row| row.start.get() < start);
-            if let Some(found) = self.starts[group_start..group_end]
-                .iter()
-                .map(|row| self.function(VariableFunctionId(row.function.get())))
-                .find(|function| function.contains(ImageAddress::new(address)))
-            {
-                return Some(found);
-            }
-            if group_start == 0 || self.starts[group_start - 1].prefix_max_end.get() <= address {
-                return None;
-            }
-            group_end = group_start;
-        }
-        None
+        function_at(self.starts, address, |id| {
+            self.function(VariableFunctionId(id)).contains(address)
+        })
+        .map(|id| self.function(VariableFunctionId(id)))
     }
 
     /// The Go function whose code begins at `address`.
@@ -944,15 +1037,29 @@ impl<'a> VariableView<'a> {
 
     /// The object of the global `index` numbers.
     pub fn global(self, index: usize) -> Option<Object<'a>> {
-        let item = self.globals.get(index)?;
-        Some(self.object(ObjectId(item.value.get())))
+        Some(self.global_entry(index)?.object)
+    }
+
+    /// The global `index` numbers.
+    pub fn global_entry(self, index: usize) -> Option<GlobalEntry<'a>> {
+        let record = self.globals.get(index)?;
+        Some(GlobalEntry {
+            object: self.object(ObjectId(record.object.get())),
+            qualified_name: self.strings.get(StrId(record.qualified_name.get())),
+            linkage_name: some(record.linkage_name).map(|name| self.strings.get(StrId(name))),
+            external: record.external != 0,
+        })
+    }
+
+    pub const fn global_count(self) -> usize {
+        self.globals.len()
     }
 
     /// The objects of every global, in global order.
     pub fn globals(self) -> impl ExactSizeIterator<Item = Object<'a>> + 'a {
         self.globals
             .iter()
-            .map(move |item| self.object(ObjectId(item.value.get())))
+            .map(move |record| self.object(ObjectId(record.object.get())))
     }
 
     fn text(self, id: U32) -> Arc<str> {
@@ -1334,10 +1441,17 @@ fn validate_functions(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(),
     if !view
         .function_objects
         .iter()
-        .chain(view.globals)
         .all(|item| (item.value.get() as usize) < objects)
     {
         return Err("a list names no data object".into());
+    }
+    if !view.globals.iter().all(|global| {
+        (global.object.get() as usize) < objects
+            && bounds.string(global.qualified_name)
+            && bounds.optional_string(global.linkage_name)
+            && global.external <= 1
+    }) {
+        return Err("a global is malformed".into());
     }
     if !view.functions.iter().all(|function| {
         span(function.ranges, function.range_count, view.ranges.len())

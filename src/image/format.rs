@@ -247,11 +247,27 @@ pub enum TableKind {
     ComplexParts = 85,
     /// The expressions finding aggregates' children at run time.
     DynamicLayouts = 86,
+    /// The code resume points and held ranges name.
+    ResumeRanges = 87,
+    /// Where each coroutine's body goes for its states.
+    Resumes = 88,
+    /// Each state a coroutine's body resumes in.
+    ResumePoints = 89,
+    /// Where async bodies' variables hold their values on resuming.
+    Held = 90,
+    /// Integer constants by name.
+    NamedConstants = 91,
+    /// Rust trait objects' vtables.
+    Vtables = 92,
+    /// The compilers that produced the debug information.
+    Producers = 93,
+    /// The bytes of the module's own views.
+    EmbeddedViews = 94,
 }
 
 impl TableKind {
     /// Every kind, in the order tables are laid out.
-    pub const ALL: [Self; 86] = [
+    pub const ALL: [Self; 94] = [
         Self::Strings,
         Self::Files,
         Self::LineAddresses,
@@ -338,6 +354,14 @@ impl TableKind {
         Self::PassedByValue,
         Self::ComplexParts,
         Self::DynamicLayouts,
+        Self::ResumeRanges,
+        Self::Resumes,
+        Self::ResumePoints,
+        Self::Held,
+        Self::NamedConstants,
+        Self::Vtables,
+        Self::Producers,
+        Self::EmbeddedViews,
     ];
 
     pub const COUNT: usize = Self::ALL.len();

@@ -5,19 +5,17 @@ use std::sync::Arc;
 
 use foldhash::HashMap;
 
+use crate::VariableKind;
 use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, Units, is_type_unit};
-use crate::{
-    GlobalVariableId, GlobalVariableInfo, GlobalVariableType, GlobalVariableVisibility,
-    VariableKind, VariableMalformedKind,
-};
+use crate::image::variables::Global;
 
 use super::die::{
-    check_data_object_capacity, copy_name, debug_info_offset, declaration_with_origins,
-    flag_with_origins, origin_chain, string_with_origins, type_with_origins,
+    copy_name, debug_info_offset, declaration_with_origins, flag_with_origins, origin_chain,
+    string_with_origins, type_with_origins,
 };
 use super::location::copy_data_object_value_with_origins;
-use super::types::{TypeArenaBuilder, TypeEntry, TypeResolution};
-use super::{DataObject, Metadata, MetadataAbsence, ValueDescription, malformed_reason};
+use super::types::TypeArenaBuilder;
+use super::{DataObject, Metadata, MetadataAbsence, ValueDescription};
 
 #[derive(Clone, Default)]
 pub(super) struct GlobalScope {
@@ -116,7 +114,7 @@ pub(super) fn load_globals<'data>(
     files: &mut Files,
     types: &mut TypeArenaBuilder<'_, 'data>,
     pool: &std::sync::Mutex<super::location::LocationsBuilder>,
-) -> std::result::Result<(Vec<GlobalVariableInfo>, Vec<usize>), DwarfError> {
+) -> std::result::Result<Vec<Global>, DwarfError> {
     let mut table = ScopeTable {
         scopes: vec![GlobalScope::default()],
         units: Vec::with_capacity(units.len()),
@@ -187,8 +185,7 @@ pub(super) fn load_globals<'data>(
         table.units.push(unit_scopes);
     }
 
-    let mut globals = Vec::<GlobalVariableInfo>::new();
-    let mut global_objects = Vec::<usize>::new();
+    let mut globals = Vec::<Global>::new();
     let mut definitions = DefinitionIndex::default();
 
     // Pass two resolves every non-routine data object independently.
@@ -280,12 +277,7 @@ pub(super) fn load_globals<'data>(
             if declaration_only {
                 continue;
             }
-            let visibility =
-                if flag_with_origins(entry, &chain, gimli::DW_AT_external).unwrap_or(false) {
-                    GlobalVariableVisibility::External
-                } else {
-                    GlobalVariableVisibility::CompilationUnit
-                };
+            let external = flag_with_origins(entry, &chain, gimli::DW_AT_external).unwrap_or(false);
             *order = order
                 .checked_add(1)
                 .expect("data-object DIE order overflow");
@@ -313,19 +305,11 @@ pub(super) fn load_globals<'data>(
                 frame_base: Metadata::Absent(MetadataAbsence::NotApplicable),
                 malformed,
             };
-            let info = GlobalVariableInfo {
-                id: GlobalVariableId::new(
-                    u32::try_from(globals.len()).expect("global count fits u32"),
-                ),
-                name,
+            let info = Global {
+                object: 0,
                 qualified_name,
                 linkage_name: linkage_name.clone(),
-                declaration: declaration.ok().flatten(),
-                // This copy is replaced after graph finalization. Keeping the
-                // initial state accurate makes the builder invariant explicit
-                // without publishing construction-only names or sizes.
-                type_info: public_global_type(&type_info, &types.entries),
-                visibility,
+                external,
             };
             let canonical_die = chain.first().map_or(key, |(origin_unit, origin)| DieKey {
                 unit: *origin_unit,
@@ -341,24 +325,29 @@ pub(super) fn load_globals<'data>(
             if let DefinitionResolution::Existing(existing_global) =
                 definitions.resolve(&identities, globals.len())
             {
-                let existing_object = global_objects[existing_global];
-                if value_rank(&object.value) > value_rank(&objects[existing_object].value) {
-                    objects[existing_object] = object;
-                    globals[existing_global] = GlobalVariableInfo {
-                        id: globals[existing_global].id,
+                let existing_object = globals[existing_global].object;
+                if value_rank(&object.value) > value_rank(&objects[existing_object as usize].value)
+                {
+                    objects[existing_object as usize] = object;
+                    globals[existing_global] = Global {
+                        object: existing_object,
                         ..info
                     };
                 }
                 continue;
             }
-            check_data_object_capacity(objects.len())?;
-            global_objects.push(objects.len());
+            types
+                .budget
+                .charge("data objects", size_of::<DataObject>())?;
+            globals.push(Global {
+                object: super::row(objects.len()),
+                ..info
+            });
             objects.push(object);
-            globals.push(info);
         }
     }
 
-    Ok((globals, global_objects))
+    Ok(globals)
 }
 
 const fn value_rank(value: &Metadata<ValueDescription>) -> u8 {
@@ -367,30 +356,5 @@ const fn value_rank(value: &Metadata<ValueDescription>) -> u8 {
         Metadata::Value(ValueDescription::Constant(_)) => 2,
         Metadata::Absent(_) => 1,
         Metadata::Malformed(_) => 0,
-    }
-}
-
-pub(super) fn public_global_type(
-    resolution: &TypeResolution,
-    types: &[TypeEntry],
-) -> GlobalVariableType {
-    match resolution {
-        TypeResolution::Resolved(id) => match types.get(id.index()) {
-            Some(TypeEntry::Resolved(value)) => GlobalVariableType::Resolved(value.clone()),
-            Some(TypeEntry::Malformed(description)) => {
-                GlobalVariableType::Malformed(malformed_reason(
-                    VariableMalformedKind::InvalidTypeGraph,
-                    Arc::clone(description),
-                ))
-            }
-            Some(TypeEntry::Building) | None => GlobalVariableType::Malformed(malformed_reason(
-                VariableMalformedKind::InvalidTypeGraph,
-                "type graph did not finish building".into(),
-            )),
-        },
-        TypeResolution::Malformed(description) => GlobalVariableType::Malformed(malformed_reason(
-            VariableMalformedKind::InvalidTypeGraph,
-            Arc::clone(description),
-        )),
     }
 }

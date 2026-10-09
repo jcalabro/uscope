@@ -28,10 +28,10 @@ use crate::debug_info::{
 use crate::inspection::InspectionBudget;
 use crate::{
     AddressRange, ByteOrder, CodeInstanceId, DereferenceReference, DereferencedValue, Error,
-    GlobalVariableId, GlobalVariableInfo, ImageAddress, InspectedValue, ModuleImageId, Result,
-    SourceFileId, SourceLanguage, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeNode,
-    TypeReference, ValueChildPage, ValueChildrenReference, Variable, VariableKind,
-    VariableMalformedKind, VariableMalformedReason, VariableQuery, VariableState,
+    GlobalVariableId, ImageAddress, InspectedValue, ModuleImageId, Result, SourceFileId,
+    SourceLanguage, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeNode, TypeReference,
+    ValueChildPage, ValueChildrenReference, Variable, VariableKind, VariableMalformedKind,
+    VariableMalformedReason, VariableQuery, VariableState,
 };
 
 use super::{
@@ -42,12 +42,12 @@ use crate::image::variables::{
     ValueDescription, VariableView,
 };
 use die::{
-    check_data_object_capacity, copy_name, data_object_scope_ranges, debug_info_offset,
-    declaration_with_origins, is_type_scope, origin_chain, strict_flag, string_with_origins,
-    type_with_origins, variable_order_key,
+    copy_name, data_object_scope_ranges, debug_info_offset, declaration_with_origins,
+    is_type_scope, origin_chain, strict_flag, string_with_origins, type_with_origins,
+    variable_order_key,
 };
 use evaluate::FrameBaseCache;
-use globals::{load_globals, public_global_type};
+use globals::load_globals;
 pub(in crate::debug_info) use identity::source_language;
 pub(in crate::debug_info) use inspect::{PathStep, array_byte_offset};
 use inspect::{data_object, evaluate_error_state, inspected_value};
@@ -61,7 +61,7 @@ use types::{
 
 mod call_sites;
 mod codec;
-mod coroutine;
+pub(super) mod coroutine;
 mod dedup;
 mod die;
 mod evaluate;
@@ -83,15 +83,10 @@ const MAX_SCALAR_BYTES: u64 = 16;
 const MAX_EVALUATION_ITERATIONS: u32 = 10_000;
 const MAX_EVALUATION_MEMORY_BYTES: usize = 1_024;
 const MAX_LOCATION_PIECES: usize = 64;
-/// rustc describes a type again in every unit that uses it, so a program
-/// built with tokio has some 70,000.
-const MAX_TYPES: usize = 1 << 20;
 const MAX_TYPE_RESOLUTION_DEPTH: usize = 256;
 const MAX_RECORD_CHILDREN: usize = 4_096;
 const MAX_VARIANT_METADATA: usize = 4_096;
-const MAX_SYMBOLIC_NAMES: usize = 262_144;
 const MAX_AGGREGATE_DEPTH: usize = 64;
-const MAX_DATA_OBJECTS: usize = 262_144;
 
 /// The row `index` numbers, in a table no larger than a module's entries.
 fn row(index: usize) -> u32 {
@@ -168,24 +163,15 @@ struct Scope {
 const DW_AT_GO_CLOSURE_OFFSET: gimli::DwAt = gimli::DwAt(0x2907);
 
 pub(super) struct DwarfVariableInfo {
-    /// The async bodies' futures, by type.
-    coroutines: BTreeMap<TypeId, crate::CoroutineInfo>,
     /// The image's types, which [`DwarfVariableInfo::bind_types`] gives
     /// once the image is sealed.
     types: Arc<crate::image::types::TypeTable>,
     target: TargetDescription,
     endian: RunTimeEndian,
-    /// For a variable of an async body, by its entry's offset, and each
-    /// suspended state of the body's future: the code where the variable
-    /// still holds what it held before the state's await, which execution
-    /// reaches from where the state resumes without leaving the variable's
-    /// scope.
-    held: BTreeMap<(u64, u64), Arc<[crate::AddressRange<ImageAddress>]>>,
 }
 
 pub(super) struct LoadedVariables {
     pub info: DwarfVariableInfo,
-    pub globals: Vec<GlobalVariableInfo>,
     pub types: Arc<[crate::TypeNode]>,
     /// The data objects and the functions whose frames show them.
     pub variables: crate::image::variables::Variables,
@@ -195,11 +181,10 @@ pub(super) struct LoadedVariables {
     pub type_facts: crate::image::type_facts::TypeFacts,
     /// Every location the variables and types name.
     pub locations: LocationsBuilder,
-    /// Rust trait objects' vtables, by address, with the concrete type each
-    /// is for.
-    pub vtables: Vec<(ImageAddress, TypeReference)>,
-    /// Integer constants the units declare at their top level, by name.
-    pub constants: BTreeMap<Arc<str>, crate::IntegerValue>,
+    /// Integer constants the units declare at their top level, by name,
+    /// and Rust trait objects' vtables, by address, with the concrete type
+    /// each is for.
+    pub declarations: crate::image::declarations::Declarations,
     /// The coroutine each code instance that runs one is passed, as the
     /// body of an `async fn` is passed its future.
     pub coroutine_bodies: BTreeMap<CodeInstanceId, TypeId>,
@@ -350,6 +335,7 @@ pub(super) fn load_variable_info<'data>(
     image_id: ModuleImageId,
     code: CodeMetadata<'_>,
     files: &mut Files,
+    budget: super::budget::Meter,
 ) -> std::result::Result<LoadedVariables, DwarfError> {
     let units = &catalog.units;
     let instance_ids = code.instance_ids;
@@ -384,10 +370,11 @@ pub(super) fn load_variable_info<'data>(
         image_id,
         target.byte_order,
         &pool,
+        budget,
     );
     drop(phase);
     let phase = crate::span!("variables.globals");
-    let (mut globals, global_objects) = load_globals(
+    let globals = load_globals(
         dwarf,
         units,
         &mut objects,
@@ -944,7 +931,9 @@ pub(super) fn load_variable_info<'data>(
                     {
                         unnamed_parameters.push((instance, *ty, objects.len()));
                     }
-                    check_data_object_capacity(objects.len())?;
+                    types
+                        .budget
+                        .charge("data objects", size_of::<DataObject>())?;
                     functions[scope.function].objects.push(row(objects.len()));
                     objects.push(DataObject {
                         debug_info_offset: debug_info_offset(unit, entry),
@@ -1012,6 +1001,10 @@ pub(super) fn load_variable_info<'data>(
     let phase = crate::span!("variables.finalize_types");
     types.finalize_type_graph();
     drop(phase);
+    // Types and symbolic names past the budget stand in for what could not
+    // be built, which fails the load once nothing more is built.
+    types.budget.check()?;
+    crate::count!("budget_spent", types.budget.spent());
     let mut types = types.finish();
     let phase = crate::span!("types.deduplicate");
     if let Some(remap) = types.deduplicate() {
@@ -1034,17 +1027,6 @@ pub(super) fn load_variable_info<'data>(
     }
     drop(phase);
     let _phase = crate::span!("variables.catalog");
-    assert_eq!(
-        globals.len(),
-        global_objects.len(),
-        "every global catalog entry has one evaluation object"
-    );
-    for (global, object) in globals.iter_mut().zip(&global_objects) {
-        let object = objects
-            .get(*object)
-            .expect("global catalog references a known evaluation object");
-        global.type_info = public_global_type(&object.type_info, &types.entries);
-    }
     let finalized_types = std::mem::take(&mut types.entries)
         .into_iter()
         .enumerate()
@@ -1085,25 +1067,18 @@ pub(super) fn load_variable_info<'data>(
             coroutine_bodies.entry(instance).or_insert(coroutine);
         }
     }
-    let running = coroutines
-        .iter()
-        .filter_map(|(ty, coroutine)| Some((*ty, coroutine.as_ref().ok()?.clone())))
-        .collect();
     Ok(LoadedVariables {
         coroutines,
         coroutine_bodies,
         function_generics,
         info: DwarfVariableInfo {
-            coroutines: running,
             types: Arc::new(crate::image::types::TypeTable::empty()),
             target,
             endian: match target.byte_order {
                 ByteOrder::Little => RunTimeEndian::Little,
                 ByteOrder::Big => RunTimeEndian::Big,
             },
-            held: BTreeMap::new(),
         },
-        globals,
         types: finalized_types,
         calls: calls.finish(),
         type_facts: crate::image::type_facts::TypeFacts {
@@ -1125,24 +1100,19 @@ pub(super) fn load_variable_info<'data>(
         variables: crate::image::variables::Variables {
             objects,
             functions,
-            globals: global_objects.into_iter().map(row).collect(),
+            globals,
             go_entries: go_function_entries,
             procedures,
         },
         locations: pool.into_inner().expect("loading does not panic"),
-        constants,
-        vtables: vtables
-            .into_iter()
-            .map(|(address, id)| {
-                (
-                    ImageAddress::new(address),
-                    TypeReference {
-                        image: image_id,
-                        id,
-                    },
-                )
-            })
-            .collect(),
+        declarations: crate::image::declarations::Declarations {
+            constants: constants.into_iter().collect(),
+            vtables: vtables
+                .into_iter()
+                .map(|(address, id)| (ImageAddress::new(address), id))
+                .collect(),
+            producers: Vec::new(),
+        },
     })
 }
 
@@ -1271,7 +1241,10 @@ fn add_abstract_only_variables<'data>(
                 || (routine.scope.rust == Some(RustScope::AsyncCaptures)
                     && kind == VariableKind::Local)
                 || (&*name == "result" && declared_line.is_some() && declared_line == awaitee));
-        check_data_object_capacity(targets.objects.len())?;
+        targets
+            .types
+            .budget
+            .charge("data objects", size_of::<DataObject>())?;
         targets.functions[routine.scope.function]
             .objects
             .push(row(targets.objects.len()));
@@ -1754,6 +1727,10 @@ impl DwarfVariableInfo {
     }
 
     /// The image's data objects, once [`Self::bind`] has given the image.
+    fn resumes(&self) -> crate::image::resumes::ResumeView<'_> {
+        crate::image::resumes::ResumeView::new(self.types.tables())
+    }
+
     fn catalog(&self) -> VariableView<'_> {
         VariableView::new(self.types.tables())
     }

@@ -95,6 +95,8 @@ fn built(entries: Vec<TypeEntry>) -> BuiltTypes {
         complex_parts: HashMap::default(),
         go_dict_indices: HashMap::default(),
         passed_by_value: HashMap::default(),
+        image: ModuleImageId::new(3),
+        pending_arguments: Vec::new(),
     }
 }
 
@@ -337,5 +339,108 @@ proptest! {
             }
         }
         prop_assert_eq!(refine(signatures(), &Colliding).unwrap(), classes);
+    }
+}
+
+/// A type named by a label, with members, and generic arguments that are
+/// types or a label its name spells.
+type NamedType = (u8, Vec<u32>, Vec<Result<u32, u8>>);
+
+/// Types named by a label, with members and generic arguments from the
+/// edges, and arguments their names spell, which resolve to a label.
+fn named_graph() -> impl Strategy<Value = Vec<NamedType>> {
+    (1_usize..9).prop_flat_map(|count| {
+        let bound = u32::try_from(count).unwrap();
+        proptest::collection::vec(
+            (
+                0_u8..3,
+                proptest::collection::vec(0..bound, 0..3),
+                proptest::collection::vec(
+                    prop_oneof![(0..bound).prop_map(Ok), (0_u8..4).prop_map(Err)],
+                    0..3,
+                ),
+            ),
+            count,
+        )
+    })
+}
+
+fn named_types(
+    types: &[NamedType],
+) -> (
+    Vec<TypeEntry>,
+    Vec<super::super::identity::PendingArguments>,
+) {
+    let label = |label: u8| ["A", "B", "C", "D"][usize::from(label)];
+    let mut pending = Vec::new();
+    let entries = types
+        .iter()
+        .enumerate()
+        .map(|(index, (name, members, arguments))| {
+            let id = u32::try_from(index).unwrap();
+            let members = members
+                .iter()
+                .map(|member| ("m", *member))
+                .collect::<Vec<_>>();
+            let TypeEntry::Resolved(mut info) = record(id, label(*name), &members) else {
+                unreachable!("a record is resolved");
+            };
+            let positions = arguments
+                .iter()
+                .enumerate()
+                .filter(|(_, argument)| argument.is_err())
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>();
+            if !positions.is_empty() {
+                pending.push(super::super::identity::PendingArguments {
+                    entry: index,
+                    language: SourceLanguage::Rust,
+                    positions,
+                });
+            }
+            info.identity = Some(Arc::new(TypeIdentity {
+                language: SourceLanguage::Rust,
+                path: Arc::from([]),
+                inline_namespaces: Arc::from([]),
+                base: label(*name).into(),
+                arguments: arguments
+                    .iter()
+                    .map(|argument| match argument {
+                        Ok(target) => TypeArgument::Type(reference(*target)),
+                        Err(text) => TypeArgument::Unknown(label(*text).into()),
+                    })
+                    .collect(),
+                pack: None,
+                origin: crate::ArgumentOrigin::ParsedName,
+                go: None,
+            }));
+            TypeEntry::Resolved(info)
+        })
+        .collect();
+    (entries, pending)
+}
+
+proptest! {
+    /// Resolving the arguments names spell while merging, searching one
+    /// type of each class, gives the types and merges that resolving them
+    /// first, searching every type, gives.
+    #[test]
+    fn arguments_resolve_while_merging_as_they_would_before(types in named_graph()) {
+        let (entries, pending) = named_types(&types);
+        let mut first = entries.clone();
+        super::super::identity::resolve_parsed_arguments(
+            &mut first,
+            ModuleImageId::new(3),
+            &pending,
+            None,
+        );
+        let mut before = built(first);
+        let expected = before.deduplicate().as_ref().map(ids);
+        let mut merging = BuiltTypes {
+            pending_arguments: pending,
+            ..built(entries)
+        };
+        prop_assert_eq!(merging.deduplicate().as_ref().map(ids), expected);
+        prop_assert_eq!(format!("{:?}", merging.entries), format!("{:?}", before.entries));
     }
 }

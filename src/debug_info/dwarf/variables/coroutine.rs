@@ -9,15 +9,12 @@
 use crate::debug_info::VariableRuntime;
 use crate::inspection::InspectionBudget;
 use crate::model::ValueStorage;
-use std::collections::BTreeMap;
-use std::sync::Arc;
 
 #[cfg(target_arch = "x86_64")]
 use crate::debug_info::dispatch::{DispatchImage, first_beyond, flood_all};
 use crate::{
-    AddressRange, CodeInstanceId, CoroutineState, CoroutineStateKind, ImageAddress,
-    RecordMemberLayout, Variable, VariableState, VariableUnavailableReason, VariableValueSource,
-    VirtualAddress,
+    CodeInstanceId, CoroutineState, CoroutineStateKind, ImageAddress, RecordMemberLayout, Variable,
+    VariableState, VariableUnavailableReason, VariableValueSource, VirtualAddress,
 };
 
 use super::DwarfVariableInfo;
@@ -35,7 +32,7 @@ pub(super) struct Resumption<'a> {
     state: &'a CoroutineState,
     /// Where the body runs.
     address: ImageAddress,
-    held: &'a BTreeMap<(u64, u64), Arc<[AddressRange<ImageAddress>]>>,
+    resumes: crate::image::resumes::ResumeView<'a>,
     locations: super::location::LocationTables<'a>,
 }
 
@@ -56,7 +53,7 @@ impl DwarfVariableInfo {
             (object.instance() == selected && self.visible_at(object, address)).then_some(())?;
             Some((object, object.coroutine()?))
         })?;
-        let coroutine = self.coroutines.get(&ty)?;
+        let coroutine = self.types.coroutine(ty)?.ok()?;
         let size = self.type_info(ty).ok()?.byte_size?;
         let ValueStorage::Memory(object) = self
             .located_data_object(future, Some(address), runtime, frame_base, budget)
@@ -79,62 +76,75 @@ impl DwarfVariableInfo {
             size,
             state,
             address,
-            held: &self.held,
+            resumes: self.resumes(),
             locations: self.locations(),
         })
     }
+}
 
-    /// Notes, for each variable of an async body and each state its future
-    /// resumes in, the code where the variable still holds what it held
-    /// before the state's await: what execution reaches from where the
-    /// state resumes without leaving the variable's scope. Elsewhere in its
-    /// scope, as when a loop goes round to the variable's binding again,
-    /// this poll bound it anew. Where the code cannot all be followed, as
-    /// past an indirect branch, nothing is noted.
-    #[cfg(target_arch = "x86_64")]
-    pub(in crate::debug_info) fn note_held(
-        &mut self,
-        code: &dyn DispatchImage,
-        image: &crate::ModuleImage,
-    ) {
-        let mut held = BTreeMap::new();
-        for instance in image.code_instances() {
-            let Some(Ok(points)) = image.resume_points(instance.id()) else {
-                continue;
-            };
-            let Some(function) = instance
-                .ranges()
-                .map(|range| range.start)
-                .min()
-                .and_then(|entry| self.function_at(entry))
-            else {
-                continue;
-            };
-            for point in points.points.iter() {
-                for object in function.objects() {
-                    let in_scope =
-                        |address: u64| self.visible_at(object, ImageAddress::new(address));
-                    let Some(offset) = object.debug_info_offset() else {
-                        continue;
-                    };
-                    if object.instance().is_some() || object.coroutine().is_some() {
-                        continue;
-                    }
-                    // The dispatch leaves for the state outside every
-                    // variable's scope.
-                    let Some(entered) =
-                        first_beyond(code, point.address, &|address| !in_scope(address))
-                    else {
-                        continue;
-                    };
-                    if let (reached, true) = flood_all(code, entered, &in_scope) {
-                        held.insert((offset, point.state), reached);
-                    }
+/// For each variable of an async body and each state its future resumes
+/// in, the code where the variable still holds what it held before the
+/// state's await: what execution reaches from where the state resumes
+/// without leaving the variable's scope. Elsewhere in its scope, as when a
+/// loop goes round to the variable's binding again, this poll bound it
+/// anew. Where the code cannot all be followed, as past an indirect
+/// branch, nothing is noted.
+#[cfg(target_arch = "x86_64")]
+pub(in crate::debug_info) fn held_ranges(
+    code: &dyn DispatchImage,
+    variables: &crate::image::variables::Variables,
+    instances: &[crate::CodeInstanceInfo],
+    resume_points: &[crate::image::resumes::Decoded],
+) -> Vec<crate::image::resumes::Held> {
+    let Ok(functions) = variables.function_index() else {
+        return Vec::new();
+    };
+    let mut held = Vec::new();
+    for (instance, points) in resume_points {
+        let Ok(points) = points else {
+            continue;
+        };
+        let Some(function) = instances
+            .get(instance.index())
+            .and_then(|instance| instance.ranges.iter().map(|range| range.start).min())
+            .and_then(|entry| functions.function_at(entry))
+        else {
+            continue;
+        };
+        for point in points.points.iter() {
+            for object in function
+                .objects
+                .iter()
+                .map(|id| &variables.objects[*id as usize])
+            {
+                // Go, whose locals are visible only past their declaration,
+                // has no coroutines.
+                let (Some(offset), None, None, None) = (
+                    object.debug_info_offset,
+                    object.instance,
+                    object.coroutine,
+                    &object.go_declaration,
+                ) else {
+                    continue;
+                };
+                let in_scope = |address: u64| {
+                    let address = ImageAddress::new(address);
+                    object.ranges.iter().any(|range| range.contains(address))
+                };
+                // The dispatch leaves for the state outside every
+                // variable's scope.
+                let Some(entered) =
+                    first_beyond(code, point.address, &|address| !in_scope(address))
+                else {
+                    continue;
+                };
+                if let (reached, true) = flood_all(code, entered, &in_scope) {
+                    held.push(((offset, point.state), reached.to_vec()));
                 }
             }
         }
-        self.held = held;
     }
+    held
 }
 
 impl Resumption<'_> {
@@ -177,10 +187,10 @@ impl Resumption<'_> {
             return None;
         }
         // Bound anew since the poll resumed, as a loop's variable is.
-        if let Some(held) = catalog
+        if let Some(mut held) = catalog
             .debug_info_offset()
-            .and_then(|offset| self.held.get(&(offset, self.state.value)))
-            && !held.iter().any(|range| range.contains(self.address))
+            .and_then(|offset| self.resumes.held(offset, self.state.value))
+            && !held.any(|range| range.contains(self.address))
         {
             return None;
         }

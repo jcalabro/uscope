@@ -662,32 +662,13 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
                     },
                 )
                 .collect(),
-            symbols: Vec::new(),
-            symbol_sources: crate::model::SymbolTableSources::default(),
-            got_slots: Vec::new(),
-            globals: Vec::new(),
-            types: Arc::default(),
             files: {
                 // The file the call sites name.
                 let mut files = crate::image::lines::Files::default();
                 files.intern(PathBuf::from("/test/inline.c"));
                 files
             },
-            lines: crate::image::lines::LineTables::default(),
-            locations: crate::image::locations::LocationsBuilder::default(),
-            variables: crate::image::variables::Variables::default(),
-            calls: crate::image::calls::Calls::default(),
-            type_facts: crate::image::type_facts::TypeFacts::default(),
-            unwind: None,
-            sections: Vec::new(),
-            vtables: Vec::new(),
-            coroutines: std::collections::BTreeMap::new(),
-            resume_points: std::collections::BTreeMap::new(),
-            thread_local_storage: false,
-            constants: std::collections::BTreeMap::new(),
-            producers: Vec::new(),
-            packages: Vec::new(),
-            thread_locals: std::collections::BTreeMap::new(),
+            ..crate::model::ModuleMetadata::default()
         },
     ))
 }

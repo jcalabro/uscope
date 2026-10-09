@@ -74,6 +74,9 @@ fn start(jobs: NonZeroUsize) -> Result<&'static rayon::ThreadPool, JobsError> {
         .thread_name(|index| format!("uscope-load-{index}"))
         .build()
         .map_err(|error| JobsError::Start(error.to_string()))?;
+    // Wait until every worker runs, so that what starting them allocates
+    // never lands in a measurement that follows.
+    pool.broadcast(|_| ());
     // Another thread may have started one first; either is the pool.
     Ok(POOL.get_or_init(|| pool))
 }

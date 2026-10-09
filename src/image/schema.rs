@@ -253,13 +253,16 @@ pub(super) const SCHEMA: &[TableSchema] = &[
     TableSchema {
         kind: TableKind::Facts,
         record: "FactsRecord",
-        size: 11,
+        size: 20,
         fields: &[
             ("embedded_reason", 0, 4),
             ("runtime_reason", 4, 4),
             ("embedded_table", 8, 1),
             ("runtime_table", 9, 1),
             ("flags", 10, 1),
+            ("debug_path", 11, 4),
+            ("debug_reason", 15, 4),
+            ("debug_file", 19, 1),
         ],
     },
     TableSchema {
@@ -594,7 +597,17 @@ pub(super) const SCHEMA: &[TableSchema] = &[
             ("location_kind", 12, 1),
         ],
     },
-    items(TableKind::Globals),
+    TableSchema {
+        kind: TableKind::Globals,
+        record: "GlobalRecord",
+        size: 13,
+        fields: &[
+            ("object", 0, 4),
+            ("qualified_name", 4, 4),
+            ("linkage_name", 8, 4),
+            ("external", 12, 1),
+        ],
+    },
     TableSchema {
         kind: TableKind::CallingFunctions,
         record: "CallingFunctionRecord",
@@ -670,6 +683,61 @@ pub(super) const SCHEMA: &[TableSchema] = &[
             ("kind", 16, 1),
         ],
     },
+    TableSchema {
+        kind: TableKind::ResumeRanges,
+        record: "CodeRange",
+        size: 16,
+        fields: &[("start", 0, 8), ("end", 8, 8)],
+    },
+    TableSchema {
+        kind: TableKind::Resumes,
+        record: "ResumeRecord",
+        size: 24,
+        fields: &[
+            ("instance", 0, 4),
+            ("dispatch", 4, 4),
+            ("dispatch_count", 8, 4),
+            ("points", 12, 4),
+            ("point_count", 16, 4),
+            ("malformed", 20, 4),
+        ],
+    },
+    TableSchema {
+        kind: TableKind::ResumePoints,
+        record: "ResumePointRecord",
+        size: 24,
+        fields: &[
+            ("state", 0, 8),
+            ("address", 8, 8),
+            ("resumption", 16, 4),
+            ("resumption_count", 20, 4),
+        ],
+    },
+    TableSchema {
+        kind: TableKind::Held,
+        record: "HeldRecord",
+        size: 24,
+        fields: &[
+            ("offset", 0, 8),
+            ("state", 8, 8),
+            ("ranges", 16, 4),
+            ("range_count", 20, 4),
+        ],
+    },
+    TableSchema {
+        kind: TableKind::NamedConstants,
+        record: "NamedConstantRecord",
+        size: 21,
+        fields: &[("name", 0, 4), ("value", 4, 16), ("signed", 20, 1)],
+    },
+    TableSchema {
+        kind: TableKind::Vtables,
+        record: "VtableRecord",
+        size: 12,
+        fields: &[("address", 0, 8), ("ty", 8, 4)],
+    },
+    items(TableKind::Producers),
+    bytes(TableKind::EmbeddedViews),
 ];
 
 const fn keyed(kind: TableKind) -> TableSchema {

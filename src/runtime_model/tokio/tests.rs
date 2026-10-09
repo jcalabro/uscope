@@ -61,8 +61,8 @@ struct Image {
 const VERIFIED_SOURCE: &str = "/crates/tokio-1.52.3/src/runtime/task/raw.rs";
 
 impl RuntimeImage for Image {
-    fn producers(&self) -> &[Arc<str>] {
-        self.module.producers()
+    fn producers(&self) -> Vec<&str> {
+        self.module.producers().collect()
     }
 
     fn constant(&self, name: &str) -> Option<IntegerValue> {

@@ -16,8 +16,8 @@ use crate::type_identity::{
     ANONYMOUS_NAMESPACE, NameIndex as _, NameSyntax, TypeIndex, TypeLookup, TypeName, parse_integer,
 };
 use crate::{
-    ArgumentOrigin, GoKind, GoTypeAttributes, SourceLanguage, TypeArgument, TypeId, TypeIdentity,
-    TypeInfo, TypeReference,
+    ArgumentOrigin, GoKind, GoTypeAttributes, ModuleImageId, SourceLanguage, TypeArgument, TypeId,
+    TypeIdentity, TypeInfo, TypeReference,
 };
 
 use super::MAX_RECORD_CHILDREN;
@@ -581,16 +581,18 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 Some((index, language, identity, pending))
             })
             .collect::<Vec<_>>();
-        let mut unresolved = Vec::new();
-        for (index, language, identity, pending) in built.into_iter().flatten() {
-            if !pending.is_empty() {
-                unresolved.push((index, language, pending));
+        for (index, language, identity, positions) in built.into_iter().flatten() {
+            if !positions.is_empty() {
+                self.pending_arguments.push(PendingArguments {
+                    entry: index,
+                    language,
+                    positions,
+                });
             }
             if let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(index) {
                 info.identity = Some(Arc::new(identity));
             }
         }
-        self.resolve_parsed_arguments(&unresolved);
     }
 
     /// The scopes enclosing the DIE a type was built from, or those of the
@@ -606,86 +608,159 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             .cloned()
             .unwrap_or_default()
     }
+}
 
-    /// Resolves the arguments parsed from names, once every identity
-    /// exists. An argument resolves when the types it could name are one.
-    fn resolve_parsed_arguments(&mut self, unresolved: &[(usize, SourceLanguage, Vec<usize>)]) {
-        if unresolved.is_empty() {
-            return;
-        }
-        let lookup = EntryLookup(&self.entries);
-        let index_phase = crate::span!("types.identities.index");
-        let index = TypeIndex::build(Some(self.image), self.entries.len(), |index| {
-            match self.entries.get(index) {
-                Some(TypeEntry::Resolved(info)) => Some(info),
-                _ => None,
-            }
-        });
-        drop(index_phase);
-        let _resolve_phase = crate::span!("types.identities.resolve");
-        // The first pointer type to each type, by the target's identity, for
-        // arguments spelled as pointers.
-        let mut pointers = HashMap::new();
-        let spelled_pointer = unresolved.iter().any(|(entry, _, positions)| {
-            matches!(
-                self.entries.get(*entry),
-                Some(TypeEntry::Resolved(TypeInfo { identity: Some(identity), .. }))
-                    if positions.iter().any(|position| matches!(
-                        identity.arguments.get(*position),
-                        Some(TypeArgument::Unknown(text)) if text.trim_end().ends_with('*')
-                    ))
-            )
-        });
-        if spelled_pointer {
-            for entry in &self.entries {
-                if let TypeEntry::Resolved(TypeInfo {
-                    reference,
-                    kind:
-                        crate::TypeKind::Pointer {
-                            target: Some(target),
-                            ..
-                        },
-                    ..
-                }) = entry
-                    && let Some(key) = index.key(*target)
-                {
-                    pointers.entry(Arc::clone(key)).or_insert(*reference);
-                }
-            }
-        }
-        // Many names spell the same argument, which resolves alike each time.
-        let mut answers = HashMap::new();
-        let mut resolved = Vec::new();
-        for (entry, language, positions) in unresolved {
-            let Some(TypeEntry::Resolved(info)) = self.entries.get(*entry) else {
-                continue;
-            };
-            let Some(identity) = &info.identity else {
-                continue;
-            };
-            let mut arguments = identity.arguments.to_vec();
-            for position in positions {
-                let TypeArgument::Unknown(text) = &arguments[*position] else {
-                    continue;
-                };
-                let found = answers
-                    .entry((Arc::clone(text), *language))
-                    .or_insert_with(|| {
-                        resolve_argument(text, *language, &index, &lookup, &pointers)
-                    });
-                if let Some(found) = found {
-                    arguments[*position] = found.clone();
-                }
-            }
-            resolved.push((*entry, arguments));
-        }
-        for (entry, arguments) in resolved {
-            if let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(entry)
-                && let Some(identity) = &mut info.identity
+/// The positions of a type's identity whose arguments its name spells,
+/// which resolve once every identity exists.
+#[derive(Debug, Clone)]
+pub(super) struct PendingArguments {
+    pub(super) entry: usize,
+    pub(super) language: SourceLanguage,
+    pub(super) positions: Vec<usize>,
+}
+
+/// Resolves the arguments `pending` names, parsed from names, once every
+/// identity exists: an argument resolves when the types it could name are
+/// one, and names the first of them.
+///
+/// With `classes`, each type's class of types whose fields and references
+/// are alike, a name is matched against the first of each class only,
+/// since it names every type of a class or none; the types it names are
+/// then every member of the classes matched. Those need not all be the
+/// same type, as copies of a cyclic type are not.
+pub(super) fn resolve_parsed_arguments(
+    entries: &mut [TypeEntry],
+    image: ModuleImageId,
+    pending: &[PendingArguments],
+    classes: Option<&[u32]>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let alike = Alike::new(classes);
+    let lookup = EntryLookup(entries);
+    let index_phase = crate::span!("types.identities.index");
+    let index = TypeIndex::build_searching(
+        Some(image),
+        entries.len(),
+        |index| alike.searchable(index),
+        |index| match entries.get(index) {
+            Some(TypeEntry::Resolved(info)) => Some(info),
+            _ => None,
+        },
+    );
+    drop(index_phase);
+    let _resolve_phase = crate::span!("types.identities.resolve");
+    // The first pointer type to each type, by the target's identity, for
+    // arguments spelled as pointers.
+    let mut pointers = HashMap::new();
+    let spelled_pointer = pending.iter().any(|pending| {
+        matches!(
+            entries.get(pending.entry),
+            Some(TypeEntry::Resolved(TypeInfo { identity: Some(identity), .. }))
+                if pending.positions.iter().any(|position| matches!(
+                    identity.arguments.get(*position),
+                    Some(TypeArgument::Unknown(text)) if text.trim_end().ends_with('*')
+                ))
+        )
+    });
+    if spelled_pointer {
+        for entry in entries.iter() {
+            if let TypeEntry::Resolved(TypeInfo {
+                reference,
+                kind:
+                    crate::TypeKind::Pointer {
+                        target: Some(target),
+                        ..
+                    },
+                ..
+            }) = entry
+                && let Some(key) = index.key(*target)
             {
-                Arc::make_mut(identity).arguments = arguments.into();
+                pointers.entry(Arc::clone(key)).or_insert(*reference);
             }
         }
+    }
+    // Many names spell the same argument, which resolves alike each time.
+    let mut answers = HashMap::new();
+    let mut resolved = Vec::new();
+    for pending in pending {
+        let Some(TypeEntry::Resolved(info)) = entries.get(pending.entry) else {
+            continue;
+        };
+        let Some(identity) = &info.identity else {
+            continue;
+        };
+        let mut arguments = identity.arguments.to_vec();
+        for position in &pending.positions {
+            let TypeArgument::Unknown(text) = &arguments[*position] else {
+                continue;
+            };
+            let found = answers
+                .entry((Arc::clone(text), pending.language))
+                .or_insert_with(|| {
+                    resolve_argument(text, pending.language, &index, &lookup, &pointers, &alike)
+                });
+            if let Some(found) = found {
+                arguments[*position] = found.clone();
+            }
+        }
+        resolved.push((pending.entry, arguments));
+    }
+    for (entry, arguments) in resolved {
+        if let Some(TypeEntry::Resolved(info)) = entries.get_mut(entry)
+            && let Some(identity) = &mut info.identity
+        {
+            Arc::make_mut(identity).arguments = arguments.into();
+        }
+    }
+}
+
+/// Each type's class of types alike to every name, with the members of
+/// each class in identifier order; without classes, each type is its own.
+struct Alike<'a> {
+    classes: Option<&'a [u32]>,
+    members: Vec<Vec<TypeId>>,
+}
+
+impl<'a> Alike<'a> {
+    fn new(classes: Option<&'a [u32]>) -> Self {
+        let mut members = Vec::<Vec<TypeId>>::new();
+        for (index, class) in classes.unwrap_or_default().iter().enumerate() {
+            let class = *class as usize;
+            if class >= members.len() {
+                members.resize_with(class + 1, Vec::new);
+            }
+            members[class].push(TypeId::new(
+                u32::try_from(index).expect("type count fits u32"),
+            ));
+        }
+        Self { classes, members }
+    }
+
+    /// Whether names are matched against the type `index` numbers: the
+    /// first of its class.
+    fn searchable(&self, index: usize) -> bool {
+        self.classes
+            .is_none_or(|classes| self.members[classes[index] as usize][0].index() == index)
+    }
+
+    /// The types alike to `reference`, itself among them.
+    fn members(&self, reference: TypeReference) -> Vec<TypeReference> {
+        self.classes
+            .and_then(|classes| classes.get(reference.id.index()))
+            .map_or_else(
+                || vec![reference],
+                |class| {
+                    self.members[*class as usize]
+                        .iter()
+                        .map(|id| TypeReference {
+                            image: reference.image,
+                            id: *id,
+                        })
+                        .collect()
+                },
+            )
     }
 }
 
@@ -784,6 +859,7 @@ fn resolve_argument(
     index: &TypeIndex,
     lookup: &EntryLookup<'_>,
     pointers: &HashMap<Arc<str>, TypeReference>,
+    alike: &Alike<'_>,
 ) -> Option<TypeArgument> {
     if let Some(value) = parse_integer(text) {
         return Some(TypeArgument::Value(value));
@@ -792,7 +868,7 @@ fn resolve_argument(
     // type whose target is the type its spelling resolves to.
     if let Some(target) = text.trim_end().strip_suffix('*') {
         let Some(TypeArgument::Type(target)) =
-            resolve_argument(target.trim_end(), language, index, lookup, pointers)
+            resolve_argument(target.trim_end(), language, index, lookup, pointers, alike)
         else {
             return None;
         };
@@ -801,8 +877,13 @@ fn resolve_argument(
             .copied()
             .map(TypeArgument::Type);
     }
-    let candidates = index
+    let mut named = index
         .named(text, true, lookup)
+        .into_iter()
+        .flat_map(|reference| alike.members(reference))
+        .collect::<Vec<_>>();
+    named.sort_unstable_by_key(|reference| reference.id);
+    let candidates = named
         .into_iter()
         .filter_map(|reference| lookup.type_info(reference))
         .filter(|info| {

@@ -193,27 +193,6 @@ bench-large:
     fi
     echo "$dir/uscope $digest"
 
-# The reference answers the rewrite of program information keeps: the dump
-# tool built from the commit that pinned it, before the rewrite began.
-reference_commit := "855e023de6265652a11cd4c241088f473a1403d6"
-
-# Builds the reference binary from `reference_commit` in a worktree.
-reference:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    [[ -n "{{reference_commit}}" ]] || { echo "error: no reference commit is pinned" >&2; exit 1; }
-    dir="$PWD/target/reference"
-    [[ -d "$dir/src" ]] || git worktree add --quiet --detach "$dir/src" {{reference_commit}}
-    git -C "$dir/src" checkout --quiet --detach {{reference_commit}}
-    (cd "$dir/src" && CARGO_TARGET_DIR="$dir/target" cargo build --quiet --profile test --features tools --bin uscope-tools)
-    cp "$dir/target/debug/uscope-tools" "$dir/uscope-tools"
-
-# Compares this checkout's dumps with the reference binary's, for PROGRAMS
-# or the differential corpus: `just differential -- --sections lines`.
-differential *ARGS: build-test-programs
-    cargo build --quiet --profile test --features tools --bin uscope-tools
-    ./scripts/contained.sh ./scripts/differential.sh "$@"
-
 # Prints where loading PROGRAM spends its instructions: Callgrind's
 # inclusive costs, trimmed to uscope's functions.
 profile-instructions PROGRAM:

@@ -1056,6 +1056,21 @@ impl<'a> TypeView<'a> {
         self.strings.get(StrId(id.get())).into()
     }
 
+    /// The records and variants whose names `keep` accepts, in identifier
+    /// order, without decoding them.
+    pub fn aggregates_named(
+        self,
+        keep: impl Fn(&str) -> bool + 'a,
+    ) -> impl Iterator<Item = TypeId> + 'a {
+        (0_u32..)
+            .zip(self.types)
+            .filter(move |(_, record)| {
+                matches!(record.kind, kinds::RECORD | kinds::VARIANT)
+                    && keep(self.strings.get(StrId(record.name.get())))
+            })
+            .map(|(id, _)| TypeId::new(id))
+    }
+
     fn optional_text(self, id: U32) -> Option<Arc<str>> {
         (id.get() != NONE).then(|| self.text(id))
     }
@@ -1335,6 +1350,9 @@ pub struct TypeTable {
     image: Arc<Image>,
     id: ModuleImageId,
     decoded: Box<[OnceLock<Box<TypeNode>>]>,
+    /// The coroutines, read from their types on the first question.
+    coroutines:
+        OnceLock<std::collections::BTreeMap<TypeId, Result<crate::CoroutineInfo, Arc<str>>>>,
 }
 
 impl TypeTable {
@@ -1353,6 +1371,7 @@ impl TypeTable {
             image,
             id,
             decoded: (0..count).map(|_| OnceLock::new()).collect(),
+            coroutines: OnceLock::new(),
         }
     }
 
@@ -1395,6 +1414,15 @@ impl TypeTable {
             TypeNode::Resolved(info) => Some(info),
             TypeNode::Malformed { .. } => None,
         }
+    }
+
+    /// What the coroutine of type `id` is, or why its layout cannot be read
+    /// as one; `None` for a type that is no coroutine.
+    pub fn coroutine(&self, id: TypeId) -> Option<Result<&crate::CoroutineInfo, &Arc<str>>> {
+        self.coroutines
+            .get_or_init(|| crate::debug_info::coroutines::in_table(self))
+            .get(&id)
+            .map(Result::as_ref)
     }
 
     /// Every type, in identifier order.

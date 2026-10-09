@@ -14,17 +14,8 @@ use crate::{
     VariableKind,
 };
 
-use super::{MAX_DATA_OBJECTS, Scope};
+use super::Scope;
 use crate::image::variables::DataObject;
-
-pub(super) const fn check_data_object_capacity(
-    count: usize,
-) -> std::result::Result<(), DwarfError> {
-    if count >= MAX_DATA_OBJECTS {
-        return Err(DwarfError::DataObjectLimit(MAX_DATA_OBJECTS));
-    }
-    Ok(())
-}
 
 pub(super) fn variable_order_key(object: &DataObject) -> (u8, u8, SourceFileId, u64, u64, u64) {
     if matches!(object.kind, VariableKind::Parameter | VariableKind::Result) {

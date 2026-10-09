@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use zerocopy::IntoBytes as _;
 
 use super::calls::{self, CallSite, CallView, CallingFunction, Calls, SiteParameter, SiteTarget};
+use super::declarations::{self, DeclarationView};
 use super::facts::{self, FactsView};
 use super::format::Trailer;
 use super::functions::{self, FunctionView};
@@ -16,6 +17,7 @@ use super::locations::{
     self, EvaluationUnit, ExpressionId, LocationListId, LocationTables, LocationsBuilder,
 };
 use super::packages::{self, PackageView};
+use super::resumes::{self, ResumeView};
 use super::symbols::{self, SymbolView};
 use super::type_facts::{self, TypeFactsView};
 use super::types::{self, TypeView};
@@ -25,7 +27,9 @@ use super::variables::{
     ReturnConvention, SystemV, TypeResolution, ValueDescription, VariableFunctionId, VariableView,
     Variables,
 };
-use super::{Builder, Image, ImageError, Limits, PathId, Paths, StringsBuilder, TableKind};
+use super::{
+    Builder, Image, ImageError, Limits, PathId, Paths, PathsBuilder, StringsBuilder, TableKind,
+};
 use crate::{
     AddressRange, BoundaryEvidence, BreakpointEntry, CodeInstanceId, CodeInstanceInfo,
     CodeInstanceKind, CodeRole, ColumnNumber, EntryProvenance, FunctionId, FunctionInfo, GotSlot,
@@ -924,7 +928,12 @@ pub(super) fn sample_variables() -> Variables {
     Variables {
         objects,
         functions,
-        globals: vec![2],
+        globals: vec![variables::Global {
+            object: 2,
+            qualified_name: "ns::g".into(),
+            linkage_name: Some("_ZN2ns1gE".into()),
+            external: true,
+        }],
         go_entries: vec![
             (ImageAddress::new(0x1000), 0),
             (ImageAddress::new(0x1004), 1),
@@ -1043,10 +1052,67 @@ pub(super) fn sample_type_facts() -> type_facts::TypeFacts {
     }
 }
 
+/// Constants and vtables out of order, one of each named twice, and
+/// producers, one named twice.
+pub(super) fn sample_declarations() -> declarations::Declarations {
+    use crate::IntegerValue::{Signed, Unsigned};
+    declarations::Declarations {
+        constants: vec![
+            ("runtime._Grunning".into(), Unsigned(2)),
+            ("max".into(), Unsigned(u128::MAX)),
+            ("min".into(), Signed(i128::MIN)),
+            ("runtime._Grunning".into(), Signed(-1)),
+        ],
+        vtables: vec![
+            (ImageAddress::new(0x6000), TypeId::new(2)),
+            (ImageAddress::new(0x5000), TypeId::new(1)),
+            (ImageAddress::new(0x6000), TypeId::new(0)),
+        ],
+        producers: vec!["rustc".into(), "clang".into(), "rustc".into()],
+    }
+}
+
+/// Resume points of two instances, one undecodable, given out of order,
+/// and held ranges, one key twice.
+pub(super) fn sample_resumes() -> resumes::Resumes {
+    let point = |state, address, resumption: &[AddressRange<ImageAddress>]| crate::ResumePoint {
+        state,
+        address: ImageAddress::new(address),
+        resumption: resumption.into(),
+    };
+    resumes::Resumes {
+        points: vec![
+            (CodeInstanceId::new(3), Err("an indirect dispatch".into())),
+            (
+                CodeInstanceId::new(0),
+                Ok(crate::ResumePoints {
+                    dispatch: [range(0x1000, 0x1002), range(0x2000, 0x2000)].into(),
+                    points: [
+                        point(0, 0x1002, &[range(0x1002, 0x1004)]),
+                        point(3, 0x1008, &[range(0x1008, 0x100c), range(0x2000, 0x2004)]),
+                        point(4, 0x100c, &[]),
+                    ]
+                    .into(),
+                }),
+            ),
+        ],
+        held: vec![
+            ((0x40, 3), vec![range(0x1008, 0x1010)]),
+            ((0x20, 3), vec![]),
+            ((0x40, 3), vec![range(0x100c, 0x1010)]),
+            (
+                (0x40, 4),
+                vec![range(0x100c, 0x1010), range(0x2000, 0x2008)],
+            ),
+        ],
+    }
+}
+
 pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, ImageError> {
     let mut builder = Builder::new(TARGET);
     tables.add_to(&mut builder);
-    files.add_to(&mut builder).unwrap();
+    let mut paths = PathsBuilder::default();
+    files.add_to(&mut builder, &mut paths).unwrap();
     let mut strings = StringsBuilder::default();
     symbols::add_to(
         &mut builder,
@@ -1088,10 +1154,15 @@ pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, I
     facts::add_to(
         &mut builder,
         &mut strings,
+        &mut paths,
         &facts::Facts {
             symbol_sources: &sample_sources(),
             thread_local_storage: true,
             thread_locals: &sample_thread_locals(),
+            debug_file: Some(&crate::DebugFile::Unusable {
+                path: std::sync::Arc::new("/usr/lib/debug/.build-id/ab/cdef.debug".into()),
+                reason: "its build id differs".into(),
+            }),
         },
     )
     .unwrap();
@@ -1099,7 +1170,12 @@ pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, I
     variables::add_to(&mut builder, &mut strings, &sample_variables()).unwrap();
     calls::add_to(&mut builder, &mut strings, &sample_calls()).unwrap();
     type_facts::add_to(&mut builder, &mut strings, &sample_type_facts()).unwrap();
-    builder.bytes(TableKind::Strings, strings.into_bytes());
+    resumes::add_to(&mut builder, &mut strings, &sample_resumes()).unwrap();
+    declarations::add_to(&mut builder, &mut strings, &sample_declarations()).unwrap();
+    builder
+        .bytes(TableKind::EmbeddedViews, b"views".to_vec())
+        .bytes(TableKind::Paths, paths.into_bytes())
+        .bytes(TableKind::Strings, strings.into_bytes());
     builder.seal(Limits::default())
 }
 
@@ -1196,15 +1272,20 @@ pub(super) fn read_everything(image: &Image) -> u64 {
             read += u64::from(view.package_name(package).is_some());
         }
     }
-    read += read_locations(
+    read + read_families(image)
+}
+
+/// Reads what the families after lines, functions, and types hold.
+fn read_families(image: &Image) -> u64 {
+    read_locations(
         LocationTables::new(image),
         image.table::<locations::ExpressionRecord>().len(),
         image.table::<locations::LocationListRecord>().len(),
-    );
-    read += read_variables(image);
-    read += read_calls(image);
-    read += read_type_facts(image);
-    read
+    ) + read_variables(image)
+        + read_calls(image)
+        + read_type_facts(image)
+        + read_resumes(image)
+        + read_declarations(image)
 }
 
 pub(super) fn reseal(bytes: &mut [u8]) {
@@ -1369,6 +1450,46 @@ pub(super) fn read_calls(image: &Image) -> u64 {
         read += u64::from(site.enters().is_some()) + u64::from(site.jump().is_some());
         read += site.parameters().count() as u64;
         read += u64::from(site.malformed().is_some());
+    }
+    read
+}
+
+/// Asks an image's declarations of every name and address they hold, and
+/// of some they do not.
+pub(super) fn read_declarations(image: &Image) -> u64 {
+    let view = DeclarationView::new(image);
+    let mut read = view.producers().map(|producer| producer.len() as u64).sum();
+    for (name, _) in view.constants() {
+        read += u64::from(view.constant(name).is_some());
+    }
+    read += u64::from(view.constant("").is_some());
+    for (address, _) in view.vtables() {
+        read += u64::from(view.vtable(address).is_some());
+        read += u64::from(view.vtable(ImageAddress::new(address.get() + 1)).is_some());
+    }
+    read
+}
+
+/// Asks an image's resume points and held ranges of the first instances,
+/// entries, and states.
+pub(super) fn read_resumes(image: &Image) -> u64 {
+    let view = ResumeView::new(image);
+    let mut read = view.resume_code().count() as u64;
+    for index in 0..8 {
+        read += match view.resume_points(CodeInstanceId::new(index)) {
+            Some(Ok(points)) => points
+                .points
+                .iter()
+                .map(|point| point.resumption.len() as u64)
+                .sum::<u64>(),
+            Some(Err(why)) => why.len() as u64,
+            None => 0,
+        };
+        for state in 0..8 {
+            read += view
+                .held(u64::from(index) * 0x20, state)
+                .map_or(0, |held| held.count() as u64);
+        }
     }
     read
 }

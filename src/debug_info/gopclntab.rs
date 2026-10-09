@@ -1242,7 +1242,11 @@ fn fuzz_table(table: &GoTable, code: &[u8]) {
         // The line tables are valid: they seal into an image.
         let mut image = crate::image::Builder::new(crate::TargetDescription::X86_64);
         lines.add_to(&mut image);
-        files.add_to(&mut image).expect("paths without NULs");
+        let mut paths = crate::image::PathsBuilder::default();
+        files
+            .add_to(&mut image, &mut paths)
+            .expect("paths without NULs");
+        image.bytes(crate::image::TableKind::Paths, paths.into_bytes());
         image
             .seal(crate::image::Limits::default())
             .expect("the completed line tables are valid");

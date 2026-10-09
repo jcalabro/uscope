@@ -174,7 +174,6 @@ impl Names {
             .collect();
         let globals = image
             .globals()
-            .iter()
             .map(|global| {
                 format!(
                     "{}|{}",
@@ -482,7 +481,7 @@ impl<'a> Dumper<'a> {
         let names = self.names;
         self.heading("globals")?;
         for global in image.globals() {
-            self.line(&names.debug(global))?;
+            self.line(&names.debug(&global))?;
         }
         Ok(())
     }
@@ -1159,8 +1158,9 @@ mod tests {
 
     type Change = (&'static str, fn(&mut Row));
 
-    /// The differential compares dumps, so a part of a row the dump left
-    /// out could change unseen: changing any part of any row changes it.
+    /// Dumps are compared to find what changed, so a part of a row the
+    /// dump left out could change unseen: changing any part of any row
+    /// changes it.
     #[test]
     fn the_dump_shows_every_part_of_every_row() {
         let row = |address, line| Row {
