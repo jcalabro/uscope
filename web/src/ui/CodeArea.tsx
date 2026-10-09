@@ -3,7 +3,7 @@
 // before the program runs, its main function (D2). A frame with no source
 // shows its instructions instead.
 
-import { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { cache, useRequest } from "../data";
 import { followedLook, formatPlace, inView, parsePlace, showingSource, type View } from "../focus";
 import { controls } from "../model";
@@ -77,9 +77,13 @@ export function CodeArea() {
   // something asks for it.
   const stop = at?.stop;
   const asked = useTab((current) => current.asked);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: each of these reopens the file
+  // Closing the last file shows the focus's own place, which stays closed:
+  // this names the showing it must not reopen.
+  const unasked = useRef<string | null>(null);
   useLayoutEffect(() => {
-    if (path) {
+    const skip = unasked.current === `${path}:${line}:${stop}:${asked}`;
+    unasked.current = null;
+    if (path && !skip) {
       openFile(path);
     }
   }, [path, line, stop, asked]);
@@ -115,13 +119,19 @@ export function CodeArea() {
     );
   };
   // Closing the file shown shows its neighbor, the next one or else the one
-  // before it.
+  // before it. Closing the last drops it from the address.
   const close = (closed: string) => {
     const index = files.indexOf(closed);
     const neighbor = files[index + 1] ?? files[index - 1];
     closeFile(closed);
-    if (closed === path && neighbor) {
+    if (closed !== path) {
+      return;
+    }
+    if (neighbor) {
       show(neighbor);
+    } else if (current.src) {
+      unasked.current = `${own?.path}:${own?.line ?? null}:${stop}:${asked}`;
+      look(({ src: _, ...rest }) => rest, { replace: false });
     }
   };
 
