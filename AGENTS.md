@@ -94,4 +94,4 @@ just sim-seed SEED                 # replay one simulated session
 just golden-record NAME            # re-record a golden program's manifest
 ```
 
-Before committing, run `just all`: formatting, aggressive Clippy, nextest, doc tests, `just stress`, and a simulator sweep. `just` alone runs the faster gate without stress or the sweep, linting and testing at once. Keep comments concise and useful, document public APIs, group related Rust code with sensible whitespace, and avoid unrelated refactors.
+Before committing, run `just all`: formatting, aggressive Clippy, nextest, doc tests, `just stress`, and a simulator sweep. `just` alone runs the faster gate without stress or the sweep. Keep comments concise and useful, document public APIs, group related Rust code with sensible whitespace, and avoid unrelated refactors.
