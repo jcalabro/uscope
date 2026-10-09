@@ -84,3 +84,51 @@ test("every stop is in the palette, and ? lists every key", async ({ page, uscop
   await page.keyboard.press("Escape");
   await expect(help).toHaveCount(0);
 });
+
+test("closing the file shown shows its neighbor, and a middle click closes a tab", async ({
+  page,
+  uscope,
+}) => {
+  await join(page, uscope.link);
+  const files = page.getByRole("navigation", { name: "Open files" });
+  const tab = (name: string) => files.getByRole("button", { name, exact: true });
+  await expect(tab("kvstore.c")).toBeVisible();
+  for (const name of ["pthread.h", "stdio.h"]) {
+    await page.keyboard.press("Control+p");
+    await search(page).fill(name);
+    await expect(palette(page).getByRole("option").first()).toContainText(name);
+    await page.keyboard.press("Enter");
+    await expect(tab(name)).toHaveAttribute("aria-current", "page");
+  }
+
+  await tab("stdio.h").click({ button: "middle" });
+  await expect(tab("stdio.h")).toHaveCount(0);
+  await expect(tab("pthread.h")).toHaveAttribute("aria-current", "page");
+  await expect(page).toHaveURL(/[?&]src=[^&]*pthread\.h:1(&|$)/);
+
+  await files.getByRole("button", { name: "Close pthread.h" }).click();
+  await expect(tab("pthread.h")).toHaveCount(0);
+  await expect(page).toHaveURL(/[?&]src=[^&]*kvstore\.c:1(&|$)/);
+
+  // The last file closed leaves nothing shown.
+  await files.getByRole("button", { name: "Close kvstore.c" }).click();
+  await expect(tab("kvstore.c")).toHaveCount(0);
+  await expect(page.locator(".cm-line")).toHaveCount(0);
+  await expect(page.getByText("No file open.")).toBeVisible();
+});
+
+test("a new stop opens its file again, even on the line it was closed at", async ({
+  page,
+  uscope,
+}) => {
+  await join(page, uscope.link);
+  await stopInHandleRequest(page);
+  const files = page.getByRole("navigation", { name: "Open files" });
+  await files.getByRole("button", { name: "Close kvstore.c" }).click();
+  await expect(page.getByText("No file open.")).toBeVisible();
+
+  await page.keyboard.press("F5");
+  await expect(page.getByTestId("stops")).toContainText("#3");
+  await expect(files.getByRole("button", { name: "kvstore.c", exact: true })).toBeVisible();
+  await expect(page.locator(".cm-pc-line")).toContainText("int status = 0;");
+});

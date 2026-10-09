@@ -3,7 +3,7 @@
 // before the program runs, its main function (D2). A frame with no source
 // shows its instructions instead.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { cache, useRequest } from "../data";
 import { formatPlace, inView, parsePlace, showingSource, type View } from "../focus";
 import { controls } from "../model";
@@ -63,12 +63,20 @@ export function CodeArea() {
 
   const path = shown?.path;
   const line = shown?.line ?? null;
-  useEffect(() => {
+  // Before paint, so a file newly shown never appears without its tab. A
+  // file closed opens again at every new stop, or when its line moves.
+  const stop = at?.stop;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new stop or line reopens the file
+  useLayoutEffect(() => {
     if (path) {
       openFile(path);
     }
-    tab.setState({ shown: path ? { path, line } : null });
-  }, [path, line]);
+  }, [path, line, stop]);
+  // A file closed stays closed until something shows it again.
+  const open = path !== undefined && files.includes(path);
+  useEffect(() => {
+    tab.setState({ shown: path && open ? { path, line } : null });
+  }, [path, line, open]);
 
   const frame = at ? trace?.frames.find((candidate) => candidate.index === at.frame) : undefined;
   // A frame with no source, and no file named, shows its instructions.
@@ -81,6 +89,16 @@ export function CodeArea() {
         replace: false,
       },
     );
+  // Closing the file shown shows its neighbor, the next one or else the one
+  // before it.
+  const close = (closed: string) => {
+    const index = files.indexOf(closed);
+    const neighbor = files[index + 1] ?? files[index - 1];
+    closeFile(closed);
+    if (closed === path && neighbor) {
+      show(neighbor);
+    }
+  };
 
   return (
     <section className="pane code grow" aria-label="Code">
@@ -92,6 +110,9 @@ export function CodeArea() {
               className="file-name"
               aria-current={path === shown?.path ? "page" : undefined}
               onClick={() => show(path)}
+              // A middle click closes the tab, without the browser's autoscroll.
+              onMouseDown={(event) => event.button === 1 && event.preventDefault()}
+              onAuxClick={(event) => event.button === 1 && close(path)}
             >
               {fileName(path)}
             </button>
@@ -99,7 +120,7 @@ export function CodeArea() {
               type="button"
               className="close"
               aria-label={`Close ${fileName(path)}`}
-              onClick={() => closeFile(path)}
+              onClick={() => close(path)}
             >
               ×
             </button>
@@ -135,19 +156,21 @@ export function CodeArea() {
         </>
       ) : view === "memory" ? (
         <Memory />
-      ) : shown ? (
+      ) : shown && open ? (
         <SourceFile shown={shown} />
       ) : (
         <div className="empty center-message">
-          {at && frame && !frame.source
-            ? `${frame.name} has no source${frame.address ? `: it is at ${frame.address}` : ""}${frame.module ? ` in ${frame.module}` : ""}.`
-            : at && !trace
-              ? stale === "passed"
-                ? `Stop #${at.stop} has passed.`
-                : "Reading the stack…"
-              : state.inferior.state === "notStarted"
-                ? "Press F5 to run the program."
-                : "No source to show."}
+          {shown
+            ? "No file open."
+            : at && frame && !frame.source
+              ? `${frame.name} has no source${frame.address ? `: it is at ${frame.address}` : ""}${frame.module ? ` in ${frame.module}` : ""}.`
+              : at && !trace
+                ? stale === "passed"
+                  ? `Stop #${at.stop} has passed.`
+                  : "Reading the stack…"
+                : state.inferior.state === "notStarted"
+                  ? "Press F5 to run the program."
+                  : "No source to show."}
         </div>
       )}
     </section>
