@@ -1,61 +1,49 @@
 # uscope
 
-uscope is a native debugger for Linux x86-64, written in Rust. It debugs C,
-C++, Rust, Zig, and Go programs from a terminal REPL or, through the Debug
-Adapter Protocol, from VS Code, Neovim, Helix, Zed, and Emacs.
+uscope is a debugger for native programs on Linux x86-64, written in Rust.
+Use it from your terminal, or from your editor through the Debug Adapter
+Protocol. It debugs C, C++, Rust, Zig, and Go.
 
 ## Features
 
-- **Targets**: launch a program, attach to a running process, or open a core
-  dump, including one from another machine (`--sysroot`, `--module-path`).
-- **Breakpoints** on functions, lines, and addresses, with
-  [expression](docs/expressions.md) conditions and hit conditions, including
-  in shared libraries that load later.
-- **Hardware watchpoints** that stop on a value change, on every store, or on
-  any access, with conditions and hit conditions, scoped to the lifetime of
-  the storage they watch.
-- **Execution control**: continue, `step`, `next`, `stepi`, `nexti`, and
-  `finish`, through inlined calls, across all threads (all-stop).
-- **Stacks**: backtraces through every loaded module, the kernel's vDSO
-  included, with frame selection that shows each caller's variables as they
-  were at its call.
-- **Values**: one [expression language](docs/expressions.md) for every source
-  language, with exact integer arithmetic, casts, and assignment.
-- **[Views](docs/views.md)** that show containers as what they stand for, such
-  as a `Vec` as its elements, for the C++, Rust, Go, and Zig standard
-  libraries and your own types.
-- **Disassembly** that names branch targets, including indirect ones resolved
-  from the stopped state, and symbolization of code without debug information.
-- **Signals** with gdb's default policies, changeable with `handle`.
+- **Launch, attach, or inspect a crash.** Start a program, attach to one that
+  is already running, or open a core dump.
+- **Breakpoints and watchpoints.** Break on functions, lines, or addresses,
+  with conditions. Watch a variable and stop when its value changes.
+- **Stepping.** `step`, `next`, `stepi`, `nexti`, and `finish`, through inlined
+  calls. Every thread stops and resumes together.
+- **Stacks.** Backtraces through every loaded library, and each caller's
+  variables as they were at its call.
+- **Expressions.** One expression language for every supported language, with
+  exact integer arithmetic.
+- **Views.** Containers display as what they hold. A `Vec` shows its elements,
+  for the C++, Rust, Go, and Zig standard libraries and for your own types.
+- **Language runtimes.** Go goroutines and async Rust tasks show up as threads
+  and stacks you can step through, and panics stop the program where they
+  happen.
+- **Honest output.** When a value is optimized out or memory cannot be read,
+  uscope says so instead of guessing.
 
-uscope prefers saying what it cannot show to showing something wrong:
-optimized-out values, unreadable memory, and unverifiable core dump modules
-are reported as such.
+uscope also has a command-line interface with batch mode for scripts, a
+browser UI (`uscope web`), and a Debug Adapter Protocol server for editors.
 
-## Language support
+## Editors
 
-| Language | Values | Execution control |
-| --- | --- | --- |
-| C, C++, Rust (GCC, Clang, rustc) | Parameters, locals, and globals, including values split across registers and memory, parameters recovered from their callers, and partly optimized-out values | Full |
-| Async Rust, with tokio 1.52 and 1.53 | What each suspended async function keeps across its await, and tokio's types | Full; tokio tasks, async backtraces, steps that stay in a task across awaits, and panics |
-| Zig 0.16 (LLVM backend) | Parameters, locals, and globals | Full; inline frames when emitted |
-| Go 1.27 `gc` (with cgo) | Parameters, locals, and globals, including partly optimized-out values | Full; goroutines as tasks, stacks across the runtime's switches, and panics |
-
-Thread-local storage is supported for programs on glibc or musl, dynamically
-or statically linked, except libraries that a statically linked glibc program
-loads with `dlopen`.
+uscope runs as a Debug Adapter Protocol server with `uscope dap`. It has a
+VS Code extension and a working Neovim (nvim-dap) setup. Helix, Zed, and Emacs
+(dape) are documented but not yet tested.
 
 ## Quick start
 
-uscope builds inside a pinned Nix environment:
+uscope builds inside a pinned Nix environment. With Nix installed:
 
 ```sh
-just dev                    # enter the environment (or ./scripts/dev.sh)
-just build-test-programs    # build the test programs
+just dev                    # enter the development environment
+just build-test-programs    # build the sample programs
 just run build/test-programs/basic
 ```
 
-Then, at the `(uscope)` prompt:
+At the `(uscope)` prompt:
 
 ```text
 break breakpoint_target
@@ -71,27 +59,28 @@ Other ways to start:
 
 ```sh
 uscope ./program -- ARG...         # launch with arguments
-uscope --attach PID                # attach; detaches on exit
+uscope --attach PID                # attach; the process keeps running on exit
 uscope --core core.1234            # open a core dump
 uscope --batch -e 'break f' -e run -e bt ./program
 uscope dap                         # serve DAP on stdio
 ```
 
-## Documentation
+## Learn more
 
-- [docs/cli.md](docs/cli.md): command-line flags and REPL commands.
-- [docs/expressions.md](docs/expressions.md): the expression language.
-- [docs/views.md](docs/views.md) and [docs/writing-views.md](docs/writing-views.md): views.
-- [docs/dap.md](docs/dap.md): editor setup and DAP support.
-- [docs/go.md](docs/go.md): how uscope debugs Go programs.
-- [docs/tokio.md](docs/tokio.md): how uscope debugs async Rust and tokio.
-- [AGENTS.md](AGENTS.md): architecture and development rules.
+- [Command line and REPL](docs/cli.md): flags, settings, and commands.
+- [Expressions](docs/expressions.md): the expression language.
+- [Views](docs/views.md): how containers are presented, and
+  [writing your own](docs/writing-views.md).
+- [Editors and DAP](docs/dap.md): setup for VS Code, Neovim, and others.
+- [Go](docs/go.md) and [async Rust and tokio](docs/tokio.md): how uscope
+  handles goroutines and tasks.
+- [AGENTS.md](AGENTS.md): architecture and development rules for contributors.
 
 ## Development
 
 ```sh
 just          # format check, Clippy, and the test suite
-just test X   # tests matching X
+just test X   # the tests matching X
 just stress   # the suite ten times under CPU load
 just sim      # simulate random debugger sessions for 30 seconds
 just all      # everything, before committing
@@ -101,4 +90,5 @@ See [AGENTS.md](AGENTS.md) for how the code is organized and tested.
 
 ## License
 
-MIT or Apache-2.0, at your option.
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),
+at your option.
