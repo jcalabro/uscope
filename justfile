@@ -38,6 +38,11 @@ golden:
 build *ARGS="": build-test-programs
     cargo build --profile test {{ARGS}}
 
+# Builds uscope as `build` does but with its own debug information, for
+# debugging uscope with uscope. The next `build` rebuilds the crate without it.
+build-debug *ARGS="":
+    cargo build --profile test --config 'profile.test.package.uscope.debug=1' {{ARGS}}
+
 # Builds uscope and runs it with the supplied arguments.
 run *ARGS: build
     ./target/debug/uscope "$@"
