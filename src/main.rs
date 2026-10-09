@@ -244,7 +244,7 @@ enum Tool {
     /// Check and explain how views present program types.
     Views(ViewsArgs),
     /// Serve a debugger to web browsers.
-    Web(web::WebArgs),
+    Web(Box<web::WebArgs>),
     /// Show, check, and create settings files, and trust projects.
     Config(ConfigArgs),
 }
