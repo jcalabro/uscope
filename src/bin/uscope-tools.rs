@@ -15,15 +15,10 @@ use uscope::profile::Report;
 use uscope::tools::Measured;
 use uscope::tools::dump::{Options as DumpOptions, Section};
 
-// Allocates as uscope does, so that loads cost what they cost there. Heap
-// profilers that cannot see mimalloc build with `system-alloc`.
-#[cfg(not(feature = "system-alloc"))]
-type Allocator = mimalloc::MiMalloc;
-#[cfg(feature = "system-alloc")]
-type Allocator = std::alloc::System;
+// Allocates as uscope does, so that loads cost what they cost there.
 #[global_allocator]
-static ALLOCATOR: uscope::profile::alloc::Counting<Allocator> =
-    uscope::profile::alloc::Counting::new(Allocator {});
+static ALLOCATOR: uscope::profile::alloc::Counting<uscope::profile::alloc::Selected> =
+    uscope::profile::alloc::selected();
 
 #[derive(Parser)]
 #[command(about = "uscope's developer tools")]
@@ -134,6 +129,7 @@ enum Corpus {
 }
 
 fn main() -> ExitCode {
+    uscope::profile::wait_for_viewer();
     match run(Args::parse()) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,

@@ -1901,10 +1901,9 @@ pub enum Request {
     },
 }
 
-#[cfg(any(debug_assertions, test, feature = "sim"))]
 impl Request {
-    /// Names the request and what it acts on, for the flight recorder and
-    /// the simulator's trace.
+    /// Names the request and what it acts on, for the flight recorder, the
+    /// simulator's trace, and `--timings`.
     #[expect(clippy::too_many_lines, reason = "one arm per request")]
     pub(crate) fn describe(&self) -> String {
         match self {

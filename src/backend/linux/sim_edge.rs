@@ -546,13 +546,15 @@ impl LinuxTraceOps for SimTrace {
         None
     }
 
-    fn load_module(
+    fn load_modules(
         &self,
-        _path: &Path,
-        _id: crate::ModuleImageId,
+        modules: &[(PathBuf, crate::ModuleImageId)],
         _search: &crate::debug_info::DebugFileSearch,
-    ) -> Result<DebugInfo> {
-        self.gap("loading a library")
+    ) -> Vec<Result<DebugInfo>> {
+        modules
+            .iter()
+            .map(|_| self.gap("loading a library"))
+            .collect()
     }
 
     fn load_bias(

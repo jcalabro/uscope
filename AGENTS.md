@@ -46,6 +46,12 @@ Development builds (`debug_assertions`) record every client request, ptrace cont
 - Each `uscope` run streams to `runs/`, keeping the latest 20, and `latest.log` links to the newest. `USCOPE_FLIGHT_RECORDING=PATH` streams to PATH instead, and an empty value turns recording off.
 - Record new native control paths through `record!` or the `Recorded` ptrace wrapper. Recording must never change what the inferior sees.
 
+## Profiling
+
+- Give a new phase a `span!` and count hot work with `count!` (`src/profile`); never time with one-off prints, and never open a span per entry or row. `--timings FILE` reports every span, stops and requests among them, and `just timings FILE [NEW]` summarizes one report or compares two.
+- `just bench-smoke` fails when a load's allocation count differs from `bench/baseline.json`; record it again with `--record` only for a deliberate change. `just bench --compare BASE` shows what a change moved, and `just profile-*` answer where instructions and allocations go.
+- `nix develop .#profile` adds Tracy and the other profilers people read at a screen. Builds with the `tracy` feature report to Tracy; `just tracy-check` keeps its client and viewer versions together.
+
 ## Simulator
 
 The deterministic simulator (`src/sim`, `plans/simulator.md`) runs the real controller and `DebuggerHandle` against a simulated kernel and CPU, so one seed names one complete, reproducible session, and oracles check the debugger against the simulation's ground truth after every action.

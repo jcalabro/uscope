@@ -523,6 +523,32 @@ pub(crate) fn load_module(
     dwarf::load(path, id, search)
 }
 
+/// Loads module files at once on the loader's workers, each result where
+/// its module is in `modules`, whatever order the loads finish in.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "the private debug-info edge is shared by sibling backend modules"
+)]
+pub(crate) fn load_modules(
+    modules: &[(std::path::PathBuf, crate::ModuleImageId)],
+    search: &DebugFileSearch,
+) -> Vec<Result<DebugInfo>> {
+    use rayon::prelude::*;
+    let _batch = crate::span!("load_modules", "{} modules", modules.len());
+    crate::pool::install(|| {
+        modules
+            .par_iter()
+            .map(|(path, id)| load_module(path, *id, search))
+            .collect()
+    })
+    .unwrap_or_else(|error| {
+        modules
+            .iter()
+            .map(|_| Err(crate::Error::debug_info(error.clone())))
+            .collect()
+    })
+}
+
 #[expect(
     clippy::redundant_pub_crate,
     reason = "the private debug-info edge is shared by sibling backend modules"
@@ -534,4 +560,37 @@ pub(crate) fn load_module_bytes(
     search: &DebugFileSearch,
 ) -> Result<DebugInfo> {
     dwarf::load_bytes(path, data, id, search)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::ModuleImageId;
+
+    /// A batch answers each module where it was asked for, whichever load
+    /// finishes first, and one module that does not load fails alone.
+    #[test]
+    fn a_batch_answers_each_module_in_its_place() {
+        let fixture = |name: &str| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("build/test-programs")
+                .join(name)
+        };
+        let modules = [
+            (fixture("containers-rust-o2"), ModuleImageId::new(4)),
+            (fixture("no-such-program"), ModuleImageId::new(5)),
+            (fixture("basic"), ModuleImageId::new(6)),
+        ];
+        let loads = super::load_modules(&modules, &super::DebugFileSearch::default());
+        assert_eq!(loads.len(), modules.len());
+        for ((path, id), load) in modules.iter().zip(&loads) {
+            if path.ends_with("no-such-program") {
+                assert!(load.is_err());
+                continue;
+            }
+            let image = &load.as_ref().expect("run `just build-test-programs`").image;
+            assert_eq!((image.path(), image.id()), (path.as_path(), *id));
+        }
+    }
 }
