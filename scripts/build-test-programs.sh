@@ -1086,6 +1086,16 @@ build_tokio_fixtures() {
 }
 
 mkdir -p "$output_dir"
+# `tokio` builds only the tokio fixtures, all that the tokio suite reads,
+# without checking every other fixture.
+if (( $# > 0 )); then
+    if [[ "$*" != tokio ]]; then
+        printf 'usage: %s [tokio]\n' "$0" >&2
+        exit 2
+    fi
+    build_tokio_fixtures
+    exit 0
+fi
 signature=$(suite_signature)
 if suite_is_current "$signature"; then
     printf '[cached] %s\n' "$output_dir"
