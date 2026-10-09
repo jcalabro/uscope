@@ -90,6 +90,15 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) passed_by_value: HashMap<TypeId, bool>,
 }
 
+/// What the loader keeps of a finished type graph.
+pub(super) struct BuiltTypes {
+    pub(super) entries: Vec<TypeEntry>,
+    pub(super) dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
+    pub(super) complex_parts: HashMap<(Arc<str>, u64), TypeId>,
+    pub(super) go_dict_indices: HashMap<TypeId, u64>,
+    pub(super) passed_by_value: HashMap<TypeId, bool>,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct AggregateMemberDeclaration {
     pub(super) aggregate: TypeId,
@@ -1342,6 +1351,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
 
         self.reject_inline_storage_cycles();
 
+        let names_phase = crate::span!("types.names");
         let names = (0..self.entries.len())
             .map(|index| {
                 let id = TypeId::new(u32::try_from(index).expect("bounded type count fits u32"));
@@ -1358,7 +1368,20 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 info.name = name;
             }
         }
+        drop(names_phase);
+        let _phase = crate::span!("types.identities");
         self.assign_identities();
+    }
+
+    /// The finished graph, once [`Self::finalize_type_graph`] has run.
+    pub(super) fn finish(self) -> BuiltTypes {
+        BuiltTypes {
+            entries: self.entries,
+            dynamic_record_layouts: self.dynamic_record_layouts,
+            complex_parts: self.complex_parts,
+            go_dict_indices: self.go_dict_indices,
+            passed_by_value: self.passed_by_value,
+        }
     }
 
     /// The type a built pointer type points to.
@@ -3581,14 +3604,36 @@ impl TypeMetadataEntry for TypeEntry {
     }
 }
 
-pub(super) fn type_info_from<T: TypeMetadataEntry>(
-    types: &[T],
+/// A module's types, as the loader builds them or an image keeps them.
+pub(super) trait TypeEntries {
+    /// The type `id` names, or why its metadata is unusable.
+    fn entry(&self, id: TypeId) -> std::result::Result<&TypeInfo, Arc<str>>;
+}
+
+impl<T: TypeMetadataEntry> TypeEntries for [T] {
+    fn entry(&self, id: TypeId) -> std::result::Result<&TypeInfo, Arc<str>> {
+        self.get(id.index()).map_or_else(
+            || Err("type ID is outside the module arena".into()),
+            TypeMetadataEntry::type_info,
+        )
+    }
+}
+
+impl TypeEntries for crate::image::types::TypeTable {
+    fn entry(&self, id: TypeId) -> std::result::Result<&TypeInfo, Arc<str>> {
+        match self.node(id) {
+            Some(crate::TypeNode::Resolved(info)) => Ok(info),
+            Some(crate::TypeNode::Malformed { description, .. }) => Err(Arc::clone(description)),
+            None => Err("type ID is outside the module arena".into()),
+        }
+    }
+}
+
+pub(super) fn type_info_from(
+    types: &(impl TypeEntries + ?Sized),
     id: TypeId,
 ) -> std::result::Result<&TypeInfo, Arc<str>> {
-    types.get(id.index()).map_or_else(
-        || Err("type ID is outside the module arena".into()),
-        TypeMetadataEntry::type_info,
-    )
+    types.entry(id)
 }
 
 pub(super) fn propagate_wrapper_sizes(types: &mut [TypeEntry]) {

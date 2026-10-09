@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use foldhash::{HashMap, HashMapExt};
 
 use crate::eval::types::c_type_key_of_name;
 use crate::{
@@ -510,107 +510,20 @@ impl TypeIndex {
                 }
             }
         }
-        let mut keys = Vec::with_capacity(count);
-        let mut memo = HashMap::new();
-        for index in 0..count {
-            keys.push(canonical_key(index, &info, &mut memo, &mut HashSet::new()));
-        }
+        let mut walk = KeyWalk {
+            memo: vec![None; count],
+            visiting: vec![false; count],
+            depth: 0,
+        };
+        let keys = (0..count)
+            .map(|index| canonical_key(index, &info, &mut walk))
+            .collect();
         Self {
             image,
             by_base,
             by_name,
             keys,
         }
-    }
-
-    const fn reference(&self, id: TypeId) -> Option<TypeReference> {
-        match self.image {
-            Some(image) => Some(TypeReference { image, id }),
-            None => None,
-        }
-    }
-
-    /// The types with exactly this language, path, and base, whatever
-    /// their arguments.
-    pub fn instances(
-        &self,
-        language: SourceLanguage,
-        path: &[&str],
-        base: &str,
-        types: &dyn TypeLookup,
-    ) -> Vec<TypeReference> {
-        self.by_base
-            .get(base)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.reference(*id))
-            .filter(|reference| {
-                types
-                    .type_info(*reference)
-                    .and_then(|info| info.identity.as_deref())
-                    .is_some_and(|identity| {
-                        identity.language == language
-                            && identity.base.as_ref() == base
-                            && identity.path.len() == path.len()
-                            && identity
-                                .path
-                                .iter()
-                                .zip(path)
-                                .all(|(have, want)| have.as_ref() == *want)
-                    })
-            })
-            .collect()
-    }
-
-    /// The types whose identity has this base, in identifier order.
-    pub fn with_base(&self, base: &str) -> Vec<TypeReference> {
-        self.by_base
-            .get(base)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.reference(*id))
-            .collect()
-    }
-
-    /// The types a name, as a person or a producer writes it, could mean,
-    /// in identifier order: those named exactly so, and those whose
-    /// identity the name spells in any language's syntax.
-    pub fn named(&self, text: &str, exact: bool, types: &dyn TypeLookup) -> Vec<TypeReference> {
-        let mut found = self
-            .by_name
-            .get(text)
-            .into_iter()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
-        for syntax in NameSyntax::ALL {
-            let parses = Parses::new(syntax);
-            let pattern = TypeName::parse(text, syntax);
-            let key = c_type_key_of_name(pattern.base);
-            let candidates = self
-                .by_base
-                .get(pattern.base)
-                .into_iter()
-                .chain(key.as_deref().and_then(|key| self.by_base.get(key)))
-                .flatten();
-            for id in candidates {
-                let Some(reference) = self.reference(*id) else {
-                    continue;
-                };
-                if types
-                    .type_info(reference)
-                    .is_some_and(|info| names_type(&pattern, &parses, info, types, exact, 0))
-                {
-                    found.push(*id);
-                }
-            }
-        }
-        found.sort_unstable();
-        found.dedup();
-        found
-            .into_iter()
-            .filter_map(|id| self.reference(id))
-            .collect()
     }
 
     /// A type's identity as one string, which every type the same as it
@@ -636,26 +549,133 @@ impl TypeIndex {
     }
 }
 
+impl NameIndex for TypeIndex {
+    fn image(&self) -> Option<ModuleImageId> {
+        self.image
+    }
+
+    fn by_name(&self, name: &str) -> Vec<TypeId> {
+        self.by_name.get(name).cloned().unwrap_or_default()
+    }
+
+    fn by_base(&self, base: &str) -> Vec<TypeId> {
+        self.by_base.get(base).cloned().unwrap_or_default()
+    }
+}
+
+/// Types by name and by their identity's base, which name lookups search.
+pub trait NameIndex {
+    /// The image whose types these are, if it has any.
+    fn image(&self) -> Option<ModuleImageId>;
+
+    /// The resolved types named exactly `name`, in identifier order.
+    fn by_name(&self, name: &str) -> Vec<TypeId>;
+
+    /// The types whose identity has base `base`, or whose base C spells
+    /// so, in identifier order.
+    fn by_base(&self, base: &str) -> Vec<TypeId>;
+
+    /// The reference to type `id` of this image.
+    fn reference(&self, id: TypeId) -> Option<TypeReference> {
+        self.image().map(|image| TypeReference { image, id })
+    }
+
+    /// The types with exactly this language, path, and base, whatever
+    /// their arguments.
+    fn instances(
+        &self,
+        language: SourceLanguage,
+        path: &[&str],
+        base: &str,
+        types: &dyn TypeLookup,
+    ) -> Vec<TypeReference> {
+        self.by_base(base)
+            .into_iter()
+            .filter_map(|id| self.reference(id))
+            .filter(|reference| {
+                types
+                    .type_info(*reference)
+                    .and_then(|info| info.identity.as_deref())
+                    .is_some_and(|identity| {
+                        identity.language == language
+                            && identity.base.as_ref() == base
+                            && identity.path.len() == path.len()
+                            && identity
+                                .path
+                                .iter()
+                                .zip(path)
+                                .all(|(have, want)| have.as_ref() == *want)
+                    })
+            })
+            .collect()
+    }
+
+    /// The types whose identity has this base, in identifier order.
+    fn with_base(&self, base: &str) -> Vec<TypeReference> {
+        self.by_base(base)
+            .into_iter()
+            .filter_map(|id| self.reference(id))
+            .collect()
+    }
+
+    /// The types a name, as a person or a producer writes it, could mean,
+    /// in identifier order: those named exactly so, and those whose
+    /// identity the name spells in any language's syntax.
+    fn named(&self, text: &str, exact: bool, types: &dyn TypeLookup) -> Vec<TypeReference> {
+        let mut found = self.by_name(text);
+        for syntax in NameSyntax::ALL {
+            let parses = Parses::new(syntax);
+            let pattern = TypeName::parse(text, syntax);
+            let key = c_type_key_of_name(pattern.base);
+            let mut candidates = self.by_base(pattern.base);
+            if let Some(key) = key.as_deref() {
+                candidates.extend(self.by_base(key));
+            }
+            for id in candidates {
+                let Some(reference) = self.reference(id) else {
+                    continue;
+                };
+                if types
+                    .type_info(reference)
+                    .is_some_and(|info| names_type(&pattern, &parses, info, types, exact, 0))
+                {
+                    found.push(id);
+                }
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        found
+            .into_iter()
+            .filter_map(|id| self.reference(id))
+            .collect()
+    }
+}
+
 /// A type's identity as one string: its identity when it has one, and
 /// otherwise its shape over its targets' keys. A type in an anonymous
 /// namespace is its unit's own, so its key is its own too.
 fn canonical_key<'a>(
     index: usize,
     info: &impl Fn(usize) -> Option<&'a TypeInfo>,
-    memo: &mut HashMap<usize, Arc<str>>,
-    visiting: &mut HashSet<usize>,
+    walk: &mut KeyWalk,
 ) -> Arc<str> {
-    if let Some(key) = memo.get(&index) {
+    if let Some(Some(key)) = walk.memo.get(index) {
         return Arc::clone(key);
     }
     let Some(type_info) = info(index) else {
         return Arc::from(format!("<malformed #{index}>"));
     };
-    if visiting.len() > MAX_ARGUMENT_DEPTH * 4 || !visiting.insert(index) {
+    if index >= walk.memo.len() {
+        walk.memo.resize(index + 1, None);
+        walk.visiting.resize(index + 1, false);
+    }
+    if walk.depth > MAX_ARGUMENT_DEPTH * 4 || walk.visiting[index] {
         return Arc::from(format!("<cycle #{index}>"));
     }
-    let mut key_of =
-        |reference: TypeReference| canonical_key(reference.id.index(), info, memo, visiting);
+    walk.visiting[index] = true;
+    walk.depth += 1;
+    let mut key_of = |reference: TypeReference| canonical_key(reference.id.index(), info, walk);
     let key = if let Some(identity) = &type_info.identity {
         let mut key = format!("{:?}|", identity.language);
         if identity
@@ -714,10 +734,19 @@ fn canonical_key<'a>(
             _ => format!("#{}", type_info.name),
         }
     };
-    visiting.remove(&index);
+    walk.visiting[index] = false;
+    walk.depth -= 1;
     let key: Arc<str> = key.into();
-    memo.insert(index, Arc::clone(&key));
+    walk.memo[index] = Some(Arc::clone(&key));
     key
+}
+
+/// What [`canonical_key`] knows between types: each finished key, and the
+/// types on the path it is walking.
+struct KeyWalk {
+    memo: Vec<Option<Arc<str>>>,
+    visiting: Vec<bool>,
+    depth: usize,
 }
 
 /// A module image's finalized types, for patterns to reach arguments.

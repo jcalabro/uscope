@@ -36,7 +36,7 @@ impl LocationRecord {
         column: U64::new(0),
     };
 
-    fn of(location: Option<&SourceLocation>) -> Self {
+    pub(super) fn of(location: Option<&SourceLocation>) -> Self {
         location.map_or(Self::NONE, |location| Self {
             file: location.file.get().into(),
             line: location.line.get().into(),
@@ -44,7 +44,7 @@ impl LocationRecord {
         })
     }
 
-    fn get(&self) -> Option<SourceLocation> {
+    pub(super) fn get(&self) -> Option<SourceLocation> {
         (self.file.get() != NONE).then(|| SourceLocation {
             file: SourceFileId::new(self.file.get()),
             line: LineNumber::new(self.line.get()).expect("validation checked the line"),
@@ -52,7 +52,7 @@ impl LocationRecord {
         })
     }
 
-    fn valid(&self, files: usize) -> bool {
+    pub(super) fn valid(&self, files: usize) -> bool {
         if self.file.get() == NONE {
             *self == Self::NONE
         } else {
@@ -231,7 +231,7 @@ const LANGUAGES: [SourceLanguage; 7] = [
 ];
 const OTHER_LANGUAGE: u8 = 5;
 
-fn code_of<T: PartialEq>(known: &[T], value: &T) -> u8 {
+pub(super) fn code_of<T: PartialEq>(known: &[T], value: &T) -> u8 {
     u8::try_from(
         known
             .iter()
@@ -241,11 +241,25 @@ fn code_of<T: PartialEq>(known: &[T], value: &T) -> u8 {
     .expect("few values")
 }
 
-fn language_code(language: SourceLanguage) -> (u8, u16) {
+pub(super) fn language_code(language: SourceLanguage) -> (u8, u16) {
     match language {
         SourceLanguage::Other(code) => (OTHER_LANGUAGE, code),
         language => (code_of(&LANGUAGES, &language), 0),
     }
+}
+
+/// The language [`language_code`] encodes, once validated.
+pub(super) fn language_of(code: u8, other: u16) -> SourceLanguage {
+    match code {
+        OTHER_LANGUAGE => SourceLanguage::Other(other),
+        code => LANGUAGES[usize::from(code)],
+    }
+}
+
+/// Whether a language code and the code of another language are one
+/// [`language_code`] makes.
+pub(super) fn valid_language(code: u8, other: u16) -> bool {
+    usize::from(code) < LANGUAGES.len() && (code == OTHER_LANGUAGE || other == 0)
 }
 
 /// A count or index of records, which the builder keeps below [`NONE`].
@@ -608,10 +622,7 @@ impl<'a> Function<'a> {
     /// The language of the unit that defines the function.
     #[must_use]
     pub fn language(self) -> SourceLanguage {
-        match self.record.language {
-            OTHER_LANGUAGE => SourceLanguage::Other(self.record.other_language.get()),
-            code => LANGUAGES[usize::from(code)],
-        }
+        language_of(self.record.language, self.record.other_language.get())
     }
 
     /// What the function is to unwinding and stepping.
@@ -804,7 +815,7 @@ impl<'a> CodeInstance<'a> {
 }
 
 /// Whether `count` records from `first` lie within `length`.
-fn span(first: U32, count: U32, length: usize) -> bool {
+pub(super) fn span(first: U32, count: U32, length: usize) -> bool {
     (first.get() as usize)
         .checked_add(count.get() as usize)
         .is_some_and(|end| end <= length)
@@ -829,15 +840,13 @@ fn validate_functions(image: &Image) -> Result<(), String> {
     let mut next_member = 0;
     let mut next_generic = 0;
     for (index, function) in functions.iter().enumerate() {
-        let language = usize::from(function.language);
         if !strings.contains(StrId(function.name.get()))
             || (function.linkage_name.get() != NONE
                 && !strings.contains(StrId(function.linkage_name.get())))
             || !function.declaration.valid(files)
             || (function.enclosing.get() != NONE
                 && function.enclosing.get() as usize >= functions.len())
-            || language >= LANGUAGES.len()
-            || (function.language != OTHER_LANGUAGE && function.other_language.get() != 0)
+            || !valid_language(function.language, function.other_language.get())
             || !valid_role(function.role)
             || function.generics.get() != next_generic
             || !span(function.generics, function.generic_count, generics.len())

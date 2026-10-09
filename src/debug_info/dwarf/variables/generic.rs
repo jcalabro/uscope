@@ -97,9 +97,10 @@ impl DwarfVariableInfo {
         if !(types..end).contains(&descriptor.get()) {
             return Err(ShapeUnresolvedReason::ForeignType.into());
         }
-        let argument = *self
-            .go_runtime_types
-            .get(&(descriptor.get() - types))
+        let argument = self
+            .types
+            .view()
+            .go_runtime_type(descriptor.get() - types)
             .ok_or(ShapeUnresolvedReason::UndescribedType)?;
         // A dictionary read where the function has not stored it yet holds
         // whatever was there; a type laid out unlike the shape is not the

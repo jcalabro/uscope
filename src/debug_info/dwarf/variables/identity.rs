@@ -9,10 +9,11 @@
 use std::sync::Arc;
 
 use foldhash::{HashMap, HashMapExt, HashSet};
+use rayon::prelude::*;
 
 use crate::debug_info::dwarf::{DieKey, Reader, die_reference_with_signatures, string_attribute};
 use crate::type_identity::{
-    ANONYMOUS_NAMESPACE, NameSyntax, TypeIndex, TypeLookup, TypeName, parse_integer,
+    ANONYMOUS_NAMESPACE, NameIndex as _, NameSyntax, TypeIndex, TypeLookup, TypeName, parse_integer,
 };
 use crate::{
     ArgumentOrigin, GoKind, GoTypeAttributes, SourceLanguage, TypeArgument, TypeId, TypeIdentity,
@@ -544,41 +545,47 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
 
     /// Gives every named type its identity, once names are final.
     pub(super) fn assign_identities(&mut self) {
+        // Each identity reads only its own type and the scopes, so they
+        // are built in parallel and stored in order.
+        // An indexed collect splits alike however the work is stolen.
+        let built = (0..self.entries.len())
+            .into_par_iter()
+            .map(|index| {
+                let id = TypeId::new(u32::try_from(index).expect("type count fits u32"));
+                if !self.explicit_names.contains(&id) {
+                    return None;
+                }
+                let Some(TypeEntry::Resolved(info)) = self.entries.get(index) else {
+                    return None;
+                };
+                let parts = self.identity_parts.get(&id)?;
+                let language = self.language(parts.die.unit);
+                let parsed = TypeName::parse(&info.name, NameSyntax::of(language));
+                let scopes = self.type_path(parts.die);
+                // Only Go and Zig names spell their packages and modules.
+                let mut path = scopes.path.to_vec();
+                path.extend(parsed.path.iter().map(|segment| Arc::<str>::from(*segment)));
+                let (arguments, origin, pending) =
+                    merge_arguments(parts, parsed.arguments.as_deref());
+                let pack = parts.pack.filter(|start| *start <= arguments.len());
+                let identity = TypeIdentity {
+                    language,
+                    path: path.into(),
+                    inline_namespaces: scopes.inline,
+                    base: Arc::from(parsed.base),
+                    arguments: arguments.into(),
+                    pack,
+                    origin,
+                    go: parts.go.as_ref().map(|go| go.attributes),
+                };
+                Some((index, language, identity, pending))
+            })
+            .collect::<Vec<_>>();
         let mut unresolved = Vec::new();
-        for index in 0..self.entries.len() {
-            let id = TypeId::new(u32::try_from(index).expect("type count fits u32"));
-            if !self.explicit_names.contains(&id) {
-                continue;
-            }
-            let Some(TypeEntry::Resolved(info)) = self.entries.get(index) else {
-                continue;
-            };
-            let Some(parts) = self.identity_parts.get(&id) else {
-                continue;
-            };
-            let language = self.language(parts.die.unit);
-            let syntax = NameSyntax::of(language);
-            let name = Arc::clone(&info.name);
-            let parsed = TypeName::parse(&name, syntax);
-            let scopes = self.type_path(parts.die);
-            // Only Go and Zig names spell their packages and modules.
-            let mut path = scopes.path.to_vec();
-            path.extend(parsed.path.iter().map(|segment| Arc::<str>::from(*segment)));
-            let (arguments, origin, pending) = merge_arguments(parts, parsed.arguments.as_deref());
+        for (index, language, identity, pending) in built.into_iter().flatten() {
             if !pending.is_empty() {
                 unresolved.push((index, language, pending));
             }
-            let pack = parts.pack.filter(|start| *start <= arguments.len());
-            let identity = TypeIdentity {
-                language,
-                path: path.into(),
-                inline_namespaces: scopes.inline,
-                base: Arc::from(parsed.base),
-                arguments: arguments.into(),
-                pack,
-                origin,
-                go: parts.go.as_ref().map(|go| go.attributes),
-            };
             if let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(index) {
                 info.identity = Some(Arc::new(identity));
             }
@@ -607,12 +614,15 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             return;
         }
         let lookup = EntryLookup(&self.entries);
+        let index_phase = crate::span!("types.identities.index");
         let index = TypeIndex::build(Some(self.image), self.entries.len(), |index| {
             match self.entries.get(index) {
                 Some(TypeEntry::Resolved(info)) => Some(info),
                 _ => None,
             }
         });
+        drop(index_phase);
+        let _resolve_phase = crate::span!("types.identities.resolve");
         // The first pointer type to each type, by the target's identity, for
         // arguments spelled as pointers.
         let mut pointers = HashMap::new();

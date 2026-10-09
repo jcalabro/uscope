@@ -797,7 +797,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             Ty::Program(reference) => {
                 representation(self.scope, *reference)
                     .ok()
-                    .and_then(|(_, info)| match info.kind {
+                    .and_then(|(_, info)| match &info.kind {
                         TypeKind::Record { members, .. } => members
                             .iter()
                             .find(|candidate| candidate.name.as_deref() == Some(member))

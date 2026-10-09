@@ -13,16 +13,41 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StrId(pub u32);
 
-/// Display strings being pooled, each where it is first pushed.
+/// Display strings being pooled, each once, where it is first pushed.
 #[derive(Debug, Default)]
 pub struct StringsBuilder {
     bytes: Vec<u8>,
+    /// The first string pooled with each hash, by its hash.
+    pooled: foldhash::HashMap<u64, StrId>,
+    /// Strings whose hash an unequal earlier string has, which no real
+    /// pool is expected to hold.
+    collided: foldhash::HashMap<Box<str>, StrId>,
 }
 
 impl StringsBuilder {
     /// The pool's name for `text`, or `None` when it holds a NUL or the
     /// pool is full.
     pub fn push(&mut self, text: &str) -> Option<StrId> {
+        self.push_hashed(
+            text,
+            std::hash::BuildHasher::hash_one(&foldhash::fast::FixedState::default(), text),
+        )
+    }
+
+    /// [`Self::push`] with `text`'s hash, which only proposes a string it
+    /// might equal.
+    pub(super) fn push_hashed(&mut self, text: &str, hash: u64) -> Option<StrId> {
+        let first = self.pooled.get(&hash).copied();
+        if let Some(id) = first
+            && Strings(&self.bytes).bytes(id) == text.as_bytes()
+        {
+            return Some(id);
+        }
+        if first.is_some()
+            && let Some(id) = self.collided.get(text)
+        {
+            return Some(*id);
+        }
         if text.as_bytes().contains(&0) {
             return None;
         }
@@ -30,6 +55,11 @@ impl StringsBuilder {
         self.bytes.extend_from_slice(text.as_bytes());
         self.bytes.push(0);
         u32::try_from(self.bytes.len()).ok()?;
+        if first.is_some() {
+            self.collided.insert(text.into(), id);
+        } else {
+            self.pooled.insert(hash, id);
+        }
         Some(id)
     }
 

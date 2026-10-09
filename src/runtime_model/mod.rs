@@ -22,7 +22,7 @@ use crate::unwind::RegisterFile;
 use crate::{
     CoroutineInfo, EntryProvenance, ExceptionFilter, FunctionInfo, ImageAddress, IntegerValue,
     ModuleImage, RecordMemberLayout, StackSegment, TaskState, ThreadId, ThreadLocal, TypeInfo,
-    TypeKind, TypeNode, TypeReference, VirtualAddress,
+    TypeKind, TypeReference, VirtualAddress,
 };
 
 /// A result with the reasons it may be incomplete, such as a task whose
@@ -670,10 +670,7 @@ impl RuntimeImage for ModuleImage {
     }
 
     fn member(&self, type_name: &str, path: &[&str]) -> Option<Member> {
-        let mut ty = self.types().iter().find_map(|node| match node {
-            TypeNode::Resolved(info) if info.name.as_ref() == type_name => Some(info),
-            _ => None,
-        })?;
+        let mut ty = self.types_named_exactly(type_name).next()?;
         let mut offset = 0_u64;
         for name in path {
             let TypeKind::Record { members, .. } = &representation(self, ty)?.kind else {

@@ -66,8 +66,8 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         "types-cpp-gcc-dwarf5",
     ] {
         let image = load_fixture_image(fixture).await;
-        assert!(!image.types().is_empty(), "{fixture}");
-        for (index, node) in image.types().iter().enumerate() {
+        assert!(image.type_count() != 0, "{fixture}");
+        for (index, node) in image.types().enumerate() {
             let reference = node.reference();
             assert_eq!(reference.image, image.id(), "{fixture}: {node:?}");
             assert_eq!(
@@ -100,7 +100,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         let image = &images[fixture];
         let resolved = image
             .types()
-            .iter()
             .filter_map(|node| match node {
                 uscope::TypeNode::Resolved(info) => Some(info),
                 _ => None,
@@ -144,7 +143,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     for fixture in ["variables-cpp-gcc-o0", "variables-cpp-clang-o0"] {
         let image = &images[fixture];
         assert!(
-            image.types().iter().any(|node| matches!(
+            image.types().any(|node| matches!(
                 node,
                 uscope::TypeNode::Resolved(uscope::TypeInfo {
                     name,
@@ -214,7 +213,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         }
         let modifiers = image
             .types()
-            .iter()
             .filter_map(|node| match node {
                 uscope::TypeNode::Resolved(uscope::TypeInfo {
                     kind: uscope::TypeKind::Modified { modifier, .. },
@@ -286,7 +284,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         None
     );
     assert!(
-        go.types().iter().any(|node| matches!(
+        go.types().any(|node| matches!(
             node,
             uscope::TypeNode::Resolved(uscope::TypeInfo {
                 kind: uscope::TypeKind::Named {
@@ -300,7 +298,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     );
     let go_names = go
         .types()
-        .iter()
         .filter_map(|node| match node {
             uscope::TypeNode::Resolved(info) => Some(info.name.as_ref()),
             _ => None,
@@ -323,7 +320,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
 
     let zig = &images["variables-zig-o0"];
     assert!(
-        zig.types().iter().any(|node| matches!(
+        zig.types().any(|node| matches!(
             node,
             uscope::TypeNode::Resolved(uscope::TypeInfo {
                 kind: uscope::TypeKind::Named {
@@ -339,7 +336,6 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     let rust = &images["variables-rust-o0"];
     assert!(
         rust.types()
-            .iter()
             .filter_map(|node| match node {
                 uscope::TypeNode::Resolved(info) => Some(info.name.as_ref()),
                 _ => None,

@@ -58,6 +58,7 @@ use types::{
 mod call_sites;
 mod codec;
 mod coroutine;
+mod dedup;
 mod die;
 mod evaluate;
 mod generic;
@@ -261,7 +262,9 @@ pub(super) struct DwarfVariableInfo {
     address_index: BTreeMap<ImageAddress, Arc<[usize]>>,
     globals: Arc<[usize]>,
     evaluation_units: Arc<[EvaluationUnit]>,
-    types: Arc<[TypeNode]>,
+    /// The image's types, which [`DwarfVariableInfo::bind_types`] gives
+    /// once the image is sealed.
+    types: Arc<crate::image::types::TypeTable>,
     dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
     /// Go functions by the address their code begins at, which a func
     /// value holds.
@@ -273,9 +276,6 @@ pub(super) struct DwarfVariableInfo {
     passed_by_value: HashMap<TypeId, bool>,
     /// Go's type parameters: the dictionary entry each shape typedef names.
     go_dict_indices: HashMap<TypeId, u64>,
-    /// The first type, in identifier order, each Go runtime type descriptor
-    /// offset describes.
-    go_runtime_types: HashMap<u64, TypeId>,
     objects_by_debug_offset: HashMap<u64, usize>,
     procedures: HashMap<u64, CatalogProcedure>,
     call_sites: call_sites::CallSiteCatalog,
@@ -463,7 +463,7 @@ pub(super) fn load_variable_info<'data>(
     let mut go_function_entries = HashMap::new();
     let mut unnamed_parameters = Vec::new();
     let mut abstract_bodies = Vec::new();
-    let mut function_generics = BTreeMap::new();
+    let mut function_generics = BTreeMap::<_, crate::FunctionGenerics>::new();
     let mut order = 0_u64;
     let phase = crate::span!("variables.evaluation_units");
     let evaluation_units = load_evaluation_units(units)?;
@@ -1089,6 +1089,27 @@ pub(super) fn load_variable_info<'data>(
     let phase = crate::span!("variables.finalize_types");
     types.finalize_type_graph();
     drop(phase);
+    let mut types = types.finish();
+    let phase = crate::span!("types.deduplicate");
+    if let Some(remap) = types.deduplicate() {
+        remap_catalog(&remap, &mut objects, &mut functions);
+        for (_, ty) in &mut vtables {
+            *ty = remap.id(*ty);
+        }
+        for (_, ty, _) in &mut unnamed_parameters {
+            *ty = remap.id(*ty);
+        }
+        for (_, ty) in &mut abstract_bodies {
+            *ty = remap.id(*ty);
+        }
+        for generics in function_generics.values_mut() {
+            *generics = generics
+                .iter()
+                .map(|(name, ty)| (Arc::clone(name), remap.id(*ty)))
+                .collect();
+        }
+    }
+    drop(phase);
     let _phase = crate::span!("variables.catalog");
     assert_eq!(
         globals.len(),
@@ -1119,18 +1140,6 @@ pub(super) fn load_variable_info<'data>(
             }
         })
         .collect::<Arc<[_]>>();
-    let mut go_runtime_types = HashMap::new();
-    for node in finalized_types.iter() {
-        if let TypeNode::Resolved(info) = node
-            && let Some(offset) = info
-                .identity
-                .as_ref()
-                .and_then(|identity| identity.go)
-                .and_then(|go| go.runtime_type)
-        {
-            go_runtime_types.entry(offset).or_insert(info.reference.id);
-        }
-    }
     let coroutines = crate::debug_info::coroutines::normalize(&finalized_types);
     let mut coroutine_bodies = BTreeMap::new();
     for (instance, ty, object) in unnamed_parameters {
@@ -1171,13 +1180,12 @@ pub(super) fn load_variable_info<'data>(
                 .collect(),
             globals: global_objects.into(),
             evaluation_units: evaluation_units.into(),
-            types: Arc::clone(&finalized_types),
+            types: Arc::new(crate::image::types::TypeTable::empty()),
             dynamic_record_layouts: types.dynamic_record_layouts,
             go_function_entries,
             complex_parts: types.complex_parts,
             passed_by_value: types.passed_by_value,
             go_dict_indices: types.go_dict_indices,
-            go_runtime_types,
             objects_by_debug_offset,
             procedures,
             call_sites: calls.finish(),
@@ -1204,6 +1212,33 @@ pub(super) fn load_variable_info<'data>(
             })
             .collect(),
     })
+}
+
+/// Points the catalog's types where deduplication moved them.
+fn remap_catalog(
+    remap: &dedup::Remap,
+    objects: &mut [CatalogDataObject],
+    functions: &mut [CatalogFunction],
+) {
+    for object in objects {
+        remap.resolution(&mut object.type_info);
+        for ty in [&mut object.escaped, &mut object.coroutine]
+            .into_iter()
+            .flatten()
+        {
+            *ty = remap.id(*ty);
+        }
+    }
+    for function in functions {
+        if let Ok(captures) = &mut function.captures {
+            for capture in captures {
+                remap.resolution(&mut capture.type_info);
+            }
+        }
+        if let Some(returns::ReturnConvention::SystemV(convention)) = &mut function.returns {
+            remap.resolution(&mut convention.ty);
+        }
+    }
 }
 
 /// A concrete instance of an abstract function, inlined or out of line,
@@ -1756,6 +1791,13 @@ impl VariableInfo for DwarfVariableInfo {
         budget: &mut InspectionBudget,
     ) -> std::result::Result<u64, VariableRuntimeError> {
         self.site_parameter_value(site, parameter, runtime, budget)
+    }
+}
+
+impl DwarfVariableInfo {
+    /// Reads types from `types`, the sealed image's.
+    pub(super) fn bind_types(&mut self, types: Arc<crate::image::types::TypeTable>) {
+        self.types = types;
     }
 }
 

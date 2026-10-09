@@ -424,7 +424,7 @@ fn wrapper_cycle() -> [TypeEntry; 2] {
     ]
 }
 
-fn expression(bytes: &[u8]) -> Expression {
+pub(super) fn expression(bytes: &[u8]) -> Expression {
     Expression {
         bytes: Arc::from(bytes),
         encoding: gimli::Encoding {
@@ -1517,7 +1517,7 @@ fn value_shapes_separate_malformed_from_unsupported_types() {
             "pointer type occupies 16 bytes; addresses wider than 8 bytes are unsupported",
         ),
     ] {
-        let error = value_shape_from(&types, TypeId::new(0)).unwrap_err();
+        let error = value_shape_from(types.as_slice(), TypeId::new(0)).unwrap_err();
         let (ValueShapeError::Malformed(description) | ValueShapeError::Unsupported(description)) =
             &error;
         assert_eq!(
@@ -1531,7 +1531,7 @@ fn value_shapes_separate_malformed_from_unsupported_types() {
 
     // A pointer may point to itself.
     assert!(matches!(
-        value_shape_from(&[pointer(Some(8), 0)], TypeId::new(0)),
+        value_shape_from(&[pointer(Some(8), 0)][..], TypeId::new(0)),
         Ok(ValueShape::Indirection {
             target: Some(id),
             byte_size: 8,

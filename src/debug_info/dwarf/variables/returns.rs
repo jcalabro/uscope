@@ -292,7 +292,7 @@ impl DwarfVariableInfo {
     ) -> std::result::Result<(TypeId, &crate::TypeInfo), Unassigned> {
         let mut id = ty;
         for _ in 0..64 {
-            let Some(TypeNode::Resolved(info)) = self.types.get(id.index()) else {
+            let Some(TypeNode::Resolved(info)) = self.types.node(id) else {
                 return Err(Unassigned::Malformed("a type is malformed".into()));
             };
             match &info.kind {

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::image::functions::{CodeInstance, Function, FunctionView};
 use crate::image::lines::LineView;
 use crate::image::symbols::{Symbol, SymbolView};
+use crate::type_identity::NameIndex as _;
 use crate::{Error, Result};
 
 mod locations;
@@ -77,6 +78,23 @@ pub enum ThreadLocal {
     /// writes as it loads the image, as a library's code reads its
     /// thread-locals.
     Slot(ImageAddress),
+}
+
+/// An image's types by name and base, as name lookups search them.
+struct TypeNames<'a>(&'a crate::image::types::TypeTable);
+
+impl crate::type_identity::NameIndex for TypeNames<'_> {
+    fn image(&self) -> Option<ModuleImageId> {
+        Some(self.0.image())
+    }
+
+    fn by_name(&self, name: &str) -> Vec<TypeId> {
+        self.0.view().named(name).collect()
+    }
+
+    fn by_base(&self, base: &str) -> Vec<TypeId> {
+        self.0.view().with_base(base).collect()
+    }
 }
 
 #[derive(Debug)]
@@ -245,6 +263,21 @@ fn seal_image(target: TargetDescription, metadata: &ModuleMetadata) -> crate::im
         },
     )
     .expect("the loader's facts fit an image");
+    let classes = {
+        let _phase = crate::span!("image.type_classes");
+        type_classes(&metadata.types)
+    };
+    let phase = crate::span!("image.encode_types");
+    crate::image::types::add_to(
+        &mut builder,
+        &mut strings,
+        &crate::image::types::Types {
+            nodes: &metadata.types,
+            classes: &classes,
+        },
+    )
+    .expect("the loader's types fit an image");
+    drop(phase);
     crate::image::packages::add_to(
         &mut builder,
         &mut strings,
@@ -274,6 +307,27 @@ fn seal_image(target: TargetDescription, metadata: &ModuleMetadata) -> crate::im
     builder
         .seal(crate::image::Limits::default())
         .expect("the loader's tables are valid")
+}
+
+/// Each type's identity class, numbered in the order classes first come:
+/// two types share one when their identity keys are equal, as one type
+/// defined in several units is.
+fn type_classes(types: &[TypeNode]) -> Vec<u32> {
+    let image = types.first().map(|node| node.reference().image);
+    let index =
+        crate::type_identity::TypeIndex::build(image, types.len(), |index| match &types[index] {
+            TypeNode::Resolved(info) => Some(info),
+            TypeNode::Malformed { .. } => None,
+        });
+    let mut classes = foldhash::HashMap::default();
+    types
+        .iter()
+        .map(|node| {
+            let key = index.key(node.reference()).expect("every type has a key");
+            let next = u32::try_from(classes.len()).expect("type counts fit u32");
+            *classes.entry(Arc::clone(key)).or_insert(next)
+        })
+        .collect()
 }
 
 fn validate_dense_ids(metadata: &ModuleMetadata) {
@@ -346,7 +400,10 @@ pub struct ModuleImage {
     got_slots: Arc<[GotSlot]>,
     sections: Arc<[SectionInfo]>,
     globals: Arc<[GlobalVariableInfo]>,
-    types: Arc<[TypeNode]>,
+    /// The type graph, decoded as it is asked for.
+    types: Arc<crate::image::types::TypeTable>,
+    /// The image every type the loader built names, which binding keeps.
+    type_owner: Option<ModuleImageId>,
     source_files: Arc<[SourceFile]>,
     /// Lines, files, symbols, sections, functions, and code, as tables.
     tables: Arc<crate::image::Image>,
@@ -355,9 +412,8 @@ pub struct ModuleImage {
     symbols_by_last_part: std::sync::OnceLock<HashMap<Box<str>, Vec<SymbolId>>>,
     /// The functions that run each coroutine type, by the type's identity,
     /// built on the first search for one.
-    coroutine_functions: std::sync::OnceLock<HashMap<Arc<str>, Vec<FunctionId>>>,
+    coroutine_functions: std::sync::OnceLock<HashMap<u32, Vec<FunctionId>>>,
     globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
-    type_index: crate::type_identity::TypeIndex,
     /// Rust trait objects' vtables, with the concrete type each is for.
     vtables: std::collections::BTreeMap<ImageAddress, TypeReference>,
     coroutines: BTreeMap<TypeId, std::result::Result<crate::CoroutineInfo, Arc<str>>>,
@@ -367,32 +423,11 @@ pub struct ModuleImage {
     resume_code: RangeIndex<CodeInstanceId>,
     constants: BTreeMap<Arc<str>, crate::IntegerValue>,
     producers: Arc<[Arc<str>]>,
-    /// The index in `types` of the first type each Go runtime type
-    /// descriptor offset names.
-    go_runtime_types: std::collections::BTreeMap<u64, usize>,
     /// The views the image carries for its own types, in its
     /// `.debug_uscope_views` section.
     views: Arc<crate::view::ViewSet>,
     /// The separate debug file found for the image.
     debug_file: Option<crate::DebugFile>,
-}
-
-/// The first type, in identifier order, that each Go runtime type
-/// descriptor offset names: a named type and its typedef may both.
-fn go_runtime_types(types: &[TypeNode]) -> std::collections::BTreeMap<u64, usize> {
-    let mut offsets = std::collections::BTreeMap::new();
-    for (index, node) in types.iter().enumerate() {
-        if let TypeNode::Resolved(info) = node
-            && let Some(offset) = info
-                .identity
-                .as_ref()
-                .and_then(|identity| identity.go)
-                .and_then(|go| go.runtime_type)
-        {
-            offsets.entry(offset).or_insert(index);
-        }
-    }
-    offsets
 }
 
 impl ModuleImage {
@@ -408,39 +443,28 @@ impl ModuleImage {
         let tables = Arc::new(seal_image(target, &metadata));
         drop(phase);
         crate::count!("image_bytes", tables.as_bytes().len());
+        crate::count!("types", metadata.types.len());
         metadata.lines = crate::image::lines::LineTables::default();
         let source_files = source_files(&tables);
 
-        let phase = crate::span!("image.type_index");
-        let type_index = crate::type_identity::TypeIndex::build(
-            metadata
-                .types
-                .first()
-                .map(TypeNode::reference)
-                .map(|reference| reference.image),
-            metadata.types.len(),
-            |index| match &metadata.types[index] {
-                TypeNode::Resolved(info) => Some(info),
-                TypeNode::Malformed { .. } => None,
-            },
-        );
-        drop(phase);
+        let type_owner = metadata.types.first().map(|node| node.reference().image);
+        let id = ModuleImageId::new(0);
         let globals_by_selector = grouped_index(global_selectors(&metadata));
 
         Self {
             symbols_by_last_part: std::sync::OnceLock::new(),
             coroutine_functions: std::sync::OnceLock::new(),
             globals_by_selector,
-            id: ModuleImageId::new(0),
+            id,
             path: Arc::new(path),
             target,
             address_range,
             got_slots: crate::image::symbols::got_slots(&tables).into(),
             sections: crate::image::symbols::sections(&tables).into(),
             globals: metadata.globals.into(),
-            types: Arc::clone(&metadata.types),
+            types: Arc::new(crate::image::types::TypeTable::new(Arc::clone(&tables), id)),
+            type_owner,
             source_files,
-            type_index,
             vtables: metadata.vtables.iter().copied().collect(),
             coroutines: std::mem::take(&mut metadata.coroutines),
             resume_code: RangeIndex::new(metadata.resume_points.iter().flat_map(
@@ -464,7 +488,6 @@ impl ModuleImage {
             resume_points: std::mem::take(&mut metadata.resume_points),
             constants: std::mem::take(&mut metadata.constants),
             producers: std::mem::take(&mut metadata.producers).into(),
-            go_runtime_types: go_runtime_types(&metadata.types),
             views: crate::view::ViewSet::empty(),
             tables,
             debug_file: None,
@@ -473,10 +496,14 @@ impl ModuleImage {
 
     pub(crate) fn with_id(mut self, id: ModuleImageId) -> Self {
         assert!(
-            self.types.iter().all(|node| node.reference().image == id),
+            self.type_owner.is_none_or(|owner| owner == id),
             "every type node is owned by its module image"
         );
         self.id = id;
+        self.types = Arc::new(crate::image::types::TypeTable::new(
+            Arc::clone(&self.tables),
+            id,
+        ));
         self
     }
 
@@ -515,11 +542,18 @@ impl ModuleImage {
         &self.views
     }
 
-    /// A type's identity as one string, which every type the same as it
-    /// shares.
+    /// A type's identity class, which every type the same as it shares.
     #[must_use]
-    pub(crate) fn type_key(&self, reference: TypeReference) -> Option<&Arc<str>> {
-        self.type_index.key(reference)
+    pub(crate) fn type_class(&self, reference: TypeReference) -> Option<u32> {
+        if reference.image != self.id {
+            return None;
+        }
+        self.types.view().class(reference.id)
+    }
+
+    /// The image's type graph, which its variable provider shares.
+    pub(crate) const fn type_table(&self) -> &Arc<crate::image::types::TypeTable> {
+        &self.types
     }
 
     /// What kept parts of the views the image carries out.
@@ -778,10 +812,16 @@ impl ModuleImage {
         self.globals.get(id.index())
     }
 
-    /// Returns the reachable, normalized type graph in stable identifier order.
+    /// Returns the reachable, normalized type graph in stable identifier
+    /// order, decoding every type.
+    pub fn types(&self) -> impl ExactSizeIterator<Item = &TypeNode> + '_ {
+        self.types.nodes()
+    }
+
+    /// How many types the image has.
     #[must_use]
-    pub fn types(&self) -> &[TypeNode] {
-        &self.types
+    pub fn type_count(&self) -> usize {
+        self.types.len()
     }
 
     /// Resolves a reference owned by this image to its finalized graph node.
@@ -790,18 +830,62 @@ impl ModuleImage {
         if reference.image != self.id {
             return None;
         }
-        self.types
-            .get(reference.id.index())
-            .filter(|node| node.reference() == reference)
+        self.types.node(reference.id)
     }
 
     /// Resolves a reference to normalized metadata when the node is not malformed.
     #[must_use]
     pub fn type_info(&self, reference: TypeReference) -> Option<&TypeInfo> {
-        match self.type_node(reference)? {
-            TypeNode::Resolved(info) => Some(info),
-            TypeNode::Malformed { .. } => None,
+        self.types.info(reference)
+    }
+
+    /// The enumerators `name` names, by their own name or qualified by
+    /// their enumeration's name, each with its qualified name, value, and
+    /// enumeration, in identifier and then source order.
+    pub(crate) fn enumerators_named(
+        &self,
+        name: &str,
+    ) -> Vec<(String, crate::IntegerValue, TypeReference)> {
+        let view = self.types.view();
+        // An enumerator's own name is the whole name or what follows a
+        // `::` in it.
+        let mut candidates = view.with_enumerator(name).collect::<Vec<_>>();
+        for (separator, _) in name.match_indices("::") {
+            candidates.extend(view.with_enumerator(&name[separator + 2..]));
         }
+        candidates.sort_unstable();
+        candidates.dedup();
+        let mut found = Vec::new();
+        for id in candidates {
+            let Some(info) = self.type_info(TypeReference { image: self.id, id }) else {
+                continue;
+            };
+            let crate::TypeKind::Enumeration { enumerators, .. } = &info.kind else {
+                continue;
+            };
+            for enumerator in enumerators.iter() {
+                let qualified = format!("{}::{}", info.name, enumerator.name);
+                if enumerator.name.as_ref() == name || qualified == name {
+                    found.push((qualified, enumerator.value, info.reference));
+                }
+            }
+        }
+        found
+    }
+
+    /// The resolved types named exactly `name`, in identifier order.
+    pub(crate) fn types_named_exactly<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a TypeInfo> + 'a {
+        self.types
+            .view()
+            .named(name)
+            .filter_map(|id| self.type_info(TypeReference { image: self.id, id }))
+    }
+
+    fn type_names(&self) -> TypeNames<'_> {
+        TypeNames(&self.types)
     }
 
     /// The types with exactly this language, path, and base, whatever their
@@ -813,8 +897,8 @@ impl ModuleImage {
         path: &[&str],
         base: &str,
     ) -> Vec<TypeReference> {
-        self.type_index
-            .instances(language, path, base, &self.types.as_ref())
+        self.type_names()
+            .instances(language, path, base, &*self.types)
     }
 
     /// The value of the integer constant the debug information declares as
@@ -845,21 +929,18 @@ impl ModuleImage {
     /// same as it.
     #[must_use]
     pub fn coroutine_functions(&self, ty: TypeId) -> Vec<Function<'_>> {
-        let key = |id| self.type_key(TypeReference { image: self.id, id });
+        let class = |id| self.type_class(TypeReference { image: self.id, id });
         let index = self.coroutine_functions.get_or_init(|| {
-            let mut index = HashMap::<Arc<str>, Vec<FunctionId>>::new();
+            let mut index = HashMap::<u32, Vec<FunctionId>>::new();
             for function in self.functions() {
-                if let Some(key) = function.coroutine().and_then(key) {
-                    index
-                        .entry(Arc::clone(key))
-                        .or_default()
-                        .push(function.id());
+                if let Some(class) = function.coroutine().and_then(class) {
+                    index.entry(class).or_default().push(function.id());
                 }
             }
             index
         });
-        key(ty)
-            .and_then(|key| index.get(key))
+        class(ty)
+            .and_then(|class| index.get(&class))
             .into_iter()
             .flatten()
             .filter_map(|id| self.function(*id))
@@ -911,18 +992,16 @@ impl ModuleImage {
     /// several, such as a named type and its typedef, say so.
     #[must_use]
     pub fn go_runtime_type(&self, offset: u64) -> Option<TypeReference> {
-        let index = *self.go_runtime_types.get(&offset)?;
-        match &self.types[index] {
-            TypeNode::Resolved(info) => Some(info.reference),
-            TypeNode::Malformed { .. } => None,
-        }
+        let id = self.types.view().go_runtime_type(offset)?;
+        self.type_info(TypeReference { image: self.id, id })
+            .map(|info| info.reference)
     }
 
     /// The types whose identity has this base, whatever their language,
     /// path, and arguments, in identifier order.
     #[must_use]
     pub fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
-        self.type_index.with_base(base)
+        self.type_names().with_base(base)
     }
 
     /// The types a name could mean, in identifier order: those named
@@ -931,14 +1010,22 @@ impl ModuleImage {
     /// `std::vector<int, std::allocator<int> >`.
     #[must_use]
     pub fn types_named(&self, name: &str) -> Vec<TypeReference> {
-        self.type_index.named(name, false, &self.types.as_ref())
+        self.type_names().named(name, false, &*self.types)
     }
 
     /// Whether two of this image's types have the same identity, as one
     /// type defined in several units does.
     #[must_use]
     pub fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
-        self.type_index.same_type(left, right)
+        left == right
+            || left.image == self.id
+                && right.image == self.id
+                && self
+                    .types
+                    .view()
+                    .class(left.id)
+                    .zip(self.types.view().class(right.id))
+                    .is_some_and(|(left, right)| left == right)
     }
 
     /// Resolves a basename, canonical qualification, source qualification, or
@@ -1416,7 +1503,11 @@ impl ModuleImage {
     /// every answer.
     #[cfg(feature = "tools")]
     pub(crate) fn go_runtime_type_offsets_for_dump(&self) -> Vec<u64> {
-        self.go_runtime_types.keys().copied().collect()
+        self.types
+            .view()
+            .go_runtime_types()
+            .map(|(offset, _)| offset)
+            .collect()
     }
 }
 
