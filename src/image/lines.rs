@@ -406,6 +406,7 @@ impl LineTables {
     }
 
     /// Every line range, decoded, in order.
+    #[cfg(test)]
     pub fn line_entries(&self) -> Vec<crate::model::LineEntry> {
         self.ranges
             .iter()

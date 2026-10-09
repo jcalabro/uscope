@@ -2,7 +2,6 @@
 //! values a function's parameters held on entry from the call that entered
 //! it, and the tail calls that may have entered it since.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -21,66 +20,31 @@ use crate::{
 use super::codec::bytes_to_u64;
 use super::die::{flag_with_origins, origin_chain, string_with_origins};
 use super::evaluate::{EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, evaluate};
-use super::location::{Expression, LocationDescription, copy_expression, copy_optional_location};
+use super::location::{
+    Expression, LocationListId, LocationSelectionError, LocationsBuilder, copy_expression,
+    copy_optional_location, select,
+};
 use super::{DwarfVariableInfo, InspectionBudget, Metadata, MetadataAbsence};
+use crate::image::calls::{
+    self, CallView, CallingFunction, Calls, Site, SiteId, SiteParameter, SiteTarget,
+};
+use crate::image::locations::ExpressionId;
 
 /// How many functions a search for tail calls may visit.
 const MAX_TAIL_CALL_FUNCTIONS: usize = 4_096;
 
-/// Every call site of a module, and what each function says of its calls.
-pub(super) struct CallSiteCatalog {
-    sites: Vec<CatalogCallSite>,
-    /// One per cataloged function, in the same order.
-    functions: Vec<CallingFunction>,
-    /// The calls that return to each address; more than one is malformed.
-    returns: BTreeMap<ImageAddress, Vec<usize>>,
-}
-
-struct CallingFunction {
-    /// The linker name other modules may call it by.
-    name: Option<Arc<str>>,
-    frame_base: Metadata<LocationDescription>,
-    /// Whether the function describes every tail call it makes.
-    tail_calls_described: bool,
-    tail_calls: Vec<usize>,
-}
-
-struct CatalogCallSite {
-    function: usize,
-    /// The instruction after the call, which a frame it entered returns to.
-    return_address: Option<ImageAddress>,
-    target: SiteTarget,
-    /// For a tail call, the function it enters in this module, if known.
-    enters: Option<usize>,
-    /// For a tail call, where it jumped from, if known.
-    jump: Option<TailJump>,
-    parameters: Vec<SiteParameter>,
-    malformed: Option<Arc<str>>,
-}
-
-enum SiteTarget {
-    /// A function's entry, until the catalog resolves it.
+/// What a call site entry says it calls: a function entry, which the
+/// catalog resolves once it has seen every function, or a target.
+enum Callee {
     Entry(DieKey),
-    Code(ImageAddress),
-    Symbol(Arc<str>),
-    Computed(Metadata<LocationDescription>),
-    Unknown,
-}
-
-struct SiteParameter {
-    /// The register the parameter is passed in.
-    register: Option<u16>,
-    /// The `.debug_info` offset of the callee's parameter entry.
-    parameter: Option<u64>,
-    value: Option<Expression>,
-    /// The value the passed address pointed at.
-    data_value: Option<Expression>,
+    Target(SiteTarget),
 }
 
 /// Builds the catalog while the variable catalog walks every entry.
 #[derive(Default)]
 pub(super) struct CallSiteBuilder {
-    sites: Vec<CatalogCallSite>,
+    /// Each site, with the function entry it calls until that is resolved.
+    sites: Vec<(calls::CallSite, Option<DieKey>)>,
     functions: Vec<CallingFunction>,
     /// The first address of each function entry with code.
     starts: HashMap<DieKey, ImageAddress>,
@@ -103,7 +67,7 @@ impl CallSiteBuilder {
         unit_index: usize,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         ranges: &[AddressRange<ImageAddress>],
-        frame_base: Metadata<LocationDescription>,
+        frame_base: Metadata<LocationListId>,
     ) {
         let index = self.functions.len();
         let start = ranges.iter().map(|range| range.start).min();
@@ -152,9 +116,14 @@ impl CallSiteBuilder {
     }
 
     /// Records a call site of the cataloged function `function`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a site is one entry of one unit, read in one walk into one pool"
+    )]
     pub(super) fn site<'data>(
         &mut self,
         dwarf: &gimli::Dwarf<Reader<'data>>,
+        pool: &mut LocationsBuilder,
         units: &Units<'data>,
         unit_index: usize,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -162,8 +131,8 @@ impl CallSiteBuilder {
         depth: usize,
     ) {
         let unit = &units[unit_index];
-        let mut site = CatalogCallSite {
-            function,
+        let mut site = calls::CallSite {
+            function: super::row(function),
             return_address: None,
             target: SiteTarget::Unknown,
             enters: None,
@@ -171,31 +140,38 @@ impl CallSiteBuilder {
             parameters: Vec::new(),
             malformed: None,
         };
-        match site_attributes(dwarf, units, unit_index, unit, entry) {
+        let mut entry_called = None;
+        match site_attributes(dwarf, pool, units, unit_index, unit, entry) {
             Ok(SiteAttributes {
                 return_address,
                 call,
                 tail,
-                target,
+                callee,
             }) => {
-                site.target = target;
+                match callee {
+                    Callee::Entry(key) => entry_called = Some(key),
+                    Callee::Target(target) => site.target = target,
+                }
                 // A tail call returns nowhere, whatever address follows it.
                 site.return_address = return_address.filter(|_| !tail);
                 if tail {
                     site.jump = tail_jump(call, return_address);
-                    self.functions[function].tail_calls.push(self.sites.len());
+                    self.functions[function]
+                        .tail_calls
+                        .push(super::row(self.sites.len()));
                 }
             }
             Err(error) => site.malformed = Some(error.to_string().into()),
         }
         self.open = Some((depth, self.sites.len()));
-        self.sites.push(site);
+        self.sites.push((site, entry_called));
     }
 
     /// Records a parameter of the site whose entry contains it.
     pub(super) fn parameter(
         &mut self,
         dwarf: &gimli::Dwarf<Reader<'_>>,
+        pool: &mut LocationsBuilder,
         units: &Units<'_>,
         unit_index: usize,
         entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
@@ -207,8 +183,8 @@ impl CallSiteBuilder {
         if depth != site_depth + 1 {
             return;
         }
-        let site = &mut self.sites[site];
-        match site_parameter(dwarf, units, unit_index, entry) {
+        let (site, _) = &mut self.sites[site];
+        match site_parameter(dwarf, pool, units, unit_index, entry) {
             Ok(parameter) => site.parameters.push(parameter),
             Err(error) => {
                 site.malformed
@@ -217,50 +193,45 @@ impl CallSiteBuilder {
         }
     }
 
-    pub(super) fn finish(mut self) -> CallSiteCatalog {
+    pub(super) fn finish(mut self) -> Calls {
         let mut code = std::mem::take(&mut self.code);
         code.sort_unstable();
         let mut concrete = HashMap::<DieKey, Vec<ImageAddress>>::new();
         for (origin, _, start) in &self.origins {
             concrete.entry(*origin).or_default().push(*start);
         }
-        let mut returns = BTreeMap::<ImageAddress, Vec<usize>>::new();
-        for (index, site) in self.sites.iter_mut().enumerate() {
-            if let SiteTarget::Entry(key) = site.target {
+        for (site, entry) in &mut self.sites {
+            if let Some(key) = entry {
                 // A function with code is entered there; an abstract one
                 // where its one out-of-line instance is.
-                site.target = match (self.starts.get(&key), concrete.get(&key).map(Vec::as_slice)) {
+                site.target = match (self.starts.get(key), concrete.get(key).map(Vec::as_slice)) {
                     (Some(start), _) | (_, Some([start])) => SiteTarget::Code(*start),
                     _ => SiteTarget::Unknown,
                 };
-            }
-            if let Some(address) = site.return_address {
-                returns.entry(address).or_default().push(index);
             }
         }
         // What each tail call enters, when it stays in this module.
         let function_at = |address: ImageAddress| {
             code.binary_search_by_key(&address, |(start, _)| *start)
                 .ok()
-                .map(|position| code[position].1)
+                .map(|position| super::row(code[position].1))
         };
         for function in &self.functions {
             for &site in &function.tail_calls {
-                let enters = match &self.sites[site].target {
+                let (site, _) = &mut self.sites[site as usize];
+                site.enters = match &site.target {
                     SiteTarget::Code(address) => function_at(*address),
                     SiteTarget::Symbol(name) => match self.external.get(name).map(Vec::as_slice) {
-                        Some([only]) => Some(*only),
+                        Some([only]) => Some(super::row(*only)),
                         _ => None,
                     },
                     _ => None,
                 };
-                self.sites[site].enters = enters;
             }
         }
-        CallSiteCatalog {
-            sites: self.sites,
+        Calls {
             functions: self.functions,
-            returns,
+            sites: self.sites.into_iter().map(|(site, _)| site).collect(),
         }
     }
 }
@@ -272,7 +243,7 @@ struct SiteAttributes {
     /// The call instruction itself.
     call: Option<ImageAddress>,
     tail: bool,
-    target: SiteTarget,
+    callee: Callee,
 }
 
 /// Where a tail call jumped from: its instruction, or else within the
@@ -293,6 +264,7 @@ fn tail_jump(call: Option<ImageAddress>, after: Option<ImageAddress>) -> Option<
 
 fn site_attributes<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
+    pool: &mut LocationsBuilder,
     units: &Units<'data>,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'data>>,
@@ -320,7 +292,7 @@ fn site_attributes<'data>(
     let origin = entry
         .attr_value(gimli::DW_AT_call_origin)
         .or_else(|| entry.attr_value(gimli::DW_AT_abstract_origin));
-    let target = if let Some(key) = die_reference(origin, unit_index, units)? {
+    let callee = if let Some(key) = die_reference(origin, unit_index, units)? {
         let origin_unit = units
             .get(key.unit)
             .ok_or(DwarfError::ReferenceOutsideUnits(key.offset))?;
@@ -329,48 +301,59 @@ fn site_attributes<'data>(
             origin.attr_value(gimli::DW_AT_declaration),
             Some(gimli::AttributeValue::Flag(true))
         ) {
-            linkage_name(dwarf, units, key.unit, &origin)?
-                .map_or(SiteTarget::Unknown, SiteTarget::Symbol)
+            Callee::Target(
+                linkage_name(dwarf, units, key.unit, &origin)?
+                    .map_or(SiteTarget::Unknown, SiteTarget::Symbol),
+            )
         } else {
-            SiteTarget::Entry(key)
+            Callee::Entry(key)
         }
     } else if let Some(value) = entry
         .attr_value(gimli::DW_AT_call_target)
         .or_else(|| entry.attr_value(gimli::DW_AT_GNU_call_site_target))
     {
-        SiteTarget::Computed(copy_optional_location(
-            dwarf,
-            unit_index,
-            unit,
-            Some(value),
-            MetadataAbsence::NotApplicable,
+        Callee::Target(SiteTarget::Computed(
+            match copy_optional_location(
+                dwarf,
+                pool,
+                unit_index,
+                unit,
+                Some(value),
+                MetadataAbsence::NotApplicable,
+            ) {
+                Metadata::Value(location) => Ok(location),
+                Metadata::Malformed(description) => Err(description),
+                Metadata::Absent(_) => Err("a computed call target has no location".into()),
+            },
         ))
     } else {
-        SiteTarget::Unknown
+        Callee::Target(SiteTarget::Unknown)
     };
     Ok(SiteAttributes {
         return_address,
         call,
         tail,
-        target,
+        callee,
     })
 }
 
 fn site_parameter(
     dwarf: &gimli::Dwarf<Reader<'_>>,
+    pool: &mut LocationsBuilder,
     units: &Units<'_>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
 ) -> Result<SiteParameter, DwarfError> {
     let unit = &units[unit_index];
-    let expression = |attributes: [gimli::DwAt; 2]| -> Result<Option<Expression>, DwarfError> {
-        attributes
-            .into_iter()
-            .find_map(|attribute| entry.attr_value(attribute))
-            .and_then(|value| value.exprloc_value())
-            .map(|expression| copy_expression(dwarf, unit_index, unit, expression, unit.encoding()))
-            .transpose()
-    };
+    let mut expression =
+        |attributes: [gimli::DwAt; 2]| -> Result<Option<ExpressionId>, DwarfError> {
+            attributes
+                .into_iter()
+                .find_map(|attribute| entry.attr_value(attribute))
+                .and_then(|value| value.exprloc_value())
+                .map(|expression| copy_expression(dwarf, pool, unit_index, unit, expression))
+                .transpose()
+        };
     let register = match entry
         .attr_value(gimli::DW_AT_location)
         .and_then(|value| value.exprloc_value())
@@ -448,165 +431,172 @@ const fn unavailable(reason: EntryValueUnavailableReason) -> VariableRuntimeErro
     VariableRuntimeError::Unavailable(VariableUnavailableReason::EntryValue(reason))
 }
 
-impl CatalogCallSite {
-    /// What the call passed for `parameter`: the value, or for a referent
-    /// the value at the address passed.
-    fn passed(&self, parameter: EntryParameter) -> Result<&Expression, VariableRuntimeError> {
-        let mut entries = self.parameters.iter().filter(|passed| match parameter {
-            EntryParameter::Register(register) | EntryParameter::Referent(register) => {
-                passed.register == Some(register)
-            }
-            EntryParameter::Parameter(offset) => passed.parameter == Some(offset),
-        });
-        let not_passed = || unavailable(EntryValueUnavailableReason::NoParameter);
-        let passed = entries.next().ok_or_else(not_passed)?;
-        if entries.next().is_some() {
-            return Err(VariableRuntimeError::Malformed(
-                "a call site describes one parameter twice".into(),
-            ));
+/// What a call passed for `parameter`: the value, or for a referent the
+/// value at the address passed.
+fn passed(site: Site<'_>, parameter: EntryParameter) -> Result<ExpressionId, VariableRuntimeError> {
+    let mut entries = site.parameters().filter(|passed| match parameter {
+        EntryParameter::Register(register) | EntryParameter::Referent(register) => {
+            passed.register == Some(register)
         }
-        match parameter {
-            EntryParameter::Referent(_) => passed.data_value.as_ref(),
-            EntryParameter::Register(_) | EntryParameter::Parameter(_) => passed.value.as_ref(),
-        }
-        .ok_or_else(not_passed)
+        EntryParameter::Parameter(offset) => passed.parameter == Some(offset),
+    });
+    let not_passed = || unavailable(EntryValueUnavailableReason::NoParameter);
+    let passed = entries.next().ok_or_else(not_passed)?;
+    if entries.next().is_some() {
+        return Err(VariableRuntimeError::Malformed(
+            "a call site describes one parameter twice".into(),
+        ));
     }
+    match parameter {
+        EntryParameter::Referent(_) => passed.data_value,
+        EntryParameter::Register(_) | EntryParameter::Parameter(_) => passed.value,
+    }
+    .ok_or_else(not_passed)
 }
 
-impl CallSiteCatalog {
-    /// The chain of tail calls from function `from`, entered by a call, to
-    /// function `to`, when exactly one is possible.
-    fn tail_path(&self, from: usize, to: usize) -> Result<Vec<usize>, VariableRuntimeError> {
-        // Every function a chain from `from` may reach must describe its
-        // tail calls, each of which must stay within this module.
-        let mut reached = vec![from];
-        let mut seen = HashSet::from_iter([from]);
-        let mut next = 0;
-        while let Some(&function) = reached.get(next) {
-            next += 1;
-            let calling = &self.functions[function];
-            if !calling.tail_calls_described {
-                return Err(unavailable(EntryValueUnavailableReason::TailCalls));
-            }
-            for &site in &calling.tail_calls {
-                let enters = self.sites[site]
-                    .enters
-                    .ok_or_else(|| unavailable(EntryValueUnavailableReason::TailCalls))?;
-                if seen.insert(enters) {
-                    if reached.len() == MAX_TAIL_CALL_FUNCTIONS {
-                        return Err(VariableUnavailableReason::EvaluationLimit.into());
-                    }
-                    reached.push(enters);
-                }
-            }
-        }
-        if !seen.contains(&to) {
-            return Err(unavailable(EntryValueUnavailableReason::TargetMismatch));
-        }
+/// The function a tail call enters, which a chain was checked to stay in
+/// the module for.
+fn entered(view: CallView<'_>, site: SiteId) -> u32 {
+    view.site(site)
+        .and_then(Site::enters)
+        .expect("checked above")
+}
 
-        // The functions that lead to `to`, by walking tail calls backwards.
-        let mut callers = HashMap::<usize, Vec<usize>>::new();
-        for &function in &reached {
-            for &site in &self.functions[function].tail_calls {
-                let enters = self.sites[site].enters.expect("checked above");
-                callers.entry(enters).or_default().push(function);
-            }
-        }
-        let mut leads = HashSet::from_iter([to]);
-        let mut pending = vec![to];
-        while let Some(function) = pending.pop() {
-            for &caller in callers.get(&function).into_iter().flatten() {
-                if leads.insert(caller) {
-                    pending.push(caller);
-                }
-            }
-        }
-
-        // Count the chains to `to`; a cycle among the functions leading to it
-        // allows endlessly many.
-        let mut chains = HashMap::<usize, u64>::new();
-        let mut active = HashSet::new();
-        self.count_chains(from, to, &leads, &mut chains, &mut active)?;
-        if chains[&from] != 1 {
+/// The chain of tail calls from function `from`, entered by a call, to
+/// function `to`, when exactly one is possible.
+fn tail_path(view: CallView<'_>, from: u32, to: u32) -> Result<Vec<SiteId>, VariableRuntimeError> {
+    // Every function a chain from `from` may reach must describe its tail
+    // calls, each of which must stay within this module.
+    let mut reached = vec![from];
+    let mut seen = HashSet::from_iter([from]);
+    let mut next = 0;
+    while let Some(&function) = reached.get(next) {
+        next += 1;
+        let calling = view.function(function);
+        if !calling.tail_calls_described() {
             return Err(unavailable(EntryValueUnavailableReason::TailCalls));
         }
-        let mut path = Vec::new();
-        let mut function = from;
-        while function != to {
-            let site = self.functions[function]
-                .tail_calls
-                .iter()
-                .copied()
-                .find(|site| {
-                    let enters = self.sites[*site].enters.expect("checked above");
-                    chains.get(&enters) == Some(&1)
-                })
-                .expect("the one chain continues");
-            path.push(site);
-            function = self.sites[site].enters.expect("checked above");
-        }
-        Ok(path)
-    }
-
-    fn count_chains(
-        &self,
-        function: usize,
-        to: usize,
-        leads: &HashSet<usize>,
-        chains: &mut HashMap<usize, u64>,
-        active: &mut HashSet<usize>,
-    ) -> Result<u64, VariableRuntimeError> {
-        if let Some(count) = chains.get(&function) {
-            return Ok(*count);
-        }
-        if !active.insert(function) {
-            return Err(unavailable(EntryValueUnavailableReason::TailCalls));
-        }
-        let mut count = u64::from(function == to);
-        for &site in &self.functions[function].tail_calls {
-            let enters = self.sites[site].enters.expect("checked above");
-            if leads.contains(&enters) {
-                count = count.saturating_add(self.count_chains(enters, to, leads, chains, active)?);
+        for site in calling.tail_calls() {
+            let enters = view
+                .site(site)
+                .and_then(Site::enters)
+                .ok_or_else(|| unavailable(EntryValueUnavailableReason::TailCalls))?;
+            if seen.insert(enters) {
+                if reached.len() == MAX_TAIL_CALL_FUNCTIONS {
+                    return Err(VariableUnavailableReason::EvaluationLimit.into());
+                }
+                reached.push(enters);
             }
         }
-        active.remove(&function);
-        chains.insert(function, count);
-        Ok(count)
     }
+    if !seen.contains(&to) {
+        return Err(unavailable(EntryValueUnavailableReason::TargetMismatch));
+    }
+
+    // The functions that lead to `to`, by walking tail calls backwards.
+    let mut callers = HashMap::<u32, Vec<u32>>::new();
+    for &function in &reached {
+        for site in view.function(function).tail_calls() {
+            callers
+                .entry(entered(view, site))
+                .or_default()
+                .push(function);
+        }
+    }
+    let mut leads = HashSet::from_iter([to]);
+    let mut pending = vec![to];
+    while let Some(function) = pending.pop() {
+        for &caller in callers.get(&function).into_iter().flatten() {
+            if leads.insert(caller) {
+                pending.push(caller);
+            }
+        }
+    }
+
+    // Count the chains to `to`; a cycle among the functions leading to it
+    // allows endlessly many.
+    let mut chains = HashMap::<u32, u64>::new();
+    let mut active = HashSet::new();
+    count_chains(view, from, to, &leads, &mut chains, &mut active)?;
+    if chains[&from] != 1 {
+        return Err(unavailable(EntryValueUnavailableReason::TailCalls));
+    }
+    let mut path = Vec::new();
+    let mut function = from;
+    while function != to {
+        let site = view
+            .function(function)
+            .tail_calls()
+            .find(|site| chains.get(&entered(view, *site)) == Some(&1))
+            .expect("the one chain continues");
+        path.push(site);
+        function = entered(view, site);
+    }
+    Ok(path)
+}
+
+fn count_chains(
+    view: CallView<'_>,
+    function: u32,
+    to: u32,
+    leads: &HashSet<u32>,
+    chains: &mut HashMap<u32, u64>,
+    active: &mut HashSet<u32>,
+) -> Result<u64, VariableRuntimeError> {
+    if let Some(count) = chains.get(&function) {
+        return Ok(*count);
+    }
+    if !active.insert(function) {
+        return Err(unavailable(EntryValueUnavailableReason::TailCalls));
+    }
+    let mut count = u64::from(function == to);
+    for site in view.function(function).tail_calls() {
+        let enters = entered(view, site);
+        if leads.contains(&enters) {
+            count = count.saturating_add(count_chains(view, enters, to, leads, chains, active)?);
+        }
+    }
+    active.remove(&function);
+    chains.insert(function, count);
+    Ok(count)
 }
 
 impl DwarfVariableInfo {
+    /// The image's calls, once [`Self::bind`] has given the image.
+    fn calls(&self) -> CallView<'_> {
+        CallView::new(self.types.tables())
+    }
+
     pub(super) fn described_call_site(
         &self,
         return_address: ImageAddress,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<Option<CallSite>, VariableRuntimeError> {
-        let Some(sites) = self.call_sites.returns.get(&return_address) else {
+        let calls = self.calls();
+        let mut sites = calls.returning_to(return_address);
+        let Some(id) = sites.next() else {
             return Ok(None);
         };
-        let [index] = sites.as_slice() else {
+        if sites.next().is_some() {
             return Err(VariableRuntimeError::Malformed(
                 format!("several call sites return to {return_address}").into(),
             ));
-        };
-        let site = &self.call_sites.sites[*index];
-        if let Some(description) = &site.malformed {
-            return Err(VariableRuntimeError::Malformed(Arc::clone(description)));
         }
-        let target = match &site.target {
-            SiteTarget::Code(address) => CallTarget::Code(*address),
-            SiteTarget::Symbol(name) => CallTarget::Symbol(Arc::clone(name)),
-            SiteTarget::Computed(location) => {
-                let location = match location {
-                    Metadata::Value(location) => location,
-                    Metadata::Malformed(description) => {
-                        return Err(VariableRuntimeError::Malformed(Arc::clone(description)));
-                    }
-                    Metadata::Absent(_) => unreachable!("a computed target has a location"),
-                };
+        let site = calls.site(id).expect("validation checked the index");
+        if let Some(description) = site.malformed() {
+            return Err(VariableRuntimeError::Malformed(description));
+        }
+        let target = match site.target() {
+            SiteTarget::Code(address) => CallTarget::Code(address),
+            SiteTarget::Symbol(name) => CallTarget::Symbol(name),
+            SiteTarget::Computed(Err(description)) => {
+                return Err(VariableRuntimeError::Malformed(description));
+            }
+            SiteTarget::Computed(Ok(location)) => {
                 // A target the caller can no longer compute is unknown.
-                match self.site_word(*index, location, runtime, budget) {
+                let list = self.locations().list(location);
+                match self.site_word(site, |address| select(list, address), runtime, budget) {
                     Ok(address) => CallTarget::Computed(VirtualAddress::new(address)),
                     Err(VariableRuntimeError::Unavailable(
                         reason @ (VariableUnavailableReason::EvaluationLimit
@@ -617,10 +607,9 @@ impl DwarfVariableInfo {
                 }
             }
             SiteTarget::Unknown => CallTarget::Unknown,
-            SiteTarget::Entry(_) => unreachable!("the catalog resolves entries"),
         };
         Ok(Some(CallSite {
-            id: CallSiteId(*index),
+            id: CallSiteId(id.0 as usize),
             target,
         }))
     }
@@ -630,26 +619,28 @@ impl DwarfVariableInfo {
         from: ImageAddress,
         to: ImageAddress,
     ) -> Result<TailCallChain, VariableRuntimeError> {
-        let from = self
-            .function_index_at(from)
-            .ok_or_else(|| unavailable(EntryValueUnavailableReason::UnknownTarget))?;
-        let to = self
-            .function_index_at(to)
-            .ok_or_else(|| unavailable(EntryValueUnavailableReason::UnknownTarget))?;
-        let catalog = &self.call_sites;
-        let links = catalog.tail_path(from, to)?;
-        let entered = links.iter().map(|site| {
-            catalog.sites[*site]
-                .enters
-                .expect("a chain stays in its module")
-        });
+        let function = |address| {
+            self.function_at(address)
+                .map(|function| function.id().0)
+                .ok_or_else(|| unavailable(EntryValueUnavailableReason::UnknownTarget))
+        };
+        let (from, to) = (function(from)?, function(to)?);
+        let calls = self.calls();
+        let links = tail_path(calls, from, to)?;
+        let entered = links.iter().map(|site| entered(calls, *site));
         Ok(TailCallChain {
             functions: std::iter::once(from)
                 .chain(entered)
-                .map(|function| catalog.functions[function].name.clone())
+                .map(|function| calls.function(function).name())
                 .collect(),
-            jumps: links.iter().map(|site| catalog.sites[*site].jump).collect(),
-            links: links.into_iter().map(CallSiteId).collect(),
+            jumps: links
+                .iter()
+                .map(|site| calls.site(*site).and_then(Site::jump))
+                .collect(),
+            links: links
+                .into_iter()
+                .map(|site| CallSiteId(site.0 as usize))
+                .collect(),
         })
     }
 
@@ -660,49 +651,40 @@ impl DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<u64, VariableRuntimeError> {
-        let index = site.0;
-        let catalog_site = self
-            .call_sites
-            .sites
-            .get(index)
+        let site = u32::try_from(site.0)
+            .ok()
+            .and_then(|id| self.calls().site(SiteId(id)))
             .ok_or_else(|| VariableRuntimeError::Fatal("unknown call site".into()))?;
-        if let Some(description) = &catalog_site.malformed {
-            return Err(VariableRuntimeError::Malformed(Arc::clone(description)));
+        if let Some(description) = site.malformed() {
+            return Err(VariableRuntimeError::Malformed(description));
         }
-        let expression = catalog_site.passed(parameter)?;
-        let location = LocationDescription {
-            entries: vec![super::location::LocationEntry {
-                range: None,
-                expression: expression.clone(),
-            }]
-            .into(),
-        };
-        self.site_word(index, &location, runtime, budget)
+        let expression = self.locations().expression(passed(site, parameter)?);
+        self.site_word(site, |_| Ok(Some(expression)), runtime, budget)
     }
 
     /// Evaluates one of a call site's expressions to a word, in the state of
     /// the frame that made the call: the value it computes, or the address
     /// it describes.
-    fn site_word(
-        &self,
-        site: usize,
-        location: &LocationDescription,
+    fn site_word<'a>(
+        &'a self,
+        site: Site<'a>,
+        expression: impl FnOnce(
+            Option<ImageAddress>,
+        ) -> Result<Option<Expression<'a>>, LocationSelectionError>,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<u64, VariableRuntimeError> {
-        let catalog_site = &self.call_sites.sites[site];
         // Within the call instruction, which the caller's frame describes.
-        let address = catalog_site
-            .return_address
+        let address = site
+            .return_address()
             .and_then(|address| address.get().checked_sub(1))
             .map(ImageAddress::new);
-        let expression = location
-            .expression(address)
+        let expression = expression(address)
             .map_err(|error| match error {
-                super::location::LocationSelectionError::Unavailable(reason) => {
+                LocationSelectionError::Unavailable(reason) => {
                     VariableRuntimeError::Unavailable(reason)
                 }
-                super::location::LocationSelectionError::Malformed(description) => {
+                LocationSelectionError::Malformed(description) => {
                     VariableRuntimeError::Malformed(description)
                 }
             })?
@@ -710,8 +692,10 @@ impl DwarfVariableInfo {
                 VariableUnavailableReason::UnavailableAtInstruction,
             ))?;
         let mut cache = FrameBaseCache::Empty;
+        let location = self.calls().function(site.function()).frame_base();
         let mut frame_base = FrameBase::Lazy(FrameBaseContext {
-            location: &self.call_sites.functions[catalog_site.function].frame_base,
+            location: &location,
+            tables: self.locations(),
             address,
             cache: &mut cache,
         });
@@ -720,7 +704,6 @@ impl DwarfVariableInfo {
             self.endian,
             address,
             &mut frame_base,
-            &self.evaluation_units,
             runtime,
             budget,
         )
@@ -782,10 +765,22 @@ pub(super) fn runtime_error(error: EvaluateError) -> VariableRuntimeError {
 mod tests {
     use super::*;
 
-    /// A catalog of functions `0..described.len()`, of which those
+    /// An image holding `calls`, whose expressions `pool` holds.
+    fn sealed(calls: &Calls, pool: &LocationsBuilder) -> crate::image::Image {
+        let mut builder = crate::image::Builder::new(crate::TargetDescription::X86_64);
+        let mut strings = crate::image::StringsBuilder::default();
+        pool.add_to(&mut builder);
+        calls::add_to(&mut builder, &mut strings, calls).expect("the calls fit");
+        builder.bytes(crate::image::TableKind::Strings, strings.into_bytes());
+        builder
+            .seal(crate::image::Limits::default())
+            .expect("the calls are valid")
+    }
+
+    /// The calls of functions `0..described.len()`, of which those
     /// `described` say what tail calls they make: `tail_calls`, from one
     /// function to another or to code outside the module.
-    fn catalog(described: &[bool], tail_calls: &[(usize, Option<usize>)]) -> CallSiteCatalog {
+    fn catalog(described: &[bool], tail_calls: &[(u32, Option<u32>)]) -> crate::image::Image {
         let mut functions = described
             .iter()
             .map(|&tail_calls_described| CallingFunction {
@@ -795,12 +790,11 @@ mod tests {
                 tail_calls: Vec::new(),
             })
             .collect::<Vec<_>>();
-        let sites = tail_calls
-            .iter()
-            .enumerate()
+        let sites = (0_u32..)
+            .zip(tail_calls)
             .map(|(site, &(function, enters))| {
-                functions[function].tail_calls.push(site);
-                CatalogCallSite {
+                functions[function as usize].tail_calls.push(site);
+                calls::CallSite {
                     function,
                     return_address: None,
                     target: SiteTarget::Unknown,
@@ -811,29 +805,16 @@ mod tests {
                 }
             })
             .collect();
-        CallSiteCatalog {
-            sites,
-            functions,
-            returns: BTreeMap::new(),
-        }
+        sealed(&Calls { functions, sites }, &LocationsBuilder::default())
     }
 
     /// What a call passed is what the one parameter entry naming the place
     /// says; a call that describes one place twice could have passed either.
     #[test]
     fn a_call_passes_what_its_one_parameter_entry_says() {
-        let value = |bytes: &[u8]| Expression {
-            bytes: Arc::from(bytes),
-            encoding: gimli::Encoding {
-                format: gimli::Format::Dwarf32,
-                version: 5,
-                address_size: 8,
-            },
-            unit: 0,
-            indexed_addresses: Arc::default(),
-            procedures: Arc::default(),
-        };
-        let site = |parameters| CatalogCallSite {
+        let mut pool = super::super::tests::Pool::new([]);
+        let (first, second) = (pool.add(&[1]), pool.add(&[2]));
+        let site = |parameters| calls::CallSite {
             function: 0,
             return_address: None,
             target: SiteTarget::Unknown,
@@ -842,15 +823,31 @@ mod tests {
             parameters,
             malformed: None,
         };
-        let in_register = |register, bytes: &[u8]| SiteParameter {
+        let in_register = |register, value| SiteParameter {
             register: Some(register),
             parameter: None,
-            value: Some(value(bytes)),
+            value: Some(value),
             data_value: None,
         };
-        let one = site(vec![in_register(5, &[1]), in_register(4, &[2])]);
-        let passed = |site: &CatalogCallSite, parameter| match site.passed(parameter) {
-            Ok(expression) => Ok(expression.bytes.to_vec()),
+        let twice = site(vec![in_register(5, first), in_register(5, second)]);
+        let one = site(vec![in_register(5, first), in_register(4, second)]);
+        let functions = vec![CallingFunction {
+            name: None,
+            frame_base: Metadata::Absent(MetadataAbsence::NotApplicable),
+            tail_calls_described: false,
+            tail_calls: Vec::new(),
+        }];
+        let image = sealed(
+            &Calls {
+                functions,
+                sites: vec![one, twice],
+            },
+            &pool.0,
+        );
+        let view = CallView::new(&image);
+        let (one, twice) = (SiteId(0), SiteId(1));
+        let passed = |site, parameter| match passed(view.site(site).unwrap(), parameter) {
+            Ok(expression) => Ok(pool.get(expression).bytes().to_vec()),
             Err(VariableRuntimeError::Unavailable(VariableUnavailableReason::EntryValue(
                 EntryValueUnavailableReason::NoParameter,
             ))) => Err("not passed"),
@@ -859,14 +856,10 @@ mod tests {
                 panic!("refused for another reason")
             }
         };
-        assert_eq!(passed(&one, EntryParameter::Register(4)), Ok(vec![2]));
-        assert_eq!(passed(&one, EntryParameter::Register(1)), Err("not passed"));
-        assert_eq!(passed(&one, EntryParameter::Referent(4)), Err("not passed"));
-        let twice = site(vec![in_register(5, &[1]), in_register(5, &[2])]);
-        assert_eq!(
-            passed(&twice, EntryParameter::Register(5)),
-            Err("malformed")
-        );
+        assert_eq!(passed(one, EntryParameter::Register(4)), Ok(vec![2]));
+        assert_eq!(passed(one, EntryParameter::Register(1)), Err("not passed"));
+        assert_eq!(passed(one, EntryParameter::Referent(4)), Err("not passed"));
+        assert_eq!(passed(twice, EntryParameter::Register(5)), Err("malformed"));
     }
 
     /// A frame's function was entered by the call its caller made, or by
@@ -877,7 +870,7 @@ mod tests {
         use EntryValueUnavailableReason::{TailCalls, TargetMismatch};
 
         let all = [true; 4];
-        let cases: [(&str, CallSiteCatalog, usize, Result<Vec<usize>, _>); 9] = [
+        let cases: Vec<(&str, crate::image::Image, u32, Result<Vec<u32>, _>)> = vec![
             ("entered directly", catalog(&all, &[]), 0, Ok(vec![])),
             (
                 "tail calls that lead elsewhere",
@@ -932,12 +925,14 @@ mod tests {
             ),
         ];
         for (case, catalog, to, expected) in cases {
-            let path = catalog.tail_path(0, to).map_err(|error| match error {
-                VariableRuntimeError::Unavailable(VariableUnavailableReason::EntryValue(
-                    reason,
-                )) => reason,
-                _ => panic!("{case}: refused for no reason of entry values"),
-            });
+            let path = tail_path(CallView::new(&catalog), 0, to)
+                .map(|path| path.into_iter().map(|site| site.0).collect())
+                .map_err(|error| match error {
+                    VariableRuntimeError::Unavailable(VariableUnavailableReason::EntryValue(
+                        reason,
+                    )) => reason,
+                    _ => panic!("{case}: refused for no reason of entry values"),
+                });
             assert_eq!(path, expected, "{case}");
         }
     }

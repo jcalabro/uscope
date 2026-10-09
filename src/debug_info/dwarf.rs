@@ -413,10 +413,9 @@ fn load_image(
 
     drop(phase);
     let phase = crate::span!("prologues");
-    // The prologue, variable, and coroutine analyses below still read rows
-    // and ranges as records: an adapter until they read the tables (P2-P4).
+    // The prologue and coroutine analyses below still read rows as
+    // records: an adapter until they read the tables (P4).
     let statements = line_tables.statement_rows();
-    let lines = line_tables.line_entries();
     super::roles::link_loop_bodies(&mut function_metadata.functions);
     refine_proved_prologue_entries(
         &object,
@@ -434,8 +433,6 @@ fn load_image(
         image_id,
         variables::CodeMetadata {
             instance_ids: &function_metadata.instance_ids,
-            lines: &lines,
-            instances: &function_metadata.code_instances,
         },
         &mut files,
     )?;
@@ -473,15 +470,9 @@ fn load_image(
     } else {
         BTreeMap::new()
     };
-    #[cfg(target_arch = "x86_64")]
-    variables.info.note_held(
-        &ObjectCode(&object),
-        &function_metadata.code_instances,
-        &resume_points,
-    );
     #[cfg(not(target_arch = "x86_64"))]
     let resume_points = BTreeMap::new();
-    drop((statements, lines));
+    drop(statements);
     drop(phase);
     let phase = crate::span!("unwind_and_symbols");
     let go_code = go_code_ranges(&dwarf, &catalog)?;
@@ -515,6 +506,10 @@ fn load_image(
                 got_slots: symbols.got_slots,
                 globals: variables.globals,
                 types: variables.types,
+                locations: variables.locations,
+                variables: variables.variables,
+                calls: variables.calls,
+                type_facts: variables.type_facts,
                 vtables: variables.vtables,
                 coroutines,
                 resume_points,
@@ -543,7 +538,10 @@ fn load_image(
 
     drop(phase);
     let mut variable_info = variables.info;
-    variable_info.bind_types(Arc::clone(image.type_table()));
+    variable_info.bind(&image);
+    // Which variables an await holds is asked of the image's code.
+    #[cfg(target_arch = "x86_64")]
+    variable_info.note_held(&ObjectCode(&object), &image);
     Ok(DebugInfo {
         unwind: Arc::new(DwarfUnwindInfo {
             tables: Arc::clone(image.tables()),

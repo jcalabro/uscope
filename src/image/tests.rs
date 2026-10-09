@@ -1,3 +1,4 @@
+use super::calls::{CallSiteRecord, CallingFunctionRecord, SiteParameterRecord};
 use super::facts::{FactsRecord, FactsView, ThreadLocalRecord};
 use super::format::Header;
 use super::functions::{
@@ -9,19 +10,29 @@ use super::lines::{
     self, ControlBoundary, FileRecord, LineExtra, LineRange, LineRow, LineSequence, LineTables,
     RowAddress, StatementKey, row_flags,
 };
+use super::locations::{
+    BaseTypeRecord, EvaluationUnitRecord, ExpressionRecord, IndexedAddressRecord,
+    LocationEntryRecord, LocationListRecord, ProcedureRecord,
+};
 use super::packages::{PackageRecord, PackageView, PackagedRecord};
 use super::sample::{
-    SAMPLE_PACKAGES, TARGET, read_everything, reseal, sample, sample_functions, sample_got,
-    sample_instances, sample_packaged, sample_rows, sample_sections, sample_sources,
-    sample_symbols, sample_thread_locals, sample_types, sample_unwind, seal,
+    ENCODING, SAMPLE_PACKAGES, TARGET, read_everything, read_locations, reseal, sample,
+    sample_functions, sample_got, sample_instances, sample_locations, sample_packaged, sample_rows,
+    sample_sections, sample_sources, sample_symbols, sample_thread_locals, sample_types,
+    sample_unwind, seal,
 };
 use super::symbols::{GotRecord, SectionRecord, SymbolRecord, SymbolView};
+use super::type_facts::{ComplexPartRecord, DynamicLayoutRecord, TypeFactRecord};
 use super::types::{
     ArgumentRecord, BaseRecord, DimensionRecord, EnumeratorRecord, IdentityRecord, Item,
     MemberRecord, RuntimeTypeRecord, SelectorRecord, TypeRecord, TypeTable, TypeView,
     VariantRecord,
 };
 use super::unwind::{FdeMiss, FrameSaveRecord, UnwindRecord, UnwindView, unwind_flags};
+use super::variables::{
+    CaptureRecord, CodeRange, ConstantRecord, DwarfProcedureRecord, FunctionStartRecord, Keyed,
+    ObjectRecord, ScopeRecord, VariableFunctionRecord,
+};
 use super::*;
 use crate::{
     AddressRange, BreakpointEntry, CodeInstanceId, EntryProvenance, FunctionId, ImageAddress,
@@ -294,10 +305,168 @@ fn the_schema_is_the_records_layout() {
         [value.bits, value.signed, reference, kind]
     );
     check!(TableKind::GoRuntimeTypes, RuntimeTypeRecord, [offset, ty]);
+    check!(
+        TableKind::Expressions,
+        ExpressionRecord,
+        [
+            bytes,
+            length,
+            unit,
+            addresses,
+            address_count,
+            procedures,
+            procedure_count,
+            version,
+            address_size,
+            dwarf64
+        ]
+    );
+    check!(
+        TableKind::IndexedAddresses,
+        IndexedAddressRecord,
+        [index, address]
+    );
+    check!(TableKind::Procedures, ProcedureRecord, [offset, list]);
+    check!(TableKind::LocationLists, LocationListRecord, [first, count]);
+    check!(
+        TableKind::LocationEntries,
+        LocationEntryRecord,
+        [start, end, expression, flags]
+    );
+    check!(
+        TableKind::EvaluationUnits,
+        EvaluationUnitRecord,
+        [offset, base_types, base_type_count, language, flags]
+    );
+    check!(TableKind::BaseTypes, BaseTypeRecord, [offset, value_type]);
+    check!(TableKind::ScopeRanges, CodeRange, [start, end]);
+    check!(
+        TableKind::Scopes,
+        ScopeRecord,
+        [
+            ranges,
+            range_count,
+            instance,
+            go_instance,
+            lexical_depth,
+            frame_base,
+            frame_base_kind
+        ]
+    );
+    check!(
+        TableKind::DataObjects,
+        ObjectRecord,
+        [
+            name,
+            declaration.file,
+            declaration.line,
+            declaration.column,
+            scope,
+            ty,
+            escaped,
+            coroutine,
+            value,
+            malformed,
+            debug_info_offset,
+            kind,
+            value_kind,
+            flags
+        ]
+    );
+    check!(TableKind::Constants, ConstantRecord, [low, high, kind]);
+    check!(
+        TableKind::VariableFunctions,
+        VariableFunctionRecord,
+        [
+            ranges,
+            range_count,
+            objects,
+            object_count,
+            name,
+            captures,
+            capture_count,
+            returned_name,
+            returned_type,
+            other_language,
+            language,
+            returns,
+            flags
+        ]
+    );
+    check!(
+        TableKind::Captures,
+        CaptureRecord,
+        [name, offset, ty, malformed]
+    );
+    check!(
+        TableKind::FunctionStarts,
+        FunctionStartRecord,
+        [start, end, prefix_max_end, function]
+    );
+    check!(
+        TableKind::DwarfProcedures,
+        DwarfProcedureRecord,
+        [offset, location, location_kind]
+    );
+    check!(
+        TableKind::CallingFunctions,
+        CallingFunctionRecord,
+        [
+            name,
+            frame_base,
+            tail_calls,
+            tail_call_count,
+            frame_base_kind,
+            flags
+        ]
+    );
+    check!(
+        TableKind::CallSites,
+        CallSiteRecord,
+        [
+            function,
+            return_address,
+            target,
+            enters,
+            jump_instruction,
+            jump_lookup,
+            parameters,
+            parameter_count,
+            malformed,
+            target_kind,
+            flags
+        ]
+    );
+    check!(
+        TableKind::SiteParameters,
+        SiteParameterRecord,
+        [register, parameter, value, data_value, flags]
+    );
+    for kind in [TableKind::DictionaryIndices, TableKind::PassedByValue] {
+        assert_eq!(schema::record(kind), "TypeFactRecord");
+        check!(kind, TypeFactRecord, [ty, value]);
+    }
+    check!(TableKind::ComplexParts, ComplexPartRecord, [name, size, ty]);
+    check!(
+        TableKind::DynamicLayouts,
+        DynamicLayoutRecord,
+        [aggregate, first, second, expression, kind]
+    );
+    for kind in [
+        TableKind::GoEntries,
+        TableKind::ObjectOffsets,
+        TableKind::CallReturns,
+    ] {
+        assert_eq!(schema::record(kind), "Keyed");
+        check!(kind, Keyed, [key, value]);
+    }
     for kind in [
         TableKind::TypeParameters,
         TableKind::IdentityStrings,
         TableKind::TypeClasses,
+        TableKind::FunctionObjects,
+        TableKind::Globals,
+        TableKind::TailCalls,
     ] {
         assert_eq!(schema::record(kind), "Item");
         check!(kind, Item, [value]);
@@ -332,7 +501,7 @@ fn the_schema_is_the_records_layout() {
     // A change to any record changes this; bump the format with it.
     assert_eq!(
         schema::layout_fingerprint(),
-        0x96b3_6b54_1c77_6aea,
+        0x7748_7ed2_92f4_b5fe,
         "the layout changed:\n{}",
         schema::schema_text()
     );
@@ -1827,6 +1996,1053 @@ mod snapshot {
         assert!(
             matches!(error, ReadError::Changed { attempts: 3, .. }),
             "{error}"
+        );
+    }
+}
+
+/// Locations read back from an image as they were pooled, and pooling one
+/// again finds it rather than adding a copy.
+#[test]
+#[expect(clippy::too_many_lines, reason = "one check for each field and query")]
+fn locations_read_back_as_they_were_pooled() {
+    use super::locations::{ExpressionId, LocationListId, LocationTables};
+
+    let mut pool = sample_locations();
+    let (tables, files) = sample();
+    let image = reopen(seal(&tables, &files).unwrap().as_bytes()).unwrap();
+    let read = LocationTables::new(&image);
+    let (expressions, lists) = (
+        image.table::<ExpressionRecord>().len(),
+        image.table::<LocationListRecord>().len(),
+    );
+    assert_eq!((expressions, lists), (3, 3));
+    assert_eq!(
+        read_locations(read, expressions, lists),
+        read_locations(pool.tables(), expressions, lists)
+    );
+
+    let caller = read.expression(ExpressionId(2));
+    assert_eq!(caller.bytes(), [0x98, 0x20, 0, 0x9f]);
+    assert_eq!(caller.unit_offset(), Some(0x100));
+    assert_eq!(read.unit_language(caller.unit()), Some(gimli::DW_LANG_C11));
+    assert_eq!(caller.encoding().format, gimli::Format::Dwarf64);
+    assert_eq!(caller.encoding().address_size, 4);
+    assert_eq!(caller.base_type(0x10), Some(gimli::ValueType::I64));
+    assert_eq!(caller.base_type(0x30), Some(gimli::ValueType::U32));
+    assert_eq!(caller.base_type(0x20), None);
+    assert_eq!(
+        caller.addresses().collect::<Vec<_>>(),
+        [(1, 0x1800), (3, 0x2000)]
+    );
+    assert_eq!(caller.indexed_address(3), Some(0x2000));
+    assert_eq!(caller.indexed_address(2), None);
+    assert_eq!(
+        caller.procedures().collect::<Vec<_>>(),
+        [(0x120, None), (0x140, Some(LocationListId(0)))]
+    );
+    assert!(matches!(
+        caller.procedure(0x120),
+        Some(super::locations::Procedure::Unlocated)
+    ));
+    assert_eq!(
+        caller
+            .procedure(0x140)
+            .and_then(super::locations::Procedure::locations)
+            .map(|list| list
+                .entries()
+                .map(|(range, expression)| (range, expression.id()))
+                .collect::<Vec<_>>()),
+        Some(vec![
+            (None, ExpressionId(0)),
+            (Some(super::sample::range(0x1000, 0x1010)), ExpressionId(1))
+        ])
+    );
+    assert!(caller.procedure(0x130).is_none());
+    let second = read.expression(ExpressionId(1));
+    assert_eq!((second.unit_offset(), read.unit_language(1)), (None, None));
+    assert!(read.list(LocationListId(2)).is_empty());
+
+    // The same contents are the same row, however their parts were
+    // ordered; any difference is another.
+    let unit = caller.unit();
+    let encoding = caller.encoding();
+    let again = pool
+        .expression(
+            &[0x98, 0x20, 0, 0x9f],
+            unit,
+            encoding,
+            &[(1, 0x1800), (3, 0x2000)],
+            &[(0x120, None), (0x140, Some(LocationListId(0)))],
+        )
+        .unwrap();
+    assert_eq!(again, ExpressionId(2));
+    let differing = [
+        pool.expression(
+            &[0x98, 0x20, 0, 0x9f],
+            unit,
+            ENCODING,
+            &[(1, 0x1800), (3, 0x2000)],
+            &[(0x120, None), (0x140, Some(LocationListId(0)))],
+        ),
+        pool.expression(
+            &[0x98, 0x20, 0, 0x9f],
+            unit,
+            encoding,
+            &[(1, 0x1800)],
+            &[(0x120, None), (0x140, Some(LocationListId(0)))],
+        ),
+        pool.expression(
+            &[0x98, 0x20, 0, 0x9f],
+            unit,
+            encoding,
+            &[(1, 0x1800), (3, 0x2000)],
+            &[(0x140, Some(LocationListId(0)))],
+        ),
+        pool.expression(
+            &[0x98, 0x20, 0, 0x9f],
+            1,
+            encoding,
+            &[(1, 0x1800), (3, 0x2000)],
+            &[(0x120, None), (0x140, Some(LocationListId(0)))],
+        ),
+    ];
+    assert_eq!(
+        differing.map(Result::unwrap),
+        [3, 4, 5, 6].map(ExpressionId)
+    );
+    assert_eq!(
+        pool.list(&[
+            (Some(super::sample::range(0x1000, 0x1004)), ExpressionId(2)),
+            (None, ExpressionId(0))
+        ]),
+        Ok(LocationListId(1))
+    );
+    assert_eq!(
+        pool.list(&[
+            (None, ExpressionId(0)),
+            (Some(super::sample::range(0x1000, 0x1004)), ExpressionId(2))
+        ]),
+        Ok(LocationListId(3))
+    );
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "one check for each field and query")]
+fn validation_rejects_locations_that_disagree() {
+    use super::locations::unit_flags;
+
+    let unit =
+        |change: fn(&mut [EvaluationUnitRecord])| tampered(TableKind::EvaluationUnits, change);
+    let base = |change: fn(&mut [BaseTypeRecord])| tampered(TableKind::BaseTypes, change);
+    let list = |change: fn(&mut [LocationListRecord])| tampered(TableKind::LocationLists, change);
+    let entry =
+        |change: fn(&mut [LocationEntryRecord])| tampered(TableKind::LocationEntries, change);
+    let expression = |change: fn(&mut [ExpressionRecord])| tampered(TableKind::Expressions, change);
+    let address =
+        |change: fn(&mut [IndexedAddressRecord])| tampered(TableKind::IndexedAddresses, change);
+    let procedure = |change: fn(&mut [ProcedureRecord])| tampered(TableKind::Procedures, change);
+    let cases = [
+        (
+            "an unknown unit flag",
+            unit(|u| u[0].flags |= 0x80),
+            "evaluation unit",
+        ),
+        (
+            "an offset not flagged",
+            unit(|u| u[1].offset = 4.into()),
+            "evaluation unit",
+        ),
+        (
+            "a language not flagged",
+            unit(|u| u[1].language = 4.into()),
+            "evaluation unit",
+        ),
+        (
+            "base types past the table",
+            unit(|u| u[0].base_type_count = 3.into()),
+            "evaluation unit",
+        ),
+        (
+            "an unknown value type",
+            base(|b| b[0].value_type = 11),
+            "evaluation unit",
+        ),
+        (
+            "no value type",
+            base(|b| b[1].value_type = 0),
+            "evaluation unit",
+        ),
+        (
+            "base types out of order",
+            base(|b| b.swap(0, 1)),
+            "evaluation unit",
+        ),
+        (
+            "entries past the table",
+            list(|l| l[2].count = 1.into()),
+            "location list",
+        ),
+        (
+            "an entry of no expression",
+            entry(|e| e[0].expression = 3.into()),
+            "location list",
+        ),
+        (
+            "a default with a range",
+            entry(|e| e[0].end = 1.into()),
+            "location list",
+        ),
+        (
+            "an empty range",
+            entry(|e| e[1].end = e[1].start),
+            "location list",
+        ),
+        (
+            "an unknown entry flag",
+            entry(|e| e[0].flags = 2),
+            "location list",
+        ),
+        (
+            "an expression of no unit",
+            expression(|x| x[0].unit = 2.into()),
+            "expression",
+        ),
+        (
+            "an unknown version",
+            expression(|x| x[0].version = 6.into()),
+            "expression",
+        ),
+        (
+            "an odd address size",
+            expression(|x| x[0].address_size = 3),
+            "expression",
+        ),
+        (
+            "an odd format",
+            expression(|x| x[0].dwarf64 = 2),
+            "expression",
+        ),
+        (
+            "bytes past the pool",
+            expression(|x| x[2].length = 5.into()),
+            "expression",
+        ),
+        (
+            "addresses past the table",
+            expression(|x| x[1].address_count = 4.into()),
+            "expression",
+        ),
+        (
+            "procedures past the table",
+            expression(|x| x[2].procedure_count = 3.into()),
+            "expression",
+        ),
+        (
+            "addresses out of order",
+            address(|a| a.swap(1, 2)),
+            "expression",
+        ),
+        (
+            "procedures out of order",
+            procedure(|p| p.swap(0, 1)),
+            "expression",
+        ),
+        (
+            "a procedure of no list",
+            procedure(|p| p[0].list = 3.into()),
+            "expression",
+        ),
+    ];
+    assert_eq!(unit_flags::ALL, 3);
+    for (name, error, expected) in cases {
+        assert!(
+            matches!(&error, Err(ImageError::Malformed(why)) if why.contains(expected)),
+            "{name}: {error:?}"
+        );
+    }
+}
+
+/// Data objects and functions read back as they were encoded: objects of
+/// one scope share its row and code, and a later entry for an index's key
+/// replaces an earlier one.
+#[test]
+fn variables_read_back_as_they_were_encoded() {
+    use super::variables::{
+        ConstantValue, Metadata, MetadataAbsence, Object, ObjectId, ReturnConvention,
+        TypeResolution, ValueDescription, VariableFunctionId, VariableView,
+    };
+
+    let input = super::sample::sample_variables();
+    let (tables, files) = sample();
+    let image = reopen(seal(&tables, &files).unwrap().as_bytes()).unwrap();
+    let view = VariableView::new(&image);
+    // x, y, u, and n share a scope; p, g, and f each have their own, and
+    // every scope but the global's shares its code with a function.
+    assert_eq!(image.table::<ScopeRecord>().len(), 4);
+    assert_eq!(image.table::<CodeRange>().len(), 5);
+    for (index, expected) in input.objects.iter().enumerate() {
+        let object = view.object(ObjectId(u32::try_from(index).unwrap()));
+        assert_eq!(object.name(), &*expected.name);
+        assert_eq!(object.kind(), expected.kind);
+        assert_eq!(object.declaration(), expected.declaration);
+        assert!(object.ranges().eq(expected.ranges.iter().copied()));
+        assert_eq!(object.go_declaration(), expected.go_declaration);
+        assert_eq!(object.instance(), expected.instance);
+        assert_eq!(object.lexical_depth(), expected.lexical_depth);
+        assert_eq!(object.type_info(), expected.type_info);
+        assert_eq!(object.escaped(), expected.escaped);
+        assert_eq!(object.hidden(), expected.hidden);
+        assert_eq!(object.coroutine(), expected.coroutine);
+        assert_eq!(object.value(), expected.value);
+        assert_eq!(object.frame_base(), expected.frame_base);
+        assert_eq!(object.malformed(), expected.malformed);
+        assert_eq!(object.debug_info_offset(), expected.debug_info_offset);
+    }
+    let x = view.object(ObjectId(0));
+    assert!(x.in_scope(ImageAddress::new(0x100f)) && !x.in_scope(ImageAddress::new(0x1010)));
+    assert_eq!(x.location(), Some(super::locations::LocationListId(0)));
+    assert_eq!(view.object(ObjectId(4)).location(), None);
+    assert_eq!(
+        view.object(ObjectId(4)).value(),
+        Metadata::Value(ValueDescription::Constant(ConstantValue::Unsigned(
+            u128::MAX - 1
+        )))
+    );
+    for (index, expected) in input.functions.iter().enumerate() {
+        let function = view.function(VariableFunctionId(u32::try_from(index).unwrap()));
+        assert!(
+            function
+                .objects()
+                .map(|object| object.id().0)
+                .eq(expected.objects.iter().copied())
+        );
+        assert_eq!(function.name(), expected.name.as_deref());
+        assert_eq!(function.captures(), expected.captures);
+        assert_eq!(function.returns(), expected.returns);
+    }
+    assert_eq!(
+        view.function(VariableFunctionId(0)).returns(),
+        Some(ReturnConvention::GoRegisters)
+    );
+    let found = |address| {
+        view.function_at(ImageAddress::new(address))
+            .map(|f| f.id().0)
+    };
+    assert_eq!(
+        [
+            0xfff, 0x1000, 0x1006, 0x100c, 0x100f, 0x1010, 0x2007, 0x2008, 0x3000
+        ]
+        .map(found),
+        [
+            None,
+            Some(0),
+            Some(1),
+            Some(0),
+            Some(0),
+            None,
+            Some(0),
+            None,
+            Some(3)
+        ]
+    );
+    let go = |address| {
+        view.go_function(ImageAddress::new(address))
+            .map(|f| f.id().0)
+    };
+    assert_eq!([0x1000, 0x1004, 0x1008].map(go), [Some(1), Some(1), None]);
+    assert!(view.globals().map(Object::name).eq(["g"]));
+    assert_eq!(view.global(0).map(Object::id), Some(ObjectId(2)));
+    assert!(view.global(1).is_none());
+    let at = |offset| view.object_at_offset(offset).map(|object| object.id().0);
+    assert_eq!(
+        [0x30, 0x40, 0x50, 0x41].map(at),
+        [Some(5), Some(0), Some(3), None]
+    );
+    assert_eq!(
+        view.procedure(0x80),
+        Some(Metadata::Absent(MetadataAbsence::NoLocation))
+    );
+    assert_eq!(view.procedure(0x70), Some(Metadata::Malformed("m".into())));
+    assert_eq!(view.procedure(0x60), None);
+    assert!(matches!(
+        view.object(ObjectId(1)).type_info(),
+        TypeResolution::Malformed(why) if &*why == "no type"
+    ));
+    assert_eq!(view.object(ObjectId(1)).type_id(), None);
+}
+
+proptest::proptest! {
+    /// A function is found at an address as before the image held them:
+    /// of the functions whose code begins at or before it, those beginning
+    /// last first, the first of them whose code contains it.
+    #[test]
+    fn a_function_is_found_where_its_code_holds_the_address(
+        functions in proptest::collection::vec(
+            proptest::collection::vec((0_u64..64, 1_u64..24), 0..3),
+            0..8,
+        ),
+        addresses in proptest::collection::vec(0_u64..96, 1..16),
+    ) {
+        use super::variables::{Function, Variables, VariableView, add_to};
+
+        let functions = functions
+            .into_iter()
+            .map(|ranges| Function {
+                ranges: ranges
+                    .into_iter()
+                    .map(|(start, length)| super::sample::range(start, start + length))
+                    .collect(),
+                objects: Vec::new(),
+                name: None,
+                captures: Ok(Vec::new()),
+                returns: None,
+            })
+            .collect::<Vec<_>>();
+        let mut starts = std::collections::BTreeMap::<u64, Vec<usize>>::new();
+        for (index, function) in functions.iter().enumerate() {
+            for range in function.ranges.iter() {
+                starts.entry(range.start.get()).or_default().push(index);
+            }
+        }
+        let mut builder = Builder::new(TARGET);
+        let mut strings = StringsBuilder::default();
+        add_to(
+            &mut builder,
+            &mut strings,
+            &Variables { functions: functions.clone(), ..Variables::default() },
+        )
+        .unwrap();
+        builder.bytes(TableKind::Strings, strings.into_bytes());
+        let image = builder.seal(Limits::default()).unwrap();
+        let view = VariableView::new(&image);
+        for address in addresses {
+            let expected = starts
+                .range(..=address)
+                .rev()
+                .flat_map(|(_, functions)| functions.iter().copied())
+                .find(|index| {
+                    functions[*index]
+                        .ranges
+                        .iter()
+                        .any(|range| range.contains(ImageAddress::new(address)))
+                });
+            let found = view
+                .function_at(ImageAddress::new(address))
+                .map(|function| function.id().0 as usize);
+            proptest::prop_assert_eq!(found, expected, "at {:#x}", address);
+        }
+    }
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "one case for each check")]
+fn validation_rejects_variables_that_disagree() {
+    use super::variables::{function_flags, object_flags, returns, value_kinds};
+
+    let ranges = |change: fn(&mut [CodeRange])| tampered(TableKind::ScopeRanges, change);
+    let scope = |change: fn(&mut [ScopeRecord])| tampered(TableKind::Scopes, change);
+    let object = |change: fn(&mut [ObjectRecord])| tampered(TableKind::DataObjects, change);
+    let constant = |change: fn(&mut [ConstantRecord])| tampered(TableKind::Constants, change);
+    let function =
+        |change: fn(&mut [VariableFunctionRecord])| tampered(TableKind::VariableFunctions, change);
+    let capture = |change: fn(&mut [CaptureRecord])| tampered(TableKind::Captures, change);
+    let start =
+        |change: fn(&mut [FunctionStartRecord])| tampered(TableKind::FunctionStarts, change);
+    let keyed = |kind, change: fn(&mut [Keyed])| tampered(kind, change);
+    let item = |kind, change: fn(&mut [Item])| tampered(kind, change);
+    let procedure =
+        |change: fn(&mut [DwarfProcedureRecord])| tampered(TableKind::DwarfProcedures, change);
+    let cases = [
+        (
+            "empty code",
+            ranges(|r| r[0].end = r[0].start),
+            "code is empty",
+        ),
+        (
+            "code past the table",
+            scope(|s| s[0].range_count = 9.into()),
+            "scope",
+        ),
+        (
+            "an unknown instance",
+            scope(|s| s[0].instance = 4.into()),
+            "scope",
+        ),
+        (
+            "an unknown Go instance",
+            scope(|s| s[0].go_instance = 4.into()),
+            "scope",
+        ),
+        (
+            "a constant frame base",
+            scope(|s| s[0].frame_base_kind = value_kinds::CONSTANT),
+            "scope",
+        ),
+        (
+            "a frame base of no list",
+            scope(|s| s[0].frame_base = 3.into()),
+            "scope",
+        ),
+        (
+            "an absence naming something",
+            scope(|s| s[1].frame_base = 1.into()),
+            "scope",
+        ),
+        (
+            "an unknown value kind",
+            scope(|s| s[0].frame_base_kind = 9),
+            "scope",
+        ),
+        (
+            "bytes past the pool",
+            constant(|c| c[1].high = 4.into()),
+            "constant",
+        ),
+        (
+            "an unknown constant kind",
+            constant(|c| c[0].kind = 4),
+            "constant",
+        ),
+        (
+            "a name not in the pool",
+            object(|o| o[0].name = 0xffff_fff0.into()),
+            "data object",
+        ),
+        (
+            "an unknown file",
+            object(|o| o[0].declaration.file = 2.into()),
+            "data object",
+        ),
+        (
+            "an unknown scope",
+            object(|o| o[0].scope = 4.into()),
+            "data object",
+        ),
+        ("an unknown kind", object(|o| o[0].kind = 5), "data object"),
+        (
+            "an unknown flag",
+            object(|o| o[0].flags |= 0x80),
+            "data object",
+        ),
+        (
+            "an unknown type",
+            object(|o| o[0].ty = 999.into()),
+            "data object",
+        ),
+        (
+            "a malformed type not in the pool",
+            object(|o| o[1].ty = 0xffff_fff0.into()),
+            "data object",
+        ),
+        (
+            "an unknown escaped type",
+            object(|o| o[0].escaped = 999.into()),
+            "data object",
+        ),
+        (
+            "an unknown coroutine",
+            object(|o| o[0].coroutine = 999.into()),
+            "data object",
+        ),
+        (
+            "a reason not in the pool",
+            object(|o| o[1].malformed = 0xffff_fff0.into()),
+            "data object",
+        ),
+        (
+            "an offset not flagged",
+            object(|o| o[2].debug_info_offset = 1.into()),
+            "data object",
+        ),
+        (
+            "a Go declaration not declared",
+            object(|o| o[0].declaration = o[1].declaration),
+            "data object",
+        ),
+        (
+            "an unknown constant",
+            object(|o| o[1].value = 9.into()),
+            "data object",
+        ),
+        (
+            "a value of no list",
+            object(|o| o[0].value = 3.into()),
+            "data object",
+        ),
+        (
+            "an unknown value",
+            object(|o| o[0].value_kind = 9),
+            "data object",
+        ),
+        (
+            "a capture's name",
+            capture(|c| c[0].name = 0xffff_fff0.into()),
+            "capture",
+        ),
+        (
+            "a capture's flag",
+            capture(|c| c[0].malformed = 2),
+            "capture",
+        ),
+        (
+            "a capture's type",
+            capture(|c| c[0].ty = 999.into()),
+            "capture",
+        ),
+        (
+            "an unknown object",
+            item(TableKind::FunctionObjects, |i| i[0].value = 7.into()),
+            "no data object",
+        ),
+        (
+            "an unknown global",
+            item(TableKind::Globals, |i| i[0].value = 7.into()),
+            "no data object",
+        ),
+        (
+            "objects past the list",
+            function(|f| f[0].object_count = 8.into()),
+            "function",
+        ),
+        (
+            "a function's name",
+            function(|f| f[0].name = 0xffff_fff0.into()),
+            "function",
+        ),
+        (
+            "captures past the table",
+            function(|f| f[0].capture_count = 3.into()),
+            "function",
+        ),
+        (
+            "malformed captures with some",
+            function(|f| f[1].capture_count = 1.into()),
+            "function",
+        ),
+        (
+            "an unknown flag",
+            function(|f| f[0].flags |= 0x80),
+            "function",
+        ),
+        (
+            "an unknown convention",
+            function(|f| f[0].returns = 3),
+            "function",
+        ),
+        (
+            "Go's with a language",
+            function(|f| f[0].language = 1),
+            "function",
+        ),
+        (
+            "Go's rewritten",
+            function(|f| f[0].flags |= function_flags::REWRITTEN),
+            "function",
+        ),
+        (
+            "an unknown returned type",
+            function(|f| f[1].returned_type = 999.into()),
+            "function",
+        ),
+        (
+            "an unknown language",
+            function(|f| f[2].language = 200),
+            "function",
+        ),
+        (
+            "System V unnamed",
+            function(|f| f[1].returned_name = NONE.into()),
+            "function",
+        ),
+        (
+            "starts out of order",
+            start(|s| {
+                s.swap(0, 1);
+                s[0].prefix_max_end = s[0].end;
+                s[1].prefix_max_end = s[0].end.max(s[1].end);
+            }),
+            "function starts",
+        ),
+        (
+            "a wrong prefix",
+            start(|s| s[1].prefix_max_end = 0x100c.into()),
+            "function starts",
+        ),
+        (
+            "an empty start",
+            start(|s| s[0].end = s[0].start),
+            "function starts",
+        ),
+        (
+            "an unknown function",
+            start(|s| s[0].function = 4.into()),
+            "function starts",
+        ),
+        (
+            "Go entries out of order",
+            keyed(TableKind::GoEntries, |k| k.swap(0, 1)),
+            "index of variables",
+        ),
+        (
+            "an entry of no function",
+            keyed(TableKind::GoEntries, |k| k[0].value = 4.into()),
+            "index of variables",
+        ),
+        (
+            "an offset of no object",
+            keyed(TableKind::ObjectOffsets, |k| k[0].value = 7.into()),
+            "index of variables",
+        ),
+        (
+            "procedures out of order",
+            procedure(|p| p.swap(0, 1)),
+            "DWARF procedure",
+        ),
+        (
+            "a constant procedure",
+            procedure(|p| p[0].location_kind = value_kinds::CONSTANT),
+            "DWARF procedure",
+        ),
+    ];
+    assert_eq!(object_flags::ALL, 0b1111);
+    assert_eq!(returns::SYSTEM_V, 2);
+    for (name, error, expected) in cases {
+        assert!(
+            matches!(&error, Err(ImageError::Malformed(why)) if why.contains(expected)),
+            "{name}: {error:?}"
+        );
+    }
+}
+
+/// Calls read back as they were encoded, and the sites returning to an
+/// address are all found, however many.
+#[test]
+fn calls_read_back_as_they_were_encoded() {
+    use super::calls::{CallView, SiteId};
+
+    let input = super::sample::sample_calls();
+    let (tables, files) = sample();
+    let image = reopen(seal(&tables, &files).unwrap().as_bytes()).unwrap();
+    let view = CallView::new(&image);
+    for (index, expected) in (0_u32..).zip(&input.functions) {
+        let function = view.function(index);
+        assert_eq!(function.name(), expected.name);
+        assert_eq!(function.frame_base(), expected.frame_base);
+        assert_eq!(
+            function.tail_calls_described(),
+            expected.tail_calls_described
+        );
+        assert!(
+            function
+                .tail_calls()
+                .map(|site| site.0)
+                .eq(expected.tail_calls.iter().copied())
+        );
+    }
+    for (index, expected) in (0_u32..).zip(&input.sites) {
+        let site = view.site(SiteId(index)).unwrap();
+        assert_eq!(site.function(), expected.function);
+        assert_eq!(site.return_address(), expected.return_address);
+        assert_eq!(site.target(), expected.target);
+        assert_eq!(site.enters(), expected.enters);
+        assert_eq!(site.jump(), expected.jump);
+        assert!(site.parameters().eq(expected.parameters.iter().copied()));
+        assert_eq!(site.malformed(), expected.malformed);
+    }
+    assert!(view.site(SiteId(5)).is_none());
+    let returning = |address| {
+        view.returning_to(ImageAddress::new(address))
+            .map(|site| site.0)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(returning(0x1008), [0, 3]);
+    assert_eq!(returning(0x1004), [4]);
+    assert_eq!(returning(0x1005), [0; 0]);
+    assert_eq!(returning(0x2000), [0; 0]);
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "one check for each field and query")]
+fn validation_rejects_calls_that_disagree() {
+    use super::calls::{site_flags, targets};
+    use super::variables::value_kinds;
+
+    let function =
+        |change: fn(&mut [CallingFunctionRecord])| tampered(TableKind::CallingFunctions, change);
+    let site = |change: fn(&mut [CallSiteRecord])| tampered(TableKind::CallSites, change);
+    let parameter =
+        |change: fn(&mut [SiteParameterRecord])| tampered(TableKind::SiteParameters, change);
+    let tail = |change: fn(&mut [Item])| tampered(TableKind::TailCalls, change);
+    let returns = |change: fn(&mut [Keyed])| tampered(TableKind::CallReturns, change);
+    let cases = [
+        (
+            "a name not in the pool",
+            function(|f| f[0].name = 0xffff_fff0.into()),
+            "calling",
+        ),
+        ("an unknown flag", function(|f| f[0].flags = 2), "calling"),
+        (
+            "a frame base of no list",
+            function(|f| f[0].frame_base = 3.into()),
+            "calling",
+        ),
+        (
+            "a constant frame base",
+            function(|f| f[0].frame_base_kind = value_kinds::CONSTANT),
+            "calling",
+        ),
+        (
+            "tail calls past the table",
+            function(|f| f[2].tail_call_count = 2.into()),
+            "calling",
+        ),
+        (
+            "a tail call of no site",
+            tail(|t| t[0].value = 5.into()),
+            "names no site",
+        ),
+        (
+            "an unknown parameter flag",
+            parameter(|p| p[0].flags = 4),
+            "parameter",
+        ),
+        (
+            "a register not flagged",
+            parameter(|p| p[1].register = 3.into()),
+            "parameter",
+        ),
+        (
+            "a parameter not flagged",
+            parameter(|p| p[0].parameter = 3.into()),
+            "parameter",
+        ),
+        (
+            "a value of no expression",
+            parameter(|p| p[0].value = 3.into()),
+            "parameter",
+        ),
+        (
+            "a referent of no expression",
+            parameter(|p| p[1].data_value = 3.into()),
+            "parameter",
+        ),
+        (
+            "a site of no function",
+            site(|s| s[0].function = 3.into()),
+            "call site is",
+        ),
+        (
+            "entering no function",
+            site(|s| s[1].enters = 3.into()),
+            "call site is",
+        ),
+        (
+            "an unknown flag",
+            site(|s| s[0].flags |= 0x80),
+            "call site is",
+        ),
+        (
+            "a return not flagged",
+            site(|s| s[1].return_address = 1.into()),
+            "call site is",
+        ),
+        (
+            "a jump not flagged",
+            site(|s| s[0].jump_lookup = 1.into()),
+            "call site is",
+        ),
+        (
+            "parameters past the table",
+            site(|s| s[0].parameter_count = 3.into()),
+            "call site is",
+        ),
+        (
+            "a reason not in the pool",
+            site(|s| s[3].malformed = 0xffff_fff0.into()),
+            "call site is",
+        ),
+        (
+            "an unknown target",
+            site(|s| s[0].target_kind = 5),
+            "call site is",
+        ),
+        (
+            "an unknown naming something",
+            site(|s| s[4].target = 1.into()),
+            "call site is",
+        ),
+        (
+            "a symbol not in the pool",
+            site(|s| s[1].target = 0xffff_fff0.into()),
+            "call site is",
+        ),
+        (
+            "a target of no list",
+            site(|s| s[2].target = 3.into()),
+            "call site is",
+        ),
+        (
+            "a list past u32",
+            site(|s| {
+                s[2].target = (1_u64 << 40).into();
+                s[2].target_kind = targets::COMPUTED;
+            }),
+            "call site is",
+        ),
+        (
+            "returns out of order",
+            returns(|r| r.swap(0, 1)),
+            "where calls return",
+        ),
+        (
+            "a return of no site",
+            returns(|r| r[0].value = 5.into()),
+            "where calls return",
+        ),
+        (
+            "a return elsewhere",
+            returns(|r| r[0].key = 0x1009.into()),
+            "where calls return",
+        ),
+        (
+            "a return left out",
+            site(|s| {
+                s[1].flags |= site_flags::RETURN_ADDRESS;
+                s[1].return_address = 0x2000.into();
+            }),
+            "where calls return",
+        ),
+    ];
+    for (name, error, expected) in cases {
+        assert!(
+            matches!(&error, Err(ImageError::Malformed(why)) if why.contains(expected)),
+            "{name}: {error:?}"
+        );
+    }
+}
+
+/// Type facts read back by their keys, whatever order they were given in.
+#[test]
+fn type_facts_read_back_by_their_keys() {
+    use super::locations::ExpressionId;
+    use super::type_facts::{LayoutChild, TypeFactsView};
+
+    let (tables, files) = sample();
+    let image = reopen(seal(&tables, &files).unwrap().as_bytes()).unwrap();
+    let view = TypeFactsView::new(&image);
+    let ty = crate::TypeId::new;
+    assert_eq!(
+        [0, 2, 3, 5].map(|id| view.dictionary_index(ty(id))),
+        [None, Some(1), None, Some(0)]
+    );
+    assert_eq!(
+        [1, 2, 4].map(|id| view.passed_by_value(ty(id))),
+        [Some(true), None, Some(false)]
+    );
+    assert_eq!(view.complex_part("float", 4), Some(ty(1)));
+    assert_eq!(view.complex_part("double", 8), Some(ty(2)));
+    assert_eq!(view.complex_part("float", 8), Some(ty(3)));
+    assert_eq!(view.complex_part("float", 16), None);
+    assert_eq!(view.complex_part("long double", 8), None);
+    let layout = |aggregate, child| view.dynamic_layout(ty(aggregate), child);
+    assert_eq!(layout(4, LayoutChild::Discriminant), Some(ExpressionId(0)));
+    assert_eq!(layout(4, LayoutChild::Member(1)), Some(ExpressionId(2)));
+    assert_eq!(layout(4, LayoutChild::Base(1)), None);
+    assert_eq!(
+        layout(
+            1,
+            LayoutChild::VariantMember {
+                variant: 1,
+                member: 0
+            }
+        ),
+        Some(ExpressionId(1))
+    );
+    assert_eq!(
+        layout(
+            1,
+            LayoutChild::VariantMember {
+                variant: 0,
+                member: 1
+            }
+        ),
+        None
+    );
+}
+
+#[test]
+fn validation_rejects_type_facts_that_disagree() {
+    let fact = |kind, change: fn(&mut [TypeFactRecord])| tampered(kind, change);
+    let part = |change: fn(&mut [ComplexPartRecord])| tampered(TableKind::ComplexParts, change);
+    let layout =
+        |change: fn(&mut [DynamicLayoutRecord])| tampered(TableKind::DynamicLayouts, change);
+    let cases = [
+        (
+            "indices out of order",
+            fact(TableKind::DictionaryIndices, |f| f.swap(0, 1)),
+            "type fact",
+        ),
+        (
+            "an index of no type",
+            fact(TableKind::DictionaryIndices, |f| f[1].ty = 999.into()),
+            "type fact",
+        ),
+        (
+            "a class twice",
+            fact(TableKind::PassedByValue, |f| f[1].ty = f[0].ty),
+            "type fact",
+        ),
+        (
+            "passed neither way",
+            fact(TableKind::PassedByValue, |f| f[0].value = 2.into()),
+            "type fact",
+        ),
+        ("parts out of order", part(|p| p.swap(0, 1)), "complex"),
+        (
+            "a part's name",
+            part(|p| p[0].name = 0xffff_fff0.into()),
+            "complex",
+        ),
+        (
+            "a part of no type",
+            part(|p| p[0].ty = 999.into()),
+            "complex",
+        ),
+        (
+            "layouts out of order",
+            layout(|l| l.swap(0, 1)),
+            "run-time layout",
+        ),
+        (
+            "an aggregate of no type",
+            layout(|l| l[2].aggregate = 999.into()),
+            "run-time layout",
+        ),
+        (
+            "a layout of no expression",
+            layout(|l| l[0].expression = 3.into()),
+            "run-time layout",
+        ),
+        (
+            "an unknown child",
+            layout(|l| l[2].kind = 4),
+            "run-time layout",
+        ),
+        (
+            "a discriminant's index",
+            layout(|l| l[2].first = 1.into()),
+            "run-time layout",
+        ),
+        (
+            "a member's second index",
+            layout(|l| l[1].second = 1.into()),
+            "run-time layout",
+        ),
+    ];
+    for (name, error, expected) in cases {
+        assert!(
+            matches!(&error, Err(ImageError::Malformed(why)) if why.contains(expected)),
+            "{name}: {error:?}"
         );
     }
 }

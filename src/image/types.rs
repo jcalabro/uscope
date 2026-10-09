@@ -1356,6 +1356,11 @@ impl TypeTable {
         }
     }
 
+    /// The image holding the types, and the rest of its module's tables.
+    pub fn tables(&self) -> &Image {
+        &self.image
+    }
+
     pub fn view(&self) -> TypeView<'_> {
         TypeView::new(&self.image)
     }

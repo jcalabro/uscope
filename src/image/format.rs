@@ -187,11 +187,71 @@ pub enum TableKind {
     EnumeratorNames = 55,
     /// Types by Go runtime type descriptor.
     GoRuntimeTypes = 56,
+    /// DWARF expressions' operations.
+    ExpressionBytes = 57,
+    /// DWARF expressions.
+    Expressions = 58,
+    /// The addresses expressions' indexes name.
+    IndexedAddresses = 59,
+    /// The procedures expressions call.
+    Procedures = 60,
+    /// Lists of locations.
+    LocationLists = 61,
+    /// The locations of lists.
+    LocationEntries = 62,
+    /// The units expressions were read from.
+    EvaluationUnits = 63,
+    /// The base types units' typed operations name.
+    BaseTypes = 64,
+    /// The code of scopes and of the functions variables are in.
+    ScopeRanges = 65,
+    /// The scopes data objects are declared in.
+    Scopes = 66,
+    /// Data objects.
+    DataObjects = 67,
+    /// Data objects' constant values.
+    Constants = 68,
+    /// The bytes of constant blocks.
+    ConstantBytes = 69,
+    /// The functions whose frames show data objects.
+    VariableFunctions = 70,
+    /// Each function's data objects.
+    FunctionObjects = 71,
+    /// The variables Go closures captured.
+    Captures = 72,
+    /// Functions by where their code begins.
+    FunctionStarts = 73,
+    /// Go functions by their entry address.
+    GoEntries = 74,
+    /// Data objects by their entries' offsets.
+    ObjectOffsets = 75,
+    /// DWARF procedures by their entries' offsets.
+    DwarfProcedures = 76,
+    /// The data objects of globals.
+    Globals = 77,
+    /// What each function says of the calls it makes.
+    CallingFunctions = 78,
+    /// The tail calls each function makes.
+    TailCalls = 79,
+    /// Call sites.
+    CallSites = 80,
+    /// What call sites passed.
+    SiteParameters = 81,
+    /// Call sites by where their calls return.
+    CallReturns = 82,
+    /// The dictionary entry each Go shape names.
+    DictionaryIndices = 83,
+    /// Whether calls pass each C++ class by value.
+    PassedByValue = 84,
+    /// The float types of complex numbers' parts.
+    ComplexParts = 85,
+    /// The expressions finding aggregates' children at run time.
+    DynamicLayouts = 86,
 }
 
 impl TableKind {
     /// Every kind, in the order tables are laid out.
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 86] = [
         Self::Strings,
         Self::Files,
         Self::LineAddresses,
@@ -248,6 +308,36 @@ impl TableKind {
         Self::TypeClasses,
         Self::EnumeratorNames,
         Self::GoRuntimeTypes,
+        Self::ExpressionBytes,
+        Self::Expressions,
+        Self::IndexedAddresses,
+        Self::Procedures,
+        Self::LocationLists,
+        Self::LocationEntries,
+        Self::EvaluationUnits,
+        Self::BaseTypes,
+        Self::ScopeRanges,
+        Self::Scopes,
+        Self::DataObjects,
+        Self::Constants,
+        Self::ConstantBytes,
+        Self::VariableFunctions,
+        Self::FunctionObjects,
+        Self::Captures,
+        Self::FunctionStarts,
+        Self::GoEntries,
+        Self::ObjectOffsets,
+        Self::DwarfProcedures,
+        Self::Globals,
+        Self::CallingFunctions,
+        Self::TailCalls,
+        Self::CallSites,
+        Self::SiteParameters,
+        Self::CallReturns,
+        Self::DictionaryIndices,
+        Self::PassedByValue,
+        Self::ComplexParts,
+        Self::DynamicLayouts,
     ];
 
     pub const COUNT: usize = Self::ALL.len();

@@ -35,6 +35,15 @@ pub struct ModuleMetadata {
     pub got_slots: Vec<GotSlot>,
     pub globals: Vec<GlobalVariableInfo>,
     pub types: Arc<[TypeNode]>,
+    /// Where variables are: expressions and lists of them, with the units
+    /// they were read from.
+    pub locations: crate::image::locations::LocationsBuilder,
+    /// The data objects and the functions whose frames show them.
+    pub variables: crate::image::variables::Variables,
+    /// The calls the functions make.
+    pub calls: crate::image::calls::Calls,
+    /// What reading values of some types takes beyond their layout.
+    pub type_facts: crate::image::type_facts::TypeFacts,
     /// Source files by resolved path.
     pub files: crate::image::lines::Files,
     /// Every line-program row and the code each line describes.
@@ -267,6 +276,13 @@ fn seal_image(target: TargetDescription, metadata: &ModuleMetadata) -> crate::im
         let _phase = crate::span!("image.type_classes");
         type_classes(&metadata.types)
     };
+    metadata.locations.add_to(&mut builder);
+    crate::image::variables::add_to(&mut builder, &mut strings, &metadata.variables)
+        .expect("the loader's data objects fit an image");
+    crate::image::calls::add_to(&mut builder, &mut strings, &metadata.calls)
+        .expect("the loader's calls fit an image");
+    crate::image::type_facts::add_to(&mut builder, &mut strings, &metadata.type_facts)
+        .expect("the loader's type facts fit an image");
     let phase = crate::span!("image.encode_types");
     crate::image::types::add_to(
         &mut builder,

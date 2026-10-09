@@ -17,11 +17,36 @@ pub struct StrId(pub u32);
 #[derive(Debug, Default)]
 pub struct StringsBuilder {
     bytes: Vec<u8>,
-    /// The first string pooled with each hash, by its hash.
-    pooled: foldhash::HashMap<u64, StrId>,
-    /// Strings whose hash an unequal earlier string has, which no real
-    /// pool is expected to hold.
-    collided: foldhash::HashMap<Box<str>, StrId>,
+    pooled: Pooled,
+}
+
+/// Rows pooled by their contents' hash. The first row with a hash is found
+/// by it; a later row whose hash collides is found by contents.
+#[derive(Debug, Default)]
+pub(super) struct Pooled {
+    first: foldhash::HashMap<u64, u32>,
+    collided: Vec<u32>,
+}
+
+impl Pooled {
+    /// The row hashed `hash` whose contents `same` accepts.
+    pub(super) fn find(&self, hash: u64, same: impl Fn(u32) -> bool) -> Option<u32> {
+        let first = *self.first.get(&hash)?;
+        if same(first) {
+            return Some(first);
+        }
+        self.collided.iter().copied().find(|row| same(*row))
+    }
+
+    /// Records row `row`, hashed `hash`, which [`Pooled::find`] did not find.
+    pub(super) fn insert(&mut self, hash: u64, row: u32) {
+        match self.first.entry(hash) {
+            std::collections::hash_map::Entry::Occupied(_) => self.collided.push(row),
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(row);
+            }
+        }
+    }
 }
 
 impl StringsBuilder {
@@ -37,16 +62,10 @@ impl StringsBuilder {
     /// [`Self::push`] with `text`'s hash, which only proposes a string it
     /// might equal.
     pub(super) fn push_hashed(&mut self, text: &str, hash: u64) -> Option<StrId> {
-        let first = self.pooled.get(&hash).copied();
-        if let Some(id) = first
-            && Strings(&self.bytes).bytes(id) == text.as_bytes()
-        {
-            return Some(id);
-        }
-        if first.is_some()
-            && let Some(id) = self.collided.get(text)
-        {
-            return Some(*id);
+        if let Some(id) = self.pooled.find(hash, |id| {
+            Strings(&self.bytes).bytes(StrId(id)) == text.as_bytes()
+        }) {
+            return Some(StrId(id));
         }
         if text.as_bytes().contains(&0) {
             return None;
@@ -55,11 +74,7 @@ impl StringsBuilder {
         self.bytes.extend_from_slice(text.as_bytes());
         self.bytes.push(0);
         u32::try_from(self.bytes.len()).ok()?;
-        if first.is_some() {
-            self.collided.insert(text.into(), id);
-        } else {
-            self.pooled.insert(hash, id);
-        }
+        self.pooled.insert(hash, id.0);
         Some(id)
     }
 

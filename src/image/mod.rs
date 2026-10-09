@@ -12,18 +12,22 @@
 //! debugger reads stays in the provider.
 
 pub mod backing;
+pub mod calls;
 pub mod facts;
 mod format;
 pub mod functions;
 pub mod index;
 pub mod lines;
+pub mod locations;
 pub mod packages;
 mod schema;
 mod strings;
 pub mod symbols;
+pub mod type_facts;
 pub mod types;
 pub mod unwind;
 mod validate;
+pub mod variables;
 
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod sample;

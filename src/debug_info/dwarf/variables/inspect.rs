@@ -30,7 +30,7 @@ use super::evaluate::{
     evaluate_dynamic_aggregate_address, materialize_constant,
 };
 use super::generic::Generic;
-use super::location::{Expression, ExpressionUse, LocationSelectionError};
+use super::location::{Expression, ExpressionUse, LocationSelectionError, select};
 use super::pieces::storage_from_pieces;
 use super::shape::tagless_variant;
 use super::shape::{
@@ -42,9 +42,10 @@ use super::types::{
 };
 use super::variant::selected_variant_index;
 use super::{
-    CatalogDataObject, CatalogFunction, ConstantValue, DwarfVariableInfo, MAX_AGGREGATE_DEPTH,
-    MAX_EVALUATION_MEMORY_BYTES, Metadata, MetadataAbsence, ValueDescription, malformed_reason,
+    ConstantValue, DwarfVariableInfo, MAX_AGGREGATE_DEPTH, MAX_EVALUATION_MEMORY_BYTES, Metadata,
+    MetadataAbsence, ValueDescription, malformed_reason,
 };
+use crate::image::variables::{Capture, Object, VariableFunction};
 
 /// One transition between storages, planned from types alone. Index steps
 /// take their index values when they are applied.
@@ -404,17 +405,19 @@ impl DwarfVariableInfo {
     /// Classifies an object's storage from the operations of its location
     /// expressions. Thread-local and indirect forms dominate frame-relative
     /// ones, which dominate static addresses.
-    pub(super) fn object_storage(&self, object: &CatalogDataObject) -> ObjectStorage {
-        let ranges = Arc::clone(&object.ranges);
-        let Metadata::Value(ValueDescription::Location(location)) = &object.value else {
+    pub(super) fn object_storage(&self, object: Object<'_>) -> ObjectStorage {
+        let ranges = self.visible_ranges(object);
+        let Some(location) = object.location() else {
             return ObjectStorage {
                 class: StorageClass::NotMemory,
                 ranges,
             };
         };
+        let tables = self.locations();
+        let location = tables.list(location);
         let mut uses = BTreeSet::new();
-        for entry in location.entries.iter() {
-            if self.expression_uses(&entry.expression, &mut uses).is_err() {
+        for (_, expression) in location.entries() {
+            if self.expression_uses(expression, &mut uses).is_err() {
                 return ObjectStorage {
                     class: StorageClass::NotMemory,
                     ranges,
@@ -423,33 +426,29 @@ impl DwarfVariableInfo {
         }
         let class = if uses.contains(&ExpressionUse::ThreadLocal) {
             StorageClass::ThreadLocal
-        } else if uses.contains(&ExpressionUse::Dereference) || object.escaped.is_some() {
+        } else if uses.contains(&ExpressionUse::Dereference) || object.escaped().is_some() {
             StorageClass::Indirect
         } else if uses.contains(&ExpressionUse::RegisterValue)
             || uses.contains(&ExpressionUse::Computed)
-            || location.entries.is_empty()
+            || location.is_empty()
         {
             StorageClass::NotMemory
         } else if uses.contains(&ExpressionUse::Frame) {
-            let single_location = location
-                .entries
-                .iter()
-                .all(|entry| entry.expression.bytes == location.entries[0].expression.bytes);
-            let single_frame_base = match &object.frame_base {
-                Metadata::Value(frame_base) => frame_base
-                    .entries
-                    .iter()
-                    .all(|entry| entry.expression.bytes == frame_base.entries[0].expression.bytes),
+            let one_place = |list: super::location::LocationList<'_>| {
+                let mut entries = list.entries().map(|(_, expression)| expression.bytes());
+                entries
+                    .next()
+                    .is_none_or(|first| entries.all(|bytes| bytes == first))
+            };
+            let single_frame_base = match object.frame_base() {
+                Metadata::Value(frame_base) => one_place(tables.list(frame_base)),
                 Metadata::Absent(_) => true,
                 Metadata::Malformed(_) => false,
             };
             StorageClass::Frame {
-                stable: single_location && single_frame_base,
-                moving_stack: location.entries.iter().any(|entry| {
-                    self.evaluation_units
-                        .get(entry.expression.unit)
-                        .and_then(|unit| unit.language)
-                        == Some(gimli::DW_LANG_Go)
+                stable: one_place(location) && single_frame_base,
+                moving_stack: location.entries().any(|(_, expression)| {
+                    tables.unit_language(expression.unit()) == Some(gimli::DW_LANG_Go)
                 }),
             }
         } else {
@@ -460,11 +459,11 @@ impl DwarfVariableInfo {
 
     fn expression_uses(
         &self,
-        expression: &Expression,
+        expression: Expression<'_>,
         uses: &mut BTreeSet<ExpressionUse>,
     ) -> std::result::Result<(), gimli::Error> {
-        let reader = gimli::EndianSlice::new(&expression.bytes, self.endian);
-        let mut operations = gimli::Expression(reader).operations(expression.encoding);
+        let reader = gimli::EndianSlice::new(expression.bytes(), self.endian);
+        let mut operations = gimli::Expression(reader).operations(expression.encoding());
         while let Some(operation) = operations.next()? {
             uses.extend(match operation {
                 gimli::Operation::TLS => Some(ExpressionUse::ThreadLocal),
@@ -495,22 +494,8 @@ impl DwarfVariableInfo {
         value_shape_from(&*self.types, id)
     }
 
-    pub(super) fn function_at(&self, address: ImageAddress) -> Option<&CatalogFunction> {
-        self.function_index_at(address)
-            .map(|index| &self.functions[index])
-    }
-
-    pub(super) fn function_index_at(&self, address: ImageAddress) -> Option<usize> {
-        self.address_index
-            .range(..=address)
-            .rev()
-            .flat_map(|(_, functions)| functions.iter().copied())
-            .find(|index| {
-                self.functions[*index]
-                    .ranges
-                    .iter()
-                    .any(|range| range.contains(address))
-            })
+    pub(super) fn function_at(&self, address: ImageAddress) -> Option<VariableFunction<'_>> {
+        self.catalog().function_at(address)
     }
 
     fn transparent_type(
@@ -755,7 +740,7 @@ impl DwarfVariableInfo {
         match step {
             // A generic pointer's shape, Go's `go.shape.*uint8`, points to
             // whatever its type argument does, which only running finds.
-            Step::Deref if self.go_dict_indices.contains_key(&from) => {
+            Step::Deref if self.type_facts().dictionary_index(from).is_some() => {
                 let reason = VariableUnavailableReason::ValueAccess(
                     crate::ValueAccessUnavailableReason::UnspecifiedPointee,
                 );
@@ -1066,43 +1051,40 @@ impl DwarfVariableInfo {
         address: ImageAddress,
         selected: Option<CodeInstanceId>,
         name: &str,
-    ) -> Result<usize> {
+    ) -> Result<Object<'_>> {
         let function = self
             .function_at(address)
             .ok_or_else(|| Error::VariableNotFound(name.to_owned()))?;
         let mut named = function
-            .objects
-            .iter()
-            .copied()
-            .filter(|&index| {
-                let object = &self.objects[index];
-                object.instance == selected
-                    && object.ranges.iter().any(|range| range.contains(address))
-                    && object.name.as_ref() == name
+            .objects()
+            .filter(|object| {
+                object.instance() == selected
+                    && object.name() == name
+                    && self.visible_at(*object, address)
             })
             .collect::<Vec<_>>();
         let depth = named
             .iter()
-            .map(|&index| self.objects[index].lexical_depth)
+            .map(|object| object.lexical_depth())
             .max()
             .ok_or_else(|| Error::VariableNotFound(name.to_owned()))?;
-        named.retain(|&index| self.objects[index].lexical_depth == depth);
-        let [index] = named.as_slice() else {
+        named.retain(|object| object.lexical_depth() == depth);
+        let [object] = named.as_slice() else {
             return Err(Error::AmbiguousVariable(name.to_owned()));
         };
-        Ok(*index)
+        Ok(*object)
     }
 
     pub(super) fn located_data_object(
         &self,
-        variable: &CatalogDataObject,
+        variable: Object<'_>,
         address: Option<ImageAddress>,
         runtime: &mut dyn VariableRuntime,
         frame_base_cache: &mut FrameBaseCache,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<ValueStorage, EvaluateError> {
         let storage = self.located_slot(variable, address, runtime, frame_base_cache, budget)?;
-        let Some(pointer) = variable.escaped else {
+        let Some(pointer) = variable.escaped() else {
             return Ok(storage);
         };
         // A variable moved to the heap is where its slot points.
@@ -1127,25 +1109,25 @@ impl DwarfVariableInfo {
     /// the heap, the pointer to it.
     fn located_slot(
         &self,
-        variable: &CatalogDataObject,
+        variable: Object<'_>,
         address: Option<ImageAddress>,
         runtime: &mut dyn VariableRuntime,
         frame_base_cache: &mut FrameBaseCache,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<ValueStorage, EvaluateError> {
-        if let Some(description) = &variable.malformed {
-            return Err(EvaluateError::Malformed(Arc::clone(description)));
+        if let Some(description) = variable.malformed() {
+            return Err(EvaluateError::Malformed(description));
         }
-        let type_id = match &variable.type_info {
-            TypeResolution::Resolved(id) => *id,
+        let type_id = match variable.type_info() {
+            TypeResolution::Resolved(id) => id,
             TypeResolution::Malformed(description) => {
-                return Err(EvaluateError::Malformed(Arc::clone(description)));
+                return Err(EvaluateError::Malformed(description));
             }
         };
         let shape = self
-            .value_shape(variable.escaped.unwrap_or(type_id))
+            .value_shape(variable.escaped().unwrap_or(type_id))
             .map_err(EvaluateError::from)?;
-        let description = match &variable.value {
+        let description = match variable.value() {
             Metadata::Value(description) => description,
             Metadata::Absent(MetadataAbsence::NoLocation) => {
                 return Err(EvaluateError::Unavailable(
@@ -1156,10 +1138,10 @@ impl DwarfVariableInfo {
                 unreachable!("data-object value cannot contain a frame-base absence")
             }
             Metadata::Malformed(description) => {
-                return Err(EvaluateError::Malformed(Arc::clone(description)));
+                return Err(EvaluateError::Malformed(description));
             }
         };
-        if let ValueDescription::Constant(constant) = description {
+        if let ValueDescription::Constant(constant) = &description {
             // An integer form holds at most 64 bits. Clang writes a wider
             // complex constant's real part alone that way, and the imaginary
             // part it leaves out is not zero.
@@ -1189,8 +1171,7 @@ impl DwarfVariableInfo {
         let ValueDescription::Location(location) = description else {
             unreachable!("constant values returned above")
         };
-        let expression = location
-            .expression(address)
+        let expression = select(self.locations().list(location), address)
             .map_err(|error| match error {
                 LocationSelectionError::Unavailable(reason) => EvaluateError::Unavailable(reason),
                 LocationSelectionError::Malformed(description) => {
@@ -1200,8 +1181,10 @@ impl DwarfVariableInfo {
             .ok_or({
                 EvaluateError::Unavailable(VariableUnavailableReason::UnavailableAtInstruction)
             })?;
+        let frame_base_location = variable.frame_base();
         let mut frame_base = FrameBase::Lazy(FrameBaseContext {
-            location: &variable.frame_base,
+            location: &frame_base_location,
+            tables: self.locations(),
             address,
             cache: frame_base_cache,
         });
@@ -1210,7 +1193,6 @@ impl DwarfVariableInfo {
             self.endian,
             address,
             &mut frame_base,
-            &self.evaluation_units,
             runtime,
             budget,
         )?;
@@ -1341,9 +1323,8 @@ impl DwarfVariableInfo {
         let code = decode_address(&word, byte_size, self.target)?;
         let function = runtime
             .image_address(code)
-            .and_then(|address| self.go_function_entries.get(&address))
-            .map(|&function| &self.functions[function]);
-        let children = match function.map(|function| &function.captures) {
+            .and_then(|address| self.catalog().go_function(address));
+        let children = match function.map(VariableFunction::captures) {
             Some(Ok(captures)) if captures.is_empty() => ValueChildren::NotApplicable,
             Some(Ok(captures)) => ValueChildren::Available(Self::child_reference(
                 &ValueStorage::Memory(closure),
@@ -1360,7 +1341,7 @@ impl DwarfVariableInfo {
         };
         let value = VariableValue::Function {
             code: Some(code),
-            function: function.and_then(|function| function.name.clone()),
+            function: function.and_then(VariableFunction::name).map(Arc::from),
         };
         Ok((value, children))
     }
@@ -1372,7 +1353,7 @@ impl DwarfVariableInfo {
         byte_size: u64,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
-    ) -> Result<&[super::Capture]> {
+    ) -> Result<Vec<Capture>> {
         let malformed = |description: &str| {
             Error::debug_info(DwarfError::MalformedVariable(description.into()))
         };
@@ -1382,8 +1363,8 @@ impl DwarfVariableInfo {
             .and_then(|(_, word)| decode_address(&word, byte_size, self.target))
             .ok()
             .and_then(|code| runtime.image_address(code))
-            .and_then(|address| self.go_function_entries.get(&address))
-            .map(|&function| &self.functions[function].captures);
+            .and_then(|address| self.catalog().go_function(address))
+            .map(VariableFunction::captures);
         match captures {
             Some(Ok(captures)) => Ok(captures),
             _ => Err(malformed(
@@ -1397,7 +1378,7 @@ impl DwarfVariableInfo {
     /// copy. A captured pointer's member is the variable it points to.
     fn capture_member(
         &self,
-        capture: &super::Capture,
+        capture: &Capture,
         image: crate::ModuleImageId,
     ) -> Result<(RecordMember, bool)> {
         let malformed = |description: &str| {
@@ -1444,9 +1425,8 @@ impl DwarfVariableInfo {
             return None;
         }
         let part = complex_part(base);
-        self.complex_parts
-            .get(&(part.base_name, part.byte_size))
-            .copied()
+        self.type_facts()
+            .complex_part(&part.base_name, part.byte_size)
     }
 
     fn child_reference(
@@ -1550,10 +1530,10 @@ impl DwarfVariableInfo {
         })?;
         let key = DynamicAggregateLayoutKey { aggregate, child };
         let address = evaluate_dynamic_aggregate_address(
-            &self.dynamic_record_layouts,
+            self.type_facts(),
+            self.locations(),
             key,
             self.endian,
-            &self.evaluation_units,
             runtime,
             budget,
             object_address,
@@ -1650,11 +1630,7 @@ impl DwarfVariableInfo {
         frame_base_cache: &mut FrameBaseCache,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<ValueStorage, EvaluateError> {
-        let Some(object_index) = self
-            .objects_by_debug_offset
-            .get(&debug_info_offset)
-            .copied()
-        else {
+        let Some(object) = self.catalog().object_at_offset(debug_info_offset) else {
             return self.procedure_referent(
                 debug_info_offset,
                 byte_offset,
@@ -1664,11 +1640,10 @@ impl DwarfVariableInfo {
                 budget,
             );
         };
-        let object = &self.objects[object_index];
-        let referenced_type = match &object.type_info {
-            TypeResolution::Resolved(id) => *id,
+        let referenced_type = match object.type_info() {
+            TypeResolution::Resolved(id) => id,
             TypeResolution::Malformed(description) => {
-                return Err(EvaluateError::Malformed(Arc::clone(description)));
+                return Err(EvaluateError::Malformed(description));
             }
         };
         let referenced_size = self.value_shape(referenced_type)?.byte_size();
@@ -1697,10 +1672,10 @@ impl DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<ValueStorage, EvaluateError> {
-        let procedure = self.procedures.get(&debug_info_offset).ok_or_else(|| {
+        let procedure = self.catalog().procedure(debug_info_offset).ok_or_else(|| {
             EvaluateError::Unavailable(crate::UnsupportedVariableFeature::CrossDieEvaluation.into())
         })?;
-        let location = match &procedure.location {
+        let location = match procedure {
             Metadata::Value(location) => location,
             Metadata::Absent(_) => {
                 return Err(VariableUnavailableReason::OptimizedOut(
@@ -1709,11 +1684,10 @@ impl DwarfVariableInfo {
                 .into());
             }
             Metadata::Malformed(description) => {
-                return Err(EvaluateError::Malformed(Arc::clone(description)));
+                return Err(EvaluateError::Malformed(description));
             }
         };
-        let expression = location
-            .expression(address)
+        let expression = select(self.locations().list(location), address)
             .map_err(|error| match error {
                 LocationSelectionError::Unavailable(reason) => EvaluateError::Unavailable(reason),
                 LocationSelectionError::Malformed(description) => {
@@ -1729,7 +1703,6 @@ impl DwarfVariableInfo {
             self.endian,
             address,
             &mut FrameBase::Unsupported,
-            &self.evaluation_units,
             runtime,
             budget,
         )?;
@@ -2750,7 +2723,7 @@ impl DwarfVariableInfo {
 
     pub(super) fn inspect_data_object(
         &self,
-        variable: &CatalogDataObject,
+        variable: Object<'_>,
         address: Option<ImageAddress>,
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
@@ -2763,19 +2736,15 @@ impl DwarfVariableInfo {
                 description,
             ))
         };
-        let type_id = match (&variable.malformed, &variable.type_info) {
+        let type_id = match (variable.malformed(), variable.type_info()) {
             (Some(description), _) | (None, TypeResolution::Malformed(description)) => {
-                return Ok(data_object(
-                    variable,
-                    None,
-                    invalid(Arc::clone(description)),
-                ));
+                return Ok(data_object(variable, None, invalid(description)));
             }
-            (None, TypeResolution::Resolved(id)) => *id,
+            (None, TypeResolution::Resolved(id)) => id,
         };
         // A generic value has its type argument, or else its shape.
         let (type_id, unresolved_shape) =
-            match self.generic_type(type_id, variable.instance, address, runtime, budget)? {
+            match self.generic_type(type_id, variable.instance(), address, runtime, budget)? {
                 Generic::Plain => (type_id, None),
                 Generic::Resolved(argument) => (argument, None),
                 Generic::Unresolved(shape, reason) => (shape, Some(reason)),
@@ -2978,15 +2947,15 @@ pub(super) const fn inspected_value(
 }
 
 pub(super) fn data_object(
-    variable: &CatalogDataObject,
+    variable: Object<'_>,
     type_info: Option<TypeInfo>,
     state: VariableState,
 ) -> Variable {
     Variable {
-        kind: variable.kind,
+        kind: variable.kind(),
         global: None,
-        name: Arc::clone(&variable.name),
-        declaration: variable.declaration.clone(),
+        name: variable.name().into(),
+        declaration: variable.declaration(),
         type_info,
         unresolved_shape: None,
         state,
