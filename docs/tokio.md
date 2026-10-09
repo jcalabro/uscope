@@ -17,10 +17,10 @@ decisions, is [plans/tokio.md](../plans/tokio.md). Go's counterpart is
 Support covers the pinned toolchain from `flake.nix` and tokio 1.52.3 on
 Linux x86-64: unoptimized and optimized builds, the multi-thread and
 current-thread runtimes, `LocalSet`s, several runtimes in one process,
-blocking pools, `tokio_unstable` spawn locations, legacy symbol mangling,
-attaching, and core dumps. Another tokio release is read the same way
-wherever its debug information binds, and every list of its tasks says it
-is unverified.
+blocking pools, `tokio_unstable` spawn locations, tokio's `parking_lot`
+feature, legacy symbol mangling, attaching, and core dumps. Another
+tokio release is read the same way wherever its debug information binds,
+and every list of its tasks says it is unverified.
 
 ## What async Rust and tokio demand
 
@@ -207,6 +207,11 @@ the thread runs, which tokio will turn into a `JoinError`.
   saves as zeros; the fixtures remove the guards before dumping a core.
 - Adding a fixture crate changes its lockfile, which rebuilds the vendored
   crates and every tokio fixture.
+- tokio's own `Mutex` wraps std's, or with its `parking_lot` feature, which
+  `full` turns on, parking_lot's beside a `PhantomData` of std's. Each
+  shard's and each blocking pool's lock is bound as whichever the program
+  has: std's futex word is held while nonzero, parking_lot's byte while its
+  low bit is set.
 
 ## Testing
 
@@ -220,7 +225,7 @@ Checkpoints wait until nothing moves, by the runtime's park counts and
 | Fixture | What it forces |
 |---|---|
 | `std-async` | Async functions under a hand-written executor, with no tokio |
-| `workers` | Eight tasks parked at different awaits; also built line-tables-only, stripped, remapped, unstable, and legacy-mangled |
+| `workers` | Eight tasks parked at different awaits; also built line-tables-only, stripped, remapped, unstable, with parking_lot's locks, and legacy-mangled |
 | `steps` | Siblings stepping through the same functions across pending awaits, on each runtime, and a task that spawns another |
 | `cancel`, `panics` | Every way a task's future ends early, and every kind of panic |
 | `drivers`, `runtimes` | `block_on` in each form; two runtimes and two local sets in one process |

@@ -220,10 +220,11 @@ impl TokioRuntime {
             .shards
             .wrapping_add(index.wrapping_mul(owned.shard_size));
         let unreadable = || Arc::<str>::from(format!("the shard at {at:#x} is unreadable"));
-        let lock =
-            records::read(stop, at.wrapping_add(owned.shard_lock), 4).ok_or_else(unreadable)?;
+        let lock = owned.shard_lock;
+        let state =
+            records::read(stop, at.wrapping_add(lock.offset), lock.size).ok_or_else(unreadable)?;
         let head = records::word(stop, at.wrapping_add(owned.head)).ok_or_else(unreadable)?;
-        Ok((head, lock != 0))
+        Ok((head, lock.is_held(state)))
     }
 
     /// Reads the task at `header`, the task after `previous` in its shard,
@@ -545,8 +546,8 @@ impl TokioRuntime {
         let unreadable = || Arc::<str>::from("the blocking pool is unreadable");
         let word = |address: u64| records::word(stop, address).ok_or_else(unreadable);
         let inner = word(runtime.handle.wrapping_add(spawner))?.wrapping_add(pool.data);
-        let locked =
-            records::read(stop, inner.wrapping_add(pool.lock), 4).ok_or_else(unreadable)?;
+        let lock = records::read(stop, inner.wrapping_add(pool.lock.offset), pool.lock.size)
+            .ok_or_else(unreadable)?;
         let head = word(inner.wrapping_add(pool.head))?;
         let length = word(inner.wrapping_add(pool.len))?;
         let buffer = word(inner.wrapping_add(pool.buffer))?;
@@ -568,7 +569,7 @@ impl TokioRuntime {
                 ..task(word(header.wrapping_add(id_offset))?, header)
             });
         }
-        Ok((queued, locked != 0))
+        Ok((queued, pool.lock.is_held(lock)))
     }
 }
 

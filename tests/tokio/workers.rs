@@ -27,6 +27,9 @@ const LEGACY: &str = "tokio-workers-legacy";
 /// A build with `tokio_unstable`, which records where each task was
 /// spawned, and gives each task's vtable one more offset.
 const UNSTABLE: &str = "tokio-workers-unstable";
+/// A build whose tokio locks with the `parking_lot` crate, whose mutex is
+/// laid out as std's is not.
+const PARKING_LOT: &str = "tokio-workers-parking-lot";
 /// Builds that describe no types: lines only, and symbols only.
 const UNTYPED: [&str; 2] = ["tokio-workers-lines", "tokio-workers-stripped"];
 
@@ -317,7 +320,7 @@ impl Truth {
 /// nothing missing, across pages of any size. A build that records where
 /// each task was spawned says so; no other says anything.
 async fn tasks_are_listed_exactly(current: bool) {
-    for fixture in BUILDS.into_iter().chain([LEGACY, UNSTABLE]) {
+    for fixture in BUILDS.into_iter().chain([LEGACY, UNSTABLE, PARKING_LOT]) {
         let mut workers = Workers::parked(fixture, current).await;
         let truth = workers.truth();
         assert_eq!(truth.tasks.len(), 8, "{fixture}: {truth:?}");

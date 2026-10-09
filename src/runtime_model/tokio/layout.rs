@@ -235,10 +235,71 @@ pub struct Owned {
     pub shards: u64,
     pub count: u64,
     pub mask: u64,
-    /// Each shard's size, its lock word, and its list's head.
+    /// Each shard's size, its lock, and its list's head.
     pub shard_size: u64,
-    pub shard_lock: u64,
+    pub shard_lock: Lock,
     pub head: u64,
+}
+
+/// The lock of one of tokio's own mutexes, which wraps std's, or with
+/// tokio's `parking_lot` feature, the `parking_lot` crate's: where its
+/// state is, its size, and the bits of the state that say it is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lock {
+    pub offset: u64,
+    pub size: usize,
+    pub held: u64,
+}
+
+impl Lock {
+    /// Whether a lock in this state is held.
+    pub const fn is_held(self, state: u64) -> bool {
+        state & self.held != 0
+    }
+}
+
+/// The lock and the data of `what`'s tokio mutex at `path` within `ty`,
+/// both placed within `ty`. tokio's `Mutex<T>` is
+/// `Mutex(std::sync::Mutex<T>)`, whose lock is a futex word that is zero
+/// when free, or with its `parking_lot` feature
+/// `Mutex(PhantomData<…>, parking_lot::Mutex<T>)`, whose lock is a byte
+/// that also says whether threads are parked on it.
+fn mutex(
+    image: &dyn RuntimeImage,
+    ty: TypeReference,
+    path: &[&str],
+    what: &str,
+) -> Result<(Lock, Field), Missing> {
+    let mutex = records::field(image, ty, path)?;
+    let parking_lot = records::field(image, mutex.ty, &["__1"]).is_ok();
+    let (state, data): (&[&str], &[&str]) = if parking_lot {
+        (&["__1", "raw", "state"], &["__1", "data", "value"])
+    } else {
+        (&["__0", "inner"], &["__0", "data", "value"])
+    };
+    // The `parking_lot` crate's lock is held while its `LOCKED_BIT` is
+    // set; its `PARKED_BIT` may be set while it is free.
+    let (size, held, kind) = if parking_lot {
+        (1, 0b1, "byte")
+    } else {
+        (4, u64::from(u32::MAX), "futex word")
+    };
+    let lock = records::field(image, mutex.ty, state)?;
+    if records::size(image, lock.ty)? != size as u64 {
+        return Err(format!("{what}'s lock is not a {kind}").into());
+    }
+    let data = records::field(image, mutex.ty, data)?;
+    Ok((
+        Lock {
+            offset: records::within(mutex.offset, lock.offset)?,
+            size,
+            held,
+        },
+        Field {
+            offset: records::within(mutex.offset, data.offset)?,
+            ty: data.ty,
+        },
+    ))
 }
 
 impl Context {
@@ -340,11 +401,8 @@ impl Owned {
         let sized = |path: &[&str]| records::sized(image, owned.ty, path, 8);
         let shards = field(&["list", "lists"])?;
         let shard = records::slice_element(image, shards.ty)?;
-        let lock = records::field(image, shard, &["__0", "inner"])?;
-        if records::size(image, lock.ty)? != 4 {
-            return Err("a shard's lock is not a futex word".into());
-        }
-        let head = records::field(image, shard, &["__0", "data", "value", "head"])?;
+        let (lock, list) = mutex(image, shard, &[], "a shard")?;
+        let head = records::field(image, list.ty, &["head"])?;
         pointer_sized(image, head.ty, "a shard's head")?;
         Ok(Self {
             at: owned.offset,
@@ -353,8 +411,8 @@ impl Owned {
             count: sized(&["list", "count"])?,
             mask: sized(&["list", "shard_mask"])?,
             shard_size: records::size(image, shard)?,
-            shard_lock: lock.offset,
-            head: head.offset,
+            shard_lock: lock,
+            head: records::within(list.offset, head.offset)?,
         })
     }
 }
@@ -399,8 +457,8 @@ impl Tasks {
 /// The blocking pool's queue: a `VecDeque<Task>` behind a mutex.
 #[derive(Debug)]
 pub struct Pool {
-    /// The mutex's lock word within the pool's `Inner`.
-    pub lock: u64,
+    /// The mutex's lock within the pool's `Inner`.
+    pub lock: Lock,
     /// The queue's head index, length, buffer, and capacity.
     pub head: u64,
     pub len: u64,
@@ -416,21 +474,19 @@ pub struct Pool {
 impl Pool {
     fn bind(image: &dyn RuntimeImage) -> Result<Self, Missing> {
         let inner = records::named(image, "tokio::runtime::blocking::pool::Inner")?;
-        let lock = records::field(image, inner, &["shared", "__0", "inner"])?;
-        if records::size(image, lock.ty)? != 4 {
-            return Err("the blocking pool's lock is not a futex word".into());
-        }
-        let queue = records::field(image, inner, &["shared", "__0", "data", "value", "queue"])?;
+        let (lock, shared) = mutex(image, inner, &["shared"], "the blocking pool")?;
+        let queue = records::field(image, shared.ty, &["queue"])?;
+        let queue_at = records::within(shared.offset, queue.offset)?;
         let sized = |path: &[&str]| {
             records::sized(image, queue.ty, path, 8)
-                .and_then(|offset| records::within(queue.offset, offset))
+                .and_then(|offset| records::within(queue_at, offset))
         };
         let task = records::named(image, "tokio::runtime::blocking::pool::Task")?;
         let spawner = records::named(image, "tokio::runtime::blocking::pool::Spawner")?;
         let arc = records::field(image, spawner, &["inner", "ptr", "pointer"])?;
         let arc = records::target(image, arc.ty)?;
         Ok(Self {
-            lock: lock.offset,
+            lock,
             head: sized(&["head"])?,
             len: sized(&["len"])?,
             buffer: sized(&["buf", "inner", "ptr", "pointer", "pointer"])?,
