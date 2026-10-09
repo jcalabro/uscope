@@ -10,7 +10,12 @@ use crate::support::Scenario;
 use crate::invariants::checked;
 use crate::stops::{line, place};
 
-const BUILDS: [&str; 2] = ["tokio-shapes-o0", "tokio-shapes-o3"];
+const BUILDS: [&str; 4] = [
+    "tokio-shapes-o0",
+    "tokio-shapes-o3",
+    "tokio-shapes-1.52-o0",
+    "tokio-shapes-1.52-o3",
+];
 const SOURCE: &str = "shapes/src/main.rs";
 
 /// The fixture, launched with a breakpoint on each of `markers`' lines, and

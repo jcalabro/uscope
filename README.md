@@ -37,7 +37,7 @@ are reported as such.
 | Language | Values | Execution control |
 | --- | --- | --- |
 | C, C++, Rust (GCC, Clang, rustc) | Parameters, locals, and globals, including values split across registers and memory, parameters recovered from their callers, and partly optimized-out values | Full |
-| Async Rust, with tokio 1.52 | What each suspended async function keeps across its await, and tokio's types | Full; tokio tasks, async backtraces, steps that stay in a task across awaits, and panics |
+| Async Rust, with tokio 1.52 and 1.53 | What each suspended async function keeps across its await, and tokio's types | Full; tokio tasks, async backtraces, steps that stay in a task across awaits, and panics |
 | Zig 0.16 (LLVM backend) | Parameters, locals, and globals | Full; inline frames when emitted |
 | Go 1.27 `gc` (with cgo) | Parameters, locals, and globals, including partly optimized-out values | Full; goroutines as tasks, stacks across the runtime's switches, and panics |
 

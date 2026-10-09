@@ -32,9 +32,10 @@ use crate::{ImageAddress, StackSegment, TaskState, ThreadId, ThreadLocal, Virtua
 
 /// What tokio calls its tasks.
 pub(super) const TASK_NOUN: (&str, &str) = ("task", "tasks");
-/// The release the contract was checked against. Another is read the same
-/// way wherever its debug information binds, and says it is unverified.
-const VERIFIED: (u64, u64) = (1, 52);
+/// The releases the contract was checked against, oldest first. Another is
+/// read as the newest of them wherever its debug information binds, and
+/// says it is unverified.
+const VERIFIED: [(u64, u64); 2] = [(1, 52), (1, 53)];
 /// A source file every build of tokio compiles, by which its version is
 /// read from the directory Cargo unpacked it in.
 const VERSIONED_SOURCE: &str = "src/runtime/task/raw.rs";
@@ -102,7 +103,7 @@ pub fn detect(
     Some(Ok(Arc::new(TokioRuntime::bind(Arc::clone(image)))))
 }
 
-/// The release a source path names, such as `tokio-1.52.3/src/…`.
+/// The release a source path names, such as `tokio-1.53.2/src/…`.
 fn version(path: &std::path::Path) -> Option<(u64, u64, Arc<str>)> {
     let mut components = path.components().rev();
     for _ in VERSIONED_SOURCE.split('/') {
@@ -211,19 +212,18 @@ impl Cursor {
 
 impl TokioRuntime {
     fn bind(image: Arc<dyn RuntimeImage + Send + Sync>) -> Self {
+        let (major, minor) = VERIFIED[VERIFIED.len() - 1];
         let caveat = match image
             .source_path_ending(VERSIONED_SOURCE)
             .as_deref()
             .map(version)
         {
-            Some(Some((major, minor, _))) if (major, minor) == VERIFIED => None,
+            Some(Some((major, minor, _))) if VERIFIED.contains(&(major, minor)) => None,
             Some(Some((.., release))) => Some(format!(
-                "tokio {release} is unverified; its runtime is read as tokio {}.{}'s",
-                VERIFIED.0, VERIFIED.1
+                "tokio {release} is unverified; its runtime is read as tokio {major}.{minor}'s"
             )),
             _ => Some(format!(
-                "tokio's version is unknown; its runtime is read as tokio {}.{}'s",
-                VERIFIED.0, VERIFIED.1
+                "tokio's version is unknown; its runtime is read as tokio {major}.{minor}'s"
             )),
         };
         let starters = STARTERS

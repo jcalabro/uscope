@@ -46,10 +46,15 @@
       muslClang = pkgs.writeShellScriptBin "musl-clang" ''
         exec ${musl64.buildPackages.clang}/bin/x86_64-unknown-linux-musl-clang "$@"
       '';
-      # The crates the tokio fixtures depend on, exactly as their lockfile
-      # names them, so that building them fetches nothing.
-      tokioFixtureCrates = pkgs.rustPlatform.importCargoLock {
-        lockFile = ./tests/fixtures/rust/tokio/Cargo.lock;
+      # The crates the tokio fixtures depend on, exactly as their lockfiles
+      # name them, one for each tokio release they are built with, so that
+      # building them fetches nothing.
+      tokioFixtureCrates = pkgs.symlinkJoin {
+        name = "tokio-fixture-crates";
+        paths = map (lockFile: pkgs.rustPlatform.importCargoLock { inherit lockFile; }) [
+          ./tests/fixtures/rust/tokio/Cargo.lock
+          ./tests/fixtures/rust/tokio/tokio-1.52/Cargo.lock
+        ];
       };
       default = pkgs.mkShell {
         NIX_HARDENING_ENABLE = "";

@@ -15,7 +15,12 @@ use crate::stops::line;
 use crate::support::Scenario;
 use crate::workers::tasks;
 
-const BUILDS: [&str; 2] = ["tokio-deadlock-o0", "tokio-deadlock-o3"];
+const BUILDS: [&str; 4] = [
+    "tokio-deadlock-o0",
+    "tokio-deadlock-o3",
+    "tokio-deadlock-1.52-o0",
+    "tokio-deadlock-1.52-o3",
+];
 const SOURCE: &str = "deadlock/src/main.rs";
 
 /// The address an expression names in frame `frame` of a task.

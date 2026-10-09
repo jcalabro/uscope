@@ -18,7 +18,12 @@ use crate::stops::line;
 use crate::support::{Scenario, ScratchDir};
 use crate::workers::check_saved_local;
 
-const BUILDS: [&str; 2] = ["tokio-drivers-o0", "tokio-drivers-o3"];
+const BUILDS: [&str; 4] = [
+    "tokio-drivers-o0",
+    "tokio-drivers-o3",
+    "tokio-drivers-1.52-o0",
+    "tokio-drivers-1.52-o3",
+];
 const SOURCE: &str = "drivers/src/main.rs";
 
 /// How the fixture drives its future: `#[tokio::main]`'s, a
