@@ -18,7 +18,12 @@ use crate::invariants::checked;
 use crate::support::{Scenario, ScratchDir};
 use crate::workers::{activities, tasks};
 
-const BUILDS: [&str; 2] = ["tokio-runtimes-o0", "tokio-runtimes-o3"];
+const BUILDS: [&str; 4] = [
+    "tokio-runtimes-o0",
+    "tokio-runtimes-o3",
+    "tokio-runtimes-1.52-o0",
+    "tokio-runtimes-1.52-o3",
+];
 
 /// What the program reported: each task's runtime, and its threads.
 #[derive(Debug, Default)]

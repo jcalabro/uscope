@@ -12,7 +12,12 @@ use crate::invariants::checked;
 use crate::stops::{line, place};
 use crate::support::Scenario;
 
-const BUILDS: [&str; 2] = ["tokio-cancel-o0", "tokio-cancel-o3"];
+const BUILDS: [&str; 4] = [
+    "tokio-cancel-o0",
+    "tokio-cancel-o3",
+    "tokio-cancel-1.52-o0",
+    "tokio-cancel-1.52-o3",
+];
 const SOURCE: &str = "cancel/src/main.rs";
 
 /// The fixture in `mode`, stopped where its task first arrives at the

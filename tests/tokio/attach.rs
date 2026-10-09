@@ -17,7 +17,12 @@ use crate::stops::{integer, line};
 use crate::support::{ExternalProcess, Scenario};
 use crate::workers::tasks;
 
-const BUILDS: [&str; 2] = ["tokio-server-o0", "tokio-server-o3"];
+const BUILDS: [&str; 4] = [
+    "tokio-server-o0",
+    "tokio-server-o3",
+    "tokio-server-1.52-o0",
+    "tokio-server-1.52-o3",
+];
 const SOURCE: &str = "server/src/main.rs";
 
 /// How long a client waits for an answer, which a server the debugger

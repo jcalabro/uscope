@@ -1,7 +1,7 @@
 uscope-views 1
 
-# tokio. Verified against tokio 1.52.3 by tests/fixtures/rust/tokio/values,
-# whose markers say what each value shows.
+# tokio. Verified against tokio 1.52.3 and 1.53.2 by
+# tests/fixtures/rust/tokio/values, whose markers say what each value shows.
 #
 # tokio wraps most of its state in cells of its own around std's (its loom
 # UnsafeCell, Mutex, and atomics), which inner() steps through.
@@ -270,21 +270,24 @@ view rust tokio::sync::notify::Notified {
 
 # A sleep's deadline, against the runtime's own clock: the time its timer
 # driver last read, its start and the milliseconds its wheel has turned
-# since. A runtime that has been idle reads late.
+# since. A runtime that has been idle reads late. tokio 1.53 keeps the
+# deadline and the runtime's handle in the sleep, and makes its timer only
+# when it is first polled; 1.52 kept both in its timer.
 view rust tokio::time::sleep::Sleep {
-    let entry = entry.Traditional.0
-    let driver = entry.driver == MultiThread ? inner(entry.driver.MultiThread.0.ptr)->data.driver : inner(entry.driver.CurrentThread.0.ptr)->data.driver
-    let time = driver.time.Some.0
+    let at = deadline or entry.Traditional.0.deadline
+    let scheduler = driver or entry.Traditional.0.driver
+    let handle = scheduler == MultiThread ? inner(scheduler.MultiThread.0.ptr)->data.driver : inner(scheduler.CurrentThread.0.ptr)->data.driver
+    let time = handle.time.Some.0
     let start = inner(time.time_source.start_time)
     let wheel = inner(time.inner.Traditional.state).data.value.wheel
     let clock = start.tv_sec * 1000000000 + inner(start.tv_nsec) + wheel.elapsed * 1000000
-    let deadline = inner(entry.deadline).tv_sec * 1000000000 + inner(inner(entry.deadline).tv_nsec)
-    show if deadline <= clock {
+    let until = inner(at).tv_sec * 1000000000 + inner(inner(at).tv_nsec)
+    show if until <= clock {
         empty("elapsed")
     } else {
-        empty("sleeping until +{(deadline - clock) / 1000000 as duration(ms)}")
+        empty("sleeping until +{(until - clock) / 1000000 as duration(ms)}")
     }
-    field deadline = entry.deadline
+    field deadline = at
 }
 
 view rust tokio::time::interval::Interval {
