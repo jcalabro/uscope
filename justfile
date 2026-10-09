@@ -32,9 +32,11 @@ build-test-programs: golden
 golden:
     ./scripts/golden.sh build
 
-# Builds the native test fixtures and uscope.
+# Builds the native test fixtures and uscope. uscope builds with the test
+# profile, as the tests do, whose optimization loads debug information five
+# times as fast as an unoptimized build, and which shares the tests' artifacts.
 build *ARGS="": build-test-programs
-    cargo build {{ARGS}}
+    cargo build --profile test {{ARGS}}
 
 # Builds uscope and runs it with the supplied arguments.
 run *ARGS: build
@@ -103,7 +105,7 @@ web-test *ARGS: web-deps
 # Drives the built page and real `uscope web` servers in Chromium and
 # Firefox. Arguments go to Playwright, e.g. `just web-e2e --project=chromium`.
 web-e2e *ARGS: web build-test-programs
-    cargo build --quiet
+    cargo build --quiet --profile test
     cd web && ./node_modules/.bin/playwright test "$@"
 
 # Serves PROGRAM on port 7342 with the page from Vite, which reloads on every
@@ -111,7 +113,7 @@ web-e2e *ARGS: web build-test-programs
 web-dev *ARGS: web-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --quiet
+    cargo build --quiet --profile test
     ./target/debug/uscope web --port 7342 --allow-origin http://127.0.0.1:5173 "$@" &
     trap 'kill %1 2>/dev/null || true' EXIT
     cd web && ./node_modules/.bin/vite
@@ -163,12 +165,12 @@ uat-nvim NVIM_DAP DIR="target/uat": build
 # Screenshots every screen in light and dark at three widths into
 # target/web-shots, with PROGRAM loaded (the kvstore fixture by default).
 web-shot *PROGRAM: web build-test-programs
-    cargo build --quiet
+    cargo build --quiet --profile test
     cd web && node e2e/shots.ts "$@"
 
 # Drives PROGRAM through STEPS in headless Chromium, saving a screenshot after
 # each and printing the page's console: `just web-probe build/test-programs/basic
 # key:F9 key:F5 wait:Stopped`. See web/e2e/probe.ts for the steps.
 web-probe PROGRAM *STEPS: web
-    cargo build --quiet
+    cargo build --quiet --profile test
     cd web && node e2e/probe.ts "$(realpath "../$1")" "${@:2}"
