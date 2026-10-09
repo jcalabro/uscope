@@ -4,7 +4,6 @@
 
 import { useId, useState } from "react";
 import { useRequest } from "../data";
-import { formatPlace, showingSource } from "../focus";
 import { type Command, describe, LABELS } from "../keys";
 import { best, score } from "../palette";
 import { useConnection } from "../store";
@@ -13,7 +12,7 @@ import { chooseTheme, THEMES } from "../theme";
 import { placeText } from "./Banner";
 import { placeLabel } from "./Breakpoints";
 import { useCommands } from "./commands";
-import { useGo, useLinkPaths, useLook } from "./navigation";
+import { useGo, useLinkPaths, useShowSource } from "./navigation";
 import { fileName } from "./paths";
 import { useFocus } from "./Workspace";
 
@@ -172,7 +171,6 @@ function ranked(name: string, items: Item[], query: string, limit = EACH): Group
 function useGroups(mode: Mode, query: string): Group[] {
   const { at, state } = useFocus();
   const go = useGo();
-  const look = useLook();
   const paths = useLinkPaths();
   const connection = useConnection();
   const runCommand = useCommands();
@@ -187,13 +185,7 @@ function useGroups(mode: Mode, query: string): Group[] {
     mode === "calls" && at ? { stop: at.stop, thread: at.thread, task: at.task ?? null } : null,
   ).data;
 
-  const showSource = (path: string, line: number) =>
-    look(
-      (current) => showingSource(current, formatPlace({ path: paths.link(path), line, end: line })),
-      {
-        replace: false,
-      },
-    );
+  const showSource = useShowSource();
 
   if (mode === "line") {
     const match = /^(?:(.+):)?(\d+)$/.exec(query);

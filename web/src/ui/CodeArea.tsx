@@ -5,11 +5,11 @@
 
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { cache, useRequest } from "../data";
-import { formatPlace, inView, parsePlace, showingSource, type View } from "../focus";
+import { followedLook, formatPlace, inView, parsePlace, showingSource, type View } from "../focus";
 import { controls } from "../model";
 import type { Breakpoint, Row } from "../protocol";
 import { useConnection, useModel } from "../store";
-import { closeFile, openFile, tab, useTab } from "../tab";
+import { closeFile, openFile, shownAt, tab, useTab } from "../tab";
 import { Disassembly } from "./Disassembly";
 import { Memory } from "./Memory";
 import { useLinkPaths, useLook } from "./navigation";
@@ -28,9 +28,9 @@ export interface Shown {
 }
 
 export function useShown(): Shown | null {
-  const { at, look, trace, state } = useFocus();
+  const { look } = useFocus();
   const paths = useLinkPaths();
-  const sources = useRequest("sources", state.session ? undefined : null).data;
+  const own = useOwnSource();
   const named = look.src ? parsePlace(look.src) : null;
   if (named) {
     const path = paths.recorded(named.path);
@@ -38,6 +38,14 @@ export function useShown(): Shown | null {
       ? { path, line: named.line, selection: { line: named.line, end: named.end } }
       : null;
   }
+  return own;
+}
+
+/** What the focus shows when no link names a file: the frame's line, or
+ * before the program runs, its main function. */
+function useOwnSource(): Shown | null {
+  const { at, trace, state } = useFocus();
+  const sources = useRequest("sources", state.session ? undefined : null).data;
   const frame = at ? trace?.frames.find((candidate) => candidate.index === at.frame) : undefined;
   if (frame?.source) {
     return { path: frame.source.path, line: frame.source.line, selection: null };
@@ -57,6 +65,7 @@ const VIEWS: readonly { view: View; label: string; key: string }[] = [
 export function CodeArea() {
   const { at, trace, state, stale, look: current } = useFocus();
   const shown = useShown();
+  const own = useOwnSource();
   const files = useTab((current) => current.files);
   const look = useLook();
   const paths = useLinkPaths();
@@ -64,31 +73,47 @@ export function CodeArea() {
   const path = shown?.path;
   const line = shown?.line ?? null;
   // Before paint, so a file newly shown never appears without its tab. A
-  // file closed opens again at every new stop, or when its line moves.
+  // file closed opens again at every new stop, when its line moves, or when
+  // something asks for it.
   const stop = at?.stop;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: a new stop or line reopens the file
+  const asked = useTab((current) => current.asked);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: each of these reopens the file
   useLayoutEffect(() => {
     if (path) {
       openFile(path);
     }
-  }, [path, line, stop]);
+  }, [path, line, stop, asked]);
   // A file closed stays closed until something shows it again.
   const open = path !== undefined && files.includes(path);
+  const place =
+    current.src ??
+    (path && formatPlace({ path: paths.link(path), line: line ?? 1, end: line ?? 1 }));
   useEffect(() => {
     tab.setState({ shown: path && open ? { path, line } : null });
-  }, [path, line, open]);
+    if (path && open && place) {
+      shownAt(path, place);
+    }
+  }, [path, line, open, place]);
 
   const frame = at ? trace?.frames.find((candidate) => candidate.index === at.frame) : undefined;
   // A frame with no source, and no file named, shows its instructions.
   const sourceless = !shown && frame !== undefined && !frame.source;
   const view = current.view ?? (sourceless ? "disassembly" : "source");
-  const show = (path: string) =>
+  // A file's tab follows the focus when the focus shows that file by
+  // itself, or else shows where the file was last shown.
+  const show = (path: string) => {
+    const place = tab.getState().places[path];
     look(
-      (current) => showingSource(current, formatPlace({ path: paths.link(path), line: 1, end: 1 })),
-      {
-        replace: false,
-      },
+      (current) =>
+        path === own?.path
+          ? inView(followedLook(current), "source")
+          : showingSource(
+              current,
+              place ?? formatPlace({ path: paths.link(path), line: 1, end: 1 }),
+            ),
+      { replace: false, ask: true },
     );
+  };
   // Closing the file shown shows its neighbor, the next one or else the one
   // before it.
   const close = (closed: string) => {
