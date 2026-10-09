@@ -934,6 +934,10 @@ readonly memoryless_core_filter=0x0
 readonly tokio_fixtures_dir="${rust_fixtures_dir}/tokio"
 readonly tokio_target_dir="build/tokio-target"
 readonly tokio_outputs="${output_dir}/.tokio.outputs"
+# The variants named for an older tokio release are built with its
+# lockfile, and the rest with Cargo.lock's.
+readonly tokio_older_release="1.52"
+readonly tokio_older_lock="${tokio_fixtures_dir}/tokio-${tokio_older_release}/Cargo.lock"
 
 # Builds the workspace's PACKAGES with PROFILE, extra RUSTFLAGS, and
 # FEATURES, a list of cargo's (or none), into VARIANT's target directory.
@@ -950,6 +954,9 @@ compile_tokio_variant() {
     done
     if [[ -n "$features" ]]; then
         packages+=(--features "$features")
+    fi
+    if [[ "$variant" == "${tokio_older_release}-"* ]]; then
+        packages+=(--config "resolver.lockfile-path='${PWD}/${tokio_older_lock}'")
     fi
     printf '[cargo]  tokio fixtures (%s)\n' "$variant"
     CARGO_TARGET_DIR="$tokio_target_dir/$variant" RUSTFLAGS="${RUSTFLAGS-} -D warnings ${flags}" \
@@ -1043,6 +1050,10 @@ build_tokio_fixtures() {
         runtimes blocking migrate deadlock)
     variant o0 dev "" "" "${fixtures[@]}" scale corrupt
     variant o3 release "" "" "${fixtures[@]}"
+    # Every fixture again with the older tokio release, which tests read
+    # as tokio-NAME-1.52-o0 and tokio-NAME-1.52-o3.
+    variant "${tokio_older_release}-o0" dev "" "" "${fixtures[@]}"
+    variant "${tokio_older_release}-o3" release "" "" "${fixtures[@]}"
     # Panics that abort rather than unwind.
     variant abort abort "" "" panics
     # Builds that describe less than tokio's types, where the debugger says
@@ -1051,7 +1062,7 @@ build_tokio_fixtures() {
     variant lines lines "" "" workers
     variant stripped stripped "" "" workers
     variant remapped dev \
-        "--remap-path-prefix=${USCOPE_FIXTURE_CRATES}/tokio-1.52.3=/vendor/tokio" "" workers
+        "--remap-path-prefix=${USCOPE_FIXTURE_CRATES}/tokio-1.53.2=/vendor/tokio" "" workers
     # tokio's unstable features, which record where each task was spawned and
     # give each task's vtable one more offset.
     variant unstable dev "--cfg tokio_unstable" "" workers
@@ -1086,7 +1097,7 @@ build_tokio_fixtures() {
     # saves.
     export TRUTH_CORE=1 MALLOC_ARENA_MAX=1
     local name
-    for name in o0 o3; do
+    for name in o0 o3 "${tokio_older_release}-o0" "${tokio_older_release}-o3"; do
         local program="$output_dir/tokio-workers-${name}"
         generate_core "${program}.core" 5 "$default_core_filter" "$program" "$program"
         generate_core "${program}-current.core" 5 "$default_core_filter" "$program" "$program" current

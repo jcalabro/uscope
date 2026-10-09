@@ -19,7 +19,12 @@ use crate::invariants::checked;
 use crate::stops::{backtrace, integer, line};
 use crate::support::{Scenario, ScratchDir};
 
-const BUILDS: [&str; 2] = ["tokio-workers-o0", "tokio-workers-o3"];
+const BUILDS: [&str; 4] = [
+    "tokio-workers-o0",
+    "tokio-workers-o3",
+    "tokio-workers-1.52-o0",
+    "tokio-workers-1.52-o3",
+];
 /// A build whose symbols are mangled as rustc did before v0, naming no
 /// generic arguments, where tokio's functions are told apart by their
 /// debug information.
@@ -38,6 +43,16 @@ const PARKING_LOT: &str = "tokio-workers-parking-lot";
 const WRAPPED: &str = "tokio-workers-wrapped";
 /// Builds that describe no types: lines only, and symbols only.
 const UNTYPED: [&str; 2] = ["tokio-workers-lines", "tokio-workers-stripped"];
+
+/// The tokio release a build of the fixtures links: Cargo.lock's, or the
+/// older one a build named for it links.
+fn release(fixture: &str) -> &'static str {
+    if fixture.contains("-1.52-") {
+        "1.52.3"
+    } else {
+        "1.53.2"
+    }
+}
 
 /// One build of the fixture, stopped at its first stop, with what it
 /// printed going to a file.
@@ -507,7 +522,7 @@ async fn tokios_machinery_is_marked(current: bool) {
             let context = format!("{fixture}: {path} {:?}", frame.function);
             if path.ends_with("workers/src/main.rs") || path.ends_with("truth/src/lib.rs") {
                 assert_eq!(role, CodeRole::Ordinary, "{context}");
-            } else if path.contains("/tokio-1.52.3/src/runtime/") {
+            } else if path.contains(&format!("/tokio-{}/src/runtime/", release(fixture))) {
                 assert!(
                     matches!(role, CodeRole::RuntimeInternal | CodeRole::Dispatch),
                     "{context}: {role:?}"
@@ -804,7 +819,7 @@ async fn a_build_without_types_refuses_tasks_and_says_why() {
 }
 
 /// tokio's sources moved out of the path its version is read from: the
-/// tasks are listed as tokio 1.52 lays them out, each page saying that
+/// tasks are listed as tokio 1.53 lays them out, each page saying that
 /// the version is unknown rather than taking it for granted.
 #[tokio::test]
 async fn an_unknown_version_is_read_as_the_supported_one_and_says_so() {
@@ -818,7 +833,7 @@ async fn an_unknown_version_is_read_as_the_supported_one_and_says_so() {
     let pages = tasks.len().div_ceil(3);
     assert_eq!(
         gaps,
-        vec!["tokio's version is unknown; its runtime is read as tokio 1.52's".to_owned(); pages],
+        vec!["tokio's version is unknown; its runtime is read as tokio 1.53's".to_owned(); pages],
         "{fixture}"
     );
     check_threads(&mut workers.scenario, false, &truth, &tasks).await;
@@ -858,15 +873,21 @@ async fn a_cores_tasks_are_those_the_program_reported() {
 
 /// rustc describes each type once in every unit that uses it, so a large
 /// program has more types than a small one by far, and a type defined in
-/// many units is still one type.
+/// many units is still one type. tokio 1.53's scheduler also keeps when it
+/// started, for its schedule latency metrics.
 #[tokio::test]
 async fn every_type_of_a_large_program_is_read_and_named_once() {
     for fixture in BUILDS {
         let workers = Workers::parked(fixture, false).await;
+        let shared = if release(fixture) == "1.52.3" {
+            296
+        } else {
+            312
+        };
         for (name, size) in [
             (
                 "tokio::runtime::scheduler::multi_thread::worker::Shared",
-                296,
+                shared,
             ),
             ("tokio::runtime::scheduler::Handle", 16),
             ("tokio::runtime::task::core::Header", 32),

@@ -786,7 +786,7 @@ The built-in views cover:
   `Instant` as durations, and `SystemTime` as the UTC time it is. `&str`,
   `Box<str>`, `&Path`, `&OsStr`, and `&CStr` are text, and slices
   elements, without a view. `Rc<[T]>` and `Arc<[T]>` show as stored.
-- Rust, in tokio 1.52: a `JoinHandle` as its task's output, or as `task N
+- Rust, in tokio 1.52 and 1.53: a `JoinHandle` as its task's output, or as `task N
   pending`, `panicked`, `was cancelled`, or `'s output taken`, and a
   `JoinError` as tokio writes it; a task's `Id`; a `Waker` of a tokio task
   as the task; `Mutex`, `RwLock`, and `Semaphore` as what they hold, with

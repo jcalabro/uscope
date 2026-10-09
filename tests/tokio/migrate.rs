@@ -18,7 +18,12 @@ use crate::stops::{integer, line, place};
 use crate::support::{Scenario, ScratchDir};
 use crate::workers::{activities, tasks};
 
-const BUILDS: [&str; 2] = ["tokio-migrate-o0", "tokio-migrate-o3"];
+const BUILDS: [&str; 4] = [
+    "tokio-migrate-o0",
+    "tokio-migrate-o3",
+    "tokio-migrate-1.52-o0",
+    "tokio-migrate-1.52-o3",
+];
 const SOURCE: &str = "migrate/src/main.rs";
 
 async fn stopped_thread(scenario: &mut Scenario) -> ThreadId {

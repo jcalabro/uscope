@@ -11,7 +11,12 @@ use uscope::{
 use crate::stops::{backtrace, evaluated, frames_to, integer, line, locals, place};
 use crate::support::Scenario;
 
-const BUILDS: [&str; 2] = ["tokio-std-async-o0", "tokio-std-async-o3"];
+const BUILDS: [&str; 4] = [
+    "tokio-std-async-o0",
+    "tokio-std-async-o3",
+    "tokio-std-async-1.52-o0",
+    "tokio-std-async-1.52-o3",
+];
 const SOURCE: &str = "std-async/src/main.rs";
 
 /// A fixture launched to its first stop at the breakpoint `spec`.

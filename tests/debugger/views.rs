@@ -862,39 +862,48 @@ async fn go_library_values_present_as_go_shows_them() {
 /// no expression reaches: a task's cell, which a join handle presents as
 /// the type its task's code says, and the futures tasks wait on for
 /// permits and messages, which the workers tests check, and for lines and
-/// sockets, which the attach tests check.
+/// sockets, which the attach tests check. Each tokio release the fixtures
+/// are built with binds every view.
 #[tokio::test]
 async fn tokio_values_present_as_their_views_say() {
-    let mut seen =
-        check_printed_markers("tokio-values-o0", "barrier", MarkedFrame::Caller, false).await;
-    seen.extend(
-        uscope::built_in_views()
-            .into_iter()
-            .filter(|view| {
-                [
-                    "rust tokio::runtime::task::core::Cell<_, _>",
-                    "rust tokio::sync::batch_semaphore::Acquire",
-                    "rust core::future::poll_fn::PollFn<tokio::sync::mpsc::**::recv::`{async_fn#0}`::`{closure_env#0}`<_>>",
-                    "rust core::future::poll_fn::PollFn<tokio::io::util::lines::**::next_line::`{async_fn#0}`::`{closure_env#0}`<_>>",
-                    "rust tokio::runtime::io::scheduled_io::Readiness",
-                ]
-                .contains(&&*view.header)
-            })
-            .map(|view| view.to_string()),
-    );
-    assert_every_view_binds("tokio.views", &seen);
+    for fixture in ["tokio-values-o0", "tokio-values-1.52-o0"] {
+        let mut seen = check_printed_markers(fixture, "barrier", MarkedFrame::Caller, false).await;
+        seen.extend(
+            uscope::built_in_views()
+                .into_iter()
+                .filter(|view| {
+                    [
+                        "rust tokio::runtime::task::core::Cell<_, _>",
+                        "rust tokio::sync::batch_semaphore::Acquire",
+                        "rust core::future::poll_fn::PollFn<tokio::sync::mpsc::**::recv::`{async_fn#0}`::`{closure_env#0}`<_>>",
+                        "rust core::future::poll_fn::PollFn<tokio::io::util::lines::**::next_line::`{async_fn#0}`::`{closure_env#0}`<_>>",
+                        "rust tokio::runtime::io::scheduled_io::Readiness",
+                    ]
+                    .contains(&&*view.header)
+                })
+                .map(|view| view.to_string()),
+        );
+        assert_every_view_binds("tokio.views", &seen);
+    }
 }
 
 #[tokio::test]
 async fn optimized_tokio_values_present_as_their_views_say() {
-    check_printed_markers("tokio-values-o3", "barrier", MarkedFrame::Caller, true).await;
+    for fixture in ["tokio-values-o3", "tokio-values-1.52-o3"] {
+        check_printed_markers(fixture, "barrier", MarkedFrame::Caller, true).await;
+    }
 }
 
 /// A core of the program's first stop presents its values as the program
 /// said before it, which the core's log keeps.
 #[tokio::test]
 async fn tokio_values_in_a_core_present_as_their_views_say() {
-    for (variant, optimized) in [("o0", false), ("o3", true)] {
+    for (variant, optimized) in [
+        ("o0", false),
+        ("o3", true),
+        ("1.52-o0", false),
+        ("1.52-o3", true),
+    ] {
         let core = format!("tokio-values-{variant}.core");
         let log =
             fs::read_to_string(Scenario::fixture(&format!("{core}.log"))).expect("the core's log");
