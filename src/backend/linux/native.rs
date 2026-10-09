@@ -103,14 +103,14 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     /// Resolves the file behind a module mapping and its load bias, or
     /// `None` when the file cannot be proven to be the mapped one.
     fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)>;
-    /// Loads the debug information of a module file, from a separate debug
-    /// file that `search` finds when the module's own has none.
-    fn load_module(
+    /// Loads the debug information of module files, each from a separate
+    /// debug file that `search` finds when the module's own has none: all
+    /// at once, with each result where its module is in `modules`.
+    fn load_modules(
         &self,
-        path: &Path,
-        id: crate::ModuleImageId,
+        modules: &[(PathBuf, crate::ModuleImageId)],
         search: &crate::debug_info::DebugFileSearch,
-    ) -> Result<DebugInfo>;
+    ) -> Vec<Result<DebugInfo>>;
     fn load_bias(
         &self,
         pid: Pid,
@@ -435,13 +435,12 @@ impl LinuxTraceOps for LinuxPtrace {
         identify_mapped_module(mapping)
     }
 
-    fn load_module(
+    fn load_modules(
         &self,
-        path: &Path,
-        id: crate::ModuleImageId,
+        modules: &[(PathBuf, crate::ModuleImageId)],
         search: &crate::debug_info::DebugFileSearch,
-    ) -> Result<DebugInfo> {
-        crate::debug_info::load_module(path, id, search)
+    ) -> Vec<Result<DebugInfo>> {
+        crate::debug_info::load_modules(modules, search)
     }
 
     fn load_bias(

@@ -6,12 +6,16 @@
 //! and `uscope-tools timings` summarizes as text.
 //!
 //! Nothing is measured unless a recording is running: a span then costs one
-//! predictable branch, and reads no clock and allocates nothing. Spans mark
+//! predictable branch, and reads no clock and allocates nothing. Built with
+//! the `tracy` feature, spans are also Tracy's zones and counters its plots
+//! while a Tracy viewer is connected. Spans mark
 //! phases and units, never single entries or rows; hot loops count instead,
 //! and their counts attach to the innermost open span on their thread.
 
 pub mod alloc;
 mod report;
+#[cfg(feature = "tracy")]
+mod tracy;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -19,6 +23,12 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 pub use report::{Phase, Report, Summary, ThreadBusy, TraceEvent};
+#[cfg(feature = "tracy")]
+pub use tracy::wait_for_viewer;
+
+/// Waits for a Tracy viewer, which only a `tracy` build reports to.
+#[cfg(not(feature = "tracy"))]
+pub const fn wait_for_viewer() {}
 
 /// The most span events one recording keeps; later ones are counted as
 /// dropped.
@@ -282,6 +292,9 @@ pub fn mark(name: &'static str) {
 #[must_use = "a span measures until it is dropped"]
 pub struct Span {
     open: bool,
+    /// The span's zone, while a Tracy viewer is connected.
+    #[cfg(feature = "tracy")]
+    _zone: Option<tracy_client::Span>,
 }
 
 impl Span {
@@ -306,14 +319,17 @@ impl Span {
 /// names it as `parent`.
 #[inline]
 pub fn span(name: &'static str, parent: Option<u64>, label: Option<&dyn Fn() -> String>) -> Span {
-    if !enabled() {
-        return Span { open: false };
+    let open = enabled() && open_span(name, parent, label);
+    Span {
+        open,
+        #[cfg(feature = "tracy")]
+        _zone: tracy::zone(name, label),
     }
-    open_span(name, parent, label)
 }
 
+/// Opens a span in the running recording, unless it has just ended.
 #[cold]
-fn open_span(name: &'static str, parent: Option<u64>, label: Option<&dyn Fn() -> String>) -> Span {
+fn open_span(name: &'static str, parent: Option<u64>, label: Option<&dyn Fn() -> String>) -> bool {
     let label = label.map(|label| {
         let mut text = label();
         if text.len() > MAX_LABEL {
@@ -325,7 +341,7 @@ fn open_span(name: &'static str, parent: Option<u64>, label: Option<&dyn Fn() ->
         }
         text.into_boxed_str()
     });
-    let opened = THREAD.with(|thread| {
+    THREAD.with(|thread| {
         let mut thread = thread.borrow_mut();
         let generation = GENERATION.load(Ordering::Relaxed);
         if thread
@@ -383,8 +399,7 @@ fn open_span(name: &'static str, parent: Option<u64>, label: Option<&dyn Fn() ->
             counters: Vec::new(),
         });
         true
-    });
-    Span { open: opened }
+    })
 }
 
 impl Drop for Span {
@@ -478,6 +493,8 @@ pub fn count(name: &'static str, amount: u64) {
     if enabled() {
         add_count(name, amount);
     }
+    #[cfg(feature = "tracy")]
+    tracy::plot(name, amount);
 }
 
 #[cold]

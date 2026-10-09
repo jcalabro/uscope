@@ -1407,9 +1407,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         let keeps_running = match message {
             ControllerMessage::Request(request) => {
                 record!("request {}", request.describe());
+                let _span = crate::span!("request", "{}", request.describe());
                 self.handle_request(request)
             }
-            ControllerMessage::Wait(status) => self.handle_wait(status),
+            ControllerMessage::Wait(status) => {
+                let _span = crate::span!("wait");
+                self.handle_wait(status)
+            }
         };
         // A shutdown, whether requested or begun when an attached process
         // failed, ends the controller once nothing is left to release.

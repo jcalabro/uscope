@@ -215,13 +215,12 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
         self.0.identify_module(mapping)
     }
 
-    fn load_module(
+    fn load_modules(
         &self,
-        path: &Path,
-        id: crate::ModuleImageId,
+        modules: &[(PathBuf, crate::ModuleImageId)],
         search: &crate::debug_info::DebugFileSearch,
-    ) -> Result<DebugInfo> {
-        self.0.load_module(path, id, search)
+    ) -> Vec<Result<DebugInfo>> {
+        self.0.load_modules(modules, search)
     }
 
     fn thread_group_id(&self, pid: Pid) -> Result<Pid> {

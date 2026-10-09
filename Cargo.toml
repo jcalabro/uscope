@@ -21,6 +21,12 @@ system-alloc = []
 # Developer tools: `uscope-tools` dumps every answer a program's debug
 # information gives, loads programs for benchmarks, and summarizes timings.
 tools = []
+# Mirrors every span and counter to a Tracy viewer on this machine, which
+# connects on demand: build in `nix develop .#profile`, whose viewer speaks
+# the client's protocol (`just tracy-check`).
+tracy = ["dep:tracy-client"]
+# Also reports every allocation to Tracy, for its memory view.
+tracy-alloc = ["tracy"]
 
 [[bin]]
 name = "uscope-tools"
@@ -76,6 +82,10 @@ foldhash = "0.2"
 zerocopy = { version = "0.8", features = ["derive"] }
 rayon = "1.11"
 twox-hash = { version = "2.1", default-features = false, features = ["std", "xxhash3_64", "xxhash3_128"] }
+# Without sampling or system tracing, which open perf events the debuggee
+# would inherit, the crash handler, which takes fatal signals, or broadcast,
+# which announces the program on the network. Pinned with the viewer.
+tracy-client = { version = "=0.18.4", optional = true, default-features = false, features = ["enable", "ondemand", "only-localhost"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cpp_demangle = "0.5"

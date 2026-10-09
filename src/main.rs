@@ -11,17 +11,10 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 
-// Reading debug information allocates many small blocks, which mimalloc
-// serves far faster than the C library's allocator. Heap profilers that
-// cannot see mimalloc build with the `system-alloc` feature instead. Each
-// thread counts its allocations for `--timings`.
-#[cfg(not(feature = "system-alloc"))]
-type Allocator = mimalloc::MiMalloc;
-#[cfg(feature = "system-alloc")]
-type Allocator = std::alloc::System;
+// Each thread counts its allocations for `--timings`.
 #[global_allocator]
-static ALLOCATOR: uscope::profile::alloc::Counting<Allocator> =
-    uscope::profile::alloc::Counting::new(Allocator {});
+static ALLOCATOR: uscope::profile::alloc::Counting<uscope::profile::alloc::Selected> =
+    uscope::profile::alloc::selected();
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use uscope::Debugger;
 
@@ -297,6 +290,7 @@ fn main() -> ExitCode {
     }
     #[cfg(debug_assertions)]
     start_flight_recording();
+    uscope::profile::wait_for_viewer();
     // SAFETY: the process has no other thread yet.
     #[allow(unsafe_code, reason = "the environment can only be edited unsafely")]
     unsafe {

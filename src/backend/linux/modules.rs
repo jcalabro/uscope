@@ -36,6 +36,10 @@ pub(super) struct ModuleMapping {
     pub(super) executable: bool,
 }
 
+/// A module observed for the first time: its file, load bias, and the
+/// identifiers it is given.
+type NewModule = (PathBuf, u64, crate::ModuleId, ModuleImageId);
+
 impl<P: InspectionOps> Controller<P> {
     pub(super) fn loaded_module(&self) -> Result<LoadedModule> {
         self.inferior
@@ -177,26 +181,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.unregister_module(id);
         }
 
-        for (path, load_bias) in observed {
-            let known = self
-                .modules
-                .values()
-                .any(|module| module.image.path() == path && module.loaded.load_bias == load_bias);
-            if known {
-                continue;
-            }
-            let module_id = crate::ModuleId::new(self.next_module_id);
-            self.next_module_id = self
-                .next_module_id
-                .checked_add(1)
-                .ok_or_else(|| backend_error(LinuxError::ModuleIdExhausted))?;
-            let image_id = crate::ModuleImageId::new(self.next_image_id);
-            self.next_image_id = self
-                .next_image_id
-                .checked_add(1)
-                .ok_or_else(|| backend_error(LinuxError::ModuleImageIdExhausted))?;
+        let new = self.number_new_modules(observed)?;
+        let mut loads = self.load_observed(&new, vdso_image.take()).into_iter();
+        for (path, load_bias, module_id, image_id) in new {
             // Metadata a module's file cannot provide leaves its frames unnamed.
-            let Ok(debug) = self.load_observed(&path, image_id, &mut vdso_image) else {
+            let Ok(debug) = loads.next().expect("a load for each new module") else {
                 continue;
             };
             let loaded = LoadedModule {
@@ -234,6 +223,33 @@ impl<P: LinuxTraceOps> Controller<P> {
 }
 
 impl<P: LinuxTraceOps> Controller<P> {
+    /// Numbers each of the `observed` modules not yet registered, in the
+    /// order they were observed, whether or not it will load.
+    fn number_new_modules(&mut self, observed: Vec<(PathBuf, u64)>) -> Result<Vec<NewModule>> {
+        let mut new = Vec::new();
+        for (path, load_bias) in observed {
+            let known = self
+                .modules
+                .values()
+                .any(|module| module.image.path() == path && module.loaded.load_bias == load_bias);
+            if known {
+                continue;
+            }
+            let module_id = crate::ModuleId::new(self.next_module_id);
+            self.next_module_id = self
+                .next_module_id
+                .checked_add(1)
+                .ok_or_else(|| backend_error(LinuxError::ModuleIdExhausted))?;
+            let image_id = crate::ModuleImageId::new(self.next_image_id);
+            self.next_image_id = self
+                .next_image_id
+                .checked_add(1)
+                .ok_or_else(|| backend_error(LinuxError::ModuleImageIdExhausted))?;
+            new.push((path, load_bias, module_id, image_id));
+        }
+        Ok(new)
+    }
+
     /// The code that moved since the modules were refreshed, as the memory
     /// map shows it now.
     pub(super) fn moved_code_now(&self, pid: Pid) -> Result<Vec<MovedCode>> {
@@ -292,27 +308,44 @@ impl<P: LinuxTraceOps> Controller<P> {
             .collect()
     }
 
-    /// Loads the metadata of an observed module: the vDSO's from the image
-    /// read from memory, and any other's from its file.
+    /// Loads the metadata of new modules, each result where its module is
+    /// in `new`: the vDSO's from `vdso_image`, read from memory, and every
+    /// other's from its file, all at once.
     fn load_observed(
         &self,
-        path: &Path,
-        image: ModuleImageId,
-        vdso_image: &mut Option<Vec<u8>>,
-    ) -> Result<DebugInfo> {
-        vdso_image
-            .take_if(|_| path.as_os_str() == VDSO_NAME)
-            .map_or_else(
-                || self.ptrace.load_module(path, image, &self.debug_files),
-                |data| {
-                    crate::debug_info::load_module_bytes(
-                        path,
-                        &data,
-                        image,
-                        &crate::debug_info::DebugFileSearch::default(),
-                    )
-                },
-            )
+        new: &[NewModule],
+        mut vdso_image: Option<Vec<u8>>,
+    ) -> Vec<Result<DebugInfo>> {
+        let mut vdso = None;
+        let mut files = Vec::new();
+        for (index, (path, _, _, image)) in new.iter().enumerate() {
+            match vdso_image.take_if(|_| path.as_os_str() == VDSO_NAME) {
+                Some(data) => {
+                    vdso = Some((
+                        index,
+                        crate::debug_info::load_module_bytes(
+                            path,
+                            &data,
+                            *image,
+                            &crate::debug_info::DebugFileSearch::default(),
+                        ),
+                    ));
+                }
+                None => files.push((path.clone(), *image)),
+            }
+        }
+        let mut files = if files.is_empty() {
+            Vec::new()
+        } else {
+            self.ptrace.load_modules(&files, &self.debug_files)
+        }
+        .into_iter();
+        (0..new.len())
+            .map(|index| match vdso.take_if(|(at, _)| *at == index) {
+                Some((_, load)) => load,
+                None => files.next().expect("a load for each file"),
+            })
+            .collect()
     }
 }
 

@@ -1536,6 +1536,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !ready {
             return Ok(());
         }
+        // From the last thread stopping to the stop's publication.
+        let _span = crate::span!("stop");
         if self.attach_reply.is_some() {
             if self.seize_untraced_threads()? {
                 return Ok(());

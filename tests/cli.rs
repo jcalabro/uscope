@@ -4842,3 +4842,35 @@ fn sessions_cache_images_unless_told_not_to() {
     );
     assert!(assert_success(output).contains("breakpoint 1"));
 }
+
+/// `--timings` reports where a session's stops and requests spend their
+/// time, beside its loads: each stop from its last thread stopping to its
+/// publication, the modules it refreshed, and every request.
+#[test]
+fn timings_report_each_stop_and_request() {
+    let directory = support::ScratchDir::new("cli-timings");
+    let report = directory.path().join("timings.json");
+    let report_arg = report.display().to_string();
+    assert_success(uscope(&[
+        "--batch",
+        "--timings",
+        &report_arg,
+        "--eval",
+        "break breakpoint_target",
+        "--eval",
+        "run",
+        "--eval",
+        "backtrace",
+        BASIC,
+    ]));
+    let report: uscope::profile::Report =
+        serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    let phases = report
+        .phases
+        .iter()
+        .map(|phase| phase.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for phase in ["load", "stop", "modules", "load_modules", "request"] {
+        assert!(phases.contains(phase), "{phase} in {phases:?}");
+    }
+}
