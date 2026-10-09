@@ -166,6 +166,7 @@ header.top { display: grid; gap: 18px; }
 }
 .tile .v { font: 600 30px/1.1 var(--display); font-variant-numeric: tabular-nums; }
 .tile .v.bad { color: var(--bad); }
+.tile .v.good { color: var(--good); }
 .tile .l { font-size: 13px; color: var(--ink-2); line-height: 1.45; }
 
 /* ---------- cards ---------- */
@@ -288,6 +289,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
   <nav class="toc" aria-label="Contents">
     <b>Performance</b>
     <a href="#summary">Summary</a>
+    <a href="#results">Results</a>
     <a href="#review">Contracts</a>
     <a href="#principles">Principles</a>
     <a href="#baseline">Where we are</a>
@@ -348,6 +350,89 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <li><b>Never guess.</b> Instrument once and feed every reader: text and JSON reports that people, scripts, and coding agents can diff, Perfetto and the usual profilers for people at a screen, and deterministic instruction and allocation benchmarks that fail when a change regresses them.</li>
           <li><b>Never do it twice.</b> Images are cached by content, so a program uscope has seen loads in milliseconds: every re-run, every shared library, and every test fixture.</li>
         </ol>
+      </div>
+    </section>
+
+
+    <!-- ================================================================ -->
+    <section id="results">
+      <div class="eyebrow">Results</div>
+      <h2>Before and after</h2>
+      <div class="tiles">
+        <div class="tile"><span class="v good">11 ms</span><span class="l">to load the tokio server from the image cache, against 517 ms before; 406 ms without the cache.</span></div>
+        <div class="tile"><span class="v good">0.38 s</span><span class="l">to load uscope's own debug build from the cache. It used to fail at the object cap after 8.4 s; without the cache it now loads completely in 22.5 s.</span></div>
+        <div class="tile"><span class="v good">60–78%</span><span class="l">less memory kept after a load: the tokio server keeps 24.3 MB instead of 110.7 MB.</span></div>
+        <div class="tile"><span class="v good">3×</span><span class="l">faster test suites: the debugger, tokio, Go, and DAP suites take 6.6 s of wall time through the cache, against 20.4 s loading afresh.</span></div>
+      </div>
+      <div class="prose">
+        <p>“Before” is <code>bench/reports/p0.json</code>, recorded with P0's harness before any loader change; “after” is <code>bench/reports/final.json</code> at <code>2af2e6f</code>, the same harness, machine (Ryzen 9 9950X, 32 CPUs), and release build: the loader alone, five loads each in fresh processes, medians. P0's loads ran with the pool's default workers over a loader that was serial; “after” lists one worker and sixteen. Cached loads are five hits in fresh processes through <code>uscope-tools --cache</code>, which read and hash the inputs, then read and validate the image.</p>
+      </div>
+      <div class="scroller">
+        <table class="data">
+          <caption>Load time, milliseconds</caption>
+          <thead><tr><th>Program</th><th class="n">size MB</th><th class="n">before</th><th class="n">after, 1 worker</th><th class="n">after, 16 workers</th><th class="n">after, cached</th></tr></thead>
+          <tbody>
+            <tr><td>containers-cpp-gcc-o2</td><td class="n">2.6</td><td class="n">51</td><td class="n">47</td><td class="n">50</td><td class="n">2.5</td></tr>
+            <tr><td>containers-zig-self-hosted</td><td class="n">12.8</td><td class="n">76</td><td class="n">74</td><td class="n">84</td><td class="n">4.8</td></tr>
+            <tr><td>containers-rust-o0</td><td class="n">7.6</td><td class="n">158</td><td class="n">150</td><td class="n">120</td><td class="n">6.6</td></tr>
+            <tr><td>server-go-o0</td><td class="n">11.2</td><td class="n">848</td><td class="n">165</td><td class="n">162</td><td class="n">9.9</td></tr>
+            <tr><td>tokio-server-o0</td><td class="n">15.0</td><td class="n">517</td><td class="n">585</td><td class="n">406</td><td class="n">11.0</td></tr>
+            <tr><td>tokio-values-o0</td><td class="n">27.7</td><td class="n">872</td><td class="n">953</td><td class="n">666</td><td class="n">22.3</td></tr>
+            <tr><td>Go command</td><td class="n">17.1</td><td class="n">172</td><td class="n">148</td><td class="n">149</td><td class="n">18.6</td></tr>
+            <tr><td>uscope dev build</td><td class="n">454.9</td><td class="n bad">fails, 8,382</td><td class="n">30,070</td><td class="n">22,491</td><td class="n">384</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="scroller">
+        <table class="data">
+          <caption>Memory, MB: kept after the load, and the process's peak RSS</caption>
+          <thead><tr><th>Program</th><th class="n">kept, before</th><th class="n">kept, after</th><th class="n">peak RSS, before</th><th class="n">peak RSS, 16 workers</th><th class="n">peak RSS, cached</th></tr></thead>
+          <tbody>
+            <tr><td>containers-cpp-gcc-o2</td><td class="n">16.8</td><td class="n">5.9</td><td class="n">78</td><td class="n">94</td><td class="n">32</td></tr>
+            <tr><td>containers-zig-self-hosted</td><td class="n">33.3</td><td class="n">10.2</td><td class="n">137</td><td class="n">178</td><td class="n">47</td></tr>
+            <tr><td>containers-rust-o0</td><td class="n">41.7</td><td class="n">15.5</td><td class="n">128</td><td class="n">210</td><td class="n">45</td></tr>
+            <tr><td>server-go-o0</td><td class="n">112.1</td><td class="n">33.3</td><td class="n">235</td><td class="n">426</td><td class="n">70</td></tr>
+            <tr><td>tokio-server-o0</td><td class="n">110.7</td><td class="n">24.3</td><td class="n">250</td><td class="n">399</td><td class="n">66</td></tr>
+            <tr><td>tokio-values-o0</td><td class="n">192.7</td><td class="n">43.9</td><td class="n">387</td><td class="n">596</td><td class="n">99</td></tr>
+            <tr><td>Go command</td><td class="n">115.1</td><td class="n">46.0</td><td class="n">242</td><td class="n">275</td><td class="n">84</td></tr>
+            <tr><td>uscope dev build</td><td class="n">—</td><td class="n">684.8</td><td class="n bad">3,832 (failed)</td><td class="n">7,179</td><td class="n">1,179</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="scroller">
+        <table class="data">
+          <caption>Heap allocations per load</caption>
+          <thead><tr><th>Program</th><th class="n">before</th><th class="n">after</th><th class="n">after, cached</th></tr></thead>
+          <tbody>
+            <tr><td>containers-cpp-gcc-o2</td><td class="n">621,547</td><td class="n">460,689</td><td class="n">378</td></tr>
+            <tr><td>containers-zig-self-hosted</td><td class="n">760,419</td><td class="n">521,577</td><td class="n">1,063</td></tr>
+            <tr><td>containers-rust-o0</td><td class="n">2,165,879</td><td class="n">1,357,710</td><td class="n">1,287</td></tr>
+            <tr><td>server-go-o0</td><td class="n">1,951,113</td><td class="n">883,759</td><td class="n">2,087</td></tr>
+            <tr><td>tokio-server-o0</td><td class="n">6,421,051</td><td class="n">5,277,103</td><td class="n">1,852</td></tr>
+            <tr><td>tokio-values-o0</td><td class="n">10,058,627</td><td class="n">8,381,215</td><td class="n">1,933</td></tr>
+            <tr><td>Go command</td><td class="n">1,564,023</td><td class="n">811,634</td><td class="n">2,570</td></tr>
+            <tr><td>uscope dev build</td><td class="n bad">75.9 M (failed)</td><td class="n">214.4 M</td><td class="n">6,178</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="scroller">
+        <table class="data">
+          <caption>Against the stretch targets in Budgets</caption>
+          <thead><tr><th>Measure</th><th class="n">target</th><th class="n">after</th></tr></thead>
+          <tbody>
+            <tr><td>tokio server, cold / cached</td><td class="n">≤ 40 / ≤ 6 ms</td><td class="n bad">406 / 11 ms</td></tr>
+            <tr><td>tokio-values-o0, cold / cached</td><td class="n">≤ 60 / ≤ 8 ms</td><td class="n bad">666 / 22 ms</td></tr>
+            <tr><td>server-go-o0, cold / cached</td><td class="n">≤ 20 / ≤ 4 ms</td><td class="n bad">162 / 9.9 ms</td></tr>
+            <tr><td>Go command, cold / cached</td><td class="n">≤ 40 / ≤ 6 ms</td><td class="n bad">149 / 19 ms</td></tr>
+            <tr><td>uscope dev build, cold / cached</td><td class="n">≤ 600 / ≤ 200 ms</td><td class="n bad">22.5 s / 384 ms</td></tr>
+            <tr><td>tokio server's image</td><td class="n">≤ 12 MB</td><td class="n bad">24.3 MB kept</td></tr>
+            <tr><td>Allocations per load, tokio server</td><td class="n">≤ 10 K</td><td class="n">1,852 cached; 5.28 M cold</td></tr>
+            <tr><td>Parallel speedup, large program, 16 workers</td><td class="n">≥ 10×</td><td class="n bad">1.34× (30.1 → 22.5 s)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="prose">
+        <p>The cache delivers most of the gain: every program in the corpus but the largest loads in 2.5–22 ms from it, and each stop of a session that loads libc, ld.so, and the vDSO takes about 1 ms instead of 4.4. Loading afresh is faster for Go (848 → 162 ms) and the Rust and tokio programs, and keeps a quarter of the memory, but is far from the cold targets. Peak RSS with sixteen workers is higher than before, the workers' allocator caches; with one it is about the same. The large program's cold load is dominated by the variable loader's serial DIE walk (7 s), types and their merging (6 s), and sealing (3 s); the shared parallel DIE walk is the next step toward the cold targets.</p>
       </div>
     </section>
 
