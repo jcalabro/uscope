@@ -3,7 +3,8 @@
 //! file.
 //!
 //! An entry's key digests the exact bytes the image was built from (the
-//! file and the separate debug file chosen for it), the image format, and
+//! file, the separate debug file chosen for it, and the dwz supplementary
+//! file its DWARF shares), the image format, and
 //! the sources the loader was built from, so an entry is never read by a
 //! loader that might have built it differently. Paths, identifiers, and
 //! everything else a session binds an image to stay out of the bytes, so
@@ -169,7 +170,9 @@ impl fmt::Display for Key {
 
 impl Key {
     /// The key of an image built from `inputs`, in their roles' order: the
-    /// file, then the separate debug file chosen for it, if any.
+    /// file, then the separate debug file chosen for it, if any, then the
+    /// supplementary file its DWARF shares, if any. Which role an input has
+    /// follows from the bytes before it.
     #[must_use]
     pub fn of(inputs: &[&[u8]]) -> Self {
         let mut digest = twox_hash::XxHash3_128::new();

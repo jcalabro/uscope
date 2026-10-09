@@ -94,7 +94,8 @@ fn answers(info: &DebugInfo) -> String {
 /// A load that hits the cache reads the bytes the load that missed wrote,
 /// and answers every question as a load without a cache does, whether the
 /// image came from the program's own file, a separate debug file, or one
-/// that could not be used.
+/// that could not be used, and whether or not its DWARF shares a
+/// supplementary file.
 #[test]
 fn a_cached_load_answers_as_an_uncached_one() {
     let split = fixture("split/basic-build-id");
@@ -106,6 +107,13 @@ fn a_cached_load_answers_as_an_uncached_one() {
         (fixture("callers-go-stripped"), search(&[])),
         (split.clone(), search(&[&root])),
         (split, search(&[&altlink])),
+        // DWARF sharing a dwz supplementary file, in a separate debug file
+        // and in the program's own.
+        (
+            fixture("dwz/gcc-o2/split/shapes"),
+            search(&[&fixture("dwz/gcc-o2/debug-root")]),
+        ),
+        (fixture("dwz/clang-o2/dwz/shapes"), search(&[])),
     ];
     for (index, (path, search)) in cases.iter().enumerate() {
         let dir = ScratchDir::new(&format!("cached-load-{index}"));
@@ -188,6 +196,32 @@ fn a_debug_file_found_later_is_another_entry() {
     let (gone, outcome) = load(&program, 0, &search(&[&root]), Some(&cache));
     assert_eq!(outcome, CacheOutcome::Hit);
     assert_eq!(gone.image.image_bytes(), alone.image.image_bytes());
+}
+
+/// A supplementary file is an input too: a debug file refused for want of
+/// its supplementary file is read once the file is found.
+#[test]
+fn a_supplementary_file_found_later_is_another_entry() {
+    let dir = ScratchDir::new("cached-supplementary-later");
+    let cache = ImageCache::open(&dir.join("images"), DEFAULT_CAPACITY).unwrap();
+    let program = fixture("dwz/gcc-o2/split/shapes");
+    let root = dir.copy(&fixture("dwz/gcc-o2/debug-root"), "root");
+    let moved = dir.join("shapes.dwz");
+    std::fs::rename(root.join(".dwz/shapes"), &moved).unwrap();
+
+    let (refused, outcome) = load(&program, 0, &search(&[&root]), Some(&cache));
+    assert_eq!(outcome, CacheOutcome::Miss);
+    assert!(matches!(
+        refused.image.separate_debug_file(),
+        Some(crate::DebugFile::Unusable { .. })
+    ));
+    std::fs::rename(&moved, root.join(".dwz/shapes")).unwrap();
+    let (found, outcome) = load(&program, 0, &search(&[&root]), Some(&cache));
+    assert_eq!(outcome, CacheOutcome::Miss);
+    assert!(found.image.debug_file().is_some());
+    let (again, outcome) = load(&program, 0, &search(&[&root]), Some(&cache));
+    assert_eq!(outcome, CacheOutcome::Hit);
+    assert_eq!(again.image.image_bytes(), found.image.image_bytes());
 }
 
 /// An entry that cannot be bound, as an image built without the debug

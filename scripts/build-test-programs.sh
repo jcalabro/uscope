@@ -483,6 +483,99 @@ derive_split_debug() {
         bash -c "$script" _ "$input" "$output" "$layout" "$root"
 }
 
+# Builds the shapes program and its library, which share a header, into
+# DIRECTORY/plain with COMPILER and FLAGS.
+build_shapes_fixture() {
+    local compiler="$1"
+    local directory="$2"
+    shift 2
+    local source_dir="$cpp_fixtures_dir/shapes"
+    local -a common=("$compiler" -std=c++20 -Wall -Wextra -Werror -g "$@" -Wl,--build-id)
+    read_dash_version "$compiler"
+    local signature="compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=${compiler}"
+    mkdir -p "$directory/plain"
+    run_cached_build "$source_dir" "$directory/plain/libshapes.so" "$signature" \
+        "${common[@]}" -shared -fPIC -Wl,-soname,libshapes.so "$source_dir/library.cpp" \
+        "$source_dir/geometry.cpp" -o "$directory/plain/libshapes.so"
+    run_cached_build "$source_dir" "$directory/plain/shapes" "$signature" \
+        "${common[@]}" "$source_dir/main.cpp" "$source_dir/geometry.cpp" \
+        "$directory/plain/libshapes.so" \
+        '-Wl,-rpath,$ORIGIN' -o "$directory/plain/shapes"
+}
+
+# Shares what the shapes program and library in DIRECTORY/plain have in
+# common through a dwz supplementary file, as distributions do. With LAYOUT
+# `whole`, DIRECTORY/dwz holds them with their debug information, which
+# names .dwz/shapes beside them by `.gnu_debugaltlink`; `dwarf5` does the
+# same in DIRECTORY/dwarf5, naming it by DWARF 5's `.debug_sup`; with
+# `split`, DIRECTORY/split holds them stripped, and their debug files are
+# filed by build-id under DIRECTORY/debug-root, naming ../../.dwz/shapes
+# there.
+derive_dwz() {
+    wait_builds
+    local directory="$1"
+    local layout="$2"
+    local script
+    # shellcheck disable=SC2016
+    script='
+        set -euo pipefail
+        directory="$1"; layout="$2"
+        plain="$directory/plain"
+        debug=()
+        standard=()
+        case "$layout" in
+            whole|dwarf5)
+                output="$directory/dwz"
+                if [[ "$layout" == dwarf5 ]]; then
+                    output="$directory/dwarf5"
+                    standard=(-5)
+                fi
+                rm -rf "$output"
+                mkdir -p "$output/.dwz"
+                for name in shapes libshapes.so; do
+                    cp "$plain/$name" "$output/$name.tmp"
+                    debug+=("$output/$name.tmp")
+                done
+                common="$output/.dwz/shapes"
+                ;;
+            split)
+                output="$directory/split"
+                root="$directory/debug-root"
+                rm -rf "$output" "$root"
+                mkdir -p "$output" "$root/.dwz"
+                for name in shapes libshapes.so; do
+                    id=$(readelf -n "$plain/$name" 2>/dev/null | awk "/Build ID:/ { print \$3 }")
+                    [[ -n "$id" ]] || { echo "$plain/$name has no build-id" >&2; exit 1; }
+                    mkdir -p "$root/.build-id/${id:0:2}"
+                    file="$root/.build-id/${id:0:2}/${id:2}.debug"
+                    objcopy --only-keep-debug "$plain/$name" "$file"
+                    strip --strip-all -o "$output/$name.tmp" "$plain/$name"
+                    debug+=("$file")
+                done
+                common="$root/.dwz/shapes"
+                ;;
+        esac
+        dwz "${standard[@]}" -m "$common" -r "${debug[@]}"
+        link=.gnu_debugaltlink
+        [[ "$layout" == dwarf5 ]] && link=.debug_sup
+        for file in "${debug[@]}"; do
+            readelf -S "$file" | grep -F " $link " >/dev/null \
+                || { echo "dwz left $file sharing nothing" >&2; exit 1; }
+        done
+        for name in libshapes.so shapes; do
+            mv "$output/$name.tmp" "$output/$name"
+        done
+    '
+    local output="$directory/dwz/shapes"
+    [[ "$layout" == split ]] && output="$directory/split/shapes"
+    [[ "$layout" == dwarf5 ]] && output="$directory/dwarf5/shapes"
+    local version
+    version=$(dwz --version | head -n 1)
+    run_cached_build "$directory/plain" "$output" \
+        "derivation=dwz-v1"$'\n'"layout=${layout}"$'\n'"dwz=${version}" \
+        bash -c "$script" _ "$directory" "$layout"
+}
+
 # Fails the build when the symbol fixture library no longer has the symbol
 # tables and layout the symbolization tests depend on. TABLES names which
 # tables must exist: full, dynamic, or embedded.
@@ -888,7 +981,7 @@ suite_signature() {
     local -a paths=()
     local tool path
     for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc cargo go zig objdump \
-        gdb setarch; do
+        gdb setarch dwz; do
         if path=$(type -P "$tool"); then
             paths+=("$path")
         fi
@@ -1322,8 +1415,9 @@ build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/split/basic-build-id.fu
 derive_split_debug "$output_dir/split/basic-build-id.full" "$output_dir/split/basic-build-id" \
     build-id "$output_dir/split/debug-root"
 # The same debug file under another debug directory, naming a dwz
-# supplementary file as distributions' debug files do, which uscope refuses
-# with its reason rather than misread.
+# supplementary file as distributions' debug files do, beside it in that
+# directory's .dwz, where none is: uscope refuses it with its reason rather
+# than misread it.
 altlinked_script='
     set -euo pipefail
     root="$1"; output="$2"
@@ -1340,6 +1434,18 @@ altlinked_script='
 run_cached_build "$output_dir/split/basic-build-id" "$output_dir/split/altlink-root/ready" \
     "derivation=altlinked-v1" \
     bash -c "$altlinked_script" _ "$output_dir/split/debug-root" "$output_dir/split/altlink-root"
+# A C++ program and its library whose debug information shares what they
+# have in common through a dwz supplementary file, as distributions' does,
+# named the GNU way and DWARF 5's.
+# dwz reads Clang's DWARF only up to version 4.
+build_shapes_fixture g++ "$output_dir/dwz/gcc-o0" -O0
+build_shapes_fixture g++ "$output_dir/dwz/gcc-o2" -O2
+build_shapes_fixture clang++ "$output_dir/dwz/clang-o2" -O2 -gdwarf-4
+for variant in gcc-o0 gcc-o2 clang-o2; do
+    derive_dwz "$output_dir/dwz/$variant" whole
+    derive_dwz "$output_dir/dwz/$variant" dwarf5
+done
+derive_dwz "$output_dir/dwz/gcc-o2" split
 build_shared_fixture gcc "$c_fixtures_dir/module-frames/library.c" \
     "$output_dir/split/libmodule-frames.so.full" -O0 -g3 -gdwarf-5 -Wl,--build-id \
     -Wl,-soname,libmodule-frames.so

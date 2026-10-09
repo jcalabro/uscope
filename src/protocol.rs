@@ -774,7 +774,10 @@ pub struct LaunchOptions {
 /// `.gnu_debuglink` names, beside it, in its `.debug` directory, or under a
 /// debug directory at its own path, or last from a debuginfod server. Each
 /// must prove it describes the module, by build-id or by the checksum the
-/// link records.
+/// link records. The dwz supplementary file DWARF shares is found where it
+/// names it, by its identifier in the same places, or under a debug
+/// directory's `.dwz`, and must have the build-id `.gnu_debugaltlink`
+/// names, or record the checksum `.debug_sup` names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DebugFileOptions {
     /// Debug directories searched before the system's: those

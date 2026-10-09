@@ -288,7 +288,7 @@ pub(super) fn load_globals<'data>(
                 .or(chain_error)
                 .or(linkage_error);
             let object = DataObject {
-                debug_info_offset: debug_info_offset(unit, entry),
+                debug_info_offset: debug_info_offset(units, unit_index, entry),
                 kind: VariableKind::Global,
                 name: Arc::clone(&name),
                 declaration: declaration.as_ref().ok().cloned().flatten(),

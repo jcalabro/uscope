@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use gimli::Reader as _;
 
-use crate::debug_info::dwarf::{DwarfError, Reader, Units};
+use crate::debug_info::dwarf::{DwarfError, Reader, Units, unit_dwarf};
 use crate::{AddressRange, ImageAddress, VariableUnavailableReason};
 
 use super::die::{ByteSize, base_type_encoding, byte_size_attribute};
@@ -317,7 +317,7 @@ fn indexed_addresses(
         else {
             continue;
         };
-        let address = dwarf.address(unit, index)?;
+        let address = unit_dwarf(dwarf, unit).address(unit, index)?;
         addresses.push((u64::try_from(index.0).expect("indexes fit u64"), address));
     }
     Ok(addresses)
@@ -354,12 +354,16 @@ pub(super) fn load_evaluation_units(
     units: &Units<'_>,
     pool: &mut LocationsBuilder,
 ) -> std::result::Result<(), DwarfError> {
-    for unit in units.iter() {
+    for (index, unit) in units.iter().enumerate() {
         let mut recorded = EvaluationUnit {
+            // The supplementary file's units lie in another section, which
+            // the file's expressions never name.
             offset: unit
                 .header
                 .debug_info_offset()
+                .filter(|_| !units.is_supplementary(index))
                 .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64")),
+            language: units.inherited_language(index),
             ..EvaluationUnit::default()
         };
         let mut entries = unit.entries();

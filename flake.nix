@@ -84,6 +84,9 @@
           muslClang
           gdb
           lldb
+          # Shares fixtures' debug information through supplementary files,
+          # as distributions do.
+          dwz
           # Profilers for the `just profile-*` recipes.
           perf
           valgrind

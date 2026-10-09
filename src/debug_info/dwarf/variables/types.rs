@@ -7,7 +7,7 @@ use std::sync::Arc;
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 
 use crate::debug_info::dwarf::{
-    DieKey, Reader, TypeSignatures, Units, die_reference_with_signatures,
+    DieKey, Reader, TypeSignatures, Units, die_reference_with_signatures, unit_dwarf,
 };
 use crate::model::ArrayDimension;
 use crate::{
@@ -213,11 +213,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     first = false;
                     language = match entry.attr_value(gimli::DW_AT_language) {
                         Some(gimli::AttributeValue::Language(language)) => Some(language),
-                        _ => None,
+                        _ => units.inherited_language(unit_index),
                     };
                     zig_producer = entry
                         .attr_value(gimli::DW_AT_producer)
-                        .and_then(|value| dwarf.attr_string(unit, value).ok())
+                        .and_then(|value| unit_dwarf(dwarf, unit).attr_string(unit, value).ok())
                         .is_some_and(|producer| producer.to_string_lossy().starts_with("zig "));
                     cpp = source_language(language, zig_producer) == SourceLanguage::Cpp;
                 }
