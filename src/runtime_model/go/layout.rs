@@ -152,6 +152,9 @@ pub struct Threads {
     pub m_g0: u64,
     pub m_gsignal: u64,
     pub m_curg: u64,
+    /// Where a vDSO call that has saved its stack pointer says its caller
+    /// went on, and zero otherwise.
+    pub m_vdso_sp: u64,
 }
 
 impl Threads {
@@ -178,6 +181,7 @@ impl Threads {
             m_g0: m(&["g0"])?,
             m_gsignal: m(&["gsignal"])?,
             m_curg: m(&["curg"])?,
+            m_vdso_sp: m(&["vdsoSP"])?,
         })
     }
 }

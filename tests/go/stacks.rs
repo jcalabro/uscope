@@ -400,6 +400,30 @@ async fn a_vdso_call_unwinds_onto_its_caller() {
     }
 }
 
+/// Until a vDSO call has saved its stack pointer, the register that will
+/// hold it holds whatever its caller left there, and the frame is still
+/// on the stack it was called on.
+#[tokio::test]
+async fn a_vdso_call_unwinds_before_it_saves_its_stack_pointer() {
+    for fixture in BUILDS {
+        let (scenario, trace) = stop_in(fixture, "runtime.nanotime1", |segments| {
+            segments[0].0 == StackSegment::Task
+        })
+        .await;
+        let context = format!("{fixture}: {trace:#?}");
+        let functions = segments(&trace);
+        assert_eq!(functions.len(), 1, "{context}");
+        assert_eq!(functions[0].1[0], "runtime.nanotime1", "{context}");
+        assert_eq!(
+            functions[0].1.last().map(String::as_str),
+            Some("runtime.goexit"),
+            "{context}"
+        );
+        assert_eq!(trace.termination, UnwindTermination::Complete, "{context}");
+        scenario.shutdown().await;
+    }
+}
+
 /// A signal's handler runs on the thread's signal stack and returns
 /// through the runtime's signal trampoline, above the frame the signal
 /// interrupted, whose registers the kernel saved in the signal frame.

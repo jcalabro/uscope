@@ -646,10 +646,27 @@ impl RuntimeModel for GoRuntime {
             Some("runtime.cgocallback") => return self.cross_callback(stop, thread, frame),
             Some("runtime.morestack" | "runtime.mcall") => Switch::Abandons,
             // A vDSO call keeps the goroutine's stack pointer in r12, which
-            // C preserves, while it runs on the system stack.
+            // C preserves, while it runs on the system stack. It saves it
+            // before it publishes `m.vdsoSP` for the runtime's traceback,
+            // and clears that after it is back, so until then the frame is
+            // on the stack it was called on and r12 is its caller's.
             Some("runtime.nanotime1" | "runtime.vgetrandom1") => {
+                let r12 = register(R12, "r12")?;
+                let gs = self
+                    .thread_gs(stop, thread)?
+                    .ok_or("the thread runs no goroutine")?;
+                let vdso_sp = word(
+                    stop,
+                    VirtualAddress::new(gs.m.wrapping_add(self.threads()?.m_vdso_sp)),
+                )
+                .ok_or("the thread's m is unreadable")?;
+                // A signal's handler may make the call while the call it
+                // interrupted has published its own.
+                if vdso_sp == 0 || !self.stack(stop, gs.g)?.contains(&r12) {
+                    return Ok(Crossing::Stay);
+                }
                 let mut registers = frame.clone();
-                registers.set(RSP, register(R12, "r12")?);
+                registers.set(RSP, r12);
                 return Ok(Crossing::Resume(registers));
             }
             // A new thread begins on the stack `clone` gives it, whose
