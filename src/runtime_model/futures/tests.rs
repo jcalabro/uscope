@@ -13,7 +13,8 @@ use crate::{
     Accessibility, ArgumentOrigin, CoroutineInfo, CoroutineKind, CoroutineState,
     CoroutineStateKind, ImageAddress, IntegerValue, LineNumber, ModuleImageId, RecordKind,
     RecordMember, RecordMemberLayout, SourceFileId, SourceLanguage, SourceLocation, StateMember,
-    ThreadId, ThreadLocal, TypeId, TypeIdentity, TypeInfo, TypeKind, TypeReference, VirtualAddress,
+    ThreadId, ThreadLocal, TypeId, TypeIdentity, TypeInfo, TypeKind, TypeReference, Variant,
+    VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind, VirtualAddress,
 };
 
 const OUTER: u32 = 0;
@@ -34,6 +35,11 @@ const MANUALLY_DROP: u32 = 14;
 const SPAN: u32 = 15;
 const LOOKALIKE: u32 = 16;
 const MAYBE_DANGLING: u32 = 17;
+const TASK_LOCAL: u32 = 18;
+const OPTION: u32 = 19;
+const SOME: u32 = 20;
+const NONE: u32 = 21;
+const TAG: u32 = 22;
 
 /// Where the awaited future lies in each coroutine.
 const AWAITEE: u64 = 8;
@@ -143,6 +149,40 @@ fn coroutine(states: Vec<CoroutineState>) -> CoroutineInfo {
     }
 }
 
+/// An `Option` of the future of type `held`, its one-byte tag first:
+/// `None` at 0 and `Some` at 1, with the future after the tag.
+fn option(held: u32) -> Vec<TypeInfo> {
+    let variant = |tag: u64, name: &str, ty: u32| Variant {
+        name: None,
+        selection: VariantSelection::Selectors(Arc::new([VariantSelector::Value(
+            IntegerValue::Unsigned(tag.into()),
+        )])),
+        members: Arc::new([member(name, ty, 0)]),
+    };
+    vec![
+        TypeInfo {
+            reference: reference(OPTION),
+            name: "Option<…>".into(),
+            byte_size: Some(32),
+            kind: TypeKind::Variant {
+                storage: VariantStorageKind::Struct,
+                common_members: Arc::new([]),
+                bases: Arc::new([]),
+                discriminant: Box::new(VariantDiscriminant::Stored(member("tag", TAG, 0))),
+                variants: Arc::new([variant(0, "None", NONE), variant(1, "Some", SOME)]),
+                incomplete: false,
+            },
+            identity: None,
+        },
+        record(SOME, "Some", vec![member("__0", held, AWAITEE)]),
+        record(NONE, "None", Vec::new()),
+        TypeInfo {
+            byte_size: Some(1),
+            ..record(TAG, "u8", Vec::new())
+        },
+    ]
+}
+
 const fn suspended(index: u32) -> CoroutineStateKind {
     CoroutineStateKind::Suspended { index }
 }
@@ -156,7 +196,7 @@ struct Types {
 
 impl Types {
     fn new() -> Self {
-        let types = vec![
+        let types: Vec<TypeInfo> = vec![
             record(OUTER, "outer", Vec::new()),
             record(INNER, "inner", Vec::new()),
             record(
@@ -218,7 +258,16 @@ impl Types {
                 "MaybeDangling",
                 vec![member("__0", PIN, 0)],
             ),
-        ];
+            named(
+                TASK_LOCAL,
+                &["tokio", "task", "task_local"],
+                "TaskLocalFuture",
+                vec![member("future", OPTION, 0)],
+            ),
+        ]
+        .into_iter()
+        .chain(option(INNER))
+        .collect();
         let outer = coroutine(vec![
             state(0, CoroutineStateKind::Unresumed, 10, None),
             state(1, CoroutineStateKind::Returned, 19, None),
@@ -231,6 +280,7 @@ impl Types {
             state(8, suspended(5), 17, Some(WRAPPER)),
             state(10, suspended(6), 18, Some(INSTRUMENTED)),
             state(11, suspended(7), 18, Some(LOOKALIKE)),
+            state(12, suspended(8), 18, Some(TASK_LOCAL)),
         ]);
         let inner = coroutine(vec![
             state(0, CoroutineStateKind::Unresumed, 20, None),
@@ -463,6 +513,28 @@ fn a_chain_reaches_its_leaf_through_every_kind_of_future() {
             leaf(outer + AWAITEE, LOOKALIKE),
             coroutine_frame(outer, OUTER, 11, suspended(7), 18),
         ]
+    );
+
+    // tokio's task-local scope holds its future in an `Option`, which the
+    // walk passes through while it is `Some`; once the scope has dropped
+    // its future, the chain ends, saying so.
+    memory.byte(outer, 12);
+    memory.byte(outer + AWAITEE, 1);
+    memory.byte(outer + 2 * AWAITEE, 3);
+    let scoped = walk_from(&memory, outer, OUTER);
+    assert_eq!(
+        scoped.frames,
+        [
+            leaf(outer + 3 * AWAITEE, SLEEP),
+            coroutine_frame(outer + 2 * AWAITEE, INNER, 3, suspended(0), 21),
+            coroutine_frame(outer, OUTER, 12, suspended(8), 18),
+        ]
+    );
+    memory.byte(outer + AWAITEE, 0);
+    let dropped = walk_from(&memory, outer, OUTER);
+    assert!(
+        matches!(&dropped.end, ChainEnd::Broken(reason) if reason.contains("it is None")),
+        "{dropped:?}"
     );
 
     // A trait object of a vtable no type names ends the chain, saying so.
