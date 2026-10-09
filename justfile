@@ -233,13 +233,13 @@ profile-counters PROGRAM:
     perf stat -e instructions:u,cycles:u,cache-references:u,cache-misses:u,branch-misses:u ./target/profiling/uscope-tools load "$1" >/dev/null
 
 # Checks that the Tracy client the `tracy` feature builds is the version of
-# the viewer `nix develop .#profile` provides, which reads no other.
+# the viewer the shell provides, which reads no other.
 tracy-check:
     ./scripts/check-tracy.sh
 
 # Records a load of PROGRAM, with its allocations, into FILE for Tracy's
-# viewer (`tracy FILE`). Run it in `nix develop .#profile`; to watch a
-# session live instead, open `tracy` and run a `tracy` build of uscope.
+# viewer (`tracy FILE`); to watch a session live instead, open `tracy` and
+# run a `tracy` build of uscope.
 tracy-load PROGRAM FILE="target/tracy/load.tracy": tracy-check
     #!/usr/bin/env bash
     set -euo pipefail
