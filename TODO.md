@@ -2,15 +2,9 @@
 
 ## Debugger
 
-- Loading binaries and debug info performance improvements
-
 ## Languages and platforms
 
 - Other Linux architectures, then other operating systems.
-
-## Clients
-
-- A richer interactive or TUI client.
 
 ## Reliability
 
@@ -24,3 +18,5 @@
 
 - Sampling and instrumented profilers.
 - Prometheus and OpenTelemetry collectors.
+- Agent skill
+- MCP server
