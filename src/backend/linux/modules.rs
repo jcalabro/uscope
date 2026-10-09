@@ -396,7 +396,13 @@ pub(super) fn identify_mapped_module(mapping: &ModuleMapping) -> Option<(PathBuf
     if mapping.deleted {
         return None;
     }
-    let path = fs::canonicalize(&mapping.path).ok()?;
+    // `/proc/<pid>/root` reads as `/`, so resolving a path through it would
+    // leave the process's root; such paths name the mapped file already.
+    let path = if mapping.path.starts_with("/proc") {
+        mapping.path.clone()
+    } else {
+        fs::canonicalize(&mapping.path).ok()?
+    };
     if fs::metadata(&path).ok()?.ino() != mapping.inode {
         return None;
     }
