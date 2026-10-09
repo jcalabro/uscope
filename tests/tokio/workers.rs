@@ -33,6 +33,9 @@ const TRACED: &str = "tokio-workers-traced";
 /// A build whose tokio locks with the `parking_lot` crate, whose mutex is
 /// laid out as std's is not.
 const PARKING_LOT: &str = "tokio-workers-parking-lot";
+/// A build that spawns some tasks' futures wrapped as programs wrap what
+/// they spawn, which the walk passes through to the futures within.
+const WRAPPED: &str = "tokio-workers-wrapped";
 /// Builds that describe no types: lines only, and symbols only.
 const UNTYPED: [&str; 2] = ["tokio-workers-lines", "tokio-workers-stripped"];
 
@@ -325,7 +328,7 @@ impl Truth {
 async fn tasks_are_listed_exactly(current: bool) {
     for fixture in BUILDS
         .into_iter()
-        .chain([LEGACY, UNSTABLE, TRACED, PARKING_LOT])
+        .chain([LEGACY, UNSTABLE, TRACED, PARKING_LOT, WRAPPED])
     {
         let mut workers = Workers::parked(fixture, current).await;
         let truth = workers.truth();
@@ -564,7 +567,7 @@ async fn before_any_runtime_there_are_no_tasks() {
 #[tokio::test]
 async fn each_task_began_in_the_function_it_spawned() {
     let header = line("workers/src/main.rs", "async fn top(");
-    for fixture in BUILDS.into_iter().chain([TRACED]) {
+    for fixture in BUILDS.into_iter().chain([TRACED, WRAPPED]) {
         for current in [false, true] {
             let workers = Workers::parked(fixture, current).await;
             let truth = workers.truth();
@@ -598,7 +601,7 @@ async fn each_task_began_in_the_function_it_spawned() {
 /// task recorded. A task spawned but never polled is its one function,
 /// at its header.
 async fn suspended_tasks_show_their_awaits(current: bool) {
-    for fixture in BUILDS.into_iter().chain([TRACED]) {
+    for fixture in BUILDS.into_iter().chain([TRACED, WRAPPED]) {
         let mut workers = Workers::parked(fixture, current).await;
         let truth = workers.truth();
         let (tasks, _) = workers.tasks(4096).await;

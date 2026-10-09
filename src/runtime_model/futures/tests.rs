@@ -166,12 +166,17 @@ impl Types {
             ),
             pointer(BOX, "Box<inner>", Some(INNER)),
             pin(PIN, BOX),
-            record(DYN, "dyn Future<Output = ()>", Vec::new()),
-            pointer(DYN_POINTER, "*mut dyn Future<Output = ()>", Some(DYN)),
+            // rustc names a trait object of several traits in parentheses.
+            record(DYN, "(dyn Future<Output = ()> + Send)", Vec::new()),
+            pointer(
+                DYN_POINTER,
+                "*mut (dyn Future<Output = ()> + Send)",
+                Some(DYN),
+            ),
             pointer(VTABLE_POINTER, "&[usize; 4]", None),
             record(
                 DYN_BOX,
-                "Box<dyn Future<Output = ()>>",
+                "Box<(dyn Future<Output = ()> + Send)>",
                 vec![
                     member("pointer", DYN_POINTER, 0),
                     member("vtable", VTABLE_POINTER, 8),
