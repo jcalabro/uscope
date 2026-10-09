@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use crate::dap::{Configuration, Dap, Profile, fixture};
+use crate::dap::{Configuration, Dap, Mark, Profile, fixture};
 
 /// The workers fixture, stopped at its checkpoint, with its threads.
 fn at_checkpoint(name: &str) -> (Dap, i64, Vec<(i64, String)>) {
@@ -132,12 +132,15 @@ fn a_suspended_tasks_stack_is_its_chain_of_awaits() {
 #[test]
 fn a_blocked_threads_stack_holds_the_future_it_drives() {
     let (mut dap, stopped, listed) = stopped_at_checkpoint("tokio driven", "tokio-drivers-o0");
-    // The main thread drives `#[tokio::main]`'s future while another
-    // reaches the checkpoint.
-    let (main, _) = listed
-        .iter()
-        .find(|(id, _)| *id != stopped)
-        .unwrap_or_else(|| panic!("{listed:?}"));
+    // The main thread, whose id is the process's, drives `#[tokio::main]`'s
+    // future while another reaches the checkpoint. Tasks may be listed
+    // before it.
+    let process = dap.event(Mark::START, "process", |_| true);
+    let main = process["systemProcessId"].as_i64().expect("a process id");
+    assert!(
+        main != stopped && listed.iter().any(|(id, _)| *id == main),
+        "{listed:?}"
+    );
     let trace = dap.request("stackTrace", json!({"threadId": main}));
     let frames = trace["stackFrames"].as_array().expect("frames");
     let names = frames

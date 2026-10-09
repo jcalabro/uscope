@@ -430,10 +430,12 @@ async fn a_vdso_call_unwinds_before_it_saves_its_stack_pointer() {
 #[tokio::test]
 async fn a_signal_handler_unwinds_onto_the_frame_it_interrupted() {
     for fixture in BUILDS {
+        // The runtime's own signals, such as preemption's, may reach the
+        // handler first, even within `main.interrupt`; wait for its kill.
         let (scenario, trace) = stop_in(fixture, "runtime.sighandler", |segments| {
             segments
                 .iter()
-                .any(|(_, names)| names.iter().any(|name| name == "main.interrupt"))
+                .any(|(_, names)| names.iter().any(|name| name == "syscall.Tgkill"))
         })
         .await;
         let found = segments(&trace);
