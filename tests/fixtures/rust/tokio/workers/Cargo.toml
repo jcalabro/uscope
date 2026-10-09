@@ -7,3 +7,8 @@ publish.workspace = true
 [dependencies]
 tokio.workspace = true
 truth.workspace = true
+
+[features]
+# tokio's own locks from parking_lot rather than std, as tokio's "full"
+# feature builds them.
+parking-lot = ["tokio/parking_lot"]
