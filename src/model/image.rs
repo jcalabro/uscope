@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::image::lines::LineView;
 use crate::{Error, Result};
 
 mod locations;
@@ -31,9 +32,10 @@ pub struct ModuleMetadata {
     pub got_slots: Vec<GotSlot>,
     pub globals: Vec<GlobalVariableInfo>,
     pub types: Arc<[TypeNode]>,
-    pub source_files: Vec<SourceFile>,
-    pub statements: Vec<StatementRow>,
-    pub lines: Vec<LineEntry>,
+    /// Source files by resolved path.
+    pub files: crate::image::lines::Files,
+    /// Every line-program row and the code each line describes.
+    pub lines: crate::image::lines::LineTables,
     pub sections: Vec<SectionInfo>,
     /// Rust trait objects' vtables, by address, with the concrete type each
     /// is for.
@@ -163,14 +165,14 @@ fn global_selectors(metadata: &ModuleMetadata) -> Vec<(Arc<str>, GlobalVariableI
             selectors.push((Arc::clone(linkage_name), global.id));
         }
         if let Some(declaration) = &global.declaration
-            && let Some(source) = metadata.source_files.get(declaration.file.index())
+            && let Some(source) = metadata.files.paths().get(declaration.file.index())
         {
-            let path = source.path.to_string_lossy();
+            let path = source.to_string_lossy();
             selectors.push((
                 format!("{path}::{}", global.qualified_name).into(),
                 global.id,
             ));
-            if let Some(file_name) = source.path.file_name() {
+            if let Some(file_name) = source.file_name() {
                 let file_name = file_name.to_string_lossy();
                 selectors.push((
                     format!("{file_name}::{}", global.qualified_name).into(),
@@ -186,15 +188,16 @@ fn global_selectors(metadata: &ModuleMetadata) -> Vec<(Arc<str>, GlobalVariableI
 /// within an out-of-line instance, or otherwise its own breakpoint entry.
 fn recommended_entries(
     metadata: &ModuleMetadata,
+    lines: LineView<'_>,
     code_range_index: &RangeIndex<CodeInstanceId>,
 ) -> BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>> {
     let mut prologue_ends = BTreeMap::<CodeInstanceId, Vec<BreakpointEntry>>::new();
-    for row in metadata
-        .statements
-        .iter()
-        .filter(|row| row.flags.prologue_end())
+    for address in lines
+        .public_rows()
+        .filter(|(_, _, flags)| flags & crate::image::lines::row_flags::PROLOGUE_END != 0)
+        .map(|(_, address, _)| address)
     {
-        for id in code_range_index.containing(row.address) {
+        for id in code_range_index.containing(address) {
             if !matches!(
                 metadata.code_instances[id.index()].kind,
                 CodeInstanceKind::OutOfLine
@@ -202,9 +205,9 @@ fn recommended_entries(
                 continue;
             }
             let entries = prologue_ends.entry(id).or_default();
-            if !entries.iter().any(|entry| entry.address == row.address) {
+            if !entries.iter().any(|entry| entry.address == address) {
                 entries.push(BreakpointEntry {
-                    address: row.address,
+                    address,
                     provenance: EntryProvenance::Statement,
                 });
             }
@@ -231,12 +234,8 @@ fn recommended_entries(
         .collect()
 }
 
-/// Ends each line entry where a function symbol begins inside it. A line
-/// program describes every function it covers from the function's first
-/// instruction, but its last row before code it does not describe, such as
-/// hand-written assembly placed after a compiled function, runs on to the
-/// next row: that code has no source line.
-fn clip_lines_at_functions(lines: &mut [LineEntry], symbols: &[SymbolInfo]) {
+/// Where each function symbol with an extent begins, in order.
+fn function_starts(symbols: &[SymbolInfo]) -> Vec<ImageAddress> {
     let mut starts = symbols
         .iter()
         .filter(|symbol| symbol.kind == SymbolKind::Function && symbol.extent.is_some())
@@ -244,14 +243,41 @@ fn clip_lines_at_functions(lines: &mut [LineEntry], symbols: &[SymbolInfo]) {
         .collect::<Vec<_>>();
     starts.sort_unstable();
     starts.dedup();
-    for line in lines {
-        let after = starts.partition_point(|start| *start <= line.range.start);
-        if let Some(&start) = starts.get(after)
-            && start < line.range.end
-        {
-            line.range.end = start;
-        }
-    }
+    starts
+}
+
+/// The source files an image's tables name.
+fn source_files(tables: &crate::image::Image) -> Arc<[SourceFile]> {
+    let paths = crate::image::Paths(tables.bytes(crate::image::TableKind::Paths));
+    tables
+        .table::<crate::image::lines::FileRecord>()
+        .iter()
+        .enumerate()
+        .map(|(index, file)| SourceFile {
+            id: SourceFileId::new(u32::try_from(index).expect("file indexes fit u32")),
+            path: Arc::new(
+                paths
+                    .get(crate::image::PathId(file.path.get()))
+                    .to_path_buf(),
+            ),
+        })
+        .collect()
+}
+
+/// The image of a module's files and lines.
+fn line_image(
+    target: TargetDescription,
+    files: &crate::image::lines::Files,
+    lines: &crate::image::lines::LineTables,
+) -> crate::image::Image {
+    let mut builder = crate::image::Builder::new(target);
+    lines.add_to(&mut builder);
+    files
+        .add_to(&mut builder)
+        .expect("source paths come from NUL-terminated strings");
+    builder
+        .seal(crate::image::Limits::default())
+        .expect("the loader's line tables are valid")
 }
 
 fn validate_dense_ids(metadata: &ModuleMetadata) {
@@ -267,13 +293,6 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
             instance.id.index(),
             index,
             "code instance IDs are dense and ordered"
-        );
-    }
-    for (index, source_file) in metadata.source_files.iter().enumerate() {
-        assert_eq!(
-            source_file.id.index(),
-            index,
-            "source file IDs are dense and ordered"
         );
     }
     for (index, symbol) in metadata.symbols.iter().enumerate() {
@@ -338,8 +357,8 @@ pub struct ModuleImage {
     globals: Arc<[GlobalVariableInfo]>,
     types: Arc<[TypeNode]>,
     source_files: Arc<[SourceFile]>,
-    statements: Arc<[StatementRow]>,
-    lines: Arc<[LineEntry]>,
+    /// Lines and files, as tables.
+    tables: Arc<crate::image::Image>,
     functions_by_name: BTreeMap<Arc<str>, Arc<[FunctionId]>>,
     /// Functions by their names within the packages defining them.
     function_names: locations::FunctionNames,
@@ -352,11 +371,8 @@ pub struct ModuleImage {
     coroutine_functions: std::sync::OnceLock<HashMap<Arc<str>, Vec<FunctionId>>>,
     globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
     instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
-    statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
-    control_boundaries_by_address: BTreeMap<ImageAddress, Arc<[u32]>>,
     recommended_entries_by_instance: BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>>,
     code_range_index: RangeIndex<CodeInstanceId>,
-    line_range_index: RangeIndex<u32>,
     symbol_range_index: RangeIndex<SymbolId>,
     storage_range_index: RangeIndex<SymbolId>,
     /// Unsized data symbols, each indexed by its one-byte address.
@@ -412,7 +428,12 @@ impl ModuleImage {
         mut metadata: ModuleMetadata,
     ) -> Self {
         validate_dense_ids(&metadata);
-        clip_lines_at_functions(&mut metadata.lines, &metadata.symbols);
+        metadata.lines.clip_at(&function_starts(&metadata.symbols));
+        let tables = Arc::new(line_image(target, &metadata.files, &metadata.lines));
+        crate::count!("line_image_bytes", tables.as_bytes().len());
+        metadata.lines = crate::image::lines::LineTables::default();
+        let lines = LineView::new(&tables);
+        let source_files = source_files(&tables);
         let code_range_index =
             RangeIndex::new(metadata.code_instances.iter().flat_map(|instance| {
                 instance
@@ -420,13 +441,6 @@ impl ModuleImage {
                     .iter()
                     .copied()
                     .map(|range| (range, instance.id))
-            }));
-        let line_range_index =
-            RangeIndex::new(metadata.lines.iter().enumerate().map(|(index, line)| {
-                (
-                    line.range,
-                    u32::try_from(index).expect("line entry count fits u32"),
-                )
             }));
         let symbol_range_index = RangeIndex::new(
             metadata
@@ -494,26 +508,11 @@ impl ModuleImage {
                     .iter()
                     .map(|instance| (instance.function, instance.id)),
             ),
-            statements_by_source_line: grouped_index(metadata.statements.iter().filter_map(
-                |row| {
-                    let location = row.location.as_ref()?;
-                    row.flags
-                        .is_statement()
-                        .then_some(((location.file, location.line), row.address))
-                },
-            )),
-            control_boundaries_by_address: grouped_index(
-                metadata
-                    .statements
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, row)| row.flags.prologue_end() || row.flags.epilogue_begin())
-                    .map(|(index, row)| {
-                        let index = u32::try_from(index).expect("line-program row count fits u32");
-                        (row.address, index)
-                    }),
+            recommended_entries_by_instance: recommended_entries(
+                &metadata,
+                lines,
+                &code_range_index,
             ),
-            recommended_entries_by_instance: recommended_entries(&metadata, &code_range_index),
             id: ModuleImageId::new(0),
             path: Arc::new(path),
             target,
@@ -527,11 +526,8 @@ impl ModuleImage {
             thread_local_storage: metadata.thread_local_storage,
             globals: metadata.globals.into(),
             types: Arc::clone(&metadata.types),
-            source_files: metadata.source_files.into(),
-            statements: metadata.statements.into(),
-            lines: metadata.lines.into(),
+            source_files,
             code_range_index,
-            line_range_index,
             symbol_range_index,
             storage_range_index,
             unsized_data_index,
@@ -564,6 +560,7 @@ impl ModuleImage {
             thread_locals: std::mem::take(&mut metadata.thread_locals),
             go_runtime_types: go_runtime_types(&metadata.types),
             views: crate::view::ViewSet::empty(),
+            tables,
             debug_file: None,
         }
     }
@@ -811,7 +808,7 @@ impl ModuleImage {
     #[must_use]
     pub fn source_location(&self, address: ImageAddress) -> Option<SourceLocation> {
         self.line_entry_containing(address)
-            .map(|entry| entry.location.clone())
+            .map(|entry| entry.location)
     }
 
     /// Describes an image address by its section and by the code symbol, or
@@ -1099,10 +1096,20 @@ impl ModuleImage {
         }
     }
 
+    /// The bytes of the image's line and file tables.
+    #[cfg(test)]
+    pub(crate) fn line_image_bytes(&self) -> &[u8] {
+        self.tables.as_bytes()
+    }
+
+    /// The image's line tables.
+    fn lines(&self) -> LineView<'_> {
+        LineView::new(&self.tables)
+    }
+
     /// Returns every ordered source line-program row in this image.
-    #[must_use]
-    pub fn statement_rows(&self) -> &[StatementRow] {
-        &self.statements
+    pub fn statement_rows(&self) -> impl Iterator<Item = StatementRow> + '_ {
+        self.lines().statement_rows()
     }
 
     /// Returns exact line-program control boundaries at an image address.
@@ -1113,12 +1120,8 @@ impl ModuleImage {
     pub fn control_boundaries_at(
         &self,
         address: ImageAddress,
-    ) -> impl Iterator<Item = &StatementRow> {
-        self.control_boundaries_by_address
-            .get(&address)
-            .into_iter()
-            .flat_map(|rows| rows.iter())
-            .filter_map(|row| self.statements.get(*row as usize))
+    ) -> impl Iterator<Item = StatementRow> + '_ {
+        self.lines().control_boundaries_at(address)
     }
 
     /// Returns where a function breakpoint enters one code instance: every
@@ -1135,18 +1138,21 @@ impl ModuleImage {
             .copied()
     }
 
-    pub(crate) fn line_entries(&self) -> &[LineEntry] {
-        &self.lines
+    #[cfg(feature = "tools")]
+    pub(crate) fn line_entries(&self) -> impl Iterator<Item = LineEntry> + '_ {
+        self.lines().line_entries()
     }
 
-    pub(crate) fn line_entry_containing(&self, address: ImageAddress) -> Option<&LineEntry> {
-        self.line_range_index
-            .containing(address)
-            .min()
-            .and_then(|index| {
-                self.lines
-                    .get(usize::try_from(index).expect("u32 fits usize"))
-            })
+    /// The line ranges that start in `instance`'s code, in order.
+    pub(crate) fn line_entries_in(
+        &self,
+        instance: &CodeInstanceInfo,
+    ) -> impl Iterator<Item = LineEntry> + '_ {
+        self.lines().line_entries_starting_in(&instance.ranges)
+    }
+
+    pub(crate) fn line_entry_containing(&self, address: ImageAddress) -> Option<LineEntry> {
+        self.lines().line_entry_containing(address)
     }
 
     /// Looks up a concrete code instance by identifier.
@@ -1172,12 +1178,16 @@ impl ModuleImage {
         &self,
         file: SourceFileId,
         line: LineNumber,
-    ) -> impl Iterator<Item = ImageAddress> + '_ {
-        self.statements_by_source_line
-            .get(&(file, line))
-            .into_iter()
-            .flat_map(|addresses| addresses.iter())
-            .copied()
+    ) -> impl Iterator<Item = ImageAddress> + use<> {
+        let lines = self.lines();
+        let mut addresses = lines
+            .statements(file, line.get()..=line.get())
+            .iter()
+            .map(|key| lines.address(key.row.get()))
+            .collect::<Vec<_>>();
+        addresses.sort_unstable();
+        addresses.dedup();
+        addresses.into_iter()
     }
 
     /// Returns the lines of one source file within `lines` that have
@@ -1188,9 +1198,37 @@ impl ModuleImage {
         file: SourceFileId,
         lines: std::ops::RangeInclusive<LineNumber>,
     ) -> impl Iterator<Item = LineNumber> + '_ {
-        self.statements_by_source_line
-            .range((file, *lines.start())..=(file, *lines.end()))
-            .map(|((_, line), _)| *line)
+        let mut previous = None;
+        self.lines()
+            .statements(file, lines.start().get()..=lines.end().get())
+            .iter()
+            .filter_map(move |key| {
+                let line = key.line.get();
+                (previous.replace(line) != Some(line)).then(|| LineNumber::new(line))?
+            })
+    }
+
+    /// The first line of `file` at or after `line` with statements.
+    pub(crate) fn next_statement_line(
+        &self,
+        file: SourceFileId,
+        line: LineNumber,
+    ) -> Option<LineNumber> {
+        let key = self
+            .lines()
+            .statements(file, line.get()..=u64::MAX)
+            .first()?;
+        LineNumber::new(key.line.get())
+    }
+
+    /// The last line of `file` at or before `line` with statements.
+    pub(crate) fn previous_statement_line(
+        &self,
+        file: SourceFileId,
+        line: u64,
+    ) -> Option<LineNumber> {
+        let key = self.lines().statements(file, 1..=line).last()?;
+        LineNumber::new(key.line.get())
     }
 
     /// Finds the line a source breakpoint requested at `line` stops at, as
@@ -1200,37 +1238,29 @@ impl ModuleImage {
     /// into the next one, and a line of a Go file never moves at all.
     #[must_use]
     pub fn breakpoint_line(&self, file: SourceFileId, line: LineNumber) -> Option<LineNumber> {
-        let ((_, next), addresses) = self
-            .statements_by_source_line
-            .range((file, line)..)
-            .next()
-            .filter(|((next_file, _), _)| *next_file == file)?;
-        if *next == line {
+        let next = self.next_statement_line(file, line)?;
+        if next == line {
             return Some(line);
         }
         if self.keeps_line_breakpoints(file) {
             return None;
         }
+        let lines = self.lines();
+        let before = lines.statements(file, 1..=line.get());
         let encloses_request = |instance: &CodeInstanceInfo| {
-            self.statements.iter().any(|row| {
-                row.flags.is_statement()
-                    && instance.contains(row.address)
-                    && row
-                        .location
-                        .as_ref()
-                        .is_some_and(|location| location.file == file && location.line <= line)
-            })
+            before
+                .iter()
+                .any(|key| instance.contains(lines.address(key.row.get())))
         };
-        addresses
-            .iter()
+        self.statement_addresses(file, next)
             .flat_map(|address| {
                 self.code_range_index
-                    .containing(*address)
+                    .containing(address)
                     .filter_map(|instance| self.code_instance(instance))
             })
             .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
             .any(encloses_request)
-            .then_some(*next)
+            .then_some(next)
     }
 
     /// Finds the single function with the supplied source-level name.
@@ -1380,7 +1410,7 @@ impl ModuleImage {
             .cloned();
         let source = self
             .line_entry_containing(address)
-            .map(|entry| entry.location.clone());
+            .map(|entry| entry.location);
 
         ImageLocation {
             address,
@@ -1606,6 +1636,14 @@ mod tests {
         )
     }
 
+    fn files(paths: &[&str]) -> crate::image::lines::Files {
+        let mut files = crate::image::lines::Files::default();
+        for path in paths {
+            files.intern(PathBuf::from(path));
+        }
+        files
+    }
+
     fn functions(names: &[&str]) -> Vec<FunctionInfo> {
         names
             .iter()
@@ -1668,14 +1706,7 @@ mod tests {
             1,
             ModuleMetadata {
                 globals,
-                source_files: ["/build/src/left.c", "/build/src/right.c"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(id, path)| SourceFile {
-                        id: SourceFileId::new(u32::try_from(id).expect("small file count")),
-                        path: Arc::new(PathBuf::from(path)),
-                    })
-                    .collect(),
+                files: files(&["/build/src/left.c", "/build/src/right.c"]),
                 ..ModuleMetadata::default()
             },
         );
@@ -1933,7 +1964,8 @@ mod tests {
             ModuleMetadata {
                 functions: functions(&["physical", "inline"]),
                 code_instances: vec![physical, inline],
-                statements: vec![
+                files: files(&["/build/src/main.c"]),
+                lines: crate::image::lines::from_statement_rows(&[
                     row(
                         0x14,
                         None,
@@ -1950,7 +1982,7 @@ mod tests {
                     ),
                     row(0x18, Some(source(9)), flags().with_prologue_end(true), 1, 0),
                     row(0x20, None, flags().with_epilogue_begin(true), 1, 1),
-                ],
+                ]),
                 ..ModuleMetadata::default()
             },
         );

@@ -2674,6 +2674,13 @@ pub struct TargetDescription {
 }
 
 impl TargetDescription {
+    /// x86-64: little-endian, with 64-bit pointers.
+    pub const X86_64: Self = Self {
+        architecture: Architecture::X86_64,
+        byte_order: ByteOrder::Little,
+        pointer_width: PointerWidth::Bits64,
+    };
+
     /// The target's C base type, as its C compiler lays it out, or `None`
     /// for a target whose C data model uscope does not know.
     #[must_use]

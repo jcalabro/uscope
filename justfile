@@ -59,7 +59,7 @@ lint:
 # configuration is an empty directory.
 [doc("Builds the native test fixtures and runs the Rust test suite.")]
 test *ARGS: build-test-programs
-    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --test-threads "$test_threads" "$@"
+    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
 
 # Builds the tokio fixtures where their sources changed and runs the tokio
@@ -67,7 +67,7 @@ test *ARGS: build-test-programs
 # e.g. `just tokio workers::`.
 tokio *ARGS:
     ./scripts/build-test-programs.sh tokio
-    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --test-threads "$test_threads" --test tokio "$@"
+    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" --test tokio "$@"
 
 # Races in process control fail far more often when the debugger competes for
 # the CPUs, so this oversubscribes the test threads and keeps busy loops
@@ -79,20 +79,20 @@ stress COUNT="10" *ARGS: build-test-programs
     #!/usr/bin/env bash
     set -euo pipefail
     # Build before the busy loops start so they slow only the tests.
-    cargo nextest run --no-run
+    cargo nextest run --features tools --no-run
     cpus="$(nproc)"
     burners=()
     trap 'kill "${burners[@]}" 2>/dev/null || true' EXIT
     for (( i = 0; i < cpus / 2; i++ )); do (while :; do :; done) & burners+=($!); done
-    XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
+    XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
 
 # Attaches uscope to a tokio server under load for MINUTES, inspecting and
 # re-attaching it over and over, with every invariant checked at every stop.
 soak MINUTES="10": build-test-programs
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo nextest run --no-run
-    USCOPE_SOAK_SECONDS="$(( $1 * 60 ))" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --profile soak --no-capture --run-ignored only --test tokio -E 'test(=soak::soak)'
+    cargo nextest run --features tools --no-run
+    USCOPE_SOAK_SECONDS="$(( $1 * 60 ))" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --profile soak --no-capture --run-ignored only --test tokio -E 'test(=soak::soak)'
 
 # Installs the web page's locked dependencies.
 web-deps:
@@ -128,7 +128,7 @@ web-dev *ARGS: web-deps
 # Rerecords the server traffic the page's replay tests read
 # (web/test/transcripts) from the Rust web tests.
 web-transcripts: build-test-programs
-    USCOPE_WEB_TRANSCRIPTS="$PWD/web/test/transcripts" cargo nextest run --test web
+    USCOPE_WEB_TRANSCRIPTS="$PWD/web/test/transcripts" cargo nextest run --features tools --test web
 
 # Rebuilds one golden program and rewrites its manifest, after a deliberate
 # change to its sources or the toolchain. Commit a new manifest on its own.
@@ -245,7 +245,7 @@ profile-counters PROGRAM:
 
 # Runs one fuzz target: expression-parse, dwarf-expression, core-dump, dispatch,
 # elf-symbols, gopclntab, disassembly, debug-register-plan, dap-transport,
-# dap-request, or views. Arguments go to libFuzzer.
+# dap-request, views, or image. Arguments go to libFuzzer.
 # iced-x86 builds its formatter tables once and never frees them, which
 # LeakSanitizer would report as a failure when the disassembly target exits.
 fuzz TARGET *ARGS="":

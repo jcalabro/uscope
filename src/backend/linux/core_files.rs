@@ -275,7 +275,7 @@ fn read_opened(
     // resolved, however its path has changed since.
     let link = fd_path(&file);
     let path = fs::read_link(&link).map_err(unreadable)?;
-    let data = fs::read(&link).map_err(unreadable)?;
+    let (data, _) = crate::image::backing::read_input(&link).map_err(unreadable)?;
     Ok(Some(ModuleFile {
         path,
         data,

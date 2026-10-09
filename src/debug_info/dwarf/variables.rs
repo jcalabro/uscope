@@ -14,8 +14,8 @@
 //!   and selecting storage of every form.
 //! - [`call_sites`]: the calls that recover parameters' entry values.
 
+use crate::image::lines::Files;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use foldhash::{HashMap, HashMapExt};
@@ -29,8 +29,8 @@ use crate::inspection::InspectionBudget;
 use crate::{
     AddressRange, ByteOrder, CodeInstanceId, DereferenceReference, DereferencedValue, Error,
     GlobalVariableId, GlobalVariableInfo, ImageAddress, InspectedValue, ModuleImageId, Result,
-    SourceFile, SourceFileId, SourceLanguage, SourceLocation, TargetDescription, TypeId, TypeInfo,
-    TypeNode, TypeReference, ValueChildPage, ValueChildrenReference, Variable, VariableKind,
+    SourceFileId, SourceLanguage, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeNode,
+    TypeReference, ValueChildPage, ValueChildrenReference, Variable, VariableKind,
     VariableMalformedKind, VariableMalformedReason, VariableQuery, VariableState,
 };
 
@@ -363,22 +363,13 @@ fn declared_file<'data>(
     units: &[gimli::Unit<Reader<'data>>],
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
-    source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+    files: &mut Files,
 ) -> Option<SourceFileId> {
     let chain = origin_chain(units, unit_index, entry).ok()?;
-    declaration_with_origins(
-        dwarf,
-        units,
-        &units[unit_index],
-        entry,
-        &chain,
-        source_files,
-        source_file_ids,
-    )
-    .ok()
-    .flatten()
-    .map(|declaration| declaration.file)
+    declaration_with_origins(dwarf, units, &units[unit_index], entry, &chain, files)
+        .ok()
+        .flatten()
+        .map(|declaration| declaration.file)
 }
 
 /// Each Go lexical block's code fused with its nested blocks' and inlined
@@ -458,8 +449,7 @@ pub(super) fn load_variable_info<'data>(
     target: TargetDescription,
     image_id: ModuleImageId,
     code: CodeMetadata<'_>,
-    source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+    files: &mut Files,
 ) -> std::result::Result<LoadedVariables, DwarfError> {
     let units = catalog.units.as_slice();
     let instance_ids = code.instance_ids;
@@ -488,15 +478,8 @@ pub(super) fn load_variable_info<'data>(
     );
     drop(phase);
     let phase = crate::span!("variables.globals");
-    let (mut globals, global_objects) = load_globals(
-        dwarf,
-        units,
-        &mut objects,
-        &mut order,
-        source_files,
-        source_file_ids,
-        &mut types,
-    )?;
+    let (mut globals, global_objects) =
+        load_globals(dwarf, units, &mut objects, &mut order, files, &mut types)?;
     drop(phase);
 
     let phase = crate::span!("variables.main_walk");
@@ -559,8 +542,7 @@ pub(super) fn load_variable_info<'data>(
                         functions: &mut functions,
                         order: &mut order,
                         types: &mut types,
-                        source_files,
-                        source_file_ids,
+                        files,
                         bodies: &mut abstract_bodies,
                     },
                 )?;
@@ -676,14 +658,7 @@ pub(super) fn load_variable_info<'data>(
                             })
                             .copied(),
                         go_file: if go {
-                            declared_file(
-                                dwarf,
-                                units,
-                                unit_index,
-                                entry,
-                                source_files,
-                                source_file_ids,
-                            )
+                            declared_file(dwarf, units, unit_index, entry, files)
                         } else {
                             None
                         },
@@ -761,14 +736,7 @@ pub(super) fn load_variable_info<'data>(
                         instance,
                         code_instance: instance,
                         go_file: if go {
-                            declared_file(
-                                dwarf,
-                                units,
-                                unit_index,
-                                entry,
-                                source_files,
-                                source_file_ids,
-                            )
+                            declared_file(dwarf, units, unit_index, entry, files)
                         } else {
                             None
                         },
@@ -951,13 +919,7 @@ pub(super) fn load_variable_info<'data>(
                         .checked_add(1)
                         .expect("data-object DIE order overflow");
                     let declaration = declaration_with_origins(
-                        dwarf,
-                        units,
-                        unit,
-                        entry,
-                        &chain,
-                        source_files,
-                        source_file_ids,
+                        dwarf, units, unit, entry, &chain, files,
                     )
                     .map(|declaration| {
                         // Go gives a variable's line alone: its file is
@@ -1095,8 +1057,7 @@ pub(super) fn load_variable_info<'data>(
                     functions: &mut functions,
                     order: &mut order,
                     types: &mut types,
-                    source_files,
-                    source_file_ids,
+                    files,
                     bodies: &mut abstract_bodies,
                 },
             )?;
@@ -1123,7 +1084,7 @@ pub(super) fn load_variable_info<'data>(
         .collect();
     let constants = types.named_constants();
     types.populate_go_named_constants();
-    types.populate_record_member_declarations(source_files, source_file_ids);
+    types.populate_record_member_declarations(files);
     drop(phase);
     let phase = crate::span!("variables.finalize_types");
     types.finalize_type_graph();
@@ -1260,8 +1221,7 @@ struct AbstractTargets<'a, 'data, 'units> {
     functions: &'a mut Vec<CatalogFunction>,
     order: &'a mut u64,
     types: &'a mut TypeArenaBuilder<'units, 'data>,
-    source_files: &'a mut Vec<SourceFile>,
-    source_file_ids: &'a mut HashMap<PathBuf, SourceFileId>,
+    files: &'a mut Files,
     /// The instances whose abstract function takes an unnamed parameter,
     /// as an `async fn`'s body takes its future, and its type.
     bodies: &'a mut Vec<(CodeInstanceId, TypeId)>,
@@ -1313,17 +1273,9 @@ fn add_abstract_only_variables<'data>(
             }
             continue;
         };
-        let declaration = declaration_with_origins(
-            dwarf,
-            units,
-            unit,
-            entry,
-            &[],
-            targets.source_files,
-            targets.source_file_ids,
-        )
-        .ok()
-        .flatten();
+        let declaration = declaration_with_origins(dwarf, units, unit, entry, &[], targets.files)
+            .ok()
+            .flatten();
         let declared_line = declaration.as_ref().map(|declared| declared.line);
         if &*name == "__awaitee" {
             awaitee = declared_line;

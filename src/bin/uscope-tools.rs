@@ -28,6 +28,10 @@ static ALLOCATOR: uscope::profile::alloc::Counting<Allocator> =
 #[derive(Parser)]
 #[command(about = "uscope's developer tools")]
 struct Args {
+    /// How many threads load debug information; otherwise `USCOPE_JOBS`,
+    /// or one per CPU up to 16.
+    #[arg(long, global = true)]
+    jobs: Option<std::num::NonZeroUsize>,
     #[command(subcommand)]
     command: Tool,
 }
@@ -131,6 +135,7 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Args) -> Result<bool> {
+    let jobs = uscope::pool::configure(args.jobs, None)?;
     match args.command {
         Tool::Dump {
             program,
@@ -192,7 +197,16 @@ fn run(args: Args) -> Result<bool> {
             }
             Ok(true)
         }
-        Tool::Bench(bench) => run_bench(&bench),
+        // Unless told how many, each program loads on one worker, whose
+        // counts repeat exactly, and on as many as there are.
+        Tool::Bench(bench) => run_bench(
+            &bench,
+            &match args.jobs {
+                Some(jobs) => vec![jobs.get()],
+                None if jobs == 1 => vec![1],
+                None => vec![1, jobs],
+            },
+        ),
         Tool::Heap { profile, rows } => {
             print!("{}", heap_text(&profile, rows)?);
             Ok(true)
@@ -340,7 +354,6 @@ struct Provenance {
     cargo_lock: String,
     debug_assertions: bool,
     system_alloc: bool,
-    jobs: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -353,6 +366,10 @@ struct BenchReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProgramResult {
     name: String,
+    /// The loader's workers; reports from before there were several had
+    /// one.
+    #[serde(default = "one")]
+    jobs: usize,
     path: PathBuf,
     digest: String,
     bytes: u64,
@@ -369,7 +386,23 @@ struct ProgramResult {
     callgrind_instructions: Option<u64>,
 }
 
-/// The deterministic counts a baseline holds for each program.
+const fn one() -> usize {
+    1
+}
+
+impl ProgramResult {
+    /// The program, and how many workers loaded it when more than one.
+    fn label(&self) -> String {
+        if self.jobs == 1 {
+            self.name.clone()
+        } else {
+            format!("{} x{}", self.name, self.jobs)
+        }
+    }
+}
+
+/// The deterministic counts a baseline holds for each program, loaded on
+/// one worker.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Counts {
     digest: String,
@@ -502,7 +535,6 @@ fn provenance() -> Provenance {
         cargo_lock: file_digest(&root.join("Cargo.lock")),
         debug_assertions: cfg!(debug_assertions),
         system_alloc: cfg!(feature = "system-alloc"),
-        jobs: std::env::var("USCOPE_JOBS").ok(),
     }
 }
 
@@ -514,8 +546,9 @@ fn median(values: &mut [f64]) -> f64 {
     values[values.len() / 2]
 }
 
-fn load_once(program: &Path) -> Result<Measured> {
+fn load_once(program: &Path, jobs: usize) -> Result<Measured> {
     let output = Command::new(std::env::current_exe()?)
+        .arg(format!("--jobs={jobs}"))
         .arg("load")
         .arg("--instructions")
         .arg(program)
@@ -533,10 +566,12 @@ fn load_once(program: &Path) -> Result<Measured> {
 /// The instructions one load of `program` runs, as Callgrind counts them.
 fn callgrind(program: &Path) -> Result<u64> {
     let out = std::env::temp_dir().join(format!("uscope-callgrind-{}.out", std::process::id()));
+    // One worker, so that the count is the same each run.
     let status = Command::new("valgrind")
         .arg("--tool=callgrind")
         .arg(format!("--callgrind-out-file={}", out.display()))
         .arg(std::env::current_exe()?)
+        .arg("--jobs=1")
         .arg("load")
         .arg(program)
         .stdout(std::process::Stdio::null())
@@ -559,13 +594,16 @@ fn callgrind(program: &Path) -> Result<u64> {
 }
 
 #[expect(clippy::too_many_lines, reason = "one benchmark run, start to end")]
-fn run_bench(args: &BenchArgs) -> Result<bool> {
+fn run_bench(args: &BenchArgs, sweep: &[usize]) -> Result<bool> {
     let mut programs = corpus(args.corpus)?;
     if !args.only.is_empty() {
         programs.retain(|program| args.only.iter().any(|only| program.name.contains(only)));
     }
     let mut results = Vec::new();
-    for program in &programs {
+    for (program, &jobs) in programs
+        .iter()
+        .flat_map(|program| sweep.iter().map(move |jobs| (program, jobs)))
+    {
         let Ok((digest, bytes)) = digest(&program.path) else {
             eprintln!(
                 "skipping {}: {} is missing",
@@ -574,13 +612,13 @@ fn run_bench(args: &BenchArgs) -> Result<bool> {
             );
             continue;
         };
-        eprint!("{} ", program.name);
+        eprint!("{} x{jobs} ", program.name);
         let mut measured = Vec::new();
         for _ in 0..args.repeat.max(1) {
-            measured.push(load_once(&program.path)?);
+            measured.push(load_once(&program.path, jobs)?);
             eprint!(".");
         }
-        let callgrind_instructions = if args.callgrind {
+        let callgrind_instructions = if args.callgrind && jobs == 1 {
             let count = callgrind(&program.path)?;
             eprint!(" callgrind");
             Some(count)
@@ -621,6 +659,7 @@ fn run_bench(args: &BenchArgs) -> Result<bool> {
         )]
         results.push(ProgramResult {
             name: program.name.clone(),
+            jobs,
             path: program.path.clone(),
             digest,
             bytes,
@@ -662,6 +701,7 @@ fn run_bench(args: &BenchArgs) -> Result<bool> {
         let counts = report
             .programs
             .iter()
+            .filter(|program| program.jobs == 1)
             .map(|program| {
                 (
                     program.name.clone(),
@@ -718,7 +758,7 @@ fn bench_text(report: &BenchReport) -> String {
         let _ = writeln!(
             text,
             "{:<34} {:>9.1} {:>6.1} {:>8} {:>9.1} {:>9} {:>11} {:>10} {:>10} {:>14}{}",
-            program.name,
+            program.label(),
             program.bytes as f64 / 1e6,
             program.ready_ms_median,
             spread,
@@ -767,7 +807,7 @@ fn compare_text(base: &BenchReport, new: &BenchReport) -> String {
     let base_programs = base
         .programs
         .iter()
-        .map(|program| (program.name.as_str(), program))
+        .map(|program| (program.label(), program))
         .collect::<BTreeMap<_, _>>();
     let _ = writeln!(
         text,
@@ -775,7 +815,8 @@ fn compare_text(base: &BenchReport, new: &BenchReport) -> String {
         "program", "measure", "base", "new", "change"
     );
     for program in &new.programs {
-        let Some(before) = base_programs.get(program.name.as_str()) else {
+        let label = program.label();
+        let Some(before) = base_programs.get(&label) else {
             continue;
         };
         let same_input = before.digest == program.digest;
@@ -791,8 +832,7 @@ fn compare_text(base: &BenchReport, new: &BenchReport) -> String {
             let flag = if change.abs() <= noise { " ~" } else { "" };
             let _ = writeln!(
                 text,
-                "{:<28} {:<14} {:>14.1} {:>14.1} {:>+8.1}%{flag}",
-                program.name, measure, old, now, change
+                "{label:<28} {measure:<14} {old:>14.1} {now:>14.1} {change:>+8.1}%{flag}"
             );
         };
         if comparable {
@@ -845,8 +885,7 @@ fn compare_text(base: &BenchReport, new: &BenchReport) -> String {
         } else {
             let _ = writeln!(
                 text,
-                "{:<28} rebuilt since the base: only times compare",
-                program.name
+                "{label:<28} rebuilt since the base: only times compare"
             );
         }
     }
@@ -863,7 +902,7 @@ fn check_counts(
     let mut text = String::new();
     let mut ok = true;
     let mut seen = BTreeSet::new();
-    for program in &report.programs {
+    for program in report.programs.iter().filter(|program| program.jobs == 1) {
         let Some(counts) = baseline.get(&program.name) else {
             let _ = writeln!(text, "{}: not in the baseline", program.name);
             continue;

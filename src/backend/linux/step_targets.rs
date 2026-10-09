@@ -45,8 +45,8 @@ impl<P: InspectionOps> Controller<P> {
             return Ok(Arc::from([]));
         };
         let mut ranges = Vec::<AddressRange<ImageAddress>>::new();
-        for line in self.module_image.line_entries() {
-            if line.range.end <= location.address || !instance.contains(line.range.start) {
+        for line in self.module_image.line_entries_in(instance) {
+            if line.range.end <= location.address {
                 continue;
             }
             let at = self.module_image.locate(line.range.start);
