@@ -386,7 +386,18 @@ fn points_to_dyn(image: &dyn RuntimeImage, ty: TypeReference) -> bool {
     };
     image
         .type_info(*target)
-        .is_some_and(|target| target.name.starts_with("dyn "))
+        .is_some_and(|target| trait_object(&target.name).is_some())
+}
+
+/// A trait object's type's name, without the parentheses rustc puts
+/// around one with several traits, as in `(dyn Future<Output = ()> +
+/// Send)`; `None` for another type's.
+pub fn trait_object(name: &str) -> Option<&str> {
+    let name = name
+        .strip_prefix('(')
+        .and_then(|name| name.strip_suffix(')'))
+        .unwrap_or(name);
+    name.starts_with("dyn ").then_some(name)
 }
 
 #[cfg(test)]
