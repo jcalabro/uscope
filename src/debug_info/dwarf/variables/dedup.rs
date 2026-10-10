@@ -668,7 +668,9 @@ pub(super) fn map_references(
         TypeKind::Reference { target, .. } | TypeKind::Modified { target, .. } => {
             *target = map(*target);
         }
-        TypeKind::Array { element, .. } | TypeKind::Slice { element, .. } => {
+        TypeKind::Array { element, .. }
+        | TypeKind::RuntimeArray { element, .. }
+        | TypeKind::Slice { element, .. } => {
             *element = map(*element);
         }
         TypeKind::Record { members, bases, .. } => {

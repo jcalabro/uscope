@@ -789,6 +789,17 @@ pub enum TypeKind {
         /// Which dimension's elements are adjacent in memory.
         ordering: ArrayOrdering,
     },
+    /// An array whose bounds, or whose elements' place, the program decides
+    /// at run time, as a Fortran array's descriptor, an Ada array of an
+    /// unconstrained type, and a C variable-length array do. Reading a
+    /// value finds them; a C flexible array member's count is never known.
+    RuntimeArray {
+        element: TypeReference,
+        /// Dimensions in source order.
+        dimensions: Arc<[RuntimeDimension]>,
+        /// Which dimension's elements are adjacent in memory.
+        ordering: ArrayOrdering,
+    },
     /// A language slice descriptor with a runtime element count.
     Slice {
         element: TypeReference,
@@ -928,6 +939,47 @@ pub struct ArrayDimension {
     pub lower_bound: i128,
     /// The number of elements in this dimension.
     pub count: u64,
+}
+
+/// One dimension of an array bounded at run time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RuntimeDimension {
+    /// The first index.
+    pub lower_bound: ArrayBound,
+    /// Where the dimension ends.
+    pub extent: ArrayExtent,
+    /// The distance in bytes from one element of the dimension to the
+    /// next, when the producer gives one rather than the elements being
+    /// adjacent.
+    pub byte_stride: Option<ArrayBound>,
+}
+
+/// Where a dimension of an array bounded at run time ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArrayExtent {
+    /// At its last index.
+    Upper(ArrayBound),
+    /// After its count of elements.
+    Count(ArrayBound),
+    /// Nowhere the producer says, as for a C flexible array member: its
+    /// elements are reached only by index.
+    Unknown,
+}
+
+/// A bound, count, or stride of an array bounded at run time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArrayBound {
+    /// Known when the program is loaded.
+    Constant(i128),
+    /// The value of an expression of the producer's, from where the array
+    /// is and the frame reading it, as an integer of `byte_size` bytes.
+    Computed { byte_size: u8, signed: bool },
+    /// What the program stored where an expression of the producer's says,
+    /// an integer of `byte_size` bytes.
+    Stored { byte_size: u8, signed: bool },
+    /// The value of the program's variable whose debugging entry is at
+    /// this offset in `.debug_info`.
+    Variable { debug_info_offset: u64 },
 }
 
 /// Immutable, normalized metadata for one type-graph node.
@@ -1215,6 +1267,11 @@ pub enum VariableValue {
     ImplicitPointer,
     /// An array whose elements are available through explicit child pages.
     Array { dimensions: Arc<[ArrayDimension]> },
+    /// A Fortran allocatable array the program has not allocated.
+    NotAllocated,
+    /// A Fortran pointer to an array the program has not associated with
+    /// one.
+    NotAssociated,
     /// A decoded language slice whose elements are available through child pages.
     Slice {
         /// Runtime length from the descriptor.
@@ -1487,6 +1544,17 @@ pub struct ValueChildrenReference {
     pub(crate) active_variant: Option<usize>,
     /// The view whose children these are, rather than the stored value's.
     pub(crate) view: Option<ViewChildren>,
+    /// Where the elements of an array bounded at run time are, from its
+    /// storage, as its value found them.
+    pub(crate) placement: Option<Arc<ArrayPlacement>>,
+}
+
+/// The bounds and strides one value of an array bounded at run time has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayPlacement {
+    pub(crate) dimensions: Arc<[ArrayDimension]>,
+    /// Each dimension's distance in bytes between adjacent elements.
+    pub(crate) strides: Arc<[i64]>,
 }
 
 /// The view a children capability presents through: its elements, then its
@@ -1890,6 +1958,10 @@ pub enum ValueAccessUnavailableReason {
     /// Debug information does not describe what the closure a function
     /// value calls captured, or describes it malformedly.
     UndescribedClosure,
+    /// The debug information does not say how many elements an array has,
+    /// as for a C flexible array member, so only its elements by index
+    /// are values.
+    UnknownLength,
     /// An implicit-pointer view falls outside its referenced source object.
     ImplicitPointerOutOfBounds {
         /// Signed byte offset into the referenced object.
@@ -2057,6 +2129,9 @@ impl fmt::Display for VariableUnavailableReason {
             }
             Self::ValueAccess(ValueAccessUnavailableReason::NullPointer) => {
                 formatter.write_str("cannot dereference a null pointer")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::UnknownLength) => {
+                formatter.write_str("the array's length is not described; index its elements")
             }
             Self::ValueAccess(ValueAccessUnavailableReason::AddressOverflow) => {
                 formatter.write_str("value address arithmetic overflowed")

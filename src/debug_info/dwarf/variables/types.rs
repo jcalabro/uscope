@@ -9,13 +9,15 @@ use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::debug_info::dwarf::{
     DieKey, DieWalk, Reader, TypeSignatures, Units, die_reference_with_signatures, unit_dwarf,
 };
+use crate::image::type_facts::BoundPart;
 use crate::model::{ArrayDimension, ArrayOrdering};
 use crate::{
-    Accessibility, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, ByteOrder,
-    EnumerationOrigin, Enumerator, GoKind, IntegerValue, ModuleImageId, NamedTypeRelationship,
-    RecordKind, RecordMember, RecordMemberLayout, ReferenceKind, SliceWords, SourceLanguage,
-    SourceLocation, TypeId, TypeInfo, TypeKind, TypeModifier, TypeReference, Variant,
-    VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
+    Accessibility, ArrayBound, ArrayExtent, BaseClass, BaseClassVirtuality, BaseType,
+    BaseTypeEncoding, ByteOrder, EnumerationOrigin, Enumerator, GoKind, IntegerValue,
+    ModuleImageId, NamedTypeRelationship, RecordKind, RecordMember, RecordMemberLayout,
+    ReferenceKind, RuntimeDimension, SliceWords, SourceLanguage, SourceLocation, TypeId, TypeInfo,
+    TypeKind, TypeModifier, TypeReference, Variant, VariantDiscriminant, VariantSelection,
+    VariantSelector, VariantStorageKind,
 };
 
 use super::codec::{complex_part, enumeration_constant};
@@ -186,7 +188,57 @@ pub(super) enum DynamicAggregateChild {
     Member(usize),
     Base(usize),
     Discriminant,
-    VariantMember { variant: usize, member: usize },
+    VariantMember {
+        variant: usize,
+        member: usize,
+    },
+    /// A bound of a dimension of an array bounded at run time.
+    Bound {
+        dimension: usize,
+        part: crate::image::type_facts::BoundPart,
+    },
+    /// Where an array's elements are.
+    DataLocation,
+    /// Whether an array is allocated.
+    Allocated,
+    /// Whether an array is associated with storage.
+    Associated,
+}
+
+/// `DW_OP_push_object_address; DW_OP_deref`: the address the value's
+/// first word holds.
+const DEREFERENCE_OBJECT: [u8; 2] = [gimli::DW_OP_push_object_address.0, gimli::DW_OP_deref.0];
+
+/// A subrange's bound, count, or stride, as its attribute gives it.
+pub(super) enum SubrangeBound<'data> {
+    Constant(i128),
+    /// The value of an expression.
+    Computed {
+        expression: gimli::Expression<Reader<'data>>,
+        byte_size: u8,
+        signed: bool,
+    },
+    /// What the program stored where an expression says.
+    Stored {
+        expression: gimli::Expression<Reader<'data>>,
+        byte_size: u8,
+    },
+    /// The value of the variable at this offset in `.debug_info`.
+    Variable(u64),
+}
+
+/// A subrange's lower bound, where it ends, and its byte stride.
+type Subrange<'data> = (
+    SubrangeBound<'data>,
+    Extent<'data>,
+    Option<SubrangeBound<'data>>,
+);
+
+/// Where a subrange ends.
+pub(super) enum Extent<'data> {
+    Upper(SubrangeBound<'data>),
+    Count(SubrangeBound<'data>),
+    Unknown,
 }
 
 /// Whether an aggregate's child DIE describes its scope, such as a method,
@@ -721,6 +773,29 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         } else {
             None
         };
+        // GNAT passes an array of an unconstrained type as a record of
+        // pointers to its elements and bounds, which is the array.
+        if slice_layout.is_none()
+            && let Some(array) = self.ada_fat_pointer(&entry, key.unit)
+        {
+            let array = self.units[key.unit]
+                .entry(array)
+                .map_err(|_| Arc::<str>::from("an array's record names no array"))?;
+            let endian = gimli::Reader::endian(gimli::Section::reader(&self.dwarf.debug_info));
+            let dereference_object = gimli::Expression(Reader::new(&DEREFERENCE_OBJECT, endian));
+            let built = self.build_array(
+                &array,
+                key.unit,
+                reference,
+                explicit_name,
+                explicit_size,
+                Some(dereference_object),
+            )?;
+            if named && matches!(built, TypeEntry::Resolved(_)) {
+                self.record_identity_parts(&entry, key, id);
+            }
+            return Ok(built);
+        }
         let built = match slice_layout {
             Some(layout) => self.build_slice_type(
                 &entry,
@@ -3214,89 +3289,167 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         explicit_name: Option<Arc<str>>,
         explicit_size: Option<u64>,
     ) -> Built {
+        self.build_array(
+            entry,
+            unit_index,
+            reference,
+            explicit_name,
+            explicit_size,
+            None,
+        )
+    }
+
+    /// Whether `entry` is the record GNAT passes an array of an
+    /// unconstrained type as: artificial, with only a pointer to the
+    /// elements, `P_ARRAY`, first, and one to the bounds, `P_BOUNDS`. Its
+    /// array's bounds are found from the record. Returns the array's entry.
+    fn ada_fat_pointer(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+    ) -> Option<gimli::UnitOffset> {
+        if self.language(unit_index) != SourceLanguage::Ada
+            || entry.attr_value(gimli::DW_AT_artificial) != Some(gimli::AttributeValue::Flag(true))
+        {
+            return None;
+        }
+        let unit = &self.units[unit_index];
+        let mut children = self.children(unit_index, entry.offset()).ok()?;
+        let mut members = Vec::new();
+        while let Ok(Some(child)) = children.next_child() {
+            if child.tag() != gimli::DW_TAG_member {
+                continue;
+            }
+            let name = child
+                .attr_value(gimli::DW_AT_name)
+                .and_then(|name| self.dwarf.attr_string(unit, name).ok())?;
+            members.push((
+                name.slice().to_vec(),
+                child
+                    .attr(gimli::DW_AT_data_member_location)
+                    .and_then(constant_member_offset),
+                child.attr_value(gimli::DW_AT_type),
+            ));
+        }
+        let [
+            (array, Some(0), Some(gimli::AttributeValue::UnitRef(pointer))),
+            (bounds, ..),
+        ] = members.as_slice()
+        else {
+            return None;
+        };
+        if array.as_slice() != b"P_ARRAY" || bounds.as_slice() != b"P_BOUNDS" {
+            return None;
+        }
+        let pointer = unit.entry(*pointer).ok()?;
+        if pointer.tag() != gimli::DW_TAG_pointer_type {
+            return None;
+        }
+        let Some(gimli::AttributeValue::UnitRef(array)) = pointer.attr_value(gimli::DW_AT_type)
+        else {
+            return None;
+        };
+        (unit.entry(array).ok()?.tag() == gimli::DW_TAG_array_type).then_some(array)
+    }
+
+    /// An array, whose elements are where `data_location` finds them from
+    /// the value's place when it is given.
+    fn build_array(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+        data_location: Option<gimli::Expression<Reader<'data>>>,
+    ) -> Built {
         let element = self
             .target(entry, unit_index)?
             .ok_or("array type has no element type")?;
-        let unit = &self.units[unit_index];
-        let mut dimensions = Vec::new();
-        let mut strided = has_stride(entry);
+        let name = || {
+            explicit_name
+                .clone()
+                .unwrap_or_else(|| Arc::from("<dynamic array>"))
+        };
+        // A stride for the whole array, or one in bits, spaces elements as
+        // nothing here reads.
+        if entry.attr(gimli::DW_AT_byte_stride).is_some()
+            || entry.attr(gimli::DW_AT_bit_stride).is_some()
+        {
+            return Ok(opaque(
+                reference,
+                name(),
+                explicit_size,
+                "arrays whose elements a stride of the whole array spaces are unsupported",
+            ));
+        }
         let default_lower = default_lower_bound(
             self.unit_languages.get(unit_index).copied().flatten(),
             self.language(unit_index),
         );
+        let mut subranges = Vec::new();
         let mut children = self.children(unit_index, entry.offset())?;
         while let Some(child) = children.next_child()? {
             if child.tag() != gimli::DW_TAG_subrange_type {
                 continue;
             }
-            strided |= has_stride(child);
-            let signed_index = index_type_is_signed(unit, child);
-            let lower = child
-                .attr(gimli::DW_AT_lower_bound)
-                .map_or(default_lower, |attribute| {
-                    array_bound(attribute, signed_index)
-                });
-            let Some(lower) = lower else {
-                return Ok(opaque(
-                    reference,
-                    explicit_name.unwrap_or_else(|| Arc::from("<dynamic array>")),
-                    explicit_size,
-                    "array lower bound is dynamic, or not stated and not its language's",
-                ));
-            };
-            let count = child
-                .attr(gimli::DW_AT_count)
-                .and_then(gimli::Attribute::udata_value)
-                .or_else(|| {
-                    let upper = array_bound(child.attr(gimli::DW_AT_upper_bound)?, signed_index)?;
-                    u64::try_from(upper.checked_sub(lower)?.checked_add(1)?).ok()
-                });
-            let Some(count) = count else {
-                return Ok(opaque(
-                    reference,
-                    explicit_name.unwrap_or_else(|| Arc::from("<dynamic array>")),
-                    explicit_size,
-                    "array bounds are dynamic or missing",
-                ));
-            };
-            dimensions.push(ArrayDimension {
-                lower_bound: lower,
-                count,
-            });
+            match self.read_subrange(unit_index, child, default_lower) {
+                Ok(subrange) => subranges.push(subrange),
+                Err(description) => {
+                    return Ok(opaque(reference, name(), explicit_size, description));
+                }
+            }
         }
-        if dimensions.is_empty() {
+        if subranges.is_empty() {
             return Err("array type has no subrange dimensions".into());
         }
-        // Elements are laid out row by row; Fortran's go column by column
-        // unless the array says otherwise.
-        let ordering = match entry.attr_value(gimli::DW_AT_ordering) {
-            Some(gimli::AttributeValue::Ordering(gimli::DW_ORD_col_major)) => {
-                ArrayOrdering::ColumnMajor
-            }
-            Some(gimli::AttributeValue::Ordering(gimli::DW_ORD_row_major)) => {
-                ArrayOrdering::RowMajor
-            }
-            Some(_) => return Err("array ordering has an invalid encoding".into()),
-            None if self.language(unit_index) == SourceLanguage::Fortran => {
-                ArrayOrdering::ColumnMajor
-            }
-            None => ArrayOrdering::RowMajor,
-        };
-        // One dimension has one order.
-        let ordering = if dimensions.len() == 1 {
-            ArrayOrdering::RowMajor
-        } else {
-            ordering
-        };
+        let ordering = self.array_ordering(entry, unit_index, subranges.len())?;
+        let located = [
+            gimli::DW_AT_data_location,
+            gimli::DW_AT_allocated,
+            gimli::DW_AT_associated,
+        ]
+        .into_iter()
+        .any(|attribute| entry.attr(attribute).is_some())
+            || data_location.is_some();
+        let statically = subranges
+            .iter()
+            .map(|(lower, extent, stride)| {
+                let SubrangeBound::Constant(lower) = *lower else {
+                    return None;
+                };
+                let count = match extent {
+                    Extent::Count(SubrangeBound::Constant(count)) => u64::try_from(*count).ok()?,
+                    Extent::Upper(SubrangeBound::Constant(upper)) => {
+                        u64::try_from(upper.checked_sub(lower)?.checked_add(1)?).ok()?
+                    }
+                    _ => return None,
+                };
+                stride.is_none().then_some(ArrayDimension {
+                    lower_bound: lower,
+                    count,
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|_| !located);
         let name =
             explicit_name.unwrap_or_else(|| Arc::from(format!("{}[]", self.target_name(element))));
+        let Some(dimensions) = statically else {
+            return self.build_runtime_array(
+                entry,
+                unit_index,
+                reference,
+                (name, explicit_size),
+                element,
+                subranges,
+                ordering,
+                data_location,
+            );
+        };
         // Producers rarely give a C array a size of its own: it is its
-        // elements', laid end to end unless a stride spaces them.
+        // elements', laid end to end.
         let byte_size = explicit_size.or_else(|| {
             let element_size = self.byte_size_of(element.id)?;
-            if strided {
-                return None;
-            }
             dimensions.iter().try_fold(element_size, |size, dimension| {
                 size.checked_mul(dimension.count)
             })
@@ -3313,9 +3466,279 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         ))
     }
 
+    /// An array bounded at run time, recording the expressions that find
+    /// its bounds and where its elements are.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the array's entry, identity, and the subranges already read"
+    )]
+    fn build_runtime_array(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        (name, explicit_size): (Arc<str>, Option<u64>),
+        element: TypeReference,
+        subranges: Vec<Subrange<'data>>,
+        ordering: ArrayOrdering,
+        data_location: Option<gimli::Expression<Reader<'data>>>,
+    ) -> Built {
+        let mut expressions = data_location
+            .map(|expression| (DynamicAggregateChild::DataLocation, expression))
+            .into_iter()
+            .collect::<Vec<_>>();
+        for (attribute, child) in [
+            (
+                gimli::DW_AT_data_location,
+                DynamicAggregateChild::DataLocation,
+            ),
+            (gimli::DW_AT_allocated, DynamicAggregateChild::Allocated),
+            (gimli::DW_AT_associated, DynamicAggregateChild::Associated),
+        ] {
+            match entry.attr_value(attribute) {
+                None => {}
+                Some(gimli::AttributeValue::Exprloc(expression)) => {
+                    expressions.push((child, expression));
+                }
+                // An array that says it is always allocated is.
+                Some(gimli::AttributeValue::Flag(true))
+                    if attribute != gimli::DW_AT_data_location => {}
+                Some(_) => {
+                    return Ok(opaque(
+                        reference,
+                        name,
+                        explicit_size,
+                        "array's place or allocation is not an expression",
+                    ));
+                }
+            }
+        }
+        let mut bound = |bound: SubrangeBound<'data>, child| match bound {
+            SubrangeBound::Constant(value) => ArrayBound::Constant(value),
+            SubrangeBound::Computed {
+                expression,
+                byte_size,
+                signed,
+            } => {
+                expressions.push((child, expression));
+                ArrayBound::Computed { byte_size, signed }
+            }
+            SubrangeBound::Stored {
+                expression,
+                byte_size,
+            } => {
+                expressions.push((child, expression));
+                ArrayBound::Stored {
+                    byte_size,
+                    signed: false,
+                }
+            }
+            SubrangeBound::Variable(debug_info_offset) => {
+                ArrayBound::Variable { debug_info_offset }
+            }
+        };
+        let dimensions = subranges
+            .into_iter()
+            .enumerate()
+            .map(|(dimension, (lower, extent, stride))| {
+                let part = |part| DynamicAggregateChild::Bound { dimension, part };
+                RuntimeDimension {
+                    lower_bound: bound(lower, part(BoundPart::Lower)),
+                    extent: match extent {
+                        Extent::Upper(upper) => {
+                            ArrayExtent::Upper(bound(upper, part(BoundPart::Extent)))
+                        }
+                        Extent::Count(count) => {
+                            ArrayExtent::Count(bound(count, part(BoundPart::Extent)))
+                        }
+                        Extent::Unknown => ArrayExtent::Unknown,
+                    },
+                    byte_stride: stride.map(|stride| bound(stride, part(BoundPart::Stride))),
+                }
+            })
+            .collect::<Arc<[_]>>();
+        self.record_array_layouts(unit_index, reference.id, expressions)?;
+        Ok(resolved(
+            reference,
+            name,
+            explicit_size,
+            TypeKind::RuntimeArray {
+                element,
+                dimensions,
+                ordering,
+            },
+        ))
+    }
+
+    /// Records the expressions that find an array's parts at run time.
+    fn record_array_layouts(
+        &mut self,
+        unit_index: usize,
+        array: TypeId,
+        expressions: Vec<(DynamicAggregateChild, gimli::Expression<Reader<'data>>)>,
+    ) -> std::result::Result<(), Arc<str>> {
+        let unit = &self.units[unit_index];
+        for (child, expression) in expressions {
+            let expression = copy_expression(
+                self.dwarf,
+                &mut self.pool.lock().expect("loading does not panic"),
+                unit_index,
+                unit,
+                expression,
+            )
+            .map_err(malformed)?;
+            self.dynamic_record_layouts.insert(
+                DynamicAggregateLayoutKey {
+                    aggregate: array,
+                    child,
+                },
+                expression,
+            );
+        }
+        Ok(())
+    }
+
+    /// How an array of `rank` dimensions lays out its elements: row by row,
+    /// but Fortran's go column by column unless the array says otherwise.
+    fn array_ordering(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        rank: usize,
+    ) -> std::result::Result<ArrayOrdering, Arc<str>> {
+        let ordering = match entry.attr_value(gimli::DW_AT_ordering) {
+            Some(gimli::AttributeValue::Ordering(gimli::DW_ORD_col_major)) => {
+                ArrayOrdering::ColumnMajor
+            }
+            Some(gimli::AttributeValue::Ordering(gimli::DW_ORD_row_major)) => {
+                ArrayOrdering::RowMajor
+            }
+            Some(_) => return Err("array ordering has an invalid encoding".into()),
+            None if self.language(unit_index) == SourceLanguage::Fortran => {
+                ArrayOrdering::ColumnMajor
+            }
+            None => ArrayOrdering::RowMajor,
+        };
+        // One dimension has one order.
+        Ok(if rank == 1 {
+            ArrayOrdering::RowMajor
+        } else {
+            ordering
+        })
+    }
+
+    /// A subrange's lower bound, where it ends, and its stride, or why
+    /// they are unsupported.
+    fn read_subrange(
+        &self,
+        unit_index: usize,
+        child: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        default_lower: Option<i128>,
+    ) -> std::result::Result<Subrange<'data>, &'static str> {
+        if child.attr(gimli::DW_AT_bit_stride).is_some() {
+            return Err("arrays whose elements a stride in bits spaces are unsupported");
+        }
+        let index = self.index_type(unit_index, child);
+        let bound = |attribute: &gimli::Attribute<Reader<'data>>| {
+            self.subrange_bound(unit_index, attribute, index)?
+                .ok_or("array bound has an invalid encoding")
+        };
+        let lower = child.attr(gimli::DW_AT_lower_bound).map_or_else(
+            || {
+                default_lower
+                    .map(SubrangeBound::Constant)
+                    .ok_or("array lower bound is not stated and not its language's")
+            },
+            bound,
+        )?;
+        let extent = match (
+            child.attr(gimli::DW_AT_count),
+            child.attr(gimli::DW_AT_upper_bound),
+        ) {
+            (Some(count), _) => Extent::Count(bound(count)?),
+            (None, Some(upper)) => Extent::Upper(bound(upper)?),
+            (None, None) => Extent::Unknown,
+        };
+        let stride = child
+            .attr(gimli::DW_AT_byte_stride)
+            .map(bound)
+            .transpose()?;
+        Ok((lower, extent, stride))
+    }
+
+    /// The size and signedness of a subrange's index type, which give its
+    /// computed bounds' values: a target word, signed, when it names none.
+    fn index_type(
+        &self,
+        unit_index: usize,
+        subrange: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    ) -> (u8, bool) {
+        let unit = &self.units[unit_index];
+        let word = (unit.encoding().address_size, true);
+        let Some(gimli::AttributeValue::UnitRef(offset)) = subrange.attr_value(gimli::DW_AT_type)
+        else {
+            return word;
+        };
+        let Ok(index_type) = unit.entry(offset) else {
+            return word;
+        };
+        let size = index_type
+            .attr(gimli::DW_AT_byte_size)
+            .and_then(gimli::Attribute::udata_value)
+            .and_then(|size| u8::try_from(size).ok())
+            .filter(|size| (1..=16).contains(size));
+        size.map_or(word, |size| (size, index_type_is_signed(unit, subrange)))
+    }
+
+    /// One bound, count, or stride of a subrange, as its attribute gives
+    /// it, or why it is unsupported.
+    fn subrange_bound(
+        &self,
+        unit_index: usize,
+        attribute: &gimli::Attribute<Reader<'data>>,
+        (byte_size, signed): (u8, bool),
+    ) -> std::result::Result<Option<SubrangeBound<'data>>, &'static str> {
+        if let Some(value) = array_bound(attribute, signed) {
+            return Ok(Some(SubrangeBound::Constant(value)));
+        }
+        match attribute.value() {
+            gimli::AttributeValue::Exprloc(expression) => Ok(Some(SubrangeBound::Computed {
+                expression,
+                byte_size,
+                signed,
+            })),
+            gimli::AttributeValue::UnitRef(offset) => {
+                let unit = &self.units[unit_index];
+                let referenced = unit
+                    .entry(offset)
+                    .map_err(|_| "array bound refers to no entry")?;
+                if !matches!(
+                    referenced.tag(),
+                    gimli::DW_TAG_variable | gimli::DW_TAG_formal_parameter
+                ) {
+                    return Err("array bounds a record's member gives are unsupported");
+                }
+                Ok(self
+                    .units
+                    .debug_info_offset(DieKey {
+                        unit: unit_index,
+                        offset: offset.0,
+                    })
+                    .map(SubrangeBound::Variable))
+            }
+            gimli::AttributeValue::Sdata(_)
+            | gimli::AttributeValue::Udata(_)
+            | gimli::AttributeValue::Data1(_)
+            | gimli::AttributeValue::Data2(_)
+            | gimli::AttributeValue::Data4(_)
+            | gimli::AttributeValue::Data8(_) => Ok(None),
+            _ => Err("array bound's form is unsupported"),
+        }
+    }
+
     /// A Fortran `character(len=N)`: N characters, counted from one, of
     /// the type it names, or else of one byte each. A length the program
-    /// decides at run time is unsupported.
+    /// decides at run time is where the string says.
     fn build_string_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -3324,15 +3747,55 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         explicit_name: Option<Arc<str>>,
         explicit_size: Option<u64>,
     ) -> Built {
+        if let Some(length) = entry.attr(gimli::DW_AT_string_length) {
+            let name = explicit_name.unwrap_or_else(|| Arc::from("character(len=:)"));
+            let unit = &self.units[unit_index];
+            let length = match length.value() {
+                gimli::AttributeValue::Exprloc(expression) => SubrangeBound::Stored {
+                    expression,
+                    byte_size: [gimli::DW_AT_string_length_byte_size, gimli::DW_AT_byte_size]
+                        .into_iter()
+                        .find_map(|attribute| entry.attr(attribute))
+                        .map_or_else(
+                            || Some(unit.encoding().address_size),
+                            |size| {
+                                size.udata_value()
+                                    .and_then(|size| u8::try_from(size).ok())
+                                    .filter(|size| (1..=16).contains(size))
+                            },
+                        )
+                        .ok_or("string length's size is invalid")?,
+                },
+                _ => match self.subrange_bound(unit_index, length, (0, false)) {
+                    Ok(Some(length @ SubrangeBound::Variable(_))) => length,
+                    Ok(_) => return Err("string length has an invalid encoding".into()),
+                    Err(description) => {
+                        return Ok(opaque(reference, name, None, description));
+                    }
+                },
+            };
+            let element = self
+                .target(entry, unit_index)?
+                .unwrap_or_else(|| self.character_type());
+            self.explicit_names.insert(reference.id);
+            return self.build_runtime_array(
+                entry,
+                unit_index,
+                reference,
+                (name, None),
+                element,
+                vec![(SubrangeBound::Constant(1), Extent::Count(length), None)],
+                ArrayOrdering::RowMajor,
+                None,
+            );
+        }
         // With a length of its own, a string's byte size is the length's.
-        let Some(byte_size) =
-            explicit_size.filter(|_| entry.attr(gimli::DW_AT_string_length).is_none())
-        else {
+        let Some(byte_size) = explicit_size else {
             return Ok(opaque(
                 reference,
-                explicit_name.unwrap_or_else(|| Arc::from("character(len=:)")),
+                explicit_name.unwrap_or_else(|| Arc::from("character(len=?)")),
                 None,
-                "string length is decided at run time",
+                "string has no length",
             ));
         };
         let element = self
@@ -4560,6 +5023,9 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
         | TypeKind::Pointer { .. }
         | TypeKind::Reference { .. }
         | TypeKind::Slice { .. }
+        // A Fortran type may hold an allocatable array of itself, whose
+        // elements are elsewhere.
+        | TypeKind::RuntimeArray { .. }
         | TypeKind::Named { target: None, .. }
         | TypeKind::Unspecified
         | TypeKind::Opaque { .. } => {}
@@ -4589,9 +5055,4 @@ fn modifier_type_name(modifier: TypeModifier, target: &str, indirection: bool) -
     } else {
         format!("{keyword} {target}")
     }
-}
-
-/// Whether an array or one of its dimensions spaces its elements apart.
-fn has_stride(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) -> bool {
-    entry.attr(gimli::DW_AT_byte_stride).is_some() || entry.attr(gimli::DW_AT_bit_stride).is_some()
 }

@@ -263,11 +263,13 @@ pub enum TableKind {
     Producers = 93,
     /// The bytes of the module's own views.
     EmbeddedViews = 94,
+    /// Array types' dimensions bounded at run time.
+    RuntimeDimensions = 95,
 }
 
 impl TableKind {
     /// Every kind, in the order tables are laid out.
-    pub const ALL: [Self; 94] = [
+    pub const ALL: [Self; 95] = [
         Self::Strings,
         Self::Files,
         Self::LineAddresses,
@@ -362,6 +364,7 @@ impl TableKind {
         Self::Vtables,
         Self::Producers,
         Self::EmbeddedViews,
+        Self::RuntimeDimensions,
     ];
 
     pub const COUNT: usize = Self::ALL.len();

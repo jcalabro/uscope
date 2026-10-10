@@ -365,6 +365,8 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
             }
         }
         VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
+        VariableValue::NotAllocated => "<not allocated>".to_owned(),
+        VariableValue::NotAssociated => "<not associated>".to_owned(),
         VariableValue::Function { code, function } => {
             uscope::function_text(*code, function.as_deref())
         }
@@ -412,6 +414,8 @@ const fn is_leaf(value: &VariableValue) -> bool {
             | VariableValue::Enumeration { .. }
             | VariableValue::Address(_)
             | VariableValue::ImplicitPointer
+            | VariableValue::NotAllocated
+            | VariableValue::NotAssociated
     )
 }
 

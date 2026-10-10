@@ -13,7 +13,7 @@ module values
   use, intrinsic :: iso_c_binding, only: c_intptr_t, c_loc
   implicit none
   private
-  public :: scalars, records, strings, add
+  public :: scalars, records, descriptors, strings, add
 
   type :: point
     integer(int32) :: x, y
@@ -154,11 +154,56 @@ contains
                    'int', decimal(int(grid(i, j), int64)))
       end do
     end do
-    ! Nor an array whose descriptor the program fills at run time.
-    call truth('records', 'heap', 'unsupported', '')
+    do i = 1, 2
+      call truth('records', 'heap.('//decimal(int(i, int64))//')', 'int', &
+                 decimal(int(heap(i), int64)))
+    end do
     call reached('records')
     call keep(origin); call keep(line); call keep(numbers); call keep(shifted); call keep(grid)
     call keep(heap)
+  end subroutine
+
+  ! Arrays whose descriptors the program fills at run time.
+  subroutine descriptors()
+    !GCC$ ATTRIBUTES noinline :: descriptors
+    integer(int32), allocatable, target :: table(:, :)
+    integer(int32), allocatable, target :: unset(:)
+    integer(int32), pointer :: loose(:)
+    integer(int32), target :: row(6)
+    integer :: i, j
+    allocate (table(0:1, -1:1))
+    do j = -1, 1
+      do i = 0, 1
+        table(i, j) = 10*i + j
+      end do
+    end do
+    row = [1, 2, 3, 4, 5, 6]
+    loose => null()
+    do j = -1, 1
+      do i = 0, 1
+        call truth('descriptors', 'table.('//decimal(int(i, int64))//','//decimal(int(j, int64))//')', &
+                   'int', decimal(int(table(i, j), int64)))
+      end do
+    end do
+    call truth('descriptors', 'unset', 'summary', '<not allocated>')
+    call truth('descriptors', 'loose', 'summary', '<not associated>')
+    call reached('descriptors')
+    call section(row(2::2))
+    call keep(table); call keep(unset); call keep(row)
+    if (associated(loose)) call keep(loose)
+  end subroutine
+
+  ! An assumed-shape array, here every other element of its actual.
+  subroutine section(part)
+    !GCC$ ATTRIBUTES noinline :: section
+    integer(int32), intent(inout), target :: part(:)
+    integer :: i
+    do i = 1, size(part)
+      call truth('section', 'part.('//decimal(int(i, int64))//')', 'int', &
+                 decimal(int(part(i), int64)))
+    end do
+    call reached('section')
+    call keep(part)
   end subroutine
 
   subroutine strings()
@@ -170,6 +215,7 @@ contains
     grown = grown//f32_bits(1.5)
     call truth('strings', 'word', 'string', '"'//word//'"')
     call truth('strings', '.grown', 'hidden', '')
+    call truth('strings', 'grown', 'string', '"'//grown//'"')
     call reached('strings')
     call keep(word); call keep(grown)
   end subroutine
@@ -181,6 +227,7 @@ program main
   implicit none
   call scalars()
   call records()
+  call descriptors()
   call strings()
   if (add(2, 3) /= 5) error stop 'add'
 end program

@@ -728,10 +728,12 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
             let flexible = dereference_named(&scenario, "flexible", 1).await;
             let flexible_page = record_page(&scenario, &flexible.state, 2, fixture).await;
             assert_signed(&named_child(&flexible_page, "count").state, 2, fixture);
-            let unsupported = uscope::UnsupportedVariableFeature::TypeRepresentation;
+            // A flexible array member's elements are reached by index.
             assert_eq!(
                 named_child(&flexible_page, "values").state,
-                VariableState::Unavailable(VariableUnavailableReason::Unsupported(unsupported)),
+                VariableState::Unavailable(VariableUnavailableReason::ValueAccess(
+                    uscope::ValueAccessUnavailableReason::UnknownLength
+                )),
                 "{fixture}"
             );
 
