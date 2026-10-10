@@ -1116,6 +1116,9 @@ pub(super) fn sample_resumes() -> resumes::Resumes {
 }
 
 pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, ImageError> {
+    // The builder borrows these until it seals.
+    let unwind = sample_unwind();
+    let locations = sample_locations();
     let mut builder = Builder::new(TARGET);
     tables.add_to(&mut builder);
     let mut paths = PathsBuilder::default();
@@ -1140,7 +1143,7 @@ pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, I
         },
     )
     .unwrap();
-    unwind::add_to(&mut builder, &mut strings, &sample_unwind()).unwrap();
+    unwind::add_to(&mut builder, &mut strings, &unwind).unwrap();
     let (nodes, classes) = sample_types();
     types::add_to(
         &mut builder,
@@ -1173,7 +1176,7 @@ pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, I
         },
     )
     .unwrap();
-    sample_locations().add_to(&mut builder);
+    locations.add_to(&mut builder);
     variables::add_to(&mut builder, &mut strings, &sample_variables()).unwrap();
     calls::add_to(&mut builder, &mut strings, &sample_calls()).unwrap();
     type_facts::add_to(&mut builder, &mut strings, &sample_type_facts()).unwrap();

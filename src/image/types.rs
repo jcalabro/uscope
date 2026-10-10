@@ -873,7 +873,7 @@ fn go_kind_code(kind: GoKind) -> Result<u8, TooMany> {
 /// Adds `types` and their indexes to `builder`, pooling text in
 /// `strings`.
 pub fn add_to(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     types: &Types<'_>,
 ) -> Result<(), TooMany> {
@@ -943,22 +943,22 @@ pub fn add_to(
         })
         .collect::<Vec<_>>();
     builder
-        .table(&encoder.types)
-        .table(&encoder.members)
-        .table(&encoder.bases)
-        .table(&encoder.variants)
-        .table(&encoder.selectors)
-        .table(&encoder.enumerators)
-        .table(&encoder.dimensions)
-        .shared(TableKind::TypeParameters, &encoder.parameters)
-        .table(&encoder.identities)
-        .shared(TableKind::IdentityStrings, &encoder.identity_strings)
-        .table(&encoder.arguments)
-        .shared(TableKind::TypeNames, &index::names(names))
-        .shared(TableKind::TypeBaseNames, &index::names(bases))
-        .shared(TableKind::TypeClasses, &classes)
-        .shared(TableKind::EnumeratorNames, &index::names(enumerators))
-        .table(&runtime_types);
+        .owned_table(encoder.types)
+        .owned_table(encoder.members)
+        .owned_table(encoder.bases)
+        .owned_table(encoder.variants)
+        .owned_table(encoder.selectors)
+        .owned_table(encoder.enumerators)
+        .owned_table(encoder.dimensions)
+        .owned_shared(TableKind::TypeParameters, encoder.parameters)
+        .owned_table(encoder.identities)
+        .owned_shared(TableKind::IdentityStrings, encoder.identity_strings)
+        .owned_table(encoder.arguments)
+        .owned_shared(TableKind::TypeNames, index::names(names))
+        .owned_shared(TableKind::TypeBaseNames, index::names(bases))
+        .owned_shared(TableKind::TypeClasses, classes)
+        .owned_shared(TableKind::EnumeratorNames, index::names(enumerators))
+        .owned_table(runtime_types);
     Ok(())
 }
 

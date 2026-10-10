@@ -157,14 +157,17 @@ impl<'a> Paths<'a> {
 }
 
 /// Whether `pool` is NUL-terminated strings, each valid UTF-8 when `utf8`.
+///
+/// NUL is a character of its own in UTF-8, and no other character's bytes
+/// contain a zero byte, so the strings are each valid exactly when the
+/// pool is valid as a whole: one pass, where checking each string found
+/// its end and started again, a third of what reading a cached image
+/// took.
 pub(super) fn valid_pool(pool: &[u8], utf8: bool) -> bool {
     if pool.last().is_some_and(|last| *last != 0) {
         return false;
     }
-    !utf8
-        || pool
-            .split(|byte| *byte == 0)
-            .all(|string| std::str::from_utf8(string).is_ok())
+    !utf8 || std::str::from_utf8(pool).is_ok()
 }
 
 /// Whether `offset` names a string in a valid pool: inside it, and, for a

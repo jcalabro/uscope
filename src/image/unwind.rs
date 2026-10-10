@@ -141,10 +141,10 @@ pub struct Unwind {
 pub struct TooLarge;
 
 /// Adds `unwind` to `builder`, pooling error descriptions in `strings`.
-pub fn add_to(
-    builder: &mut Builder,
+pub fn add_to<'a>(
+    builder: &mut Builder<'a>,
     strings: &mut StringsBuilder,
-    unwind: &Unwind,
+    unwind: &'a Unwind,
 ) -> Result<(), TooLarge> {
     let mut error = |index: &FdeIndex| -> Result<(u64, u32), TooLarge> {
         Ok(match &index.first_error {
@@ -208,7 +208,7 @@ pub fn add_to(
     };
     let go_code = index::intervals(unwind.go_code.iter().map(|range| (*range, 0)));
     builder
-        .table(&[record])
+        .owned_table(vec![record])
         .bytes(TableKind::EhFrame, unwind.eh_frame.to_vec())
         .bytes(TableKind::DebugFrame, unwind.debug_frame.to_vec())
         .shared(TableKind::EhFrameIndex, &unwind.eh_frame_index.entries)
@@ -216,7 +216,7 @@ pub fn add_to(
             TableKind::DebugFrameIndex,
             &unwind.debug_frame_index.entries,
         )
-        .shared(TableKind::GoCode, &go_code);
+        .owned_shared(TableKind::GoCode, go_code);
     if let Some(go) = go {
         let saves = go
             .frame_saves
@@ -234,7 +234,7 @@ pub fn add_to(
             .collect::<Vec<_>>();
         builder
             .bytes(TableKind::GoTable, go.bytes.to_vec())
-            .table(&saves);
+            .owned_table(saves);
     }
     Ok(())
 }

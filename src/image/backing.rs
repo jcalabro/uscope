@@ -37,13 +37,14 @@ impl std::fmt::Debug for AlignedBytes {
 
 impl AlignedBytes {
     /// `length` zero bytes, or `None` when they cannot be allocated.
+    ///
+    /// The bytes are asked of the allocator as zeroed, not filled: a large
+    /// block comes from pages the kernel has already zeroed, so an image or
+    /// file about to be written over is not written twice.
     pub fn zeroed(length: usize) -> Option<Self> {
         let blocks = length.div_ceil(TABLE_ALIGNMENT);
-        let mut storage = Vec::new();
-        storage.try_reserve_exact(blocks).ok()?;
-        storage.resize(blocks, Block::new_zeroed());
         Some(Self {
-            blocks: storage,
+            blocks: Block::new_vec_zeroed(blocks).ok()?,
             length,
         })
     }
@@ -143,12 +144,10 @@ pub fn read_input(path: &Path) -> std::io::Result<(Vec<u8>, FileStamp)> {
     Ok(read_snapshot(path, MAX_INPUT, &mut |_| {}, vector)?)
 }
 
-/// `length` zero bytes, or `None` when they cannot be allocated.
+/// `length` zero bytes, or `None` when they cannot be allocated; zeroed
+/// as [`AlignedBytes::zeroed`] is.
 fn vector(length: usize) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(length).ok()?;
-    bytes.resize(length, 0);
-    Some(bytes)
+    u8::new_vec_zeroed(length).ok()
 }
 
 /// How many times a read starts again when the file changed under it.

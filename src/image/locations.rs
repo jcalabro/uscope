@@ -361,7 +361,7 @@ impl LocationsBuilder {
     }
 
     /// Adds the pooled locations to `builder`.
-    pub fn add_to(&self, builder: &mut Builder) {
+    pub fn add_to<'a>(&'a self, builder: &mut Builder<'a>) {
         builder
             .bytes(TableKind::ExpressionBytes, self.bytes.clone())
             .table(&self.expressions)

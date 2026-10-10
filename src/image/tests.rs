@@ -1245,6 +1245,17 @@ fn validation_rejects_functions_that_disagree() {
             "code range index disagrees",
         ),
         (
+            // The second instance names one range twice, which the index
+            // holds once; changing the copy leaves every interval one of
+            // its instance's ranges, but the new range in none.
+            "an instance's range missing from the index",
+            tampered(TableKind::InstanceRanges, |r: &mut [RangeRecord]| {
+                assert_eq!(r[2], r[3], "the sample repeats a range");
+                r[3].end = (r[3].end.get() + 1).into();
+            }),
+            "code range index disagrees",
+        ),
+        (
             "unordered starts",
             tampered(TableKind::InstructionStarts, |s: &mut [StartRecord]| {
                 s.swap(0, 1);

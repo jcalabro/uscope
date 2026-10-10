@@ -115,7 +115,7 @@ fn pooled(
 /// Adds the resume points and held ranges to `builder`, pooling reasons in
 /// `strings`.
 pub fn add_to(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     resumes: &Resumes,
 ) -> Result<(), TooMany> {
@@ -168,10 +168,10 @@ pub fn add_to(
         })
         .collect::<Result<Vec<_>, TooMany>>()?;
     builder
-        .shared(TableKind::ResumeRanges, &ranges)
-        .table(&records)
-        .table(&points)
-        .table(&held);
+        .owned_shared(TableKind::ResumeRanges, ranges)
+        .owned_table(records)
+        .owned_table(points)
+        .owned_table(held);
     Ok(())
 }
 
