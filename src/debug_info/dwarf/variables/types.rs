@@ -26,8 +26,8 @@ use super::die::{
     unsigned_constant, zig_qualified_name,
 };
 use super::identity::{
-    IdentityParts, ScopePath, ScopeSegment, go_embedded, inline_namespace_path, scope_segment,
-    source_language,
+    GoParts, IdentityParts, ScopePath, ScopeSegment, go_embedded, inline_namespace_path,
+    scope_segment, source_language,
 };
 use super::location::copy_expression;
 use super::variant::{
@@ -79,8 +79,14 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) type_scopes: HashMap<DieKey, ScopePath>,
     /// The declaration each out-of-line type definition completes.
     pub(super) definition_declarations: HashMap<DieKey, DieKey>,
-    /// What each named type's identity is built from.
-    pub(super) identity_parts: HashMap<TypeId, IdentityParts>,
+    /// What each named type's identity is built from, by its identifier.
+    /// Nearly every type is named and identifiers are dense, so a vector
+    /// holds them in a third of the hash map's memory: the map's buckets
+    /// were mostly empty and every one was touched.
+    pub(super) identity_parts: Vec<Option<IdentityParts>>,
+    /// The Go parts of each Go type's identity, apart so that no other
+    /// type's parts make room for them.
+    pub(super) go_identity_parts: HashMap<TypeId, GoParts>,
     /// The float type each complex type's parts have, by the part's name
     /// and size.
     pub(super) complex_parts: HashMap<(Arc<str>, u64), TypeId>,
@@ -296,7 +302,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             budget,
             type_scopes: HashMap::new(),
             definition_declarations,
-            identity_parts: HashMap::new(),
+            identity_parts: Vec::new(),
+            go_identity_parts: HashMap::new(),
             complex_parts: HashMap::new(),
             passed_by_value: HashMap::new(),
             go_dict_indices: HashMap::new(),

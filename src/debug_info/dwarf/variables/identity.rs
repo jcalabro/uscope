@@ -59,7 +59,6 @@ pub(super) struct IdentityParts {
     pub(super) template: Vec<TypeArgument>,
     /// Where a template parameter pack's arguments begin.
     pub(super) pack: Option<usize>,
-    pub(super) go: Option<GoParts>,
 }
 
 pub(super) struct GoParts {
@@ -294,20 +293,19 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             | gimli::DW_TAG_template_alias => self.template_arguments(entry, die.unit),
             _ => (Vec::new(), None),
         };
-        let go = if self.language(die.unit) == SourceLanguage::Go {
-            self.go_parts(entry, die.unit)
-        } else {
-            None
-        };
-        self.identity_parts.insert(
-            id,
-            IdentityParts {
-                die,
-                template,
-                pack,
-                go,
-            },
-        );
+        if self.language(die.unit) == SourceLanguage::Go
+            && let Some(go) = self.go_parts(entry, die.unit)
+        {
+            self.go_identity_parts.insert(id, go);
+        }
+        if self.identity_parts.len() <= id.index() {
+            self.identity_parts.resize_with(id.index() + 1, || None);
+        }
+        self.identity_parts[id.index()] = Some(IdentityParts {
+            die,
+            template,
+            pack,
+        });
     }
 
     /// The arguments a type's template parameter DIEs describe, with packs
@@ -548,6 +546,13 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         // Each identity reads only its own type and the scopes, so they
         // are built in parallel and stored in order.
         // An indexed collect splits alike however the work is stolen.
+        // Most identities share their parts with what is already built, so
+        // the parts are shared rather than copied: every type in one scope
+        // has its path, most names are their own base, and most types take
+        // no arguments. Each identity is boxed where it is built: a vector
+        // of whole identities beside their boxes held two copies of every
+        // one at the load's peak.
+        let no_arguments = Arc::<[TypeArgument]>::from([]);
         let built = (0..self.entries.len())
             .into_par_iter()
             .map(|index| {
@@ -558,27 +563,46 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 let Some(TypeEntry::Resolved(info)) = self.entries.get(index) else {
                     return None;
                 };
-                let parts = self.identity_parts.get(&id)?;
+                let parts = self.identity_parts.get(index)?.as_ref()?;
+                let go = self.go_identity_parts.get(&id);
                 let language = self.language(parts.die.unit);
                 let parsed = TypeName::parse(&info.name, NameSyntax::of(language));
                 let scopes = self.type_path(parts.die);
                 // Only Go and Zig names spell their packages and modules.
-                let mut path = scopes.path.to_vec();
-                path.extend(parsed.path.iter().map(|segment| Arc::<str>::from(*segment)));
+                let path = if parsed.path.is_empty() {
+                    scopes.path
+                } else {
+                    scopes
+                        .path
+                        .iter()
+                        .cloned()
+                        .chain(parsed.path.iter().map(|segment| Arc::<str>::from(*segment)))
+                        .collect()
+                };
+                let base = if parsed.base == &*info.name {
+                    Arc::clone(&info.name)
+                } else {
+                    Arc::from(parsed.base)
+                };
                 let (arguments, origin, pending) =
-                    merge_arguments(parts, parsed.arguments.as_deref());
+                    merge_arguments(parts, go, parsed.arguments.as_deref());
                 let pack = parts.pack.filter(|start| *start <= arguments.len());
+                let arguments = if arguments.is_empty() {
+                    Arc::clone(&no_arguments)
+                } else {
+                    arguments.into()
+                };
                 let identity = TypeIdentity {
                     language,
-                    path: path.into(),
+                    path,
                     inline_namespaces: scopes.inline,
-                    base: Arc::from(parsed.base),
-                    arguments: arguments.into(),
+                    base,
+                    arguments,
                     pack,
                     origin,
-                    go: parts.go.as_ref().map(|go| go.attributes),
+                    go: go.map(|go| go.attributes),
                 };
-                Some((index, language, identity, pending))
+                Some((index, language, Arc::new(identity), pending))
             })
             .collect::<Vec<_>>();
         for (index, language, identity, positions) in built.into_iter().flatten() {
@@ -590,7 +614,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 });
             }
             if let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(index) {
-                info.identity = Some(Arc::new(identity));
+                info.identity = Some(identity);
             }
         }
     }
@@ -818,9 +842,10 @@ impl TypeLookup for EntryLookup<'_> {
 /// the arguments, their origin, and the positions still to resolve.
 fn merge_arguments(
     parts: &IdentityParts,
+    go: Option<&GoParts>,
     named: Option<&[&str]>,
 ) -> (Vec<TypeArgument>, ArgumentOrigin, Vec<usize>) {
-    if let Some(go) = &parts.go {
+    if let Some(go) = go {
         let described = match (go.key, go.element) {
             (Some(key), Some(element)) => vec![key, element],
             (None, Some(element)) => vec![element],
