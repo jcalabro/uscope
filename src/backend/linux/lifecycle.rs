@@ -1132,6 +1132,19 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         let process_id = process_id(inferior.tgid);
         let execution = inferior.active.as_ref().map(|active| active.id);
+        let leader_exited = pid == inferior.tgid;
+
+        // Until an attach stops every thread it seized, a thread created
+        // after its listing may run untraced, so the last seized thread to
+        // end need not be the process's last.
+        if inferior.threads.is_empty()
+            && !leader_exited
+            && self.attach_reply.is_some()
+            && self.seize_threads_left()?
+        {
+            return self.thread_exited(pid, status, exited.awaiting_breakpoint.is_some());
+        }
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
 
         if inferior.threads.is_empty() {
             self.discard_watchpoints();
@@ -1184,6 +1197,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
 
         self.thread_exited(pid, status, exited.awaiting_breakpoint.is_some())
+    }
+
+    /// Seizes the threads an attach left untraced, and returns whether any
+    /// now waits to stop. A process no longer listed has none.
+    fn seize_threads_left(&mut self) -> Result<bool> {
+        match self.seize_untraced_threads() {
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            seized => seized,
+        }
     }
 
     /// Publishes the exit of a thread whose process lives on, and ends or

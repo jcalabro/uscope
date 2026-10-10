@@ -2468,6 +2468,60 @@ fn an_attach_traces_threads_created_while_their_creators_were_seized() {
 }
 
 #[test]
+fn an_attach_whose_seized_threads_die_traces_the_threads_left_before_ending() {
+    let mut harness = watch_harness(2);
+    let (leader, seized) = (harness.threads[0], harness.threads[1]);
+    let mut attached = harness.begin_attach();
+    // The leader had exited and could not be seized, and before it did it
+    // created a thread the listing missed. SIGKILL then reaches the seized
+    // thread before its attach stop, while the new thread still runs.
+    let inferior = harness.inferior();
+    inferior.threads.remove(&leader);
+    inferior.unseized_threads.insert(leader);
+    inferior.barrier = Some(StopBarrier::visible(seized, StopReason::Attach));
+    let untraced = Pid::from_raw(5100);
+    harness
+        .trace()
+        .listed_threads
+        .replace(vec![leader, untraced]);
+
+    harness
+        .controller
+        .process_wait(WaitEvent::Signaled(seized, Signal::SIGKILL, false))
+        .expect("seized thread dies");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [format!("seize {untraced}"), format!("interrupt {untraced}")]
+    );
+    assert!(attached.try_recv().is_err(), "the attach still waits");
+    let mut ended = false;
+    while let Ok(event) = harness.events.try_recv() {
+        ended |= matches!(event, DebuggerEvent::InferiorExited { .. });
+    }
+    assert!(!ended, "the process lives on in {untraced}");
+
+    harness.trace().listed_threads.replace(vec![leader]);
+    harness
+        .controller
+        .process_wait(WaitEvent::Signaled(untraced, Signal::SIGKILL, false))
+        .expect("last thread dies");
+    let mut ended = None;
+    while let Ok(event) = harness.events.try_recv() {
+        if let DebuggerEvent::InferiorExited { status, .. } = event {
+            ended = Some(status);
+        }
+    }
+    assert!(
+        matches!(ended, Some(ExitStatus::Terminated(_))),
+        "{ended:?}"
+    );
+    assert!(
+        attached.try_recv().expect("attach replied").is_err(),
+        "the attach fails"
+    );
+}
+
+#[test]
 fn an_interrupt_kept_past_a_clone_event_resumes_the_thread_unseen() {
     let mut harness = watch_harness(1);
     let leader = harness.threads[0];
