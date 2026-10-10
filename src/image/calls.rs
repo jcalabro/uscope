@@ -189,7 +189,7 @@ const fn some(value: U32) -> Option<u32> {
 /// Adds the calling functions, call sites, and the index of where calls
 /// return to `builder`, pooling names in `strings`.
 pub fn add_to(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     calls: &Calls,
 ) -> Result<(), TooMany> {
@@ -282,11 +282,11 @@ pub fn add_to(
         })
         .collect::<Vec<_>>();
     builder
-        .table(&functions)
-        .shared(TableKind::TailCalls, &tail_calls)
-        .table(&sites)
-        .table(&parameters)
-        .shared(TableKind::CallReturns, &returns);
+        .owned_table(functions)
+        .owned_shared(TableKind::TailCalls, tail_calls)
+        .owned_table(sites)
+        .owned_table(parameters)
+        .owned_shared(TableKind::CallReturns, returns);
     Ok(())
 }
 

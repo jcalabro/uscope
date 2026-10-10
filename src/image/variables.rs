@@ -461,7 +461,9 @@ fn resolution(
 #[derive(Default)]
 struct Encoder {
     ranges: Vec<CodeRange>,
-    pooled_ranges: foldhash::HashMap<Vec<(u64, u64)>, U32>,
+    /// Keyed by the ranges themselves, so that the many objects sharing a
+    /// scope look theirs up without copying them first.
+    pooled_ranges: foldhash::HashMap<Box<[AddressRange<ImageAddress>]>, U32>,
     scopes: Vec<ScopeRecord>,
     pooled_scopes: foldhash::HashMap<ScopeRecord, u32>,
     constants: Vec<ConstantRecord>,
@@ -471,21 +473,17 @@ struct Encoder {
 impl Encoder {
     /// The first of `ranges`, pooled once.
     fn ranges(&mut self, ranges: &[AddressRange<ImageAddress>]) -> Result<(U32, U32), TooMany> {
-        let key = ranges
-            .iter()
-            .map(|range| (range.start.get(), range.end.get()))
-            .collect::<Vec<_>>();
         let count = number(ranges.len())?.into();
-        if let Some(first) = self.pooled_ranges.get(&key) {
+        if let Some(first) = self.pooled_ranges.get(ranges) {
             return Ok((*first, count));
         }
         let first = number(self.ranges.len())?.into();
-        self.ranges.extend(key.iter().map(|(start, end)| CodeRange {
-            start: (*start).into(),
-            end: (*end).into(),
+        self.ranges.extend(ranges.iter().map(|range| CodeRange {
+            start: range.start.get().into(),
+            end: range.end.get().into(),
         }));
         number(self.ranges.len())?;
-        self.pooled_ranges.insert(key, first);
+        self.pooled_ranges.insert(ranges.into(), first);
         Ok((first, count))
     }
 
@@ -612,7 +610,7 @@ const VARIABLE_KINDS: [VariableKind; 5] = [
 ///
 /// When a Go declaration is not its object's declaration.
 pub fn add_to(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     variables: &Variables,
 ) -> Result<(), TooMany> {
@@ -671,19 +669,19 @@ pub fn add_to(
         })
         .collect::<Result<Vec<_>, TooMany>>()?;
     builder
-        .table(&encoder.ranges)
-        .table(&encoder.scopes)
-        .table(&objects)
-        .table(&encoder.constants)
+        .owned_table(encoder.ranges)
+        .owned_table(encoder.scopes)
+        .owned_table(objects)
+        .owned_table(encoder.constants)
         .bytes(TableKind::ConstantBytes, encoder.constant_bytes)
-        .table(&functions)
-        .shared(TableKind::FunctionObjects, &lists.objects)
-        .table(&lists.captures)
-        .table(&starts)
-        .shared(TableKind::GoEntries, &go_entries)
-        .shared(TableKind::ObjectOffsets, &offsets)
-        .table(&procedures)
-        .table(&globals);
+        .owned_table(functions)
+        .owned_shared(TableKind::FunctionObjects, lists.objects)
+        .owned_table(lists.captures)
+        .owned_table(starts)
+        .owned_shared(TableKind::GoEntries, go_entries)
+        .owned_shared(TableKind::ObjectOffsets, offsets)
+        .owned_table(procedures)
+        .owned_table(globals);
     Ok(())
 }
 

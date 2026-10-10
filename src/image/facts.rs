@@ -108,7 +108,7 @@ pub struct Facts<'a> {
 
 /// Adds `facts` to `builder`, pooling names and reasons in `strings`.
 pub fn add_to(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     facts: &Facts<'_>,
 ) -> Result<(), TooLarge> {
@@ -169,7 +169,7 @@ pub fn add_to(
             })
         })
         .collect::<Result<Vec<_>, TooLarge>>()?;
-    builder.table(&[record]).table(&thread_locals);
+    builder.owned_table(vec![record]).owned_table(thread_locals);
     Ok(())
 }
 

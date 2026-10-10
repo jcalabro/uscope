@@ -73,7 +73,9 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 toml = "1.1"
 mimalloc = { version = "0.1", default-features = false }
 foldhash = "0.2"
-zerocopy = { version = "0.8", features = ["derive"] }
+# `alloc` for zeroed vectors the allocator can take from fresh, already
+# zero pages instead of filling.
+zerocopy = { version = "0.8", features = ["alloc", "derive"] }
 rayon = "1.11"
 twox-hash = { version = "2.1", default-features = false, features = ["std", "xxhash3_64", "xxhash3_128"] }
 

@@ -146,12 +146,43 @@ impl Image {
 }
 
 /// Assembles tables into an image.
-pub struct Builder {
+///
+/// A table is either borrowed from rows that outlive the builder or moved
+/// into it, never copied: sealing copies each table once, into its place
+/// in the image. Copying rows as they were added cost a second copy, and
+/// a second allocation, of the whole image while it was sealed.
+pub struct Builder<'a> {
     target: crate::TargetDescription,
-    tables: Vec<(TableKind, usize, usize, Vec<u8>)>,
+    tables: Vec<(TableKind, usize, usize, TableBytes<'a>)>,
 }
 
-impl Builder {
+/// The rows of one table, as the builder holds them until it seals.
+enum TableBytes<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Box<dyn AsBytes + 'a>),
+}
+
+impl TableBytes<'_> {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(rows) => rows.bytes(),
+        }
+    }
+}
+
+/// Owned rows, as bytes.
+trait AsBytes {
+    fn bytes(&self) -> &[u8];
+}
+
+impl<T: IntoBytes + Immutable> AsBytes for Vec<T> {
+    fn bytes(&self) -> &[u8] {
+        self.as_slice().as_bytes()
+    }
+}
+
+impl<'a> Builder<'a> {
     pub const fn new(target: crate::TargetDescription) -> Self {
         Self {
             target,
@@ -159,29 +190,72 @@ impl Builder {
         }
     }
 
-    /// Adds `T`'s table. Empty tables are left out.
-    pub fn table<T: Record>(&mut self, rows: &[T]) -> &mut Self {
+    /// Adds `T`'s table, borrowing its rows. Empty tables are left out.
+    pub fn table<T: Record>(&mut self, rows: &'a [T]) -> &mut Self {
         if !rows.is_empty() {
             self.add(
                 T::KIND,
                 size_of::<T>(),
                 rows.len(),
-                rows.as_bytes().to_vec(),
+                TableBytes::Borrowed(rows.as_bytes()),
             );
         }
         self
     }
 
-    /// Adds the table of `kind`, which holds `T`s. Empty tables are left
-    /// out.
-    pub fn shared<T: SharedRecord>(&mut self, kind: TableKind, rows: &[T]) -> &mut Self {
+    /// Adds `T`'s table, taking its rows. Empty tables are left out.
+    pub fn owned_table<T: Record + 'a>(&mut self, rows: Vec<T>) -> &mut Self {
+        if !rows.is_empty() {
+            let count = rows.len();
+            self.add(
+                T::KIND,
+                size_of::<T>(),
+                count,
+                TableBytes::Owned(Box::new(rows)),
+            );
+        }
+        self
+    }
+
+    /// Adds the table of `kind`, which holds `T`s, borrowing its rows.
+    /// Empty tables are left out.
+    pub fn shared<T: SharedRecord>(&mut self, kind: TableKind, rows: &'a [T]) -> &mut Self {
         assert_eq!(
             schema::record(kind),
             T::NAME,
             "{kind:?} holds another record"
         );
         if !rows.is_empty() {
-            self.add(kind, size_of::<T>(), rows.len(), rows.as_bytes().to_vec());
+            self.add(
+                kind,
+                size_of::<T>(),
+                rows.len(),
+                TableBytes::Borrowed(rows.as_bytes()),
+            );
+        }
+        self
+    }
+
+    /// Adds the table of `kind`, which holds `T`s, taking its rows. Empty
+    /// tables are left out.
+    pub fn owned_shared<T: SharedRecord + 'a>(
+        &mut self,
+        kind: TableKind,
+        rows: Vec<T>,
+    ) -> &mut Self {
+        assert_eq!(
+            schema::record(kind),
+            T::NAME,
+            "{kind:?} holds another record"
+        );
+        if !rows.is_empty() {
+            let count = rows.len();
+            self.add(
+                kind,
+                size_of::<T>(),
+                count,
+                TableBytes::Owned(Box::new(rows)),
+            );
         }
         self
     }
@@ -190,12 +264,12 @@ impl Builder {
     pub fn bytes(&mut self, kind: TableKind, bytes: Vec<u8>) -> &mut Self {
         if !bytes.is_empty() {
             let length = bytes.len();
-            self.add(kind, 1, length, bytes);
+            self.add(kind, 1, length, TableBytes::Owned(Box::new(bytes)));
         }
         self
     }
 
-    fn add(&mut self, kind: TableKind, stride: usize, count: usize, bytes: Vec<u8>) {
+    fn add(&mut self, kind: TableKind, stride: usize, count: usize, bytes: TableBytes<'a>) {
         assert!(
             self.tables.iter().all(|(added, ..)| *added != kind),
             "{kind:?} is added once"
@@ -214,6 +288,7 @@ impl Builder {
         let mut entries = Vec::with_capacity(self.tables.len());
         let mut offsets = Vec::with_capacity(self.tables.len());
         for (kind, stride, count, bytes) in &self.tables {
+            let bytes = bytes.bytes();
             offsets.push(offset);
             entries.push(DirectoryEntry {
                 kind: (*kind as u32).into(),
@@ -242,6 +317,7 @@ impl Builder {
         buffer[directory_start..directory_start + directory_length]
             .copy_from_slice(entries.as_bytes());
         for ((_, _, _, table), start) in self.tables.iter().zip(offsets) {
+            let table = table.bytes();
             buffer[start..start + table.len()].copy_from_slice(table);
         }
         let checksum = twox_hash::XxHash3_64::oneshot(&buffer[..offset]);

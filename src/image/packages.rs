@@ -47,7 +47,7 @@ pub struct TooMany;
 /// Adds `packages`, as (path, name) pairs, and each function's package
 /// and local name in `names`, function by function, to `builder`.
 pub fn add_to<'s>(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     packages: impl IntoIterator<Item = (&'s str, &'s str)>,
     names: &[Option<(&str, String)>],
@@ -87,9 +87,9 @@ pub fn add_to<'s>(
         });
     }
     builder
-        .table(&packages)
-        .table(&records)
-        .shared(TableKind::LocalNames, &index::names(locals));
+        .owned_table(packages)
+        .owned_table(records)
+        .owned_shared(TableKind::LocalNames, index::names(locals));
     Ok(())
 }
 

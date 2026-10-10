@@ -753,16 +753,16 @@ pub fn from_statement_rows(statements: &[StatementRow]) -> LineTables {
 
 impl LineTables {
     /// Adds the tables and their indexes to `builder`.
-    pub fn add_to(&self, builder: &mut super::Builder) {
+    pub fn add_to<'a>(&'a self, builder: &mut super::Builder<'a>) {
         let indexes = build_indexes(self);
         builder
             .table(&self.addresses)
             .table(&self.rows)
             .table(&self.extras)
             .table(&self.sequences)
-            .table(&indexes.ranges)
-            .table(&indexes.statements)
-            .table(&indexes.boundaries);
+            .owned_table(indexes.ranges)
+            .owned_table(indexes.statements)
+            .owned_table(indexes.boundaries);
     }
 }
 
@@ -771,7 +771,7 @@ impl Files {
     /// when a path contains a NUL or the paths do not fit.
     pub fn add_to(
         &self,
-        builder: &mut super::Builder,
+        builder: &mut super::Builder<'_>,
         paths: &mut super::PathsBuilder,
     ) -> Option<()> {
         let records = self
@@ -783,7 +783,7 @@ impl Files {
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        builder.table(&records);
+        builder.owned_table(records);
         Some(())
     }
 }

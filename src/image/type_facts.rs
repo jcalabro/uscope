@@ -123,7 +123,7 @@ fn facts(pairs: impl Iterator<Item = (TypeId, u64)>) -> Vec<TypeFactRecord> {
 
 /// Adds the type facts to `builder`, pooling names in `strings`.
 pub fn add_to(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     type_facts: &TypeFacts,
 ) -> Result<(), TooMany> {
@@ -172,10 +172,10 @@ pub fn add_to(
         )
         .collect::<Vec<_>>();
     builder
-        .shared(TableKind::DictionaryIndices, &dictionary)
-        .shared(TableKind::PassedByValue, &passed)
-        .table(&complex)
-        .table(&layouts);
+        .owned_shared(TableKind::DictionaryIndices, dictionary)
+        .owned_shared(TableKind::PassedByValue, passed)
+        .owned_table(complex)
+        .owned_table(layouts);
     Ok(())
 }
 

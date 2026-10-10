@@ -293,7 +293,7 @@ pub struct Code<'a> {
 /// Adds the functions, their instances, and their indexes to `builder`,
 /// pooling names in `strings`.
 pub fn add_to(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     code: &Code<'_>,
 ) -> Result<(), TooMany> {
@@ -307,12 +307,12 @@ pub fn add_to(
             evidence: code_of(&EVIDENCE, evidence),
         })
         .collect::<Vec<_>>();
-    builder.table(&starts);
+    builder.owned_table(starts);
     Ok(())
 }
 
 fn add_functions(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     functions: &[FunctionInfo],
     instances: &[CodeInstanceInfo],
@@ -368,15 +368,15 @@ fn add_functions(
     }
     number(generics.len())?;
     builder
-        .table(&records)
-        .shared(TableKind::FunctionNames, &index::names(names))
-        .table(&generics)
-        .shared(TableKind::FunctionInstances, &members);
+        .owned_table(records)
+        .owned_shared(TableKind::FunctionNames, index::names(names))
+        .owned_table(generics)
+        .owned_shared(TableKind::FunctionInstances, members);
     Ok(())
 }
 
 fn add_instances(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     instances: &[CodeInstanceInfo],
     prologue_ends: &[ImageAddress],
 ) -> Result<(), TooMany> {
@@ -424,10 +424,10 @@ fn add_instances(
     number(ranges.len())?;
     number(entry_records.len())?;
     builder
-        .table(&instance_records)
-        .table(&ranges)
-        .shared(TableKind::CodeRanges, &code_ranges)
-        .table(&entry_records);
+        .owned_table(instance_records)
+        .owned_table(ranges)
+        .owned_shared(TableKind::CodeRanges, code_ranges)
+        .owned_table(entry_records);
     Ok(())
 }
 
@@ -889,6 +889,29 @@ fn validate_functions(image: &Image) -> Result<(), String> {
     Ok(())
 }
 
+/// How many distinct ranges `ranges` holds. An instance has a few, which
+/// are compared in place; a long list is sorted instead, so that no image
+/// makes this quadratic.
+fn distinct_ranges(ranges: &[RangeRecord]) -> usize {
+    const IN_PLACE: usize = 16;
+    let key = |range: &RangeRecord| (range.start.get(), range.end.get());
+    if ranges.len() <= IN_PLACE {
+        return ranges
+            .iter()
+            .enumerate()
+            .filter(|(index, range)| {
+                !ranges[..*index]
+                    .iter()
+                    .any(|earlier| key(earlier) == key(range))
+            })
+            .count();
+    }
+    let mut keys = ranges.iter().map(key).collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys.dedup();
+    keys.len()
+}
+
 fn validate_instances(image: &Image) -> Result<(), String> {
     let files = image.table::<super::lines::FileRecord>().len();
     let functions = image.table::<FunctionRecord>();
@@ -937,28 +960,23 @@ fn validate_instances(image: &Image) -> Result<(), String> {
         let first = instance.ranges.get() as usize;
         &ranges[first..first + instance.range_count.get() as usize]
     };
-    let indexed = |range: &RangeRecord, id: usize| {
-        let key = (range.start.get(), range.end.get(), u32::try_from(id).ok());
-        code_ranges
-            .binary_search_by_key(&key, |interval| {
-                (
-                    interval.start.get(),
-                    interval.end.get(),
-                    Some(interval.value.get()),
-                )
-            })
-            .is_ok()
-    };
+    // The index is strictly ordered, so it names each (range, instance)
+    // once, and each of its intervals is one of its instance's ranges.
+    // Then it holds every instance's every range exactly when it has as
+    // many intervals as instances have distinct ranges: counting them is
+    // linear, where finding each range in the index searched it once per
+    // range, most of the time a cached image took to validate.
     if !index::valid_intervals(code_ranges, instances.len())
         || !code_ranges.iter().all(|interval| {
             own(&instances[interval.value.get() as usize])
                 .iter()
                 .any(|range| range.start == interval.start && range.end == interval.end)
         })
-        || !instances
+        || instances
             .iter()
-            .enumerate()
-            .all(|(id, instance)| own(instance).iter().all(|range| indexed(range, id)))
+            .map(|instance| distinct_ranges(own(instance)))
+            .sum::<usize>()
+            != code_ranges.len()
     {
         return Err("the code range index disagrees with the instances".into());
     }

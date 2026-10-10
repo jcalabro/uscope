@@ -62,7 +62,7 @@ pub struct TooMany;
 
 /// Adds the declarations to `builder`, pooling names in `strings`.
 pub fn add_to(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     declarations: &Declarations,
 ) -> Result<(), TooMany> {
@@ -102,9 +102,9 @@ pub fn add_to(
         }
     }
     builder
-        .table(&constants)
-        .table(&vtables)
-        .shared(TableKind::Producers, &producers);
+        .owned_table(constants)
+        .owned_table(vtables)
+        .owned_shared(TableKind::Producers, producers);
     Ok(())
 }
 

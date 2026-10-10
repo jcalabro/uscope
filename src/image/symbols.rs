@@ -162,7 +162,7 @@ pub struct BadName;
 /// Adds `symbols`, `sections`, and `slots`, with their indexes, to
 /// `builder`, pooling their names in `strings`.
 pub fn add_to(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     symbols: &[SymbolInfo],
     sections: &[SectionInfo],
@@ -174,7 +174,7 @@ pub fn add_to(
 }
 
 fn add_symbols(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     symbols: &[SymbolInfo],
 ) -> Result<(), BadName> {
@@ -263,16 +263,16 @@ fn add_symbols(
         ))
     }));
     builder
-        .table(&records)
-        .shared(TableKind::SymbolNames, &names)
-        .shared(TableKind::SymbolExtents, &extents)
-        .shared(TableKind::SymbolStorage, &storage)
-        .shared(TableKind::UnsizedData, &unsized_data);
+        .owned_table(records)
+        .owned_shared(TableKind::SymbolNames, names)
+        .owned_shared(TableKind::SymbolExtents, extents)
+        .owned_shared(TableKind::SymbolStorage, storage)
+        .owned_shared(TableKind::UnsizedData, unsized_data);
     Ok(())
 }
 
 fn add_sections(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     sections: &[SectionInfo],
 ) -> Result<(), BadName> {
@@ -298,13 +298,13 @@ fn add_sections(
             .map(|section| (section.range, section.id.get())),
     );
     builder
-        .table(&section_records)
-        .shared(TableKind::SectionRanges, &section_ranges);
+        .owned_table(section_records)
+        .owned_shared(TableKind::SectionRanges, section_ranges);
     Ok(())
 }
 
 fn add_got(
-    builder: &mut Builder,
+    builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
     slots: &[GotSlot],
 ) -> Result<(), BadName> {
@@ -326,7 +326,7 @@ fn add_got(
         });
     }
 
-    builder.table(&got);
+    builder.owned_table(got);
     Ok(())
 }
 
