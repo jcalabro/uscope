@@ -17,11 +17,11 @@
 //! any integer takes the next of rax and rdx, and one of only floats the
 //! next of xmm0 and xmm1. A `long double` is in st0. A larger value, and a
 //! C++ class its producer says calls pass by reference, is in memory the
-//! caller provides, whose address the function returns in rax. Rust and Zig
-//! leave their own conventions unspecified, so only their scalars, which
-//! LLVM and Zig return as C does, are known, and Rust's values of two
-//! scalars, which rustc returns as LLVM returns a pair: each scalar in the
-//! next register of its class.
+//! caller provides, whose address the function returns in rax. Rust, Zig,
+//! Odin, Fortran, D, and Ada leave their own conventions unspecified, so
+//! only their scalars, which LLVM and GCC return as C does, are known, and
+//! Rust's values of two scalars, which rustc returns as LLVM returns a
+//! pair: each scalar in the next register of its class.
 //!
 //! LLVM may change how a function no other module calls returns, such as
 //! dropping a part no caller reads, and then marks it `DW_CC_nocall`: what

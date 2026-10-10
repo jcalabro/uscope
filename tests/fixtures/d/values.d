@@ -87,6 +87,32 @@ pragma(inline, false) int add(int a, int b)
     return sum;
 }
 
+// What functions return: a checkpoint named `returned-` is about what the
+// function that reached it returns, which is named for the function.
+pragma(inline, false) int returnsInt(int n)
+{
+    int value = n * -11;
+    truth("returned-int", "returnsInt", "int", value);
+    reached("returned-int");
+    return value;
+}
+
+pragma(inline, false) double returnsDouble(int n)
+{
+    double value = -6.5 * n;
+    f64Truth("returned-double", "returnsDouble", value);
+    reached("returned-double");
+    return value;
+}
+
+pragma(inline, false) bool returnsBool(int n)
+{
+    bool value = n > 0;
+    truth("returned-bool", "returnsBool", "summary", value);
+    reached("returned-bool");
+    return value;
+}
+
 pragma(inline, false) void scalars()
 {
     byte small = -5;
@@ -172,12 +198,20 @@ string format(size_t value)
     return value.to!string;
 }
 
-void main()
+void main(string[] args)
 {
+    // Arguments the compiler cannot know.
+    int n = cast(int) args.length + 2;
     scalars();
     records();
     slices();
     loop();
     if (add(2, 3) != 5)
         assert(0, "add");
+    if (returnsInt(n) != n * -11)
+        assert(0, "returnsInt");
+    if (returnsDouble(n) != -6.5 * n)
+        assert(0, "returnsDouble");
+    if (!returnsBool(n))
+        assert(0, "returnsBool");
 }

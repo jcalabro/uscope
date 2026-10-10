@@ -11,6 +11,7 @@ package values
 
 import "base:intrinsics"
 import "core:fmt"
+import "core:os"
 
 Point :: struct {
 	x: i32,
@@ -148,7 +149,32 @@ unions :: #force_no_inline proc() {
 	keep(&whole); keep(&real); keep(&named); keep(&none); keep(&some); keep(&missing)
 }
 
+// What procedures return: a checkpoint named `returned-` is about what the
+// procedure that reached it returns, which is named for the procedure.
+returns_int :: #force_no_inline proc(n: int) -> int {
+	value := n * -11
+	truth("returned-int", "returns_int", "int", value)
+	reached("returned-int")
+	return value
+}
+
+returns_f64 :: #force_no_inline proc(n: int) -> f64 {
+	value := -6.5 * f64(n)
+	f64_truth("returned-f64", "returns_f64", value)
+	reached("returned-f64")
+	return value
+}
+
+returns_bool :: #force_no_inline proc(n: int) -> bool {
+	value := n > 0
+	truth("returned-bool", "returns_bool", "summary", value)
+	reached("returned-bool")
+	return value
+}
+
 main :: proc() {
+	// Arguments the compiler cannot know.
+	n := len(os.args) + 2
 	scalars()
 	records()
 	slices()
@@ -156,5 +182,14 @@ main :: proc() {
 	total := add(2, 3)
 	if total != 5 {
 		panic("add")
+	}
+	if returns_int(n) != n * -11 {
+		panic("returns_int")
+	}
+	if returns_f64(n) != -6.5 * f64(n) {
+		panic("returns_f64")
+	}
+	if !returns_bool(n) {
+		panic("returns_bool")
 	}
 }
