@@ -2345,7 +2345,8 @@ async fn fortran_steps_into_a_procedure_and_back_to_its_caller() {
     }
 }
 
-/// D's functions step and unwind as C's do; its main function is `D main`.
+/// D's functions step and unwind as C's do; its main function is `D main`,
+/// and druntime's frames are named by their symbols.
 #[tokio::test]
 async fn d_steps_into_a_function_and_back_to_its_caller() {
     for fixture in ["values-d-o0", "values-d-o2"] {
@@ -2376,6 +2377,16 @@ async fn d_steps_into_a_function_and_back_to_its_caller() {
             .collect::<Vec<_>>();
         assert!(
             names.starts_with(&["add", "D main"]),
+            "{fixture}: {trace:?}"
+        );
+        // druntime, which has no debug information, by its symbols' names.
+        assert!(
+            trace.frames.iter().any(|frame| frame
+                .symbol
+                .as_ref()
+                .and_then(uscope::SymbolLocation::demangled_name)
+                .as_deref()
+                == Some("rt.dmain2._d_run_main2.runAll")),
             "{fixture}: {trace:?}"
         );
         assert_eq!(
