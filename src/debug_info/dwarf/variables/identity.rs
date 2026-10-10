@@ -379,13 +379,29 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         let Ok(mut children) = self.children(unit_index, entry.offset()) else {
             return (arguments, pack);
         };
+        // LDC describes an associative array as a record holding typedefs
+        // of its key and value types.
+        let d = self.language(unit_index) == SourceLanguage::D;
+        let mut associative = [None, None];
         let mut read = 0;
         while let Ok(Some(child)) = children.next_child() {
             if read == MAX_RECORD_CHILDREN {
                 break;
             }
             read += 1;
-            if child.tag() == gimli::DW_TAG_GNU_template_parameter_pack {
+            if d && child.tag() == gimli::DW_TAG_typedef {
+                let name = self.units.get(unit_index).and_then(|unit| {
+                    string_attribute(self.dwarf, unit, child, gimli::DW_AT_name)
+                        .ok()
+                        .flatten()
+                });
+                let slot = match name.as_deref() {
+                    Some(D_KEY) => 0,
+                    Some(D_VALUE) => 1,
+                    _ => continue,
+                };
+                associative[slot] = self.target(child, unit_index).ok().flatten();
+            } else if child.tag() == gimli::DW_TAG_GNU_template_parameter_pack {
                 pack = pack.or(Some(arguments.len()));
                 let Ok(mut parameters) = self.children(unit_index, child.offset()) else {
                     continue;
@@ -403,6 +419,9 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             } else if let Some(argument) = self.parameter_argument(child, unit_index) {
                 arguments.push(argument);
             }
+        }
+        if let ([Some(key), Some(value)], true) = (associative, arguments.is_empty()) {
+            arguments = vec![TypeArgument::Type(key), TypeArgument::Type(value)];
         }
         (arguments, pack)
     }
@@ -639,6 +658,21 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                     };
                     return Some((index, language, Arc::new(identity), Vec::new()));
                 }
+                // D's associative arrays are each `AssociativeArray` of
+                // their key and value types, as druntime once named them.
+                if language == SourceLanguage::D && d_associative_array(info, parts) {
+                    let identity = TypeIdentity {
+                        language,
+                        path: Arc::from([]),
+                        inline_namespaces: Arc::from([]),
+                        base: Arc::from("AssociativeArray"),
+                        arguments: Arc::from(parts.template.as_slice()),
+                        pack: None,
+                        origin: ArgumentOrigin::Dwarf,
+                        go: None,
+                    };
+                    return Some((index, language, Arc::new(identity), Vec::new()));
+                }
                 let parsed = TypeName::parse(&info.name, NameSyntax::of(language));
                 let scopes = self.type_path(parts.die);
                 // Only Go, Zig, and Odin names spell their packages and
@@ -774,6 +808,31 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             .cloned()
             .unwrap_or_default()
     }
+}
+
+/// The names of the typedefs LDC nests in an associative array's record
+/// for its key and value types.
+const D_KEY: &str = "__key_t";
+const D_VALUE: &str = "__val_t";
+
+/// Whether a D type is an associative array as LDC describes one: `V[K]`,
+/// a record of one pointer, `ptr`, to druntime's table, holding typedefs
+/// of its key and value types.
+fn d_associative_array(info: &TypeInfo, parts: &IdentityParts) -> bool {
+    let TypeKind::Record {
+        members,
+        incomplete: false,
+        ..
+    } = &info.kind
+    else {
+        return false;
+    };
+    info.name.ends_with(']')
+        && matches!(
+            parts.template.as_slice(),
+            [TypeArgument::Type(_), TypeArgument::Type(_)]
+        )
+        && matches!(members.as_ref(), [member] if member.name.as_deref() == Some("ptr"))
 }
 
 /// The positions of a type's identity whose arguments its name spells,
