@@ -28,12 +28,28 @@ use crate::{
 enum DwarfError {
     #[error("failed to read debug information: {0}")]
     Io(#[from] std::io::Error),
-    #[error("failed to parse object file: {0}")]
+    #[error("malformed ELF file: {0}")]
     Object(#[from] object::Error),
-    #[error("failed to parse DWARF: {0}")]
+    #[error("not an ELF file")]
+    NotElf,
+    #[error(
+        "the file is truncated: its ELF headers describe {described} bytes, but it has {length}"
+    )]
+    Truncated { described: u64, length: u64 },
+    #[error(
+        "it is a relocatable object file, whose DWARF has relocations only a linker applies; \
+         debug the executable or shared library it is linked into"
+    )]
+    Relocatable,
+    #[error("it is a core dump, not a program; open it as a core dump")]
+    CoreDump,
+    #[error("malformed DWARF: {0}")]
     Dwarf(#[from] gimli::Error),
-    #[error("unsupported target architecture: {0:?}")]
+    #[error("its code is for {}, which this debugger does not support", architecture_name(*.0))]
     UnsupportedArchitecture(object::Architecture),
+    /// An error and the part of the DWARF it was found in.
+    #[error("{}", in_context(.error, .context))]
+    Context { error: Box<Self>, context: String },
     #[error("DWARF references a supplementary file that was not read")]
     UnsupportedSupplementaryReference,
     #[error("DWARF reference {0:#x} is outside every unit of the supplementary file")]
@@ -71,6 +87,126 @@ enum DwarfError {
     },
     #[error("concrete function has no source-level name")]
     MissingFunctionName,
+}
+
+impl DwarfError {
+    /// Says where in the DWARF the error was found, unless it already says,
+    /// or is about the load as a whole.
+    fn within(self, context: impl FnOnce() -> String) -> Self {
+        match self {
+            Self::Context { .. } | Self::Budget { .. } => self,
+            error => Self::Context {
+                error: Box::new(error),
+                context: context(),
+            },
+        }
+    }
+}
+
+fn in_context(error: &DwarfError, context: &str) -> String {
+    match error {
+        DwarfError::Dwarf(error) => format!("malformed DWARF in {context}: {error}"),
+        error => format!("{error}, in {context}"),
+    }
+}
+
+/// An architecture's name, as its users know it.
+fn architecture_name(architecture: object::Architecture) -> String {
+    match architecture {
+        object::Architecture::I386 => "32-bit x86".to_owned(),
+        object::Architecture::X86_64_X32 => "the x32 ABI".to_owned(),
+        object::Architecture::Arm => "32-bit Arm".to_owned(),
+        object::Architecture::Aarch64 => "AArch64".to_owned(),
+        object::Architecture::Riscv64 => "64-bit RISC-V".to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Names a unit for a reader: the source file it compiles, when it names
+/// one, and where it is.
+fn describe_unit(unit: &gimli::Unit<Reader<'_>>) -> String {
+    let at = describe_unit_offset(&unit.header);
+    unit.name.map_or_else(
+        || format!("the unit at {at}"),
+        |name| format!("the unit for {} at {at}", text(name)),
+    )
+}
+
+fn describe_unit_offset(header: &gimli::UnitHeader<Reader<'_>>) -> String {
+    format!("{}+{:#x}", header.section().name(), header.offset().0)
+}
+
+/// Parses an ELF file, saying what is wrong with one that cannot be: that
+/// it is not ELF, or is cut short of what its headers describe.
+fn parse_object(data: &[u8]) -> std::result::Result<object::File<'_>, DwarfError> {
+    if !data.starts_with(&object::elf::ELFMAG) {
+        return Err(DwarfError::NotElf);
+    }
+    object::File::parse(data).map_err(|error| {
+        let length = data.len() as u64;
+        match elf_headers_end(data) {
+            Some(described) if described > length => DwarfError::Truncated { described, length },
+            _ => DwarfError::Object(error),
+        }
+    })
+}
+
+/// Where an ELF file's header, program headers, and section headers end,
+/// as its header says; `None` when the header is malformed.
+fn elf_headers_end(data: &[u8]) -> Option<u64> {
+    let little = match data.get(5)? {
+        1 => true,
+        2 => false,
+        _ => return None,
+    };
+    // The header's size and its fields' offsets differ by class.
+    let (header, phoff, shoff, word, phentsize) = match data.get(4)? {
+        1 => (52_usize, 0x1c, 0x20, 4, 0x2a),
+        2 => (64, 0x20, 0x28, 8, 0x36),
+        _ => return None,
+    };
+    if data.len() < header {
+        return Some(header as u64);
+    }
+    let field = |at: usize, size: usize| -> Option<u64> {
+        let bytes = data.get(at..at + size)?;
+        Some((0..size).fold(0, |value, index| {
+            let byte = bytes[if little { size - 1 - index } else { index }];
+            value << 8 | u64::from(byte)
+        }))
+    };
+    let table = |offset: usize, entry: usize| -> Option<u64> {
+        let count = field(entry + 2, 2)?;
+        if count == 0 {
+            return Some(0);
+        }
+        field(offset, word)?.checked_add(field(entry, 2)?.checked_mul(count)?)
+    };
+    let program_headers = table(phoff, phentsize)?;
+    let section_headers = table(shoff, phentsize + 4)?;
+    Some((header as u64).max(program_headers).max(section_headers))
+}
+
+/// Checks that an object is one whose code and DWARF a debugger can
+/// describe as they are: a linked program or library, for a supported
+/// architecture.
+fn check_object(object: &object::File<'_>) -> std::result::Result<(), DwarfError> {
+    match object.kind() {
+        object::ObjectKind::Relocatable if has_debug_relocations(object) => {
+            return Err(DwarfError::Relocatable);
+        }
+        object::ObjectKind::Core => return Err(DwarfError::CoreDump),
+        _ => {}
+    }
+    target_description(object).map(drop)
+}
+
+/// Whether DWARF sections have relocations, which only a linker applies.
+fn has_debug_relocations(object: &object::File<'_>) -> bool {
+    object.sections().any(|section| {
+        section.name().is_ok_and(|name| name.starts_with(".debug_"))
+            && section.relocations().next().is_some()
+    })
 }
 
 type Reader<'data> = EndianSlice<'data, RunTimeEndian>;
@@ -564,7 +700,17 @@ fn load_bytes_on_pool(
     })
     .map_err(Error::debug_info)?
     .map(|(info, _)| info)
-    .map_err(Error::debug_info)
+    .map_err(|error| match error {
+        DwarfError::Object(_)
+        | DwarfError::NotElf
+        | DwarfError::Truncated { .. }
+        | DwarfError::Relocatable
+        | DwarfError::CoreDump
+        | DwarfError::UnsupportedArchitecture(_) => {
+            Error::UnsupportedFile(error.to_string().into())
+        }
+        error => Error::debug_info(error),
+    })
 }
 
 /// What a load found in the cache.
@@ -584,7 +730,9 @@ pub(super) enum CacheOutcome {
 /// Loads an image's debug information. A file without DWARF of its own may
 /// have a separate debug file, whose DWARF, symbols, and call-frame
 /// information describe the code here. One that cannot be loaded leaves
-/// the image as its own file describes it, with the reason recorded.
+/// the image as its own file describes it, and DWARF that cannot be read
+/// leaves it as its symbols describe it, with the reason recorded. Only a
+/// file that is no linked ELF image of a supported architecture fails.
 fn load_debug_info(
     path: &Path,
     data: &[u8],
@@ -593,9 +741,13 @@ fn load_debug_info(
     limits: LoadLimits,
     cache: Option<&crate::cache::ImageCache>,
 ) -> std::result::Result<(DebugInfo, CacheOutcome), DwarfError> {
-    let object = object::File::parse(data)?;
+    let object = parse_object(data)?;
+    check_object(&object)?;
     let phase = crate::span!("separate_debug_file");
-    let separate = search.find(path, &object);
+    let super::separate::Search {
+        found: separate,
+        rejected,
+    } = search.find(path, &object);
     // The supplementary file is named by whichever file holds the DWARF.
     let supplementary = separate.as_ref().map_or_else(
         || search.supplementary(path, &object),
@@ -606,24 +758,35 @@ fn load_debug_info(
         },
     );
     drop(phase);
-    if let (None, Supplementary::Missing(reason)) = (&separate, &supplementary) {
-        return Err(DwarfError::Supplementary(reason.clone()));
-    }
     let binding = Binding {
         path: Arc::new(path.to_owned()),
-        debug_path: separate.as_ref().map(|file| Arc::new(file.path.clone())),
+        debug_path: separate
+            .as_ref()
+            .or_else(|| rejected.as_ref().map(|(file, _)| file))
+            .map(|file| Arc::new(file.path.clone())),
         id: image_id,
     };
     let built = |tables| {
         bind(&binding, Arc::new(tables)).expect("an image binds to the files it was built from")
     };
+    let rejected = rejected
+        .as_ref()
+        .map(|(file, reason)| (file, Arc::<str>::from(reason.as_str())));
     let Some(cache) = cache else {
-        let tables = seal_debug_info(data, separate.as_ref(), &supplementary, limits)?;
+        let tables = seal_debug_info(
+            data,
+            separate.as_ref(),
+            rejected.as_ref(),
+            &supplementary,
+            limits,
+        )?;
         return Ok((built(tables), CacheOutcome::Off));
     };
     let phase = crate::span!("cache.read");
     let mut inputs = vec![data];
     inputs.extend(separate.as_ref().map(|file| file.data.as_slice()));
+    // A rejected file's reason is recorded, so its bytes key the image too.
+    inputs.extend(rejected.as_ref().map(|(file, _)| file.data.as_slice()));
     if let Supplementary::Found(file) = &supplementary {
         inputs.push(file.data.as_slice());
     }
@@ -648,7 +811,13 @@ fn load_debug_info(
     };
     drop(phase);
     crate::count!("cache_misses", 1);
-    let tables = seal_debug_info(data, separate.as_ref(), &supplementary, limits)?;
+    let tables = seal_debug_info(
+        data,
+        separate.as_ref(),
+        rejected.as_ref(),
+        &supplementary,
+        limits,
+    )?;
     let phase = crate::span!("cache.write");
     if let Err(error) = cache.put(key, &tables) {
         crate::cache::report(format_args!("{error}"));
@@ -661,37 +830,76 @@ fn load_debug_info(
 /// file `separate` when one was found, with the dwz supplementary file its
 /// DWARF shares. A separate debug file that cannot be loaded, or whose
 /// supplementary file was not found, leaves the image as its own file
-/// describes it, with the reason recorded.
+/// describes it, and DWARF of its own that cannot be read leaves it as its
+/// symbols and call-frame information describe it, with the reasons
+/// recorded. Without one, the file `rejected` names that describes another
+/// module is recorded with why.
 fn seal_debug_info(
     data: &[u8],
     separate: Option<&super::separate::DebugFile>,
+    rejected: Option<&(&super::separate::DebugFile, Arc<str>)>,
     supplementary: &Supplementary,
     limits: LoadLimits,
 ) -> std::result::Result<crate::image::Image, DwarfError> {
-    let supplementary = match supplementary {
-        Supplementary::Found(file) => Some(file),
-        Supplementary::None => None,
-        Supplementary::Missing(reason) => {
-            let separate = separate.expect("a file's own DWARF needs its supplementary file");
-            return load_image(
-                data,
-                Separate::Unusable(&separate.path, reason.as_str().into()),
-                None,
-                limits,
-            );
-        }
+    let none_found = || {
+        rejected.map_or(Separate::None, |(file, reason)| {
+            Separate::Unusable(&file.path, Arc::clone(reason))
+        })
     };
-    let Some(separate) = separate else {
-        return load_image(data, Separate::None, supplementary, limits);
-    };
-    load_image(data, Separate::Used(separate), supplementary, limits).or_else(|error| {
+    let image =
+        |separate, supplementary, dwarf| load_image(data, separate, supplementary, dwarf, limits);
+    // The file's own DWARF, or, when it cannot be read, none.
+    let own = |separate: Separate<'_>, supplementary| {
         load_image(
             data,
-            Separate::Unusable(&separate.path, error.to_string().into()),
-            None,
+            separate.clone(),
+            supplementary,
+            DwarfUse::Read,
             limits,
         )
-    })
+        .or_else(|error| {
+            load_image(
+                data,
+                separate,
+                None,
+                DwarfUse::Unusable(error.to_string().into()),
+                limits,
+            )
+        })
+    };
+    match (separate, supplementary) {
+        (None, Supplementary::Missing(reason)) => image(
+            none_found(),
+            None,
+            DwarfUse::Unusable(reason.as_str().into()),
+        ),
+        (None, Supplementary::None) => own(none_found(), None),
+        (None, Supplementary::Found(file)) => own(none_found(), Some(file)),
+        (Some(separate), Supplementary::Missing(reason)) => own(
+            Separate::Unusable(&separate.path, reason.as_str().into()),
+            None,
+        ),
+        (Some(separate), supplementary) => {
+            let supplementary = match supplementary {
+                Supplementary::Found(file) => Some(file),
+                Supplementary::None | Supplementary::Missing(_) => None,
+            };
+            image(Separate::Used(separate), supplementary, DwarfUse::Read).or_else(|error| {
+                own(
+                    Separate::Unusable(&separate.path, error.to_string().into()),
+                    None,
+                )
+            })
+        }
+    }
+}
+
+/// Whether a load reads the DWARF of the file that holds it.
+enum DwarfUse {
+    Read,
+    /// It could not be read, for the reason given, so the image is loaded
+    /// without it.
+    Unusable(Arc<str>),
 }
 
 type Sections<'data> = DwarfSections<Cow<'data, [u8]>>;
@@ -727,6 +935,7 @@ fn load_sections<'data>(
 }
 
 /// What a separate debug file contributes to an image.
+#[derive(Clone)]
 enum Separate<'a> {
     None,
     Used(&'a super::separate::DebugFile),
@@ -742,9 +951,10 @@ fn load_image(
     data: &[u8],
     separate: Separate<'_>,
     supplementary: Option<&super::separate::DebugFile>,
+    dwarf_use: DwarfUse,
     limits: LoadLimits,
 ) -> std::result::Result<crate::image::Image, DwarfError> {
-    let object = object::File::parse(data)?;
+    let object = parse_object(data)?;
     let target = target_description(&object)?;
     let debug_object = match &separate {
         Separate::Used(file) => Some(object::File::parse(file.data.as_slice())?),
@@ -756,7 +966,13 @@ fn load_image(
         .transpose()?;
 
     let phase = crate::span!("sections");
-    let (sections, mut input) = load_sections(dwarf_object)?;
+    let (sections, mut input) = match dwarf_use {
+        DwarfUse::Read => load_sections(dwarf_object)?,
+        DwarfUse::Unusable(_) => (
+            DwarfSections::load(|_| Ok::<_, DwarfError>(Cow::Borrowed(&[][..])))?,
+            0,
+        ),
+    };
     let supplementary_sections = supplementary_object
         .as_ref()
         .map(|supplementary| {
@@ -786,12 +1002,21 @@ fn load_image(
     let mut files = Files::default();
     let mut line_tables = LineTables::default();
     let mut headers = Vec::new();
+    // Where the next unit's header is, which a malformed one names.
+    let mut next = 0;
     let mut unit_headers = dwarf.units();
-    while let Some(header) = unit_headers.next()? {
+    while let Some(header) = unit_headers.next().map_err(|error| {
+        DwarfError::from(error).within(|| format!("the unit header at .debug_info+{next:#x}"))
+    })? {
+        next = unit_end(&header);
         headers.push(header);
     }
+    let mut next = 0;
     let mut type_unit_headers = dwarf.type_units();
-    while let Some(header) = type_unit_headers.next()? {
+    while let Some(header) = type_unit_headers.next().map_err(|error| {
+        DwarfError::from(error).within(|| format!("the unit header at .debug_types+{next:#x}"))
+    })? {
+        next = unit_end(&header);
         headers.push(header);
     }
     // Each unit's abbreviations, root DIE, and line program header, in
@@ -799,7 +1024,11 @@ fn load_image(
     let units = first_error(
         headers
             .into_par_iter()
-            .map(|header| dwarf.unit(header))
+            .map(|header| {
+                dwarf.unit(header).map_err(|error| {
+                    DwarfError::from(error).within(|| unit_failure(&dwarf, &header))
+                })
+            })
             .collect(),
     )?;
     let units = Units::load(&dwarf, units)?;
@@ -833,7 +1062,9 @@ fn load_image(
         .map(|unit| {
             let mut files = Files::default();
             let mut tables = LineTables::default();
-            load_lines(&dwarf, unit, &catalog.code, &mut files, &mut tables)?;
+            load_lines(&dwarf, unit, &catalog.code, &mut files, &mut tables).map_err(|error| {
+                error.within(|| format!("the line program of {}", describe_unit(unit)))
+            })?;
             Ok::<_, DwarfError>((files, tables))
         })
         .collect::<Vec<_>>();
@@ -897,7 +1128,8 @@ fn load_image(
         },
         &mut files,
         limits.budget(input),
-    )?;
+    )
+    .map_err(|error| error.within(|| "its variables and types".to_owned()))?;
     for (instance, generics) in std::mem::take(&mut variables.function_generics) {
         if let Some(function) = function_metadata
             .code_instances
@@ -994,6 +1226,14 @@ fn load_image(
             sections: super::elf::load_sections(&object),
             thread_local_storage: super::elf::has_thread_local_storage(&object),
             thread_locals: super::elf::load_thread_locals(&object),
+            debug_information: match dwarf_use {
+                DwarfUse::Unusable(reason) => crate::DebugInformation::Unusable { reason },
+                DwarfUse::Read => match split_units(&dwarf, &catalog)? {
+                    Some(reason) => crate::DebugInformation::Incomplete { reason },
+                    None if catalog.units.is_empty() => crate::DebugInformation::Absent,
+                    None => crate::DebugInformation::Loaded,
+                },
+            },
             debug_file: match separate {
                 Separate::None => None,
                 Separate::Used(file) => Some(crate::DebugFile::Used(Arc::new(file.path.clone()))),
@@ -1034,6 +1274,83 @@ fn embedded_views(object: &object::File<'_>) -> std::result::Result<Vec<u8>, Dwa
         .transpose()?
         .map(std::borrow::Cow::into_owned)
         .unwrap_or_default())
+}
+
+/// Which part of the unit `header` begins could not be read: its
+/// abbreviations, its root entry, or its line program's header.
+fn unit_failure(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    header: &gimli::UnitHeader<Reader<'_>>,
+) -> String {
+    let at = describe_unit_offset(header);
+    let Ok(abbreviations) = dwarf.abbreviations(header) else {
+        return format!(
+            "the abbreviations at .debug_abbrev+{:#x} of the unit at {at}",
+            header.debug_abbrev_offset().0
+        );
+    };
+    let mut entries = header.entries(&abbreviations);
+    let line_program = match entries.next_dfs() {
+        Ok(Some(root)) => root.attr_value(gimli::DW_AT_stmt_list),
+        _ => return format!("the unit at {at}"),
+    };
+    match line_program {
+        Some(gimli::AttributeValue::DebugLineRef(offset)) => {
+            format!(
+                "the line program at .debug_line+{:#x} of the unit at {at}",
+                offset.0
+            )
+        }
+        _ => format!("the unit at {at}"),
+    }
+}
+
+/// Where the unit after the one `header` begins.
+fn unit_end(header: &gimli::UnitHeader<Reader<'_>>) -> usize {
+    header
+        .offset()
+        .0
+        .saturating_add(header.length_including_self())
+}
+
+/// Why the image's DWARF is incomplete when compile units keep it in split
+/// DWARF files, which the debugger does not read: how many do, and the
+/// first one's file.
+fn split_units<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    catalog: &UnitCatalog<'data>,
+) -> std::result::Result<Option<Arc<str>>, DwarfError> {
+    let (mut compile_units, mut split, mut first) = (0, 0, None);
+    for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
+        compile_units += 1;
+        if unit.dwo_id.is_some() {
+            split += 1;
+            first.get_or_insert(unit);
+        }
+    }
+    let Some(first) = first else {
+        return Ok(None);
+    };
+    let file = match first.dwo_name()? {
+        Some(name) => Some(text(unit_dwarf(dwarf, first).attr_string(first, name)?).into_owned()),
+        None => None,
+    };
+    let file = |such_as| file.map_or_else(String::new, |file| format!(", {such_as}{file}"));
+    let reason = if compile_units == 1 {
+        format!(
+            "its compile unit is described in a split DWARF file{}, which this debugger does not \
+             read; its functions are known only by their symbols, without variables or types",
+            file("")
+        )
+    } else {
+        format!(
+            "{split} of its {compile_units} compile units are described in split DWARF files{}, which this \
+             debugger does not read; their functions are known only by their symbols, without \
+             variables or types",
+            file("such as ")
+        )
+    };
+    Ok(Some(reason.into()))
 }
 
 /// The producers the units name, in unit order.
@@ -2271,7 +2588,10 @@ fn collect_function_dies<'data>(
     let batches = first_error(
         (0..catalog.units.len())
             .into_par_iter()
-            .map(|unit| collect_unit_functions(dwarf, catalog, unit))
+            .map(|unit| {
+                collect_unit_functions(dwarf, catalog, unit)
+                    .map_err(|error| error.within(|| describe_unit(&catalog.units[unit])))
+            })
             .collect(),
     )?;
     let _merge = crate::span!("functions.merge");
@@ -3540,10 +3860,11 @@ mod tests {
         }
     }
 
-    /// Debug information that would build more than its budget fails with
-    /// the budget's error, naming what asked, and loads with the default.
+    /// Debug information that would build more than its budget is left
+    /// out, with the budget's error naming what asked, and loads with the
+    /// default.
     #[test]
-    fn a_load_past_its_budget_fails_naming_what_asked() {
+    fn a_load_past_its_budget_leaves_the_dwarf_out_naming_what_asked() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("build/test-programs/containers-rust-o2");
         let data = fs::read(&path).expect("run `just build-test-programs`");
@@ -3561,17 +3882,27 @@ mod tests {
             per_input_byte: 0,
             floor: 64 << 10,
         };
-        match load(small) {
-            Err(DwarfError::Budget { what, limit, .. }) => {
-                assert!(
-                    ["types", "data objects", "symbolic names"].contains(&what),
-                    "{what}"
-                );
-                assert_eq!(limit, 64 << 10);
-            }
-            other => panic!("{:?}", other.map(|_| ())),
-        }
-        load(LoadLimits::default()).expect("the default budget affords the program");
+        let (over, _) = load(small).expect("a load past its budget");
+        let crate::DebugInformation::Unusable { reason } = over.image.debug_information() else {
+            panic!("{:?}", over.image.debug_information());
+        };
+        assert!(
+            ["types", "data objects", "symbolic names"]
+                .iter()
+                .any(|what| reason.starts_with(&format!(
+                    "the debug information needs more than its load budget of {} bytes: {what} \
+                     asked for ",
+                    64 << 10
+                ))),
+            "{reason}"
+        );
+        assert_eq!(over.image.functions().len(), 0);
+        assert_ne!(over.image.symbols().count(), 0, "its symbols describe it");
+        let (within, _) = load(LoadLimits::default()).expect("the default budget");
+        assert_eq!(
+            within.image.debug_information(),
+            crate::DebugInformation::Loaded
+        );
     }
 
     /// FDE lookups in real images agree with a walk of the section, and so

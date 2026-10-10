@@ -67,6 +67,8 @@ pub struct ModuleMetadata {
     /// The separate debug file found for the image, whether it was used or
     /// could not be.
     pub debug_file: Option<crate::DebugFile>,
+    /// What became of the image's DWARF.
+    pub debug_information: crate::DebugInformation,
     /// The bytes of the image's `.debug_uscope_views` section, which holds
     /// views for its own types; empty when it has none.
     pub embedded_views: Vec<u8>,
@@ -291,6 +293,7 @@ fn seal_image(
             thread_local_storage: metadata.thread_local_storage,
             thread_locals: &metadata.thread_locals,
             debug_file: metadata.debug_file.as_ref(),
+            debug_information: &metadata.debug_information,
         },
     )
     .expect("the loader's facts fit an image");
@@ -552,6 +555,13 @@ impl ModuleImage {
     #[must_use]
     pub const fn separate_debug_file(&self) -> Option<&crate::DebugFile> {
         self.debug_file.as_ref()
+    }
+
+    /// What became of the image's DWARF: whether it was read, and when not
+    /// all of it was, why.
+    #[must_use]
+    pub fn debug_information(&self) -> crate::DebugInformation {
+        self.facts().debug_information()
     }
 
     /// The views the image carries for its own types.

@@ -4679,6 +4679,124 @@ fn info_modules_names_separate_debug_files_and_why_one_is_unusable() {
     );
 }
 
+/// A file that is no program the debugger can debug fails to load, saying
+/// what it is instead.
+#[test]
+fn files_that_are_no_program_to_debug_say_what_they_are() {
+    let scratch = support::ScratchDir::new("no-program");
+    let text = scratch.path().join("notes.txt");
+    fs::write(&text, "not a program\n").expect("write a text file");
+    let basic = fs::read(fixture(BASIC)).expect("read basic");
+    let truncated = scratch.path().join("truncated");
+    fs::write(&truncated, &basic[..basic.len() / 2]).expect("write half a program");
+    // `e_machine` names AArch64.
+    let mut foreign = basic.clone();
+    foreign[18..20].copy_from_slice(&183_u16.to_le_bytes());
+    let aarch64 = scratch.path().join("aarch64");
+    fs::write(&aarch64, foreign).expect("write a foreign program");
+    for (program, reason) in [
+        (text.display().to_string(), "not an ELF file".to_owned()),
+        (
+            truncated.display().to_string(),
+            format!(
+                "the file is truncated: its ELF headers describe {} bytes, but it has {}",
+                basic.len(),
+                basic.len() / 2
+            ),
+        ),
+        (
+            "build/test-programs/basic.o".to_owned(),
+            "it is a relocatable object file, whose DWARF has relocations only a linker applies; \
+             debug the executable or shared library it is linked into"
+                .to_owned(),
+        ),
+        (
+            SEGV_CORE.to_owned(),
+            "it is a core dump, not a program; open it as a core dump".to_owned(),
+        ),
+        (
+            aarch64.display().to_string(),
+            "it is a program for AArch64, and this debugger debugs x86-64 programs".to_owned(),
+        ),
+    ] {
+        assert_failure(
+            &batch_output(&[&program], &["info modules"]),
+            &format!("error: failed to initialize debugger for {program}: {reason}\n"),
+        );
+    }
+}
+
+/// Debug information that cannot be used is warned of as the session
+/// starts, for the program, and as a library loads, and `info modules`
+/// says why beneath each module; a program with none says so.
+#[test]
+fn unusable_debug_information_is_warned_of_and_listed() {
+    let scratch = support::ScratchDir::new("unusable-debug-information");
+    let program = scratch.path().join("module-frames");
+    let library = scratch.path().join("libmodule-frames.so");
+    support::corrupt_section(
+        &fixture("build/test-programs/module-frames-gcc-o0"),
+        &program,
+        ".debug_line",
+    );
+    support::corrupt_section(
+        &fixture("build/test-programs/libmodule-frames.so"),
+        &library,
+        ".debug_abbrev",
+    );
+    let output = batch_output(
+        &[program.to_str().expect("a UTF-8 path")],
+        &["break dso_apply", "run", "info modules"],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = assert_success(output);
+    let unreadable = "its debug information cannot be read, so only its symbols describe its code: \
+                      malformed DWARF in the";
+    assert!(
+        stderr.starts_with(&format!(
+            "warning: {}: {unreadable} line program at .debug_line+0x0 of the unit at \
+             .debug_info+0x0: ",
+            program.display()
+        )),
+        "{stderr}"
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            &format!(
+                "warning: {}: {unreadable} abbreviations at .debug_abbrev+0x0 of the unit at \
+                 .debug_info+0x0: ",
+                library.display()
+            ),
+            "stopped at breakpoint 1",
+            &format!(
+                "symbols  {}\n  {unreadable} line program at .debug_line+0x0",
+                program.display()
+            ),
+            &format!(
+                "symbols  {}\n  {unreadable} abbreviations at .debug_abbrev+0x0",
+                library.display()
+            ),
+        ],
+    );
+
+    let stripped = "build/test-programs/split/basic-build-id";
+    let output = batch_output(&[stripped], &["info modules"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_success(output);
+    assert_eq!(
+        stderr,
+        format!(
+            "warning: {}: it has no debug information, so only its symbols describe its code: \
+             source lines, variables, and types are unavailable\n",
+            fixture(stripped)
+                .canonicalize()
+                .expect("the program")
+                .display()
+        )
+    );
+}
+
 /// `jump` moves the stopped thread to a line of its function without
 /// running it, by number, by offset, or as `file:line`, and refuses a
 /// location outside the function; `set var` assigns registers.

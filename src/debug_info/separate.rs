@@ -52,6 +52,16 @@ pub struct DebugFile {
     pub data: Vec<u8>,
 }
 
+/// What a search for a module's separate debug file found.
+#[derive(Default)]
+pub struct Search {
+    /// The file that describes the module.
+    pub found: Option<DebugFile>,
+    /// When none does, the first file where one was looked for that
+    /// describes another, such as one left from an older build, and why.
+    pub rejected: Option<(DebugFile, String)>,
+}
+
 /// The dwz supplementary file some debug information shares.
 pub enum Supplementary {
     /// The debug information names none.
@@ -106,15 +116,63 @@ impl DebugFileSearch {
         }
     }
 
-    /// The separate debug file of a module whose own file has no DWARF.
-    pub fn find(&self, path: &Path, object: &object::File<'_>) -> Option<DebugFile> {
+    /// The separate debug file of a module whose own file has no DWARF,
+    /// or, when none describes it, the first that names it but describes
+    /// another.
+    pub fn find(&self, path: &Path, object: &object::File<'_>) -> Search {
         if has_dwarf(object) {
-            return None;
+            return Search::default();
         }
         let build_id = object.build_id().ok().flatten().filter(|id| id.len() > 1);
-        let describes = |data: &[u8]| debug_file_of(object, data, build_id, None);
-        if let Some(file) = build_id.and_then(|id| self.by_build_id(id, describes)) {
-            return Some(file);
+        let describes = |data: &[u8]| mismatch(object, data, build_id, None).is_none();
+        let rejected = std::cell::RefCell::new(None);
+        // A file where the module's build-id or debug link names one, which
+        // is rejected, with why, unless it describes the module.
+        let consider = |candidate: &Path, checksum: Option<u32>| {
+            let data = crate::image::backing::read_input(candidate).ok()?.0;
+            let file = DebugFile {
+                path: candidate.to_path_buf(),
+                data,
+            };
+            match mismatch(object, &file.data, build_id, checksum) {
+                None => Some(file),
+                Some(reason) => {
+                    rejected.borrow_mut().get_or_insert((file, reason));
+                    None
+                }
+            }
+        };
+        let found = self.find_named(path, object, build_id, consider);
+        let found = found.or_else(|| build_id.and_then(|id| self.download(id, describes)));
+        Search {
+            rejected: found.is_none().then(|| rejected.take()).flatten(),
+            found,
+        }
+    }
+
+    /// The file a module's build-id names under the debug directories, or
+    /// else one its debug link names, that `consider` accepts.
+    fn find_named(
+        &self,
+        path: &Path,
+        object: &object::File<'_>,
+        build_id: Option<&[u8]>,
+        consider: impl Fn(&Path, Option<u32>) -> Option<DebugFile>,
+    ) -> Option<DebugFile> {
+        if let Some(id) = build_id {
+            let hex = hex(id);
+            let found = self.directories.iter().find_map(|directory| {
+                consider(
+                    &directory
+                        .join(".build-id")
+                        .join(&hex[..2])
+                        .join(format!("{}.debug", &hex[2..])),
+                    None,
+                )
+            });
+            if found.is_some() {
+                return found;
+            }
         }
         if let Ok(Some((name, checksum))) = object.gnu_debuglink() {
             let name = Path::new(OsStr::from_bytes(name));
@@ -134,14 +192,13 @@ impl DebugFileSearch {
                     if candidate == path {
                         continue;
                     }
-                    let linked = |data: &[u8]| debug_file_of(object, data, None, Some(checksum));
-                    if let Some(file) = read_if(&candidate, linked) {
+                    if let Some(file) = consider(&candidate, Some(checksum)) {
                         return Some(file);
                     }
                 }
             }
         }
-        build_id.and_then(|id| self.download(id, describes))
+        None
     }
 
     /// The dwz supplementary file whose debug information the file at
@@ -307,22 +364,39 @@ fn read_if(path: &Path, describes: impl Fn(&[u8]) -> bool) -> Option<DebugFile> 
     })
 }
 
-/// Whether `data` is a debug file for the module `object`: an object for
-/// its architecture with its build-id, or the checksum its link records.
-fn debug_file_of(
+/// Why `data` is no debug file for the module `object`, or `None` when it
+/// is one: an object for its architecture with the checksum its debug link
+/// records, or else with its build-id.
+fn mismatch(
     object: &object::File<'_>,
     data: &[u8],
     build_id: Option<&[u8]>,
     checksum: Option<u32>,
-) -> bool {
-    if checksum.is_some_and(|checksum| crc32(data) != checksum) {
-        return false;
+) -> Option<String> {
+    if let Some(checksum) = checksum {
+        let actual = crc32(data);
+        if actual != checksum {
+            return Some(format!(
+                "its CRC-32 is {actual:#010x}, not the {checksum:#010x} the module's debug link \
+                 records: it is from another build, or has changed since"
+            ));
+        }
     }
     let Ok(debug) = object::File::parse(data) else {
-        return false;
+        return Some("it is not an ELF file".to_owned());
     };
-    debug.architecture() == object.architecture()
-        && build_id.is_none_or(|id| debug.build_id().ok().flatten() == Some(id))
+    if debug.architecture() != object.architecture() {
+        return Some("it describes another architecture's code".to_owned());
+    }
+    let actual = debug.build_id().ok().flatten();
+    match build_id {
+        Some(id) if checksum.is_none() && actual != Some(id) => Some(format!(
+            "its build-id is {}, not the module's {}, so it is from another build",
+            actual.map_or_else(|| "missing".to_owned(), hex),
+            hex(id)
+        )),
+        _ => None,
+    }
 }
 
 /// How DWARF names its supplementary file: by a path and the identifier

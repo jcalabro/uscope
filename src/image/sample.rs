@@ -1170,6 +1170,9 @@ pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, I
                 path: std::sync::Arc::new("/usr/lib/debug/.build-id/ab/cdef.debug".into()),
                 reason: "its build id differs".into(),
             }),
+            debug_information: &crate::DebugInformation::Incomplete {
+                reason: "a unit is in a split DWARF file".into(),
+            },
         },
     )
     .unwrap();

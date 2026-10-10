@@ -1234,6 +1234,12 @@ build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic" \
 # directory that does not exist here.
 build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic-relocated" \
     -O0 -g3 -fPIE -pie "-ffile-prefix-map=${PWD}=/nonexistent/uscope"
+# Its compile unit's debug information is in a split DWARF file, which the
+# debugger does not read.
+build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic-split-dwarf" \
+    -O0 -g3 -gsplit-dwarf -fPIE -pie
+# An object file not yet linked, whose DWARF has relocations to apply.
+build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic.o" -O0 -g3 -c
 build_fixture gcc "$c_fixtures_dir/attach.c" "$output_dir/attach" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/attach-threads.c" "$output_dir/attach-threads" \

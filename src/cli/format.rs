@@ -1269,7 +1269,8 @@ pub struct ModuleRow {
 
 /// The modules, one per line with the range each occupies and what
 /// describes its code, and below one stripped of its debug information the
-/// separate file that holds it, or why that file could not be used.
+/// separate file that holds it, or why that file could not be used, and
+/// below one whose debug information could not all be read, why.
 pub fn modules(modules: &[ModuleRow], renderer: Renderer) -> String {
     let mut lines = Vec::with_capacity(modules.len());
     for module in modules {
@@ -1311,6 +1312,13 @@ pub fn modules(modules: &[ModuleRow], renderer: Renderer) -> String {
                 renderer.path(path)
             )),
             None => {}
+        }
+        if let Some(problem) = module
+            .image
+            .as_deref()
+            .and_then(crate::present::debug_information::dwarf_problem)
+        {
+            lines.push(format!("  {}", renderer.paint(Role::Warning, problem)));
         }
     }
     lines.join("\n")
