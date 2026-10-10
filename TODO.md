@@ -2,6 +2,8 @@
 
 ## Debugger
 
+- Improving web visualization for complex data types (i.e. interactive chessboard from github.com/jcalabro/rage)
+
 ## Languages and platforms
 
 - Other Linux architectures, then other operating systems.
