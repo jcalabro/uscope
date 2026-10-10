@@ -777,7 +777,7 @@ async fn fortran_values_agree_with_their_program() {
         check_gallery(&Gallery {
             fixture,
             breakpoints: &["reached"],
-            checkpoints: &["scalars", "records", "strings"],
+            checkpoints: &["scalars", "records", "descriptors", "section", "strings"],
             optimized,
             required: &[],
             reserved: &[".", "_"],
@@ -825,7 +825,7 @@ async fn ada_values_agree_with_their_program() {
         check_gallery(&Gallery {
             fixture,
             breakpoints: &["values__reached"],
-            checkpoints: &["scalars", "records", "strings"],
+            checkpoints: &["scalars", "records", "bounded", "strings"],
             optimized,
             required: &[],
             reserved: &["C", "S", "T"],

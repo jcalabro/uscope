@@ -2289,7 +2289,7 @@ async fn odin_steps_into_a_procedure_and_back_to_its_caller() {
 async fn fortran_steps_into_a_procedure_and_back_to_its_caller() {
     for fixture in ["values-fortran-o0", "values-fortran-o2"] {
         let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("values.f90", 181).await;
+        scenario.add_source_breakpoint("values.f90", 232).await;
         assert!(matches!(
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
@@ -2439,7 +2439,7 @@ async fn nim_steps_into_a_procedure_and_back_to_its_caller() {
 async fn ada_steps_into_a_subprogram_and_back_to_its_caller() {
     for fixture in ["values-ada-o0", "values-ada-o2"] {
         let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("values.adb", 165).await;
+        scenario.add_source_breakpoint("values.adb", 188).await;
         assert!(matches!(
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }

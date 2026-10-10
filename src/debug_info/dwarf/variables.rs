@@ -73,6 +73,7 @@ mod inspect;
 mod location;
 mod pieces;
 mod returns;
+mod runtime_array;
 mod shape;
 mod storage;
 mod text;
@@ -1159,6 +1160,13 @@ fn layout_child(child: DynamicAggregateChild) -> Option<crate::image::type_facts
             variant: index(variant)?,
             member: index(member)?,
         },
+        DynamicAggregateChild::Bound { dimension, part } => LayoutChild::Bound {
+            dimension: index(dimension)?,
+            part,
+        },
+        DynamicAggregateChild::DataLocation => LayoutChild::DataLocation,
+        DynamicAggregateChild::Allocated => LayoutChild::Allocated,
+        DynamicAggregateChild::Associated => LayoutChild::Associated,
     })
 }
 

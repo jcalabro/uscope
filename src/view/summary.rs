@@ -299,6 +299,8 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
                 .map_or_else(|| text.clone(), |function| format!("{text} <{function}>"))
         }
         VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
+        VariableValue::NotAllocated => "<not allocated>".to_owned(),
+        VariableValue::NotAssociated => "<not associated>".to_owned(),
         VariableValue::Function { code, function } => self::function(*code, function.as_deref()),
         VariableValue::Array { .. } | VariableValue::Slice { .. } => "[…]".to_owned(),
         // A record with no parts has nothing to elide; Rust's is `()`.

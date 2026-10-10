@@ -309,6 +309,7 @@ const fn kind_tag(kind: &TypeKind) -> &'static str {
         TypeKind::Pointer { .. } => "pointer",
         TypeKind::Reference { .. } => "reference",
         TypeKind::Array { .. } => "array",
+        TypeKind::RuntimeArray { .. } => "runtime array",
         TypeKind::Slice { .. } => "slice",
         TypeKind::Record { .. } => "record",
         TypeKind::Union { .. } => "union",

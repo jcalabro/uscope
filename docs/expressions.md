@@ -343,7 +343,10 @@ count between them. Pointers compare with pointers, `null`, and `0`; to
 compare an address with another number, cast the pointer. Arrays index by
 each of their dimensions, and decay to a pointer to their first element in
 arithmetic. A slice's index is checked against its length when the
-expression runs. A value a view presents as another value
+expression runs, as is an index of an array the program bounds at run
+time: a C variable-length array, a Fortran array's descriptor, or an Ada
+array of an unconstrained type. A C flexible array member's length is
+not described, so its index is not checked. A value a view presents as another value
 (`docs/views.md`), as Rust's `Arc` and C++'s `std::unique_ptr` present
 what they point to, dereferences to that value: `*arc` is what the `Arc`
 shares, and `*p` on one the view presents as empty, such as a null
@@ -616,9 +619,10 @@ partial == "xyz"       => false : bool
 ## Sizes and lengths
 
 `sizeof(x)` and `sizeof(T)` give a size in bytes without reading anything.
-`len(x)` gives an array's or slice's element count, or the length in bytes of
-text: a language's string, or what a character pointer points to. An array of
-characters is an array, so its length is its element count.
+`len(x)` gives an array's or slice's element count, the first dimension's
+for an array of several, or the length in bytes of text: a language's
+string, or what a character pointer points to. An array of characters is an
+array, so its length is its element count.
 
 `cap(x)` gives how many elements `x` has room for: an array's element count,
 the capacity a slice records, as Go's slices do, or what the `capacity`

@@ -996,6 +996,9 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
     fn length(&mut self, at: &StopPlace) -> std::result::Result<u64, Stop> {
         match self.load(at)? {
             VariableValue::Slice { length, .. } => Ok(length),
+            VariableValue::Array { dimensions } => {
+                Ok(dimensions.first().map_or(0, |dimension| dimension.count))
+            }
             _ => Err(Stop::Refused(Refusal::new(
                 ErrorKind::Type,
                 "the value is not a slice",

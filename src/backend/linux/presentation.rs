@@ -2136,6 +2136,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             total: 0,
             active_variant: None,
             view: None,
+            placement: None,
         }))
     }
 

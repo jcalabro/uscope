@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::inspection::InspectionBudget;
 use crate::model::{TextCompletion, TextSummary, ValueStorage};
 use crate::{
-    BaseTypeEncoding, GoKind, InspectionExhaustion, RecordMember, RecordMemberLayout,
+    BaseTypeEncoding, GoKind, ImageAddress, InspectionExhaustion, RecordMember, RecordMemberLayout,
     SourceLanguage, TypeId, TypeKind, ValueAccessUnavailableReason, VariableUnavailableReason,
     VariableValue, VirtualAddress,
 };
@@ -212,12 +212,19 @@ impl Stopped {
 
 impl DwarfVariableInfo {
     /// The text a value of this type and shape holds, when it is a string.
+    /// A string bounded at run time finds its length in the frame
+    /// executing `context_address`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a value's type, shape, place, and the frame reading it"
+    )]
     pub(super) fn text_summary(
         &self,
         type_id: TypeId,
         shape: &ValueShape,
         value: &VariableValue,
         storage: &ValueStorage,
+        context_address: Option<ImageAddress>,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Option<TextSummary> {
@@ -304,6 +311,14 @@ impl DwarfVariableInfo {
                             };
                         self.counted_slice_text(&mut reader, &storage, length, &shape)
                     }
+                    shape @ ValueShape::RuntimeArray { .. } => self.runtime_array_text(
+                        *target,
+                        &shape,
+                        &storage,
+                        context_address,
+                        reader.runtime,
+                        reader.budget,
+                    ),
                     _ => None,
                 }
             }

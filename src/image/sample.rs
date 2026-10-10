@@ -711,6 +711,41 @@ pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
             Some(identity(SourceLanguage::C, &[], "short int")),
         ),
         (
+            "integer(kind=4)[:,:]",
+            None,
+            TypeKind::RuntimeArray {
+                element: reference(0),
+                dimensions: [
+                    crate::RuntimeDimension {
+                        lower_bound: crate::ArrayBound::Computed {
+                            byte_size: 8,
+                            signed: true,
+                        },
+                        extent: crate::ArrayExtent::Upper(crate::ArrayBound::Stored {
+                            byte_size: 4,
+                            signed: false,
+                        }),
+                        byte_stride: Some(crate::ArrayBound::Constant(-8)),
+                    },
+                    crate::RuntimeDimension {
+                        lower_bound: crate::ArrayBound::Constant(i128::MIN),
+                        extent: crate::ArrayExtent::Count(crate::ArrayBound::Variable {
+                            debug_info_offset: u64::MAX,
+                        }),
+                        byte_stride: None,
+                    },
+                    crate::RuntimeDimension {
+                        lower_bound: crate::ArrayBound::Constant(0),
+                        extent: crate::ArrayExtent::Unknown,
+                        byte_stride: None,
+                    },
+                ]
+                .into(),
+                ordering: ArrayOrdering::ColumnMajor,
+            },
+            None,
+        ),
+        (
             "int *",
             Some(8),
             TypeKind::Pointer {
@@ -1056,6 +1091,15 @@ pub(super) fn sample_type_facts() -> type_facts::TypeFacts {
                 ExpressionId(1),
             ),
             (ty(4), LayoutChild::Discriminant, ExpressionId(0)),
+            (
+                ty(5),
+                LayoutChild::Bound {
+                    dimension: 1,
+                    part: type_facts::BoundPart::Stride,
+                },
+                ExpressionId(1),
+            ),
+            (ty(5), LayoutChild::DataLocation, ExpressionId(0)),
         ],
     }
 }

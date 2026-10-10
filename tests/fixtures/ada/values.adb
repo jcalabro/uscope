@@ -34,6 +34,7 @@ procedure Values is
    type Triple is array (1 .. 3) of Integer_32;
    type Centered is array (-1 .. 1) of Integer_32;
    type Grid is array (1 .. 2, 1 .. 3) of Integer_32;
+   type Vector is array (Integer range <>) of Integer_32;
 
    Sink : System.Address with Volatile;
 
@@ -143,6 +144,23 @@ procedure Values is
       Keep (Shifted'Address); Keep (Table'Address); Keep (Shade'Address);
    end Records;
 
+   --  Arrays bounded at run time: parameters of unconstrained types, and a
+   --  local whose bounds are theirs.
+   procedure Bounded (Text : String; Items : Vector) with No_Inline;
+   procedure Bounded (Text : String; Items : Vector) is
+      Copy : aliased Vector (Items'First .. Items'Last) := Items;
+   begin
+      Truth ("bounded", "text", "summary", """" & Text & """");
+      for Index in Items'Range loop
+         Truth ("bounded", "items.(" & Decimal (Long_Long_Integer (Index)) & ")", "int",
+                Decimal (Long_Long_Integer (Items (Index))));
+         Truth ("bounded", "copy.(" & Decimal (Long_Long_Integer (Index)) & ")", "int",
+                Decimal (Long_Long_Integer (Copy (Index))));
+      end loop;
+      Reached ("bounded");
+      Keep (Copy'Address);
+   end Bounded;
+
    procedure Strings with No_Inline;
    procedure Strings is
       use Ada.Strings.Unbounded;
@@ -161,6 +179,11 @@ procedure Values is
 begin
    Scalars;
    Records;
+   declare
+      Word : constant String := "shelling";
+   begin
+      Bounded (Word (2 .. 4), [-2 => 5, -1 => 6, 0 => 7]);
+   end;
    Strings;
    if Add (2, 3) /= 5 then
       raise Program_Error with "add";

@@ -55,6 +55,8 @@ pub enum Category {
         dimensions: Arc<[ArrayDimension]>,
     },
     Slice(TypeReference),
+    /// An array bounded at run time, whose value finds its bounds.
+    RuntimeArray,
     /// A record, union, or variant, whose members are reached with `.`.
     Record,
     Void,
@@ -188,6 +190,7 @@ fn program_category(types: &dyn TypeSource, ty: TypeReference) -> Category {
             dimensions: Arc::clone(dimensions),
         },
         TypeKind::Slice { element, .. } => Category::Slice(*element),
+        TypeKind::RuntimeArray { .. } => Category::RuntimeArray,
         TypeKind::Record { .. } | TypeKind::Union { .. } | TypeKind::Variant { .. } => {
             Category::Record
         }
