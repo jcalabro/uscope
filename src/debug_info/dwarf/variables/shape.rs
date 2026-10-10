@@ -6,8 +6,8 @@ use foldhash::{HashSet, HashSetExt};
 
 use crate::model::ArrayDimension;
 use crate::{
-    BaseClass, BaseType, EnumerationOrigin, Enumerator, RecordMember, TypeId, TypeInfo, TypeKind,
-    TypeModifier, TypeReference, Variant, VariantDiscriminant, VariantSelection,
+    BaseClass, BaseType, EnumerationOrigin, Enumerator, RecordMember, SliceWords, TypeId, TypeInfo,
+    TypeKind, TypeModifier, TypeReference, Variant, VariantDiscriminant, VariantSelection,
 };
 
 use super::codec::integer_bit_width;
@@ -34,7 +34,7 @@ pub(super) enum ValueShape {
     Slice {
         element: TypeId,
         byte_size: u64,
-        has_capacity: bool,
+        words: SliceWords,
         text: bool,
     },
     Record {
@@ -354,7 +354,7 @@ fn nested_value_shape(
         }
         TypeKind::Slice {
             element,
-            has_capacity,
+            words,
             text,
         } => {
             let byte_size = info.byte_size.ok_or_else(|| {
@@ -363,7 +363,7 @@ fn nested_value_shape(
             Ok(ValueShape::Slice {
                 element: element.id,
                 byte_size,
-                has_capacity: *has_capacity,
+                words: *words,
                 text: *text,
             })
         }

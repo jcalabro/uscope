@@ -790,8 +790,8 @@ pub enum TypeKind {
     /// A language slice descriptor with a runtime element count.
     Slice {
         element: TypeReference,
-        /// Whether the descriptor includes a capacity field.
-        has_capacity: bool,
+        /// Which of the descriptor's words hold its parts.
+        words: SliceWords,
         /// Whether the elements are the language's text, as in Rust's `str`
         /// and Zig's `[]const u8`.
         text: bool,
@@ -866,6 +866,41 @@ pub enum TypeKind {
         /// A stable description of the unsupported DWARF type tag.
         description: Arc<str>,
     },
+}
+
+/// Where a slice descriptor keeps its parts: each is one target word,
+/// counted in words from the descriptor's start. A descriptor may hold
+/// other words too, as an Odin dynamic array's allocator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SliceWords {
+    /// The pointer to the first element.
+    pub data: u8,
+    /// How many elements there are.
+    pub length: u8,
+    /// How many elements there is room for, when the descriptor says, as
+    /// Go's slices do.
+    pub capacity: Option<u8>,
+}
+
+impl SliceWords {
+    /// A pointer then a length, as Rust's and Zig's slices are.
+    pub const POINTER_LENGTH: Self = Self {
+        data: 0,
+        length: 1,
+        capacity: None,
+    };
+    /// A pointer, a length, then a capacity, as Go's slices are.
+    pub const POINTER_LENGTH_CAPACITY: Self = Self {
+        data: 0,
+        length: 1,
+        capacity: Some(2),
+    };
+
+    /// How many words the parts span, from the descriptor's start.
+    #[must_use]
+    pub fn span(self) -> u64 {
+        u64::from(self.data.max(self.length).max(self.capacity.unwrap_or(0))) + 1
+    }
 }
 
 /// One statically known array dimension.

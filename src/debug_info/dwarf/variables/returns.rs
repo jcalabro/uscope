@@ -745,8 +745,8 @@ impl Assignment {
                 self.integer(offset, representation.byte_size, parts)
             }
             TypeKind::Pointer { .. } | TypeKind::Function => self.integer(offset, WORD, parts),
-            TypeKind::Slice { has_capacity, .. } => {
-                let words = if *has_capacity { 3 } else { 2 };
+            TypeKind::Slice { .. } => {
+                let words = resolved.byte_size.ok_or(Unassigned::Stack)? / WORD;
                 (0..words).try_for_each(|word| self.integer(offset + word * WORD, WORD, parts))
             }
             TypeKind::Array {

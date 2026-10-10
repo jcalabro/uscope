@@ -23,9 +23,9 @@ use crate::{
     Accessibility, ArgumentOrigin, ArrayDimension, BaseClass, BaseClassVirtuality, BaseType,
     BaseTypeEncoding, EnumerationOrigin, Enumerator, GoKind, GoTypeAttributes, IntegerValue,
     ModuleImageId, NamedTypeRelationship, RecordKind, RecordMember, RecordMemberLayout,
-    ReferenceKind, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode,
-    TypeReference, Variant, VariantDiscriminant, VariantSelection, VariantSelector,
-    VariantStorageKind,
+    ReferenceKind, SliceWords, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind,
+    TypeModifier, TypeNode, TypeReference, Variant, VariantDiscriminant, VariantSelection,
+    VariantSelector, VariantStorageKind,
 };
 
 /// One type. What each field holds depends on [`TypeRecord::kind`]; a
@@ -110,7 +110,6 @@ pub mod type_flags {
     pub const SCOPED: u16 = 1 << 3;
     /// An enumeration of a named integer's associated constants.
     pub const NAMED_CONSTANTS: u16 = 1 << 4;
-    pub const CAPACITY: u16 = 1 << 5;
     pub const TEXT: u16 = 1 << 6;
     pub const VARIADIC: u16 = 1 << 7;
     pub const PROTOTYPED: u16 = 1 << 8;
@@ -707,12 +706,12 @@ impl Encoder {
             }
             TypeKind::Slice {
                 element,
-                has_capacity,
+                words,
                 text,
             } => {
                 record.kind = kinds::SLICE;
                 record.target = reference(Some(*element));
-                flag(&mut record, *has_capacity, type_flags::CAPACITY);
+                record.value = slice_words(*words).into();
                 flag(&mut record, *text, type_flags::TEXT);
             }
             TypeKind::Record {
@@ -843,6 +842,33 @@ impl Encoder {
         Ok(())
     }
 }
+
+/// Where a slice descriptor keeps its parts, as a type record's value
+/// holds it: the data's word, the length's, and the capacity's, a byte
+/// each, the capacity's [`NO_SLICE_WORD`] when it has none.
+fn slice_words(words: SliceWords) -> u64 {
+    u64::from(words.data)
+        | u64::from(words.length) << 8
+        | u64::from(words.capacity.unwrap_or(NO_SLICE_WORD)) << 16
+}
+
+/// The words [`slice_words`] encodes.
+fn slice_words_of(value: u64) -> SliceWords {
+    let byte = |shift: u32| u8::try_from(value >> shift & 0xff).expect("one byte");
+    SliceWords {
+        data: byte(0),
+        length: byte(8),
+        capacity: Some(byte(16)).filter(|word| *word != NO_SLICE_WORD),
+    }
+}
+
+/// Whether a type record's value is slice words [`slice_words`] made.
+fn valid_slice_words(value: u64) -> bool {
+    value >> 24 == 0 && slice_words(slice_words_of(value)) == value
+}
+
+/// The capacity's word of a slice descriptor that has none.
+const NO_SLICE_WORD: u8 = 0xff;
 
 const fn layout(layout: RecordMemberLayout) -> (u8, u64, u64) {
     match layout {
@@ -1203,7 +1229,7 @@ impl<'a> TypeView<'a> {
             },
             kinds::SLICE => TypeKind::Slice {
                 element: required(),
-                has_capacity: has(record, type_flags::CAPACITY),
+                words: slice_words_of(record.value.get()),
                 text: has(record, type_flags::TEXT),
             },
             kinds::RECORD => TypeKind::Record {
@@ -1563,8 +1589,12 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     && no_variants
             }
             kinds::SLICE => {
-                plain
-                    && only(f::SIZED | f::CAPACITY | f::TEXT)
+                no_text
+                    && valid_slice_words(record.value.get())
+                    && none(record.bit_size)
+                    && record.detail == 0
+                    && no_list(record.first, record.count)
+                    && only(f::SIZED | f::TEXT)
                     && valid_type(record.target, count)
                     && no_bases
                     && no_variants

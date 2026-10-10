@@ -15,7 +15,7 @@ use crate::{
     Accessibility, AddressValue, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId,
     DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue, Error,
     ImageAddress, InspectedValue, IntegerValue, RecordMember, RecordMemberLayout, Result,
-    ScalarValue, TypeId, TypeInfo, TypeKind, TypeReference, ValueChild, ValueChildPage,
+    ScalarValue, SliceWords, TypeId, TypeInfo, TypeKind, TypeReference, ValueChild, ValueChildPage,
     ValueChildRelationship, ValueChildren, ValueChildrenReference, Variable, VariableInvalidReason,
     VariableMalformedKind, VariableState, VariableUnavailableReason, VariableValue,
     VariableValueSource, Variant, VariantDiscriminant, VirtualAddress,
@@ -63,7 +63,7 @@ pub(in crate::debug_info) enum PathStep {
     SliceIndex {
         element_size: u64,
         descriptor_size: u64,
-        has_capacity: bool,
+        words: SliceWords,
     },
     Member(Box<PlannedMemberStep>),
     Unavailable(VariableUnavailableReason),
@@ -95,6 +95,10 @@ struct MemberHop {
 
 /// How many aggregates one member lookup may examine.
 const MAX_MEMBER_SEARCH: usize = 4_096;
+
+/// The most words a slice descriptor may hold: Odin's dynamic arrays, the
+/// largest, hold five.
+const MAX_SLICE_WORDS: u64 = 8;
 
 /// The one path when every path found reaches the same subobject: paths
 /// through one virtual base reach one object, since the derived object
@@ -844,14 +848,14 @@ impl DwarfVariableInfo {
                         dimensions: Arc::clone(dimensions),
                         element_size,
                     }),
-                    TypeKind::Slice { has_capacity, .. } => {
+                    TypeKind::Slice { words, .. } => {
                         let descriptor_size = info
                             .byte_size
                             .ok_or_else(|| malformed("slice descriptor has no byte size".into()))?;
                         steps.push(PathStep::SliceIndex {
                             element_size,
                             descriptor_size,
-                            has_capacity: *has_capacity,
+                            words: *words,
                         });
                     }
                     _ => unreachable!("only arrays and slices were accepted above"),
@@ -1243,22 +1247,25 @@ impl DwarfVariableInfo {
         &self,
         storage: &ValueStorage,
         byte_size: u64,
-        has_capacity: bool,
+        words: SliceWords,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<DecodedSlice, EvaluateError> {
         let pointer_bytes = self.pointer_bytes();
-        let words = if has_capacity { 3 } else { 2 };
         // Validate the metadata's size before reading, so a bogus size cannot
-        // spend the request's memory budget.
-        let size = pointer_bytes * words;
-        if byte_size != size as u64 {
+        // spend the request's memory budget: a descriptor is a few words.
+        let word_count = byte_size / pointer_bytes as u64;
+        if !byte_size.is_multiple_of(pointer_bytes as u64)
+            || !(words.span()..=MAX_SLICE_WORDS).contains(&word_count)
+        {
             return Err(EvaluateError::Malformed(
                 "slice descriptor size does not match its target layout".into(),
             ));
         }
+        let size = usize::try_from(byte_size).expect("a few words fit usize");
         let (source, raw) = storage::read(storage, size, runtime, budget)?;
-        let word = |index: usize| {
+        let word = |index: u8| {
+            let index = usize::from(index);
             unsigned_value(
                 &raw[index * pointer_bytes..(index + 1) * pointer_bytes],
                 self.target.byte_order,
@@ -1269,12 +1276,12 @@ impl DwarfVariableInfo {
                     .map_err(|_| Arc::<str>::from("slice word exceeds target address width"))
             })
         };
-        let address = word(0)
+        let address = word(words.data)
             .map(VirtualAddress::new)
             .map_err(EvaluateError::Malformed)?;
-        let length = word(1).map_err(EvaluateError::Malformed)?;
-        let capacity = if has_capacity {
-            let capacity = word(2).map_err(EvaluateError::Malformed)?;
+        let length = word(words.length).map_err(EvaluateError::Malformed)?;
+        let capacity = if let Some(capacity) = words.capacity {
+            let capacity = word(capacity).map_err(EvaluateError::Malformed)?;
             if capacity < length {
                 return Err(EvaluateError::Malformed(
                     "slice length exceeds its capacity".into(),
@@ -1818,7 +1825,7 @@ impl DwarfVariableInfo {
                 PathStep::SliceIndex {
                     element_size,
                     descriptor_size,
-                    has_capacity,
+                    words,
                 } => {
                     let [index] = indices else {
                         return Err(Error::InvalidValueExpression(format!(
@@ -1835,7 +1842,7 @@ impl DwarfVariableInfo {
                     let decoded = attempt!(self.decode_slice(
                         &storage,
                         *descriptor_size,
-                        *has_capacity,
+                        *words,
                         runtime,
                         budget,
                     ));
@@ -2210,19 +2217,19 @@ impl DwarfVariableInfo {
             ValueShape::Slice {
                 element: _,
                 byte_size,
-                has_capacity,
+                words,
                 ..
             } => {
-                let decoded =
-                    match self.decode_slice(storage, *byte_size, *has_capacity, runtime, budget) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            return evaluate_error_state(
-                                error,
-                                VariableMalformedKind::InconsistentLayout,
-                            );
-                        }
-                    };
+                let decoded = match self.decode_slice(storage, *byte_size, *words, runtime, budget)
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return evaluate_error_state(
+                            error,
+                            VariableMalformedKind::InconsistentLayout,
+                        );
+                    }
+                };
                 let backing = ValueStorage::Memory(decoded.address);
                 VariableState::Available {
                     source: decoded.source,

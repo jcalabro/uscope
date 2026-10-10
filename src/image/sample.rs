@@ -597,7 +597,7 @@ pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
             Some(24),
             TypeKind::Slice {
                 element: reference(0),
-                has_capacity: true,
+                words: crate::SliceWords::POINTER_LENGTH_CAPACITY,
                 text: false,
             },
             None,
