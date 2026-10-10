@@ -3167,6 +3167,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let unit = &self.units[unit_index];
         let mut dimensions = Vec::new();
         let mut strided = has_stride(entry);
+        let default_lower = default_lower_bound(
+            self.unit_languages.get(unit_index).copied().flatten(),
+            self.language(unit_index),
+        );
         let mut children = self.children(unit_index, entry.offset())?;
         while let Some(child) = children.next_child()? {
             if child.tag() != gimli::DW_TAG_subrange_type {
@@ -3176,8 +3180,17 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             let signed_index = index_type_is_signed(unit, child);
             let lower = child
                 .attr(gimli::DW_AT_lower_bound)
-                .and_then(|attribute| array_bound(attribute, signed_index))
-                .unwrap_or(0);
+                .map_or(default_lower, |attribute| {
+                    array_bound(attribute, signed_index)
+                });
+            let Some(lower) = lower else {
+                return Ok(opaque(
+                    reference,
+                    explicit_name.unwrap_or_else(|| Arc::from("<dynamic array>")),
+                    explicit_size,
+                    "array lower bound is dynamic, or not stated and not its language's",
+                ));
+            };
             let count = child
                 .attr(gimli::DW_AT_count)
                 .and_then(gimli::Attribute::udata_value)
@@ -3712,6 +3725,31 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             }
         }
         false
+    }
+}
+
+/// Where an array of a unit's language begins when its subrange does not
+/// say: DWARF's default lower bound for the language, which a language not
+/// in the standard's table does not have.
+fn default_lower_bound(language: Option<gimli::DwLang>, source: SourceLanguage) -> Option<i128> {
+    if matches!(
+        source,
+        SourceLanguage::C
+            | SourceLanguage::Cpp
+            | SourceLanguage::Rust
+            | SourceLanguage::Go
+            | SourceLanguage::Zig
+            | SourceLanguage::Odin
+    ) {
+        return Some(0);
+    }
+    let language = language?;
+    match language {
+        gimli::DW_LANG_Kotlin | gimli::DW_LANG_Crystal => Some(0),
+        gimli::DW_LANG_Fortran18 | gimli::DW_LANG_Ada2005 | gimli::DW_LANG_Ada2012 => Some(1),
+        language => language
+            .default_lower_bound()
+            .and_then(|bound| i128::try_from(bound).ok()),
     }
 }
 
