@@ -39,7 +39,7 @@ use crate::image::locations::ExpressionId;
 
 pub(super) use crate::image::variables::TypeResolution;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum TypeEntry {
     Building,
     Resolved(TypeInfo),

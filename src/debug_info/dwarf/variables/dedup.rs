@@ -20,8 +20,8 @@ use rayon::prelude::*;
 use super::types::{BuiltTypes, TypeEntry, TypeResolution};
 use crate::type_identity::ANONYMOUS_NAMESPACE;
 use crate::{
-    BaseClass, RecordMember, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind, TypeReference,
-    Variant, VariantDiscriminant,
+    BaseClass, RecordMember, TypeArgument, TypeId, TypeInfo, TypeKind, TypeReference,
+    VariantDiscriminant,
 };
 
 /// How many rounds refinement may take. Each round costs one pass over
@@ -121,80 +121,134 @@ impl BuiltTypes {
     }
 
     /// Each type's class, as [`refine`] finds them.
-    fn classes<H: std::hash::BuildHasher + Clone + Sync>(&self, hasher: &H) -> Option<Vec<u32>> {
-        let signatures = {
-            let _phase = crate::span!("types.deduplicate.signatures");
-            self.signatures()
-        };
-        let _phase = crate::span!("types.deduplicate.refine");
-        refine(signatures, hasher)
+    ///
+    /// Each type's signature is its own entry with its references zeroed in
+    /// place, which are put back once refinement is done. Copying every
+    /// type with its references zeroed instead cost a clone of every
+    /// record's members, most of the work of finding classes, and held the
+    /// copies beside the types at the load's peak: 450 MB on a large Rust
+    /// program.
+    fn classes<H: std::hash::BuildHasher + Clone + Sync>(
+        &mut self,
+        hasher: &H,
+    ) -> Option<Vec<u32>> {
+        let signatures_phase = crate::span!("types.deduplicate.signatures");
+        let (mergeable, offsets, edges) = self.zero_references();
+        let fields = self
+            .entries
+            .par_iter()
+            .zip(&mergeable)
+            .enumerate()
+            .map(|(index, (entry, mergeable))| match entry {
+                TypeEntry::Resolved(info) if *mergeable => {
+                    let id = TypeId::new(u32::try_from(index).expect("type count fits u32"));
+                    Some(Fields {
+                        info,
+                        go_dict_index: self.go_dict_indices.get(&id).copied(),
+                        passed_by_value: self.passed_by_value.get(&id).copied(),
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        drop(signatures_phase);
+        let refine_phase = crate::span!("types.deduplicate.refine");
+        let classes = refine(
+            &Signatures {
+                fields,
+                offsets: &offsets,
+                edges: &edges,
+            },
+            hasher,
+        );
+        drop(refine_phase);
+        let _phase = crate::span!("types.deduplicate.signatures");
+        self.restore_references(&mergeable, &offsets, &edges);
+        classes
     }
 
-    /// Each type's own fields, with every reference zeroed, and the
-    /// references in the order a walk of its fields meets them.
+    /// Zeroes the references of every type that may merge, its own among
+    /// them, and returns which types may, and their references in the order
+    /// a walk of its fields meets them, by where each type's start.
     #[expect(
         clippy::disallowed_methods,
         reason = "which aggregates have run-time layouts is one set in any order"
     )]
-    fn signatures(&self) -> Signatures {
+    fn zero_references(&mut self) -> (Vec<bool>, Vec<usize>, Vec<u32>) {
         let count = self.entries.len();
         let layouts = self
             .dynamic_record_layouts
             .keys()
             .map(|key| key.aggregate)
             .collect::<HashSet<_>>();
-        let each = self
+        // Only a type's references, usually few, are gathered, and copied
+        // into one list after.
+        let (mergeable, edges): (Vec<bool>, Vec<Vec<u32>>) = self
             .entries
-            .par_iter()
+            .par_iter_mut()
             .enumerate()
-            .map(|(index, entry)| {
+            .map_init(Vec::new, |scratch, (index, entry)| {
                 let id = TypeId::new(u32::try_from(index).expect("type count fits u32"));
                 let TypeEntry::Resolved(info) = entry else {
-                    return None;
+                    return (false, Vec::new());
                 };
                 if layouts.contains(&id) || local(info) {
-                    return None;
+                    return (false, Vec::new());
                 }
-                let mut edges = Vec::new();
-                let mut normalized = map_references(info, &mut |reference| {
-                    edges.push(reference);
+                scratch.clear();
+                map_references(info, &mut |reference| {
+                    scratch.push(reference);
                     zero(reference)
                 });
-                normalized.reference = zero(normalized.reference);
                 // A type that refers outside the graph keeps its own
-                // identifier, so it never merges.
-                if edges.iter().any(|reference| {
+                // identifier, so it never merges, and refers to nothing
+                // refinement must follow.
+                if scratch.iter().any(|reference| {
                     reference.image != info.reference.image || reference.id.index() >= count
                 }) {
-                    return None;
+                    let mut original = scratch.iter().copied();
+                    map_references(info, &mut |_| original.next().expect("as many references"));
+                    return (false, Vec::new());
                 }
-                let fields = Fields {
-                    info: normalized,
-                    go_dict_index: self.go_dict_indices.get(&id).copied(),
-                    passed_by_value: self.passed_by_value.get(&id).copied(),
-                };
-                Some((fields, edges))
+                debug_assert_eq!(info.reference.id, id, "a type's own reference names it");
+                info.reference = zero(info.reference);
+                (
+                    true,
+                    scratch.iter().map(|reference| reference.id.get()).collect(),
+                )
             })
-            .collect::<Vec<_>>();
-        let mut signatures = Signatures {
-            fields: Vec::with_capacity(count),
-            offsets: Vec::with_capacity(count + 1),
-            edges: Vec::new(),
-        };
-        signatures.offsets.push(0);
-        for signature in each {
-            // A type that cannot merge refers to nothing refinement must
-            // follow.
-            let fields = signature.map(|(fields, edges)| {
-                signatures
-                    .edges
-                    .extend(edges.iter().map(|reference| reference.id.get()));
-                fields
-            });
-            signatures.fields.push(fields);
-            signatures.offsets.push(signatures.edges.len());
+            .unzip();
+        let mut offsets = Vec::with_capacity(count + 1);
+        offsets.push(0);
+        let mut flat = Vec::with_capacity(edges.iter().map(Vec::len).sum());
+        for own in edges {
+            flat.extend_from_slice(&own);
+            offsets.push(flat.len());
         }
-        signatures
+        (mergeable, offsets, flat)
+    }
+
+    /// Puts back what [`Self::zero_references`] zeroed. Every reference of
+    /// a type that may merge is to its own image.
+    fn restore_references(&mut self, mergeable: &[bool], offsets: &[usize], edges: &[u32]) {
+        self.entries
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(index, entry)| {
+                let TypeEntry::Resolved(info) = entry else {
+                    return;
+                };
+                if !mergeable[index] {
+                    return;
+                }
+                info.reference.id = TypeId::new(u32::try_from(index).expect("type count fits u32"));
+                let image = info.reference.image;
+                let mut original = edges[offsets[index]..offsets[index + 1]].iter();
+                map_references(info, &mut |_| TypeReference {
+                    image,
+                    id: TypeId::new(*original.next().expect("as many references")),
+                });
+            });
     }
 
     /// Keeps the first type of each class, pointing every reference where
@@ -209,15 +263,13 @@ impl BuiltTypes {
         let entries = std::mem::take(&mut self.entries)
             .into_par_iter()
             .enumerate()
-            .map(|(index, entry)| {
-                kept[index].then(|| match entry {
-                    TypeEntry::Resolved(info) => {
-                        let mut info =
-                            map_references(&info, &mut |reference| remap.reference(reference));
+            .map(|(index, mut entry)| {
+                kept[index].then(|| {
+                    if let TypeEntry::Resolved(info) = &mut entry {
+                        map_references(info, &mut |reference| remap.reference(reference));
                         info.reference.id = remap.ids[index];
-                        TypeEntry::Resolved(info)
                     }
-                    other => other,
+                    entry
                 })
             })
             .collect::<Vec<_>>();
@@ -245,20 +297,21 @@ impl BuiltTypes {
     }
 }
 
-/// What a type is apart from the types it refers to.
+/// What a type is apart from the types it refers to: its entry, with its
+/// references zeroed.
 #[derive(PartialEq, Eq, Hash)]
-struct Fields {
-    info: TypeInfo,
+struct Fields<'a> {
+    info: &'a TypeInfo,
     go_dict_index: Option<u64>,
     passed_by_value: Option<bool>,
 }
 
-struct Signatures {
+struct Signatures<'a> {
     /// Each type's fields, or `None` for one that never merges.
-    fields: Vec<Option<Fields>>,
+    fields: Vec<Option<Fields<'a>>>,
     /// Where each type's references start in `edges`.
-    offsets: Vec<usize>,
-    edges: Vec<u32>,
+    offsets: &'a [usize],
+    edges: &'a [u32],
 }
 
 /// Whether a type belongs to its unit alone, as one in an anonymous
@@ -284,55 +337,286 @@ const fn zero(reference: TypeReference) -> TypeReference {
 /// type's class, numbered by first appearance, or `None` when refinement
 /// does not settle within [`MAX_ROUNDS`].
 fn refine<H: std::hash::BuildHasher + Clone + Sync>(
-    signatures: Signatures,
+    signatures: &Signatures<'_>,
     hasher: &H,
 ) -> Option<Vec<u32>> {
     let Signatures {
-        fields,
+        ref fields,
         offsets,
         edges,
-    } = signatures;
+    } = *signatures;
     let count = fields.len();
-    let mut classes = classify(&fields, hasher);
-    // Dropping thousands of payloads is work too.
-    fields.into_par_iter().for_each(drop);
-    let mut distinct = classes
-        .iter()
-        .copied()
-        .max()
-        .map_or(0, |last| last as usize + 1);
-    let mut targets = vec![0_u32; edges.len()];
+    let mut classes = classify(fields, hasher);
+    let mut members = Members::new(&classes);
+    let referrers = Referrers::new(count, offsets, edges);
+    // Each round splits a class by what its members' references were as
+    // the round began, so a class can split only once a type it refers
+    // to has moved. Only those classes are looked at again: a large
+    // program takes dozens of rounds, and after the first few only a few
+    // types move in each. The partition each round reaches, and so the
+    // round refinement settles in, is that of splitting every class in
+    // every round.
+    let mut dirty = (0..members.ranges.len())
+        .filter(|class| members.ranges[*class].len() > 1)
+        .collect::<Vec<_>>();
+    let mut flagged = Vec::new();
     for round in 1..=MAX_ROUNDS {
-        for (target, edge) in targets.iter_mut().zip(&edges) {
-            *target = classes[*edge as usize];
-        }
-        let mut seen = HashMap::with_capacity_and_hasher(distinct, hasher.clone());
-        let refined = (0..count)
-            .map(|index| {
-                let key = (classes[index], &targets[offsets[index]..offsets[index + 1]]);
-                let next = u32::try_from(seen.len()).expect("type count fits u32");
-                *seen.entry(key).or_insert(next)
+        // An indexed collect splits alike however the work is stolen.
+        let splits = dirty
+            .par_iter()
+            .map_init(Scratch::default, |scratch, class| {
+                split(*class, &members, &classes, offsets, edges, scratch, hasher)
             })
+            .flatten()
             .collect::<Vec<_>>();
-        // Refinement only splits classes, so an equal count is the same
-        // partition.
-        let settled = seen.len() == distinct;
-        distinct = seen.len();
-        classes = refined;
-        if settled {
+        if splits.is_empty() {
             crate::count!("types_dedup_rounds", round);
-            return Some(classes);
+            return Some(numbered_by_first_appearance(&classes));
+        }
+        let mut moved = Vec::new();
+        for (class, groups) in splits {
+            members.split(class, &groups, &mut classes, &mut moved);
+        }
+        flagged.resize(members.ranges.len(), false);
+        dirty.clear();
+        for referrer in moved.iter().flat_map(|moved| referrers.of(*moved)) {
+            let class = classes[*referrer as usize] as usize;
+            if !std::mem::replace(&mut flagged[class], true) {
+                dirty.push(class);
+            }
+        }
+        for class in &dirty {
+            flagged[*class] = false;
         }
     }
     crate::count!("types_dedup_abandoned", 1);
     None
 }
 
+/// What [`split`] reuses from one class to the next.
+#[derive(Default)]
+struct Scratch {
+    /// The classes each member refers to, one member after another.
+    keys: Vec<u32>,
+    /// Where each member's run of `keys` ends.
+    ends: Vec<usize>,
+    groups: Vec<u32>,
+    /// The first member of each group so far.
+    firsts: Vec<usize>,
+}
+
+/// How many groups [`split`] tells apart by comparing a member with the
+/// first of each before it hashes them: most classes split into few.
+const LINEAR_GROUPS: usize = 8;
+
+/// The group of each member of `class` when they are told apart by the
+/// classes of the types they refer to, numbered by first appearance, or
+/// `None` when they cannot be told apart.
+fn split<H: std::hash::BuildHasher + Clone>(
+    class: usize,
+    members: &Members,
+    classes: &[u32],
+    offsets: &[usize],
+    edges: &[u32],
+    scratch: &mut Scratch,
+    hasher: &H,
+) -> Option<(usize, Vec<u32>)> {
+    let group = members.of(class);
+    if group.len() < 2 {
+        return None;
+    }
+    let Scratch {
+        keys,
+        ends,
+        groups,
+        firsts,
+    } = scratch;
+    keys.clear();
+    ends.clear();
+    for member in group {
+        let member = *member as usize;
+        keys.extend(
+            edges[offsets[member]..offsets[member + 1]]
+                .iter()
+                .map(|target| classes[*target as usize]),
+        );
+        ends.push(keys.len());
+    }
+    let key =
+        |member: usize| &keys[member.checked_sub(1).map_or(0, |last| ends[last])..ends[member]];
+    groups.clear();
+    firsts.clear();
+    let mut seen = None::<HashMap<&[u32], u32, H>>;
+    for member in 0..group.len() {
+        let own = key(member);
+        let found = seen.as_ref().map_or_else(
+            || {
+                firsts
+                    .iter()
+                    .position(|first| key(*first) == own)
+                    .map(|found| u32::try_from(found).expect("type count fits u32"))
+            },
+            |seen| seen.get(own).copied(),
+        );
+        let found = found.unwrap_or_else(|| {
+            let next = u32::try_from(firsts.len()).expect("type count fits u32");
+            firsts.push(member);
+            if let Some(seen) = &mut seen {
+                seen.insert(own, next);
+            } else if firsts.len() > LINEAR_GROUPS {
+                let mut map = HashMap::with_capacity_and_hasher(firsts.len() * 2, hasher.clone());
+                for (first, number) in firsts.iter().zip(0..) {
+                    map.insert(key(*first), number);
+                }
+                seen = Some(map);
+            }
+            next
+        });
+        groups.push(found);
+    }
+    (firsts.len() > 1).then(|| (class, groups.clone()))
+}
+
+/// Each class's members, in identifier order, contiguous in one list.
+struct Members {
+    order: Vec<u32>,
+    ranges: Vec<std::ops::Range<usize>>,
+}
+
+impl Members {
+    fn new(classes: &[u32]) -> Self {
+        let distinct = classes
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |last| last as usize + 1);
+        let mut sizes = vec![0_usize; distinct];
+        for class in classes {
+            sizes[*class as usize] += 1;
+        }
+        let mut ranges = Vec::with_capacity(distinct);
+        let mut start = 0;
+        for size in sizes {
+            ranges.push(start..start);
+            start += size;
+        }
+        let mut order = vec![0_u32; classes.len()];
+        for (index, class) in classes.iter().enumerate() {
+            let range = &mut ranges[*class as usize];
+            order[range.end] = u32::try_from(index).expect("type count fits u32");
+            range.end += 1;
+        }
+        Self { order, ranges }
+    }
+
+    fn of(&self, class: usize) -> &[u32] {
+        &self.order[self.ranges[class].clone()]
+    }
+
+    /// Splits `class` into `groups`, its members' groups in order: the
+    /// first group keeps the class, and each other becomes a new one.
+    /// Records the members that moved.
+    fn split(&mut self, class: usize, groups: &[u32], classes: &mut [u32], moved: &mut Vec<u32>) {
+        let range = self.ranges[class].clone();
+        let count = groups
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |last| last as usize + 1);
+        let mut starts = vec![0_usize; count];
+        for group in groups {
+            starts[*group as usize] += 1;
+        }
+        let mut start = range.start;
+        for size in &mut starts {
+            let own = *size;
+            *size = start;
+            start += own;
+        }
+        let first_new = self.ranges.len();
+        for (group, group_start) in starts.iter().enumerate() {
+            let end = starts.get(group + 1).copied().unwrap_or(range.end);
+            if group == 0 {
+                self.ranges[class] = *group_start..end;
+            } else {
+                self.ranges.push(*group_start..end);
+            }
+        }
+        let segment = self.order[range].to_vec();
+        for (member, group) in segment.into_iter().zip(groups) {
+            let group = *group as usize;
+            self.order[starts[group]] = member;
+            starts[group] += 1;
+            if group > 0 {
+                classes[member as usize] =
+                    u32::try_from(first_new + group - 1).expect("type count fits u32");
+                moved.push(member);
+            }
+        }
+    }
+}
+
+/// The types that refer to each type.
+struct Referrers {
+    offsets: Vec<usize>,
+    referrers: Vec<u32>,
+}
+
+impl Referrers {
+    fn new(count: usize, offsets: &[usize], edges: &[u32]) -> Self {
+        let mut starts = vec![0_usize; count + 1];
+        for edge in edges {
+            starts[*edge as usize + 1] += 1;
+        }
+        for index in 0..count {
+            starts[index + 1] += starts[index];
+        }
+        let mut cursor = starts.clone();
+        let mut referrers = vec![0_u32; edges.len()];
+        for referrer in 0..count {
+            for edge in &edges[offsets[referrer]..offsets[referrer + 1]] {
+                referrers[cursor[*edge as usize]] =
+                    u32::try_from(referrer).expect("type count fits u32");
+                cursor[*edge as usize] += 1;
+            }
+        }
+        Self {
+            offsets: starts,
+            referrers,
+        }
+    }
+
+    fn of(&self, target: u32) -> &[u32] {
+        let target = target as usize;
+        &self.referrers[self.offsets[target]..self.offsets[target + 1]]
+    }
+}
+
+/// `classes` renumbered in order of each class's first member.
+fn numbered_by_first_appearance(classes: &[u32]) -> Vec<u32> {
+    let mut numbers = vec![u32::MAX; classes.len()];
+    let mut next = 0;
+    classes
+        .iter()
+        .map(|class| {
+            let number = &mut numbers[*class as usize];
+            if *number == u32::MAX {
+                *number = next;
+                next += 1;
+            }
+            *number
+        })
+        .collect()
+}
+
 /// Numbers the types by their fields alone, in order of first appearance;
 /// a type that never merges has a class of its own. Hashes are computed in
 /// parallel and only propose the earlier type a type might equal; the
 /// fields are then compared.
-fn classify<H: std::hash::BuildHasher + Sync>(fields: &[Option<Fields>], hasher: &H) -> Vec<u32> {
+fn classify<H: std::hash::BuildHasher + Sync>(
+    fields: &[Option<Fields<'_>>],
+    hasher: &H,
+) -> Vec<u32> {
     let digests = fields
         .par_iter()
         .map(|fields| fields.as_ref().map(|fields| hasher.hash_one(fields)))
@@ -369,200 +653,108 @@ fn classify<H: std::hash::BuildHasher + Sync>(fields: &[Option<Fields>], hasher:
     classes
 }
 
-/// A copy of `info` whose every reference to a type, its own aside, is
-/// `map` of the original, met in one fixed order.
-#[expect(clippy::too_many_lines, reason = "one arm for each kind of type")]
+/// Replaces every reference of `info` to a type, its own aside, with `map`
+/// of it, met in one fixed order. Shared lists are copied first, but a
+/// type's lists are its own once its declarations are recorded.
 pub(super) fn map_references(
-    info: &TypeInfo,
+    info: &mut TypeInfo,
     map: &mut impl FnMut(TypeReference) -> TypeReference,
-) -> TypeInfo {
-    let kind = match &info.kind {
-        TypeKind::Enumeration {
-            representation,
-            underlying,
-            enumerators,
-            origin,
-            scoped,
-        } => TypeKind::Enumeration {
-            representation: representation.clone(),
-            underlying: underlying.map(&mut *map),
-            enumerators: Arc::clone(enumerators),
-            origin: *origin,
-            scoped: *scoped,
-        },
-        TypeKind::Pointer {
-            target,
-            address_class,
-        } => TypeKind::Pointer {
-            target: target.map(&mut *map),
-            address_class: *address_class,
-        },
-        TypeKind::Reference {
-            kind,
-            target,
-            address_class,
-        } => TypeKind::Reference {
-            kind: *kind,
-            target: map(*target),
-            address_class: *address_class,
-        },
-        TypeKind::Array {
-            element,
-            dimensions,
-        } => TypeKind::Array {
-            element: map(*element),
-            dimensions: Arc::clone(dimensions),
-        },
-        TypeKind::Slice {
-            element,
-            has_capacity,
-            text,
-        } => TypeKind::Slice {
-            element: map(*element),
-            has_capacity: *has_capacity,
-            text: *text,
-        },
-        TypeKind::Record {
-            kind,
-            members,
-            bases,
-            incomplete,
-        } => TypeKind::Record {
-            kind: *kind,
-            members: map_members(members, map),
-            bases: map_bases(bases, map),
-            incomplete: *incomplete,
-        },
-        TypeKind::Union {
-            members,
-            incomplete,
-        } => TypeKind::Union {
-            members: map_members(members, map),
-            incomplete: *incomplete,
-        },
+) {
+    match &mut info.kind {
+        TypeKind::Enumeration { underlying, .. } => map_optional(underlying, map),
+        TypeKind::Pointer { target, .. } | TypeKind::Named { target, .. } => {
+            map_optional(target, map);
+        }
+        TypeKind::Reference { target, .. } | TypeKind::Modified { target, .. } => {
+            *target = map(*target);
+        }
+        TypeKind::Array { element, .. } | TypeKind::Slice { element, .. } => {
+            *element = map(*element);
+        }
+        TypeKind::Record { members, bases, .. } => {
+            map_members(members, map);
+            map_bases(bases, map);
+        }
+        TypeKind::Union { members, .. } => map_members(members, map),
         TypeKind::Variant {
-            storage,
             common_members,
             bases,
             discriminant,
             variants,
-            incomplete,
-        } => TypeKind::Variant {
-            storage: *storage,
-            common_members: map_members(common_members, map),
-            bases: map_bases(bases, map),
-            discriminant: Box::new(match discriminant.as_ref() {
-                VariantDiscriminant::Stored(member) => {
-                    VariantDiscriminant::Stored(map_member(member, map))
+            ..
+        } => {
+            map_members(common_members, map);
+            map_bases(bases, map);
+            match discriminant.as_mut() {
+                VariantDiscriminant::Stored(member) => member.type_ref = map(member.type_ref),
+                VariantDiscriminant::TagType(target) => *target = map(*target),
+                VariantDiscriminant::Absent => {}
+            }
+            if !variants.is_empty() {
+                for variant in Arc::make_mut(variants) {
+                    map_members(&mut variant.members, map);
                 }
-                VariantDiscriminant::TagType(target) => VariantDiscriminant::TagType(map(*target)),
-                VariantDiscriminant::Absent => VariantDiscriminant::Absent,
-            }),
-            variants: variants
-                .iter()
-                .map(|variant| Variant {
-                    name: variant.name.clone(),
-                    selection: variant.selection.clone(),
-                    members: map_members(&variant.members, map),
-                })
-                .collect(),
-            incomplete: *incomplete,
-        },
-        TypeKind::Modified { modifier, target } => TypeKind::Modified {
-            modifier: *modifier,
-            target: map(*target),
-        },
-        TypeKind::Named {
-            target,
-            relationship,
-        } => TypeKind::Named {
-            target: target.map(&mut *map),
-            relationship: *relationship,
-        },
+            }
+        }
         TypeKind::Signature {
             returns,
             parameters,
-            variadic,
-            prototyped,
-        } => TypeKind::Signature {
-            returns: returns.map(&mut *map),
-            parameters: parameters.iter().map(|parameter| map(*parameter)).collect(),
-            variadic: *variadic,
-            prototyped: *prototyped,
-        },
-        kind @ (TypeKind::Base(_)
+            ..
+        } => {
+            map_optional(returns, map);
+            if !parameters.is_empty() {
+                for parameter in Arc::make_mut(parameters) {
+                    *parameter = map(*parameter);
+                }
+            }
+        }
+        TypeKind::Base(_)
         | TypeKind::Unspecified
         | TypeKind::Function
-        | TypeKind::Opaque { .. }) => kind.clone(),
-    };
-    let identity = info.identity.as_ref().map(|identity| {
-        if identity
+        | TypeKind::Opaque { .. } => {}
+    }
+    if let Some(identity) = &mut info.identity
+        && identity
             .arguments
             .iter()
             .any(|argument| matches!(argument, TypeArgument::Type(_)))
-        {
-            Arc::new(TypeIdentity {
-                arguments: identity
-                    .arguments
-                    .iter()
-                    .map(|argument| match argument {
-                        TypeArgument::Type(reference) => TypeArgument::Type(map(*reference)),
-                        other => other.clone(),
-                    })
-                    .collect(),
-                ..TypeIdentity::clone(identity)
-            })
-        } else {
-            Arc::clone(identity)
+    {
+        for argument in Arc::make_mut(&mut Arc::make_mut(identity).arguments) {
+            if let TypeArgument::Type(reference) = argument {
+                *reference = map(*reference);
+            }
         }
-    });
-    TypeInfo {
-        reference: info.reference,
-        name: Arc::clone(&info.name),
-        byte_size: info.byte_size,
-        kind,
-        identity,
     }
 }
 
-fn map_member(
-    member: &RecordMember,
+fn map_optional(
+    reference: &mut Option<TypeReference>,
     map: &mut impl FnMut(TypeReference) -> TypeReference,
-) -> RecordMember {
-    RecordMember {
-        type_ref: map(member.type_ref),
-        ..member.clone()
+) {
+    if let Some(reference) = reference {
+        *reference = map(*reference);
     }
 }
 
-/// `members` with each reference mapped; an empty list stays itself.
+/// Maps each member's reference; an empty list, which types share, stays
+/// itself.
 fn map_members(
-    members: &Arc<[RecordMember]>,
+    members: &mut Arc<[RecordMember]>,
     map: &mut impl FnMut(TypeReference) -> TypeReference,
-) -> Arc<[RecordMember]> {
-    if members.is_empty() {
-        return Arc::clone(members);
+) {
+    if !members.is_empty() {
+        for member in Arc::make_mut(members) {
+            member.type_ref = map(member.type_ref);
+        }
     }
-    members
-        .iter()
-        .map(|member| map_member(member, map))
-        .collect()
 }
 
-fn map_bases(
-    bases: &Arc<[BaseClass]>,
-    map: &mut impl FnMut(TypeReference) -> TypeReference,
-) -> Arc<[BaseClass]> {
-    if bases.is_empty() {
-        return Arc::clone(bases);
+fn map_bases(bases: &mut Arc<[BaseClass]>, map: &mut impl FnMut(TypeReference) -> TypeReference) {
+    if !bases.is_empty() {
+        for base in Arc::make_mut(bases) {
+            base.type_ref = map(base.type_ref);
+        }
     }
-    bases
-        .iter()
-        .map(|base| BaseClass {
-            type_ref: map(base.type_ref),
-            ..base.clone()
-        })
-        .collect()
 }
 
 #[cfg(test)]
