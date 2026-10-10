@@ -954,6 +954,8 @@ pub enum SourceLanguage {
     D,
     /// Nim, whose units are the C it compiles each module to.
     Nim,
+    /// Ada, of any standard.
+    Ada,
     /// Another language, by its DWARF language code.
     Other(u16),
     /// The unit does not say.

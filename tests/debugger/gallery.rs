@@ -818,3 +818,19 @@ async fn nim_values_agree_with_their_program() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn ada_values_agree_with_their_program() {
+    for (fixture, optimized) in [("values-ada-o0", false), ("values-ada-o2", true)] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["values__reached"],
+            checkpoints: &["scalars", "records", "strings"],
+            optimized,
+            required: &[],
+            reserved: &["C", "S", "T"],
+            unknown: &[],
+        })
+        .await;
+    }
+}

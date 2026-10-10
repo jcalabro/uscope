@@ -160,6 +160,10 @@ pub(in crate::debug_info) const fn source_language(
         | gimli::DW_LANG_Fortran08
         | gimli::DW_LANG_Fortran18 => SourceLanguage::Fortran,
         gimli::DW_LANG_D => SourceLanguage::D,
+        gimli::DW_LANG_Ada83
+        | gimli::DW_LANG_Ada95
+        | gimli::DW_LANG_Ada2005
+        | gimli::DW_LANG_Ada2012 => SourceLanguage::Ada,
         other => SourceLanguage::Other(other.0),
     }
 }
