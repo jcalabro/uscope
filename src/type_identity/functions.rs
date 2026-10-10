@@ -43,6 +43,14 @@ pub fn packaged_name(
     Some((package, local))
 }
 
+/// Splits an Ada subprogram's name into the library unit that holds it,
+/// as its package, and its name within the unit: `values.add` is `add`
+/// within `values`. A library-level subprogram is a unit of its own.
+pub fn ada_packaged_name(name: &str) -> Option<(&str, String)> {
+    let (unit, local) = name.split_once('.')?;
+    Some((unit, local.to_owned()))
+}
+
 /// A location's text with every receiver's pointer mark and parentheses
 /// removed, to compare with qualified local names. A location that spells
 /// type arguments names only the function named exactly so.

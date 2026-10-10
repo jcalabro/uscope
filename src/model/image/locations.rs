@@ -45,6 +45,9 @@ pub(super) fn packaged_names<'a>(
     functions
         .iter()
         .map(|function| {
+            if function.language == SourceLanguage::Ada {
+                return functions::ada_packaged_name(&function.name);
+            }
             functions::packaged_name(&function.name, NameSyntax::of(function.language), |path| {
                 paths.contains(path)
             })

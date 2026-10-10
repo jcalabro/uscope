@@ -16,6 +16,12 @@ pub enum Language {
     Rust,
     Go,
     Zig,
+    Odin,
+    /// Fortran's free form.
+    Fortran,
+    D,
+    Nim,
+    Ada,
 }
 
 const C_KEYWORDS: &[&str] = &[
@@ -240,6 +246,359 @@ const ZIG_KEYWORDS: &[&str] = &[
     "while",
 ];
 
+const ODIN_KEYWORDS: &[&str] = &[
+    "asm",
+    "auto_cast",
+    "bit_set",
+    "break",
+    "case",
+    "cast",
+    "context",
+    "continue",
+    "defer",
+    "distinct",
+    "do",
+    "dynamic",
+    "else",
+    "enum",
+    "fallthrough",
+    "false",
+    "for",
+    "foreign",
+    "if",
+    "import",
+    "in",
+    "map",
+    "matrix",
+    "nil",
+    "not_in",
+    "or_break",
+    "or_continue",
+    "or_else",
+    "or_return",
+    "package",
+    "proc",
+    "return",
+    "struct",
+    "switch",
+    "transmute",
+    "true",
+    "typeid",
+    "union",
+    "using",
+    "when",
+    "where",
+];
+const FORTRAN_KEYWORDS: &[&str] = &[
+    "allocatable",
+    "allocate",
+    "associate",
+    "block",
+    "call",
+    "case",
+    "character",
+    "class",
+    "close",
+    "complex",
+    "contains",
+    "contiguous",
+    "cycle",
+    "data",
+    "deallocate",
+    "default",
+    "dimension",
+    "do",
+    "elemental",
+    "else",
+    "elseif",
+    "end",
+    "enddo",
+    "endif",
+    "exit",
+    "external",
+    "function",
+    "goto",
+    "if",
+    "implicit",
+    "in",
+    "inout",
+    "integer",
+    "intent",
+    "interface",
+    "intrinsic",
+    "logical",
+    "module",
+    "none",
+    "nullify",
+    "only",
+    "open",
+    "optional",
+    "out",
+    "parameter",
+    "pointer",
+    "print",
+    "private",
+    "procedure",
+    "program",
+    "public",
+    "pure",
+    "read",
+    "real",
+    "recursive",
+    "result",
+    "return",
+    "save",
+    "select",
+    "stop",
+    "subroutine",
+    "target",
+    "then",
+    "type",
+    "use",
+    "value",
+    "where",
+    "while",
+    "write",
+];
+const D_KEYWORDS: &[&str] = &[
+    "abstract",
+    "alias",
+    "align",
+    "asm",
+    "assert",
+    "auto",
+    "bool",
+    "break",
+    "byte",
+    "case",
+    "cast",
+    "catch",
+    "char",
+    "class",
+    "const",
+    "continue",
+    "dchar",
+    "debug",
+    "default",
+    "delegate",
+    "delete",
+    "deprecated",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "export",
+    "extern",
+    "false",
+    "final",
+    "finally",
+    "float",
+    "for",
+    "foreach",
+    "foreach_reverse",
+    "function",
+    "goto",
+    "if",
+    "immutable",
+    "import",
+    "in",
+    "inout",
+    "int",
+    "interface",
+    "invariant",
+    "is",
+    "lazy",
+    "long",
+    "mixin",
+    "module",
+    "new",
+    "nothrow",
+    "null",
+    "out",
+    "override",
+    "package",
+    "pragma",
+    "private",
+    "protected",
+    "public",
+    "pure",
+    "real",
+    "ref",
+    "return",
+    "scope",
+    "shared",
+    "short",
+    "static",
+    "struct",
+    "super",
+    "switch",
+    "synchronized",
+    "template",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeid",
+    "typeof",
+    "ubyte",
+    "uint",
+    "ulong",
+    "union",
+    "unittest",
+    "ushort",
+    "version",
+    "void",
+    "wchar",
+    "while",
+    "with",
+];
+const NIM_KEYWORDS: &[&str] = &[
+    "addr",
+    "and",
+    "as",
+    "asm",
+    "bind",
+    "block",
+    "break",
+    "case",
+    "cast",
+    "concept",
+    "const",
+    "continue",
+    "converter",
+    "defer",
+    "discard",
+    "distinct",
+    "div",
+    "do",
+    "elif",
+    "else",
+    "end",
+    "enum",
+    "except",
+    "export",
+    "false",
+    "finally",
+    "for",
+    "from",
+    "func",
+    "if",
+    "import",
+    "in",
+    "include",
+    "interface",
+    "is",
+    "isnot",
+    "iterator",
+    "let",
+    "macro",
+    "method",
+    "mixin",
+    "mod",
+    "nil",
+    "not",
+    "notin",
+    "object",
+    "of",
+    "or",
+    "out",
+    "proc",
+    "ptr",
+    "raise",
+    "ref",
+    "return",
+    "shl",
+    "shr",
+    "static",
+    "template",
+    "true",
+    "try",
+    "tuple",
+    "type",
+    "using",
+    "var",
+    "when",
+    "while",
+    "xor",
+    "yield",
+];
+const ADA_KEYWORDS: &[&str] = &[
+    "abort",
+    "abs",
+    "abstract",
+    "accept",
+    "access",
+    "aliased",
+    "all",
+    "and",
+    "array",
+    "at",
+    "begin",
+    "body",
+    "case",
+    "constant",
+    "declare",
+    "delay",
+    "delta",
+    "digits",
+    "do",
+    "else",
+    "elsif",
+    "end",
+    "entry",
+    "exception",
+    "exit",
+    "for",
+    "function",
+    "generic",
+    "goto",
+    "if",
+    "in",
+    "interface",
+    "is",
+    "limited",
+    "loop",
+    "mod",
+    "new",
+    "not",
+    "null",
+    "of",
+    "or",
+    "others",
+    "out",
+    "overriding",
+    "package",
+    "parallel",
+    "pragma",
+    "private",
+    "procedure",
+    "protected",
+    "raise",
+    "range",
+    "record",
+    "rem",
+    "renames",
+    "requeue",
+    "return",
+    "reverse",
+    "select",
+    "separate",
+    "some",
+    "subtype",
+    "synchronized",
+    "tagged",
+    "task",
+    "terminate",
+    "then",
+    "type",
+    "until",
+    "use",
+    "when",
+    "while",
+    "with",
+    "xor",
+];
+
 impl Language {
     /// The language a file's extension names. A `.h` header is C's.
     pub fn of(path: &Path) -> Option<Self> {
@@ -251,6 +610,13 @@ impl Language {
             "rs" => Self::Rust,
             "go" => Self::Go,
             "zig" => Self::Zig,
+            "odin" => Self::Odin,
+            "f90" | "F90" | "f95" | "F95" | "f03" | "F03" | "f08" | "F08" | "f18" | "F18" => {
+                Self::Fortran
+            }
+            "d" | "di" => Self::D,
+            "nim" | "nims" => Self::Nim,
+            "adb" | "ads" => Self::Ada,
             _ => return None,
         })
     }
@@ -262,7 +628,45 @@ impl Language {
             Self::Rust => RUST_KEYWORDS,
             Self::Go => GO_KEYWORDS,
             Self::Zig => ZIG_KEYWORDS,
+            Self::Odin => ODIN_KEYWORDS,
+            Self::Fortran => FORTRAN_KEYWORDS,
+            Self::D => D_KEYWORDS,
+            Self::Nim => NIM_KEYWORDS,
+            Self::Ada => ADA_KEYWORDS,
         }
+    }
+
+    /// Whether a keyword is one in any case.
+    const fn ignores_case(self) -> bool {
+        matches!(self, Self::Fortran | Self::Ada)
+    }
+
+    /// What begins a comment that runs to the line's end.
+    const fn line_comment(self) -> &'static [u8] {
+        match self {
+            Self::Fortran => b"!",
+            Self::Nim => b"#",
+            Self::Ada => b"--",
+            _ => b"//",
+        }
+    }
+
+    /// The block comments: what opens and closes each, and whether they
+    /// nest.
+    const fn block_comments(self) -> &'static [(&'static [u8], &'static [u8], bool)] {
+        match self {
+            Self::C | Self::Cpp | Self::Go => &[(b"/*", b"*/", false)],
+            Self::Rust | Self::Odin => &[(b"/*", b"*/", true)],
+            Self::D => &[(b"/*", b"*/", false), (b"/+", b"+/", true)],
+            Self::Nim => &[(b"#[", b"]#", true)],
+            Self::Zig | Self::Fortran | Self::Ada => &[],
+        }
+    }
+
+    /// Whether a quote within a string is written twice, rather than
+    /// escaped with a backslash.
+    const fn doubles_quotes(self) -> bool {
+        matches!(self, Self::Fortran | Self::Ada)
     }
 }
 
@@ -374,16 +778,20 @@ fn tokens(text: &[u8], language: Language) -> Vec<Span> {
         let byte = text[index];
         let previous_is_identifier = index > 0 && is_identifier(text[index - 1]);
         let start = index;
-        let kind = if starts(index, b"//") {
-            index = memchr(text, index, b'\n');
+        let block = language
+            .block_comments()
+            .iter()
+            .find(|(open, _, _)| starts(index, open));
+        let kind = if let Some((open, close, nests)) = block {
+            index = block_comment_end(text, index, open, close, *nests);
             Some(Kind::Comment)
-        } else if starts(index, b"/*") && language != Language::Zig {
-            index = block_comment_end(text, index, language == Language::Rust);
+        } else if starts(index, language.line_comment()) {
+            index = memchr(text, index, b'\n');
             Some(Kind::Comment)
         } else if language == Language::Zig && starts(index, b"\\\\") {
             index = memchr(text, index, b'\n');
             Some(Kind::String)
-        } else if language == Language::Go && byte == b'`' {
+        } else if matches!(language, Language::Go | Language::Odin | Language::D) && byte == b'`' {
             index = memchr(text, index + 1, b'`')
                 .saturating_add(1)
                 .min(text.len());
@@ -394,8 +802,17 @@ fn tokens(text: &[u8], language: Language) -> Vec<Span> {
         {
             index = end;
             Some(Kind::String)
-        } else if byte == b'"' {
-            index = quoted_end(text, index, b'"', language == Language::Rust);
+        } else if byte == b'"' || byte == b'\'' && language == Language::Fortran {
+            index = if language.doubles_quotes() {
+                doubled_end(text, index, byte)
+            } else {
+                quoted_end(
+                    text,
+                    index,
+                    b'"',
+                    matches!(language, Language::Rust | Language::D),
+                )
+            };
             Some(Kind::String)
         } else if byte == b'\'' {
             if let Some(end) = character_end(text, index, language) {
@@ -414,7 +831,15 @@ fn tokens(text: &[u8], language: Language) -> Vec<Span> {
                 index += 1;
             }
             let word = std::str::from_utf8(&text[start..index]).unwrap_or_default();
-            language.keywords().contains(&word).then_some(Kind::Keyword)
+            let keyword = if language.ignores_case() {
+                language
+                    .keywords()
+                    .iter()
+                    .any(|keyword| keyword.eq_ignore_ascii_case(word))
+            } else {
+                language.keywords().contains(&word)
+            };
+            keyword.then_some(Kind::Keyword)
         } else if byte == b'#' && line_start && matches!(language, Language::C | Language::Cpp) {
             // A preprocessor directive's name.
             index += 1;
@@ -449,17 +874,18 @@ fn memchr(text: &[u8], from: usize, byte: u8) -> usize {
         .map_or(text.len(), |offset| from + offset)
 }
 
-/// Where a block comment opened at `start` ends; Rust's nest.
-fn block_comment_end(text: &[u8], start: usize, nests: bool) -> usize {
+/// Where a block comment opened at `start` by `open` ends, at `close`,
+/// counting those it holds when they nest.
+fn block_comment_end(text: &[u8], start: usize, open: &[u8], close: &[u8], nests: bool) -> usize {
     let mut depth = 0;
     let mut index = start;
     while index < text.len() {
-        if text[index..].starts_with(b"/*") && (nests || depth == 0) {
+        if text[index..].starts_with(open) && (nests || depth == 0) {
             depth += 1;
-            index += 2;
-        } else if text[index..].starts_with(b"*/") {
+            index += open.len();
+        } else if text[index..].starts_with(close) {
             depth -= 1;
-            index += 2;
+            index += close.len();
             if depth == 0 {
                 return index;
             }
@@ -486,9 +912,31 @@ const fn quoted_end(text: &[u8], start: usize, quote: u8, spans_lines: bool) -> 
     text.len()
 }
 
+/// Where a string quoted by `quote` from `start` ends, after its closing
+/// quote, in a language that writes a quote within it twice. It ends with
+/// its line.
+fn doubled_end(text: &[u8], start: usize, quote: u8) -> usize {
+    let mut index = start + 1;
+    while index < text.len() {
+        match text[index] {
+            b'\n' => return index,
+            byte if byte == quote && text.get(index + 1) == Some(&quote) => index += 2,
+            byte if byte == quote => return index + 1,
+            _ => index += 1,
+        }
+    }
+    text.len()
+}
+
 /// Where a character literal from `start` ends, or `None` for a Rust
-/// lifetime, which also begins with a quote.
+/// lifetime or an Ada attribute, which also begin with a quote.
 fn character_end(text: &[u8], start: usize, language: Language) -> Option<usize> {
+    if language == Language::Ada {
+        // One character between quotes, and not after a name, whose quote
+        // begins an attribute.
+        let after_name = start > 0 && (is_identifier(text[start - 1]) || text[start - 1] == b')');
+        return (!after_name && text.get(start + 2) == Some(&b'\'')).then_some(start + 3);
+    }
     if language != Language::Rust {
         return Some(quoted_end(text, start, b'\'', false));
     }
@@ -551,6 +999,18 @@ fn raw_string_end(text: &[u8], start: usize, language: Language) -> Option<usize
                 find(text, delimiter_end + 1, &closing)
                     .map_or(text.len(), |end| end + closing.len()),
             )
+        }
+        Language::D | Language::Nim if text[start..].starts_with(b"r\"") => {
+            Some(find(text, start + 2, b"\"").map_or(text.len(), |end| end + 1))
+        }
+        Language::Nim if text[start..].starts_with(b"\"\"\"") => {
+            // It ends at the last of the quotes that close it.
+            let close = find(text, start + 3, b"\"\"\"").map_or(text.len(), |end| end + 3);
+            let extra = text[close.min(text.len())..]
+                .iter()
+                .take_while(|byte| **byte == b'"')
+                .count();
+            Some(close + extra)
         }
         _ => None,
     }
@@ -688,6 +1148,68 @@ mod tests {
             [
                 of(&[("char", Keyword), ("\"open", String)]),
                 of(&[("int", Keyword)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_language_has_its_own_comments_strings_and_case() {
+        use Kind::{Comment, Keyword, Number, String};
+        // Odin's block comments nest, and its raw strings are Go's.
+        let odin = "/* a /* b */ c */ x := `r\ns` // done";
+        assert_eq!(
+            shown(odin, Language::Odin),
+            [
+                of(&[("/* a /* b */ c */", Comment), ("`r", String)]),
+                of(&[("s`", String), ("// done", Comment)]),
+            ]
+        );
+        // Fortran's keywords are any case, its comments begin with `!`, and
+        // a quote is doubled within its string.
+        let fortran = "INTEGER :: n = 3 ! three\nprint *, 'it''s'";
+        assert_eq!(
+            shown(fortran, Language::Fortran),
+            [
+                of(&[("INTEGER", Keyword), ("3", Number), ("! three", Comment)]),
+                of(&[("print", Keyword), ("'it''s'", String)]),
+            ]
+        );
+        // D's `/+` comments nest; its strings span lines.
+        let d = "/+ a /+ b +/ c +/ auto s = \"one\ntwo\";";
+        assert_eq!(
+            shown(d, Language::D),
+            [
+                of(&[
+                    ("/+ a /+ b +/ c +/", Comment),
+                    ("auto", Keyword),
+                    ("\"one", String)
+                ]),
+                of(&[("two\"", String)]),
+            ]
+        );
+        // Nim's comments begin with `#`, its block comments nest, and its
+        // triple-quoted strings span lines.
+        let nim = "#[ a #[ b ]# ]# let s = \"\"\"one\n\"two\"\"\"\" # done";
+        assert_eq!(
+            shown(nim, Language::Nim),
+            [
+                of(&[
+                    ("#[ a #[ b ]# ]#", Comment),
+                    ("let", Keyword),
+                    ("\"\"\"one", String)
+                ]),
+                of(&[("\"two\"\"\"\"", String), ("# done", Comment)]),
+            ]
+        );
+        // Ada's keywords are any case and its comments begin with `--`; a
+        // quote after a name begins an attribute, not a character.
+        let ada =
+            "Last : Integer := Items'Last; -- end\nC : Character := 'q'; S : String := \"a\"\"b\";";
+        assert_eq!(
+            shown(ada, Language::Ada),
+            [
+                of(&[("-- end", Comment)]),
+                of(&[("'q'", String), ("\"a\"\"b\"", String)]),
             ]
         );
     }

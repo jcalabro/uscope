@@ -786,12 +786,25 @@ pub enum TypeKind {
         element: TypeReference,
         /// Dimensions in source order.
         dimensions: Arc<[ArrayDimension]>,
+        /// Which dimension's elements are adjacent in memory.
+        ordering: ArrayOrdering,
+    },
+    /// An array whose bounds, or whose elements' place, the program decides
+    /// at run time, as a Fortran array's descriptor, an Ada array of an
+    /// unconstrained type, and a C variable-length array do. Reading a
+    /// value finds them; a C flexible array member's count is never known.
+    RuntimeArray {
+        element: TypeReference,
+        /// Dimensions in source order.
+        dimensions: Arc<[RuntimeDimension]>,
+        /// Which dimension's elements are adjacent in memory.
+        ordering: ArrayOrdering,
     },
     /// A language slice descriptor with a runtime element count.
     Slice {
         element: TypeReference,
-        /// Whether the descriptor includes a capacity field.
-        has_capacity: bool,
+        /// Which of the descriptor's words hold its parts.
+        words: SliceWords,
         /// Whether the elements are the language's text, as in Rust's `str`
         /// and Zig's `[]const u8`.
         text: bool,
@@ -868,6 +881,57 @@ pub enum TypeKind {
     },
 }
 
+/// Where a slice descriptor keeps its parts: each is one target word,
+/// counted in words from the descriptor's start. A descriptor may hold
+/// other words too, as an Odin dynamic array's allocator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SliceWords {
+    /// The pointer to the first element.
+    pub data: u8,
+    /// How many elements there are.
+    pub length: u8,
+    /// How many elements there is room for, when the descriptor says, as
+    /// Go's slices do.
+    pub capacity: Option<u8>,
+}
+
+impl SliceWords {
+    /// A pointer then a length, as Rust's and Zig's slices are.
+    pub const POINTER_LENGTH: Self = Self {
+        data: 0,
+        length: 1,
+        capacity: None,
+    };
+    /// A length then a pointer, as D's slices are.
+    pub const LENGTH_POINTER: Self = Self {
+        data: 1,
+        length: 0,
+        capacity: None,
+    };
+    /// A pointer, a length, then a capacity, as Go's slices are.
+    pub const POINTER_LENGTH_CAPACITY: Self = Self {
+        data: 0,
+        length: 1,
+        capacity: Some(2),
+    };
+
+    /// How many words the parts span, from the descriptor's start.
+    #[must_use]
+    pub fn span(self) -> u64 {
+        u64::from(self.data.max(self.length).max(self.capacity.unwrap_or(0))) + 1
+    }
+}
+
+/// How an array of several dimensions lays out its elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArrayOrdering {
+    /// Row by row, the last index varying fastest, as C's arrays are.
+    RowMajor,
+    /// Column by column, the first index varying fastest, as Fortran's
+    /// arrays are.
+    ColumnMajor,
+}
+
 /// One statically known array dimension.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArrayDimension {
@@ -875,6 +939,47 @@ pub struct ArrayDimension {
     pub lower_bound: i128,
     /// The number of elements in this dimension.
     pub count: u64,
+}
+
+/// One dimension of an array bounded at run time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RuntimeDimension {
+    /// The first index.
+    pub lower_bound: ArrayBound,
+    /// Where the dimension ends.
+    pub extent: ArrayExtent,
+    /// The distance in bytes from one element of the dimension to the
+    /// next, when the producer gives one rather than the elements being
+    /// adjacent.
+    pub byte_stride: Option<ArrayBound>,
+}
+
+/// Where a dimension of an array bounded at run time ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArrayExtent {
+    /// At its last index.
+    Upper(ArrayBound),
+    /// After its count of elements.
+    Count(ArrayBound),
+    /// Nowhere the producer says, as for a C flexible array member: its
+    /// elements are reached only by index.
+    Unknown,
+}
+
+/// A bound, count, or stride of an array bounded at run time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArrayBound {
+    /// Known when the program is loaded.
+    Constant(i128),
+    /// The value of an expression of the producer's, from where the array
+    /// is and the frame reading it, as an integer of `byte_size` bytes.
+    Computed { byte_size: u8, signed: bool },
+    /// What the program stored where an expression of the producer's says,
+    /// an integer of `byte_size` bytes.
+    Stored { byte_size: u8, signed: bool },
+    /// The value of the program's variable whose debugging entry is at
+    /// this offset in `.debug_info`.
+    Variable { debug_info_offset: u64 },
 }
 
 /// Immutable, normalized metadata for one type-graph node.
@@ -905,6 +1010,16 @@ pub enum SourceLanguage {
     Go,
     /// Zig, whichever backend produced it.
     Zig,
+    /// Odin, whose units say they are C99.
+    Odin,
+    /// Fortran, of any standard.
+    Fortran,
+    /// D.
+    D,
+    /// Nim, whose units are the C it compiles each module to.
+    Nim,
+    /// Ada, of any standard.
+    Ada,
     /// Another language, by its DWARF language code.
     Other(u16),
     /// The unit does not say.
@@ -1152,6 +1267,11 @@ pub enum VariableValue {
     ImplicitPointer,
     /// An array whose elements are available through explicit child pages.
     Array { dimensions: Arc<[ArrayDimension]> },
+    /// A Fortran allocatable array the program has not allocated.
+    NotAllocated,
+    /// A Fortran pointer to an array the program has not associated with
+    /// one.
+    NotAssociated,
     /// A decoded language slice whose elements are available through child pages.
     Slice {
         /// Runtime length from the descriptor.
@@ -1424,6 +1544,17 @@ pub struct ValueChildrenReference {
     pub(crate) active_variant: Option<usize>,
     /// The view whose children these are, rather than the stored value's.
     pub(crate) view: Option<ViewChildren>,
+    /// Where the elements of an array bounded at run time are, from its
+    /// storage, as its value found them.
+    pub(crate) placement: Option<Arc<ArrayPlacement>>,
+}
+
+/// The bounds and strides one value of an array bounded at run time has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayPlacement {
+    pub(crate) dimensions: Arc<[ArrayDimension]>,
+    /// Each dimension's distance in bytes between adjacent elements.
+    pub(crate) strides: Arc<[i64]>,
 }
 
 /// The view a children capability presents through: its elements, then its
@@ -1827,6 +1958,10 @@ pub enum ValueAccessUnavailableReason {
     /// Debug information does not describe what the closure a function
     /// value calls captured, or describes it malformedly.
     UndescribedClosure,
+    /// The debug information does not say how many elements an array has,
+    /// as for a C flexible array member, so only its elements by index
+    /// are values.
+    UnknownLength,
     /// An implicit-pointer view falls outside its referenced source object.
     ImplicitPointerOutOfBounds {
         /// Signed byte offset into the referenced object.
@@ -1994,6 +2129,9 @@ impl fmt::Display for VariableUnavailableReason {
             }
             Self::ValueAccess(ValueAccessUnavailableReason::NullPointer) => {
                 formatter.write_str("cannot dereference a null pointer")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::UnknownLength) => {
+                formatter.write_str("the array's length is not described; index its elements")
             }
             Self::ValueAccess(ValueAccessUnavailableReason::AddressOverflow) => {
                 formatter.write_str("value address arithmetic overflowed")
@@ -2950,6 +3088,10 @@ pub struct FunctionInfo {
     /// future it polls `T`. Empty for a function that is not generic, or
     /// whose debug information names none.
     pub generics: FunctionGenerics,
+    /// Whether the function is the program's main subprogram, which a
+    /// language's runtime enters from a C `main` of its own, as gfortran's
+    /// `MAIN__` is. The name `main` finds it too.
+    pub main_subprogram: bool,
 }
 
 /// A generic function's type arguments, each with its parameter's name.
@@ -3396,7 +3538,7 @@ pub struct SymbolLocation {
 }
 
 impl SymbolInfo {
-    /// Returns the source-level spelling of a Rust or C++ mangled name, or
+    /// Returns the source-level spelling of a Rust, C++, or D mangled name, or
     /// `None` when the name is not mangled in a recognized scheme.
     #[must_use]
     pub fn demangled_name(&self) -> Option<String> {
@@ -3426,7 +3568,7 @@ impl SymbolInfo {
 }
 
 impl SymbolLocation {
-    /// Returns the source-level spelling of a Rust or C++ mangled name, or
+    /// Returns the source-level spelling of a Rust, C++, or D mangled name, or
     /// `None` when the name is not mangled in a recognized scheme.
     #[must_use]
     pub fn demangled_name(&self) -> Option<String> {

@@ -847,9 +847,10 @@ fn suits(format: BoundFormat, ty: &Ty, types: &dyn TypeSource) -> Result<(), Str
         | BoundFormat::Duration(_)
         | BoundFormat::Time(_) => matches!(category, Category::Integer { .. }),
         BoundFormat::Bytes => matches!(ty, Ty::Program(_)),
+        // An element may be named, as C's `uint8_t` names `unsigned char`.
         BoundFormat::Utf8 => match category {
             Category::Array { element, .. } | Category::Slice(element) => {
-                types.type_info(element).is_some_and(|info| {
+                representation(types, element).is_ok_and(|(_, info)| {
                     matches!(&info.kind, TypeKind::Base(base) if base.byte_size == 1
                         && !matches!(base.encoding, BaseTypeEncoding::Boolean | BaseTypeEncoding::Floating))
                 })
@@ -857,9 +858,8 @@ fn suits(format: BoundFormat, ty: &Ty, types: &dyn TypeSource) -> Result<(), Str
             _ => false,
         },
         BoundFormat::Utf16 => match category {
-            Category::Array { element, .. } => types
-                .type_info(element)
-                .is_some_and(|info| info.byte_size == Some(2)),
+            Category::Array { element, .. } => representation(types, element)
+                .is_ok_and(|(_, info)| info.byte_size == Some(2)),
             _ => false,
         },
     };

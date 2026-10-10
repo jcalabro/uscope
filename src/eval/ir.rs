@@ -115,7 +115,8 @@ pub enum Conversion {
 /// How `len` measures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Length {
-    /// A slice's run-time length.
+    /// A slice's run-time length, or the first dimension's of an array
+    /// bounded at run time.
     Slice,
     /// The length in bytes of text.
     Text,

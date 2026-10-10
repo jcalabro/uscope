@@ -17,11 +17,11 @@
 //! any integer takes the next of rax and rdx, and one of only floats the
 //! next of xmm0 and xmm1. A `long double` is in st0. A larger value, and a
 //! C++ class its producer says calls pass by reference, is in memory the
-//! caller provides, whose address the function returns in rax. Rust and Zig
-//! leave their own conventions unspecified, so only their scalars, which
-//! LLVM and Zig return as C does, are known, and Rust's values of two
-//! scalars, which rustc returns as LLVM returns a pair: each scalar in the
-//! next register of its class.
+//! caller provides, whose address the function returns in rax. Rust, Zig,
+//! Odin, Fortran, D, and Ada leave their own conventions unspecified, so
+//! only their scalars, which LLVM and GCC return as C does, are known, and
+//! Rust's values of two scalars, which rustc returns as LLVM returns a
+//! pair: each scalar in the next register of its class.
 //!
 //! LLVM may change how a function no other module calls returns, such as
 //! dropping a part no caller reads, and then marks it `DW_CC_nocall`: what
@@ -404,7 +404,7 @@ impl DwarfVariableInfo {
                 return self.rust_pair_parts(ty);
             }
             TypeKind::Record { .. } | TypeKind::Union { .. } => match language {
-                SourceLanguage::C => true,
+                SourceLanguage::C | SourceLanguage::Nim => true,
                 SourceLanguage::Cpp => match self.type_facts().passed_by_value(id) {
                     Some(true) => true,
                     Some(false) => return Ok(memory),
@@ -619,6 +619,7 @@ impl DwarfVariableInfo {
             TypeKind::Array {
                 element,
                 dimensions,
+                ..
             } => {
                 let count = dimensions
                     .iter()
@@ -745,13 +746,14 @@ impl Assignment {
                 self.integer(offset, representation.byte_size, parts)
             }
             TypeKind::Pointer { .. } | TypeKind::Function => self.integer(offset, WORD, parts),
-            TypeKind::Slice { has_capacity, .. } => {
-                let words = if *has_capacity { 3 } else { 2 };
+            TypeKind::Slice { .. } => {
+                let words = resolved.byte_size.ok_or(Unassigned::Stack)? / WORD;
                 (0..words).try_for_each(|word| self.integer(offset + word * WORD, WORD, parts))
             }
             TypeKind::Array {
                 element,
                 dimensions,
+                ..
             } => match dimensions
                 .iter()
                 .try_fold(1_u64, |count, dimension| count.checked_mul(dimension.count))

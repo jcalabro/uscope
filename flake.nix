@@ -46,6 +46,21 @@
       muslClang = pkgs.writeShellScriptBin "musl-clang" ''
         exec ${musl64.buildPackages.clang}/bin/x86_64-unknown-linux-musl-clang "$@"
       '';
+      # GNU Fortran, alone: its wrapper's own gcc and binutils would shadow
+      # the shell's.
+      gfortran = pkgs.writeShellScriptBin "gfortran" ''
+        exec ${pkgs.gfortran15}/bin/gfortran "$@"
+      '';
+      # LDC, alone: its package would add its runtime's headers and
+      # libraries to every C compile and link in the shell.
+      ldc2 = pkgs.writeShellScriptBin "ldc2" ''
+        exec ${pkgs.ldc}/bin/ldc2 "$@"
+      '';
+      # GNAT's gnatmake, which runs its own GCC, binder, and linker; the
+      # shell's GCC compiles no Ada.
+      gnatmake = pkgs.writeShellScriptBin "gnatmake" ''
+        PATH=${pkgs.gnat15}/bin:$PATH exec gnatmake "$@"
+      '';
       # The crates the tokio fixtures depend on, exactly as their lockfiles
       # name them, one for each tokio release they are built with, so that
       # building them fetches nothing.
@@ -95,6 +110,11 @@
           valgrind
           goStable
           zig
+          odin
+          gfortran
+          ldc2
+          nim
+          gnatmake
           pkg-config
           util-linux
           nodejs_24

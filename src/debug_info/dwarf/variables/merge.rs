@@ -107,6 +107,7 @@ pub(super) struct UnitTypes {
     record_member_declarations: Vec<AggregateMemberDeclaration>,
     dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, ExpressionId>,
     void_type: Option<TypeId>,
+    character_type: Option<TypeId>,
     limit_type: Option<TypeId>,
     budget: Meter,
     foreign: bool,
@@ -129,6 +130,7 @@ struct Frozen<'a, 'data> {
     passed_by_value: Layered<HashMap<TypeId, bool>>,
     byte_order: crate::ByteOrder,
     void_type: Option<TypeId>,
+    character_type: Option<TypeId>,
     budget: Meter,
 }
 
@@ -150,6 +152,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             passed_by_value: self.passed_by_value.split(),
             byte_order: self.byte_order,
             void_type: self.void_type,
+            character_type: self.character_type,
             budget: self.budget.remaining(),
         }
     }
@@ -178,6 +181,7 @@ impl<'data> Frozen<'_, 'data> {
             byte_order: self.byte_order,
             limit_type: None,
             void_type: self.void_type,
+            character_type: self.character_type,
             dynamic_record_layouts: HashMap::default(),
             pool,
             die_buffers,
@@ -214,10 +218,23 @@ impl TypeArenaBuilder<'_, '_> {
             record_member_declarations: self.record_member_declarations,
             dynamic_record_layouts: self.dynamic_record_layouts,
             void_type: self.void_type,
+            character_type: self.character_type,
             limit_type: self.limit_type,
             budget: self.budget,
             foreign: self.foreign,
         }
+    }
+
+    /// The types an arena makes once, `void` and the character of strings
+    /// that name none, that `unit` made, each with the one a unit before it
+    /// made since, if any: the unit made one only when its base had none.
+    fn made_once(&self, unit: &UnitTypes, base: usize) -> [(Option<TypeId>, Option<TypeId>); 2] {
+        let own_void = unit.void_type.filter(|id| id.index() >= base);
+        let own_character = unit.character_type.filter(|id| id.index() >= base);
+        [
+            (own_void, own_void.and(self.void_type)),
+            (own_character, own_character.and(self.character_type)),
+        ]
     }
 
     /// Adds the types a unit built apart after these, as building them
@@ -232,17 +249,18 @@ impl TypeArenaBuilder<'_, '_> {
             unit.limit_type.is_none_or(|id| id.index() < base),
             "a unit that exceeds the budget is walked in order"
         );
-        // The unit built `void` itself only when its base had none; a unit
-        // before it may have since.
-        let own_void = unit.void_type.filter(|id| id.index() >= base);
-        let shared_void = own_void.and(self.void_type);
+        let made = self.made_once(&unit, base);
+        let [(own_void, _), (own_character, _)] = made;
+        let shared = |own: usize| {
+            made.into_iter().find_map(|(made, before)| {
+                before.filter(|_| made.is_some_and(|id| id.index() == base + own))
+            })
+        };
         let mut next = self.entries.len();
         let ids = (0..unit.entries.len())
             .map(|own| {
-                if let Some(void) = shared_void
-                    && own_void.is_some_and(|id| id.index() == base + own)
-                {
-                    return void;
+                if let Some(before) = shared(own) {
+                    return before;
                 }
                 let id = TypeId::new(u32::try_from(next).expect("bounded type count fits u32"));
                 next += 1;
@@ -251,7 +269,7 @@ impl TypeArenaBuilder<'_, '_> {
             .collect::<Vec<_>>();
         let renumbered = Renumbered { base, ids };
         for (own, entry) in unit.entries.into_iter().enumerate() {
-            if shared_void.is_some() && own_void.is_some_and(|id| id.index() == base + own) {
+            if shared(own).is_some() {
                 continue;
             }
             self.entries.push(match entry {
@@ -267,6 +285,9 @@ impl TypeArenaBuilder<'_, '_> {
         }
         if self.void_type.is_none() {
             self.void_type = own_void.map(|id| renumbered.id(id));
+        }
+        if self.character_type.is_none() {
+            self.character_type = own_character.map(|id| renumbered.id(id));
         }
         for own in unit.explicit_names.iter() {
             let id = TypeId::new(u32::try_from(own).expect("bounded type count fits u32"));
@@ -426,6 +447,7 @@ struct Checkpoint {
     record_member_declarations: usize,
     dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, ExpressionId>,
     void_type: Option<TypeId>,
+    character_type: Option<TypeId>,
     budget: Meter,
     files: Files,
     pool: LocationsBuilder,
@@ -446,6 +468,7 @@ impl Checkpoint {
             record_member_declarations: types.record_member_declarations.len(),
             dynamic_record_layouts: types.dynamic_record_layouts.clone(),
             void_type: types.void_type,
+            character_type: types.character_type,
             budget: types.budget.clone(),
             files: files.clone(),
             pool: pool.clone(),
@@ -482,6 +505,7 @@ impl Checkpoint {
             .truncate(self.record_member_declarations);
         types.dynamic_record_layouts = self.dynamic_record_layouts;
         types.void_type = self.void_type;
+        types.character_type = self.character_type;
         types.budget = self.budget;
         *files = self.files;
         *pool = self.pool;

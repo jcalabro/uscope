@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 void barrier(void *fixture);
@@ -35,6 +36,13 @@ struct node {
     struct node *next;
 };
 
+// A record whose last member is a flexible array, as long as its count
+// says.
+struct tail {
+    int count;
+    int data[];
+};
+
 struct fixture {
     int8_t i8;
     uint8_t u8;
@@ -58,6 +66,7 @@ struct fixture {
     int grid[2][3];
     struct node nodes[3];
     struct node *head;
+    struct tail *tail;
     int *ip;
     int **ipp;
     const char *text;
@@ -114,7 +123,8 @@ static unsigned short static_value = 65535;
                (unsigned long long)significand_);                                 \
     } while (0)
 
-int main(void) {
+int main(int argc, char **argv) {
+    (void)argv;
     struct fixture f = {
         .i8 = -100,
         .u8 = 250,
@@ -151,6 +161,20 @@ int main(void) {
     f.head = &f.nodes[0];
     f.ip = &f.arr[2];
     f.ipp = &f.ip;
+    f.tail = malloc(sizeof *f.tail + 4 * sizeof f.tail->data[0]);
+    f.tail->count = 4;
+    for (int i = 0; i < f.tail->count; i++) {
+        f.tail->data[i] = 100 + i;
+    }
+    // Arrays as long as the program decides: argc is one.
+    int count = argc + 3;
+    int vla[count];
+    int vla_grid[2][count];
+    for (int i = 0; i < count; i++) {
+        vla[i] = i * i;
+        vla_grid[0][i] = i;
+        vla_grid[1][i] = 10 + i;
+    }
 
     EXPECT_INT("f.i8", f.i8);
     EXPECT_UINT("f.u8", f.u8);
@@ -240,7 +264,13 @@ int main(void) {
     EXPECT_UINT("f.anonymous_bits", f.anonymous_bits);
     EXPECT_INT("f.outer_half + f.deep_half", f.outer_half + f.deep_half);
     EXPECT_ADDRESS("&f.deep_half", &f.deep_half);
+    EXPECT_INT("f.tail->data[2]", f.tail->data[2]);
+    EXPECT_INT("f.tail->data[f.tail->count - 1]", f.tail->data[f.tail->count - 1]);
+    EXPECT_INT("vla[3]", vla[3]);
+    EXPECT_INT("len(vla)", count);
+    EXPECT_INT("vla_grid[1][2]", vla_grid[1][2]);
     fflush(stdout);
     barrier(&f);
+    __asm__ volatile("" : : "r"(vla), "r"(vla_grid) : "memory");
     return f.i32 == 0;
 }

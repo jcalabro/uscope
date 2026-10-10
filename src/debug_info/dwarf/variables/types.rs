@@ -11,13 +11,15 @@ use crate::debug_info::dwarf::{
     DieKey, DieMap, DieWalk, Reader, TypeSignatures, Units, die_reference_with_signatures,
     unit_dwarf,
 };
-use crate::model::ArrayDimension;
+use crate::image::type_facts::BoundPart;
+use crate::model::{ArrayDimension, ArrayOrdering};
 use crate::{
-    Accessibility, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, ByteOrder,
-    EnumerationOrigin, Enumerator, GoKind, IntegerValue, ModuleImageId, NamedTypeRelationship,
-    RecordKind, RecordMember, RecordMemberLayout, ReferenceKind, SourceLanguage, SourceLocation,
-    TypeId, TypeInfo, TypeKind, TypeModifier, TypeReference, Variant, VariantDiscriminant,
-    VariantSelection, VariantSelector, VariantStorageKind,
+    Accessibility, ArrayBound, ArrayExtent, BaseClass, BaseClassVirtuality, BaseType,
+    BaseTypeEncoding, ByteOrder, EnumerationOrigin, Enumerator, GoKind, IntegerValue,
+    ModuleImageId, NamedTypeRelationship, RecordKind, RecordMember, RecordMemberLayout,
+    ReferenceKind, RuntimeDimension, SliceWords, SourceLanguage, SourceLocation, TypeId, TypeInfo,
+    TypeKind, TypeModifier, TypeReference, Variant, VariantDiscriminant, VariantSelection,
+    VariantSelector, VariantStorageKind,
 };
 
 use super::codec::{complex_part, enumeration_constant};
@@ -29,7 +31,7 @@ use super::die::{
 };
 use super::identity::{
     GoParts, IdentityParts, ScopePath, ScopeSegment, go_embedded, inline_namespace_path,
-    scope_segment, source_language,
+    module_segments, produced_language, scope_segment, source_language,
 };
 use super::layered::{Layered, Marks, Rows};
 use super::location::copy_expression;
@@ -68,6 +70,8 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) limit_type: Option<TypeId>,
     /// The shared `void` that qualifiers and typedefs without a target name.
     pub(super) void_type: Option<TypeId>,
+    /// The character [`Self::character_type`] made, once it has.
+    pub(super) character_type: Option<TypeId>,
     pub(super) dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, ExpressionId>,
     /// Where every location is pooled.
     pub(super) pool: &'a std::sync::Mutex<super::location::LocationsBuilder>,
@@ -111,7 +115,8 @@ pub(super) struct TypeContext {
     /// convincing nonsense.
     pub(super) die_offsets: Vec<Bits>,
     pub(super) unit_languages: Vec<Option<gimli::DwLang>>,
-    pub(super) zig_units: Vec<bool>,
+    /// The language each unit's producer proves, where it does.
+    pub(super) produced_languages: Vec<Option<SourceLanguage>>,
     /// The scopes enclosing each type DIE that has any.
     pub(super) type_scopes: DieMap<ScopePath>,
     /// The declaration each out-of-line type definition completes.
@@ -194,7 +199,8 @@ const MEMBER_DECLARATION_CHUNK: usize = 1 << 15;
 struct UnitPrepass {
     offsets: Bits,
     language: Option<gimli::DwLang>,
-    zig_producer: bool,
+    /// The language the unit's producer or name proves, where it does.
+    produced: Option<SourceLanguage>,
     /// Each type DIE declared in a scope, and the scope's segments.
     scoped_types: Vec<(DieKey, Arc<[ScopeSegment]>)>,
     inline_namespaces: Vec<Vec<Arc<str>>>,
@@ -213,12 +219,13 @@ impl UnitPrepass {
         let mut prepass = Self {
             offsets: Bits::with_length(unit.header.length_including_self()),
             language: None,
-            zig_producer: false,
+            produced: None,
             scoped_types: Vec::new(),
             inline_namespaces: Vec::new(),
             definitions: Vec::new(),
         };
         let mut cpp = false;
+        let mut d = false;
         let mut first = true;
         let mut scopes = Vec::<(isize, ScopeSegment)>::new();
         // The path of the first `n` scopes at `n`, shared by the types
@@ -255,7 +262,13 @@ impl UnitPrepass {
                 scopes.push((depth, ScopeSegment::Function(key)));
                 continue;
             }
-            if !first && die.tag != gimli::DW_TAG_namespace && !is_type_die_tag(die.tag) {
+            // A D module scopes what it declares; Zig's names spell
+            // their own modules.
+            let scopes_or_names = first
+                || die.tag == gimli::DW_TAG_namespace
+                || (d && die.tag == gimli::DW_TAG_module)
+                || is_type_die_tag(die.tag);
+            if !scopes_or_names {
                 continue;
             }
             let Ok(entry) = walk.decode() else {
@@ -267,14 +280,17 @@ impl UnitPrepass {
                     Some(gimli::AttributeValue::Language(language)) => Some(language),
                     _ => units.inherited_language(unit_index),
                 };
-                prepass.zig_producer = entry
-                    .attr_value(gimli::DW_AT_producer)
-                    .and_then(|value| unit_dwarf(dwarf, unit).attr_string(unit, value).ok())
-                    .is_some_and(|producer| producer.to_string_lossy().starts_with("zig "));
-                cpp =
-                    source_language(prepass.language, prepass.zig_producer) == SourceLanguage::Cpp;
+                prepass.produced = unit_produced_language(dwarf, unit, entry);
+                cpp = source_language(prepass.language, prepass.produced) == SourceLanguage::Cpp;
+                d = source_language(prepass.language, prepass.produced) == SourceLanguage::D;
             }
-            if let Some(segment) = scope_segment(dwarf, unit, unit_index, entry, cpp) {
+            if entry.tag() == gimli::DW_TAG_module {
+                scopes.extend(
+                    module_segments(dwarf, unit, entry)
+                        .into_iter()
+                        .map(|segment| (depth, segment)),
+                );
+            } else if let Some(segment) = scope_segment(dwarf, unit, unit_index, entry, cpp) {
                 if let ScopeSegment::Inline(name) = &segment {
                     prepass
                         .inline_namespaces
@@ -303,6 +319,23 @@ impl UnitPrepass {
         }
         prepass
     }
+}
+
+/// The language a unit's producer or name proves, from its root DIE.
+fn unit_produced_language(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+    root: &gimli::DebuggingInformationEntry<Reader<'_>>,
+) -> Option<SourceLanguage> {
+    let text = |attribute| {
+        root.attr_value(attribute)
+            .and_then(|value| unit_dwarf(dwarf, unit).attr_string(unit, value).ok())
+            .map(|text| text.to_string_lossy())
+    };
+    produced_language(
+        text(gimli::DW_AT_producer).as_deref(),
+        text(gimli::DW_AT_name).as_deref(),
+    )
 }
 
 /// What the loader keeps of a finished type graph.
@@ -349,7 +382,57 @@ pub(super) enum DynamicAggregateChild {
     Member(usize),
     Base(usize),
     Discriminant,
-    VariantMember { variant: usize, member: usize },
+    VariantMember {
+        variant: usize,
+        member: usize,
+    },
+    /// A bound of a dimension of an array bounded at run time.
+    Bound {
+        dimension: usize,
+        part: crate::image::type_facts::BoundPart,
+    },
+    /// Where an array's elements are.
+    DataLocation,
+    /// Whether an array is allocated.
+    Allocated,
+    /// Whether an array is associated with storage.
+    Associated,
+}
+
+/// `DW_OP_push_object_address; DW_OP_deref`: the address the value's
+/// first word holds.
+const DEREFERENCE_OBJECT: [u8; 2] = [gimli::DW_OP_push_object_address.0, gimli::DW_OP_deref.0];
+
+/// A subrange's bound, count, or stride, as its attribute gives it.
+pub(super) enum SubrangeBound<'data> {
+    Constant(i128),
+    /// The value of an expression.
+    Computed {
+        expression: gimli::Expression<Reader<'data>>,
+        byte_size: u8,
+        signed: bool,
+    },
+    /// What the program stored where an expression says.
+    Stored {
+        expression: gimli::Expression<Reader<'data>>,
+        byte_size: u8,
+    },
+    /// The value of the variable at this offset in `.debug_info`.
+    Variable(u64),
+}
+
+/// A subrange's lower bound, where it ends, and its byte stride.
+type Subrange<'data> = (
+    SubrangeBound<'data>,
+    Extent<'data>,
+    Option<SubrangeBound<'data>>,
+);
+
+/// Where a subrange ends.
+pub(super) enum Extent<'data> {
+    Upper(SubrangeBound<'data>),
+    Count(SubrangeBound<'data>),
+    Unknown,
 }
 
 /// Whether an aggregate's child DIE describes its scope, such as a method,
@@ -410,7 +493,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             .collect::<Vec<_>>();
         let mut die_offsets = Vec::with_capacity(units.len());
         let mut unit_languages = Vec::with_capacity(units.len());
-        let mut zig_units = Vec::with_capacity(units.len());
+        let mut produced_languages = Vec::with_capacity(units.len());
         let mut type_definitions = DieMap::default();
         let mut definition_declarations = DieMap::default();
         let mut ambiguous_type_declarations = DieMap::default();
@@ -419,7 +502,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         for prepass in prepasses {
             die_offsets.push(prepass.offsets);
             unit_languages.push(prepass.language);
-            zig_units.push(prepass.zig_producer);
+            produced_languages.push(prepass.produced);
             scoped_types.extend(prepass.scoped_types);
             inline_namespaces.extend(prepass.inline_namespaces);
             for (definition, declaration) in prepass.definitions {
@@ -443,7 +526,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 ambiguous_type_declarations,
                 die_offsets,
                 unit_languages,
-                zig_units,
+                produced_languages,
                 type_scopes: DieMap::default(),
                 definition_declarations,
             }),
@@ -454,6 +537,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             byte_order,
             limit_type: None,
             void_type: None,
+            character_type: None,
             dynamic_record_layouts: HashMap::new(),
             pool,
             die_buffers,
@@ -584,16 +668,49 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         ))
     }
 
-    pub(super) fn is_zig(&self, unit_index: usize) -> bool {
+    /// The language unit `unit_index`'s producer proves, if it does.
+    pub(super) fn produced_language(&self, unit_index: usize) -> Option<SourceLanguage> {
         self.context
-            .zig_units
+            .produced_languages
             .get(unit_index)
             .copied()
-            .unwrap_or(false)
+            .flatten()
+    }
+
+    /// The language a unit's `DW_AT_language` names.
+    pub(super) fn dwarf_language(&self, unit_index: usize) -> Option<gimli::DwLang> {
+        self.context
+            .unit_languages
+            .get(unit_index)
+            .copied()
+            .flatten()
+    }
+
+    pub(super) fn is_zig(&self, unit_index: usize) -> bool {
+        self.produced_language(unit_index) == Some(SourceLanguage::Zig)
     }
 
     fn next_id(&self) -> TypeId {
         TypeId::new(u32::try_from(self.entries.len()).expect("bounded type count fits u32"))
+    }
+
+    /// A built type through the names typedefs give it.
+    fn unnamed(&self, mut id: TypeId) -> Option<&TypeInfo> {
+        for _ in 0..MAX_TYPE_RESOLUTION_DEPTH {
+            match self.entries.get(id.index())? {
+                TypeEntry::Resolved(TypeInfo {
+                    kind:
+                        TypeKind::Named {
+                            target: Some(target),
+                            ..
+                        },
+                    ..
+                }) => id = target.id,
+                TypeEntry::Resolved(info) => return Some(info),
+                TypeEntry::Building | TypeEntry::Malformed(_) => return None,
+            }
+        }
+        None
     }
 
     /// The byte size of a built type, if it has one.
@@ -671,6 +788,32 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 TypeKind::Unspecified,
             ));
             self.void_type = Some(reference.id);
+        }
+        reference
+    }
+
+    /// The one-byte character of a string type that names none.
+    fn character_type(&mut self) -> TypeReference {
+        let reference = TypeReference {
+            image: self.image,
+            id: self.character_type.unwrap_or_else(|| self.next_id()),
+        };
+        if self.character_type.is_none() {
+            let name: Arc<str> = "character".into();
+            self.entries.push(resolved(
+                reference,
+                Arc::clone(&name),
+                Some(1),
+                TypeKind::Base(BaseType {
+                    base_name: Arc::clone(&name),
+                    name,
+                    encoding: BaseTypeEncoding::UnsignedCharacter,
+                    byte_size: 1,
+                    bit_size: None,
+                }),
+            ));
+            self.explicit_names.insert(reference.id.index());
+            self.character_type = Some(reference.id);
         }
         reference
     }
@@ -781,6 +924,29 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         } else {
             None
         };
+        // GNAT passes an array of an unconstrained type as a record of
+        // pointers to its elements and bounds, which is the array.
+        if slice_layout.is_none()
+            && let Some(array) = self.ada_fat_pointer(&entry, key.unit)
+        {
+            let array = self.units[key.unit]
+                .entry(array)
+                .map_err(|_| Arc::<str>::from("an array's record names no array"))?;
+            let endian = gimli::Reader::endian(gimli::Section::reader(&self.dwarf.debug_info));
+            let dereference_object = gimli::Expression(Reader::new(&DEREFERENCE_OBJECT, endian));
+            let built = self.build_array(
+                &array,
+                key.unit,
+                reference,
+                explicit_name,
+                explicit_size,
+                Some(dereference_object),
+            )?;
+            if named && matches!(built, TypeEntry::Resolved(_)) {
+                self.record_identity_parts(&entry, key, id);
+            }
+            return Ok(built);
+        }
         let built = match slice_layout {
             Some(layout) => self.build_slice_type(
                 &entry,
@@ -851,6 +1017,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 ),
             gimli::DW_TAG_array_type => {
                 self.build_array_type(entry, unit_index, reference, explicit_name, explicit_size)
+            }
+            gimli::DW_TAG_string_type => {
+                self.build_string_type(entry, unit_index, reference, explicit_name, explicit_size)
+            }
+            gimli::DW_TAG_subrange_type => {
+                self.build_subrange_type(entry, unit_index, reference, explicit_name, explicit_size)
             }
             gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type => {
                 self.build_record_type(entry, unit_index, reference, explicit_name, explicit_size)
@@ -1837,6 +2009,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             TypeKind::Array {
                 element,
                 dimensions,
+                ..
             } => {
                 use std::fmt::Write;
                 let mut inner = inner;
@@ -3074,15 +3247,116 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             }
         }
-        Ok(resolved(
-            reference,
-            name,
-            explicit_size,
-            TypeKind::Union {
+        let kind = self
+            .normalize_odin_union(unit_index, reference.id, &members, incomplete)
+            .unwrap_or_else(|| TypeKind::Union {
                 members: members.into(),
                 incomplete,
-            },
-        ))
+            });
+        Ok(resolved(reference, name, explicit_size, kind))
+    }
+
+    /// An Odin union as the variant its tag selects. Odin describes one as
+    /// a union of its `tag` and of each variant, named `v` and the tag value
+    /// that selects it; a tag no variant is named for, 0 unless the union is
+    /// `#no_nil`, is nil. A union without a tag, which holds one pointer
+    /// whose null is nil, stays a union.
+    fn normalize_odin_union(
+        &mut self,
+        unit_index: usize,
+        aggregate: TypeId,
+        members: &[RecordMember],
+        incomplete: bool,
+    ) -> Option<TypeKind> {
+        if incomplete || self.language(unit_index) != SourceLanguage::Odin {
+            return None;
+        }
+        let tag_index = members
+            .iter()
+            .position(|member| member.name.as_deref() == Some("tag"))?;
+        let tag = &members[tag_index];
+        let TypeKind::Base(base) = &self.unnamed(tag.type_ref.id)?.kind else {
+            return None;
+        };
+        let signed = match base.encoding {
+            BaseTypeEncoding::Signed => true,
+            BaseTypeEncoding::Unsigned => false,
+            _ => return None,
+        };
+        let value = |number: u64| {
+            if signed {
+                IntegerValue::Signed(i128::from(number))
+            } else {
+                IntegerValue::Unsigned(u128::from(number))
+            }
+        };
+        let mut variants = Vec::with_capacity(members.len());
+        let mut tags = Vec::with_capacity(members.len());
+        for (index, member) in members.iter().enumerate() {
+            if index == tag_index {
+                continue;
+            }
+            let number = member
+                .name
+                .as_deref()?
+                .strip_prefix('v')?
+                .parse::<u64>()
+                .ok()?;
+            if member.layout != RecordMemberLayout::ByteOffset(0) || tags.contains(&number) {
+                return None;
+            }
+            let TypeEntry::Resolved(info) = self.entries.get(member.type_ref.id.index())? else {
+                return None;
+            };
+            tags.push(number);
+            variants.push((
+                index,
+                Variant {
+                    name: Some(Arc::clone(&info.name)),
+                    selection: VariantSelection::Selectors(Arc::from([VariantSelector::Value(
+                        value(number),
+                    )])),
+                    members: Arc::from([member.clone()]),
+                },
+            ));
+        }
+        for metadata in &mut self.record_member_declarations {
+            if metadata.aggregate != aggregate {
+                continue;
+            }
+            if let AggregateMemberPath::Direct(index) = metadata.member {
+                metadata.member = if index == tag_index {
+                    AggregateMemberPath::Discriminant
+                } else {
+                    let variant = variants
+                        .iter()
+                        .position(|(member, _)| *member == index)
+                        .expect("every member but the tag is a variant");
+                    AggregateMemberPath::Variant { variant, member: 0 }
+                };
+            }
+        }
+        let mut variants = variants
+            .into_iter()
+            .map(|(_, variant)| variant)
+            .collect::<Vec<_>>();
+        if !tags.contains(&0) {
+            variants.push(Variant {
+                name: Some(Arc::from("nil")),
+                selection: VariantSelection::Selectors(Arc::from([VariantSelector::Value(value(
+                    0,
+                ))])),
+                members: Arc::from([]),
+            });
+        }
+        Some(TypeKind::Variant {
+            storage: VariantStorageKind::Union,
+            common_members: Arc::from([]),
+            bases: Arc::from([]),
+            discriminant: Box::new(VariantDiscriminant::Stored(tag.clone())),
+            variants: variants.into(),
+            incomplete: false,
+        })
     }
 
     fn record_member_layout(
@@ -3190,55 +3464,165 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         explicit_name: Option<Arc<str>>,
         explicit_size: Option<u64>,
     ) -> Built {
+        self.build_array(
+            entry,
+            unit_index,
+            reference,
+            explicit_name,
+            explicit_size,
+            None,
+        )
+    }
+
+    /// Whether `entry` is the record GNAT passes an array of an
+    /// unconstrained type as: artificial, with only a pointer to the
+    /// elements, `P_ARRAY`, first, and one to the bounds, `P_BOUNDS`. Its
+    /// array's bounds are found from the record. Returns the array's entry.
+    fn ada_fat_pointer(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+    ) -> Option<gimli::UnitOffset> {
+        if self.language(unit_index) != SourceLanguage::Ada
+            || entry.attr_value(gimli::DW_AT_artificial) != Some(gimli::AttributeValue::Flag(true))
+        {
+            return None;
+        }
+        let unit = &self.units[unit_index];
+        let mut children = self.children(unit_index, entry.offset()).ok()?;
+        let mut members = Vec::new();
+        while let Ok(Some(child)) = children.next_child() {
+            if child.tag() != gimli::DW_TAG_member {
+                continue;
+            }
+            let name = child
+                .attr_value(gimli::DW_AT_name)
+                .and_then(|name| self.dwarf.attr_string(unit, name).ok())?;
+            members.push((
+                name.slice().to_vec(),
+                child
+                    .attr(gimli::DW_AT_data_member_location)
+                    .and_then(constant_member_offset),
+                child.attr_value(gimli::DW_AT_type),
+            ));
+        }
+        let [
+            (array, Some(0), Some(gimli::AttributeValue::UnitRef(pointer))),
+            (bounds, ..),
+        ] = members.as_slice()
+        else {
+            return None;
+        };
+        if array.as_slice() != b"P_ARRAY" || bounds.as_slice() != b"P_BOUNDS" {
+            return None;
+        }
+        let pointer = unit.entry(*pointer).ok()?;
+        if pointer.tag() != gimli::DW_TAG_pointer_type {
+            return None;
+        }
+        let Some(gimli::AttributeValue::UnitRef(array)) = pointer.attr_value(gimli::DW_AT_type)
+        else {
+            return None;
+        };
+        (unit.entry(array).ok()?.tag() == gimli::DW_TAG_array_type).then_some(array)
+    }
+
+    /// An array, whose elements are where `data_location` finds them from
+    /// the value's place when it is given.
+    fn build_array(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+        data_location: Option<gimli::Expression<Reader<'data>>>,
+    ) -> Built {
         let element = self
             .target(entry, unit_index)?
             .ok_or("array type has no element type")?;
-        let unit = &self.units[unit_index];
-        let mut dimensions = Vec::new();
-        let mut strided = has_stride(entry);
+        let name = || {
+            explicit_name
+                .clone()
+                .unwrap_or_else(|| Arc::from("<dynamic array>"))
+        };
+        // A stride for the whole array, or one in bits, spaces elements as
+        // nothing here reads.
+        if entry.attr(gimli::DW_AT_byte_stride).is_some()
+            || entry.attr(gimli::DW_AT_bit_stride).is_some()
+        {
+            return Ok(opaque(
+                reference,
+                name(),
+                explicit_size,
+                "arrays whose elements a stride of the whole array spaces are unsupported",
+            ));
+        }
+        let default_lower =
+            default_lower_bound(self.dwarf_language(unit_index), self.language(unit_index));
+        let mut subranges = Vec::new();
         let mut children = self.children(unit_index, entry.offset())?;
         while let Some(child) = children.next_child()? {
             if child.tag() != gimli::DW_TAG_subrange_type {
                 continue;
             }
-            strided |= has_stride(child);
-            let signed_index = index_type_is_signed(unit, child);
-            let lower = child
-                .attr(gimli::DW_AT_lower_bound)
-                .and_then(|attribute| array_bound(attribute, signed_index))
-                .unwrap_or(0);
-            let count = child
-                .attr(gimli::DW_AT_count)
-                .and_then(gimli::Attribute::udata_value)
-                .or_else(|| {
-                    let upper = array_bound(child.attr(gimli::DW_AT_upper_bound)?, signed_index)?;
-                    u64::try_from(upper.checked_sub(lower)?.checked_add(1)?).ok()
-                });
-            let Some(count) = count else {
-                return Ok(opaque(
-                    reference,
-                    explicit_name.unwrap_or_else(|| Arc::from("<dynamic array>")),
-                    explicit_size,
-                    "array bounds are dynamic or missing",
-                ));
-            };
-            dimensions.push(ArrayDimension {
-                lower_bound: lower,
-                count,
-            });
+            match self.read_subrange(unit_index, child, default_lower) {
+                Ok(subrange) => subranges.push(subrange),
+                Err(description) => {
+                    return Ok(opaque(reference, name(), explicit_size, description));
+                }
+            }
         }
-        if dimensions.is_empty() {
+        if subranges.is_empty() {
             return Err("array type has no subrange dimensions".into());
         }
+        let ordering = self.array_ordering(entry, unit_index, subranges.len())?;
+        let located = [
+            gimli::DW_AT_data_location,
+            gimli::DW_AT_allocated,
+            gimli::DW_AT_associated,
+        ]
+        .into_iter()
+        .any(|attribute| entry.attr(attribute).is_some())
+            || data_location.is_some();
+        let statically = subranges
+            .iter()
+            .map(|(lower, extent, stride)| {
+                let SubrangeBound::Constant(lower) = *lower else {
+                    return None;
+                };
+                let count = match extent {
+                    Extent::Count(SubrangeBound::Constant(count)) => u64::try_from(*count).ok()?,
+                    Extent::Upper(SubrangeBound::Constant(upper)) => {
+                        u64::try_from(upper.checked_sub(lower)?.checked_add(1)?).ok()?
+                    }
+                    _ => return None,
+                };
+                stride.is_none().then_some(ArrayDimension {
+                    lower_bound: lower,
+                    count,
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|_| !located);
         let name =
             explicit_name.unwrap_or_else(|| Arc::from(format!("{}[]", self.target_name(element))));
+        let Some(dimensions) = statically else {
+            return self.build_runtime_array(
+                entry,
+                unit_index,
+                reference,
+                (name, explicit_size),
+                element,
+                subranges,
+                ordering,
+                data_location,
+            );
+        };
         // Producers rarely give a C array a size of its own: it is its
-        // elements', laid end to end unless a stride spaces them.
+        // elements', laid end to end.
         let byte_size = explicit_size.or_else(|| {
             let element_size = self.byte_size_of(element.id)?;
-            if strided {
-                return None;
-            }
             dimensions.iter().try_fold(element_size, |size, dimension| {
                 size.checked_mul(dimension.count)
             })
@@ -3250,6 +3634,395 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             TypeKind::Array {
                 element,
                 dimensions: dimensions.into(),
+                ordering,
+            },
+        ))
+    }
+
+    /// An array bounded at run time, recording the expressions that find
+    /// its bounds and where its elements are.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the array's entry, identity, and the subranges already read"
+    )]
+    fn build_runtime_array(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        (name, explicit_size): (Arc<str>, Option<u64>),
+        element: TypeReference,
+        subranges: Vec<Subrange<'data>>,
+        ordering: ArrayOrdering,
+        data_location: Option<gimli::Expression<Reader<'data>>>,
+    ) -> Built {
+        let mut expressions = data_location
+            .map(|expression| (DynamicAggregateChild::DataLocation, expression))
+            .into_iter()
+            .collect::<Vec<_>>();
+        for (attribute, child) in [
+            (
+                gimli::DW_AT_data_location,
+                DynamicAggregateChild::DataLocation,
+            ),
+            (gimli::DW_AT_allocated, DynamicAggregateChild::Allocated),
+            (gimli::DW_AT_associated, DynamicAggregateChild::Associated),
+        ] {
+            match entry.attr_value(attribute) {
+                None => {}
+                Some(gimli::AttributeValue::Exprloc(expression)) => {
+                    expressions.push((child, expression));
+                }
+                // An array that says it is always allocated is.
+                Some(gimli::AttributeValue::Flag(true))
+                    if attribute != gimli::DW_AT_data_location => {}
+                Some(_) => {
+                    return Ok(opaque(
+                        reference,
+                        name,
+                        explicit_size,
+                        "array's place or allocation is not an expression",
+                    ));
+                }
+            }
+        }
+        let mut bound = |bound: SubrangeBound<'data>, child| match bound {
+            SubrangeBound::Constant(value) => ArrayBound::Constant(value),
+            SubrangeBound::Computed {
+                expression,
+                byte_size,
+                signed,
+            } => {
+                expressions.push((child, expression));
+                ArrayBound::Computed { byte_size, signed }
+            }
+            SubrangeBound::Stored {
+                expression,
+                byte_size,
+            } => {
+                expressions.push((child, expression));
+                ArrayBound::Stored {
+                    byte_size,
+                    signed: false,
+                }
+            }
+            SubrangeBound::Variable(debug_info_offset) => {
+                ArrayBound::Variable { debug_info_offset }
+            }
+        };
+        let dimensions = subranges
+            .into_iter()
+            .enumerate()
+            .map(|(dimension, (lower, extent, stride))| {
+                let part = |part| DynamicAggregateChild::Bound { dimension, part };
+                RuntimeDimension {
+                    lower_bound: bound(lower, part(BoundPart::Lower)),
+                    extent: match extent {
+                        Extent::Upper(upper) => {
+                            ArrayExtent::Upper(bound(upper, part(BoundPart::Extent)))
+                        }
+                        Extent::Count(count) => {
+                            ArrayExtent::Count(bound(count, part(BoundPart::Extent)))
+                        }
+                        Extent::Unknown => ArrayExtent::Unknown,
+                    },
+                    byte_stride: stride.map(|stride| bound(stride, part(BoundPart::Stride))),
+                }
+            })
+            .collect::<Arc<[_]>>();
+        self.record_array_layouts(unit_index, reference.id, expressions)?;
+        Ok(resolved(
+            reference,
+            name,
+            explicit_size,
+            TypeKind::RuntimeArray {
+                element,
+                dimensions,
+                ordering,
+            },
+        ))
+    }
+
+    /// Records the expressions that find an array's parts at run time.
+    fn record_array_layouts(
+        &mut self,
+        unit_index: usize,
+        array: TypeId,
+        expressions: Vec<(DynamicAggregateChild, gimli::Expression<Reader<'data>>)>,
+    ) -> std::result::Result<(), Arc<str>> {
+        let unit = &self.units[unit_index];
+        for (child, expression) in expressions {
+            let expression = copy_expression(
+                self.dwarf,
+                &mut self.pool.lock().expect("loading does not panic"),
+                unit_index,
+                unit,
+                expression,
+            )
+            .map_err(malformed)?;
+            self.dynamic_record_layouts.insert(
+                DynamicAggregateLayoutKey {
+                    aggregate: array,
+                    child,
+                },
+                expression,
+            );
+        }
+        Ok(())
+    }
+
+    /// How an array of `rank` dimensions lays out its elements: row by row,
+    /// but Fortran's go column by column unless the array says otherwise.
+    fn array_ordering(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        rank: usize,
+    ) -> std::result::Result<ArrayOrdering, Arc<str>> {
+        let ordering = match entry.attr_value(gimli::DW_AT_ordering) {
+            Some(gimli::AttributeValue::Ordering(gimli::DW_ORD_col_major)) => {
+                ArrayOrdering::ColumnMajor
+            }
+            Some(gimli::AttributeValue::Ordering(gimli::DW_ORD_row_major)) => {
+                ArrayOrdering::RowMajor
+            }
+            Some(_) => return Err("array ordering has an invalid encoding".into()),
+            None if self.language(unit_index) == SourceLanguage::Fortran => {
+                ArrayOrdering::ColumnMajor
+            }
+            None => ArrayOrdering::RowMajor,
+        };
+        // One dimension has one order.
+        Ok(if rank == 1 {
+            ArrayOrdering::RowMajor
+        } else {
+            ordering
+        })
+    }
+
+    /// A subrange's lower bound, where it ends, and its stride, or why
+    /// they are unsupported.
+    fn read_subrange(
+        &self,
+        unit_index: usize,
+        child: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        default_lower: Option<i128>,
+    ) -> std::result::Result<Subrange<'data>, &'static str> {
+        if child.attr(gimli::DW_AT_bit_stride).is_some() {
+            return Err("arrays whose elements a stride in bits spaces are unsupported");
+        }
+        let index = self.index_type(unit_index, child);
+        let bound = |attribute: &gimli::Attribute<Reader<'data>>| {
+            self.subrange_bound(unit_index, attribute, index)?
+                .ok_or("array bound has an invalid encoding")
+        };
+        let lower = child.attr(gimli::DW_AT_lower_bound).map_or_else(
+            || {
+                default_lower
+                    .map(SubrangeBound::Constant)
+                    .ok_or("array lower bound is not stated and not its language's")
+            },
+            bound,
+        )?;
+        let extent = match (
+            child.attr(gimli::DW_AT_count),
+            child.attr(gimli::DW_AT_upper_bound),
+        ) {
+            (Some(count), _) => Extent::Count(bound(count)?),
+            (None, Some(upper)) => Extent::Upper(bound(upper)?),
+            (None, None) => Extent::Unknown,
+        };
+        let stride = child
+            .attr(gimli::DW_AT_byte_stride)
+            .map(bound)
+            .transpose()?;
+        Ok((lower, extent, stride))
+    }
+
+    /// The size and signedness of a subrange's index type, which give its
+    /// computed bounds' values: a target word, signed, when it names none.
+    fn index_type(
+        &self,
+        unit_index: usize,
+        subrange: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    ) -> (u8, bool) {
+        let unit = &self.units[unit_index];
+        let word = (unit.encoding().address_size, true);
+        let Some(gimli::AttributeValue::UnitRef(offset)) = subrange.attr_value(gimli::DW_AT_type)
+        else {
+            return word;
+        };
+        let Ok(index_type) = unit.entry(offset) else {
+            return word;
+        };
+        let size = index_type
+            .attr(gimli::DW_AT_byte_size)
+            .and_then(gimli::Attribute::udata_value)
+            .and_then(|size| u8::try_from(size).ok())
+            .filter(|size| (1..=16).contains(size));
+        size.map_or(word, |size| (size, index_type_is_signed(unit, subrange)))
+    }
+
+    /// One bound, count, or stride of a subrange, as its attribute gives
+    /// it, or why it is unsupported.
+    fn subrange_bound(
+        &self,
+        unit_index: usize,
+        attribute: &gimli::Attribute<Reader<'data>>,
+        (byte_size, signed): (u8, bool),
+    ) -> std::result::Result<Option<SubrangeBound<'data>>, &'static str> {
+        if let Some(value) = array_bound(attribute, signed) {
+            return Ok(Some(SubrangeBound::Constant(value)));
+        }
+        match attribute.value() {
+            gimli::AttributeValue::Exprloc(expression) => Ok(Some(SubrangeBound::Computed {
+                expression,
+                byte_size,
+                signed,
+            })),
+            gimli::AttributeValue::UnitRef(offset) => {
+                let unit = &self.units[unit_index];
+                let referenced = unit
+                    .entry(offset)
+                    .map_err(|_| "array bound refers to no entry")?;
+                if !matches!(
+                    referenced.tag(),
+                    gimli::DW_TAG_variable | gimli::DW_TAG_formal_parameter
+                ) {
+                    return Err("array bounds a record's member gives are unsupported");
+                }
+                Ok(self
+                    .units
+                    .debug_info_offset(DieKey {
+                        unit: unit_index,
+                        offset: offset.0,
+                    })
+                    .map(SubrangeBound::Variable))
+            }
+            gimli::AttributeValue::Sdata(_)
+            | gimli::AttributeValue::Udata(_)
+            | gimli::AttributeValue::Data1(_)
+            | gimli::AttributeValue::Data2(_)
+            | gimli::AttributeValue::Data4(_)
+            | gimli::AttributeValue::Data8(_) => Ok(None),
+            _ => Err("array bound's form is unsupported"),
+        }
+    }
+
+    /// A Fortran `character(len=N)`: N characters, counted from one, of
+    /// the type it names, or else of one byte each. A length the program
+    /// decides at run time is where the string says.
+    fn build_string_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+    ) -> Built {
+        if let Some(length) = entry.attr(gimli::DW_AT_string_length) {
+            let name = explicit_name.unwrap_or_else(|| Arc::from("character(len=:)"));
+            let unit = &self.units[unit_index];
+            let length = match length.value() {
+                gimli::AttributeValue::Exprloc(expression) => SubrangeBound::Stored {
+                    expression,
+                    byte_size: [gimli::DW_AT_string_length_byte_size, gimli::DW_AT_byte_size]
+                        .into_iter()
+                        .find_map(|attribute| entry.attr(attribute))
+                        .map_or_else(
+                            || Some(unit.encoding().address_size),
+                            |size| {
+                                size.udata_value()
+                                    .and_then(|size| u8::try_from(size).ok())
+                                    .filter(|size| (1..=16).contains(size))
+                            },
+                        )
+                        .ok_or("string length's size is invalid")?,
+                },
+                _ => match self.subrange_bound(unit_index, length, (0, false)) {
+                    Ok(Some(length @ SubrangeBound::Variable(_))) => length,
+                    Ok(_) => return Err("string length has an invalid encoding".into()),
+                    Err(description) => {
+                        return Ok(opaque(reference, name, None, description));
+                    }
+                },
+            };
+            let element = self
+                .target(entry, unit_index)?
+                .unwrap_or_else(|| self.character_type());
+            self.explicit_names.insert(reference.id.index());
+            return self.build_runtime_array(
+                entry,
+                unit_index,
+                reference,
+                (name, None),
+                element,
+                vec![(SubrangeBound::Constant(1), Extent::Count(length), None)],
+                ArrayOrdering::RowMajor,
+                None,
+            );
+        }
+        // With a length of its own, a string's byte size is the length's.
+        let Some(byte_size) = explicit_size else {
+            return Ok(opaque(
+                reference,
+                explicit_name.unwrap_or_else(|| Arc::from("character(len=?)")),
+                None,
+                "string has no length",
+            ));
+        };
+        let element = self
+            .target(entry, unit_index)?
+            .unwrap_or_else(|| self.character_type());
+        let count = self
+            .byte_size_of(element.id)
+            .filter(|&size| size > 0 && byte_size % size == 0)
+            .map(|size| byte_size / size)
+            .ok_or("string length is not a whole number of its characters")?;
+        let name = explicit_name.unwrap_or_else(|| Arc::from(format!("character(len={count})")));
+        self.explicit_names.insert(reference.id.index());
+        Ok(resolved(
+            reference,
+            name,
+            Some(byte_size),
+            TypeKind::Array {
+                element,
+                dimensions: Arc::from([ArrayDimension {
+                    lower_bound: 1,
+                    count,
+                }]),
+                ordering: ArrayOrdering::RowMajor,
+            },
+        ))
+    }
+
+    /// A subrange type, as Ada's `range -128 .. 127`, is a type of its own
+    /// that holds its base type's values within its bounds.
+    fn build_subrange_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+    ) -> Built {
+        let Some(target) = self.target(entry, unit_index)? else {
+            return Ok(opaque(
+                reference,
+                explicit_name.unwrap_or_else(|| Arc::from("<subrange>")),
+                explicit_size,
+                "subrange type names no base type",
+            ));
+        };
+        let byte_size = explicit_size.or_else(|| self.byte_size_of(target.id));
+        let name = explicit_name.unwrap_or_else(|| self.target_name(target));
+        Ok(resolved(
+            reference,
+            name,
+            byte_size,
+            TypeKind::Named {
+                target: Some(target),
+                relationship: NamedTypeRelationship::Distinct,
             },
         ))
     }
@@ -3267,16 +4040,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let byte_size = explicit_size.ok_or("slice descriptor has no byte size")?;
         let unit = &self.units[unit_index];
         let address_size = u64::from(unit.encoding().address_size);
-        let field_names = match layout {
-            SliceLayout::Rust | SliceLayout::RustBytes(_) => &["data_ptr", "length"][..],
-            SliceLayout::Zig => &["ptr", "len"][..],
-            SliceLayout::Go => &["array", "len", "cap"][..],
-        };
-        let field_count = u64::try_from(field_names.len()).expect("slice field count fits u64");
-        let word_size = byte_size
-            .checked_div(field_count)
-            .ok_or("slice descriptor size is invalid")?;
-        if byte_size != word_size * field_count || word_size != address_size {
+        let field_names = layout.members();
+        let word_size = address_size;
+        if word_size == 0 || byte_size != word_size * layout.word_count() {
             return Ok(opaque(
                 reference,
                 name,
@@ -3318,21 +4084,23 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 "unrecognized slice descriptor layout",
             ));
         }
-        let element = self.slice_element(layout, fields[0].2)?;
-        for (_, _, field_type) in &fields[1..] {
-            let valid = self
-                .entries
-                .get(field_type.id.index())
-                .is_some_and(|entry| {
-                    matches!(entry, TypeEntry::Resolved(TypeInfo {
-                        kind: TypeKind::Base(BaseType {
-                            encoding: BaseTypeEncoding::Unsigned | BaseTypeEncoding::Signed,
-                            byte_size: size,
-                            ..
-                        }),
-                        ..
-                    }) if *size == word_size)
-                });
+        let words = layout.words();
+        let element = self.slice_element(layout, fields[usize::from(words.data)].2)?;
+        let counts = [Some(words.length), words.capacity];
+        for (_, _, field_type) in counts
+            .into_iter()
+            .flatten()
+            .map(|word| &fields[usize::from(word)])
+        {
+            // Odin names its integers, as `int`, by typedefs.
+            let valid = matches!(self.unnamed(field_type.id), Some(TypeInfo {
+                kind: TypeKind::Base(BaseType {
+                    encoding: BaseTypeEncoding::Unsigned | BaseTypeEncoding::Signed,
+                    byte_size: size,
+                    ..
+                }),
+                ..
+            }) if *size == word_size);
             if !valid {
                 return Err(
                     "slice length and capacity members must be target-sized unsigned integers"
@@ -3347,7 +4115,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             Some(byte_size),
             TypeKind::Slice {
                 element,
-                has_capacity: layout == SliceLayout::Go,
+                words,
                 text,
             },
         ))
@@ -3396,9 +4164,45 @@ pub(super) enum SliceLayout {
     Zig,
     /// `{array, len, cap}`.
     Go,
+    /// `{data, len}`: Odin's slices and strings.
+    Odin,
+    /// `{data, len, cap, allocator}`: Odin's dynamic arrays, whose
+    /// allocator is two words.
+    OdinDynamic,
+    /// `{length, ptr}`: D's slices and strings.
+    D,
 }
 
 impl SliceLayout {
+    /// The descriptor's members, in order, each at the word of its index.
+    const fn members(self) -> &'static [&'static str] {
+        match self {
+            Self::Rust | Self::RustBytes(_) => &["data_ptr", "length"],
+            Self::Zig => &["ptr", "len"],
+            Self::Go => &["array", "len", "cap"],
+            Self::Odin => &["data", "len"],
+            Self::OdinDynamic => &["data", "len", "cap", "allocator"],
+            Self::D => &["length", "ptr"],
+        }
+    }
+
+    /// How many words the descriptor is.
+    const fn word_count(self) -> u64 {
+        match self {
+            Self::OdinDynamic => 5,
+            layout => layout.members().len() as u64,
+        }
+    }
+
+    /// Which of the descriptor's words hold its parts.
+    const fn words(self) -> SliceWords {
+        match self {
+            Self::Rust | Self::RustBytes(_) | Self::Zig | Self::Odin => SliceWords::POINTER_LENGTH,
+            Self::Go | Self::OdinDynamic => SliceWords::POINTER_LENGTH_CAPACITY,
+            Self::D => SliceWords::LENGTH_POINTER,
+        }
+    }
+
     /// Whether a slice so named is the language's text: Rust's `str`, and
     /// Zig's `[]const u8` and its sentinel-terminated forms.
     fn is_text(self, name: &str) -> bool {
@@ -3411,7 +4215,22 @@ impl SliceLayout {
             }
             Self::RustBytes(_) => true,
             Self::Zig => matches!(name, "[]const u8" | "[:0]const u8" | "[:0]u8"),
-            Self::Go => false,
+            Self::Odin => name == "string",
+            // D's strings, and any slice of its characters, however
+            // qualified: `char[]`, `const(wchar)[]`.
+            Self::D => {
+                matches!(name, "string" | "wstring" | "dstring")
+                    || name.strip_suffix("[]").is_some_and(|element| {
+                        let element = ["const(", "immutable(", "shared(", "inout("]
+                            .into_iter()
+                            .find_map(|qualifier| {
+                                element.strip_prefix(qualifier)?.strip_suffix(')')
+                            })
+                            .unwrap_or(element);
+                        matches!(element, "char" | "wchar" | "dchar")
+                    })
+            }
+            Self::Go | Self::OdinDynamic => false,
         }
     }
 }
@@ -3443,6 +4262,25 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             SourceLanguage::Zig => name
                 .is_some_and(|name| name.starts_with("[]") || name.starts_with("[:"))
                 .then_some(SliceLayout::Zig),
+            SourceLanguage::Odin => match name? {
+                "string" => Some(SliceLayout::Odin),
+                name if name.starts_with("[]") => Some(SliceLayout::Odin),
+                name if name.starts_with("[dynamic]") => Some(SliceLayout::OdinDynamic),
+                _ => None,
+            },
+            // A D slice is named for its element, and a string for its
+            // characters.
+            SourceLanguage::D => {
+                let name = name?;
+                if !(name.ends_with("[]") || matches!(name, "string" | "wstring" | "dstring")) {
+                    return None;
+                }
+                let members = self.member_types(entry, key.unit)?;
+                let [(length, _), (pointer, _)] = members.as_slice() else {
+                    return None;
+                };
+                (length.as_ref() == "length" && pointer.as_ref() == "ptr").then_some(SliceLayout::D)
+            }
             SourceLanguage::Rust if !self.context.type_scopes.contains_key(&key) => {
                 let members = self.member_types(entry, key.unit)?;
                 let [(first, data), (second, _)] = members.as_slice() else {
@@ -3529,6 +4367,9 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 }
                 gimli::DW_TAG_array_type => return self.array_is_unsized(current),
                 gimli::DW_TAG_structure_type => {
+                    if self.tail_overruns(&entry, current.unit) {
+                        return true;
+                    }
                     let Some(members) = self.member_types(&entry, current.unit) else {
                         return true;
                     };
@@ -3542,6 +4383,84 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             }
         }
         true
+    }
+
+    /// Whether a record's last member runs past the record's end, as an
+    /// unsized tail does when rustc describes it by its element alone:
+    /// `struct Tail { head: u32, tail: [u16] }` is 4 bytes whose `tail` is a
+    /// `u16` at offset 4. A member of no size may sit at the end of a sized
+    /// record, and a size that cannot be read proves nothing.
+    fn tail_overruns(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+    ) -> bool {
+        let Some(size) = entry
+            .attr(gimli::DW_AT_byte_size)
+            .and_then(gimli::Attribute::udata_value)
+        else {
+            return false;
+        };
+        let Ok(mut children) = self.children(unit_index, entry.offset()) else {
+            return false;
+        };
+        let mut last = None;
+        while let Ok(Some(child)) = children.next_child() {
+            if child.tag() != gimli::DW_TAG_member {
+                continue;
+            }
+            let offset = child
+                .attr(gimli::DW_AT_data_member_location)
+                .and_then(gimli::Attribute::udata_value);
+            let target = die_reference_with_signatures(
+                child.attr_value(gimli::DW_AT_type),
+                unit_index,
+                self.units,
+                self.type_signatures,
+            )
+            .ok()
+            .flatten();
+            last = Some((offset, target));
+        }
+        let Some((Some(offset), Some(target))) = last else {
+            return false;
+        };
+        self.die_byte_size(target)
+            .and_then(|member| offset.checked_add(member))
+            .is_some_and(|end| end > size)
+    }
+
+    /// The size of the type a DIE describes, through typedefs and
+    /// qualifiers, when the DIE states it.
+    fn die_byte_size(&self, mut key: DieKey) -> Option<u64> {
+        const MAX_DEPTH: usize = 16;
+        for _ in 0..MAX_DEPTH {
+            let entry = self
+                .units
+                .get(key.unit)?
+                .entry(gimli::UnitOffset(key.offset))
+                .ok()?;
+            if let Some(size) = entry
+                .attr(gimli::DW_AT_byte_size)
+                .and_then(gimli::Attribute::udata_value)
+            {
+                return Some(size);
+            }
+            if !matches!(
+                entry.tag(),
+                gimli::DW_TAG_typedef | gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type
+            ) {
+                return None;
+            }
+            key = die_reference_with_signatures(
+                entry.attr_value(gimli::DW_AT_type),
+                key.unit,
+                self.units,
+                self.type_signatures,
+            )
+            .ok()??;
+        }
+        None
     }
 
     /// The unsized array of bytes a pointer DIE's target holds, when that
@@ -3626,6 +4545,32 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             }
         }
         false
+    }
+}
+
+/// Where an array of a unit's language begins when its subrange does not
+/// say: DWARF's default lower bound for the language, which a language not
+/// in the standard's table does not have.
+fn default_lower_bound(language: Option<gimli::DwLang>, source: SourceLanguage) -> Option<i128> {
+    if matches!(
+        source,
+        SourceLanguage::C
+            | SourceLanguage::Cpp
+            | SourceLanguage::Rust
+            | SourceLanguage::Go
+            | SourceLanguage::Zig
+            | SourceLanguage::Odin
+            | SourceLanguage::Nim
+    ) {
+        return Some(0);
+    }
+    let language = language?;
+    match language {
+        gimli::DW_LANG_Kotlin | gimli::DW_LANG_Crystal => Some(0),
+        gimli::DW_LANG_Fortran18 | gimli::DW_LANG_Ada2005 | gimli::DW_LANG_Ada2012 => Some(1),
+        language => language
+            .default_lower_bound()
+            .and_then(|bound| i128::try_from(bound).ok()),
     }
 }
 
@@ -3959,8 +4904,16 @@ fn named_type_relationship(tag: gimli::DwTag, language: SourceLanguage) -> Named
         return NamedTypeRelationship::Synonym;
     }
     match language {
-        SourceLanguage::C | SourceLanguage::Cpp => NamedTypeRelationship::Synonym,
-        SourceLanguage::Go => NamedTypeRelationship::Distinct,
+        // Nim's are the C typedefs it compiles to.
+        SourceLanguage::C | SourceLanguage::Cpp | SourceLanguage::Nim => {
+            NamedTypeRelationship::Synonym
+        }
+        // Odin's typedefs are its `distinct` types, and wrappers that name
+        // its own types, as `int`; GNAT's name Ada's types, as an access
+        // type.
+        SourceLanguage::Go | SourceLanguage::Odin | SourceLanguage::Ada => {
+            NamedTypeRelationship::Distinct
+        }
         SourceLanguage::Zig => NamedTypeRelationship::Encoding,
         _ => NamedTypeRelationship::Unspecified,
     }
@@ -4287,6 +5240,9 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
         | TypeKind::Pointer { .. }
         | TypeKind::Reference { .. }
         | TypeKind::Slice { .. }
+        // A Fortran type may hold an allocatable array of itself, whose
+        // elements are elsewhere.
+        | TypeKind::RuntimeArray { .. }
         | TypeKind::Named { target: None, .. }
         | TypeKind::Unspecified
         | TypeKind::Opaque { .. } => {}
@@ -4316,9 +5272,4 @@ fn modifier_type_name(modifier: TypeModifier, target: &str, indirection: bool) -
     } else {
         format!("{keyword} {target}")
     }
-}
-
-/// Whether an array or one of its dimensions spaces its elements apart.
-fn has_stride(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) -> bool {
-    entry.attr(gimli::DW_AT_byte_stride).is_some() || entry.attr(gimli::DW_AT_bit_stride).is_some()
 }

@@ -49,7 +49,7 @@ use die::{
 };
 use evaluate::FrameBaseCache;
 use globals::load_globals;
-pub(in crate::debug_info) use identity::source_language;
+pub(in crate::debug_info) use identity::{produced_language, source_language};
 pub(in crate::debug_info) use inspect::{PathStep, array_byte_offset};
 use inspect::{data_object, evaluate_error_state, inspected_value};
 use location::{
@@ -75,6 +75,7 @@ mod location;
 mod merge;
 mod pieces;
 mod returns;
+mod runtime_array;
 mod shape;
 mod storage;
 mod text;
@@ -227,6 +228,8 @@ fn system_v_returns<'data>(
         .ok()
         .flatten()
         .unwrap_or_else(|| Arc::from("returned"));
+    // Named for the function, as C's are.
+    let name = super::own_name(language, &name).map_or(name, Arc::from);
     let rewritten = std::iter::once(entry)
         .chain(chain.iter().map(|(_, origin)| origin))
         .any(|entry| {
@@ -554,6 +557,13 @@ fn layout_child(child: DynamicAggregateChild) -> Option<crate::image::type_facts
             variant: index(variant)?,
             member: index(member)?,
         },
+        DynamicAggregateChild::Bound { dimension, part } => LayoutChild::Bound {
+            dimension: index(dimension)?,
+            part,
+        },
+        DynamicAggregateChild::DataLocation => LayoutChild::DataLocation,
+        DynamicAggregateChild::Allocated => LayoutChild::Allocated,
+        DynamicAggregateChild::Associated => LayoutChild::Associated,
     })
 }
 
@@ -618,6 +628,10 @@ fn walk_unit<'data>(
     let unit = &units[unit_index];
     calls.begin_unit();
     let go = languages[unit_index] == Some(gimli::DW_LANG_Go);
+    let fortran = source_language(languages[unit_index], None) == SourceLanguage::Fortran;
+    let d = languages[unit_index] == Some(gimli::DW_LANG_D);
+    let nim = types.produced_language(unit_index) == Some(SourceLanguage::Nim);
+    let ada = source_language(languages[unit_index], None) == SourceLanguage::Ada;
     let rust = languages[unit_index] == Some(gimli::DW_LANG_Rust);
     // Go names the register ABI its x86-64 code calls with among the
     // flags of each unit's producer, as `go1.27.1; -N -l regabi`.
@@ -631,11 +645,19 @@ fn walk_unit<'data>(
     // Other languages' x86-64 code returns as the System V convention
     // says, or, for the languages that leave theirs unspecified, as it
     // for scalars.
-    let language = source_language(languages[unit_index], types.is_zig(unit_index));
+    let language = source_language(languages[unit_index], types.produced_language(unit_index));
     let system_v = target.architecture == crate::Architecture::X86_64
         && matches!(
             language,
-            SourceLanguage::C | SourceLanguage::Cpp | SourceLanguage::Rust | SourceLanguage::Zig
+            SourceLanguage::C
+                | SourceLanguage::Cpp
+                | SourceLanguage::Rust
+                | SourceLanguage::Zig
+                | SourceLanguage::Nim
+                | SourceLanguage::Odin
+                | SourceLanguage::Fortran
+                | SourceLanguage::D
+                | SourceLanguage::Ada
         );
     let fused_blocks = if go {
         fused_block_ranges(dwarf, unit, &catalog.code)?
@@ -1047,14 +1069,19 @@ fn walk_unit<'data>(
                     VariableKind::Local => "variable",
                     VariableKind::Global => "global",
                 };
+                let mut nameless = false;
                 let (name, name_error) =
                     match string_with_origins(dwarf, units, unit, entry, &chain, gimli::DW_AT_name)
                     {
                         Ok(Some(name)) => (name, None),
-                        Ok(None) => (
-                            format!("<anonymous {object_name} at {:#x}>", entry.offset().0).into(),
-                            Some(Arc::from(format!("{object_name} has no name"))),
-                        ),
+                        Ok(None) => {
+                            nameless = true;
+                            (
+                                format!("<anonymous {object_name} at {:#x}>", entry.offset().0)
+                                    .into(),
+                                Some(Arc::from(format!("{object_name} has no name"))),
+                            )
+                        }
                         Err(error) => (
                             format!("<malformed {object_name} at {:#x}>", entry.offset().0).into(),
                             Some(error.to_string().into()),
@@ -1128,9 +1155,15 @@ fn walk_unit<'data>(
                     }
                     _ => (name, type_info, None),
                 };
-                // Go starts the names of its own variables with
-                // characters no Go identifier can. rustc's own are an
-                // async body's temporaries and unnamed parameters, the
+                // A variable with no name that says it is the
+                // compiler's own, as gfortran's temporaries do, is no
+                // defect. Go and gfortran start the names of their own
+                // variables with characters no identifier of their
+                // languages can begin with, D with the `__` it reserves
+                // for them, Nim with a trailing or doubled `_` no Nim
+                // identifier has, and GNAT, which writes every Ada
+                // identifier in lower case, with a capital letter, as
+                // `C173b`. rustc's own are an async body's temporaries and unnamed parameters, the
                 // `result` an await binds, and, in an `async fn`'s
                 // body, the fields of its future that captured its
                 // arguments, which the body moves into variables of
@@ -1141,7 +1174,19 @@ fn walk_unit<'data>(
                     .as_ref()
                     .ok()
                     .and_then(|declared| declared.as_ref().map(|declared| declared.line));
-                let hidden = (go && name.starts_with(['.', '#']))
+                let compilers = (nameless
+                    && strict_flag(entry, gimli::DW_AT_artificial) == Ok(true))
+                    || (go && name.starts_with(['.', '#']))
+                    || (fortran && !name.starts_with(|c: char| c.is_ascii_alphabetic()))
+                    || (d && name.starts_with("__"))
+                    || (nim && (name.ends_with('_') || name.contains("__")))
+                    || (ada && name.contains(|c: char| c.is_ascii_uppercase()));
+                let written = nim
+                    .then(|| nim_name(&name, kind).map(Arc::<str>::from))
+                    .flatten()
+                    .filter(|_| !compilers);
+                let name = written.unwrap_or(name);
+                let hidden = compilers
                     || (scope.rust.is_some()
                         && (rust_temporary(&name, rust_unnamed)
                             || (scope.rust == Some(RustScope::AsyncCaptures)
@@ -1196,7 +1241,7 @@ fn walk_unit<'data>(
                         .or(scope_error)
                         .or_else(|| scope.malformed.clone())
                         .or(chain_error)
-                        .or_else(|| name_error.filter(|_| !rust_unnamed)),
+                        .or_else(|| name_error.filter(|_| !rust_unnamed && !compilers)),
                 });
             }
         }
@@ -1437,6 +1482,32 @@ const fn main_walk_reads(tag: gimli::DwTag, depth: usize) -> bool {
             | gimli::DW_TAG_variable
             | gimli::DW_TAG_formal_parameter
     ) || (depth == 1 && types::is_type_die_tag(tag))
+}
+
+/// The name a Nim programmer wrote for a variable Nim 2 named in C: a
+/// local's name numbered within its procedure, as `small_1`, or a
+/// parameter's numbered by its position, as `value_p0`. Nim drops an
+/// underscore before a digit from the names it writes, and Nim reads `x_1`
+/// and `x1` as one name, so what precedes the number is the name exactly.
+/// A name Nim had to encode ends in an underscore, and stays as it is.
+fn nim_name(name: &str, kind: VariableKind) -> Option<&str> {
+    let (base, number) = name.rsplit_once('_')?;
+    let number = match kind {
+        VariableKind::Parameter => number.strip_prefix('p')?,
+        VariableKind::Local => number,
+        _ => return None,
+    };
+    let plain = base.starts_with(|first: char| first.is_ascii_alphabetic())
+        && !base.ends_with('_')
+        && base
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !base
+            .as_bytes()
+            .windows(2)
+            .any(|pair| pair[0] == b'_' && (pair[1] == b'_' || pair[1].is_ascii_digit()));
+    (plain && !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(base)
 }
 
 /// Whether rustc made a variable for its own use: an async body's

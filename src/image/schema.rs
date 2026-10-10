@@ -148,7 +148,7 @@ pub(super) const SCHEMA: &[TableSchema] = &[
     TableSchema {
         kind: TableKind::Functions,
         record: "FunctionRecord",
-        size: 56,
+        size: 57,
         fields: &[
             ("name", 0, 4),
             ("linkage_name", 4, 4),
@@ -164,6 +164,7 @@ pub(super) const SCHEMA: &[TableSchema] = &[
             ("other_language", 52, 2),
             ("language", 54, 1),
             ("role", 55, 1),
+            ("main_subprogram", 56, 1),
         ],
     },
     names(TableKind::FunctionNames),
@@ -741,6 +742,26 @@ pub(super) const SCHEMA: &[TableSchema] = &[
     },
     items(TableKind::Producers),
     bytes(TableKind::EmbeddedViews),
+    TableSchema {
+        kind: TableKind::RuntimeDimensions,
+        record: "RuntimeDimensionRecord",
+        size: 58,
+        fields: &[
+            ("lower.value", 0, 16),
+            ("lower.kind", 16, 1),
+            ("lower.byte_size", 17, 1),
+            ("lower.signed", 18, 1),
+            ("extent.value", 19, 16),
+            ("extent.kind", 35, 1),
+            ("extent.byte_size", 36, 1),
+            ("extent.signed", 37, 1),
+            ("stride.value", 38, 16),
+            ("stride.kind", 54, 1),
+            ("stride.byte_size", 55, 1),
+            ("stride.signed", 56, 1),
+            ("ends", 57, 1),
+        ],
+    },
 ];
 
 const fn keyed(kind: TableKind) -> TableSchema {

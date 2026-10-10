@@ -42,19 +42,27 @@ use super::variant::{
 };
 use super::*;
 use crate::image::locations::{ExpressionId, LocationListId};
-use crate::model::ValueStorage;
+use crate::model::{ArrayOrdering, ValueStorage};
 
 #[test]
-fn array_indices_honor_lower_bounds_and_reject_overflow() {
-    let step = |dimensions: &[(i128, u64)], element_size| PathStep::ArrayIndex {
+fn array_indices_honor_lower_bounds_ordering_and_reject_overflow() {
+    let ordered = |ordering, dimensions: &[(i128, u64)], element_size| PathStep::ArrayIndex {
         dimensions: dimensions
             .iter()
             .map(|&(lower_bound, count)| ArrayDimension { lower_bound, count })
             .collect(),
+        ordering,
         element_size,
+    };
+    let step = |dimensions: &[(i128, u64)], element_size| {
+        ordered(ArrayOrdering::RowMajor, dimensions, element_size)
     };
     let bounded = step(&[(-2, 3), (10, 2)], 4);
     assert_eq!(array_byte_offset(&bounded, &[0, 11]).ok(), Some(Some(20)));
+    // Column by column, the first index's elements are adjacent.
+    let columns = ordered(ArrayOrdering::ColumnMajor, &[(-2, 3), (10, 2)], 4);
+    assert_eq!(array_byte_offset(&columns, &[0, 11]).ok(), Some(Some(20)));
+    assert_eq!(array_byte_offset(&columns, &[-1, 10]).ok(), Some(Some(4)));
     for (indices, bad_index, bad_lower_bound, bad_count) in
         [([-3, 10], -3, -2, 3), ([0, 12], 12, 10, 2)]
     {
@@ -72,8 +80,142 @@ fn array_indices_honor_lower_bounds_and_reject_overflow() {
     let overflowing = step(&[(0, u64::MAX), (0, 2)], 1);
     assert!(matches!(
         array_byte_offset(&overflowing, &[i128::from(u64::MAX - 1), 1]),
-        Err(Error::InvalidValueExpression(message)) if message.contains("row-major")
+        Err(Error::InvalidValueExpression(message)) if message.contains("index overflows")
     ));
+}
+
+/// The type of the one variable in a unit of `language` whose type is an
+/// array of `int` with one subrange, its upper bound 3 and its lower bound
+/// as given.
+fn array_type_in(language: gimli::DwLang, lower_bound: Option<WriteAttributeValue>) -> TypeEntry {
+    let encoding = Encoding {
+        format: Format::Dwarf32,
+        version: 5,
+        address_size: 8,
+    };
+    let mut written = WriteDwarf::new();
+    let unit_id = written.units.add(Unit::new(encoding, LineProgram::none()));
+    let unit = written.units.get_mut(unit_id);
+    let root = unit.root();
+    unit.get_mut(root).set(
+        gimli::DW_AT_language,
+        WriteAttributeValue::Language(language),
+    );
+    let int = unit.add(root, gimli::DW_TAG_base_type);
+    unit.get_mut(int).set(
+        gimli::DW_AT_encoding,
+        WriteAttributeValue::Encoding(gimli::DW_ATE_signed),
+    );
+    unit.get_mut(int)
+        .set(gimli::DW_AT_byte_size, WriteAttributeValue::Udata(4));
+    let array = unit.add(root, gimli::DW_TAG_array_type);
+    unit.get_mut(array)
+        .set(gimli::DW_AT_type, WriteAttributeValue::UnitRef(int));
+    let subrange = unit.add(array, gimli::DW_TAG_subrange_type);
+    unit.get_mut(subrange)
+        .set(gimli::DW_AT_upper_bound, WriteAttributeValue::Udata(3));
+    if let Some(lower_bound) = lower_bound {
+        unit.get_mut(subrange)
+            .set(gimli::DW_AT_lower_bound, lower_bound);
+    }
+    let variable = unit.add(root, gimli::DW_TAG_variable);
+    unit.get_mut(variable)
+        .set(gimli::DW_AT_type, WriteAttributeValue::UnitRef(array));
+
+    let mut sections = Sections::new(EndianVec::new(LittleEndian));
+    written.write(&mut sections).expect("write test DWARF");
+    let dwarf = gimli::Dwarf::load(|id| {
+        let bytes = sections.get(id).map(EndianVec::slice).unwrap_or_default();
+        Ok::<_, gimli::Error>(Reader::new(bytes, RunTimeEndian::Little))
+    })
+    .expect("read test DWARF");
+    let mut headers = dwarf.units();
+    let header = headers
+        .next()
+        .expect("read unit header")
+        .expect("one test unit");
+    let units = super::super::Units::new(vec![dwarf.unit(header).expect("read test unit")]);
+    let type_value = {
+        let mut entries = units[0].entries();
+        let mut value = None;
+        while let Some(entry) = entries.next_dfs().expect("read test DIE") {
+            if entry.tag() == gimli::DW_TAG_variable {
+                value = entry.attr_value(gimli::DW_AT_type);
+            }
+        }
+        value.expect("the variable's type")
+    };
+    let signatures = HashMap::new();
+    let pool = std::sync::Mutex::default();
+    let die_buffers = super::types::DieBuffers::default();
+    let mut arena = TypeArenaBuilder::new(
+        &dwarf,
+        &units,
+        &signatures,
+        ModuleImageId::new(0),
+        ByteOrder::Little,
+        &pool,
+        &die_buffers,
+        crate::debug_info::dwarf::budget::LoadLimits::default().budget(0),
+    );
+    let TypeResolution::Resolved(id) = arena.variable_type(0, Some(type_value)) else {
+        panic!("the array type resolves");
+    };
+    arena.entries[id.index()].clone()
+}
+
+/// An array that does not say where its indices begin begins where its
+/// language's do: at 0 in C, at 1 in Fortran and Ada. A language whose
+/// default DWARF does not give, and a bound known only at run time, are
+/// not guessed at.
+#[test]
+fn an_arrays_default_lower_bound_is_its_languages() {
+    let dimensions = |entry: &TypeEntry| match entry {
+        TypeEntry::Resolved(TypeInfo {
+            kind: TypeKind::Array { dimensions, .. },
+            ..
+        }) => Some(
+            dimensions
+                .iter()
+                .map(|dimension| (dimension.lower_bound, dimension.count))
+                .collect::<Vec<_>>(),
+        ),
+        _ => None,
+    };
+    for (language, expected) in [
+        (gimli::DW_LANG_C99, (0, 4)),
+        (gimli::DW_LANG_Rust, (0, 4)),
+        (gimli::DW_LANG_Fortran08, (1, 3)),
+        (gimli::DW_LANG_Ada95, (1, 3)),
+    ] {
+        assert_eq!(
+            dimensions(&array_type_in(language, None)),
+            Some(vec![expected]),
+            "{language}"
+        );
+    }
+    assert_eq!(
+        dimensions(&array_type_in(
+            gimli::DW_LANG_Fortran08,
+            Some(WriteAttributeValue::Sdata(-1))
+        )),
+        Some(vec![(-1, 5)])
+    );
+    // A vendor's language says nothing of where its arrays begin.
+    assert_eq!(
+        dimensions(&array_type_in(gimli::DwLang(0x8001), None)),
+        None
+    );
+    let mut runtime = gimli::write::Expression::new();
+    runtime.op(gimli::DW_OP_push_object_address);
+    runtime.op(gimli::DW_OP_deref);
+    assert_eq!(
+        dimensions(&array_type_in(
+            gimli::DW_LANG_Fortran08,
+            Some(WriteAttributeValue::Exprloc(runtime))
+        )),
+        None
+    );
 }
 
 #[test]
@@ -1800,8 +1942,6 @@ fn bit_field_extraction_is_endian_aware_and_bounded() {
 /// local, a member, or a pointee of that type is.
 #[test]
 fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
-    use object::write::Object;
-
     let encoding = Encoding {
         format: Format::Dwarf32,
         version: 5,
@@ -1833,36 +1973,7 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
         gimli::DW_AT_location,
         WriteAttributeValue::Exprloc(location),
     );
-    let mut sections = Sections::new(EndianVec::new(LittleEndian));
-    written.write(&mut sections).expect("write test DWARF");
-
-    let mut elf = Object::new(
-        object::BinaryFormat::Elf,
-        object::Architecture::X86_64,
-        object::Endianness::Little,
-    );
-    let data = elf.add_section(Vec::new(), b".data".to_vec(), object::SectionKind::Data);
-    elf.append_section_data(data, &[0; 0x20], 8);
-    sections
-        .for_each(|id, section| -> std::result::Result<(), ()> {
-            if !section.slice().is_empty() {
-                let debug = elf.add_section(
-                    Vec::new(),
-                    id.name().as_bytes().to_vec(),
-                    object::SectionKind::Debug,
-                );
-                elf.append_section_data(debug, section.slice(), 1);
-            }
-            Ok(())
-        })
-        .expect("add the DWARF sections");
-    let bytes = elf.write().expect("write the test object");
-    let debug_info = crate::debug_info::load_program(
-        std::path::Path::new("malformed.o"),
-        &bytes,
-        &crate::debug_info::DebugFileSearch::default(),
-    )
-    .expect("load the test object");
+    let debug_info = load_test_object(&mut written);
     assert_eq!(debug_info.image.globals().len(), 1);
 
     let mut runtime = Runtime::new([]);
@@ -1894,6 +2005,143 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
             VariableMalformedKind::InvalidTypeGraph,
             "pointer type has a zero byte size"
         )
+    );
+}
+
+/// Loads written DWARF as an object of 0x20 bytes of data and of code,
+/// both at address zero.
+fn load_test_object(written: &mut WriteDwarf) -> crate::debug_info::DebugInfo {
+    use object::write::Object;
+
+    let mut sections = Sections::new(EndianVec::new(LittleEndian));
+    written.write(&mut sections).expect("write test DWARF");
+    let mut elf = Object::new(
+        object::BinaryFormat::Elf,
+        object::Architecture::X86_64,
+        object::Endianness::Little,
+    );
+    let data = elf.add_section(Vec::new(), b".data".to_vec(), object::SectionKind::Data);
+    elf.append_section_data(data, &[0; 0x20], 8);
+    let text = elf.add_section(Vec::new(), b".text".to_vec(), object::SectionKind::Text);
+    elf.append_section_data(text, &[0xc3; 0x20], 16);
+    sections
+        .for_each(|id, section| -> std::result::Result<(), ()> {
+            if !section.slice().is_empty() {
+                let debug = elf.add_section(
+                    Vec::new(),
+                    id.name().as_bytes().to_vec(),
+                    object::SectionKind::Debug,
+                );
+                elf.append_section_data(debug, section.slice(), 1);
+            }
+            Ok(())
+        })
+        .expect("add the DWARF sections");
+    let bytes = elf.write().expect("write the test object");
+    crate::debug_info::load_program(
+        std::path::Path::new("test.o"),
+        &bytes,
+        &crate::debug_info::DebugFileSearch::default(),
+    )
+    .expect("load the test object")
+}
+
+/// A variable the compiler made, with no name, is not listed, and not
+/// malformed; one with no name that is not the compiler's is malformed.
+#[test]
+fn a_nameless_artificial_variable_is_the_compilers_own() {
+    let encoding = Encoding {
+        format: Format::Dwarf32,
+        version: 5,
+        address_size: 8,
+    };
+    let mut written = WriteDwarf::new();
+    let unit_id = written.units.add(Unit::new(encoding, LineProgram::none()));
+    let unit = written.units.get_mut(unit_id);
+    let root = unit.root();
+    unit.get_mut(root).set(
+        gimli::DW_AT_language,
+        WriteAttributeValue::Language(gimli::DW_LANG_C11),
+    );
+    let int = unit.add(root, gimli::DW_TAG_base_type);
+    unit.get_mut(int).set(
+        gimli::DW_AT_name,
+        WriteAttributeValue::String(b"int".to_vec()),
+    );
+    unit.get_mut(int)
+        .set(gimli::DW_AT_byte_size, WriteAttributeValue::Udata(4));
+    unit.get_mut(int).set(
+        gimli::DW_AT_encoding,
+        WriteAttributeValue::Encoding(gimli::DW_ATE_signed),
+    );
+    let function = unit.add(root, gimli::DW_TAG_subprogram);
+    unit.get_mut(function).set(
+        gimli::DW_AT_name,
+        WriteAttributeValue::String(b"work".to_vec()),
+    );
+    unit.get_mut(function).set(
+        gimli::DW_AT_low_pc,
+        WriteAttributeValue::Address(gimli::write::Address::Constant(0)),
+    );
+    unit.get_mut(function)
+        .set(gimli::DW_AT_high_pc, WriteAttributeValue::Udata(0x20));
+    for (name, artificial) in [(Some("named"), false), (None, true), (None, false)] {
+        let variable = unit.add(function, gimli::DW_TAG_variable);
+        let variable = unit.get_mut(variable);
+        if let Some(name) = name {
+            variable.set(
+                gimli::DW_AT_name,
+                WriteAttributeValue::String(name.as_bytes().to_vec()),
+            );
+        }
+        if artificial {
+            variable.set(gimli::DW_AT_artificial, WriteAttributeValue::Flag(true));
+        }
+        variable.set(gimli::DW_AT_type, WriteAttributeValue::UnitRef(int));
+        let mut location = gimli::write::Expression::new();
+        location.op_addr(gimli::write::Address::Constant(0x10));
+        variable.set(
+            gimli::DW_AT_location,
+            WriteAttributeValue::Exprloc(location),
+        );
+    }
+    let debug_info = load_test_object(&mut written);
+
+    let mut runtime = Runtime::new([]);
+    runtime.memory = Some(Arc::from([0_u8; 0x20]));
+    let address = ImageAddress::new(0x8);
+    let variables = debug_info
+        .variables
+        .inspect(
+            address,
+            None,
+            &crate::VariableQuery::All,
+            crate::debug_info::VariableContext {
+                stop_id: crate::StopId::new(1),
+                context: crate::ThreadId::new(1).into(),
+                frame: crate::StackFrameId::new(0),
+                module: crate::ModuleId::new(0),
+                image: ModuleImageId::new(0),
+                address: None,
+            },
+            &mut runtime,
+            &mut InspectionBudget::default(),
+        )
+        .expect("list the function's variables");
+    let listed = variables
+        .iter()
+        .map(|variable| {
+            (
+                variable.name.as_ref(),
+                matches!(variable.state, VariableState::Malformed(_)),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert_eq!(listed[0], ("named", false));
+    assert!(
+        listed[1].0.starts_with("<anonymous variable") && listed[1].1,
+        "{listed:?}"
     );
 }
 
