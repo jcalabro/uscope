@@ -76,6 +76,140 @@ fn array_indices_honor_lower_bounds_and_reject_overflow() {
     ));
 }
 
+/// The type of the one variable in a unit of `language` whose type is an
+/// array of `int` with one subrange, its upper bound 3 and its lower bound
+/// as given.
+fn array_type_in(language: gimli::DwLang, lower_bound: Option<WriteAttributeValue>) -> TypeEntry {
+    let encoding = Encoding {
+        format: Format::Dwarf32,
+        version: 5,
+        address_size: 8,
+    };
+    let mut written = WriteDwarf::new();
+    let unit_id = written.units.add(Unit::new(encoding, LineProgram::none()));
+    let unit = written.units.get_mut(unit_id);
+    let root = unit.root();
+    unit.get_mut(root).set(
+        gimli::DW_AT_language,
+        WriteAttributeValue::Language(language),
+    );
+    let int = unit.add(root, gimli::DW_TAG_base_type);
+    unit.get_mut(int).set(
+        gimli::DW_AT_encoding,
+        WriteAttributeValue::Encoding(gimli::DW_ATE_signed),
+    );
+    unit.get_mut(int)
+        .set(gimli::DW_AT_byte_size, WriteAttributeValue::Udata(4));
+    let array = unit.add(root, gimli::DW_TAG_array_type);
+    unit.get_mut(array)
+        .set(gimli::DW_AT_type, WriteAttributeValue::UnitRef(int));
+    let subrange = unit.add(array, gimli::DW_TAG_subrange_type);
+    unit.get_mut(subrange)
+        .set(gimli::DW_AT_upper_bound, WriteAttributeValue::Udata(3));
+    if let Some(lower_bound) = lower_bound {
+        unit.get_mut(subrange)
+            .set(gimli::DW_AT_lower_bound, lower_bound);
+    }
+    let variable = unit.add(root, gimli::DW_TAG_variable);
+    unit.get_mut(variable)
+        .set(gimli::DW_AT_type, WriteAttributeValue::UnitRef(array));
+
+    let mut sections = Sections::new(EndianVec::new(LittleEndian));
+    written.write(&mut sections).expect("write test DWARF");
+    let dwarf = gimli::Dwarf::load(|id| {
+        let bytes = sections.get(id).map(EndianVec::slice).unwrap_or_default();
+        Ok::<_, gimli::Error>(Reader::new(bytes, RunTimeEndian::Little))
+    })
+    .expect("read test DWARF");
+    let mut headers = dwarf.units();
+    let header = headers
+        .next()
+        .expect("read unit header")
+        .expect("one test unit");
+    let units = super::super::Units::new(vec![dwarf.unit(header).expect("read test unit")]);
+    let type_value = {
+        let mut entries = units[0].entries();
+        let mut value = None;
+        while let Some(entry) = entries.next_dfs().expect("read test DIE") {
+            if entry.tag() == gimli::DW_TAG_variable {
+                value = entry.attr_value(gimli::DW_AT_type);
+            }
+        }
+        value.expect("the variable's type")
+    };
+    let signatures = HashMap::new();
+    let pool = std::sync::Mutex::default();
+    let die_buffers = super::types::DieBuffers::default();
+    let mut arena = TypeArenaBuilder::new(
+        &dwarf,
+        &units,
+        &signatures,
+        ModuleImageId::new(0),
+        ByteOrder::Little,
+        &pool,
+        &die_buffers,
+        crate::debug_info::dwarf::budget::LoadLimits::default().budget(0),
+    );
+    let TypeResolution::Resolved(id) = arena.variable_type(0, Some(type_value)) else {
+        panic!("the array type resolves");
+    };
+    arena.entries[id.index()].clone()
+}
+
+/// An array that does not say where its indices begin begins where its
+/// language's do: at 0 in C, at 1 in Fortran and Ada. A language whose
+/// default DWARF does not give, and a bound known only at run time, are
+/// not guessed at.
+#[test]
+fn an_arrays_default_lower_bound_is_its_languages() {
+    let dimensions = |entry: &TypeEntry| match entry {
+        TypeEntry::Resolved(TypeInfo {
+            kind: TypeKind::Array { dimensions, .. },
+            ..
+        }) => Some(
+            dimensions
+                .iter()
+                .map(|dimension| (dimension.lower_bound, dimension.count))
+                .collect::<Vec<_>>(),
+        ),
+        _ => None,
+    };
+    for (language, expected) in [
+        (gimli::DW_LANG_C99, (0, 4)),
+        (gimli::DW_LANG_Rust, (0, 4)),
+        (gimli::DW_LANG_Fortran08, (1, 3)),
+        (gimli::DW_LANG_Ada95, (1, 3)),
+    ] {
+        assert_eq!(
+            dimensions(&array_type_in(language, None)),
+            Some(vec![expected]),
+            "{language}"
+        );
+    }
+    assert_eq!(
+        dimensions(&array_type_in(
+            gimli::DW_LANG_Fortran08,
+            Some(WriteAttributeValue::Sdata(-1))
+        )),
+        Some(vec![(-1, 5)])
+    );
+    // A vendor's language says nothing of where its arrays begin.
+    assert_eq!(
+        dimensions(&array_type_in(gimli::DwLang(0x8001), None)),
+        None
+    );
+    let mut runtime = gimli::write::Expression::new();
+    runtime.op(gimli::DW_OP_push_object_address);
+    runtime.op(gimli::DW_OP_deref);
+    assert_eq!(
+        dimensions(&array_type_in(
+            gimli::DW_LANG_Fortran08,
+            Some(WriteAttributeValue::Exprloc(runtime))
+        )),
+        None
+    );
+}
+
 #[test]
 fn declaration_canonicalization_cannot_launder_a_non_type_reference() {
     let encoding = Encoding {
