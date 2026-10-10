@@ -31,6 +31,7 @@ use super::identity::{
     GoParts, IdentityParts, ScopePath, ScopeSegment, go_embedded, inline_namespace_path,
     scope_segment, source_language,
 };
+use super::layered::{Layered, Marks, Rows};
 use super::location::copy_expression;
 use super::variant::{
     VariantMetadataBudget, VariantMetadataError, copy_variant_selection,
@@ -53,17 +54,12 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) units: &'a Units<'data>,
     pub(super) type_signatures: &'a TypeSignatures,
     pub(super) image: ModuleImageId,
-    pub(super) by_die: DieMap<TypeId>,
-    pub(super) type_definitions: DieMap<DieKey>,
-    pub(super) ambiguous_type_declarations: DieMap<()>,
-    pub(super) entries: Vec<TypeEntry>,
-    /// Where each unit's DIEs begin. A reference to any other offset
-    /// points into the middle of a DIE, whose bytes could decode as
-    /// convincing nonsense.
-    pub(super) die_offsets: Vec<Bits>,
-    pub(super) unit_languages: Vec<Option<gimli::DwLang>>,
-    pub(super) zig_units: Vec<bool>,
-    pub(super) explicit_names: Bits,
+    pub(super) by_die: Layered<DieMap<TypeId>>,
+    /// What the prepass read of every unit, which building types only
+    /// reads.
+    pub(super) context: Arc<TypeContext>,
+    pub(super) entries: Rows<TypeEntry>,
+    pub(super) explicit_names: Marks,
     /// The arguments identities spell by name, which resolve once every
     /// identity exists.
     pub(super) pending_arguments: Vec<super::identity::PendingArguments>,
@@ -80,28 +76,46 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) record_member_declarations: Vec<AggregateMemberDeclaration>,
     /// What the records the loader builds may still cost.
     pub(super) budget: crate::debug_info::dwarf::budget::Meter,
-    /// The scopes enclosing each type DIE that has any.
-    pub(super) type_scopes: DieMap<ScopePath>,
-    /// The declaration each out-of-line type definition completes.
-    pub(super) definition_declarations: DieMap<DieKey>,
     /// What each named type's identity is built from, by its identifier.
     /// Nearly every type is named and identifiers are dense, so a vector
     /// holds them in a third of the hash map's memory: the map's buckets
     /// were mostly empty and every one was touched.
-    pub(super) identity_parts: Vec<Option<IdentityParts>>,
+    pub(super) identity_parts: Rows<Option<IdentityParts>>,
     /// The Go parts of each Go type's identity, apart so that no other
     /// type's parts make room for them.
-    pub(super) go_identity_parts: HashMap<TypeId, GoParts>,
+    pub(super) go_identity_parts: Layered<HashMap<TypeId, GoParts>>,
     /// The float type each complex type's parts have, by the part's name
     /// and size.
     pub(super) complex_parts: HashMap<(Arc<str>, u64), TypeId>,
     /// Go's generic type parameters: each typedef of a shape that names
     /// its type argument's entry in the function's dictionary.
-    pub(super) go_dict_indices: HashMap<TypeId, u64>,
+    pub(super) go_dict_indices: Layered<HashMap<TypeId, u64>>,
     /// Whether each C++ class whose producer says how calls pass it is
     /// passed by value, in registers where it fits, rather than by
     /// reference to a copy.
-    pub(super) passed_by_value: HashMap<TypeId, bool>,
+    pub(super) passed_by_value: Layered<HashMap<TypeId, bool>>,
+    /// The one unit whose types this arena builds, when it builds one
+    /// unit's apart from the others'.
+    pub(super) home_unit: Option<usize>,
+    /// Whether it was asked for a type of another unit, which a walk of
+    /// every unit in order may have built before this one.
+    pub(super) foreign: bool,
+}
+
+/// What the type arena's prepass found in every unit.
+pub(super) struct TypeContext {
+    pub(super) type_definitions: DieMap<DieKey>,
+    pub(super) ambiguous_type_declarations: DieMap<()>,
+    /// Where each unit's DIEs begin. A reference to any other offset
+    /// points into the middle of a DIE, whose bytes could decode as
+    /// convincing nonsense.
+    pub(super) die_offsets: Vec<Bits>,
+    pub(super) unit_languages: Vec<Option<gimli::DwLang>>,
+    pub(super) zig_units: Vec<bool>,
+    /// The scopes enclosing each type DIE that has any.
+    pub(super) type_scopes: DieMap<ScopePath>,
+    /// The declaration each out-of-line type definition completes.
+    pub(super) definition_declarations: DieMap<DieKey>,
 }
 
 /// A set of small numbers, one bit each: the offsets at which one unit's
@@ -113,7 +127,7 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
 /// types are built. Its DIEs average eight bytes, so a bit per byte, 20 MB,
 /// is a sixteenth of that, and a lookup is one load instead of a hash and a
 /// probe.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Bits {
     words: Vec<u64>,
 }
@@ -126,7 +140,7 @@ impl Bits {
         }
     }
 
-    fn insert(&mut self, value: usize) {
+    pub(super) fn insert(&mut self, value: usize) {
         let word = value / 64;
         // The set grows to fit: a unit's DIEs lie within its length, but a
         // header that lies about it must not lose one.
@@ -140,6 +154,34 @@ impl Bits {
         self.words
             .get(value / 64)
             .is_some_and(|word| word & (1 << (value % 64)) != 0)
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.words.iter().all(|word| *word == 0)
+    }
+
+    /// Adds every number of `other`.
+    pub(super) fn union(&mut self, other: &Self) {
+        if other.words.len() > self.words.len() {
+            self.words.resize(other.words.len(), 0);
+        }
+        for (word, other) in self.words.iter_mut().zip(&other.words) {
+            *word |= other;
+        }
+    }
+
+    /// The numbers in the set, in order.
+    pub(super) fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.words.iter().enumerate().flat_map(|(index, word)| {
+            let mut word = *word;
+            std::iter::from_fn(move || {
+                (word != 0).then(|| {
+                    let bit = word.trailing_zeros() as usize;
+                    word &= word - 1;
+                    index * 64 + bit
+                })
+            })
+        })
     }
 }
 
@@ -395,14 +437,18 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             units,
             type_signatures,
             image,
-            by_die: DieMap::default(),
-            type_definitions,
-            ambiguous_type_declarations,
-            entries: Vec::new(),
-            die_offsets,
-            unit_languages,
-            zig_units,
-            explicit_names: Bits::default(),
+            by_die: Layered::default(),
+            context: Arc::new(TypeContext {
+                type_definitions,
+                ambiguous_type_declarations,
+                die_offsets,
+                unit_languages,
+                zig_units,
+                type_scopes: DieMap::default(),
+                definition_declarations,
+            }),
+            entries: Rows::default(),
+            explicit_names: Marks::default(),
             pending_arguments: Vec::new(),
             resolution_depth: 0,
             byte_order,
@@ -413,13 +459,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             die_buffers,
             record_member_declarations: Vec::new(),
             budget,
-            type_scopes: DieMap::default(),
-            definition_declarations,
-            identity_parts: Vec::new(),
-            go_identity_parts: HashMap::new(),
+            identity_parts: Rows::default(),
+            go_identity_parts: Layered::default(),
             complex_parts: HashMap::new(),
-            passed_by_value: HashMap::new(),
-            go_dict_indices: HashMap::new(),
+            passed_by_value: Layered::default(),
+            go_dict_indices: Layered::default(),
+            home_unit: None,
+            foreign: false,
         };
         // Types in one scope share its segments, so each distinct list is
         // resolved once, in parallel, as a path may name another unit's
@@ -440,13 +486,26 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             .par_iter()
             .map(|segments| builder.scope_path(segments, &inline_namespaces))
             .collect::<Vec<_>>();
+        let context = Arc::get_mut(&mut builder.context).expect("the context is not shared yet");
         for (key, index) in scoped_types {
             let path = &paths[index];
             if !path.is_empty() {
-                builder.type_scopes.insert(key, path.clone());
+                context.type_scopes.insert(key, path.clone());
             }
         }
         builder
+    }
+
+    /// Makes everything built so far the base that the walks of units
+    /// share.
+    pub(super) fn freeze(&mut self) {
+        self.by_die.freeze();
+        self.entries.freeze();
+        self.explicit_names.freeze();
+        self.identity_parts.freeze();
+        self.go_identity_parts.freeze();
+        self.go_dict_indices.freeze();
+        self.passed_by_value.freeze();
     }
 
     pub(super) fn variable_type(
@@ -526,7 +585,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     }
 
     pub(super) fn is_zig(&self, unit_index: usize) -> bool {
-        self.zig_units.get(unit_index).copied().unwrap_or(false)
+        self.context
+            .zig_units
+            .get(unit_index)
+            .copied()
+            .unwrap_or(false)
     }
 
     fn next_id(&self) -> TypeId {
@@ -544,6 +607,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     pub(super) fn resolve(&mut self, key: DieKey) -> TypeId {
         if let Some(id) = self.by_die.get(&key) {
             return *id;
+        }
+        if self.home_unit.is_some_and(|home| home != key.unit) {
+            self.foreign = true;
         }
         let canonical = self.canonical_type_key(key);
         if let Ok(canonical) = canonical
@@ -618,6 +684,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 .get(current.unit)
                 .ok_or_else(|| Arc::from("type reference is outside loaded units"))?;
             if !self
+                .context
                 .die_offsets
                 .get(current.unit)
                 .is_some_and(|offsets| offsets.contains(current.offset))
@@ -632,10 +699,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if !is_type_die_tag(entry.tag()) {
                 return Err(format!("DW_AT_type target has non-type tag {:?}", entry.tag()).into());
             }
-            if self.ambiguous_type_declarations.contains_key(&current) {
+            if self
+                .context
+                .ambiguous_type_declarations
+                .contains_key(&current)
+            {
                 return Err("type declaration has multiple definitions".into());
             }
-            if let Some(definition) = self.type_definitions.get(&current).copied() {
+            if let Some(definition) = self.context.type_definitions.get(&current).copied() {
                 current = definition;
                 continue;
             }
@@ -924,6 +995,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         ) {
             Ok(Some(key)) => {
                 let target = self
+                    .context
                     .die_offsets
                     .get(key.unit)
                     .filter(|offsets| offsets.contains(key.offset))
@@ -1513,7 +1585,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     }
 
     pub(super) fn finalize_type_graph(&mut self) {
-        for (index, entry) in self.entries.iter_mut().enumerate() {
+        for (index, entry) in self.entries.flat().iter_mut().enumerate() {
             if matches!(entry, TypeEntry::Building) {
                 *entry = TypeEntry::Malformed(
                     format!("type graph node {index} did not finish building").into(),
@@ -1522,7 +1594,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
         self.add_complex_parts();
 
-        propagate_wrapper_sizes(&mut self.entries);
+        propagate_wrapper_sizes(self.entries.flat());
 
         self.reject_inline_storage_cycles();
 
@@ -1556,11 +1628,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     /// The finished graph, once [`Self::finalize_type_graph`] has run.
     pub(super) fn finish(self) -> BuiltTypes {
         BuiltTypes {
-            entries: self.entries,
+            entries: self.entries.into_flat(),
             dynamic_record_layouts: self.dynamic_record_layouts,
             complex_parts: self.complex_parts,
-            go_dict_indices: self.go_dict_indices,
-            passed_by_value: self.passed_by_value,
+            go_dict_indices: self.go_dict_indices.into_flat(),
+            passed_by_value: self.passed_by_value.into_flat(),
             image: self.image,
             pending_arguments: self.pending_arguments,
         }
@@ -1629,7 +1701,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
 
     fn reject_inline_storage_cycles(&mut self) {
         let description: Arc<str> = "type graph contains an inline-storage cycle".into();
-        for node in inline_storage_cycle_nodes(&self.entries) {
+        for node in inline_storage_cycle_nodes(self.entries.flat()) {
             self.entries[node] = TypeEntry::Malformed(Arc::clone(&description));
         }
     }
@@ -3371,7 +3443,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             SourceLanguage::Zig => name
                 .is_some_and(|name| name.starts_with("[]") || name.starts_with("[:"))
                 .then_some(SliceLayout::Zig),
-            SourceLanguage::Rust if !self.type_scopes.contains_key(&key) => {
+            SourceLanguage::Rust if !self.context.type_scopes.contains_key(&key) => {
                 let members = self.member_types(entry, key.unit)?;
                 let [(first, data), (second, _)] = members.as_slice() else {
                     return None;

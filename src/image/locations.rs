@@ -179,7 +179,7 @@ pub struct EvaluationUnit {
 }
 
 /// Expressions and lists being pooled, each once.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct LocationsBuilder {
     bytes: Vec<u8>,
     expressions: Vec<ExpressionRecord>,
@@ -344,6 +344,76 @@ impl LocationsBuilder {
         index(self.entries.len())?;
         self.pooled_lists.insert(hash, id);
         Ok(LocationListId(id))
+    }
+
+    /// The rows the largest table holds, counting each expression byte.
+    pub fn largest_table(&self) -> usize {
+        [
+            self.bytes.len(),
+            self.expressions.len(),
+            self.addresses.len(),
+            self.procedures.len(),
+            self.lists.len(),
+            self.entries.len(),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+    }
+
+    /// Pools everything `other` pooled, in the order it pooled each
+    /// expression and each list, and returns the ids each of its
+    /// expressions and lists has here.
+    ///
+    /// The ids are those pooling the same things here directly would have
+    /// given, since each kind is numbered in the order it is first pooled.
+    pub fn absorb(
+        &mut self,
+        other: &Self,
+    ) -> Result<(Vec<ExpressionId>, Vec<LocationListId>), TooLarge> {
+        let tables = other.tables();
+        let mut expressions = Vec::with_capacity(other.expressions.len());
+        let mut lists = Vec::<LocationListId>::with_capacity(other.lists.len());
+        let mut procedures = Vec::new();
+        let mut entries = Vec::new();
+        // An expression names lists pooled before it, and a list names
+        // expressions pooled before it, so each is pooled once what it
+        // names is.
+        while expressions.len() < other.expressions.len() || lists.len() < other.lists.len() {
+            if let Some(record) = other.expressions.get(expressions.len()) {
+                let first = record.procedures.get() as usize;
+                let called =
+                    &other.procedures[first..first + record.procedure_count.get() as usize];
+                if called.iter().all(|procedure| {
+                    procedure.list.get() == NONE || (procedure.list.get() as usize) < lists.len()
+                }) {
+                    let expression = tables.expression(ExpressionId(index(expressions.len())?));
+                    procedures.clear();
+                    procedures.extend(
+                        expression.procedures().map(|(offset, list)| {
+                            (offset, list.map(|list| lists[list.0 as usize]))
+                        }),
+                    );
+                    let addresses = expression.addresses().collect::<Vec<_>>();
+                    expressions.push(self.expression(
+                        expression.bytes(),
+                        expression.unit(),
+                        expression.encoding(),
+                        &addresses,
+                        &procedures,
+                    )?);
+                    continue;
+                }
+            }
+            let list = tables.list(LocationListId(index(lists.len())?));
+            entries.clear();
+            entries.extend(
+                list.entries()
+                    .map(|(range, expression)| (range, expressions[expression.id().0 as usize])),
+            );
+            lists.push(self.list(&entries)?);
+        }
+        Ok((expressions, lists))
     }
 
     /// What has been pooled so far.

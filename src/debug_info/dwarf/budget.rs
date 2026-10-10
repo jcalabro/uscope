@@ -47,7 +47,7 @@ impl LoadLimits {
 }
 
 /// Spending against one module's budget.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Meter {
     limit: u64,
     spent: u64,
@@ -87,6 +87,34 @@ impl Meter {
     /// The bytes spent so far.
     pub const fn spent(&self) -> u64 {
         self.spent
+    }
+
+    /// What may still be spent.
+    pub const fn left(&self) -> u64 {
+        self.limit - self.spent
+    }
+
+    /// A meter for work done apart, allowed what this one has left.
+    pub const fn remaining(&self) -> Self {
+        Self {
+            limit: self.limit - self.spent,
+            spent: 0,
+            exceeded: self.exceeded,
+        }
+    }
+
+    /// Charges what `apart`, split from this meter, spent, when it refused
+    /// nothing and what it spent is still left here; otherwise nothing.
+    pub fn absorb(&mut self, apart: &Self) -> bool {
+        let Some(spent) = self
+            .spent
+            .checked_add(apart.spent)
+            .filter(|spent| apart.exceeded.is_none() && *spent <= self.limit)
+        else {
+            return false;
+        };
+        self.spent = spent;
+        true
     }
 }
 

@@ -52,6 +52,7 @@ impl ScopePath {
 }
 
 /// What a type's identity is built from, recorded as the type is built.
+#[derive(Clone)]
 pub(super) struct IdentityParts {
     /// The DIE the type was built from.
     pub(super) die: DieKey,
@@ -61,10 +62,20 @@ pub(super) struct IdentityParts {
     pub(super) pack: Option<usize>,
 }
 
+#[derive(Clone)]
 pub(super) struct GoParts {
     attributes: GoTypeAttributes,
     key: Option<TypeReference>,
     element: Option<TypeReference>,
+}
+
+impl GoParts {
+    /// Replaces each type these name with `map` of it.
+    pub(super) fn map_references(&mut self, map: impl Fn(TypeReference) -> TypeReference) {
+        for reference in [&mut self.key, &mut self.element].into_iter().flatten() {
+            *reference = map(*reference);
+        }
+    }
 }
 
 /// How a DIE contributes to the scope path of the types nested in it.
@@ -273,8 +284,16 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
 
     pub(super) fn language(&self, unit_index: usize) -> SourceLanguage {
         source_language(
-            self.unit_languages.get(unit_index).copied().flatten(),
-            self.zig_units.get(unit_index).copied().unwrap_or(false),
+            self.context
+                .unit_languages
+                .get(unit_index)
+                .copied()
+                .flatten(),
+            self.context
+                .zig_units
+                .get(unit_index)
+                .copied()
+                .unwrap_or(false),
         )
     }
 
@@ -623,12 +642,14 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
     /// The scopes enclosing the DIE a type was built from, or those of the
     /// declaration it completes.
     fn type_path(&self, die: DieKey) -> ScopePath {
-        self.type_scopes
+        self.context
+            .type_scopes
             .get(&die)
             .or_else(|| {
-                self.definition_declarations
+                self.context
+                    .definition_declarations
                     .get(&die)
-                    .and_then(|declaration| self.type_scopes.get(declaration))
+                    .and_then(|declaration| self.context.type_scopes.get(declaration))
             })
             .cloned()
             .unwrap_or_default()

@@ -70,7 +70,9 @@ mod generic;
 mod globals;
 mod identity;
 mod inspect;
+mod layered;
 mod location;
+mod merge;
 mod pieces;
 mod returns;
 mod shape;
@@ -338,16 +340,7 @@ pub(super) fn load_variable_info<'data>(
 ) -> std::result::Result<LoadedVariables, DwarfError> {
     let units = &catalog.units;
     let instance_ids = code.instance_ids;
-    let mut objects = Vec::new();
-    let mut functions = Vec::new();
-    let mut calls = call_sites::CallSiteBuilder::default();
-    let mut procedures = Vec::new();
-    let mut vtables = Vec::new();
-    let mut go_function_entries = Vec::new();
-    let mut unnamed_parameters = Vec::new();
-    let mut abstract_bodies = Vec::new();
-    let mut function_generics = BTreeMap::<_, crate::FunctionGenerics>::new();
-    let mut order = 0_u64;
+    let mut walked = Walked::default();
     let phase = crate::span!("variables.evaluation_units");
     // Every location is pooled once, in the tables the image will hold.
     let pool = std::sync::Mutex::new(LocationsBuilder::default());
@@ -378,638 +371,55 @@ pub(super) fn load_variable_info<'data>(
     let globals = load_globals(
         dwarf,
         units,
-        &mut objects,
-        &mut order,
+        &mut walked.objects,
+        &mut walked.order,
         files,
         &mut types,
         &pool,
     )?;
     drop(phase);
 
+    types.freeze();
     let phase = crate::span!("variables.main_walk");
     // The file of each declaration, which the walk would otherwise spell
     // again for each variable.
     let mut declared_files = die::DeclaredFiles::default();
-    for (unit_index, unit) in units.iter().enumerate() {
-        if is_type_unit(unit) {
-            continue;
-        }
-        let go = languages[unit_index] == Some(gimli::DW_LANG_Go);
-        let rust = languages[unit_index] == Some(gimli::DW_LANG_Rust);
-        // Go names the register ABI its x86-64 code calls with among the
-        // flags of each unit's producer, as `go1.27.1; -N -l regabi`.
-        let go_registers = go
-            && target.architecture == crate::Architecture::X86_64
-            && unit_producer(dwarf, unit)?.is_some_and(|producer| {
-                producer
-                    .split_once(';')
-                    .is_some_and(|(_, flags)| flags.split_whitespace().any(|flag| flag == "regabi"))
-            });
-        // Other languages' x86-64 code returns as the System V convention
-        // says, or, for the languages that leave theirs unspecified, as it
-        // for scalars.
-        let language = source_language(languages[unit_index], types.is_zig(unit_index));
-        let system_v = target.architecture == crate::Architecture::X86_64
-            && matches!(
-                language,
-                SourceLanguage::C
-                    | SourceLanguage::Cpp
-                    | SourceLanguage::Rust
-                    | SourceLanguage::Zig
-            );
-        let fused_blocks = if go {
-            fused_block_ranges(dwarf, unit, &catalog.code)?
-        } else {
-            HashMap::new()
-        };
-        let mut walk = DieWalk::new(unit)?;
-        let mut scopes = Vec::<Option<Scope>>::new();
-        // The concrete instances of abstract functions open at this point
-        // of the walk, innermost last.
-        let mut concrete = Vec::<ConcreteRoutine>::new();
-
-        while let Some(die) = walk.next()? {
-            let depth = usize::try_from(die.depth).map_err(|_| DwarfError::InvalidEntryDepth)?;
-            scopes.truncate(depth);
-            while concrete
-                .last()
-                .is_some_and(|routine| routine.depth >= depth)
-            {
-                let routine = concrete.pop().expect("an open routine");
-                add_abstract_only_variables(
-                    dwarf,
-                    units,
-                    &routine,
-                    &mut AbstractTargets {
-                        objects: &mut objects,
-                        functions: &mut functions,
-                        order: &mut order,
-                        types: &mut types,
-                        files,
-                        bodies: &mut abstract_bodies,
-                    },
-                )?;
-            }
-            if !main_walk_reads(die.tag, depth) {
-                // Nothing here reads such a DIE's attributes; all it has is
-                // its scope for the DIEs within it: its parent's, or none
-                // within a type. Most DIEs are types' members, parameters,
-                // and arguments, which are not decoded.
-                let scope = if is_type_scope(die.tag) {
-                    None
-                } else {
-                    scopes.last().and_then(Clone::clone)
-                };
-                scopes.push(scope);
+    let cx = WalkContext {
+        dwarf,
+        catalog,
+        target,
+        languages: &languages,
+        instance_ids,
+    };
+    if !merge::walk_units_apart(&cx, &mut walked, &mut types, files, &pool) {
+        crate::count!("units_walked_in_order", units.len());
+        for (unit_index, unit) in units.iter().enumerate() {
+            if is_type_unit(unit) {
                 continue;
             }
-            let entry = walk.decode()?;
-            let parent = scopes.last().and_then(Clone::clone);
-            // A concrete DIE standing for an abstract one covers it.
-            if let Some(routine) = concrete.last_mut()
-                && matches!(
-                    entry.tag(),
-                    gimli::DW_TAG_variable | gimli::DW_TAG_formal_parameter
-                )
-                && let Some(origin) = die_reference(
-                    entry.attr_value(gimli::DW_AT_abstract_origin),
-                    unit_index,
-                    units,
-                )?
-            {
-                routine.covered.insert(origin);
-            }
-
-            let scope = match entry.tag() {
-                gimli::DW_TAG_subprogram => {
-                    let defined = strict_flag(entry, gimli::DW_AT_declaration) == Ok(false);
-                    // The types a function's code uses are the program's
-                    // types too, though no data holds them: a view may name
-                    // the type only an inlined function returns.
-                    if defined {
-                        types.reach(unit_index, entry.attr_value(gimli::DW_AT_type));
-                    }
-                    let ranges =
-                        die_code_ranges(dwarf, unit, entry, &catalog.code).map(Arc::<[_]>::from)?;
-                    let key = DieKey {
-                        unit: unit_index,
-                        offset: entry.offset().0,
-                    };
-                    if rust
-                        && defined
-                        && !ranges.is_empty()
-                        && let Some(instance) = instance_ids.get(&key)
-                    {
-                        let generics = types.function_generics(key);
-                        if !generics.is_empty() {
-                            function_generics.insert(*instance, Arc::from(generics));
-                        }
-                    }
-                    let function = functions.len();
-                    if go && defined {
-                        // A func value holds the address its code begins at.
-                        let entry_address = entry
-                            .attr_value(gimli::DW_AT_low_pc)
-                            .map(|value| unit_dwarf(dwarf, unit).attr_address(unit, value))
-                            .transpose()?
-                            .flatten()
-                            .map(ImageAddress::new)
-                            .filter(|address| ranges.iter().any(|range| range.contains(*address)));
-                        if let Some(address) = entry_address {
-                            go_function_entries.push((address, row(function)));
-                        }
-                    }
-                    functions.push(Function {
-                        ranges: Arc::clone(&ranges),
-                        objects: Vec::new(),
-                        // An optimized closure's out-of-line code names
-                        // its abstract origin.
-                        name: if go {
-                            origin_chain(units, unit_index, entry)
-                                .ok()
-                                .and_then(|chain| {
-                                    string_with_origins(
-                                        dwarf,
-                                        units,
-                                        unit,
-                                        entry,
-                                        &chain,
-                                        gimli::DW_AT_name,
-                                    )
-                                    .ok()
-                                })
-                                .flatten()
-                        } else {
-                            None
-                        },
-                        captures: Ok(Vec::new()),
-                        returns: if go_registers && defined {
-                            Some(returns::ReturnConvention::GoRegisters)
-                        } else if system_v && defined {
-                            system_v_returns(
-                                dwarf, units, unit_index, unit, entry, language, &mut types,
-                            )
-                        } else {
-                            None
-                        },
-                    });
-                    let frame_base = copy_optional_location(
-                        dwarf,
-                        &mut pool.lock().expect("loading does not panic"),
-                        unit_index,
-                        unit,
-                        entry.attr_value(gimli::DW_AT_frame_base),
-                        MetadataAbsence::NoFrameBase,
-                    );
-                    calls.function(dwarf, units, unit_index, entry, &ranges, frame_base.clone());
-                    Some(Scope {
-                        ranges,
-                        lexical_depth: 0,
-                        frame_base,
-                        routine: true,
-                        function,
-                        instance: None,
-                        code_instance: instance_ids
-                            .get(&DieKey {
-                                unit: unit_index,
-                                offset: entry.offset().0,
-                            })
-                            .copied(),
-                        go_file: if go {
-                            declared_file(dwarf, units, unit_index, entry, files)
-                        } else {
-                            None
-                        },
-                        malformed: None,
-                        defined,
-                        rust: rust
-                            .then(|| RustScope::routine(dwarf, units, unit_index, unit, entry)),
-                        awaitee: None,
-                    })
-                }
-                gimli::DW_TAG_lexical_block => parent.as_ref().map(|parent| {
-                    // A Go block's code includes its nested blocks'.
-                    let own = fused_blocks.get(&entry.offset().0).map_or_else(
-                        || die_code_ranges(dwarf, unit, entry, &catalog.code),
-                        |fused| Ok(fused.clone()),
-                    );
-                    let (ranges, malformed) = match own.map(Arc::<[_]>::from) {
-                        Ok(ranges) if !ranges.is_empty() => (ranges, None),
-                        Ok(_) => (Arc::clone(&parent.ranges), None),
-                        Err(error) => (Arc::clone(&parent.ranges), Some(error.to_string().into())),
-                    };
-                    Scope {
-                        ranges,
-                        lexical_depth: parent.lexical_depth.saturating_add(1),
-                        frame_base: parent.frame_base.clone(),
-                        routine: parent.routine,
-                        function: parent.function,
-                        instance: parent.instance,
-                        code_instance: parent.code_instance,
-                        go_file: parent.go_file,
-                        rust: parent.rust.map(|_| RustScope::Other),
-                        awaitee: if parent.rust.is_some() {
-                            origin_awaitee(dwarf, units, unit_index, entry).or(parent.awaitee)
-                        } else {
-                            None
-                        },
-                        malformed: malformed.or_else(|| parent.malformed.clone()),
-                        defined: parent.defined,
-                    }
-                }),
-                // An inline instance keeps the caller's frame base and function
-                // but only its own code ranges; one without usable ranges gets
-                // none, unlike a lexical block, so its locals never match.
-                gimli::DW_TAG_inlined_subroutine => parent.as_ref().map(|parent| {
-                    let instance = instance_ids
-                        .get(&DieKey {
-                            unit: unit_index,
-                            offset: entry.offset().0,
-                        })
-                        .copied();
-                    let (ranges, malformed) =
-                        match die_code_ranges(dwarf, unit, entry, &catalog.code)
-                            .map(Arc::<[_]>::from)
-                        {
-                            Ok(ranges) if ranges.is_empty() => (
-                                Vec::new().into(),
-                                Some(Arc::from("inlined subroutine has no address ranges")),
-                            ),
-                            // A ranged instance must be identified so lookups can
-                            // scope to it; without an identity its contents could
-                            // only be misattributed.
-                            Ok(_) if instance.is_none() => (
-                                Vec::new().into(),
-                                Some(Arc::from("inlined subroutine has no code instance")),
-                            ),
-                            Ok(ranges) => (ranges, None),
-                            Err(error) => (Vec::new().into(), Some(error.to_string().into())),
-                        };
-                    Scope {
-                        ranges,
-                        lexical_depth: parent.lexical_depth.saturating_add(1),
-                        frame_base: parent.frame_base.clone(),
-                        routine: true,
-                        function: parent.function,
-                        instance,
-                        code_instance: instance,
-                        go_file: if go {
-                            declared_file(dwarf, units, unit_index, entry, files)
-                        } else {
-                            None
-                        },
-                        rust: parent
-                            .rust
-                            .map(|_| RustScope::routine(dwarf, units, unit_index, unit, entry)),
-                        awaitee: None,
-                        malformed: malformed.or_else(|| parent.malformed.clone()),
-                        defined: parent.defined,
-                    }
-                }),
-                tag if is_type_scope(tag) => None,
-                _ => parent.clone(),
-            };
-            // An empty extent is deliberate containment (a rangeless inline
-            // instance) and must stay empty through every descendant scope;
-            // only a nested subprogram starts an independent extent.
-            let scope = if entry.tag() != gimli::DW_TAG_subprogram
-                && parent
-                    .as_ref()
-                    .is_some_and(|parent| parent.ranges.is_empty())
-            {
-                scope.map(|mut scope| {
-                    scope.ranges = Vec::new().into();
-                    scope
-                })
-            } else {
-                scope
-            };
-
-            if matches!(
-                entry.tag(),
-                gimli::DW_TAG_subprogram
-                    | gimli::DW_TAG_inlined_subroutine
-                    | gimli::DW_TAG_lexical_block
-            ) && let Some(routine) = scope.as_ref().filter(|scope| !scope.ranges.is_empty())
-                && let Some(origin) = die_reference(
-                    entry.attr_value(gimli::DW_AT_abstract_origin),
-                    unit_index,
-                    units,
-                )?
-            {
-                concrete.push(ConcreteRoutine {
-                    depth,
-                    origin,
-                    scope: routine.clone(),
-                    covered: std::collections::HashSet::new(),
-                });
-            }
-            match entry.tag() {
-                gimli::DW_TAG_call_site | gimli::DW_TAG_GNU_call_site => {
-                    if let Some(parent) = parent.as_ref().filter(|parent| parent.defined) {
-                        calls.site(
-                            dwarf,
-                            &mut pool.lock().expect("loading does not panic"),
-                            units,
-                            unit_index,
-                            entry,
-                            parent.function,
-                            depth,
-                        );
-                    }
-                }
-                gimli::DW_TAG_call_site_parameter | gimli::DW_TAG_GNU_call_site_parameter => {
-                    calls.parameter(
-                        dwarf,
-                        &mut pool.lock().expect("loading does not panic"),
-                        units,
-                        unit_index,
-                        entry,
-                        depth,
-                    );
-                }
-                gimli::DW_TAG_dwarf_procedure => {
-                    if let Some(offset) = debug_info_offset(units, unit_index, entry) {
-                        let location = copy_optional_location(
-                            dwarf,
-                            &mut pool.lock().expect("loading does not panic"),
-                            unit_index,
-                            unit,
-                            entry.attr_value(gimli::DW_AT_location),
-                            MetadataAbsence::NoLocation,
-                        );
-                        procedures.push((offset, location));
-                    }
-                }
-                _ => {}
-            }
-            if depth == 1
-                && entry.tag() == gimli::DW_TAG_variable
-                && let Some((address, ty)) = rust_vtable(dwarf, unit_index, unit, entry, &mut types)
-            {
-                vtables.push((address, ty));
-            }
-            // A Go interface may hold a value of any type the runtime
-            // describes, which no data need mention.
-            if depth == 1
-                && types::is_type_die_tag(entry.tag())
-                && identity::go_runtime_type(entry).is_some()
-            {
-                types.resolve(DieKey {
-                    unit: unit_index,
-                    offset: entry.offset().0,
-                });
-            }
-            let kind = match entry.tag() {
-                gimli::DW_TAG_variable => Some(VariableKind::Local),
-                gimli::DW_TAG_formal_parameter => Some(VariableKind::Parameter),
-                _ => None,
-            };
-            if entry.tag() == gimli::DW_TAG_variable
-                && let Some(scope) = parent.as_ref().filter(|scope| scope.routine)
-                && let Some(offset) = entry.attr_value(DW_AT_GO_CLOSURE_OFFSET)
-            {
-                let (type_unit, type_value) = type_with_origins(unit_index, entry, &[]);
-                let capture = match (offset.udata_value(), copy_name(dwarf, unit, entry)) {
-                    (Some(offset), Ok(Some(name))) => Ok(Capture {
-                        name,
-                        offset,
-                        type_info: types.variable_type(type_unit, type_value),
-                    }),
-                    _ => Err(Arc::from("a closure's captured variable is malformed")),
-                };
-                // One capture it cannot describe leaves them all unknown,
-                // rather than the closure seeming to capture less.
-                let captures = &mut functions[scope.function].captures;
-                match capture {
-                    Ok(capture) => {
-                        if let Ok(captures) = captures {
-                            captures.push(capture);
-                        }
-                    }
-                    Err(reason) => *captures = Err(reason),
-                }
-            }
-            if let Some(kind) = kind {
-                let owning_scope = parent.as_ref().filter(|scope| {
-                    !scope.ranges.is_empty() && (kind == VariableKind::Local || scope.routine)
-                });
-                // A variable of code with no address of its own, such as an
-                // abstract inline instance, names no value, but its type is
-                // the program's.
-                if owning_scope.is_none() && parent.as_ref().is_some_and(|scope| scope.defined) {
-                    types.reach(unit_index, entry.attr_value(gimli::DW_AT_type));
-                }
-                if let Some(scope) = owning_scope {
-                    // Concrete inline-instance entries reference their
-                    // abstract origin for descriptive metadata.
-                    let (chain, chain_error) = match origin_chain(units, unit_index, entry) {
-                        Ok(chain) => (chain, None),
-                        Err(error) => (Vec::new(), Some(Arc::from(error.to_string()))),
-                    };
-                    // Go marks its results as variable parameters.
-                    let kind = if kind == VariableKind::Parameter
-                        && go
-                        && entry
-                            .attr_value(gimli::DW_AT_variable_parameter)
-                            .or_else(|| {
-                                chain.iter().find_map(|(_, origin)| {
-                                    origin.attr_value(gimli::DW_AT_variable_parameter)
-                                })
-                            })
-                            .is_some_and(|value| {
-                                matches!(value, gimli::AttributeValue::Flag(true))
-                                    || value.udata_value() == Some(1)
-                            }) {
-                        VariableKind::Result
-                    } else {
-                        kind
-                    };
-                    let object_name = match kind {
-                        VariableKind::Parameter => "parameter",
-                        VariableKind::Result | VariableKind::Returned => "result",
-                        VariableKind::Local => "variable",
-                        VariableKind::Global => "global",
-                    };
-                    let (name, name_error) = match string_with_origins(
-                        dwarf,
-                        units,
-                        unit,
-                        entry,
-                        &chain,
-                        gimli::DW_AT_name,
-                    ) {
-                        Ok(Some(name)) => (name, None),
-                        Ok(None) => (
-                            format!("<anonymous {object_name} at {:#x}>", entry.offset().0).into(),
-                            Some(Arc::from(format!("{object_name} has no name"))),
-                        ),
-                        Err(error) => (
-                            format!("<malformed {object_name} at {:#x}>", entry.offset().0).into(),
-                            Some(error.to_string().into()),
-                        ),
-                    };
-                    order = order
-                        .checked_add(1)
-                        .expect("data-object DIE order overflow");
-                    let declaration = die::declaration_remembering_files(
-                        dwarf,
-                        units,
-                        unit,
-                        entry,
-                        &chain,
-                        files,
-                        &mut declared_files,
-                    )
-                    .map(|declaration| {
-                        // Go gives a variable's line alone: its file is
-                        // its function's.
-                        declaration.or_else(|| {
-                            let line = entry
-                                .attr(gimli::DW_AT_decl_line)
-                                .and_then(gimli::Attribute::udata_value)
-                                .and_then(crate::LineNumber::new)?;
-                            Some(SourceLocation {
-                                file: scope.go_file?,
-                                line,
-                                column: None,
-                            })
-                        })
-                    });
-                    let (ranges, scope_error) = data_object_scope_ranges(scope, entry);
-                    // A Go local exists from the line after its declaration.
-                    let go_declaration = match (go, kind, &declaration) {
-                        (true, VariableKind::Local, Ok(Some(declared))) => {
-                            Some(visibility::GoDeclaration {
-                                location: declared.clone(),
-                                instance: scope.code_instance,
-                            })
-                        }
-                        _ => None,
-                    };
-                    let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
-                    let type_info = types.variable_type(type_unit, type_value);
-                    // Go names a variable it moved to the heap `&name`, and
-                    // describes the pointer to it.
-                    let (name, type_info, escaped) = match (go, name.strip_prefix('&')) {
-                        (true, Some(variable)) => {
-                            let variable = Arc::from(variable);
-                            match type_info {
-                                TypeResolution::Resolved(pointer) => match types.pointee(pointer) {
-                                    Some(target) => (
-                                        variable,
-                                        TypeResolution::Resolved(target),
-                                        Some(pointer),
-                                    ),
-                                    None => (
-                                        variable,
-                                        TypeResolution::Malformed(
-                                            "a variable Go moved to the heap is not described by a pointer"
-                                                .into(),
-                                        ),
-                                        None,
-                                    ),
-                                },
-                                malformed @ TypeResolution::Malformed(_) => {
-                                    (variable, malformed, None)
-                                }
-                            }
-                        }
-                        _ => (name, type_info, None),
-                    };
-                    // Go starts the names of its own variables with
-                    // characters no Go identifier can. rustc's own are an
-                    // async body's temporaries and unnamed parameters, the
-                    // `result` an await binds, and, in an `async fn`'s
-                    // body, the fields of its future that captured its
-                    // arguments, which the body moves into variables of
-                    // its own.
-                    let rust_unnamed = scope.rust.is_some()
-                        && kind == VariableKind::Parameter
-                        && name_error.is_some();
-                    let declared_line = declaration
-                        .as_ref()
-                        .ok()
-                        .and_then(|declared| declared.as_ref().map(|declared| declared.line));
-                    let hidden = (go && name.starts_with(['.', '#']))
-                        || (scope.rust.is_some()
-                            && (rust_temporary(&name, rust_unnamed)
-                                || (scope.rust == Some(RustScope::AsyncCaptures)
-                                    && kind == VariableKind::Local)
-                                || (&*name == "result"
-                                    && declared_line.is_some()
-                                    && declared_line == scope.awaitee)));
-                    if scope.rust.is_some()
-                        && &*name == "__awaitee"
-                        && let Some(Some(enclosing)) = scopes.last_mut()
-                    {
-                        enclosing.awaitee = declared_line;
-                    }
-                    // rustc passes the body of an `async fn` its future
-                    // as an unnamed parameter.
-                    if kind == VariableKind::Parameter
-                        && name_error.is_some()
-                        && let (Some(instance), TypeResolution::Resolved(ty)) =
-                            (scope.code_instance, &type_info)
-                    {
-                        unnamed_parameters.push((instance, *ty, objects.len()));
-                    }
-                    types
-                        .budget
-                        .charge("data objects", size_of::<DataObject>())?;
-                    functions[scope.function].objects.push(row(objects.len()));
-                    objects.push(DataObject {
-                        debug_info_offset: debug_info_offset(units, unit_index, entry),
-                        kind,
-                        name,
-                        declaration: declaration.as_ref().ok().cloned().flatten(),
-                        ranges,
-                        go_declaration,
-                        instance: scope.instance,
-                        lexical_depth: scope.lexical_depth,
-                        order,
-                        type_info,
-                        escaped,
-                        hidden,
-                        coroutine: None,
-                        value: copy_data_object_value(
-                            dwarf,
-                            &mut pool.lock().expect("loading does not panic"),
-                            unit_index,
-                            unit,
-                            entry,
-                        ),
-                        frame_base: scope.frame_base.clone(),
-                        malformed: declaration
-                            .err()
-                            .map(|error| error.to_string().into())
-                            .or(scope_error)
-                            .or_else(|| scope.malformed.clone())
-                            .or(chain_error)
-                            .or_else(|| name_error.filter(|_| !rust_unnamed)),
-                    });
-                }
-            }
-
-            scopes.push(scope);
-        }
-        while let Some(routine) = concrete.pop() {
-            add_abstract_only_variables(
-                dwarf,
-                units,
-                &routine,
-                &mut AbstractTargets {
-                    objects: &mut objects,
-                    functions: &mut functions,
-                    order: &mut order,
-                    types: &mut types,
-                    files,
-                    bodies: &mut abstract_bodies,
-                },
+            walk_unit(
+                &cx,
+                unit_index,
+                &mut walked,
+                &mut types,
+                files,
+                &mut declared_files,
             )?;
         }
     }
 
+    let Walked {
+        mut objects,
+        mut functions,
+        calls,
+        procedures,
+        mut vtables,
+        go_function_entries,
+        mut unnamed_parameters,
+        mut abstract_bodies,
+        mut function_generics,
+        order: _,
+    } = walked;
     for function in &mut functions {
         function
             .objects
@@ -1145,6 +555,670 @@ fn layout_child(child: DynamicAggregateChild) -> Option<crate::image::type_facts
             member: index(member)?,
         },
     })
+}
+
+/// What the main walk reads every unit with.
+struct WalkContext<'w, 'data> {
+    dwarf: &'w gimli::Dwarf<Reader<'data>>,
+    catalog: &'w UnitCatalog<'data>,
+    target: TargetDescription,
+    languages: &'w [Option<gimli::DwLang>],
+    instance_ids: &'w super::DieMap<CodeInstanceId>,
+}
+
+/// What the main walk records, in the order it reads the DIEs.
+#[derive(Default)]
+struct Walked {
+    objects: Vec<DataObject>,
+    functions: Vec<Function>,
+    calls: call_sites::CallSiteBuilder,
+    procedures: Vec<(u64, Metadata<LocationListId>)>,
+    vtables: Vec<(u64, TypeId)>,
+    go_function_entries: Vec<(ImageAddress, u32)>,
+    unnamed_parameters: Vec<(CodeInstanceId, TypeId, usize)>,
+    abstract_bodies: Vec<(CodeInstanceId, TypeId)>,
+    function_generics: BTreeMap<CodeInstanceId, crate::FunctionGenerics>,
+    order: u64,
+}
+
+/// Records what one unit's DIEs describe: its functions, scopes, call
+/// sites, and data objects, and the types they reach.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one depth-first DIE walk must keep scope, variable, and parameter state synchronized"
+)]
+fn walk_unit<'data>(
+    cx: &WalkContext<'_, 'data>,
+    unit_index: usize,
+    walked: &mut Walked,
+    types: &mut TypeArenaBuilder<'_, 'data>,
+    files: &mut Files,
+    declared_files: &mut die::DeclaredFiles,
+) -> std::result::Result<(), DwarfError> {
+    let WalkContext {
+        dwarf,
+        catalog,
+        target,
+        languages,
+        instance_ids,
+    } = *cx;
+    let Walked {
+        objects,
+        functions,
+        calls,
+        procedures,
+        vtables,
+        go_function_entries,
+        unnamed_parameters,
+        abstract_bodies,
+        function_generics,
+        order,
+    } = walked;
+    let units = &catalog.units;
+    let unit = &units[unit_index];
+    calls.begin_unit();
+    let go = languages[unit_index] == Some(gimli::DW_LANG_Go);
+    let rust = languages[unit_index] == Some(gimli::DW_LANG_Rust);
+    // Go names the register ABI its x86-64 code calls with among the
+    // flags of each unit's producer, as `go1.27.1; -N -l regabi`.
+    let go_registers = go
+        && target.architecture == crate::Architecture::X86_64
+        && unit_producer(dwarf, unit)?.is_some_and(|producer| {
+            producer
+                .split_once(';')
+                .is_some_and(|(_, flags)| flags.split_whitespace().any(|flag| flag == "regabi"))
+        });
+    // Other languages' x86-64 code returns as the System V convention
+    // says, or, for the languages that leave theirs unspecified, as it
+    // for scalars.
+    let language = source_language(languages[unit_index], types.is_zig(unit_index));
+    let system_v = target.architecture == crate::Architecture::X86_64
+        && matches!(
+            language,
+            SourceLanguage::C | SourceLanguage::Cpp | SourceLanguage::Rust | SourceLanguage::Zig
+        );
+    let fused_blocks = if go {
+        fused_block_ranges(dwarf, unit, &catalog.code)?
+    } else {
+        HashMap::new()
+    };
+    let mut walk = DieWalk::new(unit)?;
+    let mut scopes = Vec::<Option<Scope>>::new();
+    // The concrete instances of abstract functions open at this point
+    // of the walk, innermost last.
+    let mut concrete = Vec::<ConcreteRoutine>::new();
+
+    while let Some(die) = walk.next()? {
+        let depth = usize::try_from(die.depth).map_err(|_| DwarfError::InvalidEntryDepth)?;
+        scopes.truncate(depth);
+        while concrete
+            .last()
+            .is_some_and(|routine| routine.depth >= depth)
+        {
+            let routine = concrete.pop().expect("an open routine");
+            add_abstract_only_variables(
+                dwarf,
+                units,
+                &routine,
+                &mut AbstractTargets {
+                    objects,
+                    functions,
+                    order,
+                    types,
+                    files,
+                    bodies: abstract_bodies,
+                },
+            )?;
+        }
+        if !main_walk_reads(die.tag, depth) {
+            // Nothing here reads such a DIE's attributes; all it has is
+            // its scope for the DIEs within it: its parent's, or none
+            // within a type. Most DIEs are types' members, parameters,
+            // and arguments, which are not decoded.
+            let scope = if is_type_scope(die.tag) {
+                None
+            } else {
+                scopes.last().and_then(Clone::clone)
+            };
+            scopes.push(scope);
+            continue;
+        }
+        let entry = walk.decode()?;
+        let parent = scopes.last().and_then(Clone::clone);
+        // A concrete DIE standing for an abstract one covers it.
+        if let Some(routine) = concrete.last_mut()
+            && matches!(
+                entry.tag(),
+                gimli::DW_TAG_variable | gimli::DW_TAG_formal_parameter
+            )
+            && let Some(origin) = die_reference(
+                entry.attr_value(gimli::DW_AT_abstract_origin),
+                unit_index,
+                units,
+            )?
+        {
+            routine.covered.insert(origin);
+        }
+
+        let scope = match entry.tag() {
+            gimli::DW_TAG_subprogram => {
+                let defined = strict_flag(entry, gimli::DW_AT_declaration) == Ok(false);
+                // The types a function's code uses are the program's
+                // types too, though no data holds them: a view may name
+                // the type only an inlined function returns.
+                if defined {
+                    types.reach(unit_index, entry.attr_value(gimli::DW_AT_type));
+                }
+                let ranges =
+                    die_code_ranges(dwarf, unit, entry, &catalog.code).map(Arc::<[_]>::from)?;
+                let key = DieKey {
+                    unit: unit_index,
+                    offset: entry.offset().0,
+                };
+                if rust
+                    && defined
+                    && !ranges.is_empty()
+                    && let Some(instance) = instance_ids.get(&key)
+                {
+                    let generics = types.function_generics(key);
+                    if !generics.is_empty() {
+                        function_generics.insert(*instance, Arc::from(generics));
+                    }
+                }
+                let function = functions.len();
+                if go && defined {
+                    // A func value holds the address its code begins at.
+                    let entry_address = entry
+                        .attr_value(gimli::DW_AT_low_pc)
+                        .map(|value| unit_dwarf(dwarf, unit).attr_address(unit, value))
+                        .transpose()?
+                        .flatten()
+                        .map(ImageAddress::new)
+                        .filter(|address| ranges.iter().any(|range| range.contains(*address)));
+                    if let Some(address) = entry_address {
+                        go_function_entries.push((address, row(function)));
+                    }
+                }
+                functions.push(Function {
+                    ranges: Arc::clone(&ranges),
+                    objects: Vec::new(),
+                    // An optimized closure's out-of-line code names
+                    // its abstract origin.
+                    name: if go {
+                        origin_chain(units, unit_index, entry)
+                            .ok()
+                            .and_then(|chain| {
+                                string_with_origins(
+                                    dwarf,
+                                    units,
+                                    unit,
+                                    entry,
+                                    &chain,
+                                    gimli::DW_AT_name,
+                                )
+                                .ok()
+                            })
+                            .flatten()
+                    } else {
+                        None
+                    },
+                    captures: Ok(Vec::new()),
+                    returns: if go_registers && defined {
+                        Some(returns::ReturnConvention::GoRegisters)
+                    } else if system_v && defined {
+                        system_v_returns(dwarf, units, unit_index, unit, entry, language, types)
+                    } else {
+                        None
+                    },
+                });
+                let frame_base = copy_optional_location(
+                    dwarf,
+                    &mut types.pool.lock().expect("loading does not panic"),
+                    unit_index,
+                    unit,
+                    entry.attr_value(gimli::DW_AT_frame_base),
+                    MetadataAbsence::NoFrameBase,
+                );
+                calls.function(dwarf, units, unit_index, entry, &ranges, frame_base.clone());
+                Some(Scope {
+                    ranges,
+                    lexical_depth: 0,
+                    frame_base,
+                    routine: true,
+                    function,
+                    instance: None,
+                    code_instance: instance_ids
+                        .get(&DieKey {
+                            unit: unit_index,
+                            offset: entry.offset().0,
+                        })
+                        .copied(),
+                    go_file: if go {
+                        declared_file(dwarf, units, unit_index, entry, files)
+                    } else {
+                        None
+                    },
+                    malformed: None,
+                    defined,
+                    rust: rust.then(|| RustScope::routine(dwarf, units, unit_index, unit, entry)),
+                    awaitee: None,
+                })
+            }
+            gimli::DW_TAG_lexical_block => parent.as_ref().map(|parent| {
+                // A Go block's code includes its nested blocks'.
+                let own = fused_blocks.get(&entry.offset().0).map_or_else(
+                    || die_code_ranges(dwarf, unit, entry, &catalog.code),
+                    |fused| Ok(fused.clone()),
+                );
+                let (ranges, malformed) = match own.map(Arc::<[_]>::from) {
+                    Ok(ranges) if !ranges.is_empty() => (ranges, None),
+                    Ok(_) => (Arc::clone(&parent.ranges), None),
+                    Err(error) => (Arc::clone(&parent.ranges), Some(error.to_string().into())),
+                };
+                Scope {
+                    ranges,
+                    lexical_depth: parent.lexical_depth.saturating_add(1),
+                    frame_base: parent.frame_base.clone(),
+                    routine: parent.routine,
+                    function: parent.function,
+                    instance: parent.instance,
+                    code_instance: parent.code_instance,
+                    go_file: parent.go_file,
+                    rust: parent.rust.map(|_| RustScope::Other),
+                    awaitee: if parent.rust.is_some() {
+                        origin_awaitee(dwarf, units, unit_index, entry).or(parent.awaitee)
+                    } else {
+                        None
+                    },
+                    malformed: malformed.or_else(|| parent.malformed.clone()),
+                    defined: parent.defined,
+                }
+            }),
+            // An inline instance keeps the caller's frame base and function
+            // but only its own code ranges; one without usable ranges gets
+            // none, unlike a lexical block, so its locals never match.
+            gimli::DW_TAG_inlined_subroutine => parent.as_ref().map(|parent| {
+                let instance = instance_ids
+                    .get(&DieKey {
+                        unit: unit_index,
+                        offset: entry.offset().0,
+                    })
+                    .copied();
+                let (ranges, malformed) = match die_code_ranges(dwarf, unit, entry, &catalog.code)
+                    .map(Arc::<[_]>::from)
+                {
+                    Ok(ranges) if ranges.is_empty() => (
+                        Vec::new().into(),
+                        Some(Arc::from("inlined subroutine has no address ranges")),
+                    ),
+                    // A ranged instance must be identified so lookups can
+                    // scope to it; without an identity its contents could
+                    // only be misattributed.
+                    Ok(_) if instance.is_none() => (
+                        Vec::new().into(),
+                        Some(Arc::from("inlined subroutine has no code instance")),
+                    ),
+                    Ok(ranges) => (ranges, None),
+                    Err(error) => (Vec::new().into(), Some(error.to_string().into())),
+                };
+                Scope {
+                    ranges,
+                    lexical_depth: parent.lexical_depth.saturating_add(1),
+                    frame_base: parent.frame_base.clone(),
+                    routine: true,
+                    function: parent.function,
+                    instance,
+                    code_instance: instance,
+                    go_file: if go {
+                        declared_file(dwarf, units, unit_index, entry, files)
+                    } else {
+                        None
+                    },
+                    rust: parent
+                        .rust
+                        .map(|_| RustScope::routine(dwarf, units, unit_index, unit, entry)),
+                    awaitee: None,
+                    malformed: malformed.or_else(|| parent.malformed.clone()),
+                    defined: parent.defined,
+                }
+            }),
+            tag if is_type_scope(tag) => None,
+            _ => parent.clone(),
+        };
+        // An empty extent is deliberate containment (a rangeless inline
+        // instance) and must stay empty through every descendant scope;
+        // only a nested subprogram starts an independent extent.
+        let scope = if entry.tag() != gimli::DW_TAG_subprogram
+            && parent
+                .as_ref()
+                .is_some_and(|parent| parent.ranges.is_empty())
+        {
+            scope.map(|mut scope| {
+                scope.ranges = Vec::new().into();
+                scope
+            })
+        } else {
+            scope
+        };
+
+        if matches!(
+            entry.tag(),
+            gimli::DW_TAG_subprogram
+                | gimli::DW_TAG_inlined_subroutine
+                | gimli::DW_TAG_lexical_block
+        ) && let Some(routine) = scope.as_ref().filter(|scope| !scope.ranges.is_empty())
+            && let Some(origin) = die_reference(
+                entry.attr_value(gimli::DW_AT_abstract_origin),
+                unit_index,
+                units,
+            )?
+        {
+            concrete.push(ConcreteRoutine {
+                depth,
+                origin,
+                scope: routine.clone(),
+                covered: std::collections::HashSet::new(),
+            });
+        }
+        match entry.tag() {
+            gimli::DW_TAG_call_site | gimli::DW_TAG_GNU_call_site => {
+                if let Some(parent) = parent.as_ref().filter(|parent| parent.defined) {
+                    calls.site(
+                        dwarf,
+                        &mut types.pool.lock().expect("loading does not panic"),
+                        units,
+                        unit_index,
+                        entry,
+                        parent.function,
+                        depth,
+                    );
+                }
+            }
+            gimli::DW_TAG_call_site_parameter | gimli::DW_TAG_GNU_call_site_parameter => {
+                calls.parameter(
+                    dwarf,
+                    &mut types.pool.lock().expect("loading does not panic"),
+                    units,
+                    unit_index,
+                    entry,
+                    depth,
+                );
+            }
+            gimli::DW_TAG_dwarf_procedure => {
+                if let Some(offset) = debug_info_offset(units, unit_index, entry) {
+                    let location = copy_optional_location(
+                        dwarf,
+                        &mut types.pool.lock().expect("loading does not panic"),
+                        unit_index,
+                        unit,
+                        entry.attr_value(gimli::DW_AT_location),
+                        MetadataAbsence::NoLocation,
+                    );
+                    procedures.push((offset, location));
+                }
+            }
+            _ => {}
+        }
+        if depth == 1
+            && entry.tag() == gimli::DW_TAG_variable
+            && let Some((address, ty)) = rust_vtable(dwarf, unit_index, unit, entry, types)
+        {
+            vtables.push((address, ty));
+        }
+        // A Go interface may hold a value of any type the runtime
+        // describes, which no data need mention.
+        if depth == 1
+            && types::is_type_die_tag(entry.tag())
+            && identity::go_runtime_type(entry).is_some()
+        {
+            types.resolve(DieKey {
+                unit: unit_index,
+                offset: entry.offset().0,
+            });
+        }
+        let kind = match entry.tag() {
+            gimli::DW_TAG_variable => Some(VariableKind::Local),
+            gimli::DW_TAG_formal_parameter => Some(VariableKind::Parameter),
+            _ => None,
+        };
+        if entry.tag() == gimli::DW_TAG_variable
+            && let Some(scope) = parent.as_ref().filter(|scope| scope.routine)
+            && let Some(offset) = entry.attr_value(DW_AT_GO_CLOSURE_OFFSET)
+        {
+            let (type_unit, type_value) = type_with_origins(unit_index, entry, &[]);
+            let capture = match (offset.udata_value(), copy_name(dwarf, unit, entry)) {
+                (Some(offset), Ok(Some(name))) => Ok(Capture {
+                    name,
+                    offset,
+                    type_info: types.variable_type(type_unit, type_value),
+                }),
+                _ => Err(Arc::from("a closure's captured variable is malformed")),
+            };
+            // One capture it cannot describe leaves them all unknown,
+            // rather than the closure seeming to capture less.
+            let captures = &mut functions[scope.function].captures;
+            match capture {
+                Ok(capture) => {
+                    if let Ok(captures) = captures {
+                        captures.push(capture);
+                    }
+                }
+                Err(reason) => *captures = Err(reason),
+            }
+        }
+        if let Some(kind) = kind {
+            let owning_scope = parent.as_ref().filter(|scope| {
+                !scope.ranges.is_empty() && (kind == VariableKind::Local || scope.routine)
+            });
+            // A variable of code with no address of its own, such as an
+            // abstract inline instance, names no value, but its type is
+            // the program's.
+            if owning_scope.is_none() && parent.as_ref().is_some_and(|scope| scope.defined) {
+                types.reach(unit_index, entry.attr_value(gimli::DW_AT_type));
+            }
+            if let Some(scope) = owning_scope {
+                // Concrete inline-instance entries reference their
+                // abstract origin for descriptive metadata.
+                let (chain, chain_error) = match origin_chain(units, unit_index, entry) {
+                    Ok(chain) => (chain, None),
+                    Err(error) => (Vec::new(), Some(Arc::from(error.to_string()))),
+                };
+                // Go marks its results as variable parameters.
+                let kind = if kind == VariableKind::Parameter
+                    && go
+                    && entry
+                        .attr_value(gimli::DW_AT_variable_parameter)
+                        .or_else(|| {
+                            chain.iter().find_map(|(_, origin)| {
+                                origin.attr_value(gimli::DW_AT_variable_parameter)
+                            })
+                        })
+                        .is_some_and(|value| {
+                            matches!(value, gimli::AttributeValue::Flag(true))
+                                || value.udata_value() == Some(1)
+                        }) {
+                    VariableKind::Result
+                } else {
+                    kind
+                };
+                let object_name = match kind {
+                    VariableKind::Parameter => "parameter",
+                    VariableKind::Result | VariableKind::Returned => "result",
+                    VariableKind::Local => "variable",
+                    VariableKind::Global => "global",
+                };
+                let (name, name_error) =
+                    match string_with_origins(dwarf, units, unit, entry, &chain, gimli::DW_AT_name)
+                    {
+                        Ok(Some(name)) => (name, None),
+                        Ok(None) => (
+                            format!("<anonymous {object_name} at {:#x}>", entry.offset().0).into(),
+                            Some(Arc::from(format!("{object_name} has no name"))),
+                        ),
+                        Err(error) => (
+                            format!("<malformed {object_name} at {:#x}>", entry.offset().0).into(),
+                            Some(error.to_string().into()),
+                        ),
+                    };
+                *order = order
+                    .checked_add(1)
+                    .expect("data-object DIE order overflow");
+                let declaration = die::declaration_remembering_files(
+                    dwarf,
+                    units,
+                    unit,
+                    entry,
+                    &chain,
+                    files,
+                    declared_files,
+                )
+                .map(|declaration| {
+                    // Go gives a variable's line alone: its file is
+                    // its function's.
+                    declaration.or_else(|| {
+                        let line = entry
+                            .attr(gimli::DW_AT_decl_line)
+                            .and_then(gimli::Attribute::udata_value)
+                            .and_then(crate::LineNumber::new)?;
+                        Some(SourceLocation {
+                            file: scope.go_file?,
+                            line,
+                            column: None,
+                        })
+                    })
+                });
+                let (ranges, scope_error) = data_object_scope_ranges(scope, entry);
+                // A Go local exists from the line after its declaration.
+                let go_declaration = match (go, kind, &declaration) {
+                    (true, VariableKind::Local, Ok(Some(declared))) => {
+                        Some(visibility::GoDeclaration {
+                            location: declared.clone(),
+                            instance: scope.code_instance,
+                        })
+                    }
+                    _ => None,
+                };
+                let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
+                let type_info = types.variable_type(type_unit, type_value);
+                // Go names a variable it moved to the heap `&name`, and
+                // describes the pointer to it.
+                let (name, type_info, escaped) = match (go, name.strip_prefix('&')) {
+                    (true, Some(variable)) => {
+                        let variable = Arc::from(variable);
+                        match type_info {
+                            TypeResolution::Resolved(pointer) => match types.pointee(pointer) {
+                                Some(target) => (
+                                    variable,
+                                    TypeResolution::Resolved(target),
+                                    Some(pointer),
+                                ),
+                                None => (
+                                    variable,
+                                    TypeResolution::Malformed(
+                                        "a variable Go moved to the heap is not described by a pointer"
+                                            .into(),
+                                    ),
+                                    None,
+                                ),
+                            },
+                            malformed @ TypeResolution::Malformed(_) => {
+                                (variable, malformed, None)
+                            }
+                        }
+                    }
+                    _ => (name, type_info, None),
+                };
+                // Go starts the names of its own variables with
+                // characters no Go identifier can. rustc's own are an
+                // async body's temporaries and unnamed parameters, the
+                // `result` an await binds, and, in an `async fn`'s
+                // body, the fields of its future that captured its
+                // arguments, which the body moves into variables of
+                // its own.
+                let rust_unnamed =
+                    scope.rust.is_some() && kind == VariableKind::Parameter && name_error.is_some();
+                let declared_line = declaration
+                    .as_ref()
+                    .ok()
+                    .and_then(|declared| declared.as_ref().map(|declared| declared.line));
+                let hidden = (go && name.starts_with(['.', '#']))
+                    || (scope.rust.is_some()
+                        && (rust_temporary(&name, rust_unnamed)
+                            || (scope.rust == Some(RustScope::AsyncCaptures)
+                                && kind == VariableKind::Local)
+                            || (&*name == "result"
+                                && declared_line.is_some()
+                                && declared_line == scope.awaitee)));
+                if scope.rust.is_some()
+                    && &*name == "__awaitee"
+                    && let Some(Some(enclosing)) = scopes.last_mut()
+                {
+                    enclosing.awaitee = declared_line;
+                }
+                // rustc passes the body of an `async fn` its future
+                // as an unnamed parameter.
+                if kind == VariableKind::Parameter
+                    && name_error.is_some()
+                    && let (Some(instance), TypeResolution::Resolved(ty)) =
+                        (scope.code_instance, &type_info)
+                {
+                    unnamed_parameters.push((instance, *ty, objects.len()));
+                }
+                types
+                    .budget
+                    .charge("data objects", size_of::<DataObject>())?;
+                functions[scope.function].objects.push(row(objects.len()));
+                objects.push(DataObject {
+                    debug_info_offset: debug_info_offset(units, unit_index, entry),
+                    kind,
+                    name,
+                    declaration: declaration.as_ref().ok().cloned().flatten(),
+                    ranges,
+                    go_declaration,
+                    instance: scope.instance,
+                    lexical_depth: scope.lexical_depth,
+                    order: *order,
+                    type_info,
+                    escaped,
+                    hidden,
+                    coroutine: None,
+                    value: copy_data_object_value(
+                        dwarf,
+                        &mut types.pool.lock().expect("loading does not panic"),
+                        unit_index,
+                        unit,
+                        entry,
+                    ),
+                    frame_base: scope.frame_base.clone(),
+                    malformed: declaration
+                        .err()
+                        .map(|error| error.to_string().into())
+                        .or(scope_error)
+                        .or_else(|| scope.malformed.clone())
+                        .or(chain_error)
+                        .or_else(|| name_error.filter(|_| !rust_unnamed)),
+                });
+            }
+        }
+
+        scopes.push(scope);
+    }
+    while let Some(routine) = concrete.pop() {
+        add_abstract_only_variables(
+            dwarf,
+            units,
+            &routine,
+            &mut AbstractTargets {
+                objects,
+                functions,
+                order,
+                types,
+                files,
+                bodies: abstract_bodies,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// Points the catalog's types where deduplication moved them.

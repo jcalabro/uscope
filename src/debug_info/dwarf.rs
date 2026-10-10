@@ -2297,6 +2297,7 @@ struct DieKey {
 /// The variables walk reads one unit at a time, and nearly every reference
 /// stays in its unit, so the map of the unit being read stays in cache,
 /// where one map of every DIE in a large program misses on most lookups.
+#[derive(Clone)]
 struct DieMap<V> {
     units: Vec<HashMap<usize, V>>,
 }
@@ -2321,6 +2322,41 @@ impl<V> DieMap<V> {
             self.units.resize_with(key.unit + 1, HashMap::new);
         }
         self.units[key.unit].insert(key.offset, value)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.units.iter().all(HashMap::is_empty)
+    }
+
+    /// Replaces each value with `map` of it.
+    fn map_values(&mut self, mut map: impl FnMut(V) -> V)
+    where
+        V: Copy,
+    {
+        for unit in &mut self.units {
+            #[expect(
+                clippy::disallowed_methods,
+                clippy::iter_over_hash_type,
+                reason = "each value is replaced on its own, whatever the order"
+            )]
+            for value in unit.values_mut() {
+                *value = map(*value);
+            }
+        }
+    }
+
+    /// Adds every entry of `other`, whose entries replace these.
+    fn extend(&mut self, other: Self) {
+        if other.units.len() > self.units.len() {
+            self.units.resize_with(other.units.len(), HashMap::new);
+        }
+        for (unit, other) in self.units.iter_mut().zip(other.units) {
+            if unit.is_empty() {
+                *unit = other;
+            } else {
+                unit.extend(other);
+            }
+        }
     }
 }
 
@@ -3952,11 +3988,17 @@ mod tests {
     }
 
     /// Loading on one worker, two, or eight builds a byte-identical image.
+    /// One worker walks the units in order; more walk them apart and add
+    /// what each built in order, or walk them in order again when a unit
+    /// reaches another's types, as Go's and Zig's do.
     #[test]
     fn every_number_of_workers_loads_the_same_image() {
         for fixture in [
             "containers-cpp-clang-o2",
             "containers-rust-o2",
+            "tokio-server-1.52-o0",
+            "values-go-o0",
+            "containers-zig-self-hosted",
             "callers-go-stripped",
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))

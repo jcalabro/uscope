@@ -195,6 +195,72 @@ impl CallSiteBuilder {
         }
     }
 
+    pub(super) const fn is_empty(&self) -> bool {
+        self.sites.is_empty() && self.functions.is_empty()
+    }
+
+    /// Forgets the site the parameters that follow belong to: a unit's
+    /// parameters belong to its own sites.
+    pub(super) const fn begin_unit(&mut self) {
+        self.open = None;
+    }
+
+    /// Adds what `other` recorded of a later unit, with its functions and
+    /// sites after these, and each list and expression it pooled as
+    /// `pooled` has it here.
+    pub(super) fn absorb(&mut self, other: Self, pooled: &super::merge::Pooled) {
+        let functions = self.functions.len();
+        let sites = self.sites.len();
+        let function = |index: usize| index + functions;
+        self.functions
+            .extend(other.functions.into_iter().map(|mut calling| {
+                pooled.frame_base(&mut calling.frame_base);
+                for site in &mut calling.tail_calls {
+                    *site += super::row(sites);
+                }
+                calling
+            }));
+        self.sites
+            .extend(other.sites.into_iter().map(|(mut site, entry)| {
+                site.function += super::row(functions);
+                if let SiteTarget::Computed(Ok(list)) = &mut site.target {
+                    *list = pooled.list(*list);
+                }
+                for parameter in &mut site.parameters {
+                    for expression in [&mut parameter.value, &mut parameter.data_value]
+                        .into_iter()
+                        .flatten()
+                    {
+                        *expression = pooled.expression(*expression);
+                    }
+                }
+                (site, entry)
+            }));
+        self.starts.extend(other.starts);
+        self.code.extend(
+            other
+                .code
+                .into_iter()
+                .map(|(start, index)| (start, function(index))),
+        );
+        self.origins.extend(
+            other
+                .origins
+                .into_iter()
+                .map(|(origin, index, start)| (origin, function(index), start)),
+        );
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "each name's functions are appended in order, whatever order the names come in"
+        )]
+        for (name, indices) in other.external {
+            self.external
+                .entry(name)
+                .or_default()
+                .extend(indices.into_iter().map(function));
+        }
+    }
+
     pub(super) fn finish(mut self) -> Calls {
         let mut code = std::mem::take(&mut self.code);
         code.sort_unstable();
