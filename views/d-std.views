@@ -1,0 +1,20 @@
+uscope-views 1
+
+# D's Phobos. Verified against LDC 1.41 by tests/fixtures/d/containers.d.
+# D's slices and strings need no view. Its associative arrays are
+# druntime's, which ships no debug information to read them by.
+
+# An appender's text or elements are its data's array, and one that has
+# appended nothing has no data.
+view d std.array.Appender(string) {
+    show if _data != 0 { value(_data->arr) } else { empty("") }
+}
+
+view d std.array.Appender(T) {
+    let length = _data != 0 ? len(_data->arr) : 0
+    show sequence(length) for i in range(length) => _data->arr[i]
+}
+
+view d std.typecons.Nullable(T) {
+    show if !_isNull { value(_value.payload) } else { empty("null") }
+}

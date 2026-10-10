@@ -2334,3 +2334,54 @@ async fn fortran_steps_into_a_procedure_and_back_to_its_caller() {
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
     }
 }
+
+/// D's functions step and unwind as C's do; its main function is `D main`.
+#[tokio::test]
+async fn d_steps_into_a_function_and_back_to_its_caller() {
+    for fixture in ["values-d-o0", "values-d-o2"] {
+        let mut scenario = Scenario::launch(fixture);
+        scenario.add_source_breakpoint("values.d", 181).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        assert_eq!(
+            scenario.step_to_stop(StepKind::IntoSource).await,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            }
+        );
+        let entered = scenario
+            .operation("D callee", scenario.handle().current_location())
+            .await;
+        assert_eq!(location_function(&entered), Some("add"), "{fixture}");
+        let trace = scenario
+            .operation("D backtrace", scenario.handle().backtrace())
+            .await;
+        let names = trace
+            .frames
+            .iter()
+            .filter_map(|frame| frame.function.as_ref())
+            .map(|function| function.name.as_ref())
+            .collect::<Vec<_>>();
+        assert!(
+            names.starts_with(&["add", "D main"]),
+            "{fixture}: {trace:?}"
+        );
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Out).await,
+            StopReason::Step {
+                kind: StepKind::Out
+            }
+        );
+        let caller = scenario
+            .operation("D caller", scenario.handle().current_location())
+            .await;
+        assert_eq!(location_function(&caller), Some("D main"), "{fixture}");
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}

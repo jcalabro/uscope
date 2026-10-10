@@ -74,6 +74,7 @@ pub enum Language {
     Go,
     Zig,
     Odin,
+    D,
     /// Every language.
     Any,
 }
@@ -87,6 +88,7 @@ impl Language {
             "go" => Self::Go,
             "zig" => Self::Zig,
             "odin" => Self::Odin,
+            "d" => Self::D,
             "any" => Self::Any,
             _ => return None,
         })

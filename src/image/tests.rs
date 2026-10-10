@@ -1150,7 +1150,7 @@ fn validation_rejects_functions_that_disagree() {
         ),
         (
             "an unknown language",
-            function(|f| f[0].language = 9),
+            function(|f| f[0].language = 200),
             "function is malformed",
         ),
         (
@@ -1675,7 +1675,7 @@ fn validation_rejects_types_that_disagree() {
         ),
         (
             "an unknown language",
-            identity(|i| i[0].language = 9),
+            identity(|i| i[0].language = 200),
             "identity is malformed",
         ),
         (

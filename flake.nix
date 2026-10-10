@@ -51,6 +51,11 @@
       gfortran = pkgs.writeShellScriptBin "gfortran" ''
         exec ${pkgs.gfortran15}/bin/gfortran "$@"
       '';
+      # LDC, alone: its package would add its runtime's headers and
+      # libraries to every C compile and link in the shell.
+      ldc2 = pkgs.writeShellScriptBin "ldc2" ''
+        exec ${pkgs.ldc}/bin/ldc2 "$@"
+      '';
       # The crates the tokio fixtures depend on, exactly as their lockfiles
       # name them, one for each tokio release they are built with, so that
       # building them fetches nothing.
@@ -102,6 +107,7 @@
           zig
           odin
           gfortran
+          ldc2
           pkg-config
           util-linux
           nodejs_24

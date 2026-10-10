@@ -889,6 +889,12 @@ impl SliceWords {
         length: 1,
         capacity: None,
     };
+    /// A length then a pointer, as D's slices are.
+    pub const LENGTH_POINTER: Self = Self {
+        data: 1,
+        length: 0,
+        capacity: None,
+    };
     /// A pointer, a length, then a capacity, as Go's slices are.
     pub const POINTER_LENGTH_CAPACITY: Self = Self {
         data: 0,
@@ -944,6 +950,8 @@ pub enum SourceLanguage {
     Odin,
     /// Fortran, of any standard.
     Fortran,
+    /// D.
+    D,
     /// Another language, by its DWARF language code.
     Other(u16),
     /// The unit does not say.

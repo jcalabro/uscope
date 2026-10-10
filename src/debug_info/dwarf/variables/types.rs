@@ -27,7 +27,7 @@ use super::die::{
 };
 use super::identity::{
     GoParts, IdentityParts, ScopePath, ScopeSegment, go_embedded, inline_namespace_path,
-    produced_language, scope_segment, source_language,
+    module_segments, produced_language, scope_segment, source_language,
 };
 use super::location::copy_expression;
 use super::variant::{
@@ -256,6 +256,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             let mut language = None;
             let mut produced = None;
             let mut cpp = false;
+            let mut d = false;
             let mut first = true;
             let mut scopes = Vec::<(isize, ScopeSegment)>::new();
             // The path of the first `n` scopes at `n`, shared by the types
@@ -295,7 +296,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     scopes.push((depth, ScopeSegment::Function(key)));
                     continue;
                 }
-                if !first && die.tag != gimli::DW_TAG_namespace && !is_type_die_tag(die.tag) {
+                // A D module scopes what it declares; Zig's names spell
+                // their own modules.
+                let scopes_or_names = first
+                    || die.tag == gimli::DW_TAG_namespace
+                    || (d && die.tag == gimli::DW_TAG_module)
+                    || is_type_die_tag(die.tag);
+                if !scopes_or_names {
                     continue;
                 }
                 let Ok(entry) = walk.decode() else {
@@ -315,8 +322,15 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                             .as_deref(),
                     );
                     cpp = source_language(language, produced) == SourceLanguage::Cpp;
+                    d = source_language(language, produced) == SourceLanguage::D;
                 }
-                if let Some(segment) = scope_segment(dwarf, unit, unit_index, entry, cpp) {
+                if entry.tag() == gimli::DW_TAG_module {
+                    scopes.extend(
+                        module_segments(dwarf, unit, entry)
+                            .into_iter()
+                            .map(|segment| (depth, segment)),
+                    );
+                } else if let Some(segment) = scope_segment(dwarf, unit, unit_index, entry, cpp) {
                     if let ScopeSegment::Inline(name) = &segment {
                         inline_namespaces.insert(inline_namespace_path(&scopes, name));
                     }
@@ -3473,6 +3487,8 @@ pub(super) enum SliceLayout {
     /// `{data, len, cap, allocator}`: Odin's dynamic arrays, whose
     /// allocator is two words.
     OdinDynamic,
+    /// `{length, ptr}`: D's slices and strings.
+    D,
 }
 
 impl SliceLayout {
@@ -3484,6 +3500,7 @@ impl SliceLayout {
             Self::Go => &["array", "len", "cap"],
             Self::Odin => &["data", "len"],
             Self::OdinDynamic => &["data", "len", "cap", "allocator"],
+            Self::D => &["length", "ptr"],
         }
     }
 
@@ -3500,6 +3517,7 @@ impl SliceLayout {
         match self {
             Self::Rust | Self::RustBytes(_) | Self::Zig | Self::Odin => SliceWords::POINTER_LENGTH,
             Self::Go | Self::OdinDynamic => SliceWords::POINTER_LENGTH_CAPACITY,
+            Self::D => SliceWords::LENGTH_POINTER,
         }
     }
 
@@ -3516,6 +3534,20 @@ impl SliceLayout {
             Self::RustBytes(_) => true,
             Self::Zig => matches!(name, "[]const u8" | "[:0]const u8" | "[:0]u8"),
             Self::Odin => name == "string",
+            // D's strings, and any slice of its characters, however
+            // qualified: `char[]`, `const(wchar)[]`.
+            Self::D => {
+                matches!(name, "string" | "wstring" | "dstring")
+                    || name.strip_suffix("[]").is_some_and(|element| {
+                        let element = ["const(", "immutable(", "shared(", "inout("]
+                            .into_iter()
+                            .find_map(|qualifier| {
+                                element.strip_prefix(qualifier)?.strip_suffix(')')
+                            })
+                            .unwrap_or(element);
+                        matches!(element, "char" | "wchar" | "dchar")
+                    })
+            }
             Self::Go | Self::OdinDynamic => false,
         }
     }
@@ -3554,6 +3586,19 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 name if name.starts_with("[dynamic]") => Some(SliceLayout::OdinDynamic),
                 _ => None,
             },
+            // A D slice is named for its element, and a string for its
+            // characters.
+            SourceLanguage::D => {
+                let name = name?;
+                if !(name.ends_with("[]") || matches!(name, "string" | "wstring" | "dstring")) {
+                    return None;
+                }
+                let members = self.member_types(entry, key.unit)?;
+                let [(length, _), (pointer, _)] = members.as_slice() else {
+                    return None;
+                };
+                (length.as_ref() == "length" && pointer.as_ref() == "ptr").then_some(SliceLayout::D)
+            }
             SourceLanguage::Rust if !self.type_scopes.contains_key(&key) => {
                 let members = self.member_types(entry, key.unit)?;
                 let [(first, data), (second, _)] = members.as_slice() else {
