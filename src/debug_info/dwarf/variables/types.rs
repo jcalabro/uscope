@@ -27,7 +27,7 @@ use super::die::{
 };
 use super::identity::{
     GoParts, IdentityParts, ScopePath, ScopeSegment, go_embedded, inline_namespace_path,
-    scope_segment, source_language,
+    produced_language, scope_segment, source_language,
 };
 use super::location::copy_expression;
 use super::variant::{
@@ -60,7 +60,8 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     /// convincing nonsense.
     pub(super) die_offsets: Vec<DieStarts>,
     pub(super) unit_languages: Vec<Option<gimli::DwLang>>,
-    pub(super) zig_units: Vec<bool>,
+    /// The language each unit's producer proves, where it does.
+    pub(super) produced_languages: Vec<Option<SourceLanguage>>,
     pub(super) explicit_names: HashSet<TypeId>,
     /// The arguments identities spell by name, which resolve once every
     /// identity exists.
@@ -242,7 +243,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     ) -> Self {
         let mut die_offsets = Vec::with_capacity(units.len());
         let mut unit_languages = Vec::with_capacity(units.len());
-        let mut zig_units = Vec::with_capacity(units.len());
+        let mut produced_languages = Vec::with_capacity(units.len());
         let mut type_definitions = HashMap::new();
         let mut definition_declarations = HashMap::new();
         let mut ambiguous_type_declarations = HashSet::new();
@@ -251,7 +252,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         for (unit_index, unit) in units.iter().enumerate() {
             let mut offsets = DieStarts::with_length(unit.header.length_including_self());
             let mut language = None;
-            let mut zig_producer = false;
+            let mut produced = None;
             let mut cpp = false;
             let mut first = true;
             let mut scopes = Vec::<(isize, ScopeSegment)>::new();
@@ -262,7 +263,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             let Ok(mut walk) = DieWalk::new(unit) else {
                 die_offsets.push(offsets);
                 unit_languages.push(language);
-                zig_units.push(zig_producer);
+                produced_languages.push(produced);
                 continue;
             };
             while let Ok(Some(die)) = walk.next() {
@@ -304,11 +305,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         Some(gimli::AttributeValue::Language(language)) => Some(language),
                         _ => units.inherited_language(unit_index),
                     };
-                    zig_producer = entry
-                        .attr_value(gimli::DW_AT_producer)
-                        .and_then(|value| unit_dwarf(dwarf, unit).attr_string(unit, value).ok())
-                        .is_some_and(|producer| producer.to_string_lossy().starts_with("zig "));
-                    cpp = source_language(language, zig_producer) == SourceLanguage::Cpp;
+                    produced = produced_language(
+                        entry
+                            .attr_value(gimli::DW_AT_producer)
+                            .and_then(|value| unit_dwarf(dwarf, unit).attr_string(unit, value).ok())
+                            .map(|producer| producer.to_string_lossy())
+                            .as_deref(),
+                    );
+                    cpp = source_language(language, produced) == SourceLanguage::Cpp;
                 }
                 if let Some(segment) = scope_segment(dwarf, unit, unit_index, entry, cpp) {
                     if let ScopeSegment::Inline(name) = &segment {
@@ -341,7 +345,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             die_offsets.push(offsets);
             unit_languages.push(language);
-            zig_units.push(zig_producer);
+            produced_languages.push(produced);
         }
         let mut builder = Self {
             dwarf,
@@ -354,7 +358,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             entries: Vec::new(),
             die_offsets,
             unit_languages,
-            zig_units,
+            produced_languages,
             explicit_names: HashSet::new(),
             pending_arguments: Vec::new(),
             resolution_depth: 0,
@@ -462,8 +466,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         ))
     }
 
+    /// The language unit `unit_index`'s producer proves, if it does.
+    pub(super) fn produced_language(&self, unit_index: usize) -> Option<SourceLanguage> {
+        self.produced_languages.get(unit_index).copied().flatten()
+    }
+
     pub(super) fn is_zig(&self, unit_index: usize) -> bool {
-        self.zig_units.get(unit_index).copied().unwrap_or(false)
+        self.produced_language(unit_index) == Some(SourceLanguage::Zig)
     }
 
     fn next_id(&self) -> TypeId {

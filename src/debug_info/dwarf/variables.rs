@@ -49,7 +49,7 @@ use die::{
 };
 use evaluate::FrameBaseCache;
 use globals::load_globals;
-pub(in crate::debug_info) use identity::source_language;
+pub(in crate::debug_info) use identity::{produced_language, source_language};
 pub(in crate::debug_info) use inspect::{PathStep, array_byte_offset};
 use inspect::{data_object, evaluate_error_state, inspected_value};
 use location::{
@@ -405,7 +405,7 @@ pub(super) fn load_variable_info<'data>(
         // Other languages' x86-64 code returns as the System V convention
         // says, or, for the languages that leave theirs unspecified, as it
         // for scalars.
-        let language = source_language(languages[unit_index], types.is_zig(unit_index));
+        let language = source_language(languages[unit_index], types.produced_language(unit_index));
         let system_v = target.architecture == crate::Architecture::X86_64
             && matches!(
                 language,

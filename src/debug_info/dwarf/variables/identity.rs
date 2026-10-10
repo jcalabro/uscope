@@ -105,13 +105,22 @@ pub(super) fn go_embedded(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) 
         })
 }
 
+/// The language a unit's producer proves where its `DW_AT_language` does
+/// not: Zig's LLVM backend says its units are C99.
+pub(in crate::debug_info) fn produced_language(producer: Option<&str>) -> Option<SourceLanguage> {
+    producer
+        .is_some_and(|producer| producer.starts_with("zig "))
+        .then_some(SourceLanguage::Zig)
+}
+
+/// A unit's language: what its producer proves, else what its
+/// `DW_AT_language` says.
 pub(in crate::debug_info) const fn source_language(
     language: Option<gimli::DwLang>,
-    zig: bool,
+    produced: Option<SourceLanguage>,
 ) -> SourceLanguage {
-    if zig {
-        // Zig's LLVM backend says its units are C99.
-        return SourceLanguage::Zig;
+    if let Some(produced) = produced {
+        return produced;
     }
     let Some(language) = language else {
         return SourceLanguage::Unknown;
@@ -274,7 +283,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
     pub(super) fn language(&self, unit_index: usize) -> SourceLanguage {
         source_language(
             self.unit_languages.get(unit_index).copied().flatten(),
-            self.zig_units.get(unit_index).copied().unwrap_or(false),
+            self.produced_language(unit_index),
         )
     }
 
