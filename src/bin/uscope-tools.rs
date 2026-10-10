@@ -111,7 +111,9 @@ struct BenchArgs {
     /// records for the same programs.
     #[arg(long, value_name = "BASELINE")]
     check: Option<PathBuf>,
-    /// Rewrite BASELINE with this run's deterministic counts.
+    /// Rewrite BASELINE with this run's deterministic counts, without
+    /// checking them against it. With `--only`, the other programs keep
+    /// their counts.
     #[arg(long, value_name = "BASELINE")]
     record: Option<PathBuf>,
     /// Also count each load's instructions under Callgrind.
@@ -714,7 +716,13 @@ fn run_bench(args: &BenchArgs, sweep: &[usize]) -> Result<bool> {
         let base: BenchReport = serde_json::from_str(&std::fs::read_to_string(base)?)?;
         print!("\n{}", compare_text(&base, &report));
     }
-    if let Some(path) = &args.check {
+    // A baseline being recorded again is not checked: its counts are the
+    // ones this run replaces.
+    if let Some(path) = args
+        .check
+        .as_ref()
+        .filter(|path| args.record.as_ref() != Some(*path))
+    {
         let baseline: BTreeMap<String, Counts> =
             serde_json::from_str(&std::fs::read_to_string(path)?)?;
         let (text, ok) = check_counts(&baseline, &report, args.only.is_empty());
@@ -722,25 +730,30 @@ fn run_bench(args: &BenchArgs, sweep: &[usize]) -> Result<bool> {
         passed &= ok;
     }
     if let Some(path) = &args.record {
-        let counts = report
-            .programs
-            .iter()
-            .filter(|program| program.jobs == 1)
-            .map(|program| {
-                (
-                    program.name.clone(),
-                    Counts {
-                        digest: program.digest.clone(),
-                        allocations: program.allocations,
-                        callgrind_instructions: program.callgrind_instructions,
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
+        // A run of some programs keeps the others' counts; a run of all
+        // replaces the baseline, dropping programs no longer measured.
+        let mut counts: BTreeMap<String, Counts> = if args.only.is_empty() {
+            BTreeMap::new()
+        } else {
+            serde_json::from_str(&std::fs::read_to_string(path)?)?
+        };
+        let measured = report.programs.iter().filter(|program| program.jobs == 1);
+        let mut recorded = 0;
+        for program in measured {
+            counts.insert(
+                program.name.clone(),
+                Counts {
+                    digest: program.digest.clone(),
+                    allocations: program.allocations,
+                    callgrind_instructions: program.callgrind_instructions,
+                },
+            );
+            recorded += 1;
+        }
         let mut text = serde_json::to_string_pretty(&counts)?;
         text.push('\n');
         std::fs::write(path, text)?;
-        println!("\nrecorded {} programs in {}", counts.len(), path.display());
+        println!("\nrecorded {recorded} programs in {}", path.display());
     }
     Ok(passed)
 }
