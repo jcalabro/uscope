@@ -4,12 +4,12 @@
 // policy, and Firefox are covered by e2e/sandbox.spec.ts.
 
 import { afterEach, describe, expect, it } from "vitest";
-import frameSource from "../src/visualize/frame.js?raw";
 import { validate } from "../src/visualize/picture";
-import { type DrawContext, type Outcome, Sandbox } from "../src/visualize/sandbox";
+import { type DrawContext, type Outcome, palette as pagePalette } from "../src/visualize/sandbox";
 import { buildSvg } from "../src/visualize/svg";
 import workerSource from "../src/visualize/worker.js?raw";
 import { palette } from "./palette";
+import { renderer, sandbox } from "./sandboxes";
 
 const context: DrawContext = { previous: null, paths: {}, width: 400, theme: "light", palette };
 
@@ -204,7 +204,7 @@ describe("the worker", () => {
     const idle = new Probe("const x = 1;", "idle");
     expect(await idle.next()).toMatchObject({
       type: "loaded",
-      error: { message: "the renderer never calls uscope.draw", file: "idle.js" },
+      error: { message: "the renderer never calls uscope.draw or uscope.live", file: "idle.js" },
     });
   });
 
@@ -270,23 +270,6 @@ describe("the worker", () => {
   });
 });
 
-/** A sandbox whose frame is the real frame script, from a blob, with the
- * same sandbox the server's page gets. */
-function sandbox(): Sandbox {
-  const page = `<!doctype html><script>const WORKER_SOURCE = ${JSON.stringify(workerSource).replaceAll("<", "\\u003c")};\n${frameSource}</script>`;
-  const url = URL.createObjectURL(new Blob([page], { type: "text/html" }));
-  const created = new Sandbox(url);
-  sandboxes.push(created);
-  return created;
-}
-const sandboxes: Sandbox[] = [];
-afterEach(() => {
-  for (const each of sandboxes.splice(0)) {
-    each.dispose();
-  }
-});
-
-const renderer = (name: string, source: string) => ({ name, digest: name, source });
 const counting = renderer(
   "count",
   `let draws = 0;
@@ -412,6 +395,25 @@ describe("the builder", () => {
       expect([...(pixel ?? [])]).toEqual([255, 0, 0, 255]);
     } finally {
       svg.remove();
+    }
+  });
+});
+
+describe("the theme", () => {
+  it("gives renderers every color as #rrggbb, however the stylesheet writes it", () => {
+    const root = document.documentElement;
+    root.style.setProperty("--surface", "#fff");
+    root.style.setProperty("--ink", "rgb(26, 34, 48)");
+    try {
+      const colors = pagePalette("light");
+      expect(colors.surface).toBe("#ffffff");
+      expect(colors.ink).toBe("#1a2230");
+      for (const color of [...Object.values(colors).flat()]) {
+        expect(color).toMatch(/^#[0-9a-f]{6}$/);
+      }
+    } finally {
+      root.style.removeProperty("--surface");
+      root.style.removeProperty("--ink");
     }
   });
 });

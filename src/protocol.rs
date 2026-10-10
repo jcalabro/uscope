@@ -211,11 +211,9 @@ pub enum VisualizerValue {
     Problem(Arc<str>),
 }
 
-/// How much one drawing may read through `bytes(PTR, LEN)` and in bulk.
+/// How much one drawing may read through `bytes(PTR, LEN)` and in bulk:
+/// about two million 32-byte vertices.
 pub const MAX_DRAWING_BYTES: u64 = 64 * 1024 * 1024;
-
-/// How much one `bytes(PTR, LEN)` may read.
-pub const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The kind of number each element of a sequence read in bulk is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

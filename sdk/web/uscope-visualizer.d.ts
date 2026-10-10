@@ -169,6 +169,75 @@ declare namespace uscope {
     render: (input: I, context: Context<I>) => Picture | Promise<Picture>,
   ): void;
 
+  /** What a live renderer's functions get beside its inputs. */
+  interface LiveContext<I = Inputs> {
+    previous: I | null;
+    paths: { readonly [K in keyof I]: string | null };
+    /** The canvas's size in CSS pixels; `canvas.width` and `height` are
+     * its device pixels. */
+    width: number;
+    height: number;
+    theme: "light" | "dark";
+  }
+
+  /** The pointer over a live canvas, in the canvas's own pixels. */
+  interface Pointer {
+    readonly type: "down" | "move" | "up" | "wheel" | "leave";
+    readonly x: number;
+    readonly y: number;
+    /** How far it moved since the last event. */
+    readonly dx: number;
+    readonly dy: number;
+    /** Pressed buttons: 1 the main one, 2 the secondary, 4 the middle. */
+    readonly buttons: number;
+    /** For a wheel, how far it turned, in pixels; positive is down. */
+    readonly wheel: number;
+    readonly shift: boolean;
+    readonly ctrl: boolean;
+    readonly alt: boolean;
+  }
+
+  /** A key pressed while the canvas has focus. */
+  interface Key {
+    /** As `KeyboardEvent.key` names it, such as `"w"` or `"ArrowLeft"`. */
+    readonly key: string;
+    readonly shift: boolean;
+    readonly ctrl: boolean;
+    readonly alt: boolean;
+  }
+
+  /** What a live renderer does, each optional. A frame follows `update`
+   * and `resize`; the canvas shows when `frame` returns. */
+  interface Live<I = Inputs> {
+    frame?(time: number): void | Promise<void>;
+    /** A new stop's inputs. */
+    update?(input: I, context: LiveContext<I>): void | Promise<void>;
+    pointer?(event: Pointer): void | Promise<void>;
+    key?(event: Key): void | Promise<void>;
+    /** The canvas's new size in device pixels, already set. */
+    resize?(width: number, height: number): void | Promise<void>;
+  }
+
+  /** Draws into a canvas of the renderer's own while its card is on
+   * screen: `start` gets the canvas and the first inputs. */
+  function live<I = Inputs>(
+    start: (
+      canvas: OffscreenCanvas,
+      input: I,
+      context: LiveContext<I>,
+    ) => Live<I> | undefined | Promise<Live<I> | undefined>,
+  ): void;
+  /** Asks a live renderer's page for one more frame. */
+  function redraw(): void;
+  /** Asks for every frame while the card is visible, or stops asking. */
+  function animate(on: boolean): void;
+  /** Sets a live drawing's caption. */
+  function caption(text: string): void;
+  /** Shows text beside the pointer, or hides it with null. */
+  function hint(text: string | null): void;
+  /** Opens a part of the drawn value as a row, as a shape's `select`. */
+  function select(path: string): void;
+
   function picture(picture: {
     width: number;
     height: number;

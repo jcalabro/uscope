@@ -15,13 +15,14 @@ import { buildPicture } from "../visualize/draw";
 import { type Picture, PictureError, validate } from "../visualize/picture";
 import {
   currentTheme,
+  failureText,
   type Outcome,
   palette,
   type RendererCode,
-  type RendererFailure,
   Sandbox,
 } from "../visualize/sandbox";
 import { csv, type InputRows, inputRows } from "../visualize/table";
+import { LiveDrawing, type LiveJob } from "./LiveDrawing";
 import { useLook } from "./navigation";
 import { hidden } from "./Values";
 import { LocalExpansion, ValueRow } from "./ValueTree";
@@ -142,6 +143,7 @@ export function Drawings() {
  * the inputs its renderer had when it had any. */
 type Shown =
   | { stop: number; picture: Picture; renderer: Drawing["renderer"]; inputs: Inputs }
+  | { stop: number; live: LiveJob; renderer: Drawing["renderer"]; inputs: Inputs }
   | { stop: number; problem: string; inputs: Inputs | null };
 
 type Inputs = Record<string, Value>;
@@ -179,13 +181,6 @@ function remember(key: string, stop: number, inputs: Record<string, Value>): voi
   drawn.set(key, entries.slice(-4));
 }
 
-function failureText(failure: RendererFailure): string {
-  const where = failure.file
-    ? `${failure.file}${failure.line !== null ? `:${failure.line}${failure.column !== null ? `:${failure.column}` : ""}` : ""}: `
-    : "";
-  return `${where}${failure.message}`;
-}
-
 function outcomeProblem(outcome: Outcome): string | null {
   switch (outcome.kind) {
     case "timeout":
@@ -193,9 +188,14 @@ function outcomeProblem(outcome: Outcome): string | null {
     case "failed":
       return failureText(outcome.failure);
     case "picture":
+    case "live":
       return null;
   }
 }
+
+/** Each job a live renderer draws, made once so a job drawn again, as at
+ * a new width, is not news to the renderer. */
+const liveJobs = new WeakMap<Job, LiveJob>();
 
 /** What a card shows after a draw: its picture, or why there is none. */
 function shownFor(job: Job, outcome: Outcome): Shown {
@@ -203,6 +203,21 @@ function shownFor(job: Job, outcome: Outcome): Shown {
   const failed = outcomeProblem(outcome);
   if (failed !== null) {
     return { stop, problem: failed, inputs };
+  }
+  if (outcome.kind === "live") {
+    let live = liveJobs.get(job);
+    if (live === undefined) {
+      live = {
+        stop,
+        source: job.source,
+        inputs,
+        paths: job.paths,
+        previous: previousInputs(job.key, stop),
+      };
+      liveJobs.set(job, live);
+    }
+    remember(job.key, stop, inputs);
+    return { stop, live, renderer: job.renderer, inputs };
   }
   try {
     const picture = validate((outcome as { picture: unknown }).picture);
@@ -498,6 +513,16 @@ function DrawingCard({ card }: { card: Card }) {
         </div>
       ) : null}
       <div ref={body} className="drawing-body" hidden={!picture} />
+      {shown && "live" in shown && (
+        <LiveDrawing
+          key={shown.live.source.digest}
+          card={id}
+          job={shown.live}
+          active={visible}
+          sandbox={sandbox}
+          onSelect={setSelected}
+        />
+      )}
       {picture?.caption !== undefined && <div className="drawing-caption">{picture.caption}</div>}
       {!shown && <div className="drawing-wait muted">{live ? "Drawing…" : hidden(focus)}</div>}
       {table && rows && <InputTable rows={rows} label={`Inputs of ${card.path}`} />}

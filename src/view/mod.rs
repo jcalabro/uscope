@@ -84,7 +84,7 @@ const BUILT_IN_KERNELS: [(&str, &str, &[u8]); 1] = [(
 /// The renderers built into uscope, which any `visualize` may call: each
 /// one's name and its JavaScript (`docs/visualizers.md`). They use only
 /// the API every renderer has.
-const BUILT_IN_RENDERERS: [(&str, &str); 10] = [
+const BUILT_IN_RENDERERS: [(&str, &str); 11] = [
     (
         "line-plot",
         include_str!("../../views/visualizers/line-plot.js"),
@@ -119,6 +119,7 @@ const BUILT_IN_RENDERERS: [(&str, &str); 10] = [
     ),
     ("bitmap", include_str!("../../views/visualizers/bitmap.js")),
     ("bits", include_str!("../../views/visualizers/bits.js")),
+    ("mesh", include_str!("../../views/visualizers/mesh.js")),
 ];
 
 /// The largest renderer read, in bytes.

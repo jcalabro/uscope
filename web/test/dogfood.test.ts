@@ -15,7 +15,7 @@ function files(directory: string): string[] {
   );
 }
 
-it("knows the ten built-ins", () => {
+it("knows the eleven built-ins", () => {
   expect(builtIns.sort()).toEqual([
     "bar-chart",
     "bitmap",
@@ -26,6 +26,7 @@ it("knows the ten built-ins", () => {
     "heatmap",
     "histogram",
     "line-plot",
+    "mesh",
     "scatter-plot",
   ]);
 });

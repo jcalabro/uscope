@@ -217,7 +217,16 @@ impl<P: InspectionOps> Scope for ModuleScope<'_, P> {
         from: TypeReference,
         step: StepKind<'_>,
     ) -> std::result::Result<Planned<StopStep>, Refusal> {
-        plan_in(self.controller, from, step)
+        let planned = plan_in(self.controller, from, step);
+        // A member with no indexing of its own, such as a `std::vector`, is
+        // indexed through the view that presents it, as in any expression.
+        match (&planned, step) {
+            (Err(_), StepKind::Index { .. }) => {
+                self.controller.view_index(from).map_or(planned, Ok)
+            }
+            (Err(_), StepKind::Entry) => self.controller.view_entry(from).map_or(planned, Ok),
+            _ => planned,
+        }
     }
 
     fn register(&self, _name: &str) -> Option<Register> {
@@ -396,6 +405,12 @@ impl<P: InspectionOps> Controller<P> {
         if let Some(choice) = self.views.choices.borrow().get(&ty) {
             return Arc::clone(choice);
         }
+        // While its view binds, a type has none: a view that indexes a value
+        // of its own type through itself binds no view.
+        self.views
+            .choices
+            .borrow_mut()
+            .insert(ty, Arc::new(Choice::default()));
         let choice = Arc::new(self.module_of(ty).map_or_else(Choice::default, |module| {
             crate::view::choose_among(
                 &[&self.views.set, module.image.views(), &ViewSet::built_in()],

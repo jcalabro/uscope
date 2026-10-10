@@ -79,13 +79,6 @@ impl<P: InspectionOps> Controller<P> {
         length: u64,
         read: &mut u64,
     ) -> std::result::Result<Arc<[u8]>, Arc<str>> {
-        if length > crate::MAX_INPUT_BYTES {
-            return Err(format!(
-                "`bytes` names {length} bytes, and an input may read at most {}",
-                crate::MAX_INPUT_BYTES
-            )
-            .into());
-        }
         if read.saturating_add(length) > crate::MAX_DRAWING_BYTES {
             return Err(format!(
                 "the drawing reads more than {} bytes",

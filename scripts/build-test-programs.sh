@@ -1942,6 +1942,7 @@ build_program rustc "$rust_fixtures_dir/profile/main.rs" "$output_dir/profile" \
 build_zig_fixture "$zig_fixtures_dir/samples.zig" "$output_dir/samples" \
     -O Debug -fPIE -fno-omit-frame-pointer
 build_cpp_fixture_directory g++ "$cpp_fixtures_dir/tree" "$output_dir/tree" -O0 -g3 -fPIE -pie
+build_cpp_fixture_directory g++ "$cpp_fixtures_dir/mesh" "$output_dir/mesh" -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/kvstore.c" "$output_dir/kvstore" \
     -O0 -g3 -fPIE -pie -pthread
 build_program rustc "$rust_fixtures_dir/kvstore.rs" "$output_dir/kvstore-rust" \
