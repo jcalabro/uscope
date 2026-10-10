@@ -119,6 +119,45 @@ fn modules_name_their_separate_debug_files() {
     dap.finish();
 }
 
+/// A program whose debug information cannot be read says why as the
+/// session starts, and its module says why beside its status.
+#[test]
+fn a_module_says_why_its_debug_information_cannot_be_read() {
+    let scratch = crate::support::ScratchDir::new("dap-malformed-dwarf");
+    let program = scratch.path().join("basic");
+    crate::support::corrupt_section(&fixture("basic"), &program, ".debug_abbrev");
+    let mut dap = Dap::start("malformed dwarf");
+    let started = dap.launch(
+        Profile::VsCode,
+        &program,
+        json!({"stopOnEntry": true}),
+        &Configuration::default(),
+    );
+    let problem = "its debug information cannot be read, so only its symbols describe its code: \
+                   malformed DWARF in the abbreviations at .debug_abbrev+0x0 of the unit at \
+                   .debug_info+0x0: ";
+    dap.output_containing(
+        started.mark,
+        "important",
+        &format!("{}: {problem}", program.display()),
+    );
+    dap.stopped(started.mark);
+    let modules = dap.request("modules", json!({}));
+    let described = modules["modules"]
+        .as_array()
+        .expect("modules")
+        .iter()
+        .find(|module| module["name"] == "basic")
+        .cloned()
+        .unwrap_or_else(|| panic!("no basic in {modules}"));
+    let status = described["symbolStatus"].as_str().expect("a status");
+    assert!(
+        status.starts_with(&format!("symbols only, no debug information; {problem}")),
+        "{described}"
+    );
+    dap.finish();
+}
+
 fn source_path(path: &str) -> String {
     source(path).display().to_string()
 }

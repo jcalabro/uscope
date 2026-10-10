@@ -1737,9 +1737,17 @@ impl Cli {
         while let Ok(event) = events.try_recv() {
             record(Ok(event));
         }
-        // What kept a library's own views out, once, when it loads.
+        // What could not be used of a library's debug information, and what
+        // kept its own views out, once, when it loads.
         for module in loaded {
             if let Ok(image) = self.debugger.loaded_module_image(module).await {
+                lines.extend(
+                    crate::present::debug_information::warnings(&image, false)
+                        .into_iter()
+                        .map(|warning| {
+                            format!("{}: {warning}", renderer.paint(Role::Warning, "warning"))
+                        }),
+                );
                 lines.extend(image.view_errors().iter().map(|error| {
                     format!(
                         "{}: views: {error}",

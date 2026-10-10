@@ -94,7 +94,7 @@ async fn a_debug_link_beside_the_program_describes_it() {
 }
 
 /// A debug link whose file differs from the one linked, as one left from
-/// an older build, is refused by its checksum.
+/// an older build, is refused by its checksum, which says why.
 #[tokio::test]
 async fn a_debug_link_to_a_file_from_another_build_is_refused() {
     let scratch = ScratchDir::new("stale-debuglink");
@@ -111,6 +111,21 @@ async fn a_debug_link_to_a_file_from_another_build_is_refused() {
     let image = scenario.handle().module_image();
     assert_eq!(image.debug_file(), None);
     assert_eq!(image.functions().len(), 0);
+    let Some(uscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file() else {
+        panic!("{:?}", image.separate_debug_file());
+    };
+    assert_eq!(
+        path.as_path(),
+        scratch.path().join(".debug/basic-debuglink.debug")
+    );
+    assert!(
+        reason.starts_with("its CRC-32 is 0x")
+            && reason.ends_with(
+                "the module's debug link records: it is from another build, or has changed since"
+            ),
+        "{reason}"
+    );
+    assert_eq!(image.debug_information(), uscope::DebugInformation::Absent);
     scenario.shutdown().await;
 }
 
@@ -661,8 +676,8 @@ async fn a_supplementary_file_must_be_the_one_its_debug_files_name() {
 /// A debug file naming a supplementary file that no directory holds, as
 /// one from a distribution whose `.dwz` files are not installed, is
 /// refused with its reason, and the program is described as its own file
-/// describes it. A program whose own DWARF needs one cannot be described
-/// without it, and says why.
+/// describes it. A program whose own DWARF needs one is described by its
+/// symbols, and says why its DWARF is left out.
 #[tokio::test]
 async fn a_debug_file_whose_supplementary_file_is_missing_is_refused_with_its_reason() {
     let options = DebugFileOptions {
@@ -691,15 +706,23 @@ async fn a_debug_file_whose_supplementary_file_is_missing_is_refused_with_its_re
     let scratch = ScratchDir::new("dwz-own-missing");
     let program = scratch.path().join("shapes");
     fs::copy(dwz("gcc-o0/dwz/shapes"), &program).expect("copy the program");
-    let error = Debugger::new(&program)
-        .err()
-        .expect("a program missing its supplementary file")
-        .to_string();
+    let scenario = Scenario::new("dwz-own-missing", &program);
+    let image = scenario.handle().module_image();
+    let uscope::DebugInformation::Unusable { reason } = image.debug_information() else {
+        panic!("{:?}", image.debug_information());
+    };
     assert!(
-        error.contains("its dwz supplementary file .dwz/shapes (build-id ")
-            && error.ends_with(") was not found"),
-        "{error}"
+        reason.starts_with("its dwz supplementary file .dwz/shapes (build-id ")
+            && reason.ends_with(") was not found"),
+        "{reason}"
     );
+    assert_eq!(image.functions().len(), 0);
+    assert!(
+        image
+            .symbols()
+            .any(|symbol| symbol.name() == "_ZN6shapes4areaERKNS_5ShapeE")
+    );
+    scenario.shutdown().await;
 }
 
 /// The checksum a `.debug_sup` records: after its version, flag, and name,
@@ -741,16 +764,17 @@ async fn a_debug_sup_names_its_supplementary_file_by_checksum() {
     )
     .expect("copy another build's supplementary file");
     let checksum = debug_sup_checksum(&program);
-    let error = Debugger::new(&program)
-        .err()
-        .expect("a program without its supplementary file")
-        .to_string();
-    assert!(
-        error.ends_with(&format!(
-            "its supplementary file .dwz/shapes (checksum {checksum}) was not found"
-        )),
-        "{error}"
+    let scenario = Scenario::new("debug-sup-missing", &program);
+    assert_eq!(
+        scenario.handle().module_image().debug_information(),
+        uscope::DebugInformation::Unusable {
+            reason: format!(
+                "its supplementary file .dwz/shapes (checksum {checksum}) was not found"
+            )
+            .into()
+        }
     );
+    scenario.shutdown().await;
 
     let root = scratch.path().join("root");
     let filed = filed(&root, &checksum);

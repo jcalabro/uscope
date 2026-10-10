@@ -70,6 +70,27 @@ impl ScratchDir {
     }
 }
 
+/// Copies `from` to `to`, its permissions included, with the first bytes
+/// of its section `section` overwritten by `0xff`, which begins no DWARF
+/// section well formed.
+pub fn corrupt_section(from: &Path, to: &Path, section: &str) {
+    use object::{Object as _, ObjectSection as _};
+    std::fs::copy(from, to).expect("copy the file");
+    let mut data = std::fs::read(to).expect("read the copy");
+    let object = object::File::parse(data.as_slice()).expect("an ELF file");
+    let (offset, size) = object
+        .section_by_name(section)
+        .and_then(|section| section.compressed_file_range().ok())
+        .map_or_else(
+            || panic!("{} has no {section}", from.display()),
+            |range| (range.offset, range.compressed_size),
+        );
+    let start = usize::try_from(offset).expect("an offset");
+    let end = start + usize::try_from(size.min(64)).expect("a size");
+    data[start..end].fill(0xff);
+    std::fs::write(to, data).expect("write the corrupted copy");
+}
+
 impl Drop for ScratchDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);

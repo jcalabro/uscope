@@ -372,6 +372,10 @@ impl<'a> Dumper<'a> {
                     format!("unusable {}: {reason}", path.display()),
             })
         ))?;
+        self.line(&format!(
+            "debug_information {:?}",
+            image.debug_information()
+        ))?;
         for producer in image.producers() {
             self.line(&format!("producer {producer}"))?;
         }

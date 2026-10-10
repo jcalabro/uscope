@@ -98,7 +98,14 @@ export function Modules() {
               <td>{module.name}</td>
               <td className="mono">{module.start ?? "—"}</td>
               <td className="mono">{module.end ?? "—"}</td>
-              <td className={module.symbols === "none" ? "dim" : ""}>{module.symbols}</td>
+              <td
+                className={
+                  module.debugInformationProblem ? "error" : module.symbols === "none" ? "dim" : ""
+                }
+                title={module.debugInformationProblem ?? undefined}
+              >
+                {module.symbols}
+              </td>
               <td className="dim" title={module.path}>
                 {module.path}
               </td>

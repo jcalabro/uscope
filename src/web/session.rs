@@ -1244,6 +1244,9 @@ impl Session {
             crate::cli::config::Settings::defaults(root),
             LaunchSettings::default(),
         );
+        for warning in console.debug_information_warnings().await {
+            outlet.publish(Stream::Log, &format!("warning: {warning}\n"));
+        }
         // The project's and the user's views apply, as in the terminal.
         for warning in console.load_view_sources(&self.cwd, &[]).await {
             outlet.publish(Stream::Log, &format!("views: {warning}\n"));

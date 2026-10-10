@@ -12,6 +12,11 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("debug information error: {0}")]
     DebugInfo(Box<dyn StdError + Send + Sync>),
+    /// A file that is no program or library the debugger can describe: not
+    /// ELF, cut short, not yet linked, a core dump, or for an architecture
+    /// it does not debug.
+    #[error("{0}")]
+    UnsupportedFile(Arc<str>),
     #[error("debugger backend error: {0}")]
     Backend(Box<dyn StdError + Send + Sync>),
 

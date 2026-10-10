@@ -840,7 +840,8 @@ then `/usr/lib/debug`. With `--debuginfod`, a file no directory holds is
 downloaded from the debuginfod servers `DEBUGINFOD_URLS` lists and kept in
 debuginfod's cache, which other debuggers share; no server is asked
 otherwise. Every candidate must prove it describes the module, by build-id
-or checksum.
+or checksum; when none does, the first found that names the module but
+describes another build is reported with why, as `info modules` shows.
 
 Most distributions' debug files share what a package's files have in common
 through a dwz supplementary file, which each names by `.gnu_debugaltlink`
@@ -852,6 +853,26 @@ from the servers. It must have the build-id, or record the checksum, that
 the debug file names. Only
 what the module uses is read from it. Without it a debug file cannot be
 read: the module is described by its own file, and `info modules` says why.
+
+## Debug information that cannot be read
+
+Debug information that cannot be read never stops a session. A module
+whose DWARF is malformed, needs a supplementary file that cannot be found,
+or needs more than its load budget is described by its symbols and
+call-frame information alone, so breakpoints on its functions, backtraces,
+and disassembly still work, without source lines, variables, or types. The
+reason names where the DWARF went wrong, such as `malformed DWARF in the
+abbreviations at .debug_abbrev+0x0 of the unit at .debug_info+0x0`, so it
+can be checked with `readelf` or `llvm-dwarfdump`. Split DWARF (`.dwo` and
+`.dwp` files, from `-gsplit-dwarf`) is not read: the units it describes
+keep their source lines, and their functions are known by their symbols.
+
+uscope warns of each such module as the session starts, for the program
+and any library already loaded, and as a library loads, and `info modules`
+repeats why beneath it. A program with no debug information at all is
+warned of too. A file that is no program to debug fails to load, saying
+what it is instead: not ELF, truncated, an object file not yet linked, a
+core dump (open it with `--core`), or a program for another architecture.
 
 ## The image cache
 

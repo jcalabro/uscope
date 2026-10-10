@@ -11,7 +11,6 @@
 - Continuous integration on every supported architecture.
 - End-to-end tests against well-known open source programs.
 - Harden `exec`, dynamic modules, and unusual native stops.
-- Better diagnostics for unsupported and malformed debug metadata.
 
 ## Later
 
