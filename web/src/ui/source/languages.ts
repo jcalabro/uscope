@@ -3,7 +3,12 @@
 import { cpp } from "@codemirror/lang-cpp";
 import { go } from "@codemirror/lang-go";
 import { rust } from "@codemirror/lang-rust";
-import { HighlightStyle, StreamLanguage, syntaxHighlighting } from "@codemirror/language";
+import {
+  HighlightStyle,
+  StreamLanguage,
+  type StringStream,
+  syntaxHighlighting,
+} from "@codemirror/language";
 import type { Extension } from "@codemirror/state";
 import { tags } from "@lezer/highlight";
 
@@ -77,6 +82,233 @@ const zig = StreamLanguage.define<{ inString: false }>({
   },
 });
 
+/** How a language writes its comments and strings, for {@link simple}. */
+interface Syntax {
+  name: string;
+  keywords: string;
+  /** Whether keywords are keywords in any case. */
+  ignoreCase?: boolean;
+  lineComment: string;
+  /** What opens and closes each block comment, and whether it nests. */
+  blockComments?: [string, string, boolean][];
+  /** Whether a quote within a string is written twice, not escaped. */
+  doubledQuotes?: boolean;
+  /** Whether single quotes also quote strings, as Fortran's do. */
+  singleQuoted?: boolean;
+  /** Raw strings that may span lines, by their opening and closing. */
+  rawStrings?: [string, string][];
+  /** Whether a quote after a name begins an attribute, as Ada's does. */
+  attributes?: boolean;
+}
+
+interface SimpleState {
+  /** The block comment open, and how deeply it nests. */
+  comment: [string, string, boolean] | null;
+  depth: number;
+  /** What closes the raw string open, if one is. */
+  closing: string | null;
+}
+
+/** A small tokenizer for a language that names its keywords, comments,
+ * and strings. */
+function simple(syntax: Syntax) {
+  const keywords = new Set(syntax.keywords.split(" "));
+  const blocks = syntax.blockComments ?? [];
+  const raws = syntax.rawStrings ?? [];
+
+  /** Reads on through the block comment open until it closes or the line
+   * ends. */
+  const inComment = (stream: StringStream, state: SimpleState) => {
+    const [open, close, nests] = state.comment ?? ["", "", false];
+    while (!stream.eol()) {
+      if (nests && stream.match(open)) {
+        state.depth += 1;
+      } else if (stream.match(close)) {
+        state.depth -= 1;
+        if (state.depth === 0) {
+          state.comment = null;
+          break;
+        }
+      } else {
+        stream.next();
+      }
+    }
+    return "comment";
+  };
+
+  /** Reads on through the raw string open until it closes or the line
+   * ends. A string closed by quotes ends at the last of them. */
+  const inRaw = (stream: StringStream, state: SimpleState) => {
+    const closing = state.closing ?? "";
+    while (!stream.eol()) {
+      if (stream.match(closing)) {
+        while (closing.startsWith('"') && stream.eat('"')) {}
+        state.closing = null;
+        break;
+      }
+      stream.next();
+    }
+    return "string";
+  };
+
+  return StreamLanguage.define<SimpleState>({
+    name: syntax.name,
+    startState: () => ({ comment: null, depth: 0, closing: null }),
+    copyState: (state) => ({ ...state }),
+    token(stream, state) {
+      if (state.comment !== null) {
+        return inComment(stream, state);
+      }
+      if (state.closing !== null) {
+        return inRaw(stream, state);
+      }
+      if (stream.eatSpace()) {
+        return null;
+      }
+      const block = blocks.find(([open]) => stream.match(open));
+      if (block) {
+        state.comment = block;
+        state.depth = 1;
+        return inComment(stream, state);
+      }
+      if (stream.match(syntax.lineComment)) {
+        stream.skipToEnd();
+        return "comment";
+      }
+      const raw = raws.find(([open]) => stream.match(open));
+      if (raw) {
+        state.closing = raw[1];
+        return inRaw(stream, state);
+      }
+      const before = stream.string[stream.pos - 1] ?? "";
+      const quote = stream.peek();
+      if (quote === '"' || (quote === "'" && syntax.singleQuoted)) {
+        stream.next();
+        for (let char = stream.next(); char !== undefined; char = stream.next()) {
+          if (char === quote) {
+            if (!(syntax.doubledQuotes && stream.eat(quote))) {
+              break;
+            }
+          } else if (char === "\\" && !syntax.doubledQuotes) {
+            stream.next();
+          }
+        }
+        return "string";
+      }
+      if (quote === "'") {
+        if (syntax.attributes) {
+          // A quote after a name begins an attribute, as in `Items'Last`.
+          if (/[\w)]/.test(before) || !stream.match(/^'.'/)) {
+            stream.next();
+            return null;
+          }
+          return "string";
+        }
+        stream.match(/^'(?:\\.|[^'\\])*'?/);
+        return "string";
+      }
+      if (
+        !/\w/.test(before) &&
+        stream.match(/^0x[0-9a-fA-F_]+|^\d[\d_]*(\.\d[\d_]*)?([eEdD][-+]?\d+)?/)
+      ) {
+        return "number";
+      }
+      if (stream.match(/^[A-Za-z_]\w*/)) {
+        const text = stream.current();
+        if (keywords.has(syntax.ignoreCase ? text.toLowerCase() : text)) {
+          return "keyword";
+        }
+        if (text === "true" || text === "false" || text === "nil" || text === "null") {
+          return "atom";
+        }
+        return stream.peek() === "(" ? "variableName.function" : "variableName";
+      }
+      stream.next();
+      return null;
+    },
+    tokenTable: {
+      "variableName.function": tags.function(tags.variableName),
+    },
+  });
+}
+
+const odin = simple({
+  name: "odin",
+  keywords:
+    "asm auto_cast bit_set break case cast context continue defer distinct do dynamic else enum " +
+    "fallthrough for foreign if import in map matrix not_in or_break or_continue or_else " +
+    "or_return package proc return struct switch transmute typeid union using when where",
+  lineComment: "//",
+  blockComments: [["/*", "*/", true]],
+  rawStrings: [["`", "`"]],
+});
+
+const fortran = simple({
+  name: "fortran",
+  keywords:
+    "allocatable allocate associate block call case character class close complex contains " +
+    "contiguous cycle data deallocate default dimension do else elemental elseif end enddo endif " +
+    "exit external function goto if implicit in inout integer intent interface intrinsic logical " +
+    "module none nullify only open optional out parameter pointer print private procedure " +
+    "program public pure read real recursive result return save select stop subroutine target " +
+    "then type use value where while write",
+  ignoreCase: true,
+  lineComment: "!",
+  doubledQuotes: true,
+  singleQuoted: true,
+});
+
+const d = simple({
+  name: "d",
+  keywords:
+    "abstract alias align asm assert auto bool break byte case cast catch char class const " +
+    "continue dchar debug default delegate delete deprecated do double else enum export extern " +
+    "final finally float for foreach foreach_reverse function goto if immutable import in inout " +
+    "int interface invariant is lazy long mixin module new nothrow out override package pragma " +
+    "private protected public pure real ref return scope shared short static struct super switch " +
+    "synchronized template this throw try typeid typeof ubyte uint ulong union unittest ushort " +
+    "version void wchar while with",
+  lineComment: "//",
+  blockComments: [
+    ["/*", "*/", false],
+    ["/+", "+/", true],
+  ],
+  rawStrings: [
+    ["`", "`"],
+    ['r"', '"'],
+  ],
+});
+
+const nim = simple({
+  name: "nim",
+  keywords:
+    "addr and as asm bind block break case cast concept const continue converter defer discard " +
+    "distinct div do elif else end enum except export finally for from func if import in include " +
+    "interface is isnot iterator let macro method mixin mod not notin object of or out proc ptr " +
+    "raise ref return shl shr static template try tuple type using var when while xor yield",
+  lineComment: "#",
+  blockComments: [["#[", "]#", true]],
+  rawStrings: [
+    ['"""', '"""'],
+    ['r"', '"'],
+  ],
+});
+
+const ada = simple({
+  name: "ada",
+  keywords:
+    "abort abs abstract accept access aliased all and array at begin body case constant declare " +
+    "delay delta digits do else elsif end entry exception exit for function generic goto if in " +
+    "interface is limited loop mod new not null of or others out overriding package parallel " +
+    "pragma private procedure protected raise range record rem renames requeue return reverse " +
+    "select separate some subtype synchronized tagged task terminate then type until use when " +
+    "while with xor",
+  ignoreCase: true,
+  lineComment: "--",
+  doubledQuotes: true,
+  attributes: true,
+});
+
 export function language(path: string): Extension {
   const extension = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
   switch (extension) {
@@ -96,6 +328,23 @@ export function language(path: string): Extension {
       return go();
     case "zig":
       return zig;
+    case "odin":
+      return odin;
+    case "f90":
+    case "f95":
+    case "f03":
+    case "f08":
+    case "f18":
+      return fortran;
+    case "d":
+    case "di":
+      return d;
+    case "nim":
+    case "nims":
+      return nim;
+    case "adb":
+    case "ads":
+      return ada;
     default:
       return [];
   }
