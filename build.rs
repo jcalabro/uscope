@@ -34,18 +34,30 @@ fn main() {
     std::fs::write(out.join("web_assets.rs"), table).expect("write the asset table");
 }
 
-/// Digests every source file and the locked dependencies, so that images a
-/// cache holds are never read by a loader built from other sources: any
-/// change may change what a load produces.
+/// Digests the library's source files and the locked dependencies, so that
+/// images a cache holds are never read by a loader built from other sources:
+/// any change may change what a load produces. The binary's own modules are
+/// left out, so editing them rebuilds neither the library nor its tests.
 fn sources_digest(manifest: &Path) {
     let mut files = Vec::new();
-    for root in ["src", "Cargo.lock"] {
+    let binary_only = ["bin", "cli", "dap", "main.rs", "present", "web"];
+    let mut roots = vec!["Cargo.lock".to_owned()];
+    for entry in std::fs::read_dir(manifest.join("src"))
+        .expect("read src")
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !binary_only.contains(&name.as_str()) {
+            roots.push(format!("src/{name}"));
+        }
+    }
+    for root in &roots {
         println!("cargo::rerun-if-changed={root}");
         let path = manifest.join(root);
         if path.is_dir() {
             collect(manifest, &path, &mut files);
         } else {
-            files.push((root.to_owned(), path.to_string_lossy().into_owned()));
+            files.push((root.clone(), path.to_string_lossy().into_owned()));
         }
     }
     files.sort();
