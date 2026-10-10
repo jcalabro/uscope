@@ -1,6 +1,6 @@
 {
   "containers-cpp-gcc-o2": {
-    "digest": "c0fce2463be86d48c43bc0199a0bbc28",
+    "digest": "4fb13e3838b1140fdf9600ac4d934c94",
     "allocations": 460689,
     "callgrind_instructions": null
   },
@@ -10,8 +10,8 @@
     "callgrind_instructions": null
   },
   "containers-zig-self-hosted": {
-    "digest": "702db15a07ff0f957d677ab4a2943e1a",
-    "allocations": 521577,
+    "digest": "49add622d8ff3f1803f78e140b9a2bf5",
+    "allocations": 521581,
     "callgrind_instructions": null
   },
   "golden/containers-clang-O0": {
