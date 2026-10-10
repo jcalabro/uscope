@@ -2292,6 +2292,38 @@ struct DieKey {
     offset: usize,
 }
 
+/// A map from DIEs, kept per unit.
+///
+/// The variables walk reads one unit at a time, and nearly every reference
+/// stays in its unit, so the map of the unit being read stays in cache,
+/// where one map of every DIE in a large program misses on most lookups.
+struct DieMap<V> {
+    units: Vec<HashMap<usize, V>>,
+}
+
+impl<V> Default for DieMap<V> {
+    fn default() -> Self {
+        Self { units: Vec::new() }
+    }
+}
+
+impl<V> DieMap<V> {
+    fn get(&self, key: &DieKey) -> Option<&V> {
+        self.units.get(key.unit)?.get(&key.offset)
+    }
+
+    fn contains_key(&self, key: &DieKey) -> bool {
+        self.get(key).is_some()
+    }
+
+    fn insert(&mut self, key: DieKey, value: V) -> Option<V> {
+        if key.unit >= self.units.len() {
+            self.units.resize_with(key.unit + 1, HashMap::new);
+        }
+        self.units[key.unit].insert(key.offset, value)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RawFunctionKind {
     Subprogram,
@@ -2326,7 +2358,7 @@ struct FunctionMetadata {
     code_instances: Vec<CodeInstanceInfo>,
     /// Maps each concrete function DIE to its code instance so the variable
     /// catalog can attribute scopes to logical frames.
-    instance_ids: HashMap<DieKey, CodeInstanceId>,
+    instance_ids: DieMap<CodeInstanceId>,
 }
 
 fn load_function_metadata<'data>(
@@ -2428,9 +2460,9 @@ fn code_instances(
     raw: &RawFunctions,
     definitions: &[usize],
     function_ids: &[Option<FunctionId>],
-) -> std::result::Result<(Vec<CodeInstanceInfo>, HashMap<DieKey, CodeInstanceId>), DwarfError> {
+) -> std::result::Result<(Vec<CodeInstanceInfo>, DieMap<CodeInstanceId>), DwarfError> {
     let mut instances = vec![None; raw.len()];
-    let mut instance_ids = HashMap::new();
+    let mut instance_ids = DieMap::default();
     let mut count = 0;
     for (index, function) in raw.iter().enumerate() {
         if !function.ranges.is_empty() {

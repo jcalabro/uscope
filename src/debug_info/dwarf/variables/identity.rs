@@ -558,7 +558,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             .into_par_iter()
             .map(|index| {
                 let id = TypeId::new(u32::try_from(index).expect("type count fits u32"));
-                if !self.explicit_names.contains(&id) {
+                if !self.explicit_names.contains(id.index()) {
                     return None;
                 }
                 let Some(TypeEntry::Resolved(info)) = self.entries.get(index) else {

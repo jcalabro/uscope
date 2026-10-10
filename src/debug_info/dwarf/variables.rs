@@ -320,7 +320,7 @@ fn fused_block_ranges(
 /// becomes.
 #[derive(Clone, Copy)]
 pub(super) struct CodeMetadata<'a> {
-    pub(super) instance_ids: &'a HashMap<DieKey, CodeInstanceId>,
+    pub(super) instance_ids: &'a super::DieMap<CodeInstanceId>,
 }
 
 #[expect(
@@ -387,6 +387,9 @@ pub(super) fn load_variable_info<'data>(
     drop(phase);
 
     let phase = crate::span!("variables.main_walk");
+    // The file of each declaration, which the walk would otherwise spell
+    // again for each variable.
+    let mut declared_files = die::DeclaredFiles::default();
     for (unit_index, unit) in units.iter().enumerate() {
         if is_type_unit(unit) {
             continue;
@@ -849,8 +852,14 @@ pub(super) fn load_variable_info<'data>(
                     order = order
                         .checked_add(1)
                         .expect("data-object DIE order overflow");
-                    let declaration = declaration_with_origins(
-                        dwarf, units, unit, entry, &chain, files,
+                    let declaration = die::declaration_remembering_files(
+                        dwarf,
+                        units,
+                        unit,
+                        entry,
+                        &chain,
+                        files,
+                        &mut declared_files,
                     )
                     .map(|declaration| {
                         // Go gives a variable's line alone: its file is

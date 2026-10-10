@@ -7,7 +7,9 @@ use std::sync::Arc;
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use gimli::{Location, Value};
 
-use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, Units, die_reference, unit_dwarf};
+use crate::debug_info::dwarf::{
+    DieKey, DieMap, DwarfError, Reader, Units, die_reference, unit_dwarf,
+};
 use crate::debug_info::{
     CallSite, CallSiteId, CallTarget, EntryParameter, TailCallChain, TailJump, VariableRuntime,
     VariableRuntimeError,
@@ -47,7 +49,7 @@ pub(super) struct CallSiteBuilder {
     sites: Vec<(calls::CallSite, Option<DieKey>)>,
     functions: Vec<CallingFunction>,
     /// The first address of each function entry with code.
-    starts: HashMap<DieKey, ImageAddress>,
+    starts: DieMap<ImageAddress>,
     /// Each function with code, by its first address.
     code: Vec<(ImageAddress, usize)>,
     /// The abstract origin of each function with code.
