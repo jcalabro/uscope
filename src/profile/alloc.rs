@@ -250,10 +250,11 @@ impl<A> Counting<A> {
     }
 }
 
-/// The allocator uscope's programs count: mimalloc, which serves the many
-/// small blocks reading debug information takes far faster than the C
-/// library's, or with `system-alloc` the C library's, for heap profilers
-/// that cannot see mimalloc.
+/// The allocator uscope's programs count.
+///
+/// mimalloc serves the many small blocks reading debug information takes far
+/// faster than the C library's; `system-alloc` selects the C library's
+/// instead, for heap profilers that cannot see mimalloc.
 #[cfg(not(feature = "system-alloc"))]
 pub type Selected = mimalloc::MiMalloc;
 #[cfg(feature = "system-alloc")]
