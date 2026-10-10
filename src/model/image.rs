@@ -361,19 +361,16 @@ fn seal_image(
 /// two types share one when their identity keys are equal, as one type
 /// defined in several units is.
 fn type_classes(types: &[TypeNode]) -> Vec<u32> {
-    let image = types.first().map(|node| node.reference().image);
-    let index =
-        crate::type_identity::TypeIndex::build(image, types.len(), |index| match &types[index] {
-            TypeNode::Resolved(info) => Some(info),
-            TypeNode::Malformed { .. } => None,
-        });
+    // Only the keys are read, so the names are not indexed.
+    let keys = crate::type_identity::canonical_keys(types.len(), |index| match &types[index] {
+        TypeNode::Resolved(info) => Some(info),
+        TypeNode::Malformed { .. } => None,
+    });
     let mut classes = foldhash::HashMap::default();
-    types
-        .iter()
-        .map(|node| {
-            let key = index.key(node.reference()).expect("every type has a key");
+    keys.iter()
+        .map(|key| {
             let next = u32::try_from(classes.len()).expect("type counts fit u32");
-            *classes.entry(Arc::clone(key)).or_insert(next)
+            *classes.entry(&**key).or_insert(next)
         })
         .collect()
 }
