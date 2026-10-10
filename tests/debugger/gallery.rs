@@ -366,43 +366,10 @@ async fn check_truth(
     let mut type_name = variable.type_info.as_ref().map(|info| info.name.clone());
     let mut state = variable.state.clone();
     for segment in segments {
-        let VariableState::Available {
-            children: uscope::ValueChildren::Available(reference),
-            ..
-        } = &state
-        else {
+        let VariableState::Available { .. } = &state else {
             break;
         };
-        let page = child_page(scenario, &state, 0, 256).await;
-        let child = page
-            .children
-            .iter()
-            .find(|child| match &child.relationship {
-                ValueChildRelationship::Member(member) => member.name.as_deref() == Some(segment),
-                ValueChildRelationship::SliceElement { index } => index.to_string() == segment,
-                // An element is named by its zero-based index, or by its
-                // source indices in parentheses.
-                ValueChildRelationship::ArrayElement { index, indices } => segment
-                    .strip_prefix('(')
-                    .and_then(|rest| rest.strip_suffix(')'))
-                    .map_or_else(
-                        || index.to_string() == segment,
-                        |source| {
-                            source
-                                .split(',')
-                                .map(str::parse)
-                                .collect::<Result<Vec<i128>, _>>()
-                                == Ok(indices.to_vec())
-                        },
-                    ),
-                _ => false,
-            })
-            .ok_or_else(|| {
-                format!(
-                    "has no child {segment} among {} children",
-                    reference.total()
-                )
-            });
+        let child = child_named(scenario, &state, segment).await;
         // Optimized code may leave out what nothing reads, such as a
         // variable a closure captured.
         let child = match child {
@@ -435,6 +402,78 @@ async fn check_truth(
             truth.kind,
             truth.value
         ))
+    }
+}
+
+/// The child a path's segment names among the value's own children, or
+/// else among what a view shows of it.
+async fn child_named(
+    scenario: &Scenario,
+    state: &VariableState,
+    segment: &str,
+) -> Result<uscope::ValueChild, String> {
+    let VariableState::Available {
+        children,
+        presentation,
+        ..
+    } = state
+    else {
+        return Err("is not available".to_owned());
+    };
+    let presented = presentation
+        .as_deref()
+        .filter(|presentation| presentation.shape != uscope::PresentedShape::Raw)
+        .map(|presentation| &presentation.children);
+    let mut child = Err(format!("has no child {segment}"));
+    for children in std::iter::once(children).chain(presented) {
+        let uscope::ValueChildren::Available(reference) = children else {
+            continue;
+        };
+        let page = scenario
+            .operation(
+                "value children",
+                scenario.handle().value_children(
+                    reference.clone(),
+                    uscope::ValueChildQuery {
+                        offset: 0,
+                        limit: 256,
+                    },
+                ),
+            )
+            .await;
+        if let Some(found) = page.children.iter().find(|child| named(child, segment)) {
+            return Ok(found.clone());
+        }
+        child = Err(format!(
+            "has no child {segment} among {} children",
+            reference.total()
+        ));
+    }
+    child
+}
+
+/// Whether a path's segment names `child`: a member by its name, an
+/// element by its zero-based index or by its source indices in
+/// parentheses.
+fn named(child: &uscope::ValueChild, segment: &str) -> bool {
+    match &child.relationship {
+        ValueChildRelationship::Member(member) => member.name.as_deref() == Some(segment),
+        ValueChildRelationship::SliceElement { index }
+        | ValueChildRelationship::Element { index } => index.to_string() == segment,
+        ValueChildRelationship::ArrayElement { index, indices } => segment
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+            .map_or_else(
+                || index.to_string() == segment,
+                |source| {
+                    source
+                        .split(',')
+                        .map(str::parse)
+                        .collect::<Result<Vec<i128>, _>>()
+                        == Ok(indices.to_vec())
+                },
+            ),
+        _ => false,
     }
 }
 
@@ -809,7 +848,7 @@ async fn nim_values_agree_with_their_program() {
         check_gallery(&Gallery {
             fixture,
             breakpoints: &["values::reached"],
-            checkpoints: &["scalars", "records", "strings"],
+            checkpoints: &["scalars", "records", "strings", "seqs"],
             optimized,
             required: &[],
             reserved: &["colontmp", "nimErr_", "FR_"],

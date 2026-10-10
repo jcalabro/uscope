@@ -16,14 +16,15 @@ use crate::type_identity::{
     ANONYMOUS_NAMESPACE, NameIndex as _, NameSyntax, TypeIndex, TypeLookup, TypeName, parse_integer,
 };
 use crate::{
-    ArgumentOrigin, GoKind, GoTypeAttributes, ModuleImageId, SourceLanguage, TypeArgument, TypeId,
-    TypeIdentity, TypeInfo, TypeReference,
+    ArgumentOrigin, ArrayBound, ArrayExtent, GoKind, GoTypeAttributes, ModuleImageId,
+    RuntimeDimension, SourceLanguage, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind,
+    TypeReference,
 };
 
-use super::MAX_RECORD_CHILDREN;
 use super::codec::enumeration_constant;
 use super::die::strict_flag;
 use super::types::{TypeArenaBuilder, TypeEntry};
+use super::{MAX_RECORD_CHILDREN, MAX_TYPE_RESOLUTION_DEPTH};
 
 const DW_AT_GO_KIND: gimli::DwAt = gimli::DwAt(0x2900);
 const DW_AT_GO_KEY: gimli::DwAt = gimli::DwAt(0x2901);
@@ -621,6 +622,23 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 let parts = self.identity_parts.get(index)?.as_ref()?;
                 let go = self.go_identity_parts.get(&id);
                 let language = self.language(parts.die.unit);
+                // Nim's C names each seq type for a hash of its element
+                // type; it is that type's `seq`.
+                if language == SourceLanguage::Nim
+                    && let Some(element) = self.nim_seq_element(info)
+                {
+                    let identity = TypeIdentity {
+                        language,
+                        path: Arc::from([]),
+                        inline_namespaces: Arc::from([]),
+                        base: Arc::from("seq"),
+                        arguments: Arc::from([TypeArgument::Type(element)]),
+                        pack: None,
+                        origin: ArgumentOrigin::Dwarf,
+                        go: None,
+                    };
+                    return Some((index, language, Arc::new(identity), Vec::new()));
+                }
                 let parsed = TypeName::parse(&info.name, NameSyntax::of(language));
                 let scopes = self.type_path(parts.die);
                 // Only Go, Zig, and Odin names spell their packages and
@@ -672,6 +690,74 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             if let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(index) {
                 info.identity = Some(identity);
             }
+        }
+    }
+
+    /// The element type of a Nim seq, as Nim's C lays one out: a
+    /// `tySequence__` record of its `len` and `p`, which points to a
+    /// record of its `cap` and its elements, `data`, a flexible array.
+    fn nim_seq_element(&self, info: &TypeInfo) -> Option<TypeReference> {
+        let members = |info: &TypeInfo, names: [&str; 2]| match &info.kind {
+            TypeKind::Record {
+                members,
+                incomplete: false,
+                ..
+            } if members.len() == 2
+                && members
+                    .iter()
+                    .zip(names)
+                    .all(|(member, name)| member.name.as_deref() == Some(name)) =>
+            {
+                Some(Arc::clone(members))
+            }
+            _ => None,
+        };
+        let resolved = |reference: TypeReference| {
+            let mut id = reference.id;
+            for _ in 0..MAX_TYPE_RESOLUTION_DEPTH {
+                let Some(TypeEntry::Resolved(info)) = self.entries.get(id.index()) else {
+                    return None;
+                };
+                match &info.kind {
+                    TypeKind::Named {
+                        target: Some(target),
+                        ..
+                    }
+                    | TypeKind::Modified { target, .. } => id = target.id,
+                    _ => return Some(info),
+                }
+            }
+            None
+        };
+        if !info.name.starts_with("tySequence__") {
+            return None;
+        }
+        let seq = members(info, ["len", "p"])?;
+        let TypeKind::Pointer {
+            target: Some(content),
+            ..
+        } = resolved(seq[1].type_ref)?.kind
+        else {
+            return None;
+        };
+        let content = members(resolved(content)?, ["cap", "data"])?;
+        match &resolved(content[1].type_ref)?.kind {
+            TypeKind::RuntimeArray {
+                element,
+                dimensions,
+                ..
+            } if matches!(
+                dimensions.as_ref(),
+                [RuntimeDimension {
+                    lower_bound: ArrayBound::Constant(0),
+                    extent: ArrayExtent::Unknown,
+                    byte_stride: None,
+                }]
+            ) =>
+            {
+                Some(*element)
+            }
+            _ => None,
         }
     }
 

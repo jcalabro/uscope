@@ -836,7 +836,7 @@ The built-in views cover:
   arrays, and `strings.Builder` as its text.
 - D: `std.array.Appender` as its text or elements, and
   `std.typecons.Nullable` as its value or `null`.
-- Nim: strings as their text.
+- Nim: strings as their text, and seqs as their elements.
 - Ada: GNAT's `Unbounded_String` as its text.
 
 Some values need no view, because their debug information says what they

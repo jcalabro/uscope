@@ -84,8 +84,20 @@ proc strings() {.noinline.} =
   reached("strings")
   keep(addr text); keep(addr empty)
 
+proc seqs() {.noinline.} =
+  var items = @[11'i32, 22, 33]
+  var none: seq[int32] = @[]
+  var words = @["ab", "cd"]
+  for index, item in items:
+    truth("seqs", "items_1." & $index, "int", $item)
+  truth("seqs", "none_1", "summary", "len=0 []")
+  truth("seqs", "words_1.1", "summary", "\"cd\"")
+  reached("seqs")
+  keep(addr items); keep(addr none); keep(addr words)
+
 scalars()
 records()
 strings()
+seqs()
 if add(2, 3) != 5:
   quit "add"
