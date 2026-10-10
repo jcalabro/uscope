@@ -293,6 +293,9 @@ pub struct BoundDrawing<St> {
 pub struct BoundInput<St> {
     pub name: Arc<str>,
     pub value: BoundInputValue<St>,
+    /// The part of the presented value the input is, as a drawing's
+    /// `select` names one: `""` for `self`, else members and indices.
+    pub path: Option<Arc<str>>,
 }
 
 /// What an input hands the renderer, bound.
@@ -720,18 +723,25 @@ fn bind_visualizer<S: Scope>(
             })?;
         let mut inputs = Vec::new();
         for input in &visualize.inputs {
+            let mut path = None;
             let value = match &input.value {
-                InputValue::Value(alternatives) => BoundInputValue::Value(
-                    first_alternative(alternatives, |alternative| {
+                InputValue::Value(alternatives) => {
+                    let (program, part) = first_alternative(alternatives, |alternative| {
                         bind_part(alternative, scope, Mode::Read)
+                            .map(|program| {
+                                let part = input_path(alternative, &program);
+                                (program, part)
+                            })
                             .map_err(|rejection| rejection.reason)
                     })
                     .map_err(|reason| Rejection {
                         line: input.line,
                         part: input.name.clone(),
                         reason,
-                    })?,
-                ),
+                    })?;
+                    path = part;
+                    BoundInputValue::Value(program)
+                }
                 InputValue::Bytes { pointer, length } => BoundInputValue::Bytes {
                     pointer: bind_category(
                         pointer,
@@ -748,6 +758,7 @@ fn bind_visualizer<S: Scope>(
             inputs.push(BoundInput {
                 name: input.name.as_str().into(),
                 value,
+                path,
             });
         }
         Ok(BoundDrawing { renderer, inputs })
@@ -757,6 +768,58 @@ fn bind_visualizer<S: Scope>(
         line: visualize.line,
         bound,
     }
+}
+
+/// The part of the presented value an input's expression names, when it
+/// is one: written as members and literal indices of `self`, and held in
+/// its storage rather than reached through a pointer.
+fn input_path<St>(expr: &Expr, program: &ViewProgram<St>) -> Option<Arc<str>> {
+    if !matches!(
+        program.root_object(),
+        Some(ViewObject::This | ViewObject::Member(_))
+    ) {
+        return None;
+    }
+    let text = expr.text();
+    let path = match text.strip_prefix("self") {
+        Some(rest) if rest.is_empty() || rest.starts_with('[') => rest,
+        Some(rest) if rest.starts_with('.') => &rest[1..],
+        _ => text,
+    };
+    is_part_path(path).then(|| path.into())
+}
+
+/// Whether `path` is member names and literal indices, as `a.b[2].c`.
+fn is_part_path(path: &str) -> bool {
+    let mut rest = path;
+    let mut first = true;
+    while !rest.is_empty() {
+        if let Some(index) = rest.strip_prefix('[') {
+            let Some(end) = index.find(']') else {
+                return false;
+            };
+            if end == 0 || !index[..end].bytes().all(|byte| byte.is_ascii_digit()) {
+                return false;
+            }
+            rest = &index[end + 1..];
+        } else {
+            if !first {
+                let Some(after) = rest.strip_prefix('.') else {
+                    return false;
+                };
+                rest = after;
+            }
+            let end = rest
+                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .unwrap_or(rest.len());
+            if end == 0 || rest.as_bytes()[0].is_ascii_digit() {
+                return false;
+            }
+            rest = &rest[end..];
+        }
+        first = false;
+    }
+    true
 }
 
 /// The first alternative that binds, or every alternative's reason.

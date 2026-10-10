@@ -192,6 +192,9 @@ pub struct VisualizerInputs {
 pub struct VisualizerInput {
     pub name: Arc<str>,
     pub value: VisualizerValue,
+    /// The part of the drawn value the input is, when it is one: `""` for
+    /// the value itself, else members and indices, as a `select` names.
+    pub path: Option<Arc<str>>,
 }
 
 /// What one input of a drawing holds.

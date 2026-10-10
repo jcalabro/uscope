@@ -44,6 +44,10 @@ declare namespace uscope {
   interface Context<I = Inputs> {
     /** The inputs this tab drew for the same value at its previous stop. */
     previous: I | null;
+    /** The part of the drawn value each input is, for `select`: `""` for
+     * the value itself, `"mailbox"` for `squares = mailbox`, and null for
+     * an input that is no part of it, as `bytes(…)` or `len * 2`. */
+    paths: { readonly [K in keyof I]: string | null };
     /** CSS pixels the card offers; a picture is scaled to fit. */
     width: number;
     theme: "light" | "dark";
@@ -60,10 +64,12 @@ declare namespace uscope {
     opacity?: number;
     /** Dash and gap lengths, as `stroke-dasharray`. */
     dash?: number[];
-    /** Hover text, and the shape's accessible name. */
+    /** Hover text, and the shape's accessible name. Over an image, the
+     * hover text also names the pixel under the pointer. */
     title?: string;
     /** A part of the drawn value, `member`, `[3]`, or `a.b[2].c`, which a
-     * click opens as a row. */
+     * click opens as a row. A shape with neither this nor a title, in a
+     * group with neither, lets the pointer through to what is beneath it. */
     select?: string;
   }
 
@@ -142,7 +148,7 @@ declare namespace uscope {
     readonly type: "picture";
   }
 
-  /** The page's colors in its current theme. */
+  /** The page's colors in its current theme, each `#rrggbb`. */
   interface Theme {
     ink: string;
     ink2: string;

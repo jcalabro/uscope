@@ -46,6 +46,11 @@ export function decodeInputs(inputs: DrawInput[], bytes: Uint8Array): Record<str
   return Object.fromEntries(inputs.map((input) => [input.name, decode(input.value, bytes)]));
 }
 
+/** The part of the drawn value each input is, by name, or null. */
+export function inputPaths(inputs: DrawInput[]): Record<string, string | null> {
+  return Object.fromEntries(inputs.map((input) => [input.name, input.path]));
+}
+
 /** One input, whose numbers and bytes lie in `bytes`. */
 export function decode(datum: Datum, bytes: Uint8Array): Value {
   switch (datum.t) {

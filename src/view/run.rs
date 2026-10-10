@@ -1159,6 +1159,11 @@ pub enum Input {
     Text(Arc<str>),
 }
 
+/// An input by name, with the part of the drawn value it is, when it is
+/// one: `""` for the value itself, and none for `bytes(…)` or what the view
+/// computes.
+pub type NamedInput = (Arc<str>, Input, Option<Arc<str>>);
+
 /// Runs the inputs of the `index`th of [`visualizers`], once the view's
 /// checks hold. An input the program cannot provide is that input's
 /// problem, as a field's is.
@@ -1167,7 +1172,7 @@ pub fn inputs<M: Machine>(
     index: usize,
     machine: &mut M,
     this: M::Place,
-) -> Result<Vec<(Arc<str>, Input)>, Failure> {
+) -> Result<Vec<NamedInput>, Failure> {
     let listed = visualizers(bound);
     let Some(&(owner, visualizer)) = listed.get(index) else {
         return Err(internal("no such visualizer"));
@@ -1196,7 +1201,7 @@ pub fn inputs<M: Machine>(
             },
             BoundInputValue::Text(text) => Input::Text(Arc::clone(text)),
         };
-        inputs.push((Arc::clone(&input.name), value));
+        inputs.push((Arc::clone(&input.name), value, input.path.clone()));
     }
     Ok(inputs)
 }

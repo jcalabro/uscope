@@ -9,17 +9,19 @@ import { useRequest } from "../data";
 import { type At, drawing, formatPinned, type Look, type Pinned, parsePinned } from "../focus";
 import type { Drawing, Row } from "../protocol";
 import { flash } from "../tab";
-import { useChosenTheme } from "../theme";
-import { decodeInputs, type Value } from "../visualize/decode";
+import { useShownScheme } from "../theme";
+import { decodeInputs, inputPaths, type Value } from "../visualize/decode";
+import { buildPicture } from "../visualize/draw";
 import { type Picture, PictureError, validate } from "../visualize/picture";
 import {
   currentTheme,
   type Outcome,
   palette,
+  type RendererCode,
   type RendererFailure,
   Sandbox,
 } from "../visualize/sandbox";
-import { buildSvg } from "../visualize/svg";
+import { csv, type InputRows, inputRows } from "../visualize/table";
 import { useLook } from "./navigation";
 import { hidden } from "./Values";
 import { LocalExpansion, ValueRow } from "./ValueTree";
@@ -61,10 +63,12 @@ export function useCards(): Card[] {
   const why = hidden(focus);
   const scopes = useRequest("scopes", why === null ? (focus.at as At) : null);
   const pins = focus.look.d;
-  // While the program runs, the cards stay as they were.
+  // While the program runs or its stop has passed, and until the next
+  // stop's values arrive, the cards stay as they were, each dimmed until it
+  // draws the stop shown. Replacing them would forget what they drew.
   const last = useRef<Card[]>([]);
   return useMemo(() => {
-    if (why !== null && focus.stale !== "passed" && last.current.length > 0) {
+    if ((why !== null || scopes.data === undefined) && last.current.length > 0) {
       return last.current;
     }
     const cards: Card[] = [];
@@ -108,7 +112,7 @@ export function useCards(): Card[] {
     });
     last.current = cards;
     return cards;
-  }, [scopes.data, pins, why, focus.stale]);
+  }, [scopes.data, pins, why]);
 }
 
 export function Drawings() {
@@ -134,10 +138,30 @@ export function Drawings() {
   );
 }
 
-/** What a card shows: a picture, or why there is none, from one stop. */
+/** What a card shows: a picture, or why there is none, from one stop, and
+ * the inputs its renderer had when it had any. */
 type Shown =
-  | { stop: number; picture: Picture; renderer: Drawing["renderer"] }
-  | { stop: number; problem: string };
+  | { stop: number; picture: Picture; renderer: Drawing["renderer"]; inputs: Inputs }
+  | { stop: number; problem: string; inputs: Inputs | null };
+
+type Inputs = Record<string, Value>;
+
+/** A draw a card wants: the latest replaces any that has not started. */
+interface Job {
+  stop: number;
+  key: string;
+  source: RendererCode;
+  renderer: Drawing["renderer"];
+  inputs: Inputs;
+  paths: Record<string, string | null>;
+}
+
+/** How many CSS pixels a card's width changes by before it draws again. */
+const RESIZED = 8;
+
+/** The drawing chosen among a value's several, by session and path, so it
+ * stays chosen at the next stop and in another view. */
+const tabs = new Map<string, string>();
 
 /** The inputs a card drew at each stop, for `previous`, by session, path,
  * and renderer: stops count on across sessions. */
@@ -173,6 +197,29 @@ function outcomeProblem(outcome: Outcome): string | null {
   }
 }
 
+/** What a card shows after a draw: its picture, or why there is none. */
+function shownFor(job: Job, outcome: Outcome): Shown {
+  const { stop, inputs } = job;
+  const failed = outcomeProblem(outcome);
+  if (failed !== null) {
+    return { stop, problem: failed, inputs };
+  }
+  try {
+    const picture = validate((outcome as { picture: unknown }).picture);
+    remember(job.key, stop, inputs);
+    return { stop, picture, renderer: job.renderer, inputs };
+  } catch (error) {
+    return {
+      stop,
+      problem:
+        error instanceof PictureError
+          ? `${job.renderer.name}.js returned a picture the page cannot show: ${error.message}`
+          : String(error),
+      inputs,
+    };
+  }
+}
+
 /** A value's path with a part of it, as `select` names one. */
 export function partPath(path: string, select: string): string {
   const whole = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[\d+\])*$/.test(path) ? path : `(${path})`;
@@ -184,7 +231,7 @@ function DrawingCard({ card }: { card: Card }) {
   const { at, stale } = focus;
   const live = at !== null && stale === null ? at : null;
   const look = useLook();
-  const theme = useChosenTheme();
+  const theme = useShownScheme();
   const id = useId();
   const holder = useRef<HTMLDivElement>(null);
   const body = useRef<HTMLDivElement>(null);
@@ -200,7 +247,12 @@ function DrawingCard({ card }: { card: Card }) {
       : null,
   );
   const offered = card.offered ?? evaluated.data?.drawings ?? null;
-  const [tab, setTab] = useState<string | null>(null);
+  const tabKey = `${focus.session}~${card.path}`;
+  const [tab, setTabState] = useState<string | null>(() => tabs.get(tabKey) ?? null);
+  const setTab = (name: string) => {
+    tabs.set(tabKey, name);
+    setTabState(name);
+  };
   const renderer =
     card.chosen ?? (tab !== null && offered?.includes(tab) ? tab : (offered?.[0] ?? null));
 
@@ -233,67 +285,124 @@ function DrawingCard({ card }: { card: Card }) {
   // Each card has its own worker, which ends with it.
   useEffect(() => () => shared?.release(id), [id]);
 
+  // Latest stop wins: a card runs one draw at a time, starts each on an
+  // animation frame, and skips the stops that arrived meanwhile. A drawing
+  // never replaces one of a later stop.
+  const wanted = useRef<Job | null>(null);
+  const drawing = useRef(false);
+  const frame = useRef<number | null>(null);
+  const latest = useRef(-1);
+  const mounted = useRef(true);
+  // The draw last started and the width it was offered, to draw it again
+  // when the card's width changes.
+  const started = useRef<Job | null>(null);
+  const startedWidth = useRef(0);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (frame.current !== null) {
+        cancelAnimationFrame(frame.current);
+      }
+    };
+  }, []);
+
+  const show = (next: Shown) => {
+    if (mounted.current && next.stop >= latest.current) {
+      latest.current = next.stop;
+      setShown(next);
+    }
+  };
+
+  const pump = () => {
+    if (drawing.current || frame.current !== null || wanted.current === null) {
+      return;
+    }
+    frame.current = requestAnimationFrame(() => {
+      frame.current = null;
+      const job = wanted.current;
+      wanted.current = null;
+      if (job === null || !mounted.current) {
+        return;
+      }
+      drawing.current = true;
+      started.current = job;
+      startedWidth.current = offeredWidth(holder.current, body.current);
+      const chosenTheme = currentTheme();
+      void sandbox()
+        .draw(id, job.source, job.inputs, {
+          previous: previousInputs(job.key, job.stop),
+          paths: job.paths,
+          width: startedWidth.current,
+          theme: chosenTheme,
+          palette: palette(chosenTheme),
+        })
+        .then((outcome) => {
+          drawing.current = false;
+          show(shownFor(job, outcome));
+          pump();
+        });
+    });
+  };
+
+  // A card whose width changes draws its picture again at the new width.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: pump reads only refs and the card's stable id
+  useEffect(() => {
+    const element = holder.current;
+    if (!element) {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      const job = started.current;
+      const width = offeredWidth(holder.current, body.current);
+      if (
+        job !== null &&
+        wanted.current === null &&
+        Math.abs(width - startedWidth.current) >= RESIZED
+      ) {
+        wanted.current = job;
+        pump();
+      }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
   const stop = live?.stop ?? null;
   const drawingData = asked.current ? asked.data : undefined;
   const source = code.current ? code.data : undefined;
   const problem = asked.current ? asked.error?.message : undefined;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: a new theme draws again, in its colors
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new theme draws again, in its colors; pump and show read only refs
   useEffect(() => {
     if (stop === null) {
       return;
     }
     if (problem !== undefined) {
-      setShown({ stop, problem });
+      wanted.current = null;
+      show({ stop, problem, inputs: null });
       return;
     }
     if (!drawingData) {
       return;
     }
     if (drawingData.problem !== null || drawingData.inputs === null) {
-      setShown({ stop, problem: `Cannot draw: ${drawingData.problem ?? "no inputs"}` });
+      wanted.current = null;
+      show({ stop, problem: `Cannot draw: ${drawingData.problem ?? "no inputs"}`, inputs: null });
       return;
     }
     if (!source) {
       return;
     }
-    let current = true;
-    const inputs = decodeInputs(drawingData.inputs, drawingData.payload ?? new Uint8Array());
-    const key = `${focus.session}~${card.path}~${drawingData.renderer.name}`;
-    const chosenTheme = currentTheme();
-    void sandbox()
-      .draw(id, source, inputs, {
-        previous: previousInputs(key, stop),
-        width: body.current?.clientWidth ?? 600,
-        theme: chosenTheme,
-        palette: palette(chosenTheme),
-      })
-      .then((outcome) => {
-        if (!current) {
-          return;
-        }
-        const failed = outcomeProblem(outcome);
-        if (failed !== null) {
-          setShown({ stop, problem: failed });
-          return;
-        }
-        try {
-          const picture = validate((outcome as { picture: unknown }).picture);
-          remember(key, stop, inputs);
-          setShown({ stop, picture, renderer: drawingData.renderer });
-        } catch (error) {
-          setShown({
-            stop,
-            problem:
-              error instanceof PictureError
-                ? `${drawingData.renderer.name}.js returned a picture the page cannot show: ${error.message}`
-                : String(error),
-          });
-        }
-      });
-    return () => {
-      current = false;
+    wanted.current = {
+      stop,
+      key: `${focus.session}~${card.path}~${drawingData.renderer.name}`,
+      source,
+      renderer: drawingData.renderer,
+      inputs: decodeInputs(drawingData.inputs, drawingData.payload ?? new Uint8Array()),
+      paths: inputPaths(drawingData.inputs),
     };
-  }, [stop, drawingData, source, problem, theme, id, card.path, focus.session]);
+    pump();
+  }, [stop, drawingData, source, problem, theme, card.path, focus.session]);
 
   // The page builds the picture's elements itself.
   const picture = shown && "picture" in shown ? shown.picture : null;
@@ -304,9 +413,12 @@ function DrawingCard({ card }: { card: Card }) {
     }
     element.replaceChildren();
     if (picture) {
-      element.append(buildSvg(picture, (path) => setSelected(path)));
+      element.append(buildPicture(picture, (path) => setSelected(path)));
     }
   }, [picture]);
+  const [table, setTable] = useState(false);
+  const inputs = shown?.inputs ?? null;
+  const rows = useMemo(() => (inputs === null ? null : inputRows(inputs)), [inputs]);
 
   const dim = shown !== null && (stale !== null || shown.stop !== at?.stop);
   const origin = shown && "renderer" in shown ? shown.renderer.origin : null;
@@ -347,6 +459,21 @@ function DrawingCard({ card }: { card: Card }) {
         {origin && <span className="muted">{originLabel(origin)}</span>}
         <span className="drawing-end">
           {shown && <span className="muted">stop #{shown.stop}</span>}
+          {rows && (
+            <>
+              <button
+                type="button"
+                className="link-button"
+                aria-pressed={table}
+                onClick={() => setTable(!table)}
+              >
+                Table
+              </button>
+              <button type="button" className="link-button" onClick={() => void copyCsv(rows)}>
+                Copy CSV
+              </button>
+            </>
+          )}
           <DrawAs path={card.path} />
           {remove && (
             <button
@@ -373,6 +500,7 @@ function DrawingCard({ card }: { card: Card }) {
       <div ref={body} className="drawing-body" hidden={!picture} />
       {picture?.caption !== undefined && <div className="drawing-caption">{picture.caption}</div>}
       {!shown && <div className="drawing-wait muted">{live ? "Drawing…" : hidden(focus)}</div>}
+      {table && rows && <InputTable rows={rows} label={`Inputs of ${card.path}`} />}
       {selected !== null && live && (
         <Selected
           at={live}
@@ -381,6 +509,86 @@ function DrawingCard({ card }: { card: Card }) {
         />
       )}
     </section>
+  );
+}
+
+/** Copies every input value as CSV, and says so. */
+async function copyCsv(rows: InputRows): Promise<void> {
+  const text = csv(rows);
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Pages served over plain HTTP to another machine have no clipboard
+    // API, but can still copy a selection.
+    const area = document.createElement("textarea");
+    area.value = text;
+    document.body.append(area);
+    area.select();
+    const copied = document.execCommand("copy");
+    area.remove();
+    if (!copied) {
+      flash("The browser would not copy");
+      return;
+    }
+  }
+  flash(`Copied ${rows.count} ${rows.count === 1 ? "value" : "values"} as CSV`);
+}
+
+/** The height of one of the Table's rows, in pixels. */
+const ROW = 22;
+/** How many of the Table's rows show at once. */
+const SHOWN_ROWS = 14;
+/** The tallest the Table's rows may be together, well within what every
+ * browser lays out: beyond it, scrolling moves through the rows in
+ * proportion. */
+const MOST_HEIGHT = 4_000_000;
+
+/** Every input value, a path and its value per row, of which only the rows
+ * scrolled to are in the page. */
+function InputTable({ rows, label }: { rows: InputRows; label: string }) {
+  const [scrolled, setScrolled] = useState(0);
+  const height = Math.min(rows.count * ROW, MOST_HEIGHT);
+  const shownCount = Math.min(rows.count, SHOWN_ROWS + 2);
+  const room = Math.max(0, height - shownCount * ROW);
+  const top = Math.min(scrolled, room);
+  const first =
+    rows.count * ROW <= MOST_HEIGHT
+      ? Math.floor(top / ROW)
+      : Math.round((top / Math.max(1, room)) * (rows.count - shownCount));
+  const shown: number[] = [];
+  for (let index = first; index < Math.min(rows.count, first + shownCount); index++) {
+    shown.push(index);
+  }
+  const before = rows.count * ROW <= MOST_HEIGHT ? first * ROW : top;
+  const after = Math.max(0, height - before - shown.length * ROW);
+  return (
+    <div
+      className="drawing-table"
+      style={{ maxHeight: ROW * (SHOWN_ROWS + 1) }}
+      onScroll={(event) => setScrolled(event.currentTarget.scrollTop)}
+    >
+      <table aria-label={label} aria-rowcount={rows.count + 1}>
+        <thead>
+          <tr>
+            <th>path</th>
+            <th>value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {before > 0 && <tr style={{ height: before }} />}
+          {shown.map((index) => {
+            const [path, value] = rows.row(index);
+            return (
+              <tr key={index} aria-rowindex={index + 2} style={{ height: ROW }}>
+                <td>{path}</td>
+                <td>{value}</td>
+              </tr>
+            );
+          })}
+          {after > 0 && <tr style={{ height: after }} />}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -467,4 +675,15 @@ export function DrawAs({ path }: { path: string }) {
       )}
     </span>
   );
+}
+
+/** The CSS pixels a card's body offers a picture. It is measured on the
+ * card, because the body stays hidden until it has a picture. */
+function offeredWidth(card: HTMLElement | null, body: HTMLElement | null): number {
+  if (card === null || body === null) {
+    return 600;
+  }
+  const style = getComputedStyle(body);
+  const padding = Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight);
+  return Math.floor(card.clientWidth - padding) || 600;
 }

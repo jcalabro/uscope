@@ -7,7 +7,7 @@ const GLYPHS = {
 };
 const SIZE = 40;
 
-uscope.draw(({ squares, turn }, { previous }) => {
+uscope.draw(({ squares, turn }, { previous, paths }) => {
   const shapes = [];
   for (let square = 0; square < 64; square++) {
     const file = square % 8;
@@ -25,7 +25,7 @@ uscope.draw(({ squares, turn }, { previous }) => {
       title: piece.variant === "Some"
         ? `${name}: ${piece.value.color.name} ${piece.value.kind.name}`
         : name,
-      select: `mailbox[${square}]`,
+      select: paths.squares === null ? undefined : `${paths.squares}[${square}]`,
     }));
     if (piece.variant === "Some") {
       const { color, kind } = piece.value;

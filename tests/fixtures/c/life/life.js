@@ -10,6 +10,6 @@ uscope.draw(({ cells, columns, generation }, { previous }) => {
   }
   return uscope.picture({
     width: columns * 6, height: rows * 6, caption: `generation ${generation}`,
-    shapes: [uscope.image({ x: 0, y: 0, width: columns * 6, height: rows * 6, pixels, columns, rows })],
+    shapes: [uscope.image({ x: 0, y: 0, width: columns * 6, height: rows * 6, pixels, columns, rows, title: "cells" })],
   });
 });

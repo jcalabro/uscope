@@ -131,6 +131,116 @@ test.describe("a session's views file", () => {
     await expect(board).toBeVisible();
   });
 
+  test("a card lists its inputs, copies them, and names the pixel under the pointer", async ({
+    page,
+    uscope,
+  }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: async (text: string) => {
+            (window as unknown as { copied: string }).copied = text;
+          },
+        },
+      });
+    });
+    await life(page, uscope, path.join(root, "tests/fixtures/c/life/life.views"));
+    await drawAt(page, "life.c:59");
+    const board = card(page, "life");
+    await expect(board.locator(".drawing-caption")).toHaveText("generation 1");
+
+    // Each of the 3,072 cells' bytes, then the other inputs, a row each.
+    await board.getByRole("button", { name: "Table" }).click();
+    const table = board.getByRole("table", { name: "Inputs of life" });
+    await expect(table).toHaveAttribute("aria-rowcount", "3075");
+    await expect(table.getByRole("row").nth(1)).toHaveText("cells[0]0");
+    await table.evaluate((element) => {
+      const scroller = element.parentElement as HTMLElement;
+      scroller.scrollTop = scroller.scrollHeight;
+    });
+    await expect(table.getByRole("row").last()).toHaveText("generation1");
+    await expect(table.getByRole("row", { name: "columns 64" })).toBeVisible();
+
+    await board.getByRole("button", { name: "Copy CSV" }).click();
+    await expect(page.getByText("Copied 3074 values as CSV")).toBeVisible();
+    const copied = await page.evaluate(() => (window as unknown as { copied: string }).copied);
+    const lines = copied.trimEnd().split("\n");
+    expect(lines).toHaveLength(3075);
+    expect(lines.slice(0, 2)).toEqual(["path,value", "cells[0],0"]);
+    expect(lines.slice(-2)).toEqual(["columns,64", "generation,1"]);
+    // The blinker's middle cell, alive at every generation.
+    expect(lines[1 + 20 * 64 + 31]).toBe("cells[1311],1");
+
+    // Each cell is 6 units square.
+    const image = board.locator("canvas");
+    const box = await image.boundingBox();
+    if (box === null) {
+      throw new Error("the board is not on screen");
+    }
+    const scale = box.width / 384;
+    await page.mouse.move(box.x + (31 * 6 + 3) * scale, box.y + (20 * 6 + 3) * scale);
+    await expect(board.getByRole("tooltip")).toHaveText("cells: column 31, row 20");
+  });
+
+  test("a picture of thousands of shapes is drawn on a canvas that still names and opens them", async ({
+    page,
+    uscope,
+  }) => {
+    const directory = test.info().outputPath("views");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(directory, { recursive: true });
+    const views = path.join(directory, "cells.views");
+    await writeFile(
+      views,
+      `uscope-views 1
+extend c life {
+    visualize "cells" {
+        cells = bytes(&cells[0][0], sizeof(cells))
+        columns = 64
+    }
+}
+`,
+    );
+    // A rect a cell: 3,072 shapes, each titled and selectable.
+    await writeFile(
+      path.join(directory, "cells.js"),
+      `uscope.draw(({ cells, columns }) => uscope.picture({
+  width: columns * 6, height: (cells.length / columns) * 6,
+  shapes: Array.from(cells, (alive, index) => {
+    const column = index % columns, row = Math.floor(index / columns);
+    return uscope.rect({
+      x: column * 6, y: row * 6, width: 6, height: 6,
+      fill: alive ? uscope.theme.ink : uscope.theme.surface,
+      title: \`\${column},\${row}: \${alive ? "alive" : "dead"}\`,
+      select: \`cells[\${row}][\${column}]\`,
+    });
+  }),
+}));
+`,
+    );
+    await life(page, uscope, views);
+    await drawAt(page, "life.c:59");
+    const board = card(page, "life");
+    const canvas = board.locator("canvas.picture");
+    await expect(canvas).toBeVisible();
+    await expect(board.locator("svg")).toHaveCount(0);
+    const box = await canvas.boundingBox();
+    if (box === null) {
+      throw new Error("the board is not on screen");
+    }
+    const scale = box.width / 384;
+    const cell = (column: number, row: number) =>
+      [box.x + (column * 6 + 3) * scale, box.y + (row * 6 + 3) * scale] as const;
+    await page.mouse.move(...cell(31, 20));
+    await expect(board.getByRole("tooltip")).toHaveText("31,20: alive");
+    await page.mouse.move(...cell(5, 40));
+    await expect(board.getByRole("tooltip")).toHaveText("5,40: dead");
+    await page.mouse.click(...cell(31, 20));
+    const part = page.getByRole("dialog", { name: "Part life.cells[20][31]" });
+    await expect(part).toContainText("1");
+  });
+
   test("a new session's first drawing has nothing before it", async ({ page, uscope }) => {
     await life(page, uscope, path.join(root, "tests/fixtures/c/life/life.views"));
     await drawAt(page, "life.c:59");
@@ -155,6 +265,69 @@ test.describe("a session's views file", () => {
     await page.keyboard.press("Alt+v");
     await expect(card(page, "life").locator(".drawing-caption")).toHaveText("generation 1");
     expect(await cells(page)).toEqual({ alive: 8, born: 0 });
+  });
+
+  test("a renderer is told the width its card offers, from its first drawing and when it changes", async ({
+    page,
+    uscope,
+  }) => {
+    const directory = test.info().outputPath("views");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(directory, { recursive: true });
+    const views = path.join(directory, "width.views");
+    await writeFile(
+      views,
+      'uscope-views 1\nextend c life {\n    visualize "width" { generation = generation }\n}\n',
+    );
+    await writeFile(
+      path.join(directory, "width.js"),
+      "uscope.draw((_, { width }) => uscope.picture({ width: 10, height: 10, shapes: [], caption: String(width) }));\n",
+    );
+    await life(page, uscope, views);
+    await drawAt(page, "life.c:59");
+    const board = card(page, "life");
+    const caption = board.locator(".drawing-caption");
+    await expect(caption).toHaveText(/^\d+$/);
+    const offered = () =>
+      board.locator(".drawing-body").evaluate((body: HTMLElement) => {
+        const style = getComputedStyle(body);
+        const padding =
+          Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight);
+        return Math.floor(body.clientWidth - padding);
+      });
+    expect(Number(await caption.textContent())).toBe(await offered());
+
+    // A narrower page draws again at the card's new width.
+    const wide = await offered();
+    await page.setViewportSize({ width: 1024, height: 720 });
+    await expect.poll(offered).toBeLessThan(wide);
+    await expect(caption).toHaveText(String(await offered()));
+  });
+
+  test("a card draws again in the colors of the system's new scheme", async ({ page, uscope }) => {
+    const directory = test.info().outputPath("views");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(directory, { recursive: true });
+    const views = path.join(directory, "scheme.views");
+    await writeFile(
+      views,
+      'uscope-views 1\nextend c life {\n    visualize "scheme" { generation = generation }\n}\n',
+    );
+    await writeFile(
+      path.join(directory, "scheme.js"),
+      "uscope.draw((_, { theme }) => uscope.picture({ width: 10, height: 10, shapes: [], caption: theme + ' ' + uscope.theme.ink }));\n",
+    );
+    await page.emulateMedia({ colorScheme: "light" });
+    await life(page, uscope, views);
+    await drawAt(page, "life.c:59");
+    const caption = card(page, "life").locator(".drawing-caption");
+    const ink = () =>
+      page.evaluate(() =>
+        getComputedStyle(document.documentElement).getPropertyValue("--ink").trim(),
+      );
+    await expect(caption).toHaveText(`light ${await ink()}`);
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expect(caption).toHaveText(`dark ${await ink()}`);
   });
 
   test("a pointer draws as what it points to", async ({ page, uscope }) => {

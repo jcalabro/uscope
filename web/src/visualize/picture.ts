@@ -59,7 +59,7 @@ export type Shape =
             rows: number;
             smooth?: boolean;
           }
-        | { bitmap: ImageBitmap; smooth?: boolean }
+        | { rendered: ImageBitmap; smooth?: boolean }
       ));
 
 export type Baseline = "auto" | "alphabetic" | "middle" | "central" | "hanging" | "ideographic";
@@ -96,7 +96,7 @@ const PROPERTIES: Record<Shape["type"], { required: string[]; optional: string[]
   group: { required: ["shapes"], optional: ["x", "y", "scale", "rotate"] },
   image: {
     required: ["x", "y", "width", "height"],
-    optional: ["pixels", "columns", "rows", "bitmap", "smooth"],
+    optional: ["pixels", "columns", "rows", "rendered", "smooth"],
   },
 };
 
@@ -441,14 +441,14 @@ function image(item: Record<string, unknown>, where: string, totals: Totals): vo
   if (item.smooth !== undefined && typeof item.smooth !== "boolean") {
     throw new PictureError(`${where}: \`smooth\` must be true or false`);
   }
-  if (item.bitmap !== undefined) {
+  if (item.rendered !== undefined) {
     if (item.pixels !== undefined || item.columns !== undefined || item.rows !== undefined) {
       throw new PictureError(`${where}: an image has either a canvas or pixels`);
     }
-    if (typeof ImageBitmap === "undefined" || !(item.bitmap instanceof ImageBitmap)) {
-      throw new PictureError(`${where}: \`bitmap\` is not an image`);
+    if (typeof ImageBitmap === "undefined" || !(item.rendered instanceof ImageBitmap)) {
+      throw new PictureError(`${where}: \`rendered\` is not an image`);
     }
-    totals.pixels += item.bitmap.width * item.bitmap.height;
+    totals.pixels += item.rendered.width * item.rendered.height;
   } else {
     const { pixels, columns, rows } = item;
     for (const [name, count] of [

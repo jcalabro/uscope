@@ -69,6 +69,16 @@ fn words(bytes: &[u8]) -> Vec<u64> {
         .collect()
 }
 
+/// The part of the drawn value each input names, or null.
+fn paths(inputs: &Value) -> Vec<Value> {
+    inputs
+        .as_array()
+        .expect("inputs")
+        .iter()
+        .map(|input| input["path"].clone())
+        .collect()
+}
+
 fn names(inputs: &Value) -> Vec<&str> {
     inputs
         .as_array()
@@ -76,6 +86,24 @@ fn names(inputs: &Value) -> Vec<&str> {
         .iter()
         .map(|input| input["name"].as_str().unwrap_or_default())
         .collect()
+}
+
+/// White's and black's bitboards hold the squares the mailbox says each
+/// color's pieces are on.
+fn assert_colors_match(squares: &[Value], colors: &[u64]) {
+    for (square, contents) in squares.iter().enumerate() {
+        let color = contents["value"]["members"][0][1]["name"].as_str();
+        assert_eq!(
+            colors[0] >> square & 1 == 1,
+            color == Some("White"),
+            "white at {square}"
+        );
+        assert_eq!(
+            colors[1] >> square & 1 == 1,
+            color == Some("Black"),
+            "black at {square}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -105,6 +133,11 @@ async fn a_rust_programs_own_views_draw_its_board_with_typed_inputs() {
     assert!(origin.contains("chess"), "{origin}");
     assert!(bytes.is_empty());
     assert_eq!(names(&drawing["inputs"]), ["squares", "turn"]);
+    // Inputs that are parts of the board say which, for a renderer's selects.
+    assert_eq!(
+        paths(&drawing["inputs"]),
+        [json!("mailbox"), json!("side_to_move")]
+    );
 
     // Options are sums whose payload is the one field, records of named
     // members, and enumerations with their enumerator's name.
@@ -147,20 +180,9 @@ async fn a_rust_programs_own_views_draw_its_board_with_typed_inputs() {
         input(&drawing, "origin"),
         &json!({"t": "text", "s": "bottom-left"})
     );
+    assert_eq!(paths(&drawing["inputs"]), [json!("colors"), Value::Null]);
     let colors = words(&bytes);
-    for (square, contents) in squares.iter().enumerate() {
-        let color = contents["value"]["members"][0][1]["name"].as_str();
-        assert_eq!(
-            colors[0] >> square & 1 == 1,
-            color == Some("White"),
-            "white at {square}"
-        );
-        assert_eq!(
-            colors[1] >> square & 1 == 1,
-            color == Some("Black"),
-            "black at {square}"
-        );
-    }
+    assert_colors_match(&squares, &colors);
 
     // Draw as…: any renderer draws a value its view offers no drawing of,
     // as its `values`.
@@ -173,6 +195,7 @@ async fn a_rust_programs_own_views_draw_its_board_with_typed_inputs() {
         .expect("draw the pieces");
     assert_eq!(drawing["offered"], false);
     assert_eq!(names(&drawing["inputs"]), ["values"]);
+    assert_eq!(paths(&drawing["inputs"]), [json!("")]);
     assert_eq!(
         input(&drawing, "values"),
         &json!({"t": "numbers", "kind": "u64", "offset": 0, "count": 6})
@@ -261,6 +284,11 @@ async fn a_session_views_file_draws_memory_read_at_once_at_each_stop() {
     assert_eq!(
         names(&drawing["inputs"]),
         ["cells", "columns", "generation"]
+    );
+    // Bytes and numbers the view writes are no part of the value.
+    assert_eq!(
+        paths(&drawing["inputs"]),
+        [Value::Null, Value::Null, json!("generation")]
     );
     assert_eq!(
         input(&drawing, "cells"),
@@ -471,5 +499,29 @@ async fn a_pointer_offers_and_draws_the_drawings_of_what_it_points_to() {
     assert_eq!(
         input(&drawing, "turn"),
         &json!({"t": "enum", "name": "White", "value": {"t": "int", "i": 0}})
+    );
+}
+
+#[tokio::test]
+async fn a_map_kept_behind_a_pointer_draws_as_its_entries() {
+    let views = source("go/charts/charts.views");
+    let web = Web::start("charts", &["--views", &views, &fixture("charts")]);
+    let mut tab = web.control("tab").await;
+    let frame = stop_at(&mut tab, "main.go:44").await;
+    let (drawing, _) = tab
+        .draw(with(
+            &frame,
+            &json!({"path": "hits", "renderer": "bar-chart"}),
+        ))
+        .await
+        .expect("draw the map");
+    let entries = input(&drawing, "entries");
+    assert_eq!(entries["t"], "entries", "{entries}");
+    let entries = entries["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 56);
+    // Go's int is 64 bits wide, so it arrives exact, as a bigint.
+    assert!(
+        entries.contains(&json!([{"t": "text", "s": "/api/search"}, {"t": "big", "big": "600"}])),
+        "{entries:?}"
     );
 }

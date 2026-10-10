@@ -1,17 +1,15 @@
 // Builds a checked picture as SVG, element by element: every attribute is
 // one the builder names, and text goes in as text, never as markup. Images
-// are canvases the page paints.
+// are canvases the page paints, which name the pixel under the pointer.
 
+import { type OnSelect, pixelName, type Tip } from "./draw";
 import type { Picture, Shape, Style } from "./picture";
 
 const SVG = "http://www.w3.org/2000/svg";
 const HTML = "http://www.w3.org/1999/xhtml";
 
-/** What clicking or pressing Enter on a shape with `select` does. */
-export type OnSelect = (path: string) => void;
-
 /** The picture as an `<svg>`, scaled to fit its container and never cropped. */
-export function buildSvg(picture: Picture, onSelect?: OnSelect): SVGSVGElement {
+export function buildSvg(picture: Picture, onSelect?: OnSelect, tip?: Tip): SVGSVGElement {
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("viewBox", `0 0 ${picture.width} ${picture.height}`);
   svg.setAttribute("width", String(picture.width));
@@ -24,13 +22,24 @@ export function buildSvg(picture: Picture, onSelect?: OnSelect): SVGSVGElement {
   // Shapes inherit the page's ink unless they say otherwise.
   svg.style.fill = "var(--ink)";
   svg.style.stroke = "none";
+  svg.style.fontSize = "12px";
   for (const shape of picture.shapes) {
-    svg.append(element(shape, onSelect));
+    svg.append(element(shape, { onSelect, tip, owned: false }));
   }
   return svg;
 }
 
-function element(shape: Shape, onSelect: OnSelect | undefined): SVGElement {
+/** What building a shape's element needs: whether a group around it has a
+ * title or select, which the shape answers the pointer for. */
+interface Building {
+  onSelect: OnSelect | undefined;
+  tip: Tip | undefined;
+  owned: boolean;
+}
+
+function element(shape: Shape, building: Building): SVGElement {
+  const { onSelect } = building;
+  const owned = building.owned || shape.title !== undefined || shape.select !== undefined;
   let node: SVGElement;
   switch (shape.type) {
     case "rect":
@@ -84,23 +93,24 @@ function element(shape: Shape, onSelect: OnSelect | undefined): SVGElement {
         .join(" ");
       node = make("g", { transform: transform || undefined });
       for (const child of shape.shapes) {
-        node.append(element(child, onSelect));
+        node.append(element(child, { ...building, owned }));
       }
       break;
     }
     case "image":
-      node = image(shape);
+      node = image(shape, building.tip);
       break;
   }
   styled(node, shape);
-  if (shape.title !== undefined) {
+  // An image's title goes with the pixel the tip names.
+  if (shape.title !== undefined && shape.type !== "image") {
     const title = document.createElementNS(SVG, "title");
     title.textContent = shape.title;
     node.prepend(title);
   }
-  // A shape that says nothing, such as a piece on its square, lets the
-  // pointer through to the shapes beneath it.
-  if (shape.type !== "group" && shape.title === undefined && shape.select === undefined) {
+  // A shape that says nothing, such as a piece on its square or marks
+  // over an image, lets the pointer through to the shapes beneath it.
+  if (shape.type !== "group" && !owned) {
     node.style.pointerEvents = "none";
   }
   if (shape.select !== undefined && onSelect !== undefined) {
@@ -151,7 +161,7 @@ function styled(node: SVGElement, shape: Style): void {
   }
 }
 
-function image(shape: Extract<Shape, { type: "image" }>): SVGElement {
+function image(shape: Extract<Shape, { type: "image" }>, tip: Tip | undefined): SVGElement {
   const holder = make("foreignObject", {
     x: shape.x,
     y: shape.y,
@@ -163,15 +173,32 @@ function image(shape: Extract<Shape, { type: "image" }>): SVGElement {
   canvas.style.width = "100%";
   canvas.style.height = "100%";
   canvas.style.imageRendering = shape.smooth === true ? "auto" : "pixelated";
-  if ("bitmap" in shape) {
-    canvas.width = shape.bitmap.width;
-    canvas.height = shape.bitmap.height;
-    canvas.getContext("2d")?.drawImage(shape.bitmap, 0, 0);
+  if ("rendered" in shape) {
+    canvas.width = shape.rendered.width;
+    canvas.height = shape.rendered.height;
+    canvas.getContext("2d")?.drawImage(shape.rendered, 0, 0);
   } else {
     canvas.width = shape.columns;
     canvas.height = shape.rows;
     const pixels = new Uint8ClampedArray(shape.pixels);
     canvas.getContext("2d")?.putImageData(new ImageData(pixels, shape.columns, shape.rows), 0, 0);
+  }
+  if (shape.title !== undefined) {
+    canvas.setAttribute("aria-label", shape.title);
+  }
+  if (tip) {
+    canvas.addEventListener("mousemove", (event) => {
+      const bounds = canvas.getBoundingClientRect();
+      if (bounds.width === 0 || bounds.height === 0) {
+        return;
+      }
+      const at = (offset: number, size: number, count: number) =>
+        Math.min(count - 1, Math.max(0, Math.floor((offset / size) * count)));
+      const column = at(event.clientX - bounds.left, bounds.width, canvas.width);
+      const row = at(event.clientY - bounds.top, bounds.height, canvas.height);
+      tip.show(pixelName(shape.title, column, row), event);
+    });
+    canvas.addEventListener("mouseleave", () => tip.hide());
   }
   holder.append(canvas);
   return holder;

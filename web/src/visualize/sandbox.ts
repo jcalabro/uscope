@@ -37,6 +37,8 @@ export interface Palette {
 /** What a renderer's function gets beside its inputs. */
 export interface DrawContext {
   previous: unknown;
+  /** The part of the drawn value each input is, or null. */
+  paths: Record<string, string | null>;
   width: number;
   theme: "light" | "dark";
   palette: Palette;

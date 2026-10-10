@@ -1932,6 +1932,16 @@ build_fixture gcc "$c_fixtures_dir/process-environment.c" "$output_dir/process-e
 build_fixture gcc "$c_fixtures_dir/output-streams.c" "$output_dir/output-streams" \
     -O0 -g3 -fPIE -pie
 build_c_fixture_directory gcc "$c_fixtures_dir/life" "$output_dir/life" -O0 -g3 -fPIE -pie
+# Programs whose data the built-in renderers draw, each through a views
+# file beside it, or through Draw as… alone.
+build_c_fixture_directory gcc "$c_fixtures_dir/metrics" "$output_dir/metrics" -O0 -g3 -fPIE -pie -lm
+build_go_fixture "$go_fixtures_dir/charts" "$output_dir/charts" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_program rustc "$rust_fixtures_dir/profile/main.rs" "$output_dir/profile" \
+    --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0 --crate-name profile
+build_zig_fixture "$zig_fixtures_dir/samples.zig" "$output_dir/samples" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_cpp_fixture_directory g++ "$cpp_fixtures_dir/tree" "$output_dir/tree" -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/kvstore.c" "$output_dir/kvstore" \
     -O0 -g3 -fPIE -pie -pthread
 build_program rustc "$rust_fixtures_dir/kvstore.rs" "$output_dir/kvstore-rust" \
