@@ -863,7 +863,7 @@ async fn ada_values_agree_with_their_program() {
     for (fixture, optimized) in [("values-ada-o0", false), ("values-ada-o2", true)] {
         check_gallery(&Gallery {
             fixture,
-            breakpoints: &["values__reached"],
+            breakpoints: &["reached"],
             checkpoints: &["scalars", "records", "bounded", "strings"],
             optimized,
             required: &[],
