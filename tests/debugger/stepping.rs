@@ -2392,7 +2392,7 @@ async fn d_steps_into_a_function_and_back_to_its_caller() {
 async fn nim_steps_into_a_procedure_and_back_to_its_caller() {
     for fixture in ["values-nim-gcc-o0", "values-nim-clang-o2"] {
         let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("values.nim", 90).await;
+        scenario.add_source_breakpoint("values.nim", 102).await;
         assert!(matches!(
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
