@@ -11,6 +11,7 @@ readonly rust_fixtures_dir="${fixtures_dir}/rust"
 readonly zig_fixtures_dir="${fixtures_dir}/zig"
 readonly odin_fixtures_dir="${fixtures_dir}/odin"
 readonly fortran_fixtures_dir="${fixtures_dir}/fortran"
+readonly d_fixtures_dir="${fixtures_dir}/d"
 readonly suite_stamp="${output_dir}/.suite.stamp"
 readonly suite_outputs="${output_dir}/.suite.outputs"
 readonly frame_oracle_script=scripts/frame-variables-oracle.py
@@ -24,6 +25,7 @@ go_target=""
 zig_version=""
 odin_version=""
 fortran_version=""
+d_version=""
 
 read_dash_version() {
     local tool="$1"
@@ -49,7 +51,7 @@ readonly max_jobs="${USCOPE_FIXTURE_JOBS:-$(nproc)}"
 readonly background_builders=" build_program build_fixture build_c_fixture_directory \
 build_cpp_fixture_directory build_cpp_fixture build_shared_fixture build_symbols_library \
 build_disassembly_fixture build_tls_modules_fixture build_rust_fixture build_go_fixture \
-build_go_command build_zig_fixture build_zig_self_hosted_fixture build_odin_fixture build_fortran_fixture "
+build_go_command build_zig_fixture build_zig_self_hosted_fixture build_odin_fixture build_fortran_fixture build_d_fixture "
 # What each running job makes, by process ID, and the compiles among them.
 declare -A job_outputs=()
 declare -A build_jobs=()
@@ -760,6 +762,22 @@ build_fortran_fixture() {
         "${command[@]}"
 }
 
+# Builds one D file with LDC, keeping its object beside the program.
+build_d_fixture() {
+    local source="$1"
+    local output="$2"
+    shift 2
+    local -a command=(
+        ldc2 -g -w "$@" "-od=${output}.objects" "-of=${output}" "$source"
+    )
+    if [[ -z "$d_version" ]]; then
+        d_version=$(ldc2 --version | head -n 1)
+    fi
+    run_cached_build "$source" "$output" \
+        "compiler=${d_version}"$'\n'"target=x86_64-linux" \
+        "${command[@]}"
+}
+
 validation_is_cached() {
     wait_for "$1"
     local output="$1"
@@ -1020,7 +1038,7 @@ make_core() {
 suite_signature() {
     local -a paths=()
     local tool path
-    for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc cargo go zig odin gfortran \
+    for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc cargo go zig odin gfortran ldc2 \
         objdump gdb setarch dwz; do
         if path=$(type -P "$tool"); then
             paths+=("$path")
@@ -2520,6 +2538,12 @@ build_odin_fixture "$odin_fixtures_dir/containers.odin" "$output_dir/containers-
 # Fortran, through GCC.
 build_fortran_fixture "$fortran_fixtures_dir/values.f90" "$output_dir/values-fortran-o0" -O0
 build_fortran_fixture "$fortran_fixtures_dir/values.f90" "$output_dir/values-fortran-o2" -O2
+
+# D, through LDC.
+build_d_fixture "$d_fixtures_dir/values.d" "$output_dir/values-d-o0" -O0
+build_d_fixture "$d_fixtures_dir/values.d" "$output_dir/values-d-o2" -O2
+build_d_fixture "$d_fixtures_dir/containers.d" "$output_dir/containers-d-o0" -O0
+build_d_fixture "$d_fixtures_dir/containers.d" "$output_dir/containers-d-o2" -O2
 
 # GNU objdump's decoding of every executable section, which differential tests
 # compare against uscope's disassembly. -z keeps the zero-filled runs objdump

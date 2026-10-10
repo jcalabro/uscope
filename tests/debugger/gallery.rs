@@ -50,8 +50,9 @@ struct Gallery<'a> {
     optimized: bool,
     /// `checkpoint:path` values an optimized build must show all the same.
     required: &'a [&'a str],
-    /// Whether every listed variable must have a name its program wrote.
-    go: bool,
+    /// What only the names of the compiler's own variables begin with,
+    /// none of which may be listed.
+    reserved: &'a [&'a str],
     /// `checkpoint:path` values a function returned that this build's
     /// calling convention does not say where to find, which must be shown
     /// as unknown for that reason.
@@ -98,14 +99,16 @@ async fn check_gallery(gallery: &Gallery<'_>) {
             .clone();
         let variables = checkpoint_variables(&mut scenario, fixture, &checkpoint).await;
         let returned = checkpoint.starts_with("returned-");
-        if gallery.go {
-            for variable in &variables {
-                if variable.name.starts_with(['.', '#', '&']) {
-                    failures.push(format!(
-                        "{checkpoint}: lists the compiler's {}",
-                        variable.name
-                    ));
-                }
+        for variable in &variables {
+            if gallery
+                .reserved
+                .iter()
+                .any(|prefix| variable.name.starts_with(prefix))
+            {
+                failures.push(format!(
+                    "{checkpoint}: lists the compiler's {}",
+                    variable.name
+                ));
             }
         }
         for truth in truths.iter().filter(|truth| truth.checkpoint == checkpoint) {
@@ -530,7 +533,7 @@ async fn c_pieces_agree_with_their_program() {
             checkpoints: &["split", "complex"],
             optimized,
             required,
-            go: false,
+            reserved: &[],
             unknown: &[],
         })
         .await;
@@ -586,7 +589,7 @@ async fn go_values_agree_with_their_program() {
             ],
             optimized,
             required,
-            go: true,
+            reserved: &[".", "#", "&"],
             unknown: &[],
         })
         .await;
@@ -633,7 +636,7 @@ async fn c_returned_values_agree_with_their_program() {
             checkpoints: C_RETURNS,
             optimized,
             required: &[],
-            go: false,
+            reserved: &[],
             unknown: &[],
         })
         .await;
@@ -667,7 +670,7 @@ async fn cpp_returned_values_agree_with_their_program() {
             ],
             optimized,
             required: &[],
-            go: false,
+            reserved: &[],
             unknown,
         })
         .await;
@@ -710,7 +713,7 @@ async fn rust_returned_values_agree_with_their_program() {
             ],
             optimized,
             required: &[],
-            go: false,
+            reserved: &[],
             // Rust's own convention is unspecified for aggregates of more
             // than two scalars.
             unknown,
@@ -745,7 +748,7 @@ async fn zig_returned_values_agree_with_their_program() {
             ],
             optimized,
             required: &[],
-            go: false,
+            reserved: &[],
             unknown,
         })
         .await;
@@ -761,7 +764,7 @@ async fn odin_values_agree_with_their_program() {
             checkpoints: &["scalars", "records", "slices", "unions"],
             optimized,
             required: &[],
-            go: false,
+            reserved: &[],
             unknown: &[],
         })
         .await;
@@ -777,7 +780,23 @@ async fn fortran_values_agree_with_their_program() {
             checkpoints: &["scalars", "records", "strings"],
             optimized,
             required: &[],
-            go: false,
+            reserved: &[".", "_"],
+            unknown: &[],
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn d_values_agree_with_their_program() {
+    for (fixture, optimized) in [("values-d-o0", false), ("values-d-o2", true)] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["reached"],
+            checkpoints: &["scalars", "records", "slices", "loop"],
+            optimized,
+            required: &[],
+            reserved: &["__"],
             unknown: &[],
         })
         .await;

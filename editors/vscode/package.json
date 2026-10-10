@@ -70,13 +70,14 @@
       { "language": "zig" },
       { "language": "odin" },
       { "language": "FortranFreeForm" },
-      { "language": "fortran" }
+      { "language": "fortran" },
+      { "language": "d" }
     ],
     "debuggers": [
       {
         "type": "uscope",
         "label": "uscope",
-        "languages": ["c", "cpp", "rust", "go", "zig", "odin", "FortranFreeForm", "fortran"],
+        "languages": ["c", "cpp", "rust", "go", "zig", "odin", "FortranFreeForm", "fortran", "d"],
         "variables": {
           "pickProcess": "uscope.pickProcess"
         },

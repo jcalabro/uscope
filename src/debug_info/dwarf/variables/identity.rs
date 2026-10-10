@@ -151,8 +151,30 @@ pub(in crate::debug_info) const fn source_language(
         | gimli::DW_LANG_Fortran03
         | gimli::DW_LANG_Fortran08
         | gimli::DW_LANG_Fortran18 => SourceLanguage::Fortran,
+        gimli::DW_LANG_D => SourceLanguage::D,
         other => SourceLanguage::Other(other.0),
     }
+}
+
+/// The namespaces a D module scopes what it declares in, one for each
+/// part of its name: `std.array` is `std`, then `array`.
+pub(super) fn module_segments(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+) -> Vec<ScopeSegment> {
+    string_attribute(dwarf, unit, entry, gimli::DW_AT_name)
+        .ok()
+        .flatten()
+        .map(|name| {
+            name.split('.')
+                .map(|part| ScopeSegment::Namespace {
+                    name: part.into(),
+                    listed: false,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// How a DIE scopes the types nested in it, or `None` when it is not a

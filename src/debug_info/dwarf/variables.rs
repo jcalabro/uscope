@@ -393,6 +393,7 @@ pub(super) fn load_variable_info<'data>(
         }
         let go = languages[unit_index] == Some(gimli::DW_LANG_Go);
         let fortran = source_language(languages[unit_index], None) == SourceLanguage::Fortran;
+        let d = languages[unit_index] == Some(gimli::DW_LANG_D);
         let rust = languages[unit_index] == Some(gimli::DW_LANG_Rust);
         // Go names the register ABI its x86-64 code calls with among the
         // flags of each unit's producer, as `go1.27.1; -N -l regabi`.
@@ -918,7 +919,8 @@ pub(super) fn load_variable_info<'data>(
                     // compiler's own, as gfortran's temporaries do, is no
                     // defect. Go and gfortran start the names of their own
                     // variables with characters no identifier of their
-                    // languages can begin with. rustc's own are an
+                    // languages can begin with, and D with the `__` it
+                    // reserves for them. rustc's own are an
                     // async body's temporaries and unnamed parameters, the
                     // `result` an await binds, and, in an `async fn`'s
                     // body, the fields of its future that captured its
@@ -934,7 +936,8 @@ pub(super) fn load_variable_info<'data>(
                     let compilers = (nameless
                         && strict_flag(entry, gimli::DW_AT_artificial) == Ok(true))
                         || (go && name.starts_with(['.', '#']))
-                        || (fortran && !name.starts_with(|c: char| c.is_ascii_alphabetic()));
+                        || (fortran && !name.starts_with(|c: char| c.is_ascii_alphabetic()))
+                        || (d && name.starts_with("__"));
                     let hidden = compilers
                         || (scope.rust.is_some()
                             && (rust_temporary(&name, rust_unnamed)

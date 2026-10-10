@@ -4,8 +4,8 @@ A view presents a value as the thing it stands for: a `std::string` as its
 text, a `Vec` as its elements, a hand-rolled C vector as the integers it
 holds. The value as stored stays one step away, as the `[raw]` child,
 `print/r`, or `set views off`. uscope builds in views for the C++, Rust, Go,
-Zig, and Odin standard libraries, and anyone can write views for their own
-types in the same language; `docs/writing-views.md` is a tutorial.
+Zig, Odin, and D standard libraries, and anyone can write views for their
+own types in the same language; `docs/writing-views.md` is a tutorial.
 
 A view can only read the stopped program: it cannot write memory, call
 functions, or perform I/O. Every read it makes is charged to the
@@ -96,7 +96,7 @@ v => children: [0] = 10, [1] = 20, [2] = 30, capacity = 4, [raw]
 A value expands to its elements, then the view's fields, then `[raw]`, the
 value as stored, whose children are its members.
 
-The language is `c`, `c++`, `rust`, `go`, `zig`, `odin`, or `any`. A file that does
+The language is `c`, `c++`, `rust`, `go`, `zig`, `odin`, `d`, or `any`. A file that does
 not begin with its version is refused, and a view with an error is skipped
 while the rest of its file is read:
 
@@ -143,6 +143,8 @@ namespaces such as libc++'s `std::__1` may be spelled or left out.
   its name: `go map<K, V>` presents `map[string]int` and a `type Counts
   map[string]int` alike.
 - In Odin, `map[K, V]` names `map[K]V`, and `map` every map.
+- In D, `std.array.Appender(T)` names `Appender!T` in the module
+  `std.array`.
 
 ```uscope-view-example
 uscope-views 1
@@ -831,6 +833,8 @@ The built-in views cover:
   the text it has written.
 - Odin: maps, `core:container/queue`'s queues, `core:container/small_array`'s
   arrays, and `strings.Builder` as its text.
+- D: `std.array.Appender` as its text or elements, and
+  `std.typecons.Nullable` as its value or `null`.
 
 Some values need no view, because their debug information says what they
 are:
@@ -842,6 +846,8 @@ are:
 - Odin's slices, strings, and dynamic arrays show as their elements or
   text, and a `cstring` as its text.
 - A Fortran `character(len=N)` shows as its text.
+- D's slices show as their elements, and its strings, `wstring` and
+  `dstring` among them, as their text.
 - A Rust tuple shows as Rust writes it, `(1, "two", 3.5)`, and a tuple
   struct with its name, `Meters(7)` or `Wrapping(5)`.
 - A character of any width shows as its number and the character,

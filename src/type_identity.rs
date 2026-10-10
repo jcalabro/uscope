@@ -37,16 +37,19 @@ pub enum NameSyntax {
     Zig,
     /// `package::Name(T:$int,N:$$4)`, and `map[K]V`.
     Odin,
+    /// `Name!T` and `Name!(T, 3)`, scoped by the module it is in.
+    D,
 }
 
 impl NameSyntax {
-    const ALL: [Self; 4] = [Self::Angle, Self::Go, Self::Zig, Self::Odin];
+    const ALL: [Self; 5] = [Self::Angle, Self::Go, Self::Zig, Self::Odin, Self::D];
 
     pub const fn of(language: SourceLanguage) -> Self {
         match language {
             SourceLanguage::Go => Self::Go,
             SourceLanguage::Zig => Self::Zig,
             SourceLanguage::Odin => Self::Odin,
+            SourceLanguage::D => Self::D,
             _ => Self::Angle,
         }
     }
@@ -73,6 +76,7 @@ impl<'a> TypeName<'a> {
             NameSyntax::Go => parse_go(name),
             NameSyntax::Zig => parse_zig(name),
             NameSyntax::Odin => parse_odin(name),
+            NameSyntax::D => parse_d(name),
         };
         parsed.unwrap_or(Self {
             path: Vec::new(),
@@ -194,6 +198,29 @@ fn parse_odin(name: &str) -> Option<TypeName<'_>> {
             arguments,
         },
     )
+}
+
+/// A template instance's name is its template's, `!`, and its one
+/// argument or its parenthesized list of them.
+fn parse_d(name: &str) -> Option<TypeName<'_>> {
+    let Some(bang) = top_level_position(name, '!', NameSyntax::D) else {
+        return is_identifier(name).then_some(TypeName {
+            path: Vec::new(),
+            base: name,
+            arguments: None,
+        });
+    };
+    let (base, argument) = (&name[..bang], &name[bang + 1..]);
+    let arguments = match split_arguments(argument, '(', ')', NameSyntax::D)? {
+        ("", Some(arguments)) => arguments,
+        (argument, None) if !argument.is_empty() => vec![argument],
+        _ => return None,
+    };
+    is_identifier(base).then_some(TypeName {
+        path: Vec::new(),
+        base,
+        arguments: Some(arguments),
+    })
 }
 
 const fn is_identifier_start(character: char) -> bool {
@@ -853,7 +880,7 @@ mod tests {
 
     #[test]
     fn names_split_into_path_base_and_arguments_in_each_syntax() {
-        use NameSyntax::{Angle, Go, Odin, Zig};
+        use NameSyntax::{Angle, D, Go, Odin, Zig};
         assert_eq!(
             parts("vector<int, std::allocator<int> >", Angle),
             (vec![], "vector", Some(vec!["int", "std::allocator<int>"]))
@@ -911,6 +938,14 @@ mod tests {
             parts("map[string][]main::Point", Odin),
             (vec![], "map", Some(vec!["string", "[]main::Point"]))
         );
+        assert_eq!(
+            parts("Appender!string", D),
+            (vec![], "Appender", Some(vec!["string"]))
+        );
+        assert_eq!(
+            parts("Tuple!(int[], Nullable!int, 3)", D),
+            (vec![], "Tuple", Some(vec!["int[]", "Nullable!int", "3"]))
+        );
         // What the syntax does not describe is all base.
         for (name, syntax) in [
             ("&str", Angle),
@@ -925,6 +960,9 @@ mod tests {
             ("[dynamic]int", Odin),
             ("proc(x:int)", Odin),
             ("bit_set[0..=int(7)]", Odin),
+            ("int[string]", D),
+            ("immutable(char)*", D),
+            ("Appender!", D),
             ("vector<int", Angle),
         ] {
             assert_eq!(parts(name, syntax), (vec![], name, None), "{name}");
