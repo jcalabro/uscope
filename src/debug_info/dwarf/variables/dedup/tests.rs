@@ -229,10 +229,12 @@ fn types_that_keep_their_provenance_never_merge() {
         ),
     ];
     for (name, entries, change) in cases {
-        let mut types = built(entries);
+        let mut types = built(entries.clone());
         change(&mut types);
         assert!(types.deduplicate().is_none(), "{name} copies merged");
-        assert_eq!(types.entries.len(), 2, "{name}");
+        // Signatures zero references in place, so this proves each came
+        // back.
+        assert_eq!(types.entries, entries, "{name}");
     }
 }
 
@@ -261,8 +263,9 @@ fn refinement_that_does_not_settle_keeps_every_type() {
     assert_eq!(remap.id(TypeId::new(18)), TypeId::new(0));
     let depth = u32::try_from(MAX_ROUNDS).unwrap() + 2;
     let mut deep = chains(depth);
+    let entries = deep.entries.clone();
     assert!(deep.deduplicate().is_none());
-    assert_eq!(u32::try_from(deep.entries.len()).unwrap(), 3 * (depth + 1));
+    assert_eq!(deep.entries, entries);
 }
 
 /// The greatest relation in which related types have equal fields and
@@ -311,35 +314,68 @@ fn graph() -> impl Strategy<Value = (Vec<Option<u8>>, Vec<Vec<u32>>)> {
     })
 }
 
+/// Refines types with these labels and edges with an ordinary hasher and
+/// one under which everything collides, and checks both against
+/// [`bisimilar`].
+fn check_refinement(labels: &[Option<u8>], edges: &[Vec<u32>]) -> Result<(), TestCaseError> {
+    let infos = labels
+        .iter()
+        .map(|label| label.map(|label| info(0, &label.to_string(), TypeKind::Unspecified)))
+        .collect::<Vec<_>>();
+    let mut offsets = vec![0];
+    let mut flat = Vec::new();
+    for targets in edges {
+        flat.extend(targets);
+        offsets.push(flat.len());
+    }
+    let signatures = Signatures {
+        fields: infos
+            .iter()
+            .map(|info| {
+                info.as_ref().map(|info| Fields {
+                    info,
+                    go_dict_index: None,
+                    passed_by_value: None,
+                })
+            })
+            .collect(),
+        offsets: &offsets,
+        edges: &flat,
+    };
+    let classes = refine(&signatures, &foldhash::fast::FixedState::default()).unwrap();
+    let related = bisimilar(labels, edges);
+    for left in 0..labels.len() {
+        for right in 0..labels.len() {
+            prop_assert_eq!(classes[left] == classes[right], related[left][right]);
+        }
+    }
+    prop_assert_eq!(refine(&signatures, &Colliding).unwrap(), classes);
+    Ok(())
+}
+
 proptest! {
     #[test]
     fn refinement_merges_exactly_the_types_with_equal_unfoldings((labels, edges) in graph()) {
-        let signatures = || {
-            let mut signatures = Signatures {
-                fields: Vec::new(),
-                offsets: vec![0],
-                edges: Vec::new(),
-            };
-            for (label, targets) in labels.iter().zip(&edges) {
-                signatures.fields.push(label.map(|label| Fields {
-                    info: info(0, &label.to_string(), TypeKind::Unspecified),
-                    go_dict_index: None,
-                    passed_by_value: None,
-                }));
-                signatures.edges.extend(targets);
-                signatures.offsets.push(signatures.edges.len());
-            }
-            signatures
-        };
-        let classes = refine(signatures(), &foldhash::fast::FixedState::default()).unwrap();
-        let related = bisimilar(&labels, &edges);
-        for left in 0..labels.len() {
-            for right in 0..labels.len() {
-                prop_assert_eq!(classes[left] == classes[right], related[left][right]);
-            }
-        }
-        prop_assert_eq!(refine(signatures(), &Colliding).unwrap(), classes);
+        check_refinement(&labels, &edges)?;
     }
+}
+
+#[test]
+fn a_class_splits_into_more_groups_than_it_compares_one_by_one() {
+    // Records alike but for the leaf each refers to: two leaves of each of
+    // many labels, so that one round splits the records into many groups,
+    // and the records whose leaves share a label stay together.
+    let mut labels = Vec::new();
+    let mut edges = Vec::new();
+    for label in 0..u8::try_from(LINEAR_GROUPS * 2).unwrap() {
+        for _ in 0..2 {
+            labels.push(Some(label + 1));
+            edges.push(Vec::new());
+            labels.push(Some(0));
+            edges.push(vec![u32::try_from(labels.len() - 2).unwrap()]);
+        }
+    }
+    check_refinement(&labels, &edges).unwrap();
 }
 
 /// A type named by a label, with members, and generic arguments that are
