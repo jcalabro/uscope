@@ -947,6 +947,11 @@ pub(super) fn load_variable_info<'data>(
                         || (d && name.starts_with("__"))
                         || (nim && (name.ends_with('_') || name.contains("__")))
                         || (ada && name.contains(|c: char| c.is_ascii_uppercase()));
+                    let written = nim
+                        .then(|| nim_name(&name, kind).map(Arc::<str>::from))
+                        .flatten()
+                        .filter(|_| !compilers);
+                    let name = written.unwrap_or(name);
                     let hidden = compilers
                         || (scope.rust.is_some()
                             && (rust_temporary(&name, rust_unnamed)
@@ -1386,6 +1391,32 @@ const fn main_walk_reads(tag: gimli::DwTag, depth: usize) -> bool {
             | gimli::DW_TAG_variable
             | gimli::DW_TAG_formal_parameter
     ) || (depth == 1 && types::is_type_die_tag(tag))
+}
+
+/// The name a Nim programmer wrote for a variable Nim 2 named in C: a
+/// local's name numbered within its procedure, as `small_1`, or a
+/// parameter's numbered by its position, as `value_p0`. Nim drops an
+/// underscore before a digit from the names it writes, and Nim reads `x_1`
+/// and `x1` as one name, so what precedes the number is the name exactly.
+/// A name Nim had to encode ends in an underscore, and stays as it is.
+fn nim_name(name: &str, kind: VariableKind) -> Option<&str> {
+    let (base, number) = name.rsplit_once('_')?;
+    let number = match kind {
+        VariableKind::Parameter => number.strip_prefix('p')?,
+        VariableKind::Local => number,
+        _ => return None,
+    };
+    let plain = base.starts_with(|first: char| first.is_ascii_alphabetic())
+        && !base.ends_with('_')
+        && base
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !base
+            .as_bytes()
+            .windows(2)
+            .any(|pair| pair[0] == b'_' && (pair[1] == b'_' || pair[1].is_ascii_digit()));
+    (plain && !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(base)
 }
 
 /// Whether rustc made a variable for its own use: an async body's

@@ -5,8 +5,8 @@
 #
 # and then calls reached(checkpoint); the tests read the values in
 # reached's caller. A path names a variable and then its fields and
-# elements, a variable by the name Nim gives it in C, `point_1`. Floats are
-# their bits in hexadecimal; kind `summary` is how uscope writes the value.
+# elements. Floats are their bits in hexadecimal; kind `summary` is how
+# uscope writes the value.
 
 import std/strutils
 
@@ -49,13 +49,13 @@ proc scalars() {.noinline.} =
   var precise: float64 = -0.1
   var flag = true
   var letter = 'q'
-  truth("scalars", "small_1", "int", $small)
-  truth("scalars", "wide_1", "int", $wide)
-  truth("scalars", "big_1", "int", $big)
-  truth("scalars", "single_1", "f32", bits(single))
-  truth("scalars", "precise_1", "f64", bits(precise))
-  truth("scalars", "flag_1", "summary", "true")
-  truth("scalars", "letter_1", "int", $ord(letter))
+  truth("scalars", "small", "int", $small)
+  truth("scalars", "wide", "int", $wide)
+  truth("scalars", "big", "int", $big)
+  truth("scalars", "single", "f32", bits(single))
+  truth("scalars", "precise", "f64", bits(precise))
+  truth("scalars", "flag", "summary", "true")
+  truth("scalars", "letter", "int", $ord(letter))
   reached("scalars")
   keep(addr small); keep(addr wide); keep(addr big); keep(addr single)
   keep(addr precise); keep(addr flag); keep(addr letter)
@@ -65,22 +65,22 @@ proc records() {.noinline.} =
   var segment = Segment(start: Point(x: 1, y: 2), finish: Point(x: 5, y: 6), tag: 9)
   var numbers: array[3, int32] = [10'i32, 20, 30]
   var color = green
-  truth("records", "point_1.x", "int", $point.x)
-  truth("records", "point_1.y", "int", $point.y)
-  truth("records", "segment_1.finish.y", "int", $segment.finish.y)
-  truth("records", "segment_1.tag", "int", $segment.tag)
+  truth("records", "point.x", "int", $point.x)
+  truth("records", "point.y", "int", $point.y)
+  truth("records", "segment.finish.y", "int", $segment.finish.y)
+  truth("records", "segment.tag", "int", $segment.tag)
   for index, number in numbers:
-    truth("records", "numbers_1." & $index, "int", $number)
+    truth("records", "numbers." & $index, "int", $number)
   # Nim describes an enum as the integer it is.
-  truth("records", "color_1", "int", $ord(color))
+  truth("records", "color", "int", $ord(color))
   reached("records")
   keep(addr point); keep(addr segment); keep(addr numbers); keep(addr color)
 
 proc strings() {.noinline.} =
   var text = "héllo"
   var empty = ""
-  truth("strings", "text_1", "summary", "\"" & text & "\"")
-  truth("strings", "empty_1", "summary", "\"\"")
+  truth("strings", "text", "summary", "\"" & text & "\"")
+  truth("strings", "empty", "summary", "\"\"")
   reached("strings")
   keep(addr text); keep(addr empty)
 
@@ -89,9 +89,9 @@ proc seqs() {.noinline.} =
   var none: seq[int32] = @[]
   var words = @["ab", "cd"]
   for index, item in items:
-    truth("seqs", "items_1." & $index, "int", $item)
-  truth("seqs", "none_1", "summary", "len=0 []")
-  truth("seqs", "words_1.1", "summary", "\"cd\"")
+    truth("seqs", "items." & $index, "int", $item)
+  truth("seqs", "none", "summary", "len=0 []")
+  truth("seqs", "words.1", "summary", "\"cd\"")
   reached("seqs")
   keep(addr items); keep(addr none); keep(addr words)
 
