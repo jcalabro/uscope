@@ -238,7 +238,7 @@ fn an_entry_that_disagrees_with_its_binding_is_replaced() {
 
     let data = fs::read(&program).unwrap();
     let object = object::File::parse(data.as_slice()).unwrap();
-    let debug = search(&[&root]).find(&program, &object).unwrap();
+    let debug = search(&[&root]).find(&program, &object).found.unwrap();
     let key = Key::of(&[&data, &debug.data]);
     cache.put(key, alone.image.tables()).unwrap();
 

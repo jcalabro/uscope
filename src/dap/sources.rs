@@ -80,11 +80,15 @@ impl Session {
                 json!({"reason": "new", "module": module_json(record, image.as_deref())}),
             )
             .await?;
-        // What kept a library's own views out, once, when it loads; the
-        // program's are said when the session starts.
+        // What could not be used of a library's debug information, and what
+        // kept its own views out, once, when it loads; the program's are
+        // said when the session starts.
         if let (Some(image), Ok(handle)) = (&image, self.target_handle())
             && image.id() != handle.module_image().id()
         {
+            for warning in crate::present::debug_information::warnings(image, false) {
+                self.client.important(warning).await?;
+            }
             for error in image.view_errors() {
                 self.client.important(format!("views: {error}")).await?;
             }
@@ -282,14 +286,17 @@ pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImag
         } else {
             "no symbols"
         };
-        module["symbolStatus"] = match image.separate_debug_file() {
+        let mut status = match image.separate_debug_file() {
             Some(uscope::DebugFile::Unusable { path, reason }) => format!(
                 "{status}; cannot use the debug file {}: {reason}",
                 path.display()
             ),
             _ => status.to_owned(),
+        };
+        if let Some(problem) = crate::present::debug_information::dwarf_problem(image) {
+            status = format!("{status}; {problem}");
         }
-        .into();
+        module["symbolStatus"] = status.into();
         // A separate debug file, when the module's own was stripped.
         if let Some(debug_file) = image.debug_file() {
             module["symbolFilePath"] = debug_file.display().to_string().into();

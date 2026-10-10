@@ -1288,6 +1288,8 @@ pub struct Module {
     pub debug_file: Option<String>,
     /// Why the separate debug file found for it could not be used.
     pub debug_file_problem: Option<String>,
+    /// Why not all of its debug information could be read.
+    pub debug_information_problem: Option<String>,
 }
 
 /// The answer to `share`.

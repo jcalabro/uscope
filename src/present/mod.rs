@@ -10,6 +10,7 @@
 
 pub mod complete;
 mod completing;
+pub mod debug_information;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;

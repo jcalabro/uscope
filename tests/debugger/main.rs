@@ -21,6 +21,7 @@ mod signals;
 mod step_targets;
 mod stepping;
 mod tail_frames;
+mod unreadable;
 mod unwind;
 mod values;
 mod variables;

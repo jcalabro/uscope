@@ -184,9 +184,18 @@ impl<P: LinuxTraceOps> Controller<P> {
         let new = self.number_new_modules(observed)?;
         let mut loads = self.load_observed(&new, vdso_image.take()).into_iter();
         for (path, load_bias, module_id, image_id) in new {
-            // Metadata a module's file cannot provide leaves its frames unnamed.
-            let Ok(debug) = loads.next().expect("a load for each new module") else {
-                continue;
+            // A file that is no module the debugger can describe leaves its
+            // frames unnamed.
+            let debug = match loads.next().expect("a load for each new module") {
+                Ok(debug) => debug,
+                #[cfg_attr(
+                    not(debug_assertions),
+                    expect(unused_variables, reason = "only recorded")
+                )]
+                Err(error) => {
+                    record!("module {} is undescribed: {error}", path.display());
+                    continue;
+                }
             };
             let loaded = LoadedModule {
                 id: module_id,

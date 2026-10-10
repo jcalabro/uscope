@@ -673,7 +673,11 @@ debugFile: string | null,
 /**
  * Why the separate debug file found for it could not be used.
  */
-debugFileProblem: string | null, };
+debugFileProblem: string | null, 
+/**
+ * Why not all of its debug information could be read.
+ */
+debugInformationProblem: string | null, };
 
 export type StopAt = { stop: number, };
 

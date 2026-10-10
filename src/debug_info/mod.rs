@@ -506,9 +506,34 @@ pub fn load_bytes(path: &Path, data: &[u8]) -> Result<DebugInfo> {
 }
 
 /// Loads a program's debug information, from a separate debug file that
-/// `search` finds when its own file has none.
+/// `search` finds when its own file has none. A program for another
+/// architecture than the debugger's own cannot be debugged.
 pub fn load_program(path: &Path, data: &[u8], search: &DebugFileSearch) -> Result<DebugInfo> {
-    dwarf::load_bytes(path, data, crate::ModuleImageId::new(0), search)
+    let info = dwarf::load_bytes(path, data, crate::ModuleImageId::new(0), search)?;
+    let architecture = info.image.target().architecture;
+    if architecture != HOST_ARCHITECTURE {
+        return Err(crate::Error::UnsupportedFile(
+            format!(
+                "it is a program for {}, and this debugger debugs {} programs",
+                architecture_name(architecture),
+                architecture_name(HOST_ARCHITECTURE)
+            )
+            .into(),
+        ));
+    }
+    Ok(info)
+}
+
+#[cfg(target_arch = "x86_64")]
+const HOST_ARCHITECTURE: crate::Architecture = crate::Architecture::X86_64;
+#[cfg(target_arch = "aarch64")]
+const HOST_ARCHITECTURE: crate::Architecture = crate::Architecture::Aarch64;
+
+const fn architecture_name(architecture: crate::Architecture) -> &'static str {
+    match architecture {
+        crate::Architecture::X86_64 => "x86-64",
+        crate::Architecture::Aarch64 => "AArch64",
+    }
 }
 
 #[expect(

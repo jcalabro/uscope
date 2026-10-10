@@ -383,6 +383,26 @@ impl Cli {
         warnings
     }
 
+    /// What could not be used of the debug information of the program and of
+    /// the libraries already loaded, as an attached process or a core dump
+    /// has them.
+    pub async fn debug_information_warnings(&self) -> Vec<String> {
+        let program = self.debugger.module_image();
+        let mut warnings = crate::present::debug_information::warnings(program, true);
+        // A program yet to run has loaded nothing else.
+        let Ok(loaded) = self.debugger.loaded_modules().await else {
+            return warnings;
+        };
+        for record in loaded.modules.iter() {
+            if let Ok(image) = self.debugger.loaded_module_image(record.module.id).await
+                && image.id() != program.id()
+            {
+                warnings.extend(crate::present::debug_information::warnings(&image, false));
+            }
+        }
+        warnings
+    }
+
     /// Loads view files as [`Self::load_view_sources`] does and warns about
     /// each one that cannot be used. Returns whether every one could be used.
     pub async fn load_views(&self, project_root: &std::path::Path, paths: &[PathBuf]) -> bool {
@@ -451,6 +471,9 @@ impl Cli {
         // The program is loaded and the session can take its first command.
         uscope::profile::mark("ready");
         self.announce(args)?;
+        for warning in self.debug_information_warnings().await {
+            self.warn(&warning);
+        }
         self.load_views(&self.settings.root, &args.views).await;
         self.apply_signal_settings().await?;
         if self.settings.config.step.runtime == config::StepRuntime::Enter {

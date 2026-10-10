@@ -204,7 +204,9 @@ fn the_schema_is_the_records_layout() {
             debug_reason,
             debug_file,
             address_start,
-            address_end
+            address_end,
+            dwarf_reason,
+            dwarf
         ]
     );
     check!(
@@ -541,7 +543,7 @@ fn the_schema_is_the_records_layout() {
     // A change to any record changes this; bump the format with it.
     assert_eq!(
         schema::layout_fingerprint(),
-        0xbf8b_b88f_b759_a836,
+        0x5de1_e6f6_213b_a9e2,
         "the layout changed:\n{}",
         schema::schema_text()
     );
@@ -1875,6 +1877,12 @@ fn facts_read_back_with_thread_locals_by_name() {
         }))
     );
     assert_eq!(view.debug_file(None), Err(super::facts::Unbound));
+    assert_eq!(
+        view.debug_information(),
+        crate::DebugInformation::Incomplete {
+            reason: "a unit is in a split DWARF file".into(),
+        }
+    );
     assert_eq!(image.bytes(TableKind::EmbeddedViews), b"views");
 }
 
@@ -1921,6 +1929,21 @@ fn validation_rejects_facts_that_disagree() {
         (
             "no debug file's reason",
             facts(|f| f[0].debug_file = super::facts::DEBUG_FILE_NONE),
+            "facts are malformed",
+        ),
+        (
+            "an unknown DWARF state",
+            facts(|f| f[0].dwarf = 4),
+            "facts are malformed",
+        ),
+        (
+            "an incomplete DWARF without a reason",
+            facts(|f| f[0].dwarf_reason = NONE.into()),
+            "facts are malformed",
+        ),
+        (
+            "a loaded DWARF's reason",
+            facts(|f| f[0].dwarf = super::facts::DWARF_LOADED),
             "facts are malformed",
         ),
         (
