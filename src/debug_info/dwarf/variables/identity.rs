@@ -105,9 +105,17 @@ pub(super) fn go_embedded(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) 
         })
 }
 
-/// The language a unit's producer proves where its `DW_AT_language` does
-/// not: Zig's LLVM backend and Odin say their units are C99.
-pub(in crate::debug_info) fn produced_language(producer: Option<&str>) -> Option<SourceLanguage> {
+/// The language a unit's producer or name proves where its
+/// `DW_AT_language` does not: Zig's LLVM backend and Odin say their units
+/// are C99, and Nim compiles each module to C in a file named for it, as
+/// `@mvalues.nim.c`.
+pub(in crate::debug_info) fn produced_language(
+    producer: Option<&str>,
+    name: Option<&str>,
+) -> Option<SourceLanguage> {
+    if name.is_some_and(|name| name.ends_with(".nim.c")) {
+        return Some(SourceLanguage::Nim);
+    }
     let producer = producer?;
     if producer.starts_with("zig ") {
         Some(SourceLanguage::Zig)

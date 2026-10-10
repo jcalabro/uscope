@@ -37,6 +37,7 @@ pub const fn language_matches(language: Language, actual: SourceLanguage) -> boo
             | (Language::Zig, SourceLanguage::Zig)
             | (Language::Odin, SourceLanguage::Odin)
             | (Language::D, SourceLanguage::D)
+            | (Language::Nim, SourceLanguage::Nim)
     )
 }
 

@@ -108,6 +108,7 @@
           odin
           gfortran
           ldc2
+          nim
           pkg-config
           util-linux
           nodejs_24

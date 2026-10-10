@@ -1,0 +1,91 @@
+# Nim's values, where this program says they are. Before each checkpoint
+# the program prints its own truth, one tab-separated line per value,
+#
+#	TRUTH	<checkpoint>	<path>	<kind>	<value>
+#
+# and then calls reached(checkpoint); the tests read the values in
+# reached's caller. A path names a variable and then its fields and
+# elements, a variable by the name Nim gives it in C, `point_1`. Floats are
+# their bits in hexadecimal; kind `summary` is how uscope writes the value.
+
+import std/strutils
+
+type
+  Point = object
+    x, y: int32
+  Segment = object
+    start, finish: Point
+    tag: uint8
+  Color = enum
+    red, green, blue
+
+var sink {.volatile.}: pointer
+
+# Reaches a checkpoint once every truth before it is written.
+proc reached(checkpoint: string) {.noinline.} =
+  sink = unsafeAddr checkpoint
+
+# Keeps a value alive, and where the program put it, past the checkpoint.
+proc keep(value: pointer) {.noinline.} =
+  sink = value
+
+proc truth(checkpoint, path, kind, value: string) =
+  stdout.write "TRUTH\t" & checkpoint & "\t" & path & "\t" & kind & "\t" & value & "\n"
+  stdout.flushFile
+
+proc bits(value: float32): string = "0x" & toHex(cast[uint32](value)).toLowerAscii.strip(trailing = false, chars = {'0'})
+proc bits(value: float64): string = "0x" & toHex(cast[uint64](value)).toLowerAscii.strip(trailing = false, chars = {'0'})
+
+proc add(a, b: int): int {.noinline.} =
+  var total = a + b
+  keep(addr total)
+  total
+
+proc scalars() {.noinline.} =
+  var small: int8 = -5
+  var wide: uint16 = 65000
+  var big: int64 = -(1'i64 shl 40)
+  var single: float32 = 1.5
+  var precise: float64 = -0.1
+  var flag = true
+  var letter = 'q'
+  truth("scalars", "small_1", "int", $small)
+  truth("scalars", "wide_1", "int", $wide)
+  truth("scalars", "big_1", "int", $big)
+  truth("scalars", "single_1", "f32", bits(single))
+  truth("scalars", "precise_1", "f64", bits(precise))
+  truth("scalars", "flag_1", "summary", "true")
+  truth("scalars", "letter_1", "int", $ord(letter))
+  reached("scalars")
+  keep(addr small); keep(addr wide); keep(addr big); keep(addr single)
+  keep(addr precise); keep(addr flag); keep(addr letter)
+
+proc records() {.noinline.} =
+  var point = Point(x: 3, y: -4)
+  var segment = Segment(start: Point(x: 1, y: 2), finish: Point(x: 5, y: 6), tag: 9)
+  var numbers: array[3, int32] = [10'i32, 20, 30]
+  var color = green
+  truth("records", "point_1.x", "int", $point.x)
+  truth("records", "point_1.y", "int", $point.y)
+  truth("records", "segment_1.finish.y", "int", $segment.finish.y)
+  truth("records", "segment_1.tag", "int", $segment.tag)
+  for index, number in numbers:
+    truth("records", "numbers_1." & $index, "int", $number)
+  # Nim describes an enum as the integer it is.
+  truth("records", "color_1", "int", $ord(color))
+  reached("records")
+  keep(addr point); keep(addr segment); keep(addr numbers); keep(addr color)
+
+proc strings() {.noinline.} =
+  var text = "héllo"
+  var empty = ""
+  truth("strings", "text_1", "summary", "\"" & text & "\"")
+  truth("strings", "empty_1", "summary", "\"\"")
+  reached("strings")
+  keep(addr text); keep(addr empty)
+
+scalars()
+records()
+strings()
+if add(2, 3) != 5:
+  quit "add"

@@ -66,6 +66,15 @@ pub fn last_part(name: &str) -> &str {
     written.rsplit("::").next().unwrap_or(written)
 }
 
+/// What a mangled name names, without its parameters: Nim mangles its
+/// procedures as C++'s are, `_ZN6values7reachedE6string` naming
+/// `values::reached`.
+pub fn qualified_name(mangled: &str) -> Option<String> {
+    let demangled = demangle(mangled)?;
+    let (qualified, _) = split_parameters(&demangled);
+    Some(qualified.to_owned())
+}
+
 /// A demangled Rust function's path, with no generic arguments and an
 /// inherent method's type unwrapped: v0's
 /// `<tokio::runtime::park::CachedParkThread>::block_on::<F>` and legacy's
