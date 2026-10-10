@@ -480,6 +480,7 @@ pub struct TypeIndex {
 
 impl TypeIndex {
     /// Indexes `count` types, which `info` reaches by index.
+    #[cfg(any(test, feature = "tools"))]
     pub fn build<'a>(
         image: Option<ModuleImageId>,
         count: usize,
@@ -521,19 +522,11 @@ impl TypeIndex {
                 }
             }
         }
-        let mut walk = KeyWalk {
-            memo: vec![None; count],
-            visiting: vec![false; count],
-            depth: 0,
-        };
-        let keys = (0..count)
-            .map(|index| canonical_key(index, &info, &mut walk))
-            .collect();
         Self {
             image,
             by_base,
             by_name,
-            keys,
+            keys: canonical_keys(count, info),
         }
     }
 
@@ -661,6 +654,22 @@ pub trait NameIndex {
             .filter_map(|id| self.reference(id))
             .collect()
     }
+}
+
+/// Each of `count` types' identity as one string, which every type the
+/// same as it shares: [`TypeIndex::key`] without the index.
+pub fn canonical_keys<'a>(
+    count: usize,
+    info: impl Fn(usize) -> Option<&'a TypeInfo>,
+) -> Vec<Arc<str>> {
+    let mut walk = KeyWalk {
+        memo: vec![None; count],
+        visiting: vec![false; count],
+        depth: 0,
+    };
+    (0..count)
+        .map(|index| canonical_key(index, &info, &mut walk))
+        .collect()
 }
 
 /// A type's identity as one string: its identity when it has one, and
