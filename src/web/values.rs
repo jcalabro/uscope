@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use uscope::{
     DebuggerHandle, DereferenceReference, Evaluation, EvaluationMode, Expression, InspectionLimits,
-    StopContext, StopId, ValueChildrenReference, VariableKind,
+    StopContext, StopId, ValueChildrenReference, VariableKind, VariableState,
 };
 
 use super::describe::Images;
@@ -243,10 +243,15 @@ impl Reader<'_> {
                     (ScopeKey::Args, "Arguments", VariableKind::Parameter),
                     (ScopeKey::Locals, "Locals", VariableKind::Local),
                 ] {
-                    let listed = self
+                    let mut listed = self
                         .presenter()
                         .scope(context, &snapshot, kind, module, Window::ALL)
                         .await;
+                    for row in &mut listed {
+                        if let Listed::Value(row) = row {
+                            self.add_pointee_drawings(row).await;
+                        }
+                    }
                     scopes.push(Scope {
                         key,
                         name: name.to_owned(),
@@ -354,7 +359,45 @@ impl Reader<'_> {
             .at(context)
             .evaluate_with(&expression, mode, InspectionLimits::default())
             .await?;
+        if let Evaluation::Value { value, .. } = &evaluation {
+            let mut row = self.presenter().row(
+                Item {
+                    name: text,
+                    path: Some(expression),
+                    raw: false,
+                    type_info: value.type_info.as_ref(),
+                    state: &value.state,
+                    declaration: None,
+                },
+                context,
+            );
+            self.add_pointee_drawings(&mut row).await;
+            return self.row(context, row);
+        }
         self.present(context, text, expression, evaluation)
+    }
+
+    /// Gives a pointer the drawings of what it points to, so that a frame's
+    /// `&mut Board` is drawn as its board. Variables and watches read their
+    /// pointees for this; a page of children never does.
+    async fn add_pointee_drawings(&self, row: &mut present::Row) {
+        let Some(details) = row.details.as_mut() else {
+            return;
+        };
+        if !details.drawings.is_empty() {
+            return;
+        }
+        let Some(Expand::Pointee(reference)) = &details.expand else {
+            return;
+        };
+        if let Ok(pointee) = self.handle.dereference(reference.clone()).await
+            && let VariableState::Available {
+                presentation: Some(presentation),
+                ..
+            } = &pointee.state
+        {
+            details.drawings = present::drawings(presentation);
+        }
     }
 
     /// Presents what `expression`, written as `text`, evaluated to.

@@ -128,6 +128,18 @@ pub enum Listed {
     Truncated(String),
 }
 
+/// The renderers of the drawings a presentation offers, each once.
+#[must_use]
+pub fn drawings(presentation: &uscope::Presentation) -> Vec<Arc<str>> {
+    let mut names = Vec::<Arc<str>>::new();
+    for visualizer in presentation.visualizers.iter() {
+        if !names.contains(&visualizer.renderer.name) {
+            names.push(Arc::clone(&visualizer.renderer.name));
+        }
+    }
+    names
+}
+
 /// The part of a listing a request asks for.
 #[derive(Debug, Clone, Copy)]
 pub struct Window {
@@ -280,15 +292,7 @@ impl Presenter<'_> {
                             | VariableValue::Union
                             | VariableValue::Variant { .. }
                     ),
-                    drawings: presented.map_or_else(Vec::new, |presentation| {
-                        let mut names = Vec::<Arc<str>>::new();
-                        for visualizer in presentation.visualizers.iter() {
-                            if !names.contains(&visualizer.renderer.name) {
-                                names.push(Arc::clone(&visualizer.renderer.name));
-                            }
-                        }
-                        names
-                    }),
+                    drawings: presented.map_or_else(Vec::new, drawings),
                 })
             }
             _ => None,

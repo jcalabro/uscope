@@ -850,6 +850,19 @@ textarea.input {
 
 /* ---------- tasks ---------- */
 
+.link-button {
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: 500 11.5px var(--sans);
+  cursor: pointer;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
 .pane-head .link-button {
   margin-left: auto;
   border: 0;
@@ -2338,4 +2351,165 @@ kbd {
 .asm-slot .asm-source {
   height: 20px;
   margin-top: 0;
+}
+
+/* ---------- drawings ---------- */
+
+.drawings {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 10px;
+  overflow: auto;
+}
+
+.drawing {
+  position: relative;
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.drawing-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.drawing-path {
+  overflow: hidden;
+  color: var(--ink);
+  font: 600 12px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawing-renderer {
+  color: var(--ink-2);
+  font: 12px var(--mono);
+}
+
+.drawing-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.drawing-body {
+  padding: 10px;
+  overflow: hidden;
+}
+
+.drawing-body svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.drawing-body .selectable {
+  cursor: pointer;
+}
+
+.drawing-body .selectable:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.drawing-caption {
+  padding: 0 10px 8px;
+  color: var(--ink-2);
+  font: 12px var(--mono);
+  text-align: center;
+}
+
+.drawing.stale .drawing-body,
+.drawing.stale .drawing-caption {
+  opacity: 0.45;
+}
+
+.drawing-problem {
+  margin: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--error);
+  border-radius: 5px;
+  background: var(--error-bg);
+  color: var(--error);
+  font: 12px var(--mono);
+  white-space: pre-wrap;
+}
+
+.drawing-wait {
+  padding: 16px 10px;
+  font-size: 12px;
+}
+
+.drawing-selected {
+  position: absolute;
+  z-index: 5;
+  top: 36px;
+  right: 10px;
+  width: min(460px, calc(100% - 20px));
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.drawing-selected-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.drawing-selected-head .icon {
+  margin-left: auto;
+}
+
+.badge {
+  display: inline-block;
+  min-width: 16px;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: 600 10.5px / 16px var(--sans);
+  text-align: center;
+}
+
+.popover.menu {
+  width: 260px;
+  max-height: 320px;
+  padding: 4px 0;
+  overflow: auto;
+}
+
+.menu-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 4px 10px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: 12px var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item:hover,
+.menu-item:focus {
+  background: var(--select-bg);
 }

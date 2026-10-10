@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "noImplicitAny": false,
+    "target": "ES2023",
+    "lib": ["ES2023", "WebWorker"],
+    "types": [],
+    "moduleDetection": "force"
+  },
+  "files": ["uscope-visualizer.d.ts"],
+  "include": [
+    "../../views/visualizers/*.js",
+    "../../tests/fixtures/**/*.js",
+    "../../web/e2e/visualizers/*.js"
+  ]
+}

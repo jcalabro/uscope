@@ -39,6 +39,8 @@ export default defineConfig({
       },
       {
         extends: true,
+        // Tests read the docs and fixtures they check the page against.
+        server: { fs: { allow: [".."] } },
         test: {
           name: "browser",
           include: ["test/**/*.test.tsx"],
