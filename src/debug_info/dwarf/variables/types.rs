@@ -13,9 +13,9 @@ use crate::model::ArrayDimension;
 use crate::{
     Accessibility, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, ByteOrder,
     EnumerationOrigin, Enumerator, GoKind, IntegerValue, ModuleImageId, NamedTypeRelationship,
-    RecordKind, RecordMember, RecordMemberLayout, ReferenceKind, SourceLanguage, SourceLocation,
-    TypeId, TypeInfo, TypeKind, TypeModifier, TypeReference, Variant, VariantDiscriminant,
-    VariantSelection, VariantSelector, VariantStorageKind,
+    RecordKind, RecordMember, RecordMemberLayout, ReferenceKind, SliceWords, SourceLanguage,
+    SourceLocation, TypeId, TypeInfo, TypeKind, TypeModifier, TypeReference, Variant,
+    VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
 };
 
 use super::codec::{complex_part, enumeration_constant};
@@ -3198,7 +3198,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             Some(byte_size),
             TypeKind::Slice {
                 element,
-                has_capacity: layout == SliceLayout::Go,
+                words: layout.words(),
                 text,
             },
         ))
@@ -3250,6 +3250,14 @@ pub(super) enum SliceLayout {
 }
 
 impl SliceLayout {
+    /// Which of the descriptor's words hold its parts.
+    const fn words(self) -> SliceWords {
+        match self {
+            Self::Rust | Self::RustBytes(_) | Self::Zig => SliceWords::POINTER_LENGTH,
+            Self::Go => SliceWords::POINTER_LENGTH_CAPACITY,
+        }
+    }
+
     /// Whether a slice so named is the language's text: Rust's `str`, and
     /// Zig's `[]const u8` and its sentinel-terminated forms.
     fn is_text(self, name: &str) -> bool {

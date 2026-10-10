@@ -2293,13 +2293,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             return false;
         };
         representation(self.scope, *reference).is_ok_and(|(_, info)| {
-            matches!(
-                info.kind,
-                TypeKind::Slice {
-                    has_capacity: true,
-                    ..
-                }
-            )
+            matches!(info.kind, TypeKind::Slice { words, .. } if words.capacity.is_some())
         })
     }
 
