@@ -1,0 +1,41 @@
+uscope-views 1
+
+# D's associative arrays and Phobos. Verified against LDC 1.41 by
+# tests/fixtures/d/containers.d. D's slices and strings need no view.
+
+# An associative array points to druntime's table, which druntime ships no
+# debug information for, so the view reads it as LDC 1.41's druntime lays
+# it out, which its core/internal/newaa.d mirrors: the buckets' count and
+# address, the counts of entries used and deleted, and, past a pointer and
+# a count, the sizes of a key and a value and where an entry's value
+# begins. Each bucket is a hash and the address of an entry, its key then
+# its value; a bucket holds an entry when its hash's top bit is set.
+view d AssociativeArray(K, V) {
+    let table = (u64*)ptr
+    let words = (u32*)ptr
+    let buckets = ptr == 0 ? 0 : table[0]
+    let bucket = (u64*)(ptr == 0 ? 0 : table[1])
+    let used = ptr == 0 ? 0 : words[4]
+    let deleted = ptr == 0 ? 0 : words[5]
+    let value_offset = ptr == 0 ? 0 : words[11]
+    check ptr == 0 || (deleted <= used && used - deleted <= buckets
+        && words[9] == sizeof(K) && words[10] == sizeof(V) && value_offset >= sizeof(K))
+    show map(used - deleted) for i in range(buckets) if bucket[2 * i] >> 63 != 0
+        => *(K*)bucket[2 * i + 1] : *(V*)(bucket[2 * i + 1] + value_offset)
+    field buckets = buckets
+}
+
+# An appender's text or elements are its data's array, and one that has
+# appended nothing has no data.
+view d std.array.Appender(string) {
+    show if _data != 0 { value(_data->arr) } else { empty("") }
+}
+
+view d std.array.Appender(T) {
+    let length = _data != 0 ? len(_data->arr) : 0
+    show sequence(length) for i in range(length) => _data->arr[i]
+}
+
+view d std.typecons.Nullable(T) {
+    show if !_isNull { value(_value.payload) } else { empty("null") }
+}

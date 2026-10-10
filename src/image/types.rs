@@ -20,12 +20,12 @@ use super::index::{self, NameEntry};
 use super::strings::{StrId, Strings, StringsBuilder};
 use super::{Builder, Image, NONE, Record, SharedRecord, TableKind};
 use crate::{
-    Accessibility, ArgumentOrigin, ArrayDimension, BaseClass, BaseClassVirtuality, BaseType,
-    BaseTypeEncoding, EnumerationOrigin, Enumerator, GoKind, GoTypeAttributes, IntegerValue,
-    ModuleImageId, NamedTypeRelationship, RecordKind, RecordMember, RecordMemberLayout,
-    ReferenceKind, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode,
-    TypeReference, Variant, VariantDiscriminant, VariantSelection, VariantSelector,
-    VariantStorageKind,
+    Accessibility, ArgumentOrigin, ArrayBound, ArrayDimension, ArrayExtent, ArrayOrdering,
+    BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, EnumerationOrigin, Enumerator,
+    GoKind, GoTypeAttributes, IntegerValue, ModuleImageId, NamedTypeRelationship, RecordKind,
+    RecordMember, RecordMemberLayout, ReferenceKind, RuntimeDimension, SliceWords, TypeArgument,
+    TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference, Variant,
+    VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
 };
 
 /// One type. What each field holds depends on [`TypeRecord::kind`]; a
@@ -100,6 +100,7 @@ pub mod kinds {
     pub const FUNCTION: u8 = 13;
     pub const SIGNATURE: u8 = 14;
     pub const OPAQUE: u8 = 15;
+    pub const RUNTIME_ARRAY: u8 = 16;
 }
 
 /// [`TypeRecord::flags`].
@@ -110,7 +111,6 @@ pub mod type_flags {
     pub const SCOPED: u16 = 1 << 3;
     /// An enumeration of a named integer's associated constants.
     pub const NAMED_CONSTANTS: u16 = 1 << 4;
-    pub const CAPACITY: u16 = 1 << 5;
     pub const TEXT: u16 = 1 << 6;
     pub const VARIADIC: u16 = 1 << 7;
     pub const PROTOTYPED: u16 = 1 << 8;
@@ -273,6 +273,157 @@ impl Record for DimensionRecord {
     const KIND: TableKind = TableKind::TypeDimensions;
 }
 
+/// One bound of an array dimension bounded at run time.
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
+pub struct BoundRecord {
+    /// A constant's value, or a variable's offset in `.debug_info`.
+    pub value: I128,
+    /// What [`bound_kinds`] says the bound is.
+    pub kind: u8,
+    /// How many bytes a computed or stored bound has.
+    pub byte_size: u8,
+    pub signed: u8,
+}
+
+/// [`BoundRecord::kind`].
+pub mod bound_kinds {
+    pub const NONE: u8 = 0;
+    pub const CONSTANT: u8 = 1;
+    pub const COMPUTED: u8 = 2;
+    pub const STORED: u8 = 3;
+    pub const VARIABLE: u8 = 4;
+}
+
+/// [`RuntimeDimensionRecord::ends`].
+pub mod ends {
+    pub const UPPER: u8 = 0;
+    pub const COUNT: u8 = 1;
+    pub const UNKNOWN: u8 = 2;
+}
+
+/// One dimension of an array bounded at run time.
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
+pub struct RuntimeDimensionRecord {
+    pub lower: BoundRecord,
+    pub extent: BoundRecord,
+    /// The byte stride, or [`bound_kinds::NONE`].
+    pub stride: BoundRecord,
+    /// What [`ends`] says the extent is.
+    pub ends: u8,
+}
+
+impl Record for RuntimeDimensionRecord {
+    const KIND: TableKind = TableKind::RuntimeDimensions;
+}
+
+impl BoundRecord {
+    const ABSENT: Self = Self {
+        value: I128::ZERO,
+        kind: bound_kinds::NONE,
+        byte_size: 0,
+        signed: 0,
+    };
+
+    fn of(bound: ArrayBound) -> Self {
+        let sized = |kind, byte_size, signed: bool| Self {
+            value: I128::ZERO,
+            kind,
+            byte_size,
+            signed: u8::from(signed),
+        };
+        match bound {
+            ArrayBound::Constant(value) => Self {
+                value: value.into(),
+                kind: bound_kinds::CONSTANT,
+                byte_size: 0,
+                signed: 0,
+            },
+            ArrayBound::Computed { byte_size, signed } => {
+                sized(bound_kinds::COMPUTED, byte_size, signed)
+            }
+            ArrayBound::Stored { byte_size, signed } => {
+                sized(bound_kinds::STORED, byte_size, signed)
+            }
+            ArrayBound::Variable { debug_info_offset } => Self {
+                value: i128::from(debug_info_offset).into(),
+                kind: bound_kinds::VARIABLE,
+                byte_size: 0,
+                signed: 0,
+            },
+        }
+    }
+
+    /// The bound, when the record is a valid one.
+    fn bound(self) -> Option<ArrayBound> {
+        let value = self.value.get();
+        let sized = (1..=16).contains(&self.byte_size) && self.signed <= 1;
+        let plain = self.byte_size == 0 && self.signed == 0;
+        match self.kind {
+            bound_kinds::CONSTANT if plain => Some(ArrayBound::Constant(value)),
+            bound_kinds::COMPUTED if sized && value == 0 => Some(ArrayBound::Computed {
+                byte_size: self.byte_size,
+                signed: self.signed == 1,
+            }),
+            bound_kinds::STORED if sized && value == 0 => Some(ArrayBound::Stored {
+                byte_size: self.byte_size,
+                signed: self.signed == 1,
+            }),
+            bound_kinds::VARIABLE if plain => Some(ArrayBound::Variable {
+                debug_info_offset: u64::try_from(value).ok()?,
+            }),
+            _ => None,
+        }
+    }
+
+    fn absent(self) -> bool {
+        self == Self::ABSENT
+    }
+}
+
+impl RuntimeDimensionRecord {
+    fn of(dimension: &RuntimeDimension) -> Self {
+        let (ends, extent) = match dimension.extent {
+            ArrayExtent::Upper(bound) => (ends::UPPER, BoundRecord::of(bound)),
+            ArrayExtent::Count(bound) => (ends::COUNT, BoundRecord::of(bound)),
+            ArrayExtent::Unknown => (ends::UNKNOWN, BoundRecord::ABSENT),
+        };
+        Self {
+            lower: BoundRecord::of(dimension.lower_bound),
+            extent,
+            stride: dimension
+                .byte_stride
+                .map_or(BoundRecord::ABSENT, BoundRecord::of),
+            ends,
+        }
+    }
+
+    /// The dimension, when the record is a valid one.
+    fn dimension(self) -> Option<RuntimeDimension> {
+        let extent = match self.ends {
+            ends::UPPER => ArrayExtent::Upper(self.extent.bound()?),
+            ends::COUNT => ArrayExtent::Count(self.extent.bound()?),
+            ends::UNKNOWN if self.extent.absent() => ArrayExtent::Unknown,
+            _ => return None,
+        };
+        let byte_stride = if self.stride.absent() {
+            None
+        } else {
+            Some(self.stride.bound()?)
+        };
+        Some(RuntimeDimension {
+            lower_bound: self.lower.bound()?,
+            extent,
+            byte_stride,
+        })
+    }
+}
+
 /// One value of a list of numbers: a signature's parameter types, an
 /// identity's path segments, or a type's identity class.
 #[repr(C)]
@@ -386,6 +537,7 @@ const RELATIONSHIPS: [NamedTypeRelationship; 4] = [
 ];
 const REFERENCES: [ReferenceKind; 2] = [ReferenceKind::Lvalue, ReferenceKind::Rvalue];
 const RECORDS: [RecordKind; 2] = [RecordKind::Struct, RecordKind::Class];
+const ORDERINGS: [ArrayOrdering; 2] = [ArrayOrdering::RowMajor, ArrayOrdering::ColumnMajor];
 const STORAGE: [VariantStorageKind; 3] = [
     VariantStorageKind::Struct,
     VariantStorageKind::Class,
@@ -438,6 +590,7 @@ struct Encoder {
     selectors: Vec<SelectorRecord>,
     enumerators: Vec<EnumeratorRecord>,
     dimensions: Vec<DimensionRecord>,
+    runtime_dimensions: Vec<RuntimeDimensionRecord>,
     parameters: Vec<Item>,
     identities: Vec<IdentityRecord>,
     identity_strings: Vec<Item>,
@@ -694,8 +847,10 @@ impl Encoder {
             TypeKind::Array {
                 element,
                 dimensions,
+                ordering,
             } => {
                 record.kind = kinds::ARRAY;
+                record.detail = code(&ORDERINGS, ordering);
                 record.target = reference(Some(*element));
                 record.first = number(self.dimensions.len())?.into();
                 record.count = number(dimensions.len())?.into();
@@ -705,14 +860,27 @@ impl Encoder {
                         count: dimension.count.into(),
                     }));
             }
+            TypeKind::RuntimeArray {
+                element,
+                dimensions,
+                ordering,
+            } => {
+                record.kind = kinds::RUNTIME_ARRAY;
+                record.detail = code(&ORDERINGS, ordering);
+                record.target = reference(Some(*element));
+                record.first = number(self.runtime_dimensions.len())?.into();
+                record.count = number(dimensions.len())?.into();
+                self.runtime_dimensions
+                    .extend(dimensions.iter().map(RuntimeDimensionRecord::of));
+            }
             TypeKind::Slice {
                 element,
-                has_capacity,
+                words,
                 text,
             } => {
                 record.kind = kinds::SLICE;
                 record.target = reference(Some(*element));
-                flag(&mut record, *has_capacity, type_flags::CAPACITY);
+                record.value = slice_words(*words).into();
                 flag(&mut record, *text, type_flags::TEXT);
             }
             TypeKind::Record {
@@ -844,6 +1012,33 @@ impl Encoder {
     }
 }
 
+/// Where a slice descriptor keeps its parts, as a type record's value
+/// holds it: the data's word, the length's, and the capacity's, a byte
+/// each, the capacity's [`NO_SLICE_WORD`] when it has none.
+fn slice_words(words: SliceWords) -> u64 {
+    u64::from(words.data)
+        | u64::from(words.length) << 8
+        | u64::from(words.capacity.unwrap_or(NO_SLICE_WORD)) << 16
+}
+
+/// The words [`slice_words`] encodes.
+fn slice_words_of(value: u64) -> SliceWords {
+    let byte = |shift: u32| u8::try_from(value >> shift & 0xff).expect("one byte");
+    SliceWords {
+        data: byte(0),
+        length: byte(8),
+        capacity: Some(byte(16)).filter(|word| *word != NO_SLICE_WORD),
+    }
+}
+
+/// Whether a type record's value is slice words [`slice_words`] made.
+fn valid_slice_words(value: u64) -> bool {
+    value >> 24 == 0 && slice_words(slice_words_of(value)) == value
+}
+
+/// The capacity's word of a slice descriptor that has none.
+const NO_SLICE_WORD: u8 = 0xff;
+
 const fn layout(layout: RecordMemberLayout) -> (u8, u64, u64) {
     match layout {
         RecordMemberLayout::ByteOffset(offset) => (BYTE_OFFSET, offset, 0),
@@ -950,6 +1145,7 @@ pub fn add_to(
         .owned_table(encoder.selectors)
         .owned_table(encoder.enumerators)
         .owned_table(encoder.dimensions)
+        .owned_table(encoder.runtime_dimensions)
         .owned_shared(TableKind::TypeParameters, encoder.parameters)
         .owned_table(encoder.identities)
         .owned_shared(TableKind::IdentityStrings, encoder.identity_strings)
@@ -973,6 +1169,7 @@ pub struct TypeView<'a> {
     selectors: &'a [SelectorRecord],
     enumerators: &'a [EnumeratorRecord],
     dimensions: &'a [DimensionRecord],
+    runtime_dimensions: &'a [RuntimeDimensionRecord],
     parameters: &'a [Item],
     identities: &'a [IdentityRecord],
     identity_strings: &'a [Item],
@@ -995,6 +1192,7 @@ impl<'a> TypeView<'a> {
             selectors: image.table(),
             enumerators: image.table(),
             dimensions: image.table(),
+            runtime_dimensions: image.table(),
             parameters: image.shared(TableKind::TypeParameters),
             identities: image.table(),
             identity_strings: image.shared(TableKind::IdentityStrings),
@@ -1200,10 +1398,23 @@ impl<'a> TypeView<'a> {
                         count: dimension.count.get(),
                     })
                     .collect(),
+                ordering: ORDERINGS[usize::from(record.detail)],
+            },
+            kinds::RUNTIME_ARRAY => TypeKind::RuntimeArray {
+                element: required(),
+                dimensions: self.runtime_dimensions[first..first + count]
+                    .iter()
+                    .map(|dimension| {
+                        dimension
+                            .dimension()
+                            .expect("validated runtime dimensions decode")
+                    })
+                    .collect(),
+                ordering: ORDERINGS[usize::from(record.detail)],
             },
             kinds::SLICE => TypeKind::Slice {
                 element: required(),
-                has_capacity: has(record, type_flags::CAPACITY),
+                words: slice_words_of(record.value.get()),
                 text: has(record, type_flags::TEXT),
             },
             kinds::RECORD => TypeKind::Record {
@@ -1451,6 +1662,7 @@ struct Cursors {
     selectors: u32,
     enumerators: u32,
     dimensions: u32,
+    runtime_dimensions: u32,
     parameters: u32,
     identities: u32,
 }
@@ -1478,6 +1690,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
     let types = image.table::<TypeRecord>();
     let members = image.table::<MemberRecord>();
     let variants = image.table::<VariantRecord>();
+    let runtime_dimensions = image.table::<RuntimeDimensionRecord>();
     let count = types.len();
     let text = |id: U32| strings.contains(StrId(id.get()));
     let mut cursors = Cursors::default();
@@ -1553,7 +1766,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
             }
             kinds::ARRAY => {
                 no_text
-                    && record.detail == 0
+                    && usize::from(record.detail) < ORDERINGS.len()
                     && none(record.value)
                     && none(record.bit_size)
                     && only(f::SIZED)
@@ -1562,9 +1775,29 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     && no_bases
                     && no_variants
             }
+            kinds::RUNTIME_ARRAY => {
+                let first = record.first.get() as usize;
+                no_text
+                    && usize::from(record.detail) < ORDERINGS.len()
+                    && none(record.value)
+                    && none(record.bit_size)
+                    && only(f::SIZED)
+                    && valid_type(record.target, count)
+                    && span(record.first, record.count, runtime_dimensions.len())
+                    && runtime_dimensions[first..first + record.count.get() as usize]
+                        .iter()
+                        .all(|dimension| dimension.dimension().is_some())
+                    && follows(&mut cursors.runtime_dimensions, record.first, record.count)
+                    && no_bases
+                    && no_variants
+            }
             kinds::SLICE => {
-                plain
-                    && only(f::SIZED | f::CAPACITY | f::TEXT)
+                no_text
+                    && valid_slice_words(record.value.get())
+                    && none(record.bit_size)
+                    && record.detail == 0
+                    && no_list(record.first, record.count)
+                    && only(f::SIZED | f::TEXT)
                     && valid_type(record.target, count)
                     && no_bases
                     && no_variants
@@ -1701,6 +1934,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
         (cursors.selectors, image.table::<SelectorRecord>().len()),
         (cursors.enumerators, image.table::<EnumeratorRecord>().len()),
         (cursors.dimensions, image.table::<DimensionRecord>().len()),
+        (cursors.runtime_dimensions, runtime_dimensions.len()),
         (
             cursors.parameters,
             image.shared::<Item>(TableKind::TypeParameters).len(),

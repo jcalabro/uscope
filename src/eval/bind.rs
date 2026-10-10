@@ -75,6 +75,14 @@ pub fn bind_value<S: Scope>(
     bind_as(expression, scope, Mode::Read, Finish::Value)
 }
 
+/// Whether values of a category convert only through pointers to them.
+const fn aggregate(category: &Category) -> bool {
+    matches!(
+        category,
+        Category::Record | Category::Array { .. } | Category::RuntimeArray | Category::Slice(_)
+    )
+}
+
 fn bind_as<S: Scope>(
     expression: &Expression,
     scope: &S,
@@ -1970,8 +1978,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     ),
                 ));
             }
-            (Category::Record | Category::Array { .. } | Category::Slice(_), _)
-            | (_, Category::Record | Category::Array { .. } | Category::Slice(_)) => {
+            (from, to) if aggregate(from) || aggregate(to) => {
                 return Err(Self::error(
                     span,
                     ErrorKind::Type,
@@ -2123,6 +2130,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 // language represents as a pointer; a view that presents it
                 // as a sequence may give it some, one index at a time.
                 ref category @ (Category::Array { .. }
+                | Category::RuntimeArray
                 | Category::Slice(_)
                 | Category::Record
                 | Category::Pointer(_))
@@ -2131,7 +2139,10 @@ impl<'a, S: Scope> Binder<'a, S> {
                     let Ty::Program(from) = node.ty else {
                         unreachable!("indexed places are program types")
                     };
-                    let native = matches!(category, Category::Array { .. } | Category::Slice(_));
+                    let native = matches!(
+                        category,
+                        Category::Array { .. } | Category::RuntimeArray | Category::Slice(_)
+                    );
                     // A value a view presents as a map is indexed by key.
                     if !native && let Ok(planned) = self.scope.plan(from, StepKind::Entry) {
                         node = self.entry(node, planned, *first, *span)?;
@@ -2200,7 +2211,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 let count = dimensions.first().map_or(0, |dimension| dimension.count);
                 self.node(Op::Constant(constant(count)), Ty::Exact, span)
             }
-            Category::Slice(_) if operand.is_place() => self.node(
+            Category::Slice(_) | Category::RuntimeArray if operand.is_place() => self.node(
                 Op::Length {
                     operand: Box::new(operand),
                     how: Length::Slice,
@@ -2293,13 +2304,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             return false;
         };
         representation(self.scope, *reference).is_ok_and(|(_, info)| {
-            matches!(
-                info.kind,
-                TypeKind::Slice {
-                    has_capacity: true,
-                    ..
-                }
-            )
+            matches!(info.kind, TypeKind::Slice { words, .. } if words.capacity.is_some())
         })
     }
 
@@ -2316,7 +2321,7 @@ impl<'a, S: Scope> Binder<'a, S> {
     /// Whether a type is an array, or a slice of anything but text.
     fn has_elements(&self, ty: &Ty) -> bool {
         match self.category(ty) {
-            Category::Array { .. } => true,
+            Category::Array { .. } | Category::RuntimeArray => true,
             Category::Slice(_) => !self.is_text_slice(ty),
             _ => false,
         }

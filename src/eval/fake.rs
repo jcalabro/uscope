@@ -17,12 +17,13 @@ use super::target::{
 };
 use super::types::{TypeSource, c_type_key_of_name};
 use crate::{
-    AddressValue, ArrayDimension, BaseType, BaseTypeEncoding, ByteOrder, DereferenceState,
-    EnumerationOrigin, Enumerator, FloatValue, InspectedValue, InspectionCompletion,
-    InspectionUsage, IntegerValue, ModuleImageId, NamedTypeRelationship, OptimizedOutReason,
-    RecordKind, RecordMember, RecordMemberLayout, ScalarValue, TextCompletion, TextSummary, TypeId,
-    TypeInfo, TypeKind, TypeModifier, TypeReference, ValueAccessUnavailableReason, ValueChildren,
-    VariableState, VariableUnavailableReason, VariableValue, VariableValueSource, VirtualAddress,
+    AddressValue, ArrayDimension, ArrayOrdering, BaseType, BaseTypeEncoding, ByteOrder,
+    DereferenceState, EnumerationOrigin, Enumerator, FloatValue, InspectedValue,
+    InspectionCompletion, InspectionUsage, IntegerValue, ModuleImageId, NamedTypeRelationship,
+    OptimizedOutReason, RecordKind, RecordMember, RecordMemberLayout, ScalarValue, SliceWords,
+    TextCompletion, TextSummary, TypeId, TypeInfo, TypeKind, TypeModifier, TypeReference,
+    ValueAccessUnavailableReason, ValueChildren, VariableState, VariableUnavailableReason,
+    VariableValue, VariableValueSource, VirtualAddress,
 };
 
 const IMAGE: ModuleImageId = ModuleImageId::new(1);
@@ -371,6 +372,7 @@ impl World {
             TypeKind::Array {
                 element,
                 dimensions: dimensions.into(),
+                ordering: ArrayOrdering::RowMajor,
             },
         )
     }
@@ -382,7 +384,7 @@ impl World {
             Some(16),
             TypeKind::Slice {
                 element,
-                has_capacity: false,
+                words: SliceWords::POINTER_LENGTH,
                 text: false,
             },
         )
@@ -397,7 +399,7 @@ impl World {
             Some(24),
             TypeKind::Slice {
                 element,
-                has_capacity: true,
+                words: SliceWords::POINTER_LENGTH_CAPACITY,
                 text: false,
             },
         )
@@ -806,13 +808,14 @@ impl World {
             TypeKind::Array { dimensions, .. } => VariableValue::Array {
                 dimensions: Arc::clone(dimensions),
             },
-            TypeKind::Slice { has_capacity, .. } if bytes.len() >= 16 => {
-                let word = |at: usize| {
+            TypeKind::Slice { words, .. } if bytes.len() as u64 >= words.span() * 8 => {
+                let word = |at: u8| {
+                    let at = usize::from(at) * 8;
                     u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
                 };
                 VariableValue::Slice {
-                    length: word(8),
-                    capacity: (*has_capacity && bytes.len() >= 24).then(|| word(16)),
+                    length: word(words.length),
+                    capacity: words.capacity.map(word),
                 }
             }
             _ => VariableValue::Record,
@@ -1115,6 +1118,7 @@ impl Scope for World {
                 TypeKind::Array {
                     element,
                     dimensions,
+                    ..
                 },
             ) => {
                 if available < dimensions.len() {

@@ -271,7 +271,7 @@ fn empty_location<'expression>() -> Vec<gimli::Piece<Reader<'expression>>> {
     }]
 }
 
-fn evaluate_with_object<'expression>(
+pub(super) fn evaluate_with_object<'expression>(
     expression: Expression<'expression>,
     endian: RunTimeEndian,
     address: Option<ImageAddress>,

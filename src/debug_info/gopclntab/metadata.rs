@@ -152,6 +152,7 @@ impl Builder<'_, '_> {
             enclosing: None,
             coroutine: None,
             generics: std::sync::Arc::from([]),
+            main_subprogram: false,
         });
         Ok(id)
     }

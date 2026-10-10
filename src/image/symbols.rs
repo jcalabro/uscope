@@ -462,7 +462,7 @@ impl<'a> Symbol<'a> {
         self.record.storage_rank.get()
     }
 
-    /// The source-level spelling of a Rust or C++ mangled name, or `None`
+    /// The source-level spelling of a Rust, C++, or D mangled name, or `None`
     /// when the name is not mangled in a recognized scheme.
     #[must_use]
     pub fn demangled_name(self) -> Option<String> {

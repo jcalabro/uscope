@@ -710,8 +710,10 @@ fn formatted_and_linked(world: &mut World, int: TypeReference, tagged: TypeRefer
     world.variable("item", entry, &item);
 
     // Bytes, as text and otherwise: a `message {uint8_t text[8]; uint8_t
-    // raw[4]}`, and `octets`, a `uint8_t[4]`.
-    let byte = world.base("uint8_t", E::Unsigned, 1);
+    // raw[4]}`, and `octets`, a `uint8_t[4]`. `uint8_t` names `unsigned
+    // char`, as C's does.
+    let unsigned_char = world.base("unsigned char", E::UnsignedCharacter, 1);
+    let byte = world.typedef("uint8_t", unsigned_char);
     let text = world.array(byte, &[8]);
     let raw = world.array(byte, &[4]);
     let message = world.record("message", 12, &[("text", text, 0), ("raw", raw, 8)]);

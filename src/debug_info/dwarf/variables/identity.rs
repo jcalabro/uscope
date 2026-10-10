@@ -16,14 +16,15 @@ use crate::type_identity::{
     ANONYMOUS_NAMESPACE, NameIndex as _, NameSyntax, TypeIndex, TypeLookup, TypeName, parse_integer,
 };
 use crate::{
-    ArgumentOrigin, GoKind, GoTypeAttributes, ModuleImageId, SourceLanguage, TypeArgument, TypeId,
-    TypeIdentity, TypeInfo, TypeReference,
+    ArgumentOrigin, ArrayBound, ArrayExtent, GoKind, GoTypeAttributes, ModuleImageId,
+    RuntimeDimension, SourceLanguage, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind,
+    TypeReference,
 };
 
-use super::MAX_RECORD_CHILDREN;
 use super::codec::enumeration_constant;
 use super::die::strict_flag;
 use super::types::{TypeArenaBuilder, TypeEntry};
+use super::{MAX_RECORD_CHILDREN, MAX_TYPE_RESOLUTION_DEPTH};
 
 const DW_AT_GO_KIND: gimli::DwAt = gimli::DwAt(0x2900);
 const DW_AT_GO_KEY: gimli::DwAt = gimli::DwAt(0x2901);
@@ -116,13 +117,35 @@ pub(super) fn go_embedded(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) 
         })
 }
 
+/// The language a unit's producer or name proves where its
+/// `DW_AT_language` does not: Zig's LLVM backend and Odin say their units
+/// are C99, and Nim compiles each module to C in a file named for it, as
+/// `@mvalues.nim.c`.
+pub(in crate::debug_info) fn produced_language(
+    producer: Option<&str>,
+    name: Option<&str>,
+) -> Option<SourceLanguage> {
+    if name.is_some_and(|name| name.ends_with(".nim.c")) {
+        return Some(SourceLanguage::Nim);
+    }
+    let producer = producer?;
+    if producer.starts_with("zig ") {
+        Some(SourceLanguage::Zig)
+    } else if producer == "odin" || producer.starts_with("odin ") {
+        Some(SourceLanguage::Odin)
+    } else {
+        None
+    }
+}
+
+/// A unit's language: what its producer proves, else what its
+/// `DW_AT_language` says.
 pub(in crate::debug_info) const fn source_language(
     language: Option<gimli::DwLang>,
-    zig: bool,
+    produced: Option<SourceLanguage>,
 ) -> SourceLanguage {
-    if zig {
-        // Zig's LLVM backend says its units are C99.
-        return SourceLanguage::Zig;
+    if let Some(produced) = produced {
+        return produced;
     }
     let Some(language) = language else {
         return SourceLanguage::Unknown;
@@ -142,8 +165,40 @@ pub(in crate::debug_info) const fn source_language(
         gimli::DW_LANG_Rust => SourceLanguage::Rust,
         gimli::DW_LANG_Go => SourceLanguage::Go,
         gimli::DW_LANG_Zig => SourceLanguage::Zig,
+        gimli::DW_LANG_Fortran77
+        | gimli::DW_LANG_Fortran90
+        | gimli::DW_LANG_Fortran95
+        | gimli::DW_LANG_Fortran03
+        | gimli::DW_LANG_Fortran08
+        | gimli::DW_LANG_Fortran18 => SourceLanguage::Fortran,
+        gimli::DW_LANG_D => SourceLanguage::D,
+        gimli::DW_LANG_Ada83
+        | gimli::DW_LANG_Ada95
+        | gimli::DW_LANG_Ada2005
+        | gimli::DW_LANG_Ada2012 => SourceLanguage::Ada,
         other => SourceLanguage::Other(other.0),
     }
+}
+
+/// The namespaces a D module scopes what it declares in, one for each
+/// part of its name: `std.array` is `std`, then `array`.
+pub(super) fn module_segments(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+) -> Vec<ScopeSegment> {
+    string_attribute(dwarf, unit, entry, gimli::DW_AT_name)
+        .ok()
+        .flatten()
+        .map(|name| {
+            name.split('.')
+                .map(|part| ScopeSegment::Namespace {
+                    name: part.into(),
+                    listed: false,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// How a DIE scopes the types nested in it, or `None` when it is not a
@@ -289,11 +344,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 .get(unit_index)
                 .copied()
                 .flatten(),
-            self.context
-                .zig_units
-                .get(unit_index)
-                .copied()
-                .unwrap_or(false),
+            self.produced_language(unit_index),
         )
     }
 
@@ -343,13 +394,29 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         let Ok(mut children) = self.children(unit_index, entry.offset()) else {
             return (arguments, pack);
         };
+        // LDC describes an associative array as a record holding typedefs
+        // of its key and value types.
+        let d = self.language(unit_index) == SourceLanguage::D;
+        let mut associative = [None, None];
         let mut read = 0;
         while let Ok(Some(child)) = children.next_child() {
             if read == MAX_RECORD_CHILDREN {
                 break;
             }
             read += 1;
-            if child.tag() == gimli::DW_TAG_GNU_template_parameter_pack {
+            if d && child.tag() == gimli::DW_TAG_typedef {
+                let name = self.units.get(unit_index).and_then(|unit| {
+                    string_attribute(self.dwarf, unit, child, gimli::DW_AT_name)
+                        .ok()
+                        .flatten()
+                });
+                let slot = match name.as_deref() {
+                    Some(D_KEY) => 0,
+                    Some(D_VALUE) => 1,
+                    _ => continue,
+                };
+                associative[slot] = self.target(child, unit_index).ok().flatten();
+            } else if child.tag() == gimli::DW_TAG_GNU_template_parameter_pack {
                 pack = pack.or(Some(arguments.len()));
                 let Ok(mut parameters) = self.children(unit_index, child.offset()) else {
                     continue;
@@ -367,6 +434,9 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             } else if let Some(argument) = self.parameter_argument(child, unit_index) {
                 arguments.push(argument);
             }
+        }
+        if let ([Some(key), Some(value)], true) = (associative, arguments.is_empty()) {
+            arguments = vec![TypeArgument::Type(key), TypeArgument::Type(value)];
         }
         (arguments, pack)
     }
@@ -586,9 +656,42 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 let parts = self.identity_parts.get(index)?.as_ref()?;
                 let go = self.go_identity_parts.get(&id);
                 let language = self.language(parts.die.unit);
+                // Nim's C names each seq type for a hash of its element
+                // type; it is that type's `seq`.
+                if language == SourceLanguage::Nim
+                    && let Some(element) = self.nim_seq_element(info)
+                {
+                    let identity = TypeIdentity {
+                        language,
+                        path: Arc::from([]),
+                        inline_namespaces: Arc::from([]),
+                        base: Arc::from("seq"),
+                        arguments: Arc::from([TypeArgument::Type(element)]),
+                        pack: None,
+                        origin: ArgumentOrigin::Dwarf,
+                        go: None,
+                    };
+                    return Some((index, language, Arc::new(identity), Vec::new()));
+                }
+                // D's associative arrays are each `AssociativeArray` of
+                // their key and value types, as druntime once named them.
+                if language == SourceLanguage::D && d_associative_array(info, parts) {
+                    let identity = TypeIdentity {
+                        language,
+                        path: Arc::from([]),
+                        inline_namespaces: Arc::from([]),
+                        base: Arc::from("AssociativeArray"),
+                        arguments: Arc::from(parts.template.as_slice()),
+                        pack: None,
+                        origin: ArgumentOrigin::Dwarf,
+                        go: None,
+                    };
+                    return Some((index, language, Arc::new(identity), Vec::new()));
+                }
                 let parsed = TypeName::parse(&info.name, NameSyntax::of(language));
                 let scopes = self.type_path(parts.die);
-                // Only Go and Zig names spell their packages and modules.
+                // Only Go, Zig, and Odin names spell their packages and
+                // modules.
                 let path = if parsed.path.is_empty() {
                     scopes.path
                 } else {
@@ -639,6 +742,74 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         }
     }
 
+    /// The element type of a Nim seq, as Nim's C lays one out: a
+    /// `tySequence__` record of its `len` and `p`, which points to a
+    /// record of its `cap` and its elements, `data`, a flexible array.
+    fn nim_seq_element(&self, info: &TypeInfo) -> Option<TypeReference> {
+        let members = |info: &TypeInfo, names: [&str; 2]| match &info.kind {
+            TypeKind::Record {
+                members,
+                incomplete: false,
+                ..
+            } if members.len() == 2
+                && members
+                    .iter()
+                    .zip(names)
+                    .all(|(member, name)| member.name.as_deref() == Some(name)) =>
+            {
+                Some(Arc::clone(members))
+            }
+            _ => None,
+        };
+        let resolved = |reference: TypeReference| {
+            let mut id = reference.id;
+            for _ in 0..MAX_TYPE_RESOLUTION_DEPTH {
+                let Some(TypeEntry::Resolved(info)) = self.entries.get(id.index()) else {
+                    return None;
+                };
+                match &info.kind {
+                    TypeKind::Named {
+                        target: Some(target),
+                        ..
+                    }
+                    | TypeKind::Modified { target, .. } => id = target.id,
+                    _ => return Some(info),
+                }
+            }
+            None
+        };
+        if !info.name.starts_with("tySequence__") {
+            return None;
+        }
+        let seq = members(info, ["len", "p"])?;
+        let TypeKind::Pointer {
+            target: Some(content),
+            ..
+        } = resolved(seq[1].type_ref)?.kind
+        else {
+            return None;
+        };
+        let content = members(resolved(content)?, ["cap", "data"])?;
+        match &resolved(content[1].type_ref)?.kind {
+            TypeKind::RuntimeArray {
+                element,
+                dimensions,
+                ..
+            } if matches!(
+                dimensions.as_ref(),
+                [RuntimeDimension {
+                    lower_bound: ArrayBound::Constant(0),
+                    extent: ArrayExtent::Unknown,
+                    byte_stride: None,
+                }]
+            ) =>
+            {
+                Some(*element)
+            }
+            _ => None,
+        }
+    }
+
     /// The scopes enclosing the DIE a type was built from, or those of the
     /// declaration it completes.
     fn type_path(&self, die: DieKey) -> ScopePath {
@@ -654,6 +825,31 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             .cloned()
             .unwrap_or_default()
     }
+}
+
+/// The names of the typedefs LDC nests in an associative array's record
+/// for its key and value types.
+const D_KEY: &str = "__key_t";
+const D_VALUE: &str = "__val_t";
+
+/// Whether a D type is an associative array as LDC describes one: `V[K]`,
+/// a record of one pointer, `ptr`, to druntime's table, holding typedefs
+/// of its key and value types.
+fn d_associative_array(info: &TypeInfo, parts: &IdentityParts) -> bool {
+    let TypeKind::Record {
+        members,
+        incomplete: false,
+        ..
+    } = &info.kind
+    else {
+        return false;
+    };
+    info.name.ends_with(']')
+        && matches!(
+            parts.template.as_slice(),
+            [TypeArgument::Type(_), TypeArgument::Type(_)]
+        )
+        && matches!(members.as_ref(), [member] if member.name.as_deref() == Some("ptr"))
 }
 
 /// The positions of a type's identity whose arguments its name spells,

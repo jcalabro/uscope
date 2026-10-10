@@ -27,8 +27,8 @@ use super::symbols::{GotRecord, SectionRecord, SymbolRecord, SymbolView};
 use super::type_facts::{ComplexPartRecord, DynamicLayoutRecord, TypeFactRecord};
 use super::types::{
     ArgumentRecord, BaseRecord, DimensionRecord, EnumeratorRecord, IdentityRecord, Item,
-    MemberRecord, RuntimeTypeRecord, SelectorRecord, TypeRecord, TypeTable, TypeView,
-    VariantRecord,
+    MemberRecord, RuntimeDimensionRecord, RuntimeTypeRecord, SelectorRecord, TypeRecord, TypeTable,
+    TypeView, VariantRecord,
 };
 use super::unwind::{FdeMiss, FrameSaveRecord, UnwindRecord, UnwindView, unwind_flags};
 use super::variables::{
@@ -133,7 +133,8 @@ fn the_schema_is_the_records_layout() {
             instance_count,
             other_language,
             language,
-            role
+            role,
+            main_subprogram
         ]
     );
     check!(TableKind::Generics, GenericRecord, [name, argument]);
@@ -286,6 +287,25 @@ fn the_schema_is_the_records_layout() {
         TableKind::TypeDimensions,
         DimensionRecord,
         [lower_bound, count]
+    );
+    check!(
+        TableKind::RuntimeDimensions,
+        RuntimeDimensionRecord,
+        [
+            lower.value,
+            lower.kind,
+            lower.byte_size,
+            lower.signed,
+            extent.value,
+            extent.kind,
+            extent.byte_size,
+            extent.signed,
+            stride.value,
+            stride.kind,
+            stride.byte_size,
+            stride.signed,
+            ends
+        ]
     );
     check!(
         TableKind::TypeIdentities,
@@ -543,7 +563,7 @@ fn the_schema_is_the_records_layout() {
     // A change to any record changes this; bump the format with it.
     assert_eq!(
         schema::layout_fingerprint(),
-        0x5de1_e6f6_213b_a9e2,
+        0xb725_47a4_46d4_96d8,
         "the layout changed:\n{}",
         schema::schema_text()
     );
@@ -648,7 +668,10 @@ fn functions_read_back_with_their_indexes() {
     assert_eq!(ids(&mut function(2).instances()), [] as [u32; 0]);
     assert_eq!(ids(&mut function(3).instances()), [2]);
     let named = |name| view.named(name).map(|f| f.id().get()).collect::<Vec<_>>();
-    assert_eq!(named("main"), [0, 3]);
+    // The main subprogram answers to `main` as well as its own name, and
+    // in place of what is named `main`.
+    assert_eq!(named("main"), [2]);
+    assert_eq!(named("declared"), [2]);
     assert_eq!(named("missing"), [] as [u32; 0]);
     // Latest start first, each instance once though it names a range twice.
     let at = ImageAddress::new;
@@ -1150,7 +1173,7 @@ fn validation_rejects_functions_that_disagree() {
         ),
         (
             "an unknown language",
-            function(|f| f[0].language = 9),
+            function(|f| f[0].language = 200),
             "function is malformed",
         ),
         (
@@ -1162,6 +1185,21 @@ fn validation_rejects_functions_that_disagree() {
             "an unknown role",
             function(|f| f[0].role = 99),
             "function is malformed",
+        ),
+        (
+            "a main subprogram flag that is not one bit",
+            function(|f| f[2].main_subprogram = 2),
+            "function is malformed",
+        ),
+        (
+            "a main subprogram `main` does not name",
+            function(|f| f[1].main_subprogram = 1),
+            "name index disagrees",
+        ),
+        (
+            "`main` naming what is not the main subprogram",
+            function(|f| f[2].main_subprogram = 0),
+            "name index disagrees",
         ),
         (
             "a missing enclosure",
@@ -1485,7 +1523,7 @@ fn types_read_back_with_their_indexes() {
             .map(crate::TypeId::get)
             .collect::<Vec<_>>()
     };
-    assert_eq!(ids(view.named("int *").collect()), [1, 19]);
+    assert_eq!(ids(view.named("int *").collect()), [1, 20]);
     assert!(view.named("the type's size is negative").next().is_none());
     assert_eq!(ids(view.with_base("Point").collect()), [2]);
     // C's own spelling of a base type finds it too.
@@ -1508,7 +1546,7 @@ fn types_read_back_with_their_indexes() {
         first,
         other.node(crate::TypeId::new(2)).unwrap()
     ));
-    assert!(other.node(crate::TypeId::new(20)).is_none());
+    assert!(other.node(crate::TypeId::new(21)).is_none());
 }
 
 #[test]
@@ -1554,7 +1592,7 @@ fn validation_rejects_types_that_disagree() {
         ),
         (
             "a target past the types",
-            ty(|t| t[1].target = 20.into()),
+            ty(|t| t[1].target = 21.into()),
             "a type is malformed",
         ),
         (
@@ -1624,7 +1662,7 @@ fn validation_rejects_types_that_disagree() {
         ),
         (
             "a member of no type",
-            member(|m| m[0].ty = 20.into()),
+            member(|m| m[0].ty = 21.into()),
             "member, base",
         ),
         (
@@ -1670,12 +1708,12 @@ fn validation_rejects_types_that_disagree() {
         ),
         (
             "a parameter of no type",
-            item(TableKind::TypeParameters, |p| p[0].value = 20.into()),
+            item(TableKind::TypeParameters, |p| p[0].value = 21.into()),
             "member, base",
         ),
         (
             "an unknown language",
-            identity(|i| i[0].language = 9),
+            identity(|i| i[0].language = 200),
             "identity is malformed",
         ),
         (
@@ -1721,14 +1759,14 @@ fn validation_rejects_types_that_disagree() {
         (
             "a generic of no type",
             tampered(TableKind::Generics, |g: &mut [GenericRecord]| {
-                g[0].argument = 20.into();
+                g[0].argument = 21.into();
             }),
             "names a type the image lacks",
         ),
         (
             "a coroutine of no type",
             tampered(TableKind::Functions, |f: &mut [FunctionRecord]| {
-                f[0].coroutine = 20.into();
+                f[0].coroutine = 21.into();
             }),
             "names a type the image lacks",
         ),
@@ -1751,6 +1789,14 @@ fn validation_rejects_types_that_disagree() {
             "an enumerator of another type",
             name(TableKind::EnumeratorNames, |n| n[0].value = 0.into()),
             "enumerator index",
+        ),
+        (
+            "a run-time dimension without its end",
+            tampered(
+                TableKind::RuntimeDimensions,
+                |d: &mut [RuntimeDimensionRecord]| d[2].ends = 1,
+            ),
+            "a type is malformed",
         ),
         (
             "a later type for a descriptor",
@@ -3179,7 +3225,7 @@ fn validation_rejects_type_facts_that_disagree() {
         ),
         (
             "an unknown child",
-            layout(|l| l[2].kind = 4),
+            layout(|l| l[2].kind = 8),
             "run-time layout",
         ),
         (

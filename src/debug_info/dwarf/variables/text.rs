@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::inspection::InspectionBudget;
 use crate::model::{TextCompletion, TextSummary, ValueStorage};
 use crate::{
-    BaseTypeEncoding, GoKind, InspectionExhaustion, RecordMember, RecordMemberLayout,
+    BaseTypeEncoding, GoKind, ImageAddress, InspectionExhaustion, RecordMember, RecordMemberLayout,
     SourceLanguage, TypeId, TypeKind, ValueAccessUnavailableReason, VariableUnavailableReason,
     VariableValue, VirtualAddress,
 };
@@ -119,22 +119,26 @@ impl TextReader<'_> {
         text(bytes, width, byte_order, completion)
     }
 
-    /// The `length` bytes of text at an address.
-    fn counted_text(&mut self, address: VirtualAddress, length: u64) -> TextSummary {
+    /// The `length` characters of `width` bytes at an address.
+    fn counted_text(
+        &mut self,
+        address: VirtualAddress,
+        length: u64,
+        width: usize,
+        byte_order: crate::ByteOrder,
+    ) -> TextSummary {
         let limit = usize::try_from(length)
             .unwrap_or(usize::MAX)
             .min(TextSummary::MAX_BYTES);
-        let (bytes, _, stopped) = self.read_text(address, limit, 1, false);
-        TextSummary {
-            bytes: bytes.into(),
-            completion: match stopped {
-                Some(stopped) => stopped.completion(Some(length)),
-                None if length > limit as u64 => TextCompletion::Truncated {
-                    length: Some(length),
-                },
-                None => TextCompletion::Complete,
+        let (bytes, _, stopped) = self.read_text(address, limit * width, width, false);
+        let completion = match stopped {
+            Some(stopped) => stopped.completion(Some(length)),
+            None if length > limit as u64 => TextCompletion::Truncated {
+                length: Some(length),
             },
-        }
+            None => TextCompletion::Complete,
+        };
+        text(bytes, width, byte_order, completion)
     }
 
     /// Reads `size` bytes at `offset` within a value's storage.
@@ -208,12 +212,19 @@ impl Stopped {
 
 impl DwarfVariableInfo {
     /// The text a value of this type and shape holds, when it is a string.
+    /// A string bounded at run time finds its length in the frame
+    /// executing `context_address`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a value's type, shape, place, and the frame reading it"
+    )]
     pub(super) fn text_summary(
         &self,
         type_id: TypeId,
         shape: &ValueShape,
         value: &VariableValue,
         storage: &ValueStorage,
+        context_address: Option<ImageAddress>,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Option<TextSummary> {
@@ -269,11 +280,7 @@ impl DwarfVariableInfo {
                 ))
             }
             (ValueShape::Slice { text: true, .. }, VariableValue::Slice { length, .. }) => {
-                let address = match self.read_pointer(storage, 0, &mut reader)? {
-                    Ok(address) => address,
-                    Err(stopped) => return Some(stopped.summary(Some(*length))),
-                };
-                Some(self.slice_text(reader.counted_text(address, *length), shape))
+                self.counted_slice_text(&mut reader, storage, *length, shape)
             }
             (
                 ValueShape::Record {
@@ -294,21 +301,24 @@ impl DwarfVariableInfo {
                     ValueShape::Record {
                         record, members, ..
                     } => self.record_text(record, &members, &storage, &mut reader),
-                    shape @ ValueShape::Slice { text: true, .. } => {
-                        let length = match self.read_word(
-                            &storage,
-                            self.pointer_bytes() as u64,
-                            &mut reader,
-                        )? {
-                            Ok(length) => length,
-                            Err(stopped) => return Some(stopped.summary(None)),
-                        };
-                        let address = match self.read_pointer(&storage, 0, &mut reader)? {
-                            Ok(address) => address,
-                            Err(stopped) => return Some(stopped.summary(Some(length))),
-                        };
-                        Some(self.slice_text(reader.counted_text(address, length), &shape))
+                    shape @ ValueShape::Slice {
+                        text: true, words, ..
+                    } => {
+                        let length =
+                            match self.read_word(&storage, self.word(words.length), &mut reader)? {
+                                Ok(length) => length,
+                                Err(stopped) => return Some(stopped.summary(None)),
+                            };
+                        self.counted_slice_text(&mut reader, &storage, length, &shape)
                     }
+                    shape @ ValueShape::RuntimeArray { .. } => self.runtime_array_text(
+                        *target,
+                        &shape,
+                        &storage,
+                        context_address,
+                        reader.runtime,
+                        reader.budget,
+                    ),
                     _ => None,
                 }
             }
@@ -344,8 +354,14 @@ impl DwarfVariableInfo {
                 }
                 Some(Ok((address.address, None)))
             }
-            (ValueShape::Slice { text: true, .. }, VariableValue::Slice { length, .. }) => self
-                .read_pointer(storage, 0, &mut reader)
+            // Slices of text count bytes, which wider characters are not.
+            (
+                ValueShape::Slice {
+                    text: true, words, ..
+                },
+                VariableValue::Slice { length, .. },
+            ) if self.slice_width(shape) == 1 => self
+                .read_pointer(storage, self.word(words.data), &mut reader)
                 .map(|address| address.map(|address| (address, Some(*length)))),
             (
                 ValueShape::Record {
@@ -400,11 +416,47 @@ impl DwarfVariableInfo {
             Ok(length) => length,
             Err(stopped) => return Some(stopped.summary(None)),
         };
-        Some(reader.counted_text(address, length))
+        Some(reader.counted_text(address, length, 1, self.target.byte_order))
     }
 
-    /// Whether a type is a one-byte character, through typedefs and
-    /// qualifiers.
+    /// How many bytes a text slice's characters are: D's `wstring` and
+    /// `dstring` hold UTF-16 and UTF-32.
+    fn slice_width(&self, slice: &ValueShape) -> usize {
+        let ValueShape::Slice { element, .. } = slice else {
+            return 1;
+        };
+        self.value_shape(*element)
+            .ok()
+            .and_then(|shape| shape.scalar().map(|base| base.byte_size))
+            .filter(|size| matches!(size, 2 | 4))
+            .and_then(|size| usize::try_from(size).ok())
+            .unwrap_or(1)
+    }
+
+    /// The text of the `length` characters a slice stored here points to.
+    fn counted_slice_text(
+        &self,
+        reader: &mut TextReader<'_>,
+        storage: &ValueStorage,
+        length: u64,
+        slice: &ValueShape,
+    ) -> Option<TextSummary> {
+        let ValueShape::Slice { words, .. } = slice else {
+            return None;
+        };
+        let address = match self.read_pointer(storage, self.word(words.data), reader)? {
+            Ok(address) => address,
+            Err(stopped) => return Some(stopped.summary(Some(length))),
+        };
+        let text = reader.counted_text(
+            address,
+            length,
+            self.slice_width(slice),
+            self.target.byte_order,
+        );
+        Some(self.slice_text(text, slice))
+    }
+
     /// A text slice's text. Text of C's characters, as a Rust `CStr` is,
     /// ends with its NUL, which is not part of it.
     fn slice_text(&self, mut text: TextSummary, slice: &ValueShape) -> TextSummary {
@@ -429,6 +481,8 @@ impl DwarfVariableInfo {
         text
     }
 
+    /// Whether a type is a one-byte character, through typedefs and
+    /// qualifiers.
     fn is_character(&self, id: TypeId) -> bool {
         self.character_width(id) == Some(1)
     }
@@ -476,8 +530,9 @@ impl DwarfVariableInfo {
         None
     }
 
-    /// Whether a type is Zig's NUL-terminated pointer to bytes,
-    /// `[*:0]const u8`, through typedefs and qualifiers.
+    /// Whether a type is a NUL-terminated pointer to bytes that its
+    /// language names as text, through typedefs and qualifiers: Zig's
+    /// `[*:0]const u8` and Odin's `cstring`.
     fn is_sentinel_text(&self, id: TypeId) -> bool {
         let mut current = id;
         for _ in 0..MAX_STRING_DEPTH {
@@ -494,11 +549,12 @@ impl DwarfVariableInfo {
                     target: Some(target),
                     ..
                 } => {
-                    return info
-                        .identity
-                        .as_ref()
-                        .is_some_and(|identity| identity.language == SourceLanguage::Zig)
-                        && info.name.starts_with("[*:0]")
+                    let named = match info.identity.as_ref().map(|identity| identity.language) {
+                        Some(SourceLanguage::Zig) => info.name.starts_with("[*:0]"),
+                        Some(SourceLanguage::Odin) => info.name.as_ref() == "cstring",
+                        _ => false,
+                    };
+                    return named
                         && self.value_shape(target.id).is_ok_and(|shape| {
                             shape.scalar().is_some_and(|base| {
                                 base.byte_size == 1 && base.encoding == BaseTypeEncoding::Unsigned
@@ -528,6 +584,11 @@ impl DwarfVariableInfo {
 
     pub(super) const fn pointer_bytes(&self) -> usize {
         self.target.pointer_width.bytes() as usize
+    }
+
+    /// Where a descriptor's word of this index begins.
+    fn word(&self, index: u8) -> u64 {
+        u64::from(index) * self.pointer_bytes() as u64
     }
 
     fn read_pointer(

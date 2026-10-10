@@ -2378,6 +2378,8 @@ struct RawFunction {
     linkage_name: Option<Arc<str>>,
     /// Whether the DIE says the code only forwards to another function.
     trampoline: bool,
+    /// Whether the DIE says it is the program's main subprogram.
+    main_subprogram: bool,
     declaration: Option<SourceLocation>,
     call_site: Option<SourceLocation>,
     ranges: Vec<AddressRange<ImageAddress>>,
@@ -2467,6 +2469,7 @@ fn load_function_metadata<'data>(
             enclosing: None,
             coroutine: None,
             generics: Arc::from([]),
+            main_subprogram: origin.main_subprogram,
         });
         function_ids[definition] = Some(id);
     }
@@ -2557,10 +2560,42 @@ fn origin_role(origin: &RawFunction, name: &str, futures: &Futures) -> crate::Co
     }
 }
 
+/// What a function's language writes for a function whose DWARF name is
+/// an encoding: Nim names its procedures' C functions by their mangled
+/// names, and GNAT its subprograms by their scopes, encoded.
+fn written_name(language: SourceLanguage, name: &str) -> Option<String> {
+    match language {
+        SourceLanguage::Nim => crate::demangle::qualified_name(name),
+        SourceLanguage::Ada => crate::demangle::ada_name(name),
+        _ => None,
+    }
+}
+
+/// A function's own name, without the scopes its language qualifies it
+/// with, as C names a function: Nim's `values::add`, Odin's, and Ada's
+/// `values.add` are `add`. Other languages' DWARF names are their own.
+pub(super) fn own_name(language: SourceLanguage, name: &str) -> Option<String> {
+    let written = written_name(language, name);
+    let qualified = written.as_deref().unwrap_or(name);
+    let own = match language {
+        SourceLanguage::Nim | SourceLanguage::Odin => qualified.rsplit("::").next(),
+        SourceLanguage::Ada => qualified.rsplit('.').next(),
+        _ => None,
+    };
+    own.map(str::to_owned).or(written)
+}
+
 /// The name a function shows. Clang names the thunks a multiply inherited
 /// virtual function needs only by their linkage names, and the body of a
 /// Rust `async fn` or block shows as the function its programmer wrote.
 fn function_name(function: &RawFunction) -> Option<Arc<str>> {
+    if let Some(written) = function
+        .name
+        .as_deref()
+        .and_then(|name| written_name(function.language, name))
+    {
+        return Some(written.into());
+    }
     let name = function.name.clone().or_else(|| {
         function
             .linkage_name
@@ -2901,6 +2936,9 @@ fn raw_function<'data>(
         trampoline: entry
             .attr_value(gimli::DW_AT_trampoline)
             .is_some_and(|value| value != gimli::AttributeValue::Flag(false)),
+        main_subprogram: entry
+            .attr_value(gimli::DW_AT_main_subprogram)
+            .is_some_and(|value| value != gimli::AttributeValue::Flag(false)),
         declaration: entry_source_location(
             dwarf,
             unit,
@@ -2975,9 +3013,12 @@ fn unit_language(
         Some(gimli::AttributeValue::Language(language)) => Some(language),
         _ => units.inherited_language(unit_index),
     };
-    let zig = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?
-        .is_some_and(|producer| producer.starts_with("zig "));
-    Ok(variables::source_language(language, zig))
+    let producer = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?;
+    let name = str_attribute(dwarf, unit, root, gimli::DW_AT_name)?;
+    Ok(variables::source_language(
+        language,
+        variables::produced_language(producer.as_deref(), name.as_deref()),
+    ))
 }
 
 fn string_attribute(

@@ -1,16 +1,22 @@
 //! Source-level spellings of mangled linker names.
 
+mod dlang;
+
 /// Bounds the C++ demangler's recursion so adversarial names cannot exhaust
 /// the stack.
 const CPP_RECURSION_LIMIT: u32 = 96;
 
-/// Demangles a Rust (legacy or v0) or Itanium C++ linker name.
+/// Demangles a Rust (legacy or v0), Itanium C++, or D linker name. A D
+/// name is what the symbol names, without its type (see [`dlang`]).
 ///
 /// Rust is tried first because its legacy scheme is a subset of the Itanium
 /// grammar; the alternate rendering omits Rust's per-crate hash suffix.
 pub fn demangle(name: &str) -> Option<String> {
     if let Ok(demangled) = rustc_demangle::try_demangle(name) {
         return Some(format!("{demangled:#}"));
+    }
+    if name.starts_with("_D") {
+        return dlang::qualified_name(name);
     }
     if !name.starts_with("_Z") {
         return None;
@@ -64,6 +70,45 @@ pub fn spells(mangled: &str, name: &str) -> bool {
 pub fn last_part(name: &str) -> &str {
     let (written, _) = split_parameters(name);
     written.rsplit("::").next().unwrap_or(written)
+}
+
+/// What a mangled name names, without its parameters: Nim mangles its
+/// procedures as C++'s are, `_ZN6values7reachedE6string` naming
+/// `values::reached`.
+pub fn qualified_name(mangled: &str) -> Option<String> {
+    let demangled = demangle(mangled)?;
+    let (qualified, _) = split_parameters(&demangled);
+    Some(qualified.to_owned())
+}
+
+/// The name an Ada programmer writes for an entity GNAT named, when its
+/// encoding decodes exactly: scopes joined by `__`, which no Ada identifier
+/// holds, become dots, and an overload's number (`__2`) and a body's mark
+/// (`X`, `Xb`, `Xn`) are dropped. GNAT writes names in lower case and its
+/// other encodings in upper case or with `___`, so any other spelling is
+/// not decoded at all.
+pub fn ada_name(encoded: &str) -> Option<String> {
+    let name = ["Xb", "Xn", "X"]
+        .into_iter()
+        .find_map(|mark| encoded.strip_suffix(mark))
+        .unwrap_or(encoded);
+    let name = name
+        .rsplit_once("__")
+        .filter(|(_, number)| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .map_or(name, |(scoped, _)| scoped);
+    let identifier = |part: &str| {
+        part.starts_with(|first: char| first.is_ascii_lowercase())
+            && !part.ends_with('_')
+            && !part.contains("__")
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    };
+    name.split("__")
+        .all(identifier)
+        .then(|| name.replace("__", "."))
 }
 
 /// A demangled Rust function's path, with no generic arguments and an
@@ -135,7 +180,7 @@ fn split_parameters(name: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{demangle, rust_path, spells};
+    use super::{ada_name, demangle, rust_path, spells};
 
     #[test]
     fn rust_paths_leave_out_generic_arguments_and_inherent_impls_brackets() {
@@ -223,6 +268,89 @@ mod tests {
             ("_ZZZZZZZZ", None),
         ] {
             assert_eq!(demangle(mangled).as_deref(), expected, "{mangled}");
+        }
+    }
+
+    /// Checked against libiberty's D demangler, less parameters and with
+    /// template arguments left out.
+    #[test]
+    fn d_names_demangle_to_what_they_name_or_not_at_all() {
+        for (mangled, expected) in [
+            // A function nested in another, which is followed by its type.
+            (
+                "_D2rt6dmain212_d_run_main2UAAamPUQgZiZ6runAllMFZv",
+                Some("rt.dmain2._d_run_main2.runAll"),
+            ),
+            (
+                "_D3std6socket9TcpSocket6__vtblZ",
+                Some("std.socket.TcpSocket.__vtbl"),
+            ),
+            // Template instances, with values, back references to their
+            // names, and symbols as arguments.
+            (
+                "_D3std10functional__T6safeOpVAyaa1_3cZ__TQuTmTiZQBbFNaNbNiNfKmKiZb",
+                Some("std.functional.safeOp!(…).safeOp!(…).safeOp"),
+            ),
+            (
+                "_D3std11concurrency__T8initOnceS_DQBg8datetime8timezone9LocalTime9singletonFNeZ5guardObZQCoFNcLObZOb",
+                Some("std.concurrency.initOnce!(…).initOnce"),
+            ),
+            // A type that refers back to a function type.
+            (
+                "_D3std11concurrency14FiberScheduler6createMFNbDFZvZ4wrapMQk",
+                Some("std.concurrency.FiberScheduler.create.wrap"),
+            ),
+            ("_Dmain", Some("D main")),
+            // A thunk, names cut short, and what only begins as D's do.
+            (
+                "_DThn16_4core8internal2gc4impl6manualQp8ManualGC6enableMFZv",
+                None,
+            ),
+            ("_D2rt6dmain212_d_run_main2UAAam", None),
+            ("_D3std", None),
+            ("_D3stdQz", None),
+            ("_DYNAMIC", None),
+        ] {
+            assert_eq!(demangle(mangled).as_deref(), expected, "{mangled}");
+        }
+        let nested = format!("_D1f{}v", "P".repeat(10_000));
+        assert_eq!(demangle(&nested), None);
+    }
+
+    #[test]
+    fn gnat_names_decode_exactly_or_not_at_all() {
+        for (encoded, expected) in [
+            ("values__reached", Some("values.reached")),
+            (
+                "ada__characters__handling__to_upper",
+                Some("ada.characters.handling.to_upper"),
+            ),
+            // An overload's number and a body's mark are not the name's.
+            (
+                "ada__characters__handling__to_upper__2",
+                Some("ada.characters.handling.to_upper"),
+            ),
+            (
+                "ada__exceptions__exception_data__append_info_natXn",
+                Some("ada.exceptions.exception_data.append_info_nat"),
+            ),
+            (
+                "ada__exceptions__exception_data__append_info_exception_name__2Xn",
+                Some("ada.exceptions.exception_data.append_info_exception_name"),
+            ),
+            ("values", Some("values")),
+            // Other encodings, and what no Ada name is, stay as GNAT wrote
+            // them.
+            ("ada__containers__Tcount_typeB", None),
+            ("ada__containers___elabs", None),
+            ("ada__characters__handling__to_string__L_6__T144b___L", None),
+            ("system__secondary_stack__ss_allocate__2__3", None),
+            ("_ada_values", None),
+            ("values__", None),
+            ("values__2", Some("values")),
+            ("main", Some("main")),
+        ] {
+            assert_eq!(ada_name(encoded).as_deref(), expected, "{encoded}");
         }
     }
 

@@ -15,13 +15,40 @@ use super::strings::{StrId, Strings, StringsBuilder};
 use super::{Builder, Image, NONE, Record, SharedRecord, TableKind};
 use crate::TypeId;
 
-/// A child of an aggregate whose place an expression computes.
+/// A child of an aggregate whose place an expression computes, or a part
+/// of an array bounded at run time that one does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum LayoutChild {
     Member(u32),
     Base(u32),
     Discriminant,
-    VariantMember { variant: u32, member: u32 },
+    VariantMember {
+        variant: u32,
+        member: u32,
+    },
+    /// A dimension's lower bound, extent, or stride, as `part` says.
+    Bound {
+        dimension: u32,
+        part: BoundPart,
+    },
+    /// Where an array's elements are.
+    DataLocation,
+    /// Whether an array is allocated.
+    Allocated,
+    /// Whether an array is associated with storage.
+    Associated,
+}
+
+/// Which bound of a dimension an expression computes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BoundPart {
+    Lower,
+    Extent,
+    Stride,
+}
+
+impl BoundPart {
+    const ALL: [Self; 3] = [Self::Lower, Self::Extent, Self::Stride];
 }
 
 /// What [`add_to`] encodes, in any order, at most once for each key.
@@ -91,6 +118,10 @@ pub mod children {
     pub const BASE: u8 = 1;
     pub const DISCRIMINANT: u8 = 2;
     pub const VARIANT_MEMBER: u8 = 3;
+    pub const BOUND: u8 = 4;
+    pub const DATA_LOCATION: u8 = 5;
+    pub const ALLOCATED: u8 = 6;
+    pub const ASSOCIATED: u8 = 7;
 }
 
 /// Why type facts could not be encoded.
@@ -106,6 +137,10 @@ const fn encode_child(child: LayoutChild) -> (u8, u32, u32) {
         LayoutChild::VariantMember { variant, member } => {
             (children::VARIANT_MEMBER, variant, member)
         }
+        LayoutChild::Bound { dimension, part } => (children::BOUND, dimension, part as u32),
+        LayoutChild::DataLocation => (children::DATA_LOCATION, 0, 0),
+        LayoutChild::Allocated => (children::ALLOCATED, 0, 0),
+        LayoutChild::Associated => (children::ASSOCIATED, 0, 0),
     }
 }
 
@@ -290,6 +325,10 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
                 children::MEMBER | children::BASE => layout.second.get() == 0,
                 children::DISCRIMINANT => layout.first.get() == 0 && layout.second.get() == 0,
                 children::VARIANT_MEMBER => true,
+                children::BOUND => (layout.second.get() as usize) < BoundPart::ALL.len(),
+                children::DATA_LOCATION | children::ALLOCATED | children::ASSOCIATED => {
+                    layout.first.get() == 0 && layout.second.get() == 0
+                }
                 _ => false,
             }
     }) || !view

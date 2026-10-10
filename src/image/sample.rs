@@ -214,6 +214,7 @@ pub(super) fn sample_functions() -> Vec<FunctionInfo> {
         enclosing: None,
         coroutine: None,
         generics: std::sync::Arc::from([]),
+        main_subprogram: false,
     };
     vec![
         FunctionInfo {
@@ -234,7 +235,10 @@ pub(super) fn sample_functions() -> Vec<FunctionInfo> {
             enclosing: Some(FunctionId::new(0)),
             ..function(1, "helper")
         },
-        function(2, "declared"),
+        FunctionInfo {
+            main_subprogram: true,
+            ..function(2, "declared")
+        },
         function(3, "main"),
     ]
 }
@@ -398,12 +402,12 @@ pub(super) fn sample_packaged() -> Vec<Option<(&'static str, String)>> {
 #[expect(clippy::too_many_lines, reason = "one type of each kind and shape")]
 pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
     use crate::{
-        Accessibility, ArgumentOrigin, ArrayDimension, BaseClass, BaseClassVirtuality, BaseType,
-        BaseTypeEncoding, EnumerationOrigin, Enumerator, GoKind, GoTypeAttributes, IntegerValue,
-        ModuleImageId, NamedTypeRelationship, RecordKind, RecordMember, RecordMemberLayout,
-        ReferenceKind, TypeArgument, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode,
-        TypeReference, Variant, VariantDiscriminant, VariantSelection, VariantSelector,
-        VariantStorageKind,
+        Accessibility, ArgumentOrigin, ArrayDimension, ArrayOrdering, BaseClass,
+        BaseClassVirtuality, BaseType, BaseTypeEncoding, EnumerationOrigin, Enumerator, GoKind,
+        GoTypeAttributes, IntegerValue, ModuleImageId, NamedTypeRelationship, RecordKind,
+        RecordMember, RecordMemberLayout, ReferenceKind, TypeArgument, TypeIdentity, TypeInfo,
+        TypeKind, TypeModifier, TypeNode, TypeReference, Variant, VariantDiscriminant,
+        VariantSelection, VariantSelector, VariantStorageKind,
     };
     let reference = |id| TypeReference {
         image: ModuleImageId::new(0),
@@ -589,6 +593,7 @@ pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
                     },
                 ]
                 .into(),
+                ordering: ArrayOrdering::ColumnMajor,
             },
             None,
         ),
@@ -597,7 +602,7 @@ pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
             Some(24),
             TypeKind::Slice {
                 element: reference(0),
-                has_capacity: true,
+                words: crate::SliceWords::POINTER_LENGTH_CAPACITY,
                 text: false,
             },
             None,
@@ -708,6 +713,41 @@ pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
                 bit_size: None,
             }),
             Some(identity(SourceLanguage::C, &[], "short int")),
+        ),
+        (
+            "integer(kind=4)[:,:]",
+            None,
+            TypeKind::RuntimeArray {
+                element: reference(0),
+                dimensions: [
+                    crate::RuntimeDimension {
+                        lower_bound: crate::ArrayBound::Computed {
+                            byte_size: 8,
+                            signed: true,
+                        },
+                        extent: crate::ArrayExtent::Upper(crate::ArrayBound::Stored {
+                            byte_size: 4,
+                            signed: false,
+                        }),
+                        byte_stride: Some(crate::ArrayBound::Constant(-8)),
+                    },
+                    crate::RuntimeDimension {
+                        lower_bound: crate::ArrayBound::Constant(i128::MIN),
+                        extent: crate::ArrayExtent::Count(crate::ArrayBound::Variable {
+                            debug_info_offset: u64::MAX,
+                        }),
+                        byte_stride: None,
+                    },
+                    crate::RuntimeDimension {
+                        lower_bound: crate::ArrayBound::Constant(0),
+                        extent: crate::ArrayExtent::Unknown,
+                        byte_stride: None,
+                    },
+                ]
+                .into(),
+                ordering: ArrayOrdering::ColumnMajor,
+            },
+            None,
         ),
         (
             "int *",
@@ -1055,6 +1095,15 @@ pub(super) fn sample_type_facts() -> type_facts::TypeFacts {
                 ExpressionId(1),
             ),
             (ty(4), LayoutChild::Discriminant, ExpressionId(0)),
+            (
+                ty(5),
+                LayoutChild::Bound {
+                    dimension: 1,
+                    part: type_facts::BoundPart::Stride,
+                },
+                ExpressionId(1),
+            ),
+            (ty(5), LayoutChild::DataLocation, ExpressionId(0)),
         ],
     }
 }

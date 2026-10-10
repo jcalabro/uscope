@@ -2,8 +2,8 @@
 
 use super::*;
 use uscope::{
-    ArgumentOrigin, GoKind, IntegerValue, SourceLanguage, TypeArgument, TypeIdentity, TypeInfo,
-    TypeKind, TypeReference,
+    ArgumentOrigin, GoKind, IntegerValue, SliceWords, SourceLanguage, TypeArgument, TypeIdentity,
+    TypeInfo, TypeKind, TypeReference,
 };
 
 fn info(image: &ModuleImage, reference: TypeReference) -> &TypeInfo {
@@ -233,7 +233,7 @@ async fn rust_identities_and_fat_pointers_follow_structure_not_spelling() {
             let slice = named(&image, name);
             let TypeKind::Slice {
                 element: found,
-                has_capacity: false,
+                words: SliceWords::POINTER_LENGTH,
                 text: false,
             } = slice.kind
             else {
@@ -292,7 +292,7 @@ async fn go_identities_come_from_kinds_and_instance_names() {
         assert!(matches!(
             named(&image, "[]int").kind,
             TypeKind::Slice {
-                has_capacity: true,
+                words: SliceWords::POINTER_LENGTH_CAPACITY,
                 text: false,
                 ..
             }

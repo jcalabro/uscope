@@ -10,12 +10,12 @@ use crate::debug_info::{
     ObjectStorage, PlannedStep, Step, StorageClass, VariableContext, VariableRuntime,
 };
 use crate::inspection::InspectionBudget;
-use crate::model::{ArrayDimension, ValueStorage};
+use crate::model::{ArrayDimension, ArrayOrdering, ValueStorage};
 use crate::{
     Accessibility, AddressValue, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId,
     DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue, Error,
     ImageAddress, InspectedValue, IntegerValue, RecordMember, RecordMemberLayout, Result,
-    ScalarValue, TypeId, TypeInfo, TypeKind, TypeReference, ValueChild, ValueChildPage,
+    ScalarValue, SliceWords, TypeId, TypeInfo, TypeKind, TypeReference, ValueChild, ValueChildPage,
     ValueChildRelationship, ValueChildren, ValueChildrenReference, Variable, VariableInvalidReason,
     VariableMalformedKind, VariableState, VariableUnavailableReason, VariableValue,
     VariableValueSource, Variant, VariantDiscriminant, VirtualAddress,
@@ -32,6 +32,7 @@ use super::evaluate::{
 use super::generic::Generic;
 use super::location::{Expression, ExpressionUse, LocationSelectionError, select};
 use super::pieces::storage_from_pieces;
+use super::runtime_array::{Resolved, element_offset};
 use super::shape::tagless_variant;
 use super::shape::{
     ValueShape, ValueShapeError, indirection_byte_size, transparent_type_from, value_shape_from,
@@ -58,12 +59,18 @@ pub(in crate::debug_info) enum PathStep {
     },
     ArrayIndex {
         dimensions: Arc<[ArrayDimension]>,
+        ordering: ArrayOrdering,
         element_size: u64,
+    },
+    /// An index into the array bounded at run time `array`, whose value
+    /// finds its bounds.
+    RuntimeArrayIndex {
+        array: TypeId,
     },
     SliceIndex {
         element_size: u64,
         descriptor_size: u64,
-        has_capacity: bool,
+        words: SliceWords,
     },
     Member(Box<PlannedMemberStep>),
     Unavailable(VariableUnavailableReason),
@@ -95,6 +102,10 @@ struct MemberHop {
 
 /// How many aggregates one member lookup may examine.
 const MAX_MEMBER_SEARCH: usize = 4_096;
+
+/// The most words a slice descriptor may hold: Odin's dynamic arrays, the
+/// largest, hold five.
+const MAX_SLICE_WORDS: u64 = 8;
 
 /// The one path when every path found reaches the same subobject: paths
 /// through one virtual base reach one object, since the derived object
@@ -228,11 +239,23 @@ pub(in crate::debug_info) fn array_byte_offset(
 ) -> Result<Option<i64>> {
     let PathStep::ArrayIndex {
         dimensions,
+        ordering,
         element_size,
     } = step
     else {
         return Ok(None);
     };
+    element_byte_offset(dimensions, *ordering, indices, *element_size).map(Some)
+}
+
+/// The byte offset of the element at source `indices` of an array laid
+/// out in `ordering`, checked against its bounds.
+fn element_byte_offset(
+    dimensions: &[ArrayDimension],
+    ordering: ArrayOrdering,
+    indices: &[i128],
+    element_size: u64,
+) -> Result<i64> {
     if indices.len() != dimensions.len() {
         return Err(Error::InvalidValueExpression(format!(
             "an array of {} dimensions takes as many indices, not {}",
@@ -240,7 +263,7 @@ pub(in crate::debug_info) fn array_byte_offset(
             indices.len()
         )));
     }
-    let mut linear = 0_u64;
+    let mut position = Vec::with_capacity(indices.len());
     for (index, dimension) in indices.iter().copied().zip(dimensions.iter()) {
         let relative = index
             .checked_sub(dimension.lower_bound)
@@ -251,17 +274,24 @@ pub(in crate::debug_info) fn array_byte_offset(
                 lower_bound: dimension.lower_bound,
                 count: dimension.count,
             })?;
+        position.push((relative, dimension.count));
+    }
+    // The dimension whose elements are adjacent comes last.
+    if ordering == ArrayOrdering::ColumnMajor {
+        position.reverse();
+    }
+    let mut linear = 0_u64;
+    for (relative, count) in position {
         linear = linear
-            .checked_mul(dimension.count)
+            .checked_mul(count)
             .and_then(|value| value.checked_add(relative))
             .ok_or_else(|| {
-                Error::InvalidValueExpression("array row-major index overflows".to_owned())
+                Error::InvalidValueExpression("array element index overflows".to_owned())
             })?;
     }
     linear
-        .checked_mul(*element_size)
+        .checked_mul(element_size)
         .and_then(|offset| i64::try_from(offset).ok())
-        .map(Some)
         .ok_or_else(|| Error::InvalidValueExpression("array element offset overflows".to_owned()))
 }
 
@@ -811,13 +841,29 @@ impl DwarfVariableInfo {
             }
             Step::Index { available } => {
                 let source_info = self.type_info(from).map_err(malformed)?;
-                let Some((_canonical, info)) = supported_shape(self.transparent_type(from))? else {
+                let Some((canonical, info)) = supported_shape(self.transparent_type(from))? else {
                     return Ok(planned(vec![unsupported()], 1, None));
                 };
                 let (element, consumed) = match &info.kind {
+                    TypeKind::RuntimeArray {
+                        element,
+                        dimensions,
+                        ..
+                    } => {
+                        if available < dimensions.len() {
+                            return Err(Error::IncompleteArrayIndex {
+                                type_name: Arc::clone(&source_info.name),
+                                expected: dimensions.len(),
+                                supplied: available,
+                            });
+                        }
+                        steps.push(PathStep::RuntimeArrayIndex { array: canonical });
+                        return Ok(planned(steps, dimensions.len(), Some(element.id)));
+                    }
                     TypeKind::Array {
                         element,
                         dimensions,
+                        ..
                     } => {
                         if available < dimensions.len() {
                             return Err(Error::IncompleteArrayIndex {
@@ -840,18 +886,23 @@ impl DwarfVariableInfo {
                 };
                 let element_size = element_shape.byte_size();
                 match &info.kind {
-                    TypeKind::Array { dimensions, .. } => steps.push(PathStep::ArrayIndex {
+                    TypeKind::Array {
+                        dimensions,
+                        ordering,
+                        ..
+                    } => steps.push(PathStep::ArrayIndex {
                         dimensions: Arc::clone(dimensions),
+                        ordering: *ordering,
                         element_size,
                     }),
-                    TypeKind::Slice { has_capacity, .. } => {
+                    TypeKind::Slice { words, .. } => {
                         let descriptor_size = info
                             .byte_size
                             .ok_or_else(|| malformed("slice descriptor has no byte size".into()))?;
                         steps.push(PathStep::SliceIndex {
                             element_size,
                             descriptor_size,
-                            has_capacity: *has_capacity,
+                            words: *words,
                         });
                     }
                     _ => unreachable!("only arrays and slices were accepted above"),
@@ -1243,22 +1294,25 @@ impl DwarfVariableInfo {
         &self,
         storage: &ValueStorage,
         byte_size: u64,
-        has_capacity: bool,
+        words: SliceWords,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<DecodedSlice, EvaluateError> {
         let pointer_bytes = self.pointer_bytes();
-        let words = if has_capacity { 3 } else { 2 };
         // Validate the metadata's size before reading, so a bogus size cannot
-        // spend the request's memory budget.
-        let size = pointer_bytes * words;
-        if byte_size != size as u64 {
+        // spend the request's memory budget: a descriptor is a few words.
+        let word_count = byte_size / pointer_bytes as u64;
+        if !byte_size.is_multiple_of(pointer_bytes as u64)
+            || !(words.span()..=MAX_SLICE_WORDS).contains(&word_count)
+        {
             return Err(EvaluateError::Malformed(
                 "slice descriptor size does not match its target layout".into(),
             ));
         }
+        let size = usize::try_from(byte_size).expect("a few words fit usize");
         let (source, raw) = storage::read(storage, size, runtime, budget)?;
-        let word = |index: usize| {
+        let word = |index: u8| {
+            let index = usize::from(index);
             unsigned_value(
                 &raw[index * pointer_bytes..(index + 1) * pointer_bytes],
                 self.target.byte_order,
@@ -1269,12 +1323,12 @@ impl DwarfVariableInfo {
                     .map_err(|_| Arc::<str>::from("slice word exceeds target address width"))
             })
         };
-        let address = word(0)
+        let address = word(words.data)
             .map(VirtualAddress::new)
             .map_err(EvaluateError::Malformed)?;
-        let length = word(1).map_err(EvaluateError::Malformed)?;
-        let capacity = if has_capacity {
-            let capacity = word(2).map_err(EvaluateError::Malformed)?;
+        let length = word(words.length).map_err(EvaluateError::Malformed)?;
+        let capacity = if let Some(capacity) = words.capacity {
+            let capacity = word(capacity).map_err(EvaluateError::Malformed)?;
             if capacity < length {
                 return Err(EvaluateError::Malformed(
                     "slice length exceeds its capacity".into(),
@@ -1448,6 +1502,7 @@ impl DwarfVariableInfo {
             total,
             active_variant,
             view: None,
+            placement: None,
         })
     }
 
@@ -1815,10 +1870,39 @@ impl DwarfVariableInfo {
                     let byte_offset = array_byte_offset(step, indices)?.unwrap_or_default();
                     attempt!(storage::offset(storage, byte_offset))
                 }
+                PathStep::RuntimeArrayIndex { array } => {
+                    let shape = attempt!(self.value_shape(*array).map_err(EvaluateError::from));
+                    match attempt!(
+                        self.resolve_runtime_array(&shape, &storage, address, runtime, budget)
+                    ) {
+                        Resolved::Elements {
+                            data,
+                            dimensions,
+                            strides,
+                        } => {
+                            if indices.len() != dimensions.len() {
+                                return Err(Error::InvalidValueExpression(format!(
+                                    "an array of {} dimensions takes as many indices, not {}",
+                                    dimensions.len(),
+                                    indices.len()
+                                )));
+                            }
+                            let at = attempt!(element_offset(&dimensions, &strides, indices));
+                            attempt!(storage::offset(data, at))
+                        }
+                        Resolved::NotAllocated | Resolved::NotAssociated => {
+                            return Ok(Err(EvaluateError::Unavailable(
+                                VariableUnavailableReason::ValueAccess(
+                                    crate::ValueAccessUnavailableReason::NullPointer,
+                                ),
+                            )));
+                        }
+                    }
+                }
                 PathStep::SliceIndex {
                     element_size,
                     descriptor_size,
-                    has_capacity,
+                    words,
                 } => {
                     let [index] = indices else {
                         return Err(Error::InvalidValueExpression(format!(
@@ -1835,7 +1919,7 @@ impl DwarfVariableInfo {
                     let decoded = attempt!(self.decode_slice(
                         &storage,
                         *descriptor_size,
-                        *has_capacity,
+                        *words,
                         runtime,
                         budget,
                     ));
@@ -1961,9 +2045,20 @@ impl DwarfVariableInfo {
     ) -> Result<VariableState> {
         let mut state =
             self.materialize_shape_state(type_id, shape, storage, context, runtime, budget)?;
-        if let VariableState::Available { value, text, .. } = &mut state {
+        // An array bounded at run time found its text where its elements are.
+        if let VariableState::Available { value, text, .. } = &mut state
+            && !matches!(shape, ValueShape::RuntimeArray { .. })
+        {
             *text = self
-                .text_summary(type_id, shape, value, storage, runtime, budget)
+                .text_summary(
+                    type_id,
+                    shape,
+                    value,
+                    storage,
+                    context.address,
+                    runtime,
+                    budget,
+                )
                 .map(Arc::new);
         }
         self.constrain_dereference(&mut state, shape);
@@ -2207,22 +2302,94 @@ impl DwarfVariableInfo {
                     None,
                 )
             }
+            ValueShape::RuntimeArray { .. } => {
+                let resolved = match self.resolve_runtime_array(
+                    shape,
+                    storage,
+                    context.address,
+                    runtime,
+                    budget,
+                ) {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        return evaluate_error_state(
+                            error,
+                            VariableMalformedKind::InconsistentLayout,
+                        );
+                    }
+                };
+                let (data, bounds, strides) = match resolved {
+                    Resolved::Elements {
+                        data,
+                        dimensions,
+                        strides,
+                    } => (data, dimensions, strides),
+                    absent @ (Resolved::NotAllocated | Resolved::NotAssociated) => {
+                        return Ok(VariableState::Available {
+                            source: storage::source(storage),
+                            raw: None,
+                            value: if matches!(absent, Resolved::NotAllocated) {
+                                VariableValue::NotAllocated
+                            } else {
+                                VariableValue::NotAssociated
+                            },
+                            dereference: DereferenceState::NotApplicable,
+                            children: ValueChildren::NotApplicable,
+                            text: None,
+                            presentation: None,
+                        });
+                    }
+                };
+                let Some(placement) = Resolved::placement(&bounds, &strides) else {
+                    return Ok(VariableState::Unavailable(
+                        VariableUnavailableReason::ValueAccess(
+                            crate::ValueAccessUnavailableReason::UnknownLength,
+                        ),
+                    ));
+                };
+                let Some(total) = placement
+                    .dimensions
+                    .iter()
+                    .try_fold(1_u64, |total, dimension| total.checked_mul(dimension.count))
+                else {
+                    return Ok(VariableState::Unavailable(
+                        VariableUnavailableReason::EvaluationLimit,
+                    ));
+                };
+                let value = VariableValue::Array {
+                    dimensions: Arc::clone(&placement.dimensions),
+                };
+                let text = self
+                    .resolved_text(type_id, shape, &data, &placement, runtime, budget)
+                    .map(Arc::new);
+                let mut reference = Self::child_reference(&data, context, type_id, total, None);
+                Arc::make_mut(&mut reference).placement = Some(Arc::new(placement));
+                VariableState::Available {
+                    source: storage::source(&data),
+                    raw: None,
+                    value,
+                    dereference: DereferenceState::NotApplicable,
+                    children: ValueChildren::Available(reference),
+                    text,
+                    presentation: None,
+                }
+            }
             ValueShape::Slice {
                 element: _,
                 byte_size,
-                has_capacity,
+                words,
                 ..
             } => {
-                let decoded =
-                    match self.decode_slice(storage, *byte_size, *has_capacity, runtime, budget) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            return evaluate_error_state(
-                                error,
-                                VariableMalformedKind::InconsistentLayout,
-                            );
-                        }
-                    };
+                let decoded = match self.decode_slice(storage, *byte_size, *words, runtime, budget)
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return evaluate_error_state(
+                            error,
+                            VariableMalformedKind::InconsistentLayout,
+                        );
+                    }
+                };
                 let backing = ValueStorage::Memory(decoded.address);
                 VariableState::Available {
                     source: decoded.source,
@@ -2400,6 +2567,26 @@ impl DwarfVariableInfo {
         let shape = self
             .value_shape(reference.target_type)
             .map_err(shape_error)?;
+        // An array bounded at run time is the array its value found.
+        let shape = match (shape, &reference.placement) {
+            (
+                ValueShape::RuntimeArray {
+                    element, ordering, ..
+                },
+                Some(placement),
+            ) => ValueShape::Array {
+                element,
+                dimensions: Arc::clone(&placement.dimensions),
+                ordering,
+                byte_size: 0,
+            },
+            (ValueShape::RuntimeArray { .. }, None) => {
+                return Err(Error::debug_info(DwarfError::MalformedVariable(
+                    "an array bounded at run time has no bounds for its children".into(),
+                )));
+            }
+            (shape, _) => shape,
+        };
         // A closure's children are what it captured.
         let captures = match &shape {
             ValueShape::Function { byte_size } => Some(
@@ -2487,6 +2674,16 @@ impl DwarfVariableInfo {
             None
         } else {
             match &shape {
+                // Strides place each element of an array bounded at run
+                // time.
+                ValueShape::Array { .. } if reference.placement.is_some() => None,
+                // An array laid out column by column keeps a page's rows
+                // apart.
+                ValueShape::Array {
+                    dimensions,
+                    ordering: ArrayOrdering::ColumnMajor,
+                    ..
+                } if dimensions.len() > 1 => None,
                 ValueShape::Array { element, .. } | ValueShape::Slice { element, .. } => {
                     let element_shape = self.value_shape(*element).ok();
                     let requires_bytes = element_shape.as_ref().is_some_and(|shape| {
@@ -2673,7 +2870,7 @@ impl DwarfVariableInfo {
                 } else {
                     index
                 };
-                let child_storage = storage_index
+                let mut child_storage = storage_index
                     .checked_mul(stride)
                     .and_then(|offset| i64::try_from(offset).ok())
                     .ok_or_else(|| VariableUnavailableReason::EvaluationLimit.into())
@@ -2684,10 +2881,30 @@ impl DwarfVariableInfo {
                         )
                     });
                 let relationship = match &shape {
-                    ValueShape::Array { dimensions, .. } => ValueChildRelationship::ArrayElement {
-                        index,
-                        indices: array_source_indices(dimensions, index)?.into(),
-                    },
+                    ValueShape::Array {
+                        dimensions,
+                        ordering,
+                        ..
+                    } => {
+                        let indices = array_source_indices(dimensions, index)?;
+                        // Elements are listed row by row wherever they are.
+                        if let Some(placement) = &reference.placement {
+                            let bounds = placement
+                                .dimensions
+                                .iter()
+                                .map(|dimension| (dimension.lower_bound, Some(dimension.count)))
+                                .collect::<Vec<_>>();
+                            child_storage = element_offset(&bounds, &placement.strides, &indices)
+                                .and_then(|at| storage::offset(storage.clone(), at));
+                        } else if *ordering == ArrayOrdering::ColumnMajor {
+                            let at = element_byte_offset(dimensions, *ordering, &indices, stride)?;
+                            child_storage = storage::offset(storage.clone(), at);
+                        }
+                        ValueChildRelationship::ArrayElement {
+                            index,
+                            indices: indices.into(),
+                        }
+                    }
                     _ => ValueChildRelationship::SliceElement { index },
                 };
                 (relationship, *element, child_storage)

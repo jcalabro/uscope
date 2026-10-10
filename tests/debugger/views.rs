@@ -825,6 +825,32 @@ async fn zig_containers_present_as_their_views_say() {
 }
 
 #[tokio::test]
+async fn odin_containers_present_as_their_views_say() {
+    let mut seen = BTreeSet::new();
+    for (fixture, optimized) in [("containers-odin-o0", false), ("containers-odin-o2", true)] {
+        seen.extend(
+            check_containers(
+                fixture,
+                "odin/containers.odin",
+                "containers::barrier",
+                optimized,
+            )
+            .await,
+        );
+    }
+    assert_every_view_binds("odin-core.views", &seen);
+}
+
+#[tokio::test]
+async fn d_containers_present_as_their_views_say() {
+    let mut seen = BTreeSet::new();
+    for (fixture, optimized) in [("containers-d-o0", false), ("containers-d-o2", true)] {
+        seen.extend(check_containers(fixture, "d/containers.d", "barrier", optimized).await);
+    }
+    assert_every_view_binds("d-std.views", &seen);
+}
+
+#[tokio::test]
 async fn go_containers_present_as_their_views_say() {
     let mut seen = BTreeSet::new();
     for (fixture, optimized) in [("containers-go-o0", false), ("containers-go-o2", true)] {

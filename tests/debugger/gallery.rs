@@ -50,8 +50,9 @@ struct Gallery<'a> {
     optimized: bool,
     /// `checkpoint:path` values an optimized build must show all the same.
     required: &'a [&'a str],
-    /// Whether every listed variable must have a name its program wrote.
-    go: bool,
+    /// What only the names of the compiler's own variables begin with,
+    /// none of which may be listed.
+    reserved: &'a [&'a str],
     /// `checkpoint:path` values a function returned that this build's
     /// calling convention does not say where to find, which must be shown
     /// as unknown for that reason.
@@ -98,14 +99,16 @@ async fn check_gallery(gallery: &Gallery<'_>) {
             .clone();
         let variables = checkpoint_variables(&mut scenario, fixture, &checkpoint).await;
         let returned = checkpoint.starts_with("returned-");
-        if gallery.go {
-            for variable in &variables {
-                if variable.name.starts_with(['.', '#', '&']) {
-                    failures.push(format!(
-                        "{checkpoint}: lists the compiler's {}",
-                        variable.name
-                    ));
-                }
+        for variable in &variables {
+            if gallery
+                .reserved
+                .iter()
+                .any(|prefix| variable.name.starts_with(prefix))
+            {
+                failures.push(format!(
+                    "{checkpoint}: lists the compiler's {}",
+                    variable.name
+                ));
             }
         }
         for truth in truths.iter().filter(|truth| truth.checkpoint == checkpoint) {
@@ -349,6 +352,13 @@ async fn check_truth(
             Err("is not listed".to_owned())
         };
     };
+    // A value uscope cannot show yet must say so.
+    if truth.kind == "unsupported" {
+        return match &variable.state {
+            VariableState::Unavailable(uscope::VariableUnavailableReason::Unsupported(_)) => Ok(()),
+            state => Err(format!("is not unsupported: {state:?}")),
+        };
+    }
     if let Some(checked) = check_variable(variable, truth, may_be_unavailable) {
         return checked;
     }
@@ -356,31 +366,10 @@ async fn check_truth(
     let mut type_name = variable.type_info.as_ref().map(|info| info.name.clone());
     let mut state = variable.state.clone();
     for segment in segments {
-        let VariableState::Available {
-            children: uscope::ValueChildren::Available(reference),
-            ..
-        } = &state
-        else {
+        let VariableState::Available { .. } = &state else {
             break;
         };
-        let page = child_page(scenario, &state, 0, 256).await;
-        let child = page
-            .children
-            .iter()
-            .find(|child| match &child.relationship {
-                ValueChildRelationship::Member(member) => member.name.as_deref() == Some(segment),
-                ValueChildRelationship::SliceElement { index }
-                | ValueChildRelationship::ArrayElement { index, .. } => {
-                    index.to_string() == segment
-                }
-                _ => false,
-            })
-            .ok_or_else(|| {
-                format!(
-                    "has no child {segment} among {} children",
-                    reference.total()
-                )
-            });
+        let child = child_named(scenario, &state, segment).await;
         // Optimized code may leave out what nothing reads, such as a
         // variable a closure captured.
         let child = match child {
@@ -413,6 +402,78 @@ async fn check_truth(
             truth.kind,
             truth.value
         ))
+    }
+}
+
+/// The child a path's segment names among the value's own children, or
+/// else among what a view shows of it.
+async fn child_named(
+    scenario: &Scenario,
+    state: &VariableState,
+    segment: &str,
+) -> Result<uscope::ValueChild, String> {
+    let VariableState::Available {
+        children,
+        presentation,
+        ..
+    } = state
+    else {
+        return Err("is not available".to_owned());
+    };
+    let presented = presentation
+        .as_deref()
+        .filter(|presentation| presentation.shape != uscope::PresentedShape::Raw)
+        .map(|presentation| &presentation.children);
+    let mut child = Err(format!("has no child {segment}"));
+    for children in std::iter::once(children).chain(presented) {
+        let uscope::ValueChildren::Available(reference) = children else {
+            continue;
+        };
+        let page = scenario
+            .operation(
+                "value children",
+                scenario.handle().value_children(
+                    reference.clone(),
+                    uscope::ValueChildQuery {
+                        offset: 0,
+                        limit: 256,
+                    },
+                ),
+            )
+            .await;
+        if let Some(found) = page.children.iter().find(|child| named(child, segment)) {
+            return Ok(found.clone());
+        }
+        child = Err(format!(
+            "has no child {segment} among {} children",
+            reference.total()
+        ));
+    }
+    child
+}
+
+/// Whether a path's segment names `child`: a member by its name, an
+/// element by its zero-based index or by its source indices in
+/// parentheses.
+fn named(child: &uscope::ValueChild, segment: &str) -> bool {
+    match &child.relationship {
+        ValueChildRelationship::Member(member) => member.name.as_deref() == Some(segment),
+        ValueChildRelationship::SliceElement { index }
+        | ValueChildRelationship::Element { index } => index.to_string() == segment,
+        ValueChildRelationship::ArrayElement { index, indices } => segment
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+            .map_or_else(
+                || index.to_string() == segment,
+                |source| {
+                    source
+                        .split(',')
+                        .map(str::parse)
+                        .collect::<Result<Vec<i128>, _>>()
+                        == Ok(indices.to_vec())
+                },
+            ),
+        _ => false,
     }
 }
 
@@ -511,7 +572,7 @@ async fn c_pieces_agree_with_their_program() {
             checkpoints: &["split", "complex"],
             optimized,
             required,
-            go: false,
+            reserved: &[],
             unknown: &[],
         })
         .await;
@@ -567,7 +628,7 @@ async fn go_values_agree_with_their_program() {
             ],
             optimized,
             required,
-            go: true,
+            reserved: &[".", "#", "&"],
             unknown: &[],
         })
         .await;
@@ -614,7 +675,7 @@ async fn c_returned_values_agree_with_their_program() {
             checkpoints: C_RETURNS,
             optimized,
             required: &[],
-            go: false,
+            reserved: &[],
             unknown: &[],
         })
         .await;
@@ -648,7 +709,7 @@ async fn cpp_returned_values_agree_with_their_program() {
             ],
             optimized,
             required: &[],
-            go: false,
+            reserved: &[],
             unknown,
         })
         .await;
@@ -691,7 +752,7 @@ async fn rust_returned_values_agree_with_their_program() {
             ],
             optimized,
             required: &[],
-            go: false,
+            reserved: &[],
             // Rust's own convention is unspecified for aggregates of more
             // than two scalars.
             unknown,
@@ -726,8 +787,121 @@ async fn zig_returned_values_agree_with_their_program() {
             ],
             optimized,
             required: &[],
-            go: false,
+            reserved: &[],
             unknown,
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn odin_values_agree_with_their_program() {
+    for (fixture, optimized) in [("values-odin-o0", false), ("values-odin-o2", true)] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["values::reached"],
+            checkpoints: &[
+                "scalars",
+                "records",
+                "slices",
+                "unions",
+                "returned-int",
+                "returned-f64",
+                "returned-bool",
+            ],
+            optimized,
+            required: &[],
+            reserved: &[],
+            unknown: &[],
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn fortran_values_agree_with_their_program() {
+    for (fixture, optimized) in [("values-fortran-o0", false), ("values-fortran-o2", true)] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["reached"],
+            checkpoints: &[
+                "scalars",
+                "records",
+                "descriptors",
+                "section",
+                "strings",
+                "returned-int",
+                "returned-double",
+                "returned-logical",
+            ],
+            optimized,
+            required: &[],
+            reserved: &[".", "_"],
+            unknown: &[],
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn d_values_agree_with_their_program() {
+    for (fixture, optimized) in [("values-d-o0", false), ("values-d-o2", true)] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["reached"],
+            checkpoints: &[
+                "scalars",
+                "records",
+                "slices",
+                "loop",
+                "returned-int",
+                "returned-double",
+                "returned-bool",
+            ],
+            optimized,
+            required: &[],
+            reserved: &["__"],
+            unknown: &[],
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn nim_values_agree_with_their_program() {
+    for (fixture, optimized) in [("values-nim-gcc-o0", false), ("values-nim-clang-o2", true)] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["values::reached"],
+            checkpoints: &["scalars", "records", "strings", "seqs"],
+            optimized,
+            required: &[],
+            reserved: &["colontmp", "nimErr_", "FR_"],
+            unknown: &[],
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn ada_values_agree_with_their_program() {
+    for (fixture, optimized) in [("values-ada-o0", false), ("values-ada-o2", true)] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["reached"],
+            checkpoints: &[
+                "scalars",
+                "records",
+                "bounded",
+                "strings",
+                "returned-int",
+                "returned-float",
+                "returned-boolean",
+            ],
+            optimized,
+            required: &[],
+            reserved: &["C", "S", "T"],
+            unknown: &[],
         })
         .await;
     }

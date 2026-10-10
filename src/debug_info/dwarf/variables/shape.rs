@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use foldhash::{HashSet, HashSetExt};
 
-use crate::model::ArrayDimension;
+use crate::model::{ArrayDimension, ArrayOrdering, RuntimeDimension};
 use crate::{
-    BaseClass, BaseType, EnumerationOrigin, Enumerator, RecordMember, TypeId, TypeInfo, TypeKind,
-    TypeModifier, TypeReference, Variant, VariantDiscriminant, VariantSelection,
+    BaseClass, BaseType, EnumerationOrigin, Enumerator, RecordMember, SliceWords, TypeId, TypeInfo,
+    TypeKind, TypeModifier, TypeReference, Variant, VariantDiscriminant, VariantSelection,
 };
 
 use super::codec::integer_bit_width;
@@ -29,12 +29,26 @@ pub(super) enum ValueShape {
     Array {
         element: TypeId,
         dimensions: Arc<[ArrayDimension]>,
+        ordering: ArrayOrdering,
+        byte_size: u64,
+    },
+    /// An array bounded at run time, which a value resolves to an
+    /// [`ValueShape::Array`] where its elements are.
+    RuntimeArray {
+        /// The canonical array type, whose expressions find its bounds.
+        array: TypeId,
+        element: TypeId,
+        element_size: u64,
+        dimensions: Arc<[RuntimeDimension]>,
+        ordering: ArrayOrdering,
+        /// The size of the descriptor, as an Ada array's, or zero when the
+        /// producer gives none.
         byte_size: u64,
     },
     Slice {
         element: TypeId,
         byte_size: u64,
-        has_capacity: bool,
+        words: SliceWords,
         text: bool,
     },
     Record {
@@ -334,6 +348,7 @@ fn nested_value_shape(
         TypeKind::Array {
             element,
             dimensions,
+            ordering,
         } => {
             let element_shape = nested_value_shape(types, element.id, depth + 1)?;
             let mut count = 1_u64;
@@ -349,12 +364,28 @@ fn nested_value_shape(
             Ok(ValueShape::Array {
                 element: element.id,
                 dimensions: Arc::clone(dimensions),
+                ordering: *ordering,
                 byte_size,
+            })
+        }
+        TypeKind::RuntimeArray {
+            element,
+            dimensions,
+            ordering,
+        } => {
+            let element_size = nested_value_shape(types, element.id, depth + 1)?.byte_size();
+            Ok(ValueShape::RuntimeArray {
+                array: current,
+                element: element.id,
+                element_size,
+                dimensions: Arc::clone(dimensions),
+                ordering: *ordering,
+                byte_size: info.byte_size.unwrap_or(0),
             })
         }
         TypeKind::Slice {
             element,
-            has_capacity,
+            words,
             text,
         } => {
             let byte_size = info.byte_size.ok_or_else(|| {
@@ -363,7 +394,7 @@ fn nested_value_shape(
             Ok(ValueShape::Slice {
                 element: element.id,
                 byte_size,
-                has_capacity: *has_capacity,
+                words: *words,
                 text: *text,
             })
         }
@@ -489,6 +520,7 @@ impl ValueShape {
             | Self::Indirection { byte_size, .. }
             | Self::Function { byte_size }
             | Self::Array { byte_size, .. }
+            | Self::RuntimeArray { byte_size, .. }
             | Self::Slice { byte_size, .. }
             | Self::Record { byte_size, .. }
             | Self::Union { byte_size, .. }
@@ -503,6 +535,7 @@ impl ValueShape {
             | Self::Indirection { .. }
             | Self::Function { .. }
             | Self::Array { .. }
+            | Self::RuntimeArray { .. }
             | Self::Slice { .. }
             | Self::Record { .. }
             | Self::Union { .. }
