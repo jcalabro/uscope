@@ -3430,65 +3430,53 @@ fn malformed(error: impl std::fmt::Display) -> Arc<str> {
     error.to_string().into()
 }
 
-/// Gives the members `declarations` names their declarations, copying each
-/// list of `kind`'s once.
+/// Gives the members `declarations` names their declarations.
 fn declare_members(
     kind: &mut TypeKind,
-    declarations: impl Iterator<Item = (AggregateMemberPath, Option<SourceLocation>)> + Clone,
+    declarations: impl Iterator<Item = (AggregateMemberPath, Option<SourceLocation>)>,
 ) {
-    match kind {
-        TypeKind::Record { members, .. }
-        | TypeKind::Union { members, .. }
-        | TypeKind::Variant {
-            common_members: members,
+    // A record's lists are its own until types merge, so each is written
+    // in place; copying a list for each member it declares made a variant
+    // part's cost grow with the square of its members.
+    let (mut direct, mut discriminant, mut variants) = match kind {
+        TypeKind::Record { members, .. } | TypeKind::Union { members, .. } => {
+            (Some(members), None, None)
+        }
+        TypeKind::Variant {
+            common_members,
+            discriminant,
+            variants,
             ..
-        } if declarations
-            .clone()
-            .any(|(path, _)| matches!(path, AggregateMemberPath::Direct(_))) =>
-        {
-            let mut updated = members.to_vec();
-            for (path, declaration) in declarations.clone() {
-                if let AggregateMemberPath::Direct(member) = path
-                    && let Some(member) = updated.get_mut(member)
+        } => (Some(common_members), Some(discriminant), Some(variants)),
+        _ => (None, None, None),
+    };
+    for (path, declaration) in declarations {
+        match path {
+            AggregateMemberPath::Direct(member) => {
+                if let Some(members) = &mut direct
+                    && member < members.len()
+                {
+                    Arc::make_mut(members)[member].declaration = declaration;
+                }
+            }
+            AggregateMemberPath::Discriminant => {
+                if let Some(discriminant) = &mut discriminant
+                    && let VariantDiscriminant::Stored(member) = discriminant.as_mut()
                 {
                     member.declaration = declaration;
                 }
             }
-            *members = updated.into();
-        }
-        _ => {}
-    }
-    let TypeKind::Variant {
-        discriminant,
-        variants,
-        ..
-    } = kind
-    else {
-        return;
-    };
-    let mut updated_variants: Option<Vec<Variant>> = None;
-    for (path, declaration) in declarations {
-        match path {
-            AggregateMemberPath::Discriminant => {
-                if let VariantDiscriminant::Stored(member) = discriminant.as_mut() {
-                    member.declaration = declaration;
-                }
-            }
             AggregateMemberPath::Variant { variant, member } => {
-                let updated = updated_variants.get_or_insert_with(|| variants.to_vec());
-                if let Some(variant) = updated.get_mut(variant) {
-                    let mut members = variant.members.to_vec();
-                    if let Some(member) = members.get_mut(member) {
-                        member.declaration = declaration;
-                        variant.members = members.into();
-                    }
+                if let Some(variants) = &mut variants
+                    && variants
+                        .get(variant)
+                        .is_some_and(|variant| member < variant.members.len())
+                {
+                    let members = &mut Arc::make_mut(variants)[variant].members;
+                    Arc::make_mut(members)[member].declaration = declaration;
                 }
             }
-            AggregateMemberPath::Direct(_) => {}
         }
-    }
-    if let Some(updated) = updated_variants {
-        *variants = updated.into();
     }
 }
 
