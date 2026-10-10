@@ -367,7 +367,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
     <section id="hermetic">
       <h2>Hermetic builds</h2>
       <div class="prose">
-        <p>The compilers join the dev shell from the pinned nixpkgs. gfortran's and GNAT's wrappers ship their own <code>gcc</code>, <code>ld</code>, and binutils, which must not shadow the shell's, so they enter it as wrapper scripts exposing only their drivers, as <code>musl-gcc</code> does. A compiler that needs anything from the host, or that writes outside <code>build/</code>, is not supported. Every new toolchain joins <code>suite_signature</code>, so a toolchain update rebuilds the fixtures.</p>
+        <p>The compilers join the dev shell from the pinned nixpkgs. gfortran's and GNAT's wrappers ship their own <code>gcc</code>, <code>ld</code>, and binutils, which must not shadow the shell's, and LDC's package adds its runtime's headers and libraries to every C compile and link, which changed every C fixture's recorded switches; so they enter it as wrapper scripts exposing only their drivers, as <code>musl-gcc</code> does. GNAT's <code>gnatmake</code> runs with GNAT's own toolchain first on its path. A compiler that needs anything from the host, or that writes outside <code>build/</code>, is not supported. Every new toolchain joins <code>suite_signature</code>, so a toolchain update rebuilds the fixtures.</p>
       </div>
     </section>
 
@@ -385,25 +385,28 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
 
     <section id="tracker">
       <h2>Tracker</h2>
-      <div class="phase">
-        <header><span class="pid">L1</span><h3>Odin</h3><span class="st todo">todo</span></header>
-        <p>Recognize Odin units; slices, strings, <code>cstring</code>, and unions natively; views for dynamic arrays; a gallery, a views fixture, and a stepping scenario.</p>
+      <div class="prose">
+        <p>Each language's cost is its commit, less the docs; the general fixes it needed are counted where they landed.</p>
       </div>
       <div class="phase">
-        <header><span class="pid">L2</span><h3>Fortran</h3><span class="st todo">todo</span></header>
-        <p>Recognize Fortran units; language-dependent lower bounds; descriptor arrays and strings; a gallery and a stepping scenario. Fortran has no library containers to view.</p>
+        <header><span class="pid">L1</span><h3>Odin</h3><span class="st done">done</span></header>
+        <p>Odin units by their producer; package-qualified and argument-bearing names; slices, strings, dynamic arrays, <code>cstring</code>, and unions natively; views for maps, queues, small arrays, and builders; a gallery, a views fixture, and a stepping scenario. About 290 lines of source and 340 of fixtures and tests.</p>
       </div>
       <div class="phase">
-        <header><span class="pid">L3</span><h3>D</h3><span class="st todo">todo</span></header>
-        <p>Recognize D units; slices and strings natively; views where library layouts are described; a gallery, a views fixture, and a stepping scenario.</p>
+        <header><span class="pid">L2</span><h3>Fortran</h3><span class="st done">done</span></header>
+        <p>Fortran units; arrays from their lower bounds; <code>character(len=N)</code> as text; gfortran's own variables left out. Descriptor arrays, deferred-length strings, and arrays of more than one dimension, which Fortran lays out column by column, are explicitly unsupported rather than read wrongly. A gallery, naming elements by their source indices, and a stepping scenario. About 100 lines of source, and 160 of a synthetic test for nameless variables.</p>
       </div>
       <div class="phase">
-        <header><span class="pid">L4</span><h3>Nim</h3><span class="st todo">todo</span></header>
-        <p>Recognize Nim units; demangled function names; views for strings and sequences; a gallery and a views fixture with GCC and Clang.</p>
+        <header><span class="pid">L3</span><h3>D</h3><span class="st done">done</span></header>
+        <p>D units; slices and strings natively, length first, with <code>wstring</code> and <code>dstring</code> read by their characters' width; D's <code>__</code> temporaries left out; template names (<code>Appender!string</code>) and types scoped by their dotted modules; views for <code>Appender</code> and <code>Nullable</code>. A gallery, a views fixture, and a stepping scenario. About 210 lines of source and 310 of fixtures and tests.</p>
       </div>
       <div class="phase">
-        <header><span class="pid">L5</span><h3>Ada</h3><span class="st todo">todo</span></header>
-        <p>Recognize Ada units; arbitrary bounds; fat pointers; internal variables kept out of the list; a gallery and a stepping scenario.</p>
+        <header><span class="pid">L4</span><h3>Nim</h3><span class="st done">done</span></header>
+        <p>Nim units by their file names; procedures named as Nim mangles them (<code>values::reached</code>); Nim's own variables left out; its C treated as C for typedefs, bounds, and returns; a view for strings. Seqs keep their elements in a C flexible array member, which uscope does not read, so they wait on that. A gallery built through GCC unoptimized and Clang optimized, and a stepping scenario. About 60 lines of source and 150 of fixtures and tests.</p>
+      </div>
+      <div class="phase">
+        <header><span class="pid">L5</span><h3>Ada</h3><span class="st done">done</span></header>
+        <p>Ada units; subrange types, as GNAT describes <code>Integer_8</code>; GNAT's typedefs seen through; GNAT's own variables left out; arrays with their own bounds, two-dimensional ones by their indices; a view for <code>Unbounded_String</code>. Unconstrained arrays, whose bounds are found at run time, wait on runtime-bounded arrays. A gallery and a stepping scenario. About 60 lines of source and 230 of fixtures and tests.</p>
       </div>
     </section>
 
@@ -415,8 +418,16 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <div class="scroller"><table class="data">
         <thead><tr><th>Bug</th><th>Found by</th><th>Status</th></tr></thead>
         <tbody>
-          <tr><td>An array without <code>DW_AT_lower_bound</code> is assumed to start at 0 whatever its language, so a Fortran or Ada array of three shows four elements.</td><td>gfortran, GNAT</td><td><span class="st todo">todo</span></td></tr>
-          <tr><td>A nameless artificial variable is listed as malformed instead of being left out.</td><td>gfortran</td><td><span class="st todo">todo</span></td></tr>
+          <tr><td>An array without <code>DW_AT_lower_bound</code> was assumed to start at 0 whatever its language, so a Fortran or Ada array of three showed four elements.</td><td>gfortran, GNAT</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>A Fortran array of more than one dimension was read row by row, so <code>grid(1,2)</code> showed <code>grid(2,1)</code>'s value.</td><td>gfortran</td><td><span class="st done">unsupported, not wrong</span></td></tr>
+          <tr><td>A nameless artificial variable was listed as malformed instead of being left out.</td><td>gfortran</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>A subrange type used as a type, as GNAT's <code>Integer_8</code>, was unsupported, and so was every array of one.</td><td>GNAT</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>A slice's text was read from its first word whatever its layout, so a D string, length first, read as garbage.</td><td>LDC</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>A slice's text was read as bytes whatever its characters' width.</td><td>LDC</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>The pinned nightly rustc describes an unsized tail, <code>[u16]</code> in <code>Tail</code>, as one element inside the record's size, which uscope read as a slice.</td><td>rustc</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>The <code>utf8</code> format refused an array of a typedef of bytes, as Odin's <code>u8</code>.</td><td>Odin</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>A typedef in a language the evaluator did not know the meaning of typedefs in blocked evaluation of its values, as GNAT's access types and Nim's integers.</td><td>GNAT, Nim</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>Odin's <code>rawptr</code> carries <code>DW_AT_address_class 1</code>, so uscope refuses it as a pointer into another address space. Odin's quirk; uscope is right to refuse.</td><td>Odin</td><td><span class="st todo">noted</span></td></tr>
         </tbody>
       </table></div>
     </section>
@@ -425,10 +436,15 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <h2>Deferred</h2>
       <div class="prose">
         <ul>
-          <li>Syntax highlighting of the new languages' sources in the CLI and the web UI.</li>
+          <li><b>Arrays bounded at run time</b>, the largest gap: Fortran's assumed-shape and allocatable arrays (<code>DW_AT_data_location</code>, bounds over <code>DW_OP_push_object_address</code>), deferred-length strings, Ada's unconstrained arrays, and C's variable-length arrays all need bounds evaluated at inspection rather than load. One feature serves all four.</li>
+          <li><b>Column-major arrays</b>: an ordering for arrays, so that a Fortran array of more than one dimension shows its elements by their indices.</li>
+          <li><b>C flexible array members</b>, which Nim's seqs keep their elements in.</li>
+          <li>Odin's and D's maps beyond what views can prove, and D's associative arrays, whose druntime carries no debug information.</li>
+          <li>Names as their languages write them: GNAT's <code>values__reached</code> as <code>values.reached</code>, D's druntime symbols, and Nim's locals without their suffixes (<code>small_1</code>), each an encoding to decode exactly or not at all.</li>
+          <li>Nim's enums, which its C describes as integers.</li>
+          <li>Breaking on <code>main</code> in Fortran stops in gfortran's wrapper rather than <code>MAIN__</code>, which <code>DW_AT_main_subprogram</code> marks.</li>
+          <li>Syntax highlighting of the new languages' sources in the CLI and the web UI, and checking VS Code's language identifiers for Fortran against its extensions.</li>
           <li>Each language's expression syntax: expressions keep uscope's one neutral language.</li>
-          <li>D symbol demangling for druntime's frames, which carry no debug information.</li>
-          <li>Odin and D maps, unless their layouts can be proven from what the program carries.</li>
           <li>Return values (<code>finish</code>) for the new languages' own calling conventions, until a gallery pins them.</li>
         </ul>
       </div>
