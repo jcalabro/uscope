@@ -415,11 +415,18 @@ fn absorb_walked(
             .drain(..)
             .map(|(address, function)| (address, function + row(functions))),
     );
-    into.unnamed_parameters.extend(
-        unit.unnamed_parameters
-            .drain(..)
-            .map(|(instance, id, object)| (instance, types.id(id), object + objects)),
-    );
+    into.unnamed_parameters
+        .extend(
+            unit.unnamed_parameters
+                .drain(..)
+                .map(|(instance, id, object)| {
+                    (
+                        instance,
+                        types.id(id),
+                        object.map(|object| object + objects),
+                    )
+                }),
+        );
     into.abstract_bodies.extend(
         unit.abstract_bodies
             .drain(..)

@@ -860,7 +860,13 @@ Debug information that cannot be read never stops a session. A module
 whose DWARF is malformed, needs a supplementary file that cannot be found,
 or needs more than its load budget is described by its symbols and
 call-frame information alone, so breakpoints on its functions, backtraces,
-and disassembly still work, without source lines, variables, or types. The
+and disassembly still work, without source lines, variables, or types.
+The budget is 32 bytes of what the loader builds for each byte of
+uncompressed DWARF. A module whose locals and parameters take it past
+that is loaded without them, and without the types only they use: its
+source lines, functions, globals and their types, and async tasks
+remain, and its frames say why they show no variables rather than seeming
+to have none. The
 reason names where the DWARF went wrong, such as `malformed DWARF in the
 abbreviations at .debug_abbrev+0x0 of the unit at .debug_info+0x0`, so it
 can be checked with `readelf` or `llvm-dwarfdump`. Split DWARF (`.dwo` and

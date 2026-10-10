@@ -254,7 +254,7 @@ pub(super) const SCHEMA: &[TableSchema] = &[
     TableSchema {
         kind: TableKind::Facts,
         record: "FactsRecord",
-        size: 37,
+        size: 41,
         fields: &[
             ("embedded_reason", 0, 4),
             ("runtime_reason", 4, 4),
@@ -267,6 +267,7 @@ pub(super) const SCHEMA: &[TableSchema] = &[
             ("address_end", 24, 8),
             ("dwarf_reason", 32, 4),
             ("dwarf", 36, 1),
+            ("locals_reason", 37, 4),
         ],
     },
     TableSchema {

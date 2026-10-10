@@ -47,6 +47,9 @@ pub struct FactsRecord {
     /// [`DWARF_ABSENT`], [`DWARF_LOADED`], [`DWARF_INCOMPLETE`], or
     /// [`DWARF_UNUSABLE`].
     pub dwarf: u8,
+    /// Why the DWARF's locals were left out, when
+    /// [`fact_flags::LOCALS_LEFT_OUT`]; otherwise [`NONE`].
+    pub locals_reason: U32,
 }
 
 impl Record for FactsRecord {
@@ -71,7 +74,8 @@ pub mod fact_flags {
     pub const STATIC_TABLE: u8 = 1 << 0;
     pub const DYNAMIC_TABLE: u8 = 1 << 1;
     pub const THREAD_LOCAL_STORAGE: u8 = 1 << 2;
-    pub const ALL: u8 = STATIC_TABLE | DYNAMIC_TABLE | THREAD_LOCAL_STORAGE;
+    pub const LOCALS_LEFT_OUT: u8 = 1 << 3;
+    pub const ALL: u8 = STATIC_TABLE | DYNAMIC_TABLE | THREAD_LOCAL_STORAGE | LOCALS_LEFT_OUT;
 }
 
 /// One thread-local variable, ordered by its name's bytes.
@@ -119,6 +123,7 @@ pub struct Facts<'a> {
     /// binding.
     pub debug_file: Option<&'a DebugFile>,
     pub debug_information: &'a DebugInformation,
+    pub locals_left_out: Option<&'a str>,
 }
 
 /// Adds `facts` to `builder`, pooling names and reasons in `strings`.
@@ -141,6 +146,7 @@ pub fn add_to(
         DebugInformation::Incomplete { reason } => (DWARF_INCOMPLETE, push(reason)?),
         DebugInformation::Unusable { reason } => (DWARF_UNUSABLE, push(reason)?),
     };
+    let locals_reason = facts.locals_left_out.map(&mut push).transpose()?;
     let mut table = |table: &EmbeddedSymbolTable| -> Result<(u8, u32), TooLarge> {
         Ok(match table {
             EmbeddedSymbolTable::Absent => (TABLE_ABSENT, NONE),
@@ -156,6 +162,7 @@ pub fn add_to(
         (sources.static_table, fact_flags::STATIC_TABLE),
         (sources.dynamic_table, fact_flags::DYNAMIC_TABLE),
         (facts.thread_local_storage, fact_flags::THREAD_LOCAL_STORAGE),
+        (locals_reason.is_some(), fact_flags::LOCALS_LEFT_OUT),
     ] {
         if present {
             flags |= flag;
@@ -173,6 +180,7 @@ pub fn add_to(
         address_end: facts.address_range.end.get().into(),
         dwarf_reason: dwarf_reason.into(),
         dwarf,
+        locals_reason: locals_reason.unwrap_or(NONE).into(),
     };
     // A map's order is its names' byte order, which lookups search.
     let thread_locals = facts
@@ -282,6 +290,13 @@ impl<'a> FactsView<'a> {
         }
     }
 
+    /// Why the DWARF's locals were left out, when they were.
+    pub fn locals_left_out(self) -> Option<Arc<str>> {
+        let record = self.record?;
+        self.flag(fact_flags::LOCALS_LEFT_OUT)
+            .then(|| self.strings.get(StrId(record.locals_reason.get())).into())
+    }
+
     pub fn thread_local_storage(self) -> bool {
         self.flag(fact_flags::THREAD_LOCAL_STORAGE)
     }
@@ -334,6 +349,13 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
         DWARF_INCOMPLETE | DWARF_UNUSABLE => strings.contains(StrId(record.dwarf_reason.get())),
         _ => false,
     };
+    let locals = |record: &FactsRecord| {
+        if record.flags & fact_flags::LOCALS_LEFT_OUT == 0 {
+            record.locals_reason.get() == NONE
+        } else {
+            strings.contains(StrId(record.locals_reason.get()))
+        }
+    };
     let reason = |state: u8, reason: U32| match state {
         TABLE_ABSENT | TABLE_LOADED => reason.get() == NONE,
         TABLE_UNUSABLE => strings.contains(StrId(reason.get())),
@@ -346,6 +368,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
                 || !reason(record.runtime_table, record.runtime_reason)
                 || !debug_file(record)
                 || !dwarf(record)
+                || !locals(record)
                 || record.address_start.get() > record.address_end.get()
         })
     {

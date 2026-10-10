@@ -3,7 +3,9 @@
 //! entries, data objects, and symbolic names. Every one comes from a DIE,
 //! so the budget grows with the debug information: information that is
 //! sound fits, and information describing far more than its own size fails
-//! with [`DwarfError::Budget`] before it exhausts memory.
+//! with [`DwarfError::Budget`] before it exhausts memory. A load that fails
+//! so is read again without its locals and parameters, and is left out
+//! only when the rest does not fit either.
 
 use super::DwarfError;
 
@@ -21,11 +23,11 @@ impl Default for LoadLimits {
     /// Programs of the corpus build at most 4.4 bytes of these records
     /// for each byte of their debug information (optimized Go), and
     /// uscope's own debug build 2.1; the smallest build some 40 KB in all.
-    /// Sixteen leaves room for producers that repeat themselves more.
+    /// Thirty-two leaves room for producers that repeat themselves more.
     fn default() -> Self {
         Self {
-            per_input_byte: 16,
-            floor: 16 << 20,
+            per_input_byte: 32,
+            floor: 32 << 20,
         }
     }
 }

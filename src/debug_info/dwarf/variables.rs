@@ -321,6 +321,15 @@ fn fused_block_ranges(
     Ok(fused)
 }
 
+/// Whether a load reads the locals and parameters of functions, or leaves
+/// them out, and the types only they name, so that the rest fits its
+/// budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Locals {
+    Read,
+    LeftOut,
+}
+
 /// What the image knows of its code: the instance each function DIE
 /// becomes.
 #[derive(Clone, Copy)]
@@ -330,6 +339,7 @@ pub(super) struct CodeMetadata<'a> {
 
 #[expect(
     clippy::too_many_lines,
+    clippy::too_many_arguments,
     reason = "one depth-first DIE walk must keep scope, variable, and parameter state synchronized"
 )]
 pub(super) fn load_variable_info<'data>(
@@ -339,6 +349,7 @@ pub(super) fn load_variable_info<'data>(
     image_id: ModuleImageId,
     code: CodeMetadata<'_>,
     files: &mut Files,
+    locals: Locals,
     budget: super::budget::Meter,
 ) -> std::result::Result<LoadedVariables, DwarfError> {
     let units = &catalog.units;
@@ -393,6 +404,7 @@ pub(super) fn load_variable_info<'data>(
         target,
         languages: &languages,
         instance_ids,
+        locals,
     };
     if !merge::walk_units_apart(&cx, &mut walked, &mut types, files, &pool) {
         crate::count!("units_walked_in_order", units.len());
@@ -489,11 +501,13 @@ pub(super) fn load_variable_info<'data>(
         {
             coroutine_bodies.insert(instance, coroutine);
             // The body's future is what the parameter points to.
-            let future = &mut objects[object];
-            future.name = "$future".into();
-            future.type_info = TypeResolution::Resolved(coroutine);
-            future.escaped = Some(ty);
-            future.coroutine = Some(coroutine);
+            if let Some(object) = object {
+                let future = &mut objects[object];
+                future.name = "$future".into();
+                future.type_info = TypeResolution::Resolved(coroutine);
+                future.escaped = Some(ty);
+                future.coroutine = Some(coroutine);
+            }
         }
     }
     for (instance, ty) in abstract_bodies {
@@ -574,6 +588,7 @@ struct WalkContext<'w, 'data> {
     target: TargetDescription,
     languages: &'w [Option<gimli::DwLang>],
     instance_ids: &'w super::DieMap<CodeInstanceId>,
+    locals: Locals,
 }
 
 /// What the main walk records, in the order it reads the DIEs.
@@ -585,7 +600,10 @@ struct Walked {
     procedures: Vec<(u64, Metadata<LocationListId>)>,
     vtables: Vec<(u64, TypeId)>,
     go_function_entries: Vec<(ImageAddress, u32)>,
-    unnamed_parameters: Vec<(CodeInstanceId, TypeId, usize)>,
+    /// The instances passed an unnamed parameter, as an `async fn`'s body
+    /// is passed its future, its type, and its data object, when locals
+    /// are read.
+    unnamed_parameters: Vec<(CodeInstanceId, TypeId, Option<usize>)>,
     abstract_bodies: Vec<(CodeInstanceId, TypeId)>,
     function_generics: BTreeMap<CodeInstanceId, crate::FunctionGenerics>,
     order: u64,
@@ -611,6 +629,7 @@ fn walk_unit<'data>(
         target,
         languages,
         instance_ids,
+        locals,
     } = *cx;
     let Walked {
         objects,
@@ -689,6 +708,7 @@ fn walk_unit<'data>(
                     types,
                     files,
                     bodies: abstract_bodies,
+                    locals,
                 },
             )?;
         }
@@ -1028,10 +1048,30 @@ fn walk_unit<'data>(
                 Err(reason) => *captures = Err(reason),
             }
         }
-        if let Some(kind) = kind {
-            let owning_scope = parent.as_ref().filter(|scope| {
+        let owning_scope = kind.and_then(|kind| {
+            parent.as_ref().filter(|scope| {
                 !scope.ranges.is_empty() && (kind == VariableKind::Local || scope.routine)
-            });
+            })
+        });
+        if kind.is_some() && locals == Locals::LeftOut {
+            // rustc passes the body of an `async fn` its future as an
+            // unnamed parameter, which says what coroutine the body runs.
+            if kind == Some(VariableKind::Parameter)
+                && let Some(instance) = owning_scope.and_then(|scope| scope.code_instance)
+            {
+                let chain = origin_chain(units, unit_index, entry).unwrap_or_default();
+                let named = matches!(
+                    string_with_origins(dwarf, units, unit, entry, &chain, gimli::DW_AT_name),
+                    Ok(Some(_))
+                );
+                let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
+                if !named
+                    && let TypeResolution::Resolved(ty) = types.variable_type(type_unit, type_value)
+                {
+                    unnamed_parameters.push((instance, ty, None));
+                }
+            }
+        } else if let Some(kind) = kind {
             // A variable of code with no address of its own, such as an
             // abstract inline instance, names no value, but its type is
             // the program's.
@@ -1207,7 +1247,7 @@ fn walk_unit<'data>(
                     && let (Some(instance), TypeResolution::Resolved(ty)) =
                         (scope.code_instance, &type_info)
                 {
-                    unnamed_parameters.push((instance, *ty, objects.len()));
+                    unnamed_parameters.push((instance, *ty, Some(objects.len())));
                 }
                 types
                     .budget
@@ -1260,6 +1300,7 @@ fn walk_unit<'data>(
                 types,
                 files,
                 bodies: abstract_bodies,
+                locals,
             },
         )?;
     }
@@ -1308,6 +1349,7 @@ struct AbstractTargets<'a, 'data, 'units> {
     /// The instances whose abstract function takes an unnamed parameter,
     /// as an `async fn`'s body takes its future, and its type.
     bodies: &'a mut Vec<(CodeInstanceId, TypeId)>,
+    locals: Locals,
 }
 
 /// Adds the named variables and parameters of a concrete instance's
@@ -1356,6 +1398,9 @@ fn add_abstract_only_variables<'data>(
             }
             continue;
         };
+        if targets.locals == Locals::LeftOut {
+            continue;
+        }
         let declaration = declaration_with_origins(dwarf, units, unit, entry, &[], targets.files)
             .ok()
             .flatten();
@@ -1585,16 +1630,19 @@ impl VariableInfo for DwarfVariableInfo {
         budget: &mut InspectionBudget,
     ) -> Result<Vec<Variable>> {
         let objects = match query {
-            VariableQuery::All => self.function_at(address).map_or_else(Vec::new, |function| {
-                function
-                    .objects()
-                    .filter(|object| {
-                        object.instance() == selected
-                            && !object.hidden()
-                            && self.visible_at(*object, address)
-                    })
-                    .collect()
-            }),
+            VariableQuery::All => {
+                self.locals_read()?;
+                self.function_at(address).map_or_else(Vec::new, |function| {
+                    function
+                        .objects()
+                        .filter(|object| {
+                            object.instance() == selected
+                                && !object.hidden()
+                                && self.visible_at(*object, address)
+                        })
+                        .collect()
+                })
+            }
             VariableQuery::Name(name) => vec![self.visible_object(address, selected, name)?],
             VariableQuery::Global(global) => {
                 return Err(Error::VariableNotFound(global.variable.to_string()));
@@ -1909,6 +1957,14 @@ impl DwarfVariableInfo {
                 ByteOrder::Big => RunTimeEndian::Big,
             },
         }
+    }
+
+    /// Fails when the image's locals and parameters were left out, so
+    /// that no frame seems to have none.
+    fn locals_read(&self) -> Result<()> {
+        crate::image::facts::FactsView::new(self.types.tables())
+            .locals_left_out()
+            .map_or(Ok(()), |reason| Err(Error::LocalsLeftOut(reason)))
     }
 
     /// The image's locations.

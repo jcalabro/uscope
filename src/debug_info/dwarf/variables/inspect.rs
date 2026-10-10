@@ -1103,6 +1103,7 @@ impl DwarfVariableInfo {
         selected: Option<CodeInstanceId>,
         name: &str,
     ) -> Result<Object<'_>> {
+        self.locals_read()?;
         let function = self
             .function_at(address)
             .ok_or_else(|| Error::VariableNotFound(name.to_owned()))?;

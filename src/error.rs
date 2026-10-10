@@ -119,6 +119,13 @@ pub enum Error {
     },
     #[error("variable inspection is unavailable for the selected logical frame")]
     VariableContextUnsupported,
+    /// The frame's module was loaded without its locals and parameters,
+    /// for the reason given.
+    #[error(
+        "the frame's locals and parameters are unknown, as its module's debug information is \
+         incomplete: {0}"
+    )]
+    LocalsLeftOut(Arc<str>),
     #[error("global catalog page limit {0} is outside 1..=256")]
     InvalidGlobalPageLimit(u32),
     #[error("value child page limit {0} is outside 1..=256")]

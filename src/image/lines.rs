@@ -679,6 +679,13 @@ impl Files {
         id
     }
 
+    /// Forgets every file but the first `len`.
+    pub fn truncate(&mut self, len: usize) {
+        for path in self.paths.drain(len.min(self.paths.len())..) {
+            self.ids.remove(&path);
+        }
+    }
+
     /// The file a relative path names when exactly one absolute path ends
     /// with it, as a type unit names the file of its declarations;
     /// otherwise the path itself.
