@@ -9,7 +9,7 @@ use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::debug_info::dwarf::{
     DieKey, DieWalk, Reader, TypeSignatures, Units, die_reference_with_signatures, unit_dwarf,
 };
-use crate::model::ArrayDimension;
+use crate::model::{ArrayDimension, ArrayOrdering};
 use crate::{
     Accessibility, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, ByteOrder,
     EnumerationOrigin, Enumerator, GoKind, IntegerValue, ModuleImageId, NamedTypeRelationship,
@@ -1759,6 +1759,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             TypeKind::Array {
                 element,
                 dimensions,
+                ..
             } => {
                 use std::fmt::Write;
                 let mut inner = inner;
@@ -3268,19 +3269,25 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
         // Elements are laid out row by row; Fortran's go column by column
         // unless the array says otherwise.
-        let column_major = match entry.attr_value(gimli::DW_AT_ordering) {
-            Some(gimli::AttributeValue::Ordering(ordering)) => ordering == gimli::DW_ORD_col_major,
+        let ordering = match entry.attr_value(gimli::DW_AT_ordering) {
+            Some(gimli::AttributeValue::Ordering(gimli::DW_ORD_col_major)) => {
+                ArrayOrdering::ColumnMajor
+            }
+            Some(gimli::AttributeValue::Ordering(gimli::DW_ORD_row_major)) => {
+                ArrayOrdering::RowMajor
+            }
             Some(_) => return Err("array ordering has an invalid encoding".into()),
-            None => self.language(unit_index) == SourceLanguage::Fortran,
+            None if self.language(unit_index) == SourceLanguage::Fortran => {
+                ArrayOrdering::ColumnMajor
+            }
+            None => ArrayOrdering::RowMajor,
         };
-        if column_major && dimensions.len() > 1 {
-            return Ok(opaque(
-                reference,
-                explicit_name.unwrap_or_else(|| Arc::from("<column-major array>")),
-                explicit_size,
-                "arrays laid out column by column are unsupported",
-            ));
-        }
+        // One dimension has one order.
+        let ordering = if dimensions.len() == 1 {
+            ArrayOrdering::RowMajor
+        } else {
+            ordering
+        };
         let name =
             explicit_name.unwrap_or_else(|| Arc::from(format!("{}[]", self.target_name(element))));
         // Producers rarely give a C array a size of its own: it is its
@@ -3301,6 +3308,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             TypeKind::Array {
                 element,
                 dimensions: dimensions.into(),
+                ordering,
             },
         ))
     }
@@ -3347,6 +3355,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     lower_bound: 1,
                     count,
                 }]),
+                ordering: ArrayOrdering::RowMajor,
             },
         ))
     }

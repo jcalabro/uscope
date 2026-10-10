@@ -10,7 +10,7 @@ use crate::debug_info::{
     ObjectStorage, PlannedStep, Step, StorageClass, VariableContext, VariableRuntime,
 };
 use crate::inspection::InspectionBudget;
-use crate::model::{ArrayDimension, ValueStorage};
+use crate::model::{ArrayDimension, ArrayOrdering, ValueStorage};
 use crate::{
     Accessibility, AddressValue, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId,
     DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue, Error,
@@ -58,6 +58,7 @@ pub(in crate::debug_info) enum PathStep {
     },
     ArrayIndex {
         dimensions: Arc<[ArrayDimension]>,
+        ordering: ArrayOrdering,
         element_size: u64,
     },
     SliceIndex {
@@ -232,11 +233,23 @@ pub(in crate::debug_info) fn array_byte_offset(
 ) -> Result<Option<i64>> {
     let PathStep::ArrayIndex {
         dimensions,
+        ordering,
         element_size,
     } = step
     else {
         return Ok(None);
     };
+    element_byte_offset(dimensions, *ordering, indices, *element_size).map(Some)
+}
+
+/// The byte offset of the element at source `indices` of an array laid
+/// out in `ordering`, checked against its bounds.
+fn element_byte_offset(
+    dimensions: &[ArrayDimension],
+    ordering: ArrayOrdering,
+    indices: &[i128],
+    element_size: u64,
+) -> Result<i64> {
     if indices.len() != dimensions.len() {
         return Err(Error::InvalidValueExpression(format!(
             "an array of {} dimensions takes as many indices, not {}",
@@ -244,7 +257,7 @@ pub(in crate::debug_info) fn array_byte_offset(
             indices.len()
         )));
     }
-    let mut linear = 0_u64;
+    let mut position = Vec::with_capacity(indices.len());
     for (index, dimension) in indices.iter().copied().zip(dimensions.iter()) {
         let relative = index
             .checked_sub(dimension.lower_bound)
@@ -255,17 +268,24 @@ pub(in crate::debug_info) fn array_byte_offset(
                 lower_bound: dimension.lower_bound,
                 count: dimension.count,
             })?;
+        position.push((relative, dimension.count));
+    }
+    // The dimension whose elements are adjacent comes last.
+    if ordering == ArrayOrdering::ColumnMajor {
+        position.reverse();
+    }
+    let mut linear = 0_u64;
+    for (relative, count) in position {
         linear = linear
-            .checked_mul(dimension.count)
+            .checked_mul(count)
             .and_then(|value| value.checked_add(relative))
             .ok_or_else(|| {
-                Error::InvalidValueExpression("array row-major index overflows".to_owned())
+                Error::InvalidValueExpression("array element index overflows".to_owned())
             })?;
     }
     linear
-        .checked_mul(*element_size)
+        .checked_mul(element_size)
         .and_then(|offset| i64::try_from(offset).ok())
-        .map(Some)
         .ok_or_else(|| Error::InvalidValueExpression("array element offset overflows".to_owned()))
 }
 
@@ -822,6 +842,7 @@ impl DwarfVariableInfo {
                     TypeKind::Array {
                         element,
                         dimensions,
+                        ..
                     } => {
                         if available < dimensions.len() {
                             return Err(Error::IncompleteArrayIndex {
@@ -844,8 +865,13 @@ impl DwarfVariableInfo {
                 };
                 let element_size = element_shape.byte_size();
                 match &info.kind {
-                    TypeKind::Array { dimensions, .. } => steps.push(PathStep::ArrayIndex {
+                    TypeKind::Array {
+                        dimensions,
+                        ordering,
+                        ..
+                    } => steps.push(PathStep::ArrayIndex {
                         dimensions: Arc::clone(dimensions),
+                        ordering: *ordering,
                         element_size,
                     }),
                     TypeKind::Slice { words, .. } => {
@@ -2494,6 +2520,13 @@ impl DwarfVariableInfo {
             None
         } else {
             match &shape {
+                // An array laid out column by column keeps a page's rows
+                // apart.
+                ValueShape::Array {
+                    dimensions,
+                    ordering: ArrayOrdering::ColumnMajor,
+                    ..
+                } if dimensions.len() > 1 => None,
                 ValueShape::Array { element, .. } | ValueShape::Slice { element, .. } => {
                     let element_shape = self.value_shape(*element).ok();
                     let requires_bytes = element_shape.as_ref().is_some_and(|shape| {
@@ -2680,7 +2713,7 @@ impl DwarfVariableInfo {
                 } else {
                     index
                 };
-                let child_storage = storage_index
+                let mut child_storage = storage_index
                     .checked_mul(stride)
                     .and_then(|offset| i64::try_from(offset).ok())
                     .ok_or_else(|| VariableUnavailableReason::EvaluationLimit.into())
@@ -2691,10 +2724,22 @@ impl DwarfVariableInfo {
                         )
                     });
                 let relationship = match &shape {
-                    ValueShape::Array { dimensions, .. } => ValueChildRelationship::ArrayElement {
-                        index,
-                        indices: array_source_indices(dimensions, index)?.into(),
-                    },
+                    ValueShape::Array {
+                        dimensions,
+                        ordering,
+                        ..
+                    } => {
+                        let indices = array_source_indices(dimensions, index)?;
+                        // Elements are listed row by row wherever they are.
+                        if *ordering == ArrayOrdering::ColumnMajor {
+                            let at = element_byte_offset(dimensions, *ordering, &indices, stride)?;
+                            child_storage = storage::offset(storage.clone(), at);
+                        }
+                        ValueChildRelationship::ArrayElement {
+                            index,
+                            indices: indices.into(),
+                        }
+                    }
                     _ => ValueChildRelationship::SliceElement { index },
                 };
                 (relationship, *element, child_storage)

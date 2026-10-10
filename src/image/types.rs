@@ -20,12 +20,12 @@ use super::index::{self, NameEntry};
 use super::strings::{StrId, Strings, StringsBuilder};
 use super::{Builder, Image, NONE, Record, SharedRecord, TableKind};
 use crate::{
-    Accessibility, ArgumentOrigin, ArrayDimension, BaseClass, BaseClassVirtuality, BaseType,
-    BaseTypeEncoding, EnumerationOrigin, Enumerator, GoKind, GoTypeAttributes, IntegerValue,
-    ModuleImageId, NamedTypeRelationship, RecordKind, RecordMember, RecordMemberLayout,
-    ReferenceKind, SliceWords, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind,
-    TypeModifier, TypeNode, TypeReference, Variant, VariantDiscriminant, VariantSelection,
-    VariantSelector, VariantStorageKind,
+    Accessibility, ArgumentOrigin, ArrayDimension, ArrayOrdering, BaseClass, BaseClassVirtuality,
+    BaseType, BaseTypeEncoding, EnumerationOrigin, Enumerator, GoKind, GoTypeAttributes,
+    IntegerValue, ModuleImageId, NamedTypeRelationship, RecordKind, RecordMember,
+    RecordMemberLayout, ReferenceKind, SliceWords, TypeArgument, TypeId, TypeIdentity, TypeInfo,
+    TypeKind, TypeModifier, TypeNode, TypeReference, Variant, VariantDiscriminant,
+    VariantSelection, VariantSelector, VariantStorageKind,
 };
 
 /// One type. What each field holds depends on [`TypeRecord::kind`]; a
@@ -385,6 +385,7 @@ const RELATIONSHIPS: [NamedTypeRelationship; 4] = [
 ];
 const REFERENCES: [ReferenceKind; 2] = [ReferenceKind::Lvalue, ReferenceKind::Rvalue];
 const RECORDS: [RecordKind; 2] = [RecordKind::Struct, RecordKind::Class];
+const ORDERINGS: [ArrayOrdering; 2] = [ArrayOrdering::RowMajor, ArrayOrdering::ColumnMajor];
 const STORAGE: [VariantStorageKind; 3] = [
     VariantStorageKind::Struct,
     VariantStorageKind::Class,
@@ -693,8 +694,10 @@ impl Encoder {
             TypeKind::Array {
                 element,
                 dimensions,
+                ordering,
             } => {
                 record.kind = kinds::ARRAY;
+                record.detail = code(&ORDERINGS, ordering);
                 record.target = reference(Some(*element));
                 record.first = number(self.dimensions.len())?.into();
                 record.count = number(dimensions.len())?.into();
@@ -1226,6 +1229,7 @@ impl<'a> TypeView<'a> {
                         count: dimension.count.get(),
                     })
                     .collect(),
+                ordering: ORDERINGS[usize::from(record.detail)],
             },
             kinds::SLICE => TypeKind::Slice {
                 element: required(),
@@ -1579,7 +1583,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
             }
             kinds::ARRAY => {
                 no_text
-                    && record.detail == 0
+                    && usize::from(record.detail) < ORDERINGS.len()
                     && none(record.value)
                     && none(record.bit_size)
                     && only(f::SIZED)

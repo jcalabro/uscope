@@ -17,11 +17,11 @@ use super::target::{
 };
 use super::types::{TypeSource, c_type_key_of_name};
 use crate::{
-    AddressValue, ArrayDimension, BaseType, BaseTypeEncoding, ByteOrder, DereferenceState,
-    EnumerationOrigin, Enumerator, FloatValue, InspectedValue, InspectionCompletion,
-    InspectionUsage, IntegerValue, ModuleImageId, NamedTypeRelationship, OptimizedOutReason,
-    RecordKind, RecordMember, RecordMemberLayout, ScalarValue, SliceWords, TextCompletion,
-    TextSummary, TypeId, TypeInfo, TypeKind, TypeModifier, TypeReference,
+    AddressValue, ArrayDimension, ArrayOrdering, BaseType, BaseTypeEncoding, ByteOrder,
+    DereferenceState, EnumerationOrigin, Enumerator, FloatValue, InspectedValue,
+    InspectionCompletion, InspectionUsage, IntegerValue, ModuleImageId, NamedTypeRelationship,
+    OptimizedOutReason, RecordKind, RecordMember, RecordMemberLayout, ScalarValue, SliceWords,
+    TextCompletion, TextSummary, TypeId, TypeInfo, TypeKind, TypeModifier, TypeReference,
     ValueAccessUnavailableReason, ValueChildren, VariableState, VariableUnavailableReason,
     VariableValue, VariableValueSource, VirtualAddress,
 };
@@ -372,6 +372,7 @@ impl World {
             TypeKind::Array {
                 element,
                 dimensions: dimensions.into(),
+                ordering: ArrayOrdering::RowMajor,
             },
         )
     }
@@ -1117,6 +1118,7 @@ impl Scope for World {
                 TypeKind::Array {
                     element,
                     dimensions,
+                    ..
                 },
             ) => {
                 if available < dimensions.len() {

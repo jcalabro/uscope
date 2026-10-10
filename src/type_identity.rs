@@ -16,8 +16,8 @@ use foldhash::{HashMap, HashMapExt};
 
 use crate::eval::types::c_type_key_of_name;
 use crate::{
-    IntegerValue, ModuleImageId, SourceLanguage, TypeArgument, TypeId, TypeInfo, TypeKind,
-    TypeModifier, TypeNode, TypeReference,
+    ArrayOrdering, IntegerValue, ModuleImageId, SourceLanguage, TypeArgument, TypeId, TypeInfo,
+    TypeKind, TypeModifier, TypeNode, TypeReference,
 };
 
 /// How a path spells a namespace without a name. Each unit's is its own.
@@ -815,8 +815,12 @@ fn canonical_key<'a>(
             TypeKind::Array {
                 element,
                 dimensions,
+                ordering,
             } => {
                 let mut key = String::new();
+                if *ordering == ArrayOrdering::ColumnMajor {
+                    key.push_str("column-major ");
+                }
                 for dimension in dimensions.iter() {
                     let _ = write!(key, "[{}]", dimension.count);
                 }

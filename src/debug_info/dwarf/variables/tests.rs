@@ -42,19 +42,27 @@ use super::variant::{
 };
 use super::*;
 use crate::image::locations::{ExpressionId, LocationListId};
-use crate::model::ValueStorage;
+use crate::model::{ArrayOrdering, ValueStorage};
 
 #[test]
-fn array_indices_honor_lower_bounds_and_reject_overflow() {
-    let step = |dimensions: &[(i128, u64)], element_size| PathStep::ArrayIndex {
+fn array_indices_honor_lower_bounds_ordering_and_reject_overflow() {
+    let ordered = |ordering, dimensions: &[(i128, u64)], element_size| PathStep::ArrayIndex {
         dimensions: dimensions
             .iter()
             .map(|&(lower_bound, count)| ArrayDimension { lower_bound, count })
             .collect(),
+        ordering,
         element_size,
+    };
+    let step = |dimensions: &[(i128, u64)], element_size| {
+        ordered(ArrayOrdering::RowMajor, dimensions, element_size)
     };
     let bounded = step(&[(-2, 3), (10, 2)], 4);
     assert_eq!(array_byte_offset(&bounded, &[0, 11]).ok(), Some(Some(20)));
+    // Column by column, the first index's elements are adjacent.
+    let columns = ordered(ArrayOrdering::ColumnMajor, &[(-2, 3), (10, 2)], 4);
+    assert_eq!(array_byte_offset(&columns, &[0, 11]).ok(), Some(Some(20)));
+    assert_eq!(array_byte_offset(&columns, &[-1, 10]).ok(), Some(Some(4)));
     for (indices, bad_index, bad_lower_bound, bad_count) in
         [([-3, 10], -3, -2, 3), ([0, 12], 12, 10, 2)]
     {
@@ -72,7 +80,7 @@ fn array_indices_honor_lower_bounds_and_reject_overflow() {
     let overflowing = step(&[(0, u64::MAX), (0, 2)], 1);
     assert!(matches!(
         array_byte_offset(&overflowing, &[i128::from(u64::MAX - 1), 1]),
-        Err(Error::InvalidValueExpression(message)) if message.contains("row-major")
+        Err(Error::InvalidValueExpression(message)) if message.contains("index overflows")
     ));
 }
 
