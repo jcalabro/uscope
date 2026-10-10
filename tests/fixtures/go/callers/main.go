@@ -11,6 +11,13 @@ import (
 
 var sink int
 
+// Keeps the main goroutine on the main thread. A stripped program's steps
+// follow their thread, and the runtime may otherwise resume a goroutine it
+// preempted on another.
+func init() {
+	runtime.LockOSThread()
+}
+
 //go:noinline
 func reached(name string) {
 	sink += len(name)

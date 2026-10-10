@@ -564,7 +564,9 @@ The pin is a change of its own:
 - A parked goroutine has only pc, sp, and bp, so its innermost runtime
   frames' other registers are unknown.
 - Goroutines and values need DWARF. A stripped binary has named frames,
-  breakpoints, and steps only.
+  breakpoints, and steps only, and its steps follow the thread they began
+  on. A goroutine the runtime preempts during a step may resume on another
+  thread, leaving the step to run on; time stopped makes preemption likely.
 - Goroutines cannot be frozen or resumed individually. Neither the runtime
   nor any debugger supports that (go#31132).
 - The program's functions are never called, so a value is shown through its
