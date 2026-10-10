@@ -8,7 +8,8 @@ use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use rayon::prelude::*;
 
 use crate::debug_info::dwarf::{
-    DieKey, DieWalk, Reader, TypeSignatures, Units, die_reference_with_signatures, unit_dwarf,
+    DieKey, DieMap, DieWalk, Reader, TypeSignatures, Units, die_reference_with_signatures,
+    unit_dwarf,
 };
 use crate::model::ArrayDimension;
 use crate::{
@@ -52,17 +53,17 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) units: &'a Units<'data>,
     pub(super) type_signatures: &'a TypeSignatures,
     pub(super) image: ModuleImageId,
-    pub(super) by_die: HashMap<DieKey, TypeId>,
-    pub(super) type_definitions: HashMap<DieKey, DieKey>,
-    pub(super) ambiguous_type_declarations: HashSet<DieKey>,
+    pub(super) by_die: DieMap<TypeId>,
+    pub(super) type_definitions: DieMap<DieKey>,
+    pub(super) ambiguous_type_declarations: DieMap<()>,
     pub(super) entries: Vec<TypeEntry>,
     /// Where each unit's DIEs begin. A reference to any other offset
     /// points into the middle of a DIE, whose bytes could decode as
     /// convincing nonsense.
-    pub(super) die_offsets: Vec<DieStarts>,
+    pub(super) die_offsets: Vec<Bits>,
     pub(super) unit_languages: Vec<Option<gimli::DwLang>>,
     pub(super) zig_units: Vec<bool>,
-    pub(super) explicit_names: HashSet<TypeId>,
+    pub(super) explicit_names: Bits,
     /// The arguments identities spell by name, which resolve once every
     /// identity exists.
     pub(super) pending_arguments: Vec<super::identity::PendingArguments>,
@@ -80,9 +81,9 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     /// What the records the loader builds may still cost.
     pub(super) budget: crate::debug_info::dwarf::budget::Meter,
     /// The scopes enclosing each type DIE that has any.
-    pub(super) type_scopes: HashMap<DieKey, ScopePath>,
+    pub(super) type_scopes: DieMap<ScopePath>,
     /// The declaration each out-of-line type definition completes.
-    pub(super) definition_declarations: HashMap<DieKey, DieKey>,
+    pub(super) definition_declarations: DieMap<DieKey>,
     /// What each named type's identity is built from, by its identifier.
     /// Nearly every type is named and identifiers are dense, so a vector
     /// holds them in a third of the hash map's memory: the map's buckets
@@ -103,19 +104,21 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) passed_by_value: HashMap<TypeId, bool>,
 }
 
-/// The offsets at which one unit's DIEs begin, one bit per byte of the
-/// unit.
+/// A set of small numbers, one bit each: the offsets at which one unit's
+/// DIEs begin, one bit per byte of the unit, or the types built with
+/// explicit names.
 ///
 /// A set of offsets cost a hash table entry, about 16 bytes, per DIE: some
 /// 300 MB for the large benchmark program's 20 million, all live while its
 /// types are built. Its DIEs average eight bytes, so a bit per byte, 20 MB,
 /// is a sixteenth of that, and a lookup is one load instead of a hash and a
 /// probe.
-pub(super) struct DieStarts {
+#[derive(Default)]
+pub(super) struct Bits {
     words: Vec<u64>,
 }
 
-impl DieStarts {
+impl Bits {
     /// Room for the offsets of a unit `length` bytes long.
     fn with_length(length: usize) -> Self {
         Self {
@@ -123,20 +126,20 @@ impl DieStarts {
         }
     }
 
-    fn insert(&mut self, offset: usize) {
-        let word = offset / 64;
-        // A unit's DIEs lie within its length, but a header that lies about
-        // it must not lose one.
+    fn insert(&mut self, value: usize) {
+        let word = value / 64;
+        // The set grows to fit: a unit's DIEs lie within its length, but a
+        // header that lies about it must not lose one.
         if word >= self.words.len() {
             self.words.resize(word + 1, 0);
         }
-        self.words[word] |= 1 << (offset % 64);
+        self.words[word] |= 1 << (value % 64);
     }
 
-    pub(super) fn contains(&self, offset: usize) -> bool {
+    pub(super) fn contains(&self, value: usize) -> bool {
         self.words
-            .get(offset / 64)
-            .is_some_and(|word| word & (1 << (offset % 64)) != 0)
+            .get(value / 64)
+            .is_some_and(|word| word & (1 << (value % 64)) != 0)
     }
 }
 
@@ -147,7 +150,7 @@ const MEMBER_DECLARATION_CHUNK: usize = 1 << 15;
 
 /// What the type arena's prepass reads of one unit.
 struct UnitPrepass {
-    offsets: DieStarts,
+    offsets: Bits,
     language: Option<gimli::DwLang>,
     zig_producer: bool,
     /// Each type DIE declared in a scope, and the scope's segments.
@@ -166,7 +169,7 @@ impl UnitPrepass {
     ) -> Self {
         let unit = &units[unit_index];
         let mut prepass = Self {
-            offsets: DieStarts::with_length(unit.header.length_including_self()),
+            offsets: Bits::with_length(unit.header.length_including_self()),
             language: None,
             zig_producer: false,
             scoped_types: Vec::new(),
@@ -366,9 +369,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let mut die_offsets = Vec::with_capacity(units.len());
         let mut unit_languages = Vec::with_capacity(units.len());
         let mut zig_units = Vec::with_capacity(units.len());
-        let mut type_definitions = HashMap::new();
-        let mut definition_declarations = HashMap::new();
-        let mut ambiguous_type_declarations = HashSet::new();
+        let mut type_definitions = DieMap::default();
+        let mut definition_declarations = DieMap::default();
+        let mut ambiguous_type_declarations = DieMap::default();
         let mut scoped_types = Vec::new();
         let mut inline_namespaces = HashSet::new();
         for prepass in prepasses {
@@ -383,7 +386,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     .insert(declaration, definition)
                     .is_some_and(|existing| existing != definition)
                 {
-                    ambiguous_type_declarations.insert(declaration);
+                    ambiguous_type_declarations.insert(declaration, ());
                 }
             }
         }
@@ -392,14 +395,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             units,
             type_signatures,
             image,
-            by_die: HashMap::new(),
+            by_die: DieMap::default(),
             type_definitions,
             ambiguous_type_declarations,
             entries: Vec::new(),
             die_offsets,
             unit_languages,
             zig_units,
-            explicit_names: HashSet::new(),
+            explicit_names: Bits::default(),
             pending_arguments: Vec::new(),
             resolution_depth: 0,
             byte_order,
@@ -410,7 +413,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             die_buffers,
             record_member_declarations: Vec::new(),
             budget,
-            type_scopes: HashMap::new(),
+            type_scopes: DieMap::default(),
             definition_declarations,
             identity_parts: Vec::new(),
             go_identity_parts: HashMap::new(),
@@ -437,7 +440,6 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             .par_iter()
             .map(|segments| builder.scope_path(segments, &inline_namespaces))
             .collect::<Vec<_>>();
-        builder.type_scopes.reserve(scoped_types.len());
         for (key, index) in scoped_types {
             let path = &paths[index];
             if !path.is_empty() {
@@ -630,7 +632,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if !is_type_die_tag(entry.tag()) {
                 return Err(format!("DW_AT_type target has non-type tag {:?}", entry.tag()).into());
             }
-            if self.ambiguous_type_declarations.contains(&current) {
+            if self.ambiguous_type_declarations.contains_key(&current) {
                 return Err("type declaration has multiple definitions".into());
             }
             if let Some(definition) = self.type_definitions.get(&current).copied() {
@@ -685,7 +687,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             name => name,
         };
         if explicit_name.is_some() {
-            self.explicit_names.insert(id);
+            self.explicit_names.insert(id.index());
         }
         // Validate the tag's mandatory attributes first: an unusable size
         // returns an opaque type early, which must not mask a defect.
@@ -1532,7 +1534,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let names = (0..self.entries.len())
             .map(|index| {
                 let id = TypeId::new(u32::try_from(index).expect("bounded type count fits u32"));
-                if self.explicit_names.contains(&id) {
+                if self.explicit_names.contains(id.index()) {
                     return None;
                 }
                 visiting.clear();
@@ -1620,7 +1622,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 Some(part.byte_size),
                 TypeKind::Base(part),
             ));
-            self.explicit_names.insert(reference.id);
+            self.explicit_names.insert(reference.id.index());
             self.complex_parts.insert(key, reference.id);
         }
     }
@@ -1644,7 +1646,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             visiting.remove(&id);
             return Arc::from(format!("<type #{}>", id.get()));
         };
-        if self.explicit_names.contains(&id) {
+        if self.explicit_names.contains(id.index()) {
             visiting.remove(&id);
             return Arc::clone(&info.name);
         }
@@ -1729,13 +1731,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         | TypeKind::Signature { .. },
                     ..
                 },
-            )) if !self.explicit_names.contains(&id) => info,
+            )) if !self.explicit_names.contains(id.index()) => info,
             Some(TypeEntry::Resolved(
                 info @ TypeInfo {
                     kind: TypeKind::Modified { modifier, target },
                     ..
                 },
-            )) if !self.explicit_names.contains(&id)
+            )) if !self.explicit_names.contains(id.index())
                 && modifier_keyword(*modifier).is_some()
                 && self.modified_target_is_indirection(target.id) =>
             {
@@ -1820,7 +1822,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         inner: &str,
         visiting: &mut HashSet<TypeId>,
     ) -> String {
-        let binds_tighter = !self.explicit_names.contains(&target)
+        let binds_tighter = !self.explicit_names.contains(target.index())
             && matches!(
                 self.entries.get(target.index()),
                 Some(TypeEntry::Resolved(TypeInfo {

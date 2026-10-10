@@ -3,7 +3,7 @@
 use crate::image::lines::Files;
 use std::sync::Arc;
 
-use foldhash::{HashSet, HashSetExt};
+use foldhash::{HashMap, HashSet, HashSetExt};
 use gimli::Reader as _;
 
 use crate::debug_info::dwarf::{
@@ -358,51 +358,126 @@ pub(super) fn declared_source<'data>(
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
 ) -> std::result::Result<Option<DeclaredSource>, DwarfError> {
+    declared_with(units, unit, entry, chain, |file_unit, header, file, _| {
+        Ok((
+            source_path(dwarf, file_unit, header, file)?,
+            is_type_unit(file_unit),
+        ))
+    })
+    .map(|declared| {
+        declared.map(|((path, suffix), line, column)| DeclaredSource {
+            path,
+            suffix,
+            line,
+            column,
+        })
+    })
+}
+
+/// The files declarations name, by the unit whose line program names each
+/// and its index there.
+///
+/// Most of a unit's variables are declared in a few files, and each
+/// declaration spelled its file's path from the line program again only
+/// for interning to find the path it already holds.
+#[derive(Default)]
+pub(super) struct DeclaredFiles(HashMap<(usize, u64), SourceFileId>);
+
+/// [`declaration_with_origins`], finding each file `files` interned for a
+/// declaration before in `declared` rather than spelling its path again:
+/// interning a path again names the file it named first. A type unit's
+/// relative path is not remembered, as the file it names depends on the
+/// files interned by then.
+pub(super) fn declaration_remembering_files<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    units: &Units<'data>,
+    unit: &gimli::Unit<Reader<'data>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
+    files: &mut Files,
+    declared: &mut DeclaredFiles,
+) -> std::result::Result<Option<SourceLocation>, DwarfError> {
+    declared_with(
+        units,
+        unit,
+        entry,
+        chain,
+        |file_unit, header, file, index| {
+            if is_type_unit(file_unit) {
+                return Ok(files.intern_suffix(source_path(dwarf, file_unit, header, file)?));
+            }
+            let key = (std::ptr::from_ref(file_unit).addr(), index);
+            if let Some(id) = declared.0.get(&key) {
+                return Ok(*id);
+            }
+            let id = files.intern(source_path(dwarf, file_unit, header, file)?);
+            declared.0.insert(key, id);
+            Ok(id)
+        },
+    )
+    .map(|declared| declared.map(|(file, line, column)| SourceLocation { file, line, column }))
+}
+
+/// Where a DIE says it is declared, with its file as `file` makes it of
+/// the unit whose line program names it, that program's header, the
+/// file's entry, and its index there.
+fn declared_with<'a, 'data, F>(
+    units: &'a Units<'data>,
+    unit: &'a gimli::Unit<Reader<'data>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
+    file: impl FnOnce(
+        &'a gimli::Unit<Reader<'data>>,
+        &'a gimli::LineProgramHeader<Reader<'data>>,
+        &'a gimli::FileEntry<Reader<'data>>,
+        u64,
+    ) -> std::result::Result<F, DwarfError>,
+) -> std::result::Result<Option<(F, LineNumber, Option<ColumnNumber>)>, DwarfError> {
     // DWARF inherits declaration attributes individually: each of decl_file,
     // decl_line, and decl_column comes from the first DIE in the chain that
     // supplies it. decl_file indexes the line program of the unit that owns
     // the DIE supplying it.
-    let mut dies = Vec::with_capacity(chain.len() + 1);
-    dies.push((unit, entry));
-    for (origin_unit, origin_entry) in chain {
-        dies.push((&units[*origin_unit], origin_entry));
-    }
-    let file = dies.iter().find_map(|(unit, entry)| {
+    let dies = || {
+        std::iter::once((unit, entry)).chain(
+            chain
+                .iter()
+                .map(|(origin_unit, origin_entry)| (&units[*origin_unit], origin_entry)),
+        )
+    };
+    let found = dies().find_map(|(unit, entry)| {
         entry
             .attr(gimli::DW_AT_decl_file)
             .and_then(gimli::Attribute::udata_value)
-            .map(|index| (*unit, index))
+            .map(|index| (unit, index))
     });
-    let line = dies
-        .iter()
+    let line = dies()
         .find_map(|(_, entry)| {
             entry
                 .attr(gimli::DW_AT_decl_line)
                 .and_then(gimli::Attribute::udata_value)
         })
         .and_then(LineNumber::new);
-    let (Some((file_unit, file_index)), Some(line)) = (file, line) else {
+    let (Some((file_unit, file_index)), Some(line)) = (found, line) else {
         return Ok(None);
     };
     let Some(program) = file_unit.line_program.as_ref() else {
         return Ok(None);
     };
-    let Some(file) = program.header().file(file_index) else {
+    let Some(file_entry) = program.header().file(file_index) else {
         return Ok(None);
     };
-    Ok(Some(DeclaredSource {
-        path: source_path(dwarf, file_unit, program.header(), file)?,
-        suffix: is_type_unit(file_unit),
+    let column = dies()
+        .find_map(|(_, entry)| {
+            entry
+                .attr(gimli::DW_AT_decl_column)
+                .and_then(gimli::Attribute::udata_value)
+        })
+        .and_then(ColumnNumber::new);
+    Ok(Some((
+        file(file_unit, program.header(), file_entry, file_index)?,
         line,
-        column: dies
-            .iter()
-            .find_map(|(_, entry)| {
-                entry
-                    .attr(gimli::DW_AT_decl_column)
-                    .and_then(gimli::Attribute::udata_value)
-            })
-            .and_then(ColumnNumber::new),
-    }))
+        column,
+    )))
 }
 
 /// Returns a member's offset when it is constant: a constant form, or the
