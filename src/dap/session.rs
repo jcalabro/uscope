@@ -745,6 +745,7 @@ impl Session {
         if follow_forks && !core {
             self.hold_forks().await?;
         }
+        self.warn_debug_information().await?;
         self.load_views(working_directory, &view_files).await?;
         self.apply_signal_policies().await?;
 
@@ -835,6 +836,18 @@ impl Session {
             .await;
         for warning in warnings {
             self.client.important(format!("views: {warning}")).await?;
+        }
+        Ok(())
+    }
+
+    /// Says what could not be used of the program's debug information; a
+    /// library's is said as it is announced.
+    async fn warn_debug_information(&self) -> Result<(), Closed> {
+        let Some(handle) = self.handle() else {
+            return Ok(());
+        };
+        for warning in crate::present::debug_information::warnings(handle.module_image(), true) {
+            self.client.important(warning).await?;
         }
         Ok(())
     }

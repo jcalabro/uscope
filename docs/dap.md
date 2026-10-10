@@ -97,6 +97,7 @@ Attaching to a process, or opening a core dump:
 ```
 
 - A module stripped of its debug information takes it from a separate debug file: by build-id under a debug directory's `.build-id`, by `.gnu_debuglink` beside it, in its `.debug` directory, or under a debug directory, and, with `debuginfod`, from a debuginfod server. The `modules` request names the file as a module's `symbolFilePath`.
+- Debug information that cannot be read leaves its module described by its symbols and call-frame information. The adapter says why as `important` output when the session starts, for the program, and as each library loads, and the module's `symbolStatus` repeats it.
 - `pid` may be a number or a numeric string, as VS Code's `${command:pickProcess}` produces.
 - Attaching continues the process unless `stopOnEntry` is set.
 - Disconnecting detaches from an attached process and kills a launched one, unless the client asks otherwise with `terminateDebuggee`.

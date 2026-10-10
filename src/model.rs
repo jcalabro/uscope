@@ -3295,6 +3295,29 @@ pub enum DebugFile {
     },
 }
 
+/// What became of a module's DWARF, the debug information that names its
+/// functions and describes its source lines, types, and variables.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum DebugInformation {
+    /// The module has none, so its symbols alone describe its code.
+    #[default]
+    Absent,
+    /// All of it was read.
+    Loaded,
+    /// Some of it was read; the rest is in a form the debugger does not
+    /// read, so the code it describes is described by symbols alone.
+    Incomplete {
+        /// What was left out, and why.
+        reason: Arc<str>,
+    },
+    /// None of it could be read, so the module's symbols alone describe its
+    /// code.
+    Unusable {
+        /// Why it could not be read.
+        reason: Arc<str>,
+    },
+}
+
 /// A slot of a module's global offset table that the loader fills with a
 /// function's address as it relocates the module.
 #[derive(Debug, Clone, PartialEq, Eq)]

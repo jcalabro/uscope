@@ -1,6 +1,7 @@
 //! Facts about an image as a whole: the addresses it spans, which symbol
-//! tables it provided, what became of the separate debug file found for it,
-//! and where each thread's copy of its thread-local variables is.
+//! tables it provided, what became of its DWARF and of the separate debug
+//! file found for it, and where each thread's copy of its thread-local
+//! variables is.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -12,7 +13,10 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 use super::strings::{StrId, Strings, StringsBuilder};
 use super::{Builder, Image, NONE, Record, TableKind};
 use crate::model::ThreadLocal;
-use crate::{AddressRange, DebugFile, EmbeddedSymbolTable, ImageAddress, SymbolTableSources};
+use crate::{
+    AddressRange, DebugFile, DebugInformation, EmbeddedSymbolTable, ImageAddress,
+    SymbolTableSources,
+};
 
 /// The image's facts. An image holds at most one; none means it spans no
 /// addresses, every table is absent, and it has no thread-local storage.
@@ -38,6 +42,11 @@ pub struct FactsRecord {
     /// The addresses the image's segments span.
     pub address_start: U64,
     pub address_end: U64,
+    /// Why the DWARF is incomplete or unusable, or [`NONE`].
+    pub dwarf_reason: U32,
+    /// [`DWARF_ABSENT`], [`DWARF_LOADED`], [`DWARF_INCOMPLETE`], or
+    /// [`DWARF_UNUSABLE`].
+    pub dwarf: u8,
 }
 
 impl Record for FactsRecord {
@@ -51,6 +60,11 @@ pub const TABLE_UNUSABLE: u8 = 2;
 pub const DEBUG_FILE_NONE: u8 = 0;
 pub const DEBUG_FILE_USED: u8 = 1;
 pub const DEBUG_FILE_UNUSABLE: u8 = 2;
+
+pub const DWARF_ABSENT: u8 = 0;
+pub const DWARF_LOADED: u8 = 1;
+pub const DWARF_INCOMPLETE: u8 = 2;
+pub const DWARF_UNUSABLE: u8 = 3;
 
 /// [`FactsRecord::flags`].
 pub mod fact_flags {
@@ -104,6 +118,7 @@ pub struct Facts<'a> {
     /// The separate debug file found for the image, whose path is left to
     /// binding.
     pub debug_file: Option<&'a DebugFile>,
+    pub debug_information: &'a DebugInformation,
 }
 
 /// Adds `facts` to `builder`, pooling names and reasons in `strings`.
@@ -120,6 +135,12 @@ pub fn add_to(
         }
     };
     let mut push = |text: &str| strings.push(text).map(|id| id.0).ok_or(TooLarge);
+    let (dwarf, dwarf_reason) = match facts.debug_information {
+        DebugInformation::Absent => (DWARF_ABSENT, NONE),
+        DebugInformation::Loaded => (DWARF_LOADED, NONE),
+        DebugInformation::Incomplete { reason } => (DWARF_INCOMPLETE, push(reason)?),
+        DebugInformation::Unusable { reason } => (DWARF_UNUSABLE, push(reason)?),
+    };
     let mut table = |table: &EmbeddedSymbolTable| -> Result<(u8, u32), TooLarge> {
         Ok(match table {
             EmbeddedSymbolTable::Absent => (TABLE_ABSENT, NONE),
@@ -150,6 +171,8 @@ pub fn add_to(
         debug_file,
         address_start: facts.address_range.start.get().into(),
         address_end: facts.address_range.end.get().into(),
+        dwarf_reason: dwarf_reason.into(),
+        dwarf,
     };
     // A map's order is its names' byte order, which lookups search.
     let thread_locals = facts
@@ -245,6 +268,20 @@ impl<'a> FactsView<'a> {
         }
     }
 
+    /// What became of the image's DWARF.
+    pub fn debug_information(self) -> DebugInformation {
+        let Some(record) = self.record else {
+            return DebugInformation::Absent;
+        };
+        let reason = || self.strings.get(StrId(record.dwarf_reason.get())).into();
+        match record.dwarf {
+            DWARF_LOADED => DebugInformation::Loaded,
+            DWARF_INCOMPLETE => DebugInformation::Incomplete { reason: reason() },
+            DWARF_UNUSABLE => DebugInformation::Unusable { reason: reason() },
+            _ => DebugInformation::Absent,
+        }
+    }
+
     pub fn thread_local_storage(self) -> bool {
         self.flag(fact_flags::THREAD_LOCAL_STORAGE)
     }
@@ -292,6 +329,11 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
         DEBUG_FILE_UNUSABLE => strings.contains(StrId(record.debug_reason.get())),
         _ => false,
     };
+    let dwarf = |record: &FactsRecord| match record.dwarf {
+        DWARF_ABSENT | DWARF_LOADED => record.dwarf_reason.get() == NONE,
+        DWARF_INCOMPLETE | DWARF_UNUSABLE => strings.contains(StrId(record.dwarf_reason.get())),
+        _ => false,
+    };
     let reason = |state: u8, reason: U32| match state {
         TABLE_ABSENT | TABLE_LOADED => reason.get() == NONE,
         TABLE_UNUSABLE => strings.contains(StrId(reason.get())),
@@ -303,6 +345,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
                 || !reason(record.embedded_table, record.embedded_reason)
                 || !reason(record.runtime_table, record.runtime_reason)
                 || !debug_file(record)
+                || !dwarf(record)
                 || record.address_start.get() > record.address_end.get()
         })
     {

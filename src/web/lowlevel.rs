@@ -503,6 +503,9 @@ pub async fn modules(handle: &DebuggerHandle, images: &Images) -> Result<Vec<Mod
                 Some(uscope::DebugFile::Unusable { reason, .. }) => Some(reason.to_string()),
                 _ => None,
             },
+            debug_information_problem: image
+                .as_deref()
+                .and_then(crate::present::debug_information::dwarf_problem),
         });
     }
     Ok(modules)
