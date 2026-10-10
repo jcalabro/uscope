@@ -1,13 +1,18 @@
-// D's Phobos containers, which the built-in views present. Each `VIEW:`
-// marker says what its expression must show, evaluated in main() where
-// barrier() is called; `problem:` says the view must refuse the value, and
-// why.
+// D's associative arrays and Phobos containers, which the built-in views
+// present. Each `VIEW:` marker says what its expression must show,
+// evaluated in main() where barrier() is called; `problem:` says the view
+// must refuse the value, and why.
 module containers;
 
 import std.array : Appender, appender;
 import std.typecons : Nullable, nullable;
 
 __gshared const(void)* sink;
+
+struct Triple
+{
+    ulong a, b, c;
+}
 
 // Takes every value at once, so that each is complete where it stops.
 pragma(inline, false) void barrier(const(void)*[] fixtures...)
@@ -28,5 +33,22 @@ void main()
     Appender!(int[]) unused; // VIEW: unused => len=0 []
     auto present = nullable(42); // VIEW: present => 42
     Nullable!int absent; // VIEW: absent => null
-    barrier(&text, &numbers, &unused, &present, &absent);
+    int[string] counts; // VIEW: counts => len=2 {"one": 1, "two": 2} (any order)
+    counts["one"] = 1;
+    counts["two"] = 2;
+    double[int] none; // VIEW: none => len=0 {}
+    uint[uint] many; // VIEW: many => count: 300
+    foreach (i; 0 .. 300)
+        many[i] = i * 2;
+    // A removed entry leaves its bucket marked deleted.
+    int[int] pruned; // VIEW: pruned => len=1 {2: 20}
+    pruned[1] = 10;
+    pruned[2] = 20;
+    pruned.remove(1);
+    // Values stored apart from their keys' alignment.
+    Triple[ubyte] triples; // VIEW: triples => count: 20
+    foreach (ubyte i; 0 .. 20)
+        triples[i] = Triple(i, 0, 0);
+    barrier(&text, &numbers, &unused, &present, &absent, &counts, &none, &many, &pruned,
+        &triples);
 }

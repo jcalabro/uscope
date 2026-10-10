@@ -144,6 +144,7 @@ namespaces such as libc++'s `std::__1` may be spelled or left out.
   its name: `go map<K, V>` presents `map[string]int` and a `type Counts
   map[string]int` alike.
 - In Odin, `map[K, V]` names `map[K]V`, and `map` every map.
+- In D, `AssociativeArray(K, V)` names every associative array `V[K]`.
 - In D, `std.array.Appender(T)` names `Appender!T` in the module
   `std.array`.
 
@@ -834,7 +835,7 @@ The built-in views cover:
   the text it has written.
 - Odin: maps, `core:container/queue`'s queues, `core:container/small_array`'s
   arrays, and `strings.Builder` as its text.
-- D: `std.array.Appender` as its text or elements, and
+- D: associative arrays, `std.array.Appender` as its text or elements, and
   `std.typecons.Nullable` as its value or `null`.
 - Nim: strings as their text, and seqs as their elements.
 - Ada: GNAT's `Unbounded_String` as its text.
