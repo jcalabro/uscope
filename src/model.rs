@@ -2490,6 +2490,51 @@ pub struct Presentation {
     /// For a value presented as an integer, as an atomic is, that integer,
     /// so a client can write it as it writes any, such as in hexadecimal.
     pub number: Option<Arc<InspectedValue>>,
+    /// For a value a view presents as another, as a `Box` is what it
+    /// holds, that value.
+    pub presented: Option<Arc<InspectedValue>>,
+    /// The drawings the view and its `extend`s offer of the value, in
+    /// order, which only the web page draws.
+    pub visualizers: Arc<[Visualizer]>,
+}
+
+/// The header of the debugger's own presentation of Rust tuples.
+pub const RUST_TUPLES: &str = "Rust tuples";
+
+impl Presentation {
+    /// Whether this is the debugger's own presentation of a Rust tuple,
+    /// which shows its positional fields.
+    #[must_use]
+    pub fn is_rust_tuple(&self) -> bool {
+        &*self.view.source == "uscope" && &*self.view.header == RUST_TUPLES
+    }
+}
+
+/// A drawing a view offers of a value: the renderer that draws it, and the
+/// inputs it hands the renderer, which
+/// [`crate::DebuggerHandle::visualizer_inputs`] reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Visualizer {
+    pub renderer: Arc<crate::Renderer>,
+    pub inputs: Arc<VisualizerReference>,
+}
+
+/// Opaque capability for reading one drawing's inputs at one exact stopped
+/// state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisualizerReference {
+    /// The presented value's children, which name its view.
+    pub(crate) children: Arc<ValueChildrenReference>,
+    /// Which of the view's and its `extend`s' `visualize`s it is.
+    pub(crate) index: usize,
+}
+
+impl VisualizerReference {
+    /// The stop whose state the inputs are read at.
+    #[must_use]
+    pub fn stop_id(&self) -> crate::StopId {
+        self.children.stop_id
+    }
 }
 
 /// The inspection state of one visible variable.

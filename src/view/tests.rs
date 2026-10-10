@@ -785,6 +785,32 @@ fn example_outcome(views: &ViewSet, name: &str, outcome: &str) -> String {
             },
         );
     };
+    let listed = super::run::visualizers(&bound);
+    if outcome.starts_with("visualizers: ") {
+        let drawn = listed
+            .iter()
+            .filter_map(|(_, visualizer)| {
+                let drawing = visualizer.bound.as_ref().ok()?;
+                let inputs = drawing
+                    .inputs
+                    .iter()
+                    .map(|input| input.name.as_ref())
+                    .collect::<Vec<_>>();
+                Some(format!("{}({})", visualizer.name, inputs.join(", ")))
+            })
+            .collect::<Vec<_>>();
+        return format!("visualizers: {}", drawn.join(", "));
+    }
+    if outcome.starts_with("unbound visualizers: ") {
+        let unbound = listed
+            .iter()
+            .filter_map(|(_, visualizer)| {
+                let rejection = visualizer.bound.as_ref().err()?;
+                Some(format!("`{}`: {}", visualizer.name, rejection.reason))
+            })
+            .collect::<Vec<_>>();
+        return format!("unbound visualizers: {}", unbound.join("; "));
+    }
     let this = place(&world, name);
     let mut checkpoints = Checkpoints::default();
     let presented = match present(&bound, &mut world, this.clone(), &mut checkpoints) {

@@ -1797,6 +1797,13 @@ run_cached_build "$rust_fixtures_dir/embedded-views" "$output_dir/embedded-views
     --crate-name embedded_views \
     --extern "uscope_views=$output_dir/libuscope_views.rlib" \
     "$rust_fixtures_dir/embedded-views/main.rs" -o "$output_dir/embedded-views-rust"
+# A chess position that carries its views and the renderer that draws it.
+run_cached_build "$rust_fixtures_dir/chess" "$output_dir/chess" \
+    "$rust_sdk_metadata" \
+    rustc --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0 \
+    --crate-name chess \
+    --extern "uscope_views=$output_dir/libuscope_views.rlib" \
+    "$rust_fixtures_dir/chess/main.rs" -o "$output_dir/chess"
 # Unlike the other Rust fixtures, the containers use std.
 build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-o0" \
     --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0
@@ -1924,6 +1931,7 @@ build_fixture gcc "$c_fixtures_dir/process-environment.c" "$output_dir/process-e
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/output-streams.c" "$output_dir/output-streams" \
     -O0 -g3 -fPIE -pie
+build_c_fixture_directory gcc "$c_fixtures_dir/life" "$output_dir/life" -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/kvstore.c" "$output_dir/kvstore" \
     -O0 -g3 -fPIE -pie -pthread
 build_program rustc "$rust_fixtures_dir/kvstore.rs" "$output_dir/kvstore-rust" \

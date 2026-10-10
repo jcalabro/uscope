@@ -447,7 +447,7 @@ impl Client {
         };
         let errors = self
             .handle
-            .load_views(&[("program.views", views)], &[])
+            .load_views(&[("program.views", views)], &[], &[])
             .await
             .map_err(|error| protocol(format!("loading views failed: {error}")))?;
         if errors.is_empty() {

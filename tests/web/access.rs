@@ -109,6 +109,7 @@ async fn a_viewer_watches_but_cannot_control_or_share_control() {
         ("completePath", json!({"text": "/"})),
         ("launch", json!({"program": "/bin/true"})),
         ("share", json!({"role": "control", "to": "/"})),
+        ("reloadViews", json!(null)),
     ] {
         let (kind, _) = viewer.request(method, params).await.expect_err(method);
         assert_eq!(kind, "forbidden", "{method}");

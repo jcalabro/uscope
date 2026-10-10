@@ -20,8 +20,8 @@ use crate::{BaseTypeEncoding, TypeArgument, TypeInfo, TypeKind, TypeReference};
 
 use super::pattern::{Captured, Captures};
 use super::syntax::{
-    ArgumentPattern, Clause, Count, DynamicType, Expr, Format, Generator, Item, Pattern, Piece,
-    Shape, Statement, TypeExpr, View,
+    ArgumentPattern, Clause, Count, DynamicType, Expr, Format, Generator, InputValue, Item,
+    Pattern, Piece, Shape, Statement, TypeExpr, View, Visualize,
 };
 
 /// Something a view's expression names, which its machine reaches at a
@@ -272,6 +272,42 @@ impl<St> BoundShape<St> {
     }
 }
 
+/// A `visualize`, bound: the renderer it calls and its inputs, or why it
+/// does not bind, which leaves the rest of its view as it is.
+#[derive(Debug, Clone)]
+pub struct BoundVisualizer<St> {
+    pub name: Arc<str>,
+    pub line: u32,
+    pub bound: Result<BoundDrawing<St>, Rejection>,
+}
+
+/// What a `visualize` that binds draws with.
+#[derive(Debug, Clone)]
+pub struct BoundDrawing<St> {
+    pub renderer: Arc<crate::Renderer>,
+    pub inputs: Vec<BoundInput<St>>,
+}
+
+/// An input of a `visualize`, bound.
+#[derive(Debug, Clone)]
+pub struct BoundInput<St> {
+    pub name: Arc<str>,
+    pub value: BoundInputValue<St>,
+}
+
+/// What an input hands the renderer, bound.
+#[derive(Debug, Clone)]
+pub enum BoundInputValue<St> {
+    Value(ViewProgram<St>),
+    /// `bytes(PTR, LEN)`: an address and a count of bytes.
+    Bytes {
+        pointer: ViewProgram<St>,
+        length: ViewProgram<St>,
+    },
+    /// A string, as written.
+    Text(Arc<str>),
+}
+
 /// A view bound against one concrete type.
 #[derive(Debug, Clone)]
 pub struct BoundView<St> {
@@ -294,6 +330,8 @@ pub struct BoundView<St> {
     /// The `extend`s that add to this view, each bound in a scope of its
     /// own, in the order they are tried.
     pub extensions: Vec<Arc<Self>>,
+    /// Its `visualize` statements, in order, each bound or not.
+    pub visualizers: Vec<BoundVisualizer<St>>,
 }
 
 impl<St> BoundView<St> {
@@ -581,6 +619,7 @@ pub fn bind<S: Scope>(
     let mut shape = None;
     let mut hidden = Vec::new();
     let mut formats = Vec::new();
+    let mut visualizers = Vec::new();
     for statement in &view.statements {
         match statement {
             Statement::Check(expr) => {
@@ -612,6 +651,9 @@ pub fn bind<S: Scope>(
                         .iter()
                         .map(|name| (Arc::<str>::from(name.as_str()), format, *line)),
                 );
+            }
+            Statement::Visualize(visualize) => {
+                visualizers.push(bind_visualizer(visualize, set, &scope));
             }
             Statement::Let { .. } | Statement::Type { .. } => {}
         }
@@ -646,12 +688,75 @@ pub fn bind<S: Scope>(
         formats,
         self_text,
         extensions: Vec::new(),
+        visualizers,
     };
     if !view.extend {
         let self_ty = presented(&bound.shape, scope.self_type);
         check_against(&bound, &bound.named_programs(), &self_ty, &scope)?;
     }
     Ok(bound)
+}
+
+/// Binds a `visualize`: its renderer, from the view's own set or else the
+/// built-in ones, and each input, as a field binds.
+fn bind_visualizer<S: Scope>(
+    visualize: &Visualize,
+    set: &super::ViewSet,
+    scope: &ViewScope<'_, S>,
+) -> BoundVisualizer<S::Step> {
+    let bound = (|| {
+        let renderer = set
+            .renderer(&visualize.name)
+            .cloned()
+            .or_else(|| {
+                super::ViewSet::built_in()
+                    .renderer(&visualize.name)
+                    .cloned()
+            })
+            .ok_or_else(|| Rejection {
+                line: visualize.line,
+                part: format!("visualize \"{}\"", visualize.name),
+                reason: "no renderer has that name".to_owned(),
+            })?;
+        let mut inputs = Vec::new();
+        for input in &visualize.inputs {
+            let value = match &input.value {
+                InputValue::Value(alternatives) => BoundInputValue::Value(
+                    first_alternative(alternatives, |alternative| {
+                        bind_part(alternative, scope, Mode::Read)
+                            .map_err(|rejection| rejection.reason)
+                    })
+                    .map_err(|reason| Rejection {
+                        line: input.line,
+                        part: input.name.clone(),
+                        reason,
+                    })?,
+                ),
+                InputValue::Bytes { pointer, length } => BoundInputValue::Bytes {
+                    pointer: bind_category(
+                        pointer,
+                        scope,
+                        |category| {
+                            matches!(category, Category::Pointer(_) | Category::Integer { .. })
+                        },
+                        "`bytes` reads at a pointer or an address",
+                    )?,
+                    length: bind_integer(length, scope)?,
+                },
+                InputValue::Text(text) => BoundInputValue::Text(text.as_str().into()),
+            };
+            inputs.push(BoundInput {
+                name: input.name.as_str().into(),
+                value,
+            });
+        }
+        Ok(BoundDrawing { renderer, inputs })
+    })();
+    BoundVisualizer {
+        name: visualize.name.as_str().into(),
+        line: visualize.line,
+        bound,
+    }
 }
 
 /// The first alternative that binds, or every alternative's reason.

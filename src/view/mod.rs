@@ -81,6 +81,49 @@ const BUILT_IN_KERNELS: [(&str, &str, &[u8]); 1] = [(
     include_bytes!("../../views/kernels/rust-btree.wasm"),
 )];
 
+/// The renderers built into uscope, which any `visualize` may call: each
+/// one's name and its JavaScript (`docs/visualizers.md`). They use only
+/// the API every renderer has.
+const BUILT_IN_RENDERERS: [(&str, &str); 10] = [
+    (
+        "line-plot",
+        include_str!("../../views/visualizers/line-plot.js"),
+    ),
+    (
+        "bar-chart",
+        include_str!("../../views/visualizers/bar-chart.js"),
+    ),
+    (
+        "scatter-plot",
+        include_str!("../../views/visualizers/scatter-plot.js"),
+    ),
+    (
+        "histogram",
+        include_str!("../../views/visualizers/histogram.js"),
+    ),
+    (
+        "box-plot",
+        include_str!("../../views/visualizers/box-plot.js"),
+    ),
+    (
+        "donut-chart",
+        include_str!("../../views/visualizers/donut-chart.js"),
+    ),
+    (
+        "heatmap",
+        include_str!("../../views/visualizers/heatmap.js"),
+    ),
+    (
+        "flame-graph",
+        include_str!("../../views/visualizers/flame-graph.js"),
+    ),
+    ("bitmap", include_str!("../../views/visualizers/bitmap.js")),
+    ("bits", include_str!("../../views/visualizers/bits.js")),
+];
+
+/// The largest renderer read, in bytes.
+pub const MAX_RENDERER_BYTES: usize = 256 * 1024;
+
 /// Views from one source, such as the files loaded for a session, a
 /// module's embedded views, or the built-in ones, in the order they are
 /// tried, and the kernels they may call. Immutable once made; loading
@@ -92,6 +135,8 @@ pub struct ViewSet {
     by_base: BTreeMap<String, Vec<usize>>,
     /// Each kernel, by name, with where it was loaded from.
     kernels: BTreeMap<String, (Arc<str>, Arc<kernel::Kernel>)>,
+    /// Each renderer, by name.
+    renderers: BTreeMap<String, Arc<crate::Renderer>>,
     errors: Vec<syntax::Error>,
 }
 
@@ -117,8 +162,57 @@ impl ViewSet {
             views,
             by_base,
             kernels: BTreeMap::new(),
+            renderers: BTreeMap::new(),
             errors,
         }
+    }
+
+    /// Adds renderers loaded from `origin`, each a name and its
+    /// JavaScript. A renderer too large, or whose name an earlier one has,
+    /// is an error of `origin`.
+    pub fn add_renderers<'a>(
+        &mut self,
+        origin: &str,
+        renderers: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) {
+        for (name, source) in renderers {
+            let error = |message: String| syntax::Error {
+                source: Arc::from(origin),
+                line: 0,
+                column: 0,
+                message: format!("renderer `{name}`: {message}"),
+            };
+            if !syntax::is_renderer_name(name) {
+                self.errors.push(error(syntax::RENDERER_NAME.to_owned()));
+                continue;
+            }
+            if source.len() > MAX_RENDERER_BYTES {
+                self.errors.push(error(format!(
+                    "a renderer may be at most {MAX_RENDERER_BYTES} bytes long"
+                )));
+                continue;
+            }
+            if self.renderers.contains_key(name) {
+                self.errors
+                    .push(error("an earlier renderer has the same name".to_owned()));
+                continue;
+            }
+            self.renderers.insert(
+                name.to_owned(),
+                Arc::new(crate::Renderer::new(name, origin, source)),
+            );
+        }
+    }
+
+    /// The renderer named `name`, if the set has one.
+    #[must_use]
+    pub fn renderer(&self, name: &str) -> Option<&Arc<crate::Renderer>> {
+        self.renderers.get(name)
+    }
+
+    /// The set's renderers, by name.
+    pub fn renderers(&self) -> impl Iterator<Item = &Arc<crate::Renderer>> + '_ {
+        self.renderers.values()
     }
 
     /// Adds kernels loaded from `origin`, each a name, its source or a link
@@ -180,6 +274,7 @@ impl ViewSet {
         Arc::clone(BUILT_IN_SET.get_or_init(|| {
             let mut set = Self::new(BUILT_IN);
             set.add_kernels("built-in", BUILT_IN_KERNELS);
+            set.add_renderers("built-in", BUILT_IN_RENDERERS);
             Arc::new(set)
         }))
     }

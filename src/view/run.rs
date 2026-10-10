@@ -15,8 +15,8 @@ use crate::{
 };
 
 use super::bind::{
-    BoundDynamic, BoundField, BoundFormat, BoundScan, BoundShape, BoundView, TextSource,
-    ViewObject, ViewProgram,
+    BoundDynamic, BoundField, BoundFormat, BoundInputValue, BoundScan, BoundShape, BoundView,
+    BoundVisualizer, TextSource, ViewObject, ViewProgram,
 };
 use super::pattern::{Captured, Captures};
 use super::scan::{Checkpoints, Scanner, Var};
@@ -534,6 +534,8 @@ fn formatted<M: Machine>(
             children: children.clone(),
             problem: None,
             number: None,
+            presented: None,
+            visualizers: Arc::from([]),
         }));
     }
     Ok(value)
@@ -1128,6 +1130,113 @@ pub fn children<M: Machine>(
         children.push(child);
     }
     Ok(children)
+}
+
+/// The `visualize` statements of a view and of the `extend`s that add to
+/// it, in order, each with the view it belongs to.
+pub fn visualizers<St>(bound: &BoundView<St>) -> Vec<(&BoundView<St>, &BoundVisualizer<St>)> {
+    std::iter::once(bound)
+        .chain(bound.extensions.iter().map(AsRef::as_ref))
+        .flat_map(|view| {
+            view.visualizers
+                .iter()
+                .map(move |visualizer| (view, visualizer))
+        })
+        .collect()
+}
+
+/// An input a drawing hands its renderer, as run at a stop.
+#[derive(Debug)]
+pub enum Input {
+    Value(Box<InspectedValue>),
+    /// `bytes(PTR, LEN)`: where the bytes are and how many, which the
+    /// caller reads at once.
+    Bytes {
+        address: u64,
+        length: u64,
+    },
+    /// A string the `visualize` writes.
+    Text(Arc<str>),
+}
+
+/// Runs the inputs of the `index`th of [`visualizers`], once the view's
+/// checks hold. An input the program cannot provide is that input's
+/// problem, as a field's is.
+pub fn inputs<M: Machine>(
+    bound: &BoundView<M::Step>,
+    index: usize,
+    machine: &mut M,
+    this: M::Place,
+) -> Result<Vec<(Arc<str>, Input)>, Failure> {
+    let listed = visualizers(bound);
+    let Some(&(owner, visualizer)) = listed.get(index) else {
+        return Err(internal("no such visualizer"));
+    };
+    let drawing = visualizer
+        .bound
+        .as_ref()
+        .map_err(|rejection| refused(rejection.to_string()))?;
+    let mut machine = ViewMachine::new(machine, bound, this.clone());
+    resolve(bound, &mut machine)?;
+    let mut extension;
+    let machine = if std::ptr::eq(owner, bound) {
+        &mut machine
+    } else {
+        extension = ViewMachine::new(&mut *machine.base, owner, this);
+        &mut extension
+    };
+    let mut inputs = Vec::new();
+    for input in &drawing.inputs {
+        machine.set_variables(&[]);
+        let value = match &input.value {
+            BoundInputValue::Value(program) => Input::Value(Box::new(element(program, machine)?)),
+            BoundInputValue::Bytes { pointer, length } => Input::Bytes {
+                address: code_address(pointer, machine)?,
+                length: count(length, machine, "length")?,
+            },
+            BoundInputValue::Text(text) => Input::Text(Arc::clone(text)),
+        };
+        inputs.push((Arc::clone(&input.name), value));
+    }
+    Ok(inputs)
+}
+
+/// Where a sequence's elements lie when they lie next to each other in
+/// memory: when the view's elements are `p[i]` for each `i` in `range(n)`,
+/// with `p` a pointer that `i` does not change. The address of the
+/// first, how many there are, the type of each, and its size.
+pub fn contiguous<M: Machine>(
+    bound: &BoundView<M::Step>,
+    machine: &mut M,
+    this: M::Place,
+) -> Result<Option<(u64, u64, TypeReference, u64)>, Failure>
+where
+    M::Step: Clone,
+{
+    let mut machine = ViewMachine::new(machine, bound, this);
+    let shape = resolve(bound, &mut machine)?;
+    let BoundShape::Sequence { scan, element } = shape else {
+        return Ok(None);
+    };
+    if !scan.random_access() || !scan.clauses[0].items.is_empty() {
+        return Ok(None);
+    }
+    let Some((pointer, scale, element_type)) =
+        element.indexed_pointer(|object| matches!(object, ViewObject::Variable(0)))
+    else {
+        return Ok(None);
+    };
+    if pointer.mentions(&|object| matches!(object, ViewObject::Variable(_))) {
+        return Ok(None);
+    }
+    let Some(count) = declared_length(scan, &mut machine)? else {
+        return Ok(None);
+    };
+    machine.set_variables(&[]);
+    let Value::Pointer(address) = interp::value(&pointer, &mut machine)? else {
+        return Ok(None);
+    };
+    Ok(Some((address, count, element_type, scale)))
 }
 
 /// Whether running stopped because the inspection's budget ran out.

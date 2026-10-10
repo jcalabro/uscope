@@ -13,12 +13,21 @@ use std::path::{Path, PathBuf};
 use crate::view::syntax::MAX_FILE_BYTES;
 
 /// One view file's name, as errors and `info view` give it, and text, with
-/// the kernels beside it that its views call.
+/// the kernels and renderers beside it that its views call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewFile {
     pub name: String,
     pub text: String,
     pub kernels: Vec<KernelFile>,
+    pub renderers: Vec<RendererFile>,
+}
+
+/// A renderer beside a view file, `NAME.js` for the renderer `NAME`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RendererFile {
+    pub name: String,
+    pub path: String,
+    pub source: String,
 }
 
 /// A kernel beside a view file, `NAME.wasm` for the kernel `NAME`.
@@ -54,11 +63,12 @@ pub fn user_directory() -> Option<PathBuf> {
     Some(config.join("uscope/views"))
 }
 
-/// Reads one view file and the kernels beside it that its views call.
+/// Reads one view file and the kernels and renderers beside it that its
+/// views call.
 ///
 /// It reads at most one byte more than a view file may hold, so that the
-/// parser refuses one too long without reading all of it. A kernel with no
-/// file beside it may be a built-in one.
+/// parser refuses one too long without reading all of it. A kernel or
+/// renderer with no file beside it may be a built-in one.
 pub fn read(path: &Path) -> Result<ViewFile, String> {
     let name = path.display().to_string();
     let bytes = read_at_most(path, MAX_FILE_BYTES)?;
@@ -85,10 +95,34 @@ pub fn read(path: &Path) -> Result<ViewFile, String> {
             module: read_at_most(&path, crate::view::kernel::MAX_MODULE_BYTES)?,
         });
     }
+    let mut drawn = file
+        .views
+        .iter()
+        .flat_map(|view| view.renderer_names())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    drawn.sort();
+    drawn.dedup();
+    let mut renderers = Vec::new();
+    for renderer in drawn {
+        let path = directory.join(format!("{renderer}.js"));
+        if !path.exists() {
+            continue;
+        }
+        let source = read_at_most(&path, crate::view::MAX_RENDERER_BYTES)?;
+        let name = path.display().to_string();
+        renderers.push(RendererFile {
+            name: renderer,
+            source: String::from_utf8(source)
+                .map_err(|_| format!("{name}: the file is not UTF-8"))?,
+            path: name,
+        });
+    }
     Ok(ViewFile {
         name,
         text,
         kernels,
+        renderers,
     })
 }
 

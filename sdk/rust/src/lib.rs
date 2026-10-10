@@ -4,7 +4,9 @@
 //! [`uscope_views_file!`] embeds a view file in the `.debug_uscope_views`
 //! section of the object that expands it. uscope presents the module's own
 //! types with those views, and no other module's. [`uscope_kernel!`]
-//! embeds a kernel those views may call, with its source. The section is
+//! embeds a kernel those views may call, with its source, and
+//! [`uscope_visualizer!`] a renderer their drawings may call, which uscope's
+//! web page runs in its sandbox. The section is
 //! not loaded when the program runs, and `strip --strip-debug` removes it
 //! with the rest of the debug information.
 //!
@@ -64,6 +66,35 @@ macro_rules! uscope_kernel {
             concat!(".incbin \"", $source, "\""),
             "6:",
             concat!(".incbin \"", $module, "\""),
+            "8:",
+            ".popsection",
+        );
+    };
+}
+
+/// Embeds the renderer `name`, whose JavaScript is the file at `path`,
+/// which the assembler reads, as [`uscope_views_file!`] says. A view's
+/// `visualize "NAME"` draws with it in uscope's web page, as uscope's
+/// `docs/visualizers.md` describes.
+///
+/// ```ignore
+/// uscope_views::uscope_visualizer!("chess-board", concat!(env!("CARGO_MANIFEST_DIR"), "/chess-board.js"));
+/// ```
+#[macro_export]
+macro_rules! uscope_visualizer {
+    ($name:expr, $path:expr) => {
+        // A record: kind 3 (renderer), format 1, its length, then the
+        // name's length and the name, and the renderer's JavaScript.
+        ::core::arch::global_asm!(
+            ".pushsection .debug_uscope_views,\"\",@progbits",
+            ".byte 3, 1",
+            ".long 8f - 7f",
+            "7:",
+            ".short 4f - 3f",
+            "3:",
+            concat!(".ascii \"", $name, "\""),
+            "4:",
+            concat!(".incbin \"", $path, "\""),
             "8:",
             ".popsection",
         );

@@ -39,7 +39,7 @@ use super::protocol::{
     Person, Presence, Processes, Request, Role, ServerMessage, ShareLink, State, StepKind, Stream,
     TargetKind,
 };
-use super::{inspect, lowlevel, picker, values};
+use super::{draw, inspect, lowlevel, picker, values};
 use crate::cli::format;
 use crate::cli::terminal::Renderer;
 use crate::cli::{Cli, LaunchSettings, Renderers};
@@ -136,6 +136,9 @@ enum Chosen {
 pub struct Session {
     cwd: PathBuf,
     home: Option<PathBuf>,
+    /// The view files given for every program the session debugs, before
+    /// the project's and the user's.
+    views: Vec<PathBuf>,
     /// Where every program's separate debug files are found.
     debug_files: uscope::DebugFileOptions,
     /// What links begin with, such as `http://127.0.0.1:7341/`, or the
@@ -206,6 +209,7 @@ impl Session {
         link_base: String,
         tokens: Tokens,
         debug_files: uscope::DebugFileOptions,
+        views: Vec<PathBuf>,
     ) -> Arc<Self> {
         let (state, _) = watch::channel(Arc::new(State::idle(None)));
         let (messages, _) = broadcast::channel(1024);
@@ -216,6 +220,7 @@ impl Session {
         Arc::new(Self {
             cwd,
             home: std::env::var_os("HOME").map(PathBuf::from),
+            views,
             debug_files,
             link_base,
             tokens,
@@ -329,6 +334,58 @@ impl Session {
         }));
     }
 
+    /// The inputs of a drawing, and the bytes their numbers and bytes lie
+    /// in, which go to the tab before the answer.
+    pub async fn draw(&self, request: &protocol::Draw) -> Result<(Value, Vec<u8>), Failure> {
+        let handle = self.current_handle().await?;
+        let drawn = draw::draw(&handle, request).await?;
+        Ok((to_value(&drawn.drawing), drawn.bytes))
+    }
+
+    /// Answers a request about the renderers drawings name.
+    async fn renderers(&self, request: Request) -> Answer {
+        match request {
+            Request::Renderer(protocol::RendererRef { digest }) => Ok(to_value(
+                &draw::renderer(&self.current_handle().await?, &digest).await?,
+            )),
+            Request::Renderers => Ok(to_value(
+                &draw::renderers(&self.current_handle().await?).await?,
+            )),
+            _ => unreachable!("only reads are read"),
+        }
+    }
+
+    /// Reads the session's view files, and the renderers beside them,
+    /// again, and has every tab read its values again.
+    async fn reload_views(&self, connection: u32) -> Result<(), Failure> {
+        let console = self
+            .target
+            .lock()
+            .await
+            .as_ref()
+            .map(|target| Arc::clone(&target.console))
+            .ok_or_else(|| Failure::new(ErrorKind::NotStopped, "nothing is being debugged"))?;
+        let warnings = console
+            .lock()
+            .await
+            .load_view_sources(&self.cwd, &self.views)
+            .await;
+        self.count(
+            |target| &target.settings,
+            |state, count| state.settings = count,
+        )
+        .await;
+        self.notice(
+            connection,
+            if warnings.is_empty() {
+                "reloaded the views".to_owned()
+            } else {
+                format!("reloaded the views: {}", warnings.join("; "))
+            },
+        );
+        Ok(())
+    }
+
     /// Serves one request from `connection`.
     pub async fn handle(&self, connection: u32, role: Role, request: Request) -> Answer {
         let reads = matches!(
@@ -352,6 +409,8 @@ impl Session {
                 | Request::Modules
                 | Request::Functions(_)
                 | Request::Tasks(_)
+                | Request::Renderer(_)
+                | Request::Renderers
         );
         if !reads && role != Role::Control {
             return Err(Failure::new(
@@ -382,6 +441,10 @@ impl Session {
             | Request::EditWatchpoint(_)
             | Request::RemoveWatchpoint(_)
             | Request::SetSignal(_) => return self.low_level(connection, request).await,
+            Request::ReloadViews => {
+                self.reload_views(connection).await?;
+                return Ok(Value::Null);
+            }
             Request::SetValue(set) => {
                 let row = self
                     .reader(connection)
@@ -499,7 +562,7 @@ impl Session {
                     modules: lowlevel::modules(&handle, &images).await?,
                 }))
             }
-            _ => unreachable!("only reads are read"),
+            request => self.renderers(request).await,
         }
     }
 
@@ -1247,8 +1310,9 @@ impl Session {
         for warning in console.debug_information_warnings().await {
             outlet.publish(Stream::Log, &format!("warning: {warning}\n"));
         }
-        // The project's and the user's views apply, as in the terminal.
-        for warning in console.load_view_sources(&self.cwd, &[]).await {
+        // The session's, the project's, and the user's views apply, as in
+        // the terminal.
+        for warning in console.load_view_sources(&self.cwd, &self.views).await {
             outlet.publish(Stream::Log, &format!("views: {warning}\n"));
         }
         let session = describer.id.clone();

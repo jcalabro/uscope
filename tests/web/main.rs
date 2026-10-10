@@ -7,6 +7,7 @@ mod support;
 mod web;
 
 mod access;
+mod drawing;
 mod inspecting;
 mod lowlevel;
 mod running;
