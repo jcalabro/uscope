@@ -6,6 +6,9 @@
 //! last written before that await, which the await's state does not keep,
 //! holds whatever other polls left in its storage.
 
+#[cfg(target_arch = "x86_64")]
+use rayon::prelude::*;
+
 use crate::debug_info::VariableRuntime;
 use crate::inspection::InspectionBudget;
 use crate::model::ValueStorage;
@@ -91,7 +94,7 @@ impl DwarfVariableInfo {
 /// branch, nothing is noted.
 #[cfg(target_arch = "x86_64")]
 pub(in crate::debug_info) fn held_ranges(
-    code: &dyn DispatchImage,
+    code: &(dyn DispatchImage + Sync),
     variables: &crate::image::variables::Variables,
     instances: &[crate::CodeInstanceInfo],
     resume_points: &[crate::image::resumes::Decoded],
@@ -99,52 +102,58 @@ pub(in crate::debug_info) fn held_ranges(
     let Ok(functions) = variables.function_index() else {
         return Vec::new();
     };
-    let mut held = Vec::new();
-    for (instance, points) in resume_points {
-        let Ok(points) = points else {
-            continue;
-        };
-        let Some(function) = instances
-            .get(instance.index())
-            .and_then(|instance| instance.ranges.iter().map(|range| range.start).min())
-            .and_then(|entry| functions.function_at(entry))
-        else {
-            continue;
-        };
-        for point in points.points.iter() {
-            for object in function
-                .objects
-                .iter()
-                .map(|id| &variables.objects[*id as usize])
-            {
-                // Go, whose locals are visible only past their declaration,
-                // has no coroutines.
-                let (Some(offset), None, None, None) = (
-                    object.debug_info_offset,
-                    object.instance,
-                    object.coroutine,
-                    &object.go_declaration,
-                ) else {
-                    continue;
-                };
-                let in_scope = |address: u64| {
-                    let address = ImageAddress::new(address);
-                    object.ranges.iter().any(|range| range.contains(address))
-                };
-                // The dispatch leaves for the state outside every
-                // variable's scope.
-                let Some(entered) =
-                    first_beyond(code, point.address, &|address| !in_scope(address))
-                else {
-                    continue;
-                };
-                if let (reached, true) = flood_all(code, entered, &in_scope) {
-                    held.push(((offset, point.state), reached.to_vec()));
+    // Each body's resumptions are followed on their own, in parallel, and
+    // kept in the order of the bodies.
+    let held = resume_points
+        .par_iter()
+        .map(|(instance, points)| {
+            let mut held = Vec::new();
+            let Ok(points) = points else {
+                return held;
+            };
+            let Some(function) = instances
+                .get(instance.index())
+                .and_then(|instance| instance.ranges.iter().map(|range| range.start).min())
+                .and_then(|entry| functions.function_at(entry))
+            else {
+                return held;
+            };
+            for point in points.points.iter() {
+                for object in function
+                    .objects
+                    .iter()
+                    .map(|id| &variables.objects[*id as usize])
+                {
+                    // Go, whose locals are visible only past their declaration,
+                    // has no coroutines.
+                    let (Some(offset), None, None, None) = (
+                        object.debug_info_offset,
+                        object.instance,
+                        object.coroutine,
+                        &object.go_declaration,
+                    ) else {
+                        continue;
+                    };
+                    let in_scope = |address: u64| {
+                        let address = ImageAddress::new(address);
+                        object.ranges.iter().any(|range| range.contains(address))
+                    };
+                    // The dispatch leaves for the state outside every
+                    // variable's scope.
+                    let Some(entered) =
+                        first_beyond(code, point.address, &|address| !in_scope(address))
+                    else {
+                        continue;
+                    };
+                    if let (reached, true) = flood_all(code, entered, &in_scope) {
+                        held.push(((offset, point.state), reached.to_vec()));
+                    }
                 }
             }
-        }
-    }
-    held
+            held
+        })
+        .collect::<Vec<_>>();
+    held.into_iter().flatten().collect()
 }
 
 impl Resumption<'_> {

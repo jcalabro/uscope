@@ -1132,12 +1132,13 @@ pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, I
         &sample_got(),
     )
     .unwrap();
-    functions::add_to(
+    let instances = sample_instances();
+    functions::add_functions_to(&mut builder, &mut strings, &sample_functions(), &instances)
+        .unwrap();
+    functions::add_code_to(
         &mut builder,
-        &mut strings,
         &functions::Code {
-            functions: &sample_functions(),
-            instances: &sample_instances(),
+            instances: &instances,
             prologue_ends: &tables.prologue_ends(),
             instruction_starts: &sample_starts(),
         },

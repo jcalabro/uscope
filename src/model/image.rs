@@ -260,7 +260,29 @@ pub fn seal(
     drop(phase);
     crate::count!("image_bytes", tables.as_bytes().len());
     crate::count!("types", metadata.types.len());
+    drop_in_parallel(metadata);
     tables
+}
+
+/// Frees what was sealed. Its largest parts hold millions of allocations
+/// each, which took a fifth of a second to free in turn.
+fn drop_in_parallel(metadata: ModuleMetadata) {
+    let _phase = crate::span!("image.free_metadata");
+    let ModuleMetadata {
+        types,
+        variables,
+        functions,
+        code_instances,
+        lines,
+        ..
+    } = metadata;
+    rayon::scope(|scope| {
+        scope.spawn(move |_| drop(types));
+        scope.spawn(move |_| drop(variables));
+        scope.spawn(move |_| drop(functions));
+        scope.spawn(move |_| drop(code_instances));
+        scope.spawn(move |_| drop(lines));
+    });
 }
 
 fn seal_image(
@@ -268,50 +290,25 @@ fn seal_image(
     address_range: AddressRange<ImageAddress>,
     metadata: &ModuleMetadata,
 ) -> crate::image::Image {
+    // Strings are pooled in the order the tables are encoded, which names
+    // each, so the tables that pool strings are encoded in turn on this
+    // thread while those that pool none are built beside them. Tables are
+    // laid out by kind, whatever order they are added in.
     let mut builder = crate::image::Builder::new(target);
     let mut strings = crate::image::StringsBuilder::default();
-    let mut paths = crate::image::PathsBuilder::default();
-    metadata.lines.add_to(&mut builder);
-    metadata
-        .files
-        .add_to(&mut builder, &mut paths)
-        .expect("source paths come from NUL-terminated strings");
-    crate::image::symbols::add_to(
-        &mut builder,
-        &mut strings,
-        &metadata.symbols,
-        &metadata.sections,
-        &metadata.got_slots,
-    )
-    .expect("names come from NUL-terminated strings");
-    crate::image::facts::add_to(
-        &mut builder,
-        &mut strings,
-        &crate::image::facts::Facts {
-            address_range,
-            symbol_sources: &metadata.symbol_sources,
-            thread_local_storage: metadata.thread_local_storage,
-            thread_locals: &metadata.thread_locals,
-            debug_file: metadata.debug_file.as_ref(),
-            debug_information: &metadata.debug_information,
+    let ((classes, code), ()) = rayon::join(
+        || {
+            rayon::join(
+                || {
+                    let _phase = crate::span!("image.type_classes");
+                    type_classes(&metadata.types)
+                },
+                || encode_without_strings(target, metadata),
+            )
         },
-    )
-    .expect("the loader's facts fit an image");
-    let classes = {
-        let _phase = crate::span!("image.type_classes");
-        type_classes(&metadata.types)
-    };
-    metadata.locations.add_to(&mut builder);
-    crate::image::variables::add_to(&mut builder, &mut strings, &metadata.variables)
-        .expect("the loader's data objects fit an image");
-    crate::image::calls::add_to(&mut builder, &mut strings, &metadata.calls)
-        .expect("the loader's calls fit an image");
-    crate::image::type_facts::add_to(&mut builder, &mut strings, &metadata.type_facts)
-        .expect("the loader's type facts fit an image");
-    crate::image::resumes::add_to(&mut builder, &mut strings, &metadata.resumes)
-        .expect("the loader's resume points fit an image");
-    crate::image::declarations::add_to(&mut builder, &mut strings, &metadata.declarations)
-        .expect("the loader's declarations fit an image");
+        || encode_strings_before_types(&mut builder, &mut strings, address_range, metadata),
+    );
+    builder.absorb(code);
     let phase = crate::span!("image.encode_types");
     crate::image::types::add_to(
         &mut builder,
@@ -333,15 +330,11 @@ fn seal_image(
         &locations::packaged_names(&metadata.functions, &metadata.packages),
     )
     .expect("the loader's packages fit an image");
-    crate::image::functions::add_to(
+    crate::image::functions::add_functions_to(
         &mut builder,
         &mut strings,
-        &crate::image::functions::Code {
-            functions: &metadata.functions,
-            instances: &metadata.code_instances,
-            prologue_ends: &metadata.lines.prologue_ends(),
-            instruction_starts: &instruction_starts(metadata),
-        },
+        &metadata.functions,
+        &metadata.code_instances,
     )
     .expect("the loader's functions fit an image");
     if let Some(unwind) = &metadata.unwind {
@@ -353,11 +346,81 @@ fn seal_image(
             crate::image::TableKind::EmbeddedViews,
             metadata.embedded_views.clone(),
         )
-        .bytes(crate::image::TableKind::Paths, paths.into_bytes())
         .bytes(crate::image::TableKind::Strings, strings.into_bytes());
     builder
         .seal(crate::image::Limits::default())
         .expect("the loader's tables are valid")
+}
+
+/// The tables that pool no string: the lines, the files and their paths,
+/// the locations, and the code instances.
+fn encode_without_strings(
+    target: TargetDescription,
+    metadata: &ModuleMetadata,
+) -> crate::image::Builder<'_> {
+    let _phase = crate::span!("image.encode_without_strings");
+    let mut builder = crate::image::Builder::new(target);
+    let mut paths = crate::image::PathsBuilder::default();
+    metadata.lines.add_to(&mut builder);
+    metadata
+        .files
+        .add_to(&mut builder, &mut paths)
+        .expect("source paths come from NUL-terminated strings");
+    metadata.locations.add_to(&mut builder);
+    crate::image::functions::add_code_to(
+        &mut builder,
+        &crate::image::functions::Code {
+            instances: &metadata.code_instances,
+            prologue_ends: &metadata.lines.prologue_ends(),
+            instruction_starts: &instruction_starts(metadata),
+        },
+    )
+    .expect("the loader's functions fit an image");
+    builder.bytes(crate::image::TableKind::Paths, paths.into_bytes());
+    builder
+}
+
+/// The tables that pool strings before the types do, in the order they
+/// pool them.
+fn encode_strings_before_types<'a>(
+    builder: &mut crate::image::Builder<'a>,
+    strings: &mut crate::image::StringsBuilder,
+    address_range: AddressRange<ImageAddress>,
+    metadata: &'a ModuleMetadata,
+) {
+    crate::image::symbols::add_to(
+        builder,
+        strings,
+        &metadata.symbols,
+        &metadata.sections,
+        &metadata.got_slots,
+    )
+    .expect("names come from NUL-terminated strings");
+    crate::image::facts::add_to(
+        builder,
+        strings,
+        &crate::image::facts::Facts {
+            address_range,
+            symbol_sources: &metadata.symbol_sources,
+            thread_local_storage: metadata.thread_local_storage,
+            thread_locals: &metadata.thread_locals,
+            debug_file: metadata.debug_file.as_ref(),
+            debug_information: &metadata.debug_information,
+        },
+    )
+    .expect("the loader's facts fit an image");
+    let phase = crate::span!("image.encode_variables");
+    crate::image::variables::add_to(builder, strings, &metadata.variables)
+        .expect("the loader's data objects fit an image");
+    drop(phase);
+    crate::image::calls::add_to(builder, strings, &metadata.calls)
+        .expect("the loader's calls fit an image");
+    crate::image::type_facts::add_to(builder, strings, &metadata.type_facts)
+        .expect("the loader's type facts fit an image");
+    crate::image::resumes::add_to(builder, strings, &metadata.resumes)
+        .expect("the loader's resume points fit an image");
+    crate::image::declarations::add_to(builder, strings, &metadata.declarations)
+        .expect("the loader's declarations fit an image");
 }
 
 /// Each type's identity class, numbered in the order classes first come:

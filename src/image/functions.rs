@@ -279,9 +279,8 @@ fn optional(id: Option<u32>) -> U32 {
 #[error("the functions, their names, or their instances do not fit an image")]
 pub struct TooMany;
 
-/// What [`add_to`] encodes.
+/// What [`add_code_to`] encodes.
 pub struct Code<'a> {
-    pub functions: &'a [FunctionInfo],
     pub instances: &'a [CodeInstanceInfo],
     /// Where the line tables end prologues, in line-table order, which
     /// orders each instance's recommended entries.
@@ -290,14 +289,21 @@ pub struct Code<'a> {
     pub instruction_starts: &'a [(ImageAddress, BoundaryEvidence)],
 }
 
-/// Adds the functions, their instances, and their indexes to `builder`,
-/// pooling names in `strings`.
-pub fn add_to(
+/// Adds the functions, their names, and their name index to `builder`,
+/// pooling names in `strings`, which must be pooled in a fixed order.
+pub fn add_functions_to(
     builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
-    code: &Code<'_>,
+    functions: &[FunctionInfo],
+    instances: &[CodeInstanceInfo],
 ) -> Result<(), TooMany> {
-    add_functions(builder, strings, code.functions, code.instances)?;
+    add_functions(builder, strings, functions, instances)
+}
+
+/// Adds the instances, their ranges and entries, and the instruction
+/// starts to `builder`. None names a string, so another thread can build
+/// them while strings are pooled.
+pub fn add_code_to(builder: &mut Builder<'_>, code: &Code<'_>) -> Result<(), TooMany> {
     add_instances(builder, code.instances, code.prologue_ends)?;
     let starts = code
         .instruction_starts

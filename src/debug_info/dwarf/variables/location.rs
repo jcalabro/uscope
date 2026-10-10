@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use gimli::Reader as _;
+use rayon::prelude::*;
 
 use crate::debug_info::dwarf::{DieWalk, DwarfError, Reader, Units, unit_dwarf};
 use crate::{AddressRange, ImageAddress, VariableUnavailableReason};
@@ -349,60 +350,72 @@ fn calls(
 }
 
 /// Records each unit's base types, which typed operations name, in unit
-/// order.
+/// order. Each unit is read on its own in parallel, and recorded in order.
 pub(super) fn load_evaluation_units(
     units: &Units<'_>,
     pool: &mut LocationsBuilder,
 ) -> std::result::Result<(), DwarfError> {
-    for (index, unit) in units.iter().enumerate() {
-        let mut recorded = EvaluationUnit {
-            // The supplementary file's units lie in another section, which
-            // the file's expressions never name.
-            offset: unit
-                .header
-                .debug_info_offset()
-                .filter(|_| !units.is_supplementary(index))
-                .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64")),
-            language: units.inherited_language(index),
-            ..EvaluationUnit::default()
-        };
-        let mut walk = DieWalk::new(unit)?;
-        while let Some(die) = walk.next()? {
-            if !matches!(
-                die.tag,
-                gimli::DW_TAG_compile_unit | gimli::DW_TAG_base_type
-            ) {
-                continue;
-            }
-            let entry = walk.decode()?;
-            if entry.tag() == gimli::DW_TAG_compile_unit {
-                if let Some(gimli::AttributeValue::Language(value)) =
-                    entry.attr_value(gimli::DW_AT_language)
-                {
-                    recorded.language = Some(value);
-                }
-                continue;
-            }
-            if entry.tag() != gimli::DW_TAG_base_type {
-                continue;
-            }
-            let ByteSize::Constant(byte_size) = byte_size_attribute(entry) else {
-                continue;
-            };
-            let Ok(raw_encoding) = base_type_encoding(entry) else {
-                continue;
-            };
-            let encoding = gimli::DwAte(raw_encoding);
-            if let Some(value_type) = dwarf_value_type(encoding, byte_size) {
-                recorded.base_types.push((
-                    u64::try_from(entry.offset().0).expect("DWARF offset fits u64"),
-                    value_type,
-                ));
-            }
-        }
-        pool.unit(&recorded).map_err(too_large)?;
+    let recorded = (0..units.len())
+        .into_par_iter()
+        .map(|index| evaluation_unit(units, index))
+        .collect::<Vec<_>>();
+    // The first unit to fail fails the load, as when they were read in turn.
+    for recorded in recorded {
+        pool.unit(&recorded?).map_err(too_large)?;
     }
     Ok(())
+}
+
+/// What unit `index` records for evaluation: its offset, its language,
+/// and its base types.
+fn evaluation_unit(
+    units: &Units<'_>,
+    index: usize,
+) -> std::result::Result<EvaluationUnit, DwarfError> {
+    let unit = &units[index];
+    let mut recorded = EvaluationUnit {
+        // The supplementary file's units lie in another section, which
+        // the file's expressions never name.
+        offset: unit
+            .header
+            .debug_info_offset()
+            .filter(|_| !units.is_supplementary(index))
+            .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64")),
+        language: units.inherited_language(index),
+        ..EvaluationUnit::default()
+    };
+    let mut walk = DieWalk::new(unit)?;
+    while let Some(die) = walk.next()? {
+        if !matches!(
+            die.tag,
+            gimli::DW_TAG_compile_unit | gimli::DW_TAG_base_type
+        ) {
+            continue;
+        }
+        let entry = walk.decode()?;
+        if entry.tag() == gimli::DW_TAG_compile_unit {
+            if let Some(gimli::AttributeValue::Language(value)) =
+                entry.attr_value(gimli::DW_AT_language)
+            {
+                recorded.language = Some(value);
+            }
+            continue;
+        }
+        let ByteSize::Constant(byte_size) = byte_size_attribute(entry) else {
+            continue;
+        };
+        let Ok(raw_encoding) = base_type_encoding(entry) else {
+            continue;
+        };
+        let encoding = gimli::DwAte(raw_encoding);
+        if let Some(value_type) = dwarf_value_type(encoding, byte_size) {
+            recorded.base_types.push((
+                u64::try_from(entry.offset().0).expect("DWARF offset fits u64"),
+                value_type,
+            ));
+        }
+    }
+    Ok(recorded)
 }
 
 const fn dwarf_value_type(encoding: gimli::DwAte, byte_size: u64) -> Option<gimli::ValueType> {

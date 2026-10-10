@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use rayon::prelude::*;
 
 use crate::debug_info::dwarf::{
     DieKey, DieWalk, Reader, TypeSignatures, Units, die_reference_with_signatures, unit_dwarf,
@@ -20,8 +21,8 @@ use crate::{
 
 use super::codec::{complex_part, enumeration_constant};
 use super::die::{
-    ByteSize, DW_AT_ZIG_PARENT, Seen, UnsignedConstant, array_bound, base_type_encoding,
-    byte_size_attribute, constant_member_offset, copy_name, declaration_with_origins,
+    ByteSize, DW_AT_ZIG_PARENT, DeclaredSource, Seen, UnsignedConstant, array_bound,
+    base_type_encoding, byte_size_attribute, constant_member_offset, copy_name, declared_source,
     index_type_is_signed, origin_chain, strict_flag, string_with_origins, type_with_origins,
     unsigned_constant, zig_qualified_name,
 };
@@ -139,6 +140,126 @@ impl DieStarts {
     }
 }
 
+/// How many member declarations are read in parallel before their files
+/// are interned: enough to keep every worker busy, few enough that their
+/// paths take a few megabytes rather than one per member of the program.
+const MEMBER_DECLARATION_CHUNK: usize = 1 << 15;
+
+/// What the type arena's prepass reads of one unit.
+struct UnitPrepass {
+    offsets: DieStarts,
+    language: Option<gimli::DwLang>,
+    zig_producer: bool,
+    /// Each type DIE declared in a scope, and the scope's segments.
+    scoped_types: Vec<(DieKey, Arc<[ScopeSegment]>)>,
+    inline_namespaces: Vec<Vec<Arc<str>>>,
+    /// Each out-of-line type definition and the declaration it completes.
+    definitions: Vec<(DieKey, DieKey)>,
+}
+
+impl UnitPrepass {
+    fn read(
+        dwarf: &gimli::Dwarf<Reader<'_>>,
+        units: &Units<'_>,
+        type_signatures: &TypeSignatures,
+        unit_index: usize,
+    ) -> Self {
+        let unit = &units[unit_index];
+        let mut prepass = Self {
+            offsets: DieStarts::with_length(unit.header.length_including_self()),
+            language: None,
+            zig_producer: false,
+            scoped_types: Vec::new(),
+            inline_namespaces: Vec::new(),
+            definitions: Vec::new(),
+        };
+        let mut cpp = false;
+        let mut first = true;
+        let mut scopes = Vec::<(isize, ScopeSegment)>::new();
+        // The path of the first `n` scopes at `n`, shared by the types
+        // declared in them. Leaving a scope keeps its parents' paths, so
+        // the types after a record share one path with those before it.
+        let mut paths_at = Vec::<Option<Arc<[ScopeSegment]>>>::new();
+        let Ok(mut walk) = DieWalk::new(unit) else {
+            return prepass;
+        };
+        while let Ok(Some(die)) = walk.next() {
+            prepass.offsets.insert(die.offset.0);
+            let depth = die.depth;
+            while scopes.last().is_some_and(|(scope, _)| *scope >= depth) {
+                scopes.pop();
+            }
+            paths_at.truncate(scopes.len() + 1);
+            let key = DieKey {
+                unit: unit_index,
+                offset: die.offset.0,
+            };
+            // Paths are resolved once every unit is read, since a
+            // function's name may live in another unit.
+            if is_type_die_tag(die.tag) && !scopes.is_empty() {
+                paths_at.resize(scopes.len() + 1, None);
+                let segments = paths_at[scopes.len()].get_or_insert_with(|| {
+                    scopes.iter().map(|(_, segment)| segment.clone()).collect()
+                });
+                prepass.scoped_types.push((key, Arc::clone(segments)));
+            }
+            // Only the root, namespaces, and types have attributes
+            // this reads; a function scopes the types in it by its
+            // offset alone.
+            if die.tag == gimli::DW_TAG_subprogram && !first {
+                scopes.push((depth, ScopeSegment::Function(key)));
+                continue;
+            }
+            if !first && die.tag != gimli::DW_TAG_namespace && !is_type_die_tag(die.tag) {
+                continue;
+            }
+            let Ok(entry) = walk.decode() else {
+                break;
+            };
+            if first {
+                first = false;
+                prepass.language = match entry.attr_value(gimli::DW_AT_language) {
+                    Some(gimli::AttributeValue::Language(language)) => Some(language),
+                    _ => units.inherited_language(unit_index),
+                };
+                prepass.zig_producer = entry
+                    .attr_value(gimli::DW_AT_producer)
+                    .and_then(|value| unit_dwarf(dwarf, unit).attr_string(unit, value).ok())
+                    .is_some_and(|producer| producer.to_string_lossy().starts_with("zig "));
+                cpp =
+                    source_language(prepass.language, prepass.zig_producer) == SourceLanguage::Cpp;
+            }
+            if let Some(segment) = scope_segment(dwarf, unit, unit_index, entry, cpp) {
+                if let ScopeSegment::Inline(name) = &segment {
+                    prepass
+                        .inline_namespaces
+                        .push(inline_namespace_path(&scopes, name));
+                }
+                scopes.push((depth, segment));
+            }
+            if !is_type_die_tag(entry.tag()) {
+                continue;
+            }
+            let Ok(Some(declaration)) = die_reference_with_signatures(
+                entry.attr_value(gimli::DW_AT_specification),
+                unit_index,
+                units,
+                type_signatures,
+            ) else {
+                continue;
+            };
+            prepass.definitions.push((
+                DieKey {
+                    unit: unit_index,
+                    offset: entry.offset().0,
+                },
+                declaration,
+            ));
+        }
+        prepass
+    }
+}
+
 /// What the loader keeps of a finished type graph.
 pub(super) struct BuiltTypes {
     pub(super) entries: Vec<TypeEntry>,
@@ -223,10 +344,6 @@ pub(super) fn zig_error_union_type_names(name: &str) -> Option<(&str, &str)> {
 
 impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     #[expect(
-        clippy::too_many_lines,
-        reason = "one walk of each unit collects its DIE boundaries, language, scopes, and declarations"
-    )]
-    #[expect(
         clippy::too_many_arguments,
         reason = "the module's debug information and what building shares"
     )]
@@ -240,6 +357,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         die_buffers: &'a DieBuffers<'data>,
         budget: crate::debug_info::dwarf::budget::Meter,
     ) -> Self {
+        // Each unit is read on its own in parallel and merged in unit order,
+        // which is the order a serial walk recorded everything in.
+        let prepasses = (0..units.len())
+            .into_par_iter()
+            .map(|unit_index| UnitPrepass::read(dwarf, units, type_signatures, unit_index))
+            .collect::<Vec<_>>();
         let mut die_offsets = Vec::with_capacity(units.len());
         let mut unit_languages = Vec::with_capacity(units.len());
         let mut zig_units = Vec::with_capacity(units.len());
@@ -248,89 +371,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let mut ambiguous_type_declarations = HashSet::new();
         let mut scoped_types = Vec::new();
         let mut inline_namespaces = HashSet::new();
-        for (unit_index, unit) in units.iter().enumerate() {
-            let mut offsets = DieStarts::with_length(unit.header.length_including_self());
-            let mut language = None;
-            let mut zig_producer = false;
-            let mut cpp = false;
-            let mut first = true;
-            let mut scopes = Vec::<(isize, ScopeSegment)>::new();
-            // The path of the first `n` scopes at `n`, shared by the types
-            // declared in them. Leaving a scope keeps its parents' paths, so
-            // the types after a record share one path with those before it.
-            let mut paths_at = Vec::<Option<Arc<[ScopeSegment]>>>::new();
-            let Ok(mut walk) = DieWalk::new(unit) else {
-                die_offsets.push(offsets);
-                unit_languages.push(language);
-                zig_units.push(zig_producer);
-                continue;
-            };
-            while let Ok(Some(die)) = walk.next() {
-                offsets.insert(die.offset.0);
-                let depth = die.depth;
-                while scopes.last().is_some_and(|(scope, _)| *scope >= depth) {
-                    scopes.pop();
-                }
-                paths_at.truncate(scopes.len() + 1);
-                let key = DieKey {
-                    unit: unit_index,
-                    offset: die.offset.0,
-                };
-                // Paths are resolved once every unit is read, since a
-                // function's name may live in another unit.
-                if is_type_die_tag(die.tag) && !scopes.is_empty() {
-                    paths_at.resize(scopes.len() + 1, None);
-                    let segments = paths_at[scopes.len()].get_or_insert_with(|| {
-                        scopes.iter().map(|(_, segment)| segment.clone()).collect()
-                    });
-                    scoped_types.push((key, Arc::clone(segments)));
-                }
-                // Only the root, namespaces, and types have attributes
-                // this reads; a function scopes the types in it by its
-                // offset alone.
-                if die.tag == gimli::DW_TAG_subprogram && !first {
-                    scopes.push((depth, ScopeSegment::Function(key)));
-                    continue;
-                }
-                if !first && die.tag != gimli::DW_TAG_namespace && !is_type_die_tag(die.tag) {
-                    continue;
-                }
-                let Ok(entry) = walk.decode() else {
-                    break;
-                };
-                if first {
-                    first = false;
-                    language = match entry.attr_value(gimli::DW_AT_language) {
-                        Some(gimli::AttributeValue::Language(language)) => Some(language),
-                        _ => units.inherited_language(unit_index),
-                    };
-                    zig_producer = entry
-                        .attr_value(gimli::DW_AT_producer)
-                        .and_then(|value| unit_dwarf(dwarf, unit).attr_string(unit, value).ok())
-                        .is_some_and(|producer| producer.to_string_lossy().starts_with("zig "));
-                    cpp = source_language(language, zig_producer) == SourceLanguage::Cpp;
-                }
-                if let Some(segment) = scope_segment(dwarf, unit, unit_index, entry, cpp) {
-                    if let ScopeSegment::Inline(name) = &segment {
-                        inline_namespaces.insert(inline_namespace_path(&scopes, name));
-                    }
-                    scopes.push((depth, segment));
-                }
-                if !is_type_die_tag(entry.tag()) {
-                    continue;
-                }
-                let Ok(Some(declaration)) = die_reference_with_signatures(
-                    entry.attr_value(gimli::DW_AT_specification),
-                    unit_index,
-                    units,
-                    type_signatures,
-                ) else {
-                    continue;
-                };
-                let definition = DieKey {
-                    unit: unit_index,
-                    offset: entry.offset().0,
-                };
+        for prepass in prepasses {
+            die_offsets.push(prepass.offsets);
+            unit_languages.push(prepass.language);
+            zig_units.push(prepass.zig_producer);
+            scoped_types.extend(prepass.scoped_types);
+            inline_namespaces.extend(prepass.inline_namespaces);
+            for (definition, declaration) in prepass.definitions {
                 definition_declarations.insert(definition, declaration);
                 if type_definitions
                     .insert(declaration, definition)
@@ -339,9 +386,6 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     ambiguous_type_declarations.insert(declaration);
                 }
             }
-            die_offsets.push(offsets);
-            unit_languages.push(language);
-            zig_units.push(zig_producer);
         }
         let mut builder = Self {
             dwarf,
@@ -374,11 +418,28 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             passed_by_value: HashMap::new(),
             go_dict_indices: HashMap::new(),
         };
-        let mut paths = HashMap::<*const ScopeSegment, ScopePath>::new();
-        for (key, segments) in scoped_types {
-            let path = paths
-                .entry(segments.as_ptr())
-                .or_insert_with(|| builder.scope_path(&segments, &inline_namespaces));
+        // Types in one scope share its segments, so each distinct list is
+        // resolved once, in parallel, as a path may name another unit's
+        // function.
+        let mut distinct = HashMap::<*const ScopeSegment, usize>::new();
+        let mut lists = Vec::new();
+        let scoped_types = scoped_types
+            .into_iter()
+            .map(|(key, segments)| {
+                let index = *distinct.entry(segments.as_ptr()).or_insert_with(|| {
+                    lists.push(Arc::clone(&segments));
+                    lists.len() - 1
+                });
+                (key, index)
+            })
+            .collect::<Vec<_>>();
+        let paths = lists
+            .par_iter()
+            .map(|segments| builder.scope_path(segments, &inline_namespaces))
+            .collect::<Vec<_>>();
+        builder.type_scopes.reserve(scoped_types.len());
+        for (key, index) in scoped_types {
+            let path = &paths[index];
             if !path.is_empty() {
                 builder.type_scopes.insert(key, path.clone());
             }
@@ -1211,18 +1272,32 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     /// out; values come from each constant's own type, read before typed Go
     /// constants turn their types into enumerations.
     pub(super) fn named_constants(&mut self) -> BTreeMap<Arc<str>, IntegerValue> {
-        let mut constants = BTreeMap::new();
-        for (unit_index, unit) in self.units.iter().enumerate() {
-            let Ok(mut walk) = DieWalk::new(unit) else {
-                continue;
-            };
-            while let Ok(Some(die)) = walk.next() {
-                if die.depth != 1 || die.tag != gimli::DW_TAG_constant {
-                    continue;
-                }
-                let Ok(entry) = walk.decode() else {
-                    break;
+        // Each unit is searched for its constants in parallel; their types
+        // are built in unit order, which numbers them.
+        let units: &Units<'data> = self.units;
+        let found = units
+            .par_iter()
+            .map(|unit| {
+                let mut found = Vec::new();
+                let Ok(mut walk) = DieWalk::new(unit) else {
+                    return found;
                 };
+                while let Ok(Some(die)) = walk.next() {
+                    if die.depth != 1 || die.tag != gimli::DW_TAG_constant {
+                        continue;
+                    }
+                    let Ok(entry) = walk.decode() else {
+                        break;
+                    };
+                    found.push(entry.clone());
+                }
+                found
+            })
+            .collect::<Vec<_>>();
+        let mut constants = BTreeMap::new();
+        for (unit_index, found) in found.iter().enumerate() {
+            let unit = &units[unit_index];
+            for entry in found {
                 let (Ok(Some(name)), Some(value)) = (
                     copy_name(self.dwarf, unit, entry),
                     entry.attr_value(gimli::DW_AT_const_value),
@@ -1366,13 +1441,23 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     /// aggregate malformed when one of its members' cannot be read.
     pub(super) fn populate_record_member_declarations(&mut self, files: &mut Files) {
         let pending = std::mem::take(&mut self.record_member_declarations);
-        // Read in the order noted, which is the order files are interned.
-        let declarations = pending
-            .iter()
-            .map(|metadata| self.member_declaration(metadata.die, files))
-            .collect::<Vec<_>>();
+        // Each declaration is read on its own in parallel, and their files
+        // interned in the order noted, which numbers them as a serial pass.
+        // A chunk at a time, so that only a chunk's paths are held at once.
+        let mut declarations = Vec::with_capacity(pending.len());
+        for chunk in pending.chunks(MEMBER_DECLARATION_CHUNK) {
+            let read = chunk
+                .par_iter()
+                .map(|metadata| self.member_declaration(metadata.die))
+                .collect::<Vec<_>>();
+            declarations.extend(read.into_iter().map(
+                |declaration| -> std::result::Result<_, Arc<str>> {
+                    Ok(declaration?.map(|declared| declared.intern(files)))
+                },
+            ));
+        }
         let mut order = (0..pending.len()).collect::<Vec<_>>();
-        order.sort_by_key(|index| pending[*index].aggregate);
+        order.par_sort_by_key(|index| pending[*index].aggregate);
         for members in
             order.chunk_by(|left, right| pending[*left].aggregate == pending[*right].aggregate)
         {
@@ -1401,8 +1486,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     fn member_declaration(
         &self,
         key: DieKey,
-        files: &mut Files,
-    ) -> std::result::Result<Option<SourceLocation>, Arc<str>> {
+    ) -> std::result::Result<Option<DeclaredSource>, Arc<str>> {
         let unit = self
             .units
             .get(key.unit)
@@ -1412,7 +1496,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             .map_err(|error| Arc::from(error.to_string()))?;
         let chain = origin_chain(self.units, key.unit, &entry)
             .map_err(|error| Arc::from(error.to_string()))?;
-        declaration_with_origins(self.dwarf, self.units, unit, &entry, &chain, files)
+        declared_source(self.dwarf, self.units, unit, &entry, &chain)
             .map_err(|error| Arc::from(error.to_string()))
     }
 
@@ -3949,31 +4033,34 @@ pub(super) fn propagate_wrapper_sizes(types: &mut [TypeEntry]) {
 }
 
 pub(super) fn inline_storage_cycle_nodes(types: &[TypeEntry]) -> Vec<usize> {
-    let mut edges = vec![Vec::new(); types.len()];
-    for (index, entry) in types.iter().enumerate() {
-        let TypeEntry::Resolved(info) = entry else {
-            continue;
-        };
-        inline_storage_targets(&info.kind, &mut edges[index]);
-        edges[index].retain(|target| *target < types.len());
-    }
-    let mut reverse = vec![Vec::new(); edges.len()];
-    for (source, targets) in edges.iter().enumerate() {
-        for target in targets {
-            reverse[*target].push(source);
+    // The edges are kept flat, each node's after the one before: a vector
+    // of their own for each node, and another of predecessors, allocated
+    // twice for every type a load builds.
+    let mut targets = Vec::new();
+    let mut edges = Edges::default();
+    for entry in types {
+        if let TypeEntry::Resolved(info) = entry {
+            targets.clear();
+            inline_storage_targets(&info.kind, &mut targets);
+            edges
+                .targets
+                .extend(targets.iter().filter(|target| **target < types.len()));
         }
+        edges.ends.push(edges.targets.len());
     }
+    let reverse = edges.reversed();
 
-    let mut visited = vec![false; edges.len()];
-    let mut finish = Vec::with_capacity(edges.len());
-    for start in 0..edges.len() {
+    let mut visited = vec![false; types.len()];
+    let mut finish = Vec::with_capacity(types.len());
+    let mut stack = Vec::new();
+    for start in 0..types.len() {
         if visited[start] {
             continue;
         }
         visited[start] = true;
-        let mut stack = vec![(start, 0_usize)];
+        stack.push((start, 0_usize));
         while let Some((node, edge_index)) = stack.last_mut() {
-            if let Some(next) = edges[*node].get(*edge_index).copied() {
+            if let Some(next) = edges.of(*node).get(*edge_index).copied() {
                 *edge_index += 1;
                 if !visited[next] {
                     visited[next] = true;
@@ -3986,18 +4073,20 @@ pub(super) fn inline_storage_cycle_nodes(types: &[TypeEntry]) -> Vec<usize> {
         }
     }
 
-    let mut assigned = vec![false; edges.len()];
+    let mut assigned = vec![false; types.len()];
     let mut cyclic_nodes = Vec::new();
+    let mut component = Vec::new();
+    let mut stack = Vec::new();
     for start in finish.into_iter().rev() {
         if assigned[start] {
             continue;
         }
         assigned[start] = true;
-        let mut component = Vec::new();
-        let mut stack = vec![start];
+        component.clear();
+        stack.push(start);
         while let Some(node) = stack.pop() {
             component.push(node);
-            for predecessor in &reverse[node] {
+            for predecessor in reverse.of(node) {
                 if !assigned[*predecessor] {
                     assigned[*predecessor] = true;
                     stack.push(*predecessor);
@@ -4007,12 +4096,51 @@ pub(super) fn inline_storage_cycle_nodes(types: &[TypeEntry]) -> Vec<usize> {
         let cyclic = component.len() > 1
             || component
                 .first()
-                .is_some_and(|node| edges[*node].contains(node));
+                .is_some_and(|node| edges.of(*node).contains(node));
         if cyclic {
-            cyclic_nodes.extend(component);
+            cyclic_nodes.extend_from_slice(&component);
         }
     }
     cyclic_nodes
+}
+
+/// A graph's edges, each node's targets after the node before's.
+#[derive(Default)]
+struct Edges {
+    targets: Vec<usize>,
+    /// Where each node's targets end.
+    ends: Vec<usize>,
+}
+
+impl Edges {
+    fn of(&self, node: usize) -> &[usize] {
+        let start = node.checked_sub(1).map_or(0, |before| self.ends[before]);
+        &self.targets[start..self.ends[node]]
+    }
+
+    /// The same graph with every edge turned around, each node's
+    /// predecessors in the order their edges were added.
+    fn reversed(&self) -> Self {
+        let mut ends = vec![0; self.ends.len()];
+        for target in &self.targets {
+            ends[*target] += 1;
+        }
+        let mut total = 0;
+        for end in &mut ends {
+            total += *end;
+            *end = total;
+        }
+        // Each node's predecessors fill its slot from its start.
+        let mut next = ends.clone();
+        let mut targets = vec![0; self.targets.len()];
+        for source in (0..self.ends.len()).rev() {
+            for target in self.of(source).iter().rev() {
+                next[*target] -= 1;
+                targets[next[*target]] = source;
+            }
+        }
+        Self { targets, ends }
+    }
 }
 
 fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
