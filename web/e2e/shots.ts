@@ -83,6 +83,7 @@ try {
   await shoot(page, "8-exited");
 
   await shootDrawings(page);
+  await shootMesh(page);
 } finally {
   await browser.close();
   await server.stop();
@@ -115,4 +116,27 @@ async function shootDrawings(page: Page): Promise<void> {
     await metrics.stop();
   }
 }
+/** The mesh fixture's torus in the built-in live viewer. */
+async function shootMesh(page: Page): Promise<void> {
+  const views = path.join(root, "tests/fixtures/cpp/mesh/mesh.views");
+  const mesh = await startUscope(["--views", views, fixture("mesh")], "");
+  try {
+    await page.setViewportSize({ width: 1440, height: 800 });
+    await page.goto(mesh.link);
+    await page.waitForURL(/\/s\//);
+    const adder = page.getByRole("textbox", { name: "Add a breakpoint" });
+    await adder.fill("mesh.cpp:124");
+    await adder.press("Enter");
+    await adder.press("Escape");
+    await page.keyboard.press("F5");
+    await page.getByTestId("stops").getByText("#2").waitFor();
+    await page.keyboard.press("Alt+v");
+    const board = page.getByRole("region", { name: "Drawing of mesh", exact: true });
+    await board.locator("canvas.live-canvas[data-stop]").waitFor();
+    await shoot(page, "11-drawings-mesh", 400);
+  } finally {
+    await mesh.stop();
+  }
+}
+
 console.log(`screenshots in ${out}`);

@@ -50,8 +50,8 @@ const square = [
 const squareIndices = [0, 1, 2, 0, 2, 3];
 
 /** A session of the viewer on `input`, once it has drawn its first frame. */
-async function viewer(input: unknown) {
-  const live = new Watched(sandbox(), "card", source, input, "mesh", shape);
+async function viewer(input: unknown, size = shape) {
+  const live = new Watched(sandbox(), "card", source, input, "mesh", size);
   await live.expect("started");
   const caption = await live.caption();
   live.session.frame(0);
@@ -129,6 +129,16 @@ describe("mesh", () => {
     expect(pixels(wire)).not.toEqual(zoomed);
     // Only the edges are drawn: the square's middle is the surface.
     expect(pixel(wire, 120, 80)).toBe(palette.surface);
+  });
+
+  it("fits a mesh whole into a tall, narrow canvas", async () => {
+    const { bitmap } = await viewer(mesh(square, squareIndices), { width: 60, height: 240 });
+    // The square's corners stay inside: its edge columns are the surface.
+    for (let y = 0; y < 240; y += 8) {
+      expect(pixel(bitmap, 0, y)).toBe(palette.surface);
+      expect(pixel(bitmap, 59, y)).toBe(palette.surface);
+    }
+    expect(pixel(bitmap, 30, 120)).not.toBe(palette.surface);
   });
 
   it("names the vertex nearest the pointer", async () => {

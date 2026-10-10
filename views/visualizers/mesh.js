@@ -123,10 +123,14 @@ uscope.live((canvas, input) => {
     ];
     const near = Math.max(distance - radius * 2, distance / 1000, 1e-6);
     const far = distance + radius * 2;
+    const aspect = width / Math.max(1, height);
+    // The narrower side sees FIELD, so the fitted mesh shows whole on a
+    // tall canvas too.
+    const field = aspect >= 1 ? FIELD : 2 * Math.atan(Math.tan(FIELD / 2) / aspect);
     return {
       eye,
       view: lookAt(eye, center),
-      projection: perspective(FIELD, width / Math.max(1, height), near, far),
+      projection: perspective(field, aspect, near, far),
     };
   }
 
