@@ -133,7 +133,8 @@ fn the_schema_is_the_records_layout() {
             instance_count,
             other_language,
             language,
-            role
+            role,
+            main_subprogram
         ]
     );
     check!(TableKind::Generics, GenericRecord, [name, argument]);
@@ -562,7 +563,7 @@ fn the_schema_is_the_records_layout() {
     // A change to any record changes this; bump the format with it.
     assert_eq!(
         schema::layout_fingerprint(),
-        0x8681_0009_cacf_4a9c,
+        0xb725_47a4_46d4_96d8,
         "the layout changed:\n{}",
         schema::schema_text()
     );
@@ -667,7 +668,10 @@ fn functions_read_back_with_their_indexes() {
     assert_eq!(ids(&mut function(2).instances()), [] as [u32; 0]);
     assert_eq!(ids(&mut function(3).instances()), [2]);
     let named = |name| view.named(name).map(|f| f.id().get()).collect::<Vec<_>>();
-    assert_eq!(named("main"), [0, 3]);
+    // The main subprogram answers to `main` as well as its own name, and
+    // in place of what is named `main`.
+    assert_eq!(named("main"), [2]);
+    assert_eq!(named("declared"), [2]);
     assert_eq!(named("missing"), [] as [u32; 0]);
     // Latest start first, each instance once though it names a range twice.
     let at = ImageAddress::new;
@@ -1181,6 +1185,21 @@ fn validation_rejects_functions_that_disagree() {
             "an unknown role",
             function(|f| f[0].role = 99),
             "function is malformed",
+        ),
+        (
+            "a main subprogram flag that is not one bit",
+            function(|f| f[2].main_subprogram = 2),
+            "function is malformed",
+        ),
+        (
+            "a main subprogram `main` does not name",
+            function(|f| f[1].main_subprogram = 1),
+            "name index disagrees",
+        ),
+        (
+            "`main` naming what is not the main subprogram",
+            function(|f| f[2].main_subprogram = 0),
+            "name index disagrees",
         ),
         (
             "a missing enclosure",

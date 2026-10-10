@@ -2284,14 +2284,24 @@ async fn odin_steps_into_a_procedure_and_back_to_its_caller() {
 }
 
 /// gfortran's procedures step and unwind as C's do; its main program is
-/// `MAIN__`, whatever the program calls it.
+/// `MAIN__`, whatever the program calls it, and `main` names it rather than
+/// the C wrapper gfortran calls it from.
 #[tokio::test]
 async fn fortran_steps_into_a_procedure_and_back_to_its_caller() {
     for fixture in ["values-fortran-o0", "values-fortran-o2"] {
         let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("values.f90", 232).await;
+        scenario.add_breakpoint("main").await;
         assert!(matches!(
             scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let started = scenario
+            .operation("Fortran main", scenario.handle().current_location())
+            .await;
+        assert_eq!(location_function(&started), Some("MAIN__"), "{fixture}");
+        scenario.add_source_breakpoint("values.f90", 232).await;
+        assert!(matches!(
+            scenario.resume_to_stop().await,
             StopReason::Breakpoint { .. }
         ));
         assert_eq!(

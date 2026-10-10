@@ -3088,6 +3088,10 @@ pub struct FunctionInfo {
     /// future it polls `T`. Empty for a function that is not generic, or
     /// whose debug information names none.
     pub generics: FunctionGenerics,
+    /// Whether the function is the program's main subprogram, which a
+    /// language's runtime enters from a C `main` of its own, as gfortran's
+    /// `MAIN__` is. The name `main` finds it too.
+    pub main_subprogram: bool,
 }
 
 /// A generic function's type arguments, each with its parameter's name.
