@@ -940,6 +940,8 @@ pub enum SourceLanguage {
     Go,
     /// Zig, whichever backend produced it.
     Zig,
+    /// Odin, whose units say they are C99.
+    Odin,
     /// Another language, by its DWARF language code.
     Other(u16),
     /// The unit does not say.

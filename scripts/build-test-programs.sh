@@ -9,6 +9,7 @@ readonly cpp_fixtures_dir="${fixtures_dir}/cpp"
 readonly go_fixtures_dir="${fixtures_dir}/go"
 readonly rust_fixtures_dir="${fixtures_dir}/rust"
 readonly zig_fixtures_dir="${fixtures_dir}/zig"
+readonly odin_fixtures_dir="${fixtures_dir}/odin"
 readonly suite_stamp="${output_dir}/.suite.stamp"
 readonly suite_outputs="${output_dir}/.suite.outputs"
 readonly frame_oracle_script=scripts/frame-variables-oracle.py
@@ -20,6 +21,7 @@ gdb_version=""
 go_version=""
 go_target=""
 zig_version=""
+odin_version=""
 
 read_dash_version() {
     local tool="$1"
@@ -45,7 +47,7 @@ readonly max_jobs="${USCOPE_FIXTURE_JOBS:-$(nproc)}"
 readonly background_builders=" build_program build_fixture build_c_fixture_directory \
 build_cpp_fixture_directory build_cpp_fixture build_shared_fixture build_symbols_library \
 build_disassembly_fixture build_tls_modules_fixture build_rust_fixture build_go_fixture \
-build_go_command build_zig_fixture build_zig_self_hosted_fixture "
+build_go_command build_zig_fixture build_zig_self_hosted_fixture build_odin_fixture "
 # What each running job makes, by process ID, and the compiles among them.
 declare -A job_outputs=()
 declare -A build_jobs=()
@@ -722,6 +724,22 @@ build_zig_self_hosted_fixture() {
         "${command[@]}"
 }
 
+# Builds one Odin file as a package of its own.
+build_odin_fixture() {
+    local source="$1"
+    local output="$2"
+    shift 2
+    local -a command=(
+        odin build "$source" -file -debug -vet -strict-style "$@" "-out:${output}"
+    )
+    if [[ -z "$odin_version" ]]; then
+        odin_version=$(odin version)
+    fi
+    run_cached_build "$source" "$output" \
+        "compiler=${odin_version}"$'\n'"target=x86_64-linux"$'\n'"backend=llvm" \
+        "${command[@]}"
+}
+
 validation_is_cached() {
     wait_for "$1"
     local output="$1"
@@ -982,8 +1000,8 @@ make_core() {
 suite_signature() {
     local -a paths=()
     local tool path
-    for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc cargo go zig objdump \
-        gdb setarch dwz; do
+    for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc cargo go zig odin \
+        objdump gdb setarch dwz; do
         if path=$(type -P "$tool"); then
             paths+=("$path")
         fi
@@ -2472,6 +2490,12 @@ generate_gosym_oracle() {
 }
 generate_gosym_oracle "$output_dir/callers-go"
 generate_gosym_oracle "$output_dir/callers-go-stripped"
+
+# Odin, through its LLVM backend.
+build_odin_fixture "$odin_fixtures_dir/values.odin" "$output_dir/values-odin-o0" -o:none
+build_odin_fixture "$odin_fixtures_dir/values.odin" "$output_dir/values-odin-o2" -o:speed
+build_odin_fixture "$odin_fixtures_dir/containers.odin" "$output_dir/containers-odin-o0" -o:none
+build_odin_fixture "$odin_fixtures_dir/containers.odin" "$output_dir/containers-odin-o2" -o:speed
 
 # GNU objdump's decoding of every executable section, which differential tests
 # compare against uscope's disassembly. -z keeps the zero-filled runs objdump

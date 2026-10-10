@@ -35,15 +35,18 @@ pub enum NameSyntax {
     Go,
     /// `module.Name(T,null)`.
     Zig,
+    /// `package::Name(T:$int,N:$$4)`, and `map[K]V`.
+    Odin,
 }
 
 impl NameSyntax {
-    const ALL: [Self; 3] = [Self::Angle, Self::Go, Self::Zig];
+    const ALL: [Self; 4] = [Self::Angle, Self::Go, Self::Zig, Self::Odin];
 
     pub const fn of(language: SourceLanguage) -> Self {
         match language {
             SourceLanguage::Go => Self::Go,
             SourceLanguage::Zig => Self::Zig,
+            SourceLanguage::Odin => Self::Odin,
             _ => Self::Angle,
         }
     }
@@ -69,6 +72,7 @@ impl<'a> TypeName<'a> {
             NameSyntax::Angle => parse_angle(name),
             NameSyntax::Go => parse_go(name),
             NameSyntax::Zig => parse_zig(name),
+            NameSyntax::Odin => parse_odin(name),
         };
         parsed.unwrap_or(Self {
             path: Vec::new(),
@@ -143,6 +147,46 @@ fn parse_zig(name: &str) -> Option<TypeName<'_>> {
     let (qualified, arguments) = split_arguments(name, '(', ')', NameSyntax::Zig)?;
     let mut segments = qualified.split('.').collect::<Vec<_>>();
     let base = segments.pop()?;
+    (is_identifier(base) && segments.iter().all(|segment| is_identifier(segment))).then_some(
+        TypeName {
+            path: segments,
+            base,
+            arguments,
+        },
+    )
+}
+
+fn parse_odin(name: &str) -> Option<TypeName<'_>> {
+    // Every map is `map[K]V`, whose arguments are its key and its value.
+    if let Some(rest) = name.strip_prefix("map[") {
+        let close = top_level_position(rest, ']', NameSyntax::Odin)?;
+        let (key, value) = (&rest[..close], &rest[close + 1..]);
+        return (!key.is_empty() && !value.is_empty()).then(|| TypeName {
+            path: Vec::new(),
+            base: "map",
+            arguments: Some(vec![key, value]),
+        });
+    }
+    if !name.starts_with(is_identifier_start) || name.starts_with("proc") {
+        return None;
+    }
+    let (qualified, arguments) = split_arguments(name, '(', ')', NameSyntax::Odin)?;
+    let mut segments = split_top_level(qualified, "::", NameSyntax::Odin)?;
+    let base = segments.pop()?;
+    // An argument names its parameter: `T:$int` is the type `int`, and
+    // `N:$$4` the constant 4.
+    let arguments = arguments
+        .map(|arguments| {
+            arguments
+                .into_iter()
+                .map(|argument| {
+                    let (_, value) = argument.split_once(':')?;
+                    let value = value.trim_start_matches('$');
+                    (!value.is_empty()).then_some(value)
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .map_or(Some(None), |arguments| arguments.map(Some))?;
     (is_identifier(base) && segments.iter().all(|segment| is_identifier(segment))).then_some(
         TypeName {
             path: segments,
@@ -809,7 +853,7 @@ mod tests {
 
     #[test]
     fn names_split_into_path_base_and_arguments_in_each_syntax() {
-        use NameSyntax::{Angle, Go, Zig};
+        use NameSyntax::{Angle, Go, Odin, Zig};
         assert_eq!(
             parts("vector<int, std::allocator<int> >", Angle),
             (vec![], "vector", Some(vec!["int", "std::allocator<int>"]))
@@ -855,6 +899,18 @@ mod tests {
             parts("array_list.Aligned(u32,null)", Zig),
             (vec!["array_list"], "Aligned", Some(vec!["u32", "null"]))
         );
+        assert_eq!(
+            parts("container_small_array::Small_Array(N:$$4,T:$int)", Odin),
+            (
+                vec!["container_small_array"],
+                "Small_Array",
+                Some(vec!["4", "int"])
+            )
+        );
+        assert_eq!(
+            parts("map[string][]main::Point", Odin),
+            (vec![], "map", Some(vec!["string", "[]main::Point"]))
+        );
         // What the syntax does not describe is all base.
         for (name, syntax) in [
             ("&str", Angle),
@@ -866,6 +922,9 @@ mod tests {
             ("struct { a int }", Go),
             ("[]const u8", Zig),
             ("error{Oops}!u32", Zig),
+            ("[dynamic]int", Odin),
+            ("proc(x:int)", Odin),
+            ("bit_set[0..=int(7)]", Odin),
             ("vector<int", Angle),
         ] {
             assert_eq!(parts(name, syntax), (vec![], name, None), "{name}");

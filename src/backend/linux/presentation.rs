@@ -867,7 +867,8 @@ impl Sum {
     /// of the variant's fields, `__0` and on for a tuple variant, and a Zig
     /// tagged union's any value: `Some(42)`, `Ok(7)`, `Point {x: 1, y: 2}`,
     /// `circle(3)`, `None`. A Zig optional or error union is its payload,
-    /// `null`, or its error.
+    /// `null`, or its error, and an Odin union the value it holds, or
+    /// `nil`.
     fn of<P: InspectionOps>(
         language: Option<crate::SourceLanguage>,
         name: &str,
@@ -912,6 +913,13 @@ impl Sum {
                 });
             }
             _ => {}
+        }
+        // An Odin union's variant is named for its one member's type.
+        if let (Some(crate::SourceLanguage::Odin), [member]) = (language, members) {
+            return Ok(Self {
+                summary: crate::view::summary::value(Some(&member.type_info), &member.state),
+                payload: Some(member.clone()),
+            });
         }
         // One member named as the variant is its payload: a Rust variant's
         // record of fields, or a Zig tagged union's value.

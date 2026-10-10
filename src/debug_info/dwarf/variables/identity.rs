@@ -106,11 +106,16 @@ pub(super) fn go_embedded(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) 
 }
 
 /// The language a unit's producer proves where its `DW_AT_language` does
-/// not: Zig's LLVM backend says its units are C99.
+/// not: Zig's LLVM backend and Odin say their units are C99.
 pub(in crate::debug_info) fn produced_language(producer: Option<&str>) -> Option<SourceLanguage> {
-    producer
-        .is_some_and(|producer| producer.starts_with("zig "))
-        .then_some(SourceLanguage::Zig)
+    let producer = producer?;
+    if producer.starts_with("zig ") {
+        Some(SourceLanguage::Zig)
+    } else if producer == "odin" || producer.starts_with("odin ") {
+        Some(SourceLanguage::Odin)
+    } else {
+        None
+    }
 }
 
 /// A unit's language: what its producer proves, else what its
@@ -578,7 +583,8 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 let language = self.language(parts.die.unit);
                 let parsed = TypeName::parse(&info.name, NameSyntax::of(language));
                 let scopes = self.type_path(parts.die);
-                // Only Go and Zig names spell their packages and modules.
+                // Only Go, Zig, and Odin names spell their packages and
+                // modules.
                 let path = if parsed.path.is_empty() {
                     scopes.path
                 } else {
