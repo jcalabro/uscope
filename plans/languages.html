@@ -408,6 +408,23 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <header><span class="pid">L5</span><h3>Ada</h3><span class="st done">done</span></header>
         <p>Ada units; subrange types, as GNAT describes <code>Integer_8</code>; GNAT's typedefs seen through; GNAT's own variables left out; arrays with their own bounds, two-dimensional ones by their indices; a view for <code>Unbounded_String</code>. Unconstrained arrays, whose bounds are found at run time, wait on runtime-bounded arrays. A gallery and a stepping scenario. About 60 lines of source and 230 of fixtures and tests.</p>
       </div>
+      <div class="phase">
+        <header><span class="pid">L6</span><h3>Closing the gaps</h3><span class="st done">done</span></header>
+        <p>One commit per gap the five languages left, each with its test first. Source lines count a file's own unit tests; tests count fixtures and scenarios.</p>
+        <ul>
+          <li><b>Column-major arrays</b>: an ordering on arrays, so that <code>grid(1,2)</code> is Fortran's element. About 160 lines of source.</li>
+          <li><b>Arrays bounded at run time</b>: bounds, strides, data locations, and allocation states evaluated at inspection, serving Fortran's assumed-shape, allocatable, and pointer arrays and deferred-length strings, GNAT's unconstrained arrays and fat pointers, C's variable-length arrays, and C's flexible array members, which are listed with an unknown length rather than guessed. <code>&lt;not allocated&gt;</code> and <code>&lt;not associated&gt;</code> are values of their own. The largest change: about 1,700 lines of source, including the image's table of run-time dimensions and its validation, and 110 of fixtures.</li>
+          <li><b>Nim's seqs</b>, now that a flexible array member is indexable: a seq laid out as Nim lays one out is its element type's <code>seq</code>, and a view shows its elements. About 100 lines each of source and tests.</li>
+          <li><b><code>break main</code> in Fortran</b> stops in <code>MAIN__</code>: a function records <code>DW_AT_main_subprogram</code>, and <code>main</code> names the main subprogram wherever a program has one. About 70 lines.</li>
+          <li><b>VS Code</b>: Fortran's fixed form is <code>FortranFixedForm</code>, as the Modern Fortran extension registers it; nothing registers the <code>fortran</code> the manifest named. Odin's, D's, Nim's, and Ada's extensions use the identifiers already listed.</li>
+          <li><b>Syntax highlighting</b> of the five languages in the CLI and the web page: each language's comments, strings, and keywords, case-insensitive for Fortran and Ada. About 790 lines, two thirds of them keyword lists, and one small stream tokenizer on the page shared by all five. Fortran's fixed form stays plain.</li>
+          <li><b>Ada's names</b>: <code>values__add</code> is <code>values.add</code>, overload numbers and body marks dropped, and its library unit is its package, so <code>break add</code> finds it. Other GNAT encodings stay raw. About 85 lines.</li>
+          <li><b>D's symbols</b>: druntime's and Phobos's frames read as what they name, <code>rt.dmain2._d_run_main2.runAll</code>, with template arguments written <code>!(…)</code>. A name-only reader of D's mangling grammar, back references included, that refuses anything it does not follow exactly; checked against libiberty over the fixture's 3,838 symbols, it names every one libiberty reads the same, and one libiberty cannot read. About 540 lines.</li>
+          <li><b>Nim's variables</b>: <code>small_1</code> is <code>small</code> and <code>value_p0</code> is <code>value</code>. Nim 2 numbers every local and parameter, and its mangling drops any underscore before a digit, so the number is never part of the name. About 30 lines.</li>
+          <li><b>Return values</b> of Odin, Fortran, D, and Ada: their scalars, which LLVM and GCC return as C's, pinned by an integer, a double, and a truth value in each gallery at both optimization levels; their aggregates stay unknown. Returned values are named as C's are, without scopes. About 40 lines of source and 190 of fixtures.</li>
+          <li><b>D's associative arrays</b>: LDC's record of a table pointer with typedefs of its key and value types is <code>AssociativeArray(K, V)</code>, and a view reads druntime's table as <code>core/internal/newaa.d</code> lays it out, refusing a table whose key and value sizes are not its types'. About 85 lines.</li>
+        </ul>
+      </div>
     </section>
 
     <section id="findings">
@@ -419,7 +436,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <thead><tr><th>Bug</th><th>Found by</th><th>Status</th></tr></thead>
         <tbody>
           <tr><td>An array without <code>DW_AT_lower_bound</code> was assumed to start at 0 whatever its language, so a Fortran or Ada array of three showed four elements.</td><td>gfortran, GNAT</td><td><span class="st done">fixed</span></td></tr>
-          <tr><td>A Fortran array of more than one dimension was read row by row, so <code>grid(1,2)</code> showed <code>grid(2,1)</code>'s value.</td><td>gfortran</td><td><span class="st done">unsupported, not wrong</span></td></tr>
+          <tr><td>A Fortran array of more than one dimension was read row by row, so <code>grid(1,2)</code> showed <code>grid(2,1)</code>'s value.</td><td>gfortran</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>A nameless artificial variable was listed as malformed instead of being left out.</td><td>gfortran</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>A subrange type used as a type, as GNAT's <code>Integer_8</code>, was unsupported, and so was every array of one.</td><td>GNAT</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>A slice's text was read from its first word whatever its layout, so a D string, length first, read as garbage.</td><td>LDC</td><td><span class="st done">fixed</span></td></tr>
@@ -427,6 +444,10 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <tr><td>The pinned nightly rustc describes an unsized tail, <code>[u16]</code> in <code>Tail</code>, as one element inside the record's size, which uscope read as a slice.</td><td>rustc</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>The <code>utf8</code> format refused an array of a typedef of bytes, as Odin's <code>u8</code>.</td><td>Odin</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>A typedef in a language the evaluator did not know the meaning of typedefs in blocked evaluation of its values, as GNAT's access types and Nim's integers.</td><td>GNAT, Nim</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>An array's <code>DW_AT_byte_stride</code> or <code>DW_AT_bit_stride</code> was ignored, so a strided array was read as adjacent elements. A dimension's stride, as a Fortran array section's, is now read, and an array's own is unsupported rather than misread.</td><td>gfortran</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>A returned value was named by its function's DWARF name, so Nim's read <code>_ZN6values3addE3int3int</code>.</td><td>Nim</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>The VS Code manifest named the Fortran language <code>fortran</code>, which no extension registers, so fixed-form sources took no breakpoints.</td><td>Modern Fortran</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>libiberty cannot read a D symbol whose type refers back to a function type, as <code>std.concurrency.FiberScheduler.create.wrap</code>. Not uscope's; uscope reads it.</td><td>LDC</td><td><span class="st todo">noted</span></td></tr>
           <tr><td>Odin's <code>rawptr</code> carries <code>DW_AT_address_class 1</code>, so uscope refuses it as a pointer into another address space. Odin's quirk; uscope is right to refuse.</td><td>Odin</td><td><span class="st todo">noted</span></td></tr>
         </tbody>
       </table></div>
@@ -435,17 +456,13 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
     <section id="deferred">
       <h2>Deferred</h2>
       <div class="prose">
+        <p>What the gaps left, and what was declined.</p>
         <ul>
-          <li><b>Arrays bounded at run time</b>, the largest gap: Fortran's assumed-shape and allocatable arrays (<code>DW_AT_data_location</code>, bounds over <code>DW_OP_push_object_address</code>), deferred-length strings, Ada's unconstrained arrays, and C's variable-length arrays all need bounds evaluated at inspection rather than load. One feature serves all four.</li>
-          <li><b>Column-major arrays</b>: an ordering for arrays, so that a Fortran array of more than one dimension shows its elements by their indices.</li>
-          <li><b>C flexible array members</b>, which Nim's seqs keep their elements in.</li>
-          <li>Odin's and D's maps beyond what views can prove, and D's associative arrays, whose druntime carries no debug information.</li>
-          <li>Names as their languages write them: GNAT's <code>values__reached</code> as <code>values.reached</code>, D's druntime symbols, and Nim's locals without their suffixes (<code>small_1</code>), each an encoding to decode exactly or not at all.</li>
-          <li>Nim's enums, which its C describes as integers.</li>
-          <li>Breaking on <code>main</code> in Fortran stops in gfortran's wrapper rather than <code>MAIN__</code>, which <code>DW_AT_main_subprogram</code> marks.</li>
-          <li>Syntax highlighting of the new languages' sources in the CLI and the web UI, and checking VS Code's language identifiers for Fortran against its extensions.</li>
-          <li>Each language's expression syntax: expressions keep uscope's one neutral language.</li>
-          <li>Return values (<code>finish</code>) for the new languages' own calling conventions, until a gallery pins them.</li>
+          <li><b>Each language's expression syntax</b>, declined: expressions are one neutral language for every source language, so <code>a(1, 2)</code> in Fortran and <code>A (1)</code> in Ada are written <code>a[1][2]</code> and <code>a[1]</code>.</li>
+          <li><b>Nim's enums</b>, declined: Nim's C describes an enum as a typedef of an integer, and its enumerators' names are only in the code of the <code>$</code> it generates, so no debug information names them.</li>
+          <li>GNAT's types and package-level variables keep their encoded names; only subprograms are decoded.</li>
+          <li>Aggregates that Odin, Fortran, D, and Ada functions return, whose conventions the languages leave unspecified.</li>
+          <li>D's thunks (<code>_DThn…</code>), which libiberty does not read either, and highlighting of Fortran's fixed form.</li>
         </ul>
       </div>
     </section>
