@@ -635,6 +635,7 @@ pub trait NameIndex {
             if let Some(key) = key.as_deref() {
                 candidates.extend(self.by_base(key));
             }
+            crate::count!("type_name_candidates", candidates.len());
             for id in candidates {
                 let Some(reference) = self.reference(id) else {
                     continue;

@@ -681,8 +681,19 @@ pub(super) fn resolve_parsed_arguments(
             }
         }
     }
-    // Many names spell the same argument, which resolves alike each time.
-    let mut answers = HashMap::new();
+    // Many names spell the same argument, which resolves alike each time,
+    // so each spelling resolves once. A spelling's answer depends on nothing
+    // but the spelling, and finding it searches every type its base names,
+    // thousands in a large program, so the spellings resolve in parallel.
+    let (spellings, ordered) = spellings(entries, pending);
+    crate::count!("type_arguments_spelled", ordered.len());
+    // An indexed collect splits alike however the work is stolen.
+    let answers = ordered
+        .par_iter()
+        .map(|(text, language)| {
+            resolve_argument(text, *language, &index, &lookup, &pointers, &alike)
+        })
+        .collect::<Vec<_>>();
     let mut resolved = Vec::new();
     for pending in pending {
         let Some(TypeEntry::Resolved(info)) = entries.get(pending.entry) else {
@@ -696,12 +707,7 @@ pub(super) fn resolve_parsed_arguments(
             let TypeArgument::Unknown(text) = &arguments[*position] else {
                 continue;
             };
-            let found = answers
-                .entry((Arc::clone(text), pending.language))
-                .or_insert_with(|| {
-                    resolve_argument(text, pending.language, &index, &lookup, &pointers, &alike)
-                });
-            if let Some(found) = found {
+            if let Some(found) = &answers[spellings[&(Arc::clone(text), pending.language)]] {
                 arguments[*position] = found.clone();
             }
         }
@@ -714,6 +720,39 @@ pub(super) fn resolve_parsed_arguments(
             Arc::make_mut(identity).arguments = arguments.into();
         }
     }
+}
+
+/// A spelling of a type argument, in its language.
+type Spelling = (Arc<str>, SourceLanguage);
+
+/// The spellings of the arguments `pending` names, each once in the order
+/// first named, and where each is in that order.
+fn spellings(
+    entries: &[TypeEntry],
+    pending: &[PendingArguments],
+) -> (HashMap<Spelling, usize>, Vec<Spelling>) {
+    let mut spellings = HashMap::new();
+    let mut ordered = Vec::new();
+    for pending in pending {
+        let Some(TypeEntry::Resolved(TypeInfo {
+            identity: Some(identity),
+            ..
+        })) = entries.get(pending.entry)
+        else {
+            continue;
+        };
+        for position in &pending.positions {
+            if let Some(TypeArgument::Unknown(text)) = identity.arguments.get(*position) {
+                spellings
+                    .entry((Arc::clone(text), pending.language))
+                    .or_insert_with(|| {
+                        ordered.push((Arc::clone(text), pending.language));
+                        ordered.len() - 1
+                    });
+            }
+        }
+    }
+    (spellings, ordered)
 }
 
 /// Each type's class of types alike to every name, with the members of
