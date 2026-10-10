@@ -3538,7 +3538,7 @@ pub struct SymbolLocation {
 }
 
 impl SymbolInfo {
-    /// Returns the source-level spelling of a Rust or C++ mangled name, or
+    /// Returns the source-level spelling of a Rust, C++, or D mangled name, or
     /// `None` when the name is not mangled in a recognized scheme.
     #[must_use]
     pub fn demangled_name(&self) -> Option<String> {
@@ -3568,7 +3568,7 @@ impl SymbolInfo {
 }
 
 impl SymbolLocation {
-    /// Returns the source-level spelling of a Rust or C++ mangled name, or
+    /// Returns the source-level spelling of a Rust, C++, or D mangled name, or
     /// `None` when the name is not mangled in a recognized scheme.
     #[must_use]
     pub fn demangled_name(&self) -> Option<String> {

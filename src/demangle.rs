@@ -1,16 +1,22 @@
 //! Source-level spellings of mangled linker names.
 
+mod dlang;
+
 /// Bounds the C++ demangler's recursion so adversarial names cannot exhaust
 /// the stack.
 const CPP_RECURSION_LIMIT: u32 = 96;
 
-/// Demangles a Rust (legacy or v0) or Itanium C++ linker name.
+/// Demangles a Rust (legacy or v0), Itanium C++, or D linker name. A D
+/// name is what the symbol names, without its type (see [`dlang`]).
 ///
 /// Rust is tried first because its legacy scheme is a subset of the Itanium
 /// grammar; the alternate rendering omits Rust's per-crate hash suffix.
 pub fn demangle(name: &str) -> Option<String> {
     if let Ok(demangled) = rustc_demangle::try_demangle(name) {
         return Some(format!("{demangled:#}"));
+    }
+    if name.starts_with("_D") {
+        return dlang::qualified_name(name);
     }
     if !name.starts_with("_Z") {
         return None;
@@ -263,6 +269,52 @@ mod tests {
         ] {
             assert_eq!(demangle(mangled).as_deref(), expected, "{mangled}");
         }
+    }
+
+    /// Checked against libiberty's D demangler, less parameters and with
+    /// template arguments left out.
+    #[test]
+    fn d_names_demangle_to_what_they_name_or_not_at_all() {
+        for (mangled, expected) in [
+            // A function nested in another, which is followed by its type.
+            (
+                "_D2rt6dmain212_d_run_main2UAAamPUQgZiZ6runAllMFZv",
+                Some("rt.dmain2._d_run_main2.runAll"),
+            ),
+            (
+                "_D3std6socket9TcpSocket6__vtblZ",
+                Some("std.socket.TcpSocket.__vtbl"),
+            ),
+            // Template instances, with values, back references to their
+            // names, and symbols as arguments.
+            (
+                "_D3std10functional__T6safeOpVAyaa1_3cZ__TQuTmTiZQBbFNaNbNiNfKmKiZb",
+                Some("std.functional.safeOp!(…).safeOp!(…).safeOp"),
+            ),
+            (
+                "_D3std11concurrency__T8initOnceS_DQBg8datetime8timezone9LocalTime9singletonFNeZ5guardObZQCoFNcLObZOb",
+                Some("std.concurrency.initOnce!(…).initOnce"),
+            ),
+            // A type that refers back to a function type.
+            (
+                "_D3std11concurrency14FiberScheduler6createMFNbDFZvZ4wrapMQk",
+                Some("std.concurrency.FiberScheduler.create.wrap"),
+            ),
+            ("_Dmain", Some("D main")),
+            // A thunk, names cut short, and what only begins as D's do.
+            (
+                "_DThn16_4core8internal2gc4impl6manualQp8ManualGC6enableMFZv",
+                None,
+            ),
+            ("_D2rt6dmain212_d_run_main2UAAam", None),
+            ("_D3std", None),
+            ("_D3stdQz", None),
+            ("_DYNAMIC", None),
+        ] {
+            assert_eq!(demangle(mangled).as_deref(), expected, "{mangled}");
+        }
+        let nested = format!("_D1f{}v", "P".repeat(10_000));
+        assert_eq!(demangle(&nested), None);
     }
 
     #[test]
