@@ -251,6 +251,7 @@ impl Web {
                 traffic: Vec::new(),
                 started: self.started,
                 state: None,
+                binary: Vec::new(),
             }),
             Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => {
                 Err(response.status().as_u16())
@@ -310,6 +311,8 @@ pub struct Client {
     started: Instant,
     /// The newest `state` received.
     state: Option<Value>,
+    /// Binary frames not yet claimed, by the id of the answer they precede.
+    binary: Vec<(u64, Vec<u8>)>,
 }
 
 impl Client {
@@ -361,8 +364,22 @@ impl Client {
                 .unwrap_or_else(|_| panic!("{} waited too long for a message", self.name))
                 .unwrap_or_else(|| panic!("{} was disconnected", self.name))
                 .expect("a message");
-            let Message::Text(text) = message else {
-                continue;
+            let text = match message {
+                Message::Text(text) => text,
+                Message::Binary(bytes) => {
+                    let (id, bytes) = bytes.split_at(8);
+                    let id = u64::from_le_bytes(id.try_into().expect("an id"));
+                    self.log("<<", &format!("{} bytes for {id}", bytes.len()));
+                    let hex = bytes.iter().fold(String::new(), |mut hex, byte| {
+                        let _ = write!(hex, "{byte:02x}");
+                        hex
+                    });
+                    self.traffic
+                        .push(json!({"to": "page", "binary": {"id": id, "hex": hex}}));
+                    self.binary.push((id, bytes.to_vec()));
+                    continue;
+                }
+                _ => continue,
             };
             self.log("<<", &text);
             let value: Value = serde_json::from_str(&text).expect("JSON");
@@ -416,6 +433,21 @@ impl Client {
                     .to_owned(),
             ))
         }
+    }
+
+    /// Draws a value: the `draw` answer and the bytes of the binary frame
+    /// sent before it.
+    pub async fn draw(&mut self, params: Value) -> Result<(Value, Vec<u8>), (String, String)> {
+        let id = self.next_id;
+        let drawing = self.request("draw", params).await?;
+        let index = self.binary.iter().position(|(frame, _)| *frame == id);
+        let bytes = index.map_or_else(Vec::new, |index| self.binary.remove(index).1);
+        assert_eq!(
+            drawing["bytes"].as_u64(),
+            Some(bytes.len() as u64),
+            "the binary frame holds the bytes the drawing counts"
+        );
+        Ok((drawing, bytes))
     }
 
     /// Sends a request that must succeed.

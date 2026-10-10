@@ -9,6 +9,7 @@ mod assets;
 mod auth;
 mod connection;
 mod describe;
+mod draw;
 mod inspect;
 mod lowlevel;
 mod picker;
@@ -131,6 +132,12 @@ pub struct WebArgs {
     #[arg(long)]
     debuginfod: bool,
 
+    /// Present values with the views in FILE, and draw them with the
+    /// renderers beside it, before the project's and the user's. May be
+    /// repeated.
+    #[arg(long = "views", value_name = "FILE")]
+    views: Vec<PathBuf>,
+
     /// Arguments passed to the launched program.
     #[arg(last = true, value_name = "ARGS", conflicts_with_all = ["attach", "core"])]
     arguments: Vec<OsString>,
@@ -201,7 +208,7 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         debuginfod: args.debuginfod,
         ..uscope::DebugFileOptions::default()
     };
-    let session = Session::new(cwd, link_base, tokens, debug_files);
+    let session = Session::new(cwd, link_base, tokens, debug_files, args.views.clone());
     session.resume_attached(args.resume);
     let app = Arc::new(App {
         session: Arc::clone(&session),

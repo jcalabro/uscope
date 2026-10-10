@@ -55,6 +55,10 @@ export interface Results {
   modules: P.Modules;
   functions: P.Functions;
   tasks: P.TaskList;
+  draw: P.Drawing;
+  renderer: P.RendererSource;
+  renderers: P.RendererList;
+  reloadViews: null;
 }
 
 // Fails to compile when a method has no entry in Results, or Results names

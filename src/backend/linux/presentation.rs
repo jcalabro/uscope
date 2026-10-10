@@ -156,7 +156,7 @@ fn scan_key(bound: &ViewBound, image: crate::ModuleImageId, place: &StopPlace) -
 
 impl StopPlace {
     /// Where the value a children reference belongs to is.
-    fn of(reference: &ValueChildrenReference) -> Self {
+    pub(super) fn of(reference: &ValueChildrenReference) -> Self {
         Self {
             module: reference.module,
             located: Located {
@@ -169,9 +169,9 @@ impl StopPlace {
 
 /// The scope a view binds in: one module's types, and no names. A view
 /// sees nothing a frame names, so it means the same at every stop.
-struct ModuleScope<'a, P: InspectionOps> {
-    controller: &'a Controller<P>,
-    module: &'a RuntimeModule,
+pub(super) struct ModuleScope<'a, P: InspectionOps> {
+    pub(super) controller: &'a Controller<P>,
+    pub(super) module: &'a RuntimeModule,
 }
 
 impl<P: InspectionOps> TypeSource for ModuleScope<'_, P> {
@@ -354,6 +354,41 @@ fn candidates(choice: &Choice<StopStep>) -> Vec<crate::ViewCandidate> {
         .collect()
 }
 
+/// The drawings the view a choice binds, and its `extend`s, offer, each
+/// with whether it binds.
+fn drawing_bindings(choice: &Choice<StopStep>) -> Vec<crate::VisualizerBinding> {
+    let Some(bound) = &choice.bound else {
+        return Vec::new();
+    };
+    crate::view::run::visualizers(bound)
+        .into_iter()
+        .map(|(owner, visualizer)| {
+            let drawing = visualizer.bound.as_ref().ok();
+            crate::VisualizerBinding {
+                view: crate::view::name_of(&owner.view),
+                line: visualizer.line,
+                name: Arc::clone(&visualizer.name),
+                origin: drawing.map(|drawing| Arc::clone(&drawing.renderer.origin)),
+                inputs: drawing.map_or_else(
+                    || Arc::from([]),
+                    |drawing| {
+                        drawing
+                            .inputs
+                            .iter()
+                            .map(|input| Arc::clone(&input.name))
+                            .collect()
+                    },
+                ),
+                rejection: visualizer
+                    .bound
+                    .as_ref()
+                    .err()
+                    .map(|rejection| Arc::from(rejection.reason.as_str())),
+            }
+        })
+        .collect()
+}
+
 impl<P: InspectionOps> Controller<P> {
     /// The view that presents values of `ty`, with why each candidate
     /// before it did not bind.
@@ -465,10 +500,22 @@ impl<P: InspectionOps> Controller<P> {
                     .flat_map(|module| module.image.views().kernels()),
             )
             .collect();
+        let renderers = self
+            .views
+            .set
+            .renderers()
+            .chain(
+                self.modules
+                    .values()
+                    .flat_map(|module| module.image.views().renderers()),
+            )
+            .cloned()
+            .collect();
         crate::ViewCheck {
             types: types.into(),
             unused,
             kernels,
+            renderers,
         }
     }
 
@@ -478,10 +525,12 @@ impl<P: InspectionOps> Controller<P> {
         module: &RuntimeModule,
         reference: TypeReference,
     ) -> Option<crate::TypeViews> {
+        let choice = self.view_choice(reference);
         Some(crate::TypeViews {
             type_info: module.image.type_info(reference)?.clone(),
             module: Arc::from(module.image.path()),
-            candidates: candidates(&self.view_choice(reference)).into(),
+            candidates: candidates(&choice).into(),
+            visualizers: drawing_bindings(&choice).into(),
         })
     }
 
@@ -494,8 +543,12 @@ impl<P: InspectionOps> Controller<P> {
         expression: &crate::Expression,
     ) -> Result<crate::ViewExplanation> {
         let value = self.view_subject(stop_id, root, frame, expression, "explain")?;
-        let candidates = value.type_info.as_ref().map_or_else(Vec::new, |info| {
-            candidates(&self.view_choice(info.reference))
+        let choice = value
+            .type_info
+            .as_ref()
+            .map(|info| self.view_choice(info.reference));
+        let (candidates, visualizers) = choice.map_or_else(Default::default, |choice| {
+            (candidates(&choice), drawing_bindings(&choice))
         });
         let presentation = match &value.state {
             VariableState::Available { presentation, .. } => presentation.clone(),
@@ -505,6 +558,7 @@ impl<P: InspectionOps> Controller<P> {
             type_info: value.type_info,
             enabled: self.views.enabled,
             candidates: candidates.into(),
+            visualizers: visualizers.into(),
             presentation,
         })
     }
@@ -935,7 +989,10 @@ impl Sum {
                     children: ValueChildren::Available(reference),
                     presentation,
                     ..
-                } if presentation.as_deref().is_none_or(is_rust_tuple) => {
+                } if presentation
+                    .as_deref()
+                    .is_none_or(Presentation::is_rust_tuple) =>
+                {
                     let reference = Arc::clone(reference);
                     machine.children_of(&reference)?
                 }
@@ -985,14 +1042,6 @@ impl Sum {
         Ok(Self { payload, summary })
     }
 }
-
-/// Whether a presentation is the debugger's own of a Rust tuple.
-fn is_rust_tuple(presentation: &Presentation) -> bool {
-    &*presentation.view.source == "uscope" && &*presentation.view.header == RUST_TUPLES
-}
-
-/// The header of the debugger's own presentation of Rust tuples.
-const RUST_TUPLES: &str = "Rust tuples";
 
 /// Whether a variant's member holds nothing: of no size, or of a type
 /// that is no type, as Zig's `void` and the type of `null` are.
@@ -1162,6 +1211,57 @@ fn presented_children(
     ValueChildren::Available(Arc::new(reference))
 }
 
+/// The presentation of a value of the raw children `raw` that `bound`,
+/// named `name`, presented as `presented`.
+fn view_presentation(
+    name: Arc<crate::ViewName>,
+    bound: &Arc<ViewBound>,
+    raw: &ValueChildrenReference,
+    presented: crate::view::run::Presented,
+) -> Presentation {
+    let (shape, count, inner, elements) = collection(&presented);
+    let children = presented_children(
+        raw,
+        Some(Arc::clone(bound)),
+        inner,
+        elements,
+        presented.named,
+    );
+    Presentation {
+        view: name,
+        shape,
+        count,
+        summary: presented.summary.into(),
+        visualizers: drawings(bound, &children),
+        children,
+        problem: presented.partial,
+        number: presented.inner.as_ref().and_then(number),
+        presented: presented.inner.map(Arc::new),
+    }
+}
+
+/// The drawings a view and its `extend`s offer of a value whose children,
+/// through the view, are `children`.
+fn drawings(bound: &ViewBound, children: &ValueChildren) -> Arc<[crate::Visualizer]> {
+    let ValueChildren::Available(children) = children else {
+        return Arc::from([]);
+    };
+    crate::view::run::visualizers(bound)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, visualizer))| {
+            let drawing = visualizer.bound.as_ref().ok()?;
+            Some(crate::Visualizer {
+                renderer: Arc::clone(&drawing.renderer),
+                inputs: Arc::new(crate::VisualizerReference {
+                    children: Arc::clone(children),
+                    index,
+                }),
+            })
+        })
+        .collect()
+}
+
 /// A presentation the debugger makes from debug information alone, under
 /// `header`, standing for the value whose children are `lent`.
 fn built_in_presentation(
@@ -1185,6 +1285,8 @@ fn built_in_presentation(
         children: presented_children(raw, None, inner, elements, 0),
         problem: None,
         number: None,
+        presented: None,
+        visualizers: Arc::from([]),
     }
 }
 
@@ -1229,6 +1331,8 @@ fn failed(view: Arc<crate::ViewName>, problem: ViewProblem) -> Presentation {
         children: ValueChildren::NotApplicable,
         problem: Some(problem),
         number: None,
+        presented: None,
+        visualizers: Arc::from([]),
     }
 }
 
@@ -1343,18 +1447,9 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             Err(Failure::Problem(problem)) => return Ok(present_as(value, failed(name, problem))),
             Err(Failure::Debugger(error)) => return Err(Stop::Failed(error)),
         };
-        let (shape, count, inner, elements) = collection(&presented);
-        let presentation = Presentation {
-            view: name,
-            shape,
-            count,
-            summary: presented.summary.into(),
-            children: presented_children(&raw, Some(bound), inner, elements, presented.named),
-            problem: presented.partial,
-            number: presented.inner.as_ref().and_then(number),
-        };
-        let mut value = present_as(value, presentation);
-        if let Some(text) = presented.text
+        let text = presented.text.clone();
+        let mut value = present_as(value, view_presentation(name, &bound, &raw, presented));
+        if let Some(text) = text
             && let VariableState::Available { text: slot, .. } = &mut value.state
         {
             *slot = Some(Arc::new(text));
@@ -1959,7 +2054,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         Ok(Some(present_as(
             value.clone(),
             built_in_presentation(
-                RUST_TUPLES,
+                crate::model::RUST_TUPLES,
                 PresentedShape::Value,
                 summary,
                 &reference,

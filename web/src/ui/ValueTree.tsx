@@ -382,5 +382,6 @@ export function messageRow(name: string, text: string): Row {
     memory: null,
     memoryBytes: null,
     truncated: false,
+    drawings: [],
   };
 }

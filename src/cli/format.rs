@@ -2452,7 +2452,42 @@ pub fn view_explanation(
         lines.push("views tried, in order:".to_owned());
         lines.extend(candidate_lines(&explanation.candidates, "  "));
     }
+    lines.extend(drawing_lines(&explanation.visualizers, ""));
     lines.join("\n")
+}
+
+/// The drawings a type's view offers, which only the web page draws, and
+/// why each that does not bind does not.
+fn drawing_lines(drawings: &[uscope::VisualizerBinding], indent: &str) -> Vec<String> {
+    if drawings.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!("{indent}drawings, which only the web page draws:")];
+    lines.extend(drawings.iter().map(|drawing| {
+        drawing.rejection.as_ref().map_or_else(
+            || {
+                format!(
+                    "{indent}  {}({}) by {}, with the renderer from {}",
+                    drawing.name,
+                    drawing
+                        .inputs
+                        .iter()
+                        .map(AsRef::as_ref)
+                        .collect::<Vec<&str>>()
+                        .join(", "),
+                    drawing.view,
+                    drawing.origin.as_deref().unwrap_or("nowhere"),
+                )
+            },
+            |rejection| {
+                format!(
+                    "{indent}  {} by {}, line {}: {rejection}",
+                    drawing.name, drawing.view, drawing.line
+                )
+            },
+        )
+    }));
+    lines
 }
 
 /// Each view a type was matched against, and why it did not bind or that
@@ -2484,6 +2519,9 @@ pub fn type_views(name: &str, types: &[uscope::TypeViews], renderer: Renderer) -
         ));
         match views.presented_by() {
             Some(view) => lines.push(format!("  presented by {view}")),
+            None if views.extended_by().is_some() => {
+                lines.push("  no view presents it; an `extend` binds".to_owned());
+            }
             None if views.candidates.is_empty() => {
                 lines.push("  no view's pattern names it".to_owned());
             }
@@ -2493,6 +2531,7 @@ pub fn type_views(name: &str, types: &[uscope::TypeViews], renderer: Renderer) -
             lines.push("  views tried, in order:".to_owned());
             lines.extend(candidate_lines(&views.candidates, "    "));
         }
+        lines.extend(drawing_lines(&views.visualizers, "  "));
     }
     lines.join("\n")
 }
@@ -2516,10 +2555,24 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
             ));
         }
     }
+    let extended = check
+        .types
+        .iter()
+        .filter_map(|views| Some((views, views.extended_by()?)))
+        .collect::<Vec<_>>();
+    if !extended.is_empty() {
+        lines.push("extended, with no view presenting them:".to_owned());
+        for (views, view) in extended {
+            lines.push(format!(
+                "  {} by {view}",
+                renderer.paint(Role::Type, &views.type_info.name)
+            ));
+        }
+    }
     let refused = check
         .types
         .iter()
-        .filter(|views| views.presented_by().is_none())
+        .filter(|views| views.presented_by().is_none() && views.extended_by().is_none())
         .collect::<Vec<_>>();
     if !refused.is_empty() {
         lines.push("not presented, though views name them:".to_owned());
@@ -2540,6 +2593,7 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
         lines.push("views that present no type:".to_owned());
         lines.extend(check.unused.iter().map(|view| format!("  {view}")));
     }
+    failed |= unbound_drawings(check, &mut lines);
     if lines.is_empty() {
         lines.push("no view's pattern names any type".to_owned());
     }
@@ -2557,7 +2611,53 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
             }));
         }
     }
+    // A renderer runs only in the web page, in its sandbox, and is shown
+    // as its source, to be reviewed as that.
+    if !check.renderers.is_empty() {
+        lines.push("renderers, which only the web page runs:".to_owned());
+        for renderer in check.renderers.iter() {
+            lines.push(format!("  {} ({}):", renderer.name, renderer.origin));
+            lines.extend(renderer.source.lines().map(|line| {
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("    {line}")
+                }
+            }));
+        }
+    }
     (lines.join("\n"), failed)
+}
+
+/// Adds the drawings that do not bind, each once however many types its
+/// view names, and returns whether any is not built in.
+fn unbound_drawings(check: &uscope::ViewCheck, lines: &mut Vec<String>) -> bool {
+    let mut unbound = check
+        .types
+        .iter()
+        .flat_map(|views| views.visualizers.iter())
+        .filter(|drawing| drawing.rejection.is_some())
+        .map(|drawing| {
+            (
+                Arc::clone(&drawing.view),
+                drawing.line,
+                drawing.name.clone(),
+                drawing.rejection.clone().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    unbound.sort_by(|left, right| (&left.0.source, left.1).cmp(&(&right.0.source, right.1)));
+    unbound.dedup();
+    if unbound.is_empty() {
+        return false;
+    }
+    lines.push("drawings that do not bind:".to_owned());
+    lines.extend(unbound.iter().map(|(view, line, name, rejection)| {
+        format!("  {name} by {view}, line {line}: {rejection}")
+    }));
+    unbound
+        .iter()
+        .any(|(view, ..)| !uscope::is_built_in_view(view))
 }
 
 /// Renders a logged message with the values it shows.

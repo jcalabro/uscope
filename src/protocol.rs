@@ -78,6 +78,26 @@ pub struct TypeViews {
     /// The module image that defines the type.
     pub module: Arc<std::path::Path>,
     pub candidates: Arc<[ViewCandidate]>,
+    /// The drawings the view that binds and its `extend`s offer.
+    pub visualizers: Arc<[VisualizerBinding]>,
+}
+
+/// A `visualize` that a type's view or an `extend` of it holds, and
+/// whether it binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisualizerBinding {
+    /// The view or `extend` that holds it.
+    pub view: Arc<crate::ViewName>,
+    /// The line it is on.
+    pub line: u32,
+    /// The renderer it names.
+    pub name: Arc<str>,
+    /// Where that renderer was loaded from, when it binds.
+    pub origin: Option<Arc<str>>,
+    /// Its inputs' names, when it binds.
+    pub inputs: Arc<[Arc<str>]>,
+    /// Why it does not bind, when it does not.
+    pub rejection: Option<Arc<str>>,
 }
 
 impl TypeViews {
@@ -87,6 +107,18 @@ impl TypeViews {
         self.candidates
             .iter()
             .find(|candidate| candidate.rejection.is_none() && !candidate.view.extend)
+            .map(|candidate| &candidate.view)
+    }
+
+    /// The first `extend` that binds, when no view presents the type.
+    #[must_use]
+    pub fn extended_by(&self) -> Option<&Arc<crate::ViewName>> {
+        if self.presented_by().is_some() {
+            return None;
+        }
+        self.candidates
+            .iter()
+            .find(|candidate| candidate.rejection.is_none())
             .map(|candidate| &candidate.view)
     }
 }
@@ -101,6 +133,9 @@ pub struct ViewCheck {
     /// The kernels loaded for the session or carried by a module, which
     /// their views may call.
     pub kernels: Arc<[KernelSource]>,
+    /// The renderers loaded for the session or carried by a module, which
+    /// their views' drawings may call.
+    pub renderers: Arc<[Arc<Renderer>]>,
 }
 
 /// A kernel views may call, and what it is built from, so that it is
@@ -114,6 +149,109 @@ pub struct KernelSource {
     pub source: Arc<str>,
 }
 
+/// A renderer `visualize` statements call (`docs/visualizers.md`).
+///
+/// It is JavaScript that the web page runs, in its sandbox, to draw a
+/// value. Only the web page draws; the terminal and debug adapters never
+/// run one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Renderer {
+    pub name: Arc<str>,
+    /// The file or module record it was loaded from, or `built-in`.
+    pub origin: Arc<str>,
+    /// Its JavaScript.
+    pub source: Arc<str>,
+    /// A digest of its source, which names this exact text.
+    pub digest: Arc<str>,
+}
+
+impl Renderer {
+    /// A renderer named `name`, loaded from `origin`.
+    #[must_use]
+    pub fn new(name: &str, origin: &str, source: &str) -> Self {
+        let digest = twox_hash::XxHash3_128::oneshot(source.as_bytes());
+        Self {
+            name: name.into(),
+            origin: origin.into(),
+            source: source.into(),
+            digest: format!("{digest:032x}").into(),
+        }
+    }
+}
+
+/// The inputs of one drawing, read at one stop, in the order its
+/// `visualize` names them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisualizerInputs {
+    pub stop_id: StopId,
+    pub inputs: Arc<[VisualizerInput]>,
+}
+
+/// One input of a drawing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisualizerInput {
+    pub name: Arc<str>,
+    pub value: VisualizerValue,
+}
+
+/// What one input of a drawing holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VisualizerValue {
+    /// A value, presented as views present it; its children and elements
+    /// are read as any value's are.
+    Value(Box<crate::InspectedValue>),
+    /// `bytes(PTR, LEN)`: the bytes of memory there.
+    Bytes(Arc<[u8]>),
+    /// A string the `visualize` writes.
+    Text(Arc<str>),
+    /// Why the input could not be read.
+    Problem(Arc<str>),
+}
+
+/// How much one drawing may read through `bytes(PTR, LEN)` and in bulk.
+pub const MAX_DRAWING_BYTES: u64 = 64 * 1024 * 1024;
+
+/// How much one `bytes(PTR, LEN)` may read.
+pub const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The kind of number each element of a sequence read in bulk is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumberKind {
+    I8,
+    U8,
+    I16,
+    U16,
+    I32,
+    U32,
+    I64,
+    U64,
+    F32,
+    F64,
+}
+
+impl NumberKind {
+    /// How many bytes one element takes.
+    #[must_use]
+    pub const fn size(self) -> u64 {
+        match self {
+            Self::I8 | Self::U8 => 1,
+            Self::I16 | Self::U16 => 2,
+            Self::I32 | Self::U32 | Self::F32 => 4,
+            Self::I64 | Self::U64 | Self::F64 => 8,
+        }
+    }
+}
+
+/// A sequence of numbers whose elements lie next to each other in memory,
+/// read at once: `count` elements of `kind`, little-endian.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Numbers {
+    pub stop_id: StopId,
+    pub kind: NumberKind,
+    pub count: u64,
+    pub bytes: Arc<[u8]>,
+}
+
 /// Why a value is presented as it is: the views its type matched, and how
 /// the one that binds presents the value at this stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +262,8 @@ pub struct ViewExplanation {
     pub enabled: bool,
     /// The views whose patterns name the type, until the first that binds.
     pub candidates: Arc<[ViewCandidate]>,
+    /// The drawings the view that binds and its `extend`s offer.
+    pub visualizers: Arc<[VisualizerBinding]>,
     /// The value's presentation at this stop, when a view binds.
     pub presentation: Option<Arc<crate::Presentation>>,
 }
@@ -1818,6 +1958,21 @@ pub enum Request {
         limits: crate::InspectionLimits,
         reply: Reply<ValueChildPage>,
     },
+    VisualizerInputs {
+        reference: Arc<crate::VisualizerReference>,
+        limits: crate::InspectionLimits,
+        reply: Reply<VisualizerInputs>,
+    },
+    /// The elements of a sequence of numbers that lie next to each other,
+    /// read at once, or `None` when they do not.
+    Numbers {
+        reference: Arc<ValueChildrenReference>,
+        most_bytes: u64,
+        reply: Reply<Option<Numbers>>,
+    },
+    Renderers {
+        reply: Reply<Arc<[Arc<Renderer>]>>,
+    },
     Globals {
         query: GlobalVariableQuery,
         reply: Reply<GlobalVariablePage>,
@@ -2006,6 +2161,9 @@ impl Request {
             Self::ExpressionType { expression, .. } => format!("type of `{}`", expression.text()),
             Self::Dereference { .. } => "dereference".to_owned(),
             Self::ValueChildren { .. } => "value children".to_owned(),
+            Self::VisualizerInputs { .. } => "visualizer inputs".to_owned(),
+            Self::Numbers { .. } => "numbers".to_owned(),
+            Self::Renderers { .. } => "renderers".to_owned(),
             Self::Globals { .. } => "globals".to_owned(),
             Self::SetViews { .. } => "set views".to_owned(),
             Self::EnableViews { enabled, .. } => format!("enable views {enabled}"),
