@@ -7,7 +7,7 @@ use std::sync::Arc;
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 
 use crate::debug_info::dwarf::{
-    DieKey, Reader, TypeSignatures, Units, die_reference_with_signatures, unit_dwarf,
+    DieKey, DieWalk, Reader, TypeSignatures, Units, die_reference_with_signatures, unit_dwarf,
 };
 use crate::model::ArrayDimension;
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
 
 use super::codec::{complex_part, enumeration_constant};
 use super::die::{
-    ByteSize, DW_AT_ZIG_PARENT, UnsignedConstant, array_bound, base_type_encoding,
+    ByteSize, DW_AT_ZIG_PARENT, Seen, UnsignedConstant, array_bound, base_type_encoding,
     byte_size_attribute, constant_member_offset, copy_name, declaration_with_origins,
     index_type_is_signed, origin_chain, strict_flag, string_with_origins, type_with_origins,
     unsigned_constant, zig_qualified_name,
@@ -55,9 +55,10 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) type_definitions: HashMap<DieKey, DieKey>,
     pub(super) ambiguous_type_declarations: HashSet<DieKey>,
     pub(super) entries: Vec<TypeEntry>,
-    /// Each unit's DIE offsets. A reference to any other offset points into
-    /// the middle of a DIE, whose bytes could decode as convincing nonsense.
-    pub(super) die_offsets: Vec<HashSet<usize>>,
+    /// Where each unit's DIEs begin. A reference to any other offset
+    /// points into the middle of a DIE, whose bytes could decode as
+    /// convincing nonsense.
+    pub(super) die_offsets: Vec<DieStarts>,
     pub(super) unit_languages: Vec<Option<gimli::DwLang>>,
     pub(super) zig_units: Vec<bool>,
     pub(super) explicit_names: HashSet<TypeId>,
@@ -72,6 +73,8 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, ExpressionId>,
     /// Where every location is pooled.
     pub(super) pool: &'a std::sync::Mutex<super::location::LocationsBuilder>,
+    /// The DIEs [`Children`] read into.
+    pub(super) die_buffers: &'a DieBuffers<'data>,
     pub(super) record_member_declarations: Vec<AggregateMemberDeclaration>,
     /// What the records the loader builds may still cost.
     pub(super) budget: crate::debug_info::dwarf::budget::Meter,
@@ -97,6 +100,43 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     /// passed by value, in registers where it fits, rather than by
     /// reference to a copy.
     pub(super) passed_by_value: HashMap<TypeId, bool>,
+}
+
+/// The offsets at which one unit's DIEs begin, one bit per byte of the
+/// unit.
+///
+/// A set of offsets cost a hash table entry, about 16 bytes, per DIE: some
+/// 300 MB for the large benchmark program's 20 million, all live while its
+/// types are built. Its DIEs average eight bytes, so a bit per byte, 20 MB,
+/// is a sixteenth of that, and a lookup is one load instead of a hash and a
+/// probe.
+pub(super) struct DieStarts {
+    words: Vec<u64>,
+}
+
+impl DieStarts {
+    /// Room for the offsets of a unit `length` bytes long.
+    fn with_length(length: usize) -> Self {
+        Self {
+            words: vec![0; length.div_ceil(64)],
+        }
+    }
+
+    fn insert(&mut self, offset: usize) {
+        let word = offset / 64;
+        // A unit's DIEs lie within its length, but a header that lies about
+        // it must not lose one.
+        if word >= self.words.len() {
+            self.words.resize(word + 1, 0);
+        }
+        self.words[word] |= 1 << (offset % 64);
+    }
+
+    pub(super) fn contains(&self, offset: usize) -> bool {
+        self.words
+            .get(offset / 64)
+            .is_some_and(|word| word & (1 << (offset % 64)) != 0)
+    }
 }
 
 /// What the loader keeps of a finished type graph.
@@ -186,6 +226,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         clippy::too_many_lines,
         reason = "one walk of each unit collects its DIE boundaries, language, scopes, and declarations"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the module's debug information and what building shares"
+    )]
     pub(super) fn new(
         dwarf: &'a gimli::Dwarf<Reader<'data>>,
         units: &'a Units<'data>,
@@ -193,6 +237,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         image: ModuleImageId,
         byte_order: ByteOrder,
         pool: &'a std::sync::Mutex<super::location::LocationsBuilder>,
+        die_buffers: &'a DieBuffers<'data>,
         budget: crate::debug_info::dwarf::budget::Meter,
     ) -> Self {
         let mut die_offsets = Vec::with_capacity(units.len());
@@ -204,17 +249,55 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let mut scoped_types = Vec::new();
         let mut inline_namespaces = HashSet::new();
         for (unit_index, unit) in units.iter().enumerate() {
-            let mut offsets = HashSet::new();
+            let mut offsets = DieStarts::with_length(unit.header.length_including_self());
             let mut language = None;
             let mut zig_producer = false;
             let mut cpp = false;
             let mut first = true;
             let mut scopes = Vec::<(isize, ScopeSegment)>::new();
-            // The current scopes, shared by the types declared in them.
-            let mut current = None::<Arc<[ScopeSegment]>>;
-            let mut entries = unit.entries();
-            while let Ok(Some(entry)) = entries.next_dfs() {
-                offsets.insert(entry.offset().0);
+            // The path of the first `n` scopes at `n`, shared by the types
+            // declared in them. Leaving a scope keeps its parents' paths, so
+            // the types after a record share one path with those before it.
+            let mut paths_at = Vec::<Option<Arc<[ScopeSegment]>>>::new();
+            let Ok(mut walk) = DieWalk::new(unit) else {
+                die_offsets.push(offsets);
+                unit_languages.push(language);
+                zig_units.push(zig_producer);
+                continue;
+            };
+            while let Ok(Some(die)) = walk.next() {
+                offsets.insert(die.offset.0);
+                let depth = die.depth;
+                while scopes.last().is_some_and(|(scope, _)| *scope >= depth) {
+                    scopes.pop();
+                }
+                paths_at.truncate(scopes.len() + 1);
+                let key = DieKey {
+                    unit: unit_index,
+                    offset: die.offset.0,
+                };
+                // Paths are resolved once every unit is read, since a
+                // function's name may live in another unit.
+                if is_type_die_tag(die.tag) && !scopes.is_empty() {
+                    paths_at.resize(scopes.len() + 1, None);
+                    let segments = paths_at[scopes.len()].get_or_insert_with(|| {
+                        scopes.iter().map(|(_, segment)| segment.clone()).collect()
+                    });
+                    scoped_types.push((key, Arc::clone(segments)));
+                }
+                // Only the root, namespaces, and types have attributes
+                // this reads; a function scopes the types in it by its
+                // offset alone.
+                if die.tag == gimli::DW_TAG_subprogram && !first {
+                    scopes.push((depth, ScopeSegment::Function(key)));
+                    continue;
+                }
+                if !first && die.tag != gimli::DW_TAG_namespace && !is_type_die_tag(die.tag) {
+                    continue;
+                }
+                let Ok(entry) = walk.decode() else {
+                    break;
+                };
                 if first {
                     first = false;
                     language = match entry.attr_value(gimli::DW_AT_language) {
@@ -227,29 +310,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         .is_some_and(|producer| producer.to_string_lossy().starts_with("zig "));
                     cpp = source_language(language, zig_producer) == SourceLanguage::Cpp;
                 }
-                let depth = entry.depth();
-                while scopes.last().is_some_and(|(scope, _)| *scope >= depth) {
-                    scopes.pop();
-                    current = None;
-                }
-                let key = DieKey {
-                    unit: unit_index,
-                    offset: entry.offset().0,
-                };
-                // Paths are resolved once every unit is read, since a
-                // function's name may live in another unit.
-                if is_type_die_tag(entry.tag()) && !scopes.is_empty() {
-                    let segments = current.get_or_insert_with(|| {
-                        scopes.iter().map(|(_, segment)| segment.clone()).collect()
-                    });
-                    scoped_types.push((key, Arc::clone(segments)));
-                }
                 if let Some(segment) = scope_segment(dwarf, unit, unit_index, entry, cpp) {
                     if let ScopeSegment::Inline(name) = &segment {
                         inline_namespaces.insert(inline_namespace_path(&scopes, name));
                     }
                     scopes.push((depth, segment));
-                    current = None;
                 }
                 if !is_type_die_tag(entry.tag()) {
                     continue;
@@ -298,6 +363,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             void_type: None,
             dynamic_record_layouts: HashMap::new(),
             pool,
+            die_buffers,
             record_member_declarations: Vec::new(),
             budget,
             type_scopes: HashMap::new(),
@@ -390,11 +456,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     ) -> std::result::Result<Children<'a, 'data>, Arc<str>> {
         let units: &'a Units<'data> = self.units;
         let unit = units.get(unit_index).ok_or("DIE unit is unavailable")?;
-        Ok(Children {
-            cursor: unit.entries_at_offset(offset).map_err(malformed)?,
-            started: false,
-            done: false,
-        })
+        Ok(Children::new(
+            unit.entries_raw(Some(offset)).map_err(malformed)?,
+            self.die_buffers,
+        ))
     }
 
     pub(super) fn is_zig(&self, unit_index: usize) -> bool {
@@ -483,7 +548,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
 
     fn canonical_type_key(&self, key: DieKey) -> std::result::Result<DieKey, Arc<str>> {
         let mut current = key;
-        let mut visited = HashSet::new();
+        let mut visited = Seen::default();
         while visited.insert(current) {
             let unit = self
                 .units
@@ -492,12 +557,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if !self
                 .die_offsets
                 .get(current.unit)
-                .is_some_and(|offsets| offsets.contains(&current.offset))
+                .is_some_and(|offsets| offsets.contains(current.offset))
             {
                 return Err("type reference does not identify a DIE".into());
             }
+            let offset = gimli::UnitOffset(current.offset);
             let entry = unit
-                .entry(gimli::UnitOffset(current.offset))
+                .entries_raw(Some(offset))
+                .and_then(|raw| self.die_buffers.read(raw, offset))
                 .map_err(|error| Arc::from(error.to_string()))?;
             if !is_type_die_tag(entry.tag()) {
                 return Err(format!("DW_AT_type target has non-type tag {:?}", entry.tag()).into());
@@ -531,8 +598,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let unit = units
             .get(key.unit)
             .ok_or("type reference is outside loaded units")?;
+        let buffers: &'a DieBuffers<'data> = self.die_buffers;
+        let offset = gimli::UnitOffset(key.offset);
         let entry = unit
-            .entry(gimli::UnitOffset(key.offset))
+            .entries_raw(Some(offset))
+            .and_then(|raw| buffers.read(raw, offset))
             .map_err(malformed)?;
         let reference = TypeReference {
             image: self.image,
@@ -793,7 +863,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 let target = self
                     .die_offsets
                     .get(key.unit)
-                    .filter(|offsets| offsets.contains(&key.offset))
+                    .filter(|offsets| offsets.contains(key.offset))
                     .and_then(|_| self.units.get(key.unit))
                     .and_then(|unit| unit.entry(gimli::UnitOffset(key.offset)).ok());
                 match target {
@@ -1024,8 +1094,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
 
         let unit = &self.units[unit_index];
         let mut enumerators = Vec::new();
-        for child in self.children(unit_index, entry.offset())? {
-            let child = child?;
+        let mut children = self.children(unit_index, entry.offset())?;
+        while let Some(child) = children.next_child()? {
             // rustc declares an enumeration's methods inside it, and its
             // generic arguments, none of which change its values.
             if matches!(
@@ -1056,7 +1126,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     "enumerator metadata exceeds its resource limit",
                 ));
             }
-            let enumerator_name = copy_name(self.dwarf, unit, &child)
+            let enumerator_name = copy_name(self.dwarf, unit, child)
                 .map_err(malformed)?
                 .ok_or("enumerator has no name")?;
             let value = child
@@ -1093,8 +1163,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let returns = self.target(entry, unit_index)?;
         let mut parameters = Vec::new();
         let mut variadic = false;
-        for child in self.children(unit_index, entry.offset())? {
-            let child = child?;
+        let mut children = self.children(unit_index, entry.offset())?;
+        while let Some(child) = children.next_child()? {
             match child.tag() {
                 gimli::DW_TAG_formal_parameter => {
                     if parameters.len() >= MAX_RECORD_CHILDREN {
@@ -1106,7 +1176,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         ));
                     }
                     parameters.push(
-                        self.target(&child, unit_index)?
+                        self.target(child, unit_index)?
                             .ok_or("a function type's parameter has no type")?,
                     );
                 }
@@ -1143,11 +1213,16 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     pub(super) fn named_constants(&mut self) -> BTreeMap<Arc<str>, IntegerValue> {
         let mut constants = BTreeMap::new();
         for (unit_index, unit) in self.units.iter().enumerate() {
-            let mut entries = unit.entries();
-            while let Ok(Some(entry)) = entries.next_dfs() {
-                if entry.depth() != 1 || entry.tag() != gimli::DW_TAG_constant {
+            let Ok(mut walk) = DieWalk::new(unit) else {
+                continue;
+            };
+            while let Ok(Some(die)) = walk.next() {
+                if die.depth != 1 || die.tag != gimli::DW_TAG_constant {
                     continue;
                 }
+                let Ok(entry) = walk.decode() else {
+                    break;
+                };
                 let (Ok(Some(name)), Some(value)) = (
                     copy_name(self.dwarf, unit, entry),
                     entry.attr_value(gimli::DW_AT_const_value),
@@ -1181,11 +1256,16 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if self.language(unit_index) != SourceLanguage::Go {
                 continue;
             }
-            let mut entries = unit.entries();
-            while let Ok(Some(entry)) = entries.next_dfs() {
-                if entry.tag() != gimli::DW_TAG_constant {
+            let Ok(mut walk) = DieWalk::new(unit) else {
+                continue;
+            };
+            while let Ok(Some(die)) = walk.next() {
+                if die.tag != gimli::DW_TAG_constant {
                     continue;
                 }
+                let Ok(entry) = walk.decode() else {
+                    break;
+                };
                 let Ok(Some(target)) = self.target(entry, unit_index) else {
                     continue;
                 };
@@ -1241,7 +1321,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             }
         }
+        self.declare_go_named_constants(constants);
+    }
 
+    /// Makes each typed Go constant's type an enumeration of its constants.
+    fn declare_go_named_constants(&mut self, constants: BTreeMap<TypeId, NamedConstantCollection>) {
         for (target, collection) in constants {
             let index = target.index();
             match collection {
@@ -1357,19 +1441,24 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         self.reject_inline_storage_cycles();
 
         let names_phase = crate::span!("types.names");
+        // Most types are named explicitly and keep their names, so only the
+        // others are rendered, and with one set of the types being visited,
+        // which every rendering leaves empty.
+        let mut visiting = HashSet::new();
         let names = (0..self.entries.len())
             .map(|index| {
                 let id = TypeId::new(u32::try_from(index).expect("bounded type count fits u32"));
-                self.render_type_name(id, &mut HashSet::new())
+                if self.explicit_names.contains(&id) {
+                    return None;
+                }
+                visiting.clear();
+                Some(self.render_type_name(id, &mut visiting))
             })
             .collect::<Vec<_>>();
         for (index, name) in names.into_iter().enumerate() {
-            if self.explicit_names.contains(&TypeId::new(
-                u32::try_from(index).expect("bounded type count fits u32"),
-            )) {
-                continue;
-            }
-            if let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(index) {
+            if let Some(name) = name
+                && let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(index)
+            {
                 info.name = name;
             }
         }
@@ -1519,7 +1608,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
 
     fn modified_target_is_indirection(&self, start: TypeId) -> bool {
         let mut current = start;
-        let mut visited = HashSet::new();
+        let mut visited = Seen::default();
         while visited.insert(current) {
             let Some(TypeEntry::Resolved(info)) = self.entries.get(current.index()) else {
                 return false;
@@ -1786,8 +1875,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         unit_index: usize,
     ) -> std::result::Result<bool, Arc<str>> {
         let mut found = false;
-        for child in self.children(unit_index, entry.offset())? {
-            if child?.tag() == gimli::DW_TAG_variant_part {
+        let mut children = self.children(unit_index, entry.offset())?;
+        while let Some(child) = children.next_child()? {
+            if child.tag() == gimli::DW_TAG_variant_part {
                 if found {
                     return Err("aggregate contains multiple direct variant parts".into());
                 }
@@ -2339,8 +2429,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let mut common_members = Vec::new();
         let mut bases = Vec::new();
         let mut part = None;
-        for child in self.children(unit_index, entry.offset())? {
-            let child = child?;
+        let mut children = self.children(unit_index, entry.offset())?;
+        while let Some(child) = children.next_child()? {
             match child.tag() {
                 gimli::DW_TAG_member => {
                     if budget.consume().is_err() {
@@ -2348,7 +2438,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     }
                     let index = common_members.len();
                     common_members.push(self.build_member(
-                        &child,
+                        child,
                         unit_index,
                         reference.id,
                         DynamicAggregateChild::Member(index),
@@ -2363,7 +2453,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         return Ok(limit());
                     }
                     bases.push(self.build_base(
-                        &child,
+                        child,
                         unit_index,
                         reference.id,
                         bases.len(),
@@ -2376,7 +2466,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         return Err("variant aggregate contains multiple variant parts".into());
                     }
                     part = match self.variant_part(
-                        &child,
+                        child,
                         unit_index,
                         reference.id,
                         record_kind,
@@ -2437,8 +2527,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let tag_type = self.target(part, unit_index)?;
         let discriminant = if let Some(discriminator) = discriminator {
             let mut stored = None;
-            for child in self.children(unit_index, part.offset())? {
-                let child = child?;
+            let mut children = self.children(unit_index, part.offset())?;
+            while let Some(child) = children.next_child()? {
                 if child.offset().0 != discriminator.offset || discriminator.unit != unit_index {
                     continue;
                 }
@@ -2449,7 +2539,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
                 budget.consume()?;
                 stored = Some(self.build_member(
-                    &child,
+                    child,
                     unit_index,
                     aggregate,
                     DynamicAggregateChild::Discriminant,
@@ -2482,8 +2572,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
 
         let unit = &self.units[unit_index];
         let mut variants = Vec::new();
-        for variant in self.children(unit_index, part.offset())? {
-            let variant = variant?;
+        let mut variant_entries = self.children(unit_index, part.offset())?;
+        while let Some(variant) = variant_entries.next_child()? {
             if variant.tag() == gimli::DW_TAG_member {
                 continue;
             }
@@ -2499,7 +2589,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             budget.consume()?;
             let selection = match &representation {
                 Some(representation) => {
-                    copy_variant_selection(&variant, representation, self.byte_order, budget)?
+                    copy_variant_selection(variant, representation, self.byte_order, budget)?
                 }
                 None if variant.attr_value(gimli::DW_AT_discr_value).is_some()
                     || variant.attr_value(gimli::DW_AT_discr_list).is_some() =>
@@ -2510,11 +2600,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
                 None => VariantSelection::Default,
             };
-            let name = copy_name(self.dwarf, unit, &variant).map_err(malformed)?;
+            let name = copy_name(self.dwarf, unit, variant).map_err(malformed)?;
             let variant_index = variants.len();
             let mut members = Vec::new();
-            for member in self.children(unit_index, variant.offset())? {
-                let member = member?;
+            let mut member_entries = self.children(unit_index, variant.offset())?;
+            while let Some(member) = member_entries.next_child()? {
                 if member.tag() != gimli::DW_TAG_member {
                     return Err(VariantMetadataError::Malformed(
                         format!("variant contains unsupported component {:?}", member.tag()).into(),
@@ -2523,7 +2613,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 budget.consume()?;
                 let member_index = members.len();
                 members.push(self.build_member(
-                    &member,
+                    member,
                     unit_index,
                     aggregate,
                     DynamicAggregateChild::VariantMember {
@@ -2633,13 +2723,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         });
         let mut members = Vec::new();
         let mut bases = Vec::new();
-        for child in self.children(unit_index, entry.offset())? {
-            let child = child?;
+        let mut children = self.children(unit_index, entry.offset())?;
+        while let Some(child) = children.next_child()? {
             match child.tag() {
                 // A DWARF 4 static data member is a declaration with no bytes
                 // in an instance.
                 gimli::DW_TAG_member
-                    if strict_flag(&child, gimli::DW_AT_declaration).unwrap_or(false) => {}
+                    if strict_flag(child, gimli::DW_AT_declaration).unwrap_or(false) => {}
                 gimli::DW_TAG_member | gimli::DW_TAG_inheritance
                     if members.len().saturating_add(bases.len()) >= MAX_RECORD_CHILDREN =>
                 {
@@ -2648,7 +2738,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 gimli::DW_TAG_member => {
                     let index = members.len();
                     members.push(self.build_member(
-                        &child,
+                        child,
                         unit_index,
                         reference.id,
                         DynamicAggregateChild::Member(index),
@@ -2660,7 +2750,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
                 gimli::DW_TAG_inheritance => {
                     bases.push(self.build_base(
-                        &child,
+                        child,
                         unit_index,
                         reference.id,
                         bases.len(),
@@ -2789,11 +2879,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let name = explicit_name
             .unwrap_or_else(|| Arc::from(format!("<anonymous union@0x{:x}>", entry.offset().0)));
         let mut members = Vec::new();
-        for child in self.children(unit_index, entry.offset())? {
-            let child = child?;
+        let mut children = self.children(unit_index, entry.offset())?;
+        while let Some(child) = children.next_child()? {
             match child.tag() {
                 gimli::DW_TAG_member
-                    if strict_flag(&child, gimli::DW_AT_declaration).unwrap_or(false) => {}
+                    if strict_flag(child, gimli::DW_AT_declaration).unwrap_or(false) => {}
                 gimli::DW_TAG_member if members.len() >= MAX_RECORD_CHILDREN => {
                     return Ok(opaque(
                         reference,
@@ -2805,7 +2895,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 gimli::DW_TAG_member => {
                     let index = members.len();
                     members.push(self.build_member(
-                        &child,
+                        child,
                         unit_index,
                         reference.id,
                         DynamicAggregateChild::Member(index),
@@ -2948,13 +3038,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let unit = &self.units[unit_index];
         let mut dimensions = Vec::new();
         let mut strided = has_stride(entry);
-        for child in self.children(unit_index, entry.offset())? {
-            let child = child?;
+        let mut children = self.children(unit_index, entry.offset())?;
+        while let Some(child) = children.next_child()? {
             if child.tag() != gimli::DW_TAG_subrange_type {
                 continue;
             }
-            strided |= has_stride(&child);
-            let signed_index = index_type_is_signed(unit, &child);
+            strided |= has_stride(child);
+            let signed_index = index_type_is_signed(unit, child);
             let lower = child
                 .attr(gimli::DW_AT_lower_bound)
                 .and_then(|attribute| array_bound(attribute, signed_index))
@@ -3037,12 +3127,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             ));
         }
         let mut fields = Vec::new();
-        for child in self.children(unit_index, entry.offset())? {
-            let child = child?;
+        let mut children = self.children(unit_index, entry.offset())?;
+        while let Some(child) = children.next_child()? {
             if child.tag() != gimli::DW_TAG_member {
                 continue;
             }
-            let field_name = copy_name(self.dwarf, unit, &child)
+            let field_name = copy_name(self.dwarf, unit, child)
                 .map_err(malformed)?
                 .ok_or("slice member has no name")?;
             let offset = child
@@ -3050,7 +3140,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 .and_then(gimli::Attribute::udata_value)
                 .ok_or("slice member has no constant offset")?;
             let field_type = self
-                .target(&child, unit_index)?
+                .target(child, unit_index)?
                 .ok_or("slice member has no type")?;
             fields.push((field_name, offset, field_type));
         }
@@ -3221,15 +3311,15 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
     ) -> Option<Vec<(Arc<str>, Option<DieKey>)>> {
         let unit = self.units.get(unit_index)?;
         let mut members = Vec::new();
-        for child in self.children(unit_index, entry.offset()).ok()? {
-            let child = child.ok()?;
+        let mut children = self.children(unit_index, entry.offset()).ok()?;
+        while let Some(child) = children.next_child().ok()? {
             if child.tag() != gimli::DW_TAG_member {
                 continue;
             }
             if members.len() >= MAX_RECORD_CHILDREN {
                 return None;
             }
-            let name = copy_name(self.dwarf, unit, &child).ok()??;
+            let name = copy_name(self.dwarf, unit, child).ok()??;
             let target = die_reference_with_signatures(
                 child.attr_value(gimli::DW_AT_type),
                 unit_index,
@@ -3324,20 +3414,29 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             let current_entry = entry(current)?;
             match current_entry.tag() {
                 gimli::DW_TAG_structure_type => {
-                    let mut members = self
-                        .children(current.unit, current_entry.offset())
-                        .ok()?
-                        .map_while(Result::ok)
-                        .filter(|child| child.tag() == gimli::DW_TAG_member);
-                    let member = members.next()?;
-                    let at_start = member
-                        .attr(gimli::DW_AT_data_member_location)
-                        .and_then(gimli::Attribute::udata_value)
-                        == Some(0);
-                    if members.next().is_some() || !at_start {
+                    // The one member: whether it is at offset zero, and
+                    // its type. A second member, or an error before one,
+                    // ends the search.
+                    let mut children = self.children(current.unit, current_entry.offset()).ok()?;
+                    let mut only = None;
+                    while let Ok(Some(child)) = children.next_child() {
+                        if child.tag() != gimli::DW_TAG_member {
+                            continue;
+                        }
+                        if only.is_some() {
+                            return None;
+                        }
+                        let at_start = child
+                            .attr(gimli::DW_AT_data_member_location)
+                            .and_then(gimli::Attribute::udata_value)
+                            == Some(0);
+                        only = Some((at_start, target(child, current.unit)));
+                    }
+                    let (at_start, member_type) = only?;
+                    if !at_start {
                         return None;
                     }
-                    current = target(&member, current.unit)?;
+                    current = member_type?;
                     wrapped = true;
                 }
                 gimli::DW_TAG_array_type if wrapped && self.array_is_unsized(current) => {
@@ -3357,14 +3456,18 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
 
     /// Whether an array type DIE has a dimension with no count.
     pub(super) fn array_is_unsized(&self, array: DieKey) -> bool {
-        let Ok(children) = self.children(array.unit, gimli::UnitOffset(array.offset)) else {
+        let Ok(mut children) = self.children(array.unit, gimli::UnitOffset(array.offset)) else {
             return true;
         };
-        children.map_while(Result::ok).any(|child| {
-            child.tag() == gimli::DW_TAG_subrange_type
+        while let Ok(Some(child)) = children.next_child() {
+            if child.tag() == gimli::DW_TAG_subrange_type
                 && child.attr(gimli::DW_AT_count).is_none()
                 && child.attr(gimli::DW_AT_upper_bound).is_none()
-        })
+            {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -3537,52 +3640,152 @@ const fn integer_encoding(encoding: gimli::DwAte) -> Option<BaseTypeEncoding> {
     })
 }
 
-/// The direct children of one DIE, read one at a time.
+/// Spare DIEs for [`Children`] to read into, kept for the whole load.
+///
+/// A DIE owns a vector of its decoded attributes, so reading children into
+/// a DIE of their own allocated once for every aggregate, enumeration,
+/// array, and signature a load builds, several times for each record. Each
+/// [`Children`] takes a DIE from here and gives it back when dropped, so a
+/// load allocates only as many as it nests. The builder is shared with the
+/// threads that build identities, so the spares are behind a lock, which
+/// costs less uncontended than the allocation it saves.
+#[derive(Default)]
+pub(super) struct DieBuffers<'data>(
+    std::sync::Mutex<Vec<gimli::DebuggingInformationEntry<Reader<'data>>>>,
+);
+
+impl<'data> DieBuffers<'data> {
+    fn take(&self) -> gimli::DebuggingInformationEntry<Reader<'data>> {
+        self.0
+            .lock()
+            .expect("loading does not panic")
+            .pop()
+            .unwrap_or_else(gimli::DebuggingInformationEntry::null)
+    }
+
+    fn give_back(&self, entry: gimli::DebuggingInformationEntry<Reader<'data>>) {
+        self.0.lock().expect("loading does not panic").push(entry);
+    }
+
+    /// The DIE at `offset`, which `raw` starts at, read into a spare as
+    /// `gimli::Unit::entry` reads it. Resolving a type reads its DIE twice,
+    /// once to find its definition and once to build it, which allocated
+    /// the DIE's attributes each time.
+    fn read(
+        &self,
+        mut raw: gimli::EntriesRaw<'_, Reader<'data>>,
+        offset: gimli::UnitOffset,
+    ) -> gimli::Result<SpareEntry<'_, 'data>> {
+        let mut spare = SpareEntry {
+            entry: self.take(),
+            buffers: self,
+        };
+        raw.read_entry(&mut spare.entry)?;
+        if spare.entry.is_null() {
+            return Err(gimli::Error::NoEntryAtGivenOffset(offset.0 as u64));
+        }
+        Ok(spare)
+    }
+}
+
+/// A DIE read into a spare from [`DieBuffers`], which it goes back to when
+/// dropped.
+pub(super) struct SpareEntry<'a, 'data> {
+    entry: gimli::DebuggingInformationEntry<Reader<'data>>,
+    buffers: &'a DieBuffers<'data>,
+}
+
+impl<'data> std::ops::Deref for SpareEntry<'_, 'data> {
+    type Target = gimli::DebuggingInformationEntry<Reader<'data>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entry
+    }
+}
+
+impl Drop for SpareEntry<'_, '_> {
+    fn drop(&mut self) {
+        let entry = std::mem::replace(&mut self.entry, gimli::DebuggingInformationEntry::null());
+        self.buffers.give_back(entry);
+    }
+}
+
+/// The direct children of one DIE, read one at a time into one reused DIE
+/// and lent from it.
 pub(super) struct Children<'a, 'data> {
-    cursor: gimli::EntriesCursor<'a, Reader<'data>>,
+    raw: gimli::EntriesRaw<'a, Reader<'data>>,
+    entry: gimli::DebuggingInformationEntry<Reader<'data>>,
+    buffers: &'a DieBuffers<'data>,
     started: bool,
     done: bool,
 }
 
-impl<'data> Iterator for Children<'_, 'data> {
-    type Item = std::result::Result<gimli::DebuggingInformationEntry<Reader<'data>>, Arc<str>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
+impl<'a, 'data> Children<'a, 'data> {
+    fn new(raw: gimli::EntriesRaw<'a, Reader<'data>>, buffers: &'a DieBuffers<'data>) -> Self {
+        Self {
+            entry: buffers.take(),
+            raw,
+            buffers,
+            started: false,
+            done: false,
         }
-        let next = if self.started {
-            self.cursor.next_sibling().map(Option::<&_>::cloned)
-        } else {
-            self.started = true;
-            self.first_child()
-        };
-        match next {
-            Ok(Some(child)) => Some(Ok(child)),
-            Ok(None) => {
+    }
+
+    /// The next child, or `None` after the last. After an error there are
+    /// no more.
+    pub(super) fn next_child(
+        &mut self,
+    ) -> std::result::Result<Option<&gimli::DebuggingInformationEntry<Reader<'data>>>, Arc<str>>
+    {
+        if self.done {
+            return Ok(None);
+        }
+        match self.advance() {
+            Ok(true) => Ok(Some(&self.entry)),
+            Ok(false) => {
                 self.done = true;
-                None
+                Ok(None)
             }
             Err(error) => {
                 self.done = true;
-                Some(Err(malformed(error)))
+                Err(malformed(error))
             }
         }
     }
+
+    /// Reads the next child into the DIE, returning whether there is one.
+    fn advance(&mut self) -> gimli::Result<bool> {
+        if !self.started {
+            self.started = true;
+            // The parent itself, whose attributes nothing here reads.
+            let Some(parent) = self.raw.read_abbreviation()? else {
+                return Ok(false);
+            };
+            self.raw.skip_attributes(parent.attributes())?;
+            if !parent.has_children() {
+                return Ok(false);
+            }
+        }
+        // The parent is at depth zero and its children at one. Their own
+        // children are skipped by their abbreviations, without decoding
+        // the attributes nothing here reads.
+        while !self.raw.is_empty() {
+            if self.raw.next_depth() <= 1 {
+                // A null entry ends the children.
+                return self.raw.read_entry(&mut self.entry);
+            }
+            if let Some(abbreviation) = self.raw.read_abbreviation()? {
+                self.raw.skip_attributes(abbreviation.attributes())?;
+            }
+        }
+        Ok(false)
+    }
 }
 
-impl<'data> Children<'_, 'data> {
-    fn first_child(
-        &mut self,
-    ) -> gimli::Result<Option<gimli::DebuggingInformationEntry<Reader<'data>>>> {
-        let has_children = self
-            .cursor
-            .next_dfs()?
-            .is_some_and(gimli::DebuggingInformationEntry::has_children);
-        if !has_children || !self.cursor.next_entry()? {
-            return Ok(None);
-        }
-        Ok(self.cursor.current().cloned())
+impl Drop for Children<'_, '_> {
+    fn drop(&mut self) {
+        let entry = std::mem::replace(&mut self.entry, gimli::DebuggingInformationEntry::null());
+        self.buffers.give_back(entry);
     }
 }
 

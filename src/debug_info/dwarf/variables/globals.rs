@@ -1,33 +1,48 @@
 //! The catalog of global data objects, deduplicated across units.
 
 use crate::image::lines::Files;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use foldhash::HashMap;
 
 use crate::VariableKind;
-use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, Units, is_type_unit};
+use crate::debug_info::dwarf::{
+    DieKey, DieWalk, DwarfError, Reader, Units, is_type_unit, str_attribute,
+};
 use crate::image::variables::Global;
 
 use super::die::{
-    copy_name, debug_info_offset, declaration_with_origins, flag_with_origins, origin_chain,
+    debug_info_offset, declaration_with_origins, flag_with_origins, origin_chain,
     string_with_origins, type_with_origins,
 };
 use super::location::copy_data_object_value_with_origins;
 use super::types::TypeArenaBuilder;
 use super::{DataObject, Metadata, MetadataAbsence, ValueDescription};
 
+/// One scope a DIE can be in, as a link to the scope enclosing it.
+///
+/// Every namespace and aggregate of every unit is a scope, and few hold
+/// globals, so a scope keeps the one name it adds, borrowed from the
+/// debug information, and a path is spelled only for a global's scope.
+/// Copying each scope's whole path into one of its own allocated three
+/// times for every aggregate a program declares.
 #[derive(Clone, Default)]
-pub(super) struct GlobalScope {
-    pub(super) path: Arc<[Arc<str>]>,
-    pub(super) routine: bool,
+struct GlobalScope<'data> {
+    /// The scope enclosing this one; the root encloses itself.
+    parent: u32,
+    /// The name this scope adds to its parent's path, if any.
+    name: Option<Cow<'data, str>>,
+    /// How many names the path has.
+    depth: u32,
+    routine: bool,
 }
 
 /// The scope of every DIE outside type units: the distinct scopes, the
 /// first the empty one, and for each unit its DIEs' offsets in order with
 /// the scope each has. Most DIEs share their parent's.
-struct ScopeTable {
-    scopes: Vec<GlobalScope>,
+struct ScopeTable<'data> {
+    scopes: Vec<GlobalScope<'data>>,
     units: Vec<UnitScopes>,
 }
 
@@ -37,17 +52,36 @@ struct UnitScopes {
     scopes: Vec<u32>,
 }
 
-impl ScopeTable {
-    fn get(&self, key: DieKey) -> Option<&GlobalScope> {
+impl<'data> ScopeTable<'data> {
+    /// The scope of the DIE `key` names, by its index.
+    fn get(&self, key: DieKey) -> Option<u32> {
         let unit = self.units.get(key.unit)?;
         let index = unit.offsets.binary_search(&key.offset).ok()?;
-        self.scopes.get(usize::try_from(unit.scopes[index]).ok()?)
+        Some(unit.scopes[index]).filter(|scope| (*scope as usize) < self.scopes.len())
+    }
+
+    fn scope(&self, index: u32) -> &GlobalScope<'data> {
+        &self.scopes[index as usize]
     }
 
     /// A scope's index once it is in the table.
-    fn add(&mut self, scope: GlobalScope) -> u32 {
+    fn add(&mut self, scope: GlobalScope<'data>) -> u32 {
         self.scopes.push(scope);
         u32::try_from(self.scopes.len() - 1).expect("scope count fits u32")
+    }
+
+    /// The names of a scope's path, outermost first, joined by `::`.
+    fn path(&self, index: u32) -> String {
+        let mut names = Vec::new();
+        let mut current = self.scope(index);
+        while current.depth > 0 {
+            if let Some(name) = &current.name {
+                names.push(&**name);
+            }
+            current = self.scope(current.parent);
+        }
+        names.reverse();
+        names.join("::")
     }
 }
 
@@ -125,21 +159,23 @@ pub(super) fn load_globals<'data>(
     for unit in units.iter() {
         let mut unit_scopes = UnitScopes::default();
         if !is_type_unit(unit) {
-            let mut entries = unit.entries();
+            let mut walk = DieWalk::new(unit)?;
             let mut scopes = Vec::<u32>::new();
-            while let Some(entry) = entries.next_dfs()? {
+            while let Some(die) = walk.next()? {
                 let depth =
-                    usize::try_from(entry.depth()).map_err(|_| DwarfError::InvalidEntryDepth)?;
+                    usize::try_from(die.depth).map_err(|_| DwarfError::InvalidEntryDepth)?;
                 scopes.truncate(depth);
                 let parent = scopes.last().copied().unwrap_or(0);
-                let parent_scope = &table.scopes[usize::try_from(parent).expect("u32 fits usize")];
-                let scope = match entry.tag() {
+                let parent_scope = table.scope(parent);
+                let scope = match die.tag {
                     gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine
                         if !parent_scope.routine =>
                     {
-                        let path = Arc::clone(&parent_scope.path);
+                        let depth = parent_scope.depth;
                         table.add(GlobalScope {
-                            path,
+                            parent,
+                            name: None,
+                            depth,
                             routine: true,
                         })
                     }
@@ -148,25 +184,26 @@ pub(super) fn load_globals<'data>(
                     | gimli::DW_TAG_class_type
                     | gimli::DW_TAG_structure_type
                     | gimli::DW_TAG_union_type => {
-                        let component = match copy_name(dwarf, unit, entry) {
-                            Ok(Some(name)) => name,
-                            Ok(None) if entry.tag() == gimli::DW_TAG_namespace => {
-                                Arc::from("{anonymous}")
-                            }
-                            Ok(None) => Arc::from("{anonymous type}"),
-                            Err(error) => Arc::from(format!("{{malformed scope: {error}}}")),
-                        };
-                        let mut path = parent_scope.path.to_vec();
-                        path.push(component);
-                        let routine = parent_scope.routine;
+                        let (depth, routine) = (parent_scope.depth + 1, parent_scope.routine);
+                        let name =
+                            match str_attribute(dwarf, unit, walk.decode()?, gimli::DW_AT_name) {
+                                Ok(Some(name)) => name,
+                                Ok(None) if die.tag == gimli::DW_TAG_namespace => {
+                                    Cow::Borrowed("{anonymous}")
+                                }
+                                Ok(None) => Cow::Borrowed("{anonymous type}"),
+                                Err(error) => Cow::Owned(format!("{{malformed scope: {error}}}")),
+                            };
                         table.add(GlobalScope {
-                            path: path.into(),
+                            parent,
+                            name: Some(name),
+                            depth,
                             routine,
                         })
                     }
                     _ => parent,
                 };
-                unit_scopes.offsets.push(entry.offset().0);
+                unit_scopes.offsets.push(die.offset.0);
                 unit_scopes.scopes.push(scope);
                 scopes.push(scope);
             }
@@ -193,19 +230,20 @@ pub(super) fn load_globals<'data>(
         if is_type_unit(unit) {
             continue;
         }
-        let mut entries = unit.entries();
-        while let Some(entry) = entries.next_dfs()? {
-            if entry.tag() != gimli::DW_TAG_variable {
+        let mut walk = DieWalk::new(unit)?;
+        while let Some(die) = walk.next()? {
+            if die.tag != gimli::DW_TAG_variable {
                 continue;
             }
             let key = DieKey {
                 unit: unit_index,
-                offset: entry.offset().0,
+                offset: die.offset.0,
             };
-            let current_scope = table.get(key).unwrap_or(&table.scopes[0]);
-            if current_scope.routine {
+            let current_scope = table.get(key).unwrap_or(0);
+            if table.scope(current_scope).routine {
                 continue;
             }
+            let entry = walk.decode()?;
 
             let (chain, chain_error) = match origin_chain(units, unit_index, entry) {
                 Ok(chain) => (chain, None),
@@ -239,25 +277,16 @@ pub(super) fn load_globals<'data>(
                     })
                 })
                 .chain(std::iter::once(current_scope))
-                .max_by_key(|scope| scope.path.len())
-                .cloned()
-                .unwrap_or_default();
-            let qualified_name = if scope.path.is_empty() {
+                .max_by_key(|scope| table.scope(*scope).depth)
+                .unwrap_or(0);
+            let qualified_name = if table.scope(scope).depth == 0 {
                 linkage_name
                     .as_ref()
                     .filter(|linkage| !linkage.starts_with('_') && linkage.contains('.'))
                     .cloned()
                     .unwrap_or_else(|| Arc::clone(&name))
             } else {
-                Arc::from(format!(
-                    "{}::{name}",
-                    scope
-                        .path
-                        .iter()
-                        .map(AsRef::as_ref)
-                        .collect::<Vec<_>>()
-                        .join("::")
-                ))
+                Arc::from(format!("{}::{name}", table.path(scope)))
             };
             let declaration = declaration_with_origins(dwarf, units, unit, entry, &chain, files);
             let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);

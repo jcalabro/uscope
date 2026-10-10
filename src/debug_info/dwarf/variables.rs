@@ -35,8 +35,8 @@ use crate::{
 };
 
 use super::{
-    DieKey, DwarfError, Reader, UnitCatalog, Units, die_code_ranges, die_reference, is_type_unit,
-    unit_dwarf,
+    DieKey, DieWalk, DwarfError, Reader, UnitCatalog, Units, die_code_ranges, die_reference,
+    is_type_unit, unit_dwarf,
 };
 use crate::image::variables::{
     Capture, ConstantValue, DataObject, Function, Metadata, MetadataAbsence, Object, ObjectId,
@@ -362,6 +362,7 @@ pub(super) fn load_variable_info<'data>(
         .collect::<Vec<_>>();
     drop(phase);
     let phase = crate::span!("variables.type_arena");
+    let die_buffers = types::DieBuffers::default();
     let mut types = TypeArenaBuilder::new(
         dwarf,
         units,
@@ -369,6 +370,7 @@ pub(super) fn load_variable_info<'data>(
         image_id,
         target.byte_order,
         &pool,
+        &die_buffers,
         budget,
     );
     drop(phase);
@@ -417,15 +419,14 @@ pub(super) fn load_variable_info<'data>(
         } else {
             HashMap::new()
         };
-        let mut entries = unit.entries();
+        let mut walk = DieWalk::new(unit)?;
         let mut scopes = Vec::<Option<Scope>>::new();
         // The concrete instances of abstract functions open at this point
         // of the walk, innermost last.
         let mut concrete = Vec::<ConcreteRoutine>::new();
 
-        while let Some(entry) = entries.next_dfs()? {
-            let depth =
-                usize::try_from(entry.depth()).map_err(|_| DwarfError::InvalidEntryDepth)?;
+        while let Some(die) = walk.next()? {
+            let depth = usize::try_from(die.depth).map_err(|_| DwarfError::InvalidEntryDepth)?;
             scopes.truncate(depth);
             while concrete
                 .last()
@@ -446,6 +447,20 @@ pub(super) fn load_variable_info<'data>(
                     },
                 )?;
             }
+            if !main_walk_reads(die.tag, depth) {
+                // Nothing here reads such a DIE's attributes; all it has is
+                // its scope for the DIEs within it: its parent's, or none
+                // within a type. Most DIEs are types' members, parameters,
+                // and arguments, which are not decoded.
+                let scope = if is_type_scope(die.tag) {
+                    None
+                } else {
+                    scopes.last().and_then(Clone::clone)
+                };
+                scopes.push(scope);
+                continue;
+            }
+            let entry = walk.decode()?;
             let parent = scopes.last().and_then(Clone::clone);
             // A concrete DIE standing for an abstract one covers it.
             if let Some(routine) = concrete.last_mut()
@@ -1306,6 +1321,11 @@ fn async_fn_body<'data>(
     unit: &gimli::Unit<Reader<'data>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
 ) -> bool {
+    // Most routines name themselves, and their origins are read only for
+    // those that do not; the name is only inspected, never kept.
+    if let Ok(Some(name)) = super::str_attribute(dwarf, unit, entry, gimli::DW_AT_name) {
+        return crate::debug_info::coroutines::is_async_fn_body(&name);
+    }
     origin_chain(units, unit_index, entry)
         .ok()
         .and_then(|chain| {
@@ -1314,6 +1334,26 @@ fn async_fn_body<'data>(
                 .flatten()
         })
         .is_some_and(|name| crate::debug_info::coroutines::is_async_fn_body(&name))
+}
+
+/// Whether the main walk reads anything of a DIE at `depth` with `tag`
+/// but its place: what builds scopes, call sites, procedures, and data
+/// objects, and the types a module declares at its top level, which a
+/// vtable or a Go interface may name though no data does.
+const fn main_walk_reads(tag: gimli::DwTag, depth: usize) -> bool {
+    matches!(
+        tag,
+        gimli::DW_TAG_subprogram
+            | gimli::DW_TAG_lexical_block
+            | gimli::DW_TAG_inlined_subroutine
+            | gimli::DW_TAG_call_site
+            | gimli::DW_TAG_GNU_call_site
+            | gimli::DW_TAG_call_site_parameter
+            | gimli::DW_TAG_GNU_call_site_parameter
+            | gimli::DW_TAG_dwarf_procedure
+            | gimli::DW_TAG_variable
+            | gimli::DW_TAG_formal_parameter
+    ) || (depth == 1 && types::is_type_die_tag(tag))
 }
 
 /// Whether rustc made a variable for its own use: an async body's
