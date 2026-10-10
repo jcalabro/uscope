@@ -3388,6 +3388,9 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 }
                 gimli::DW_TAG_array_type => return self.array_is_unsized(current),
                 gimli::DW_TAG_structure_type => {
+                    if self.tail_overruns(&entry, current.unit) {
+                        return true;
+                    }
                     let Some(members) = self.member_types(&entry, current.unit) else {
                         return true;
                     };
@@ -3401,6 +3404,84 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             }
         }
         true
+    }
+
+    /// Whether a record's last member runs past the record's end, as an
+    /// unsized tail does when rustc describes it by its element alone:
+    /// `struct Tail { head: u32, tail: [u16] }` is 4 bytes whose `tail` is a
+    /// `u16` at offset 4. A member of no size may sit at the end of a sized
+    /// record, and a size that cannot be read proves nothing.
+    fn tail_overruns(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+    ) -> bool {
+        let Some(size) = entry
+            .attr(gimli::DW_AT_byte_size)
+            .and_then(gimli::Attribute::udata_value)
+        else {
+            return false;
+        };
+        let Ok(mut children) = self.children(unit_index, entry.offset()) else {
+            return false;
+        };
+        let mut last = None;
+        while let Ok(Some(child)) = children.next_child() {
+            if child.tag() != gimli::DW_TAG_member {
+                continue;
+            }
+            let offset = child
+                .attr(gimli::DW_AT_data_member_location)
+                .and_then(gimli::Attribute::udata_value);
+            let target = die_reference_with_signatures(
+                child.attr_value(gimli::DW_AT_type),
+                unit_index,
+                self.units,
+                self.type_signatures,
+            )
+            .ok()
+            .flatten();
+            last = Some((offset, target));
+        }
+        let Some((Some(offset), Some(target))) = last else {
+            return false;
+        };
+        self.die_byte_size(target)
+            .and_then(|member| offset.checked_add(member))
+            .is_some_and(|end| end > size)
+    }
+
+    /// The size of the type a DIE describes, through typedefs and
+    /// qualifiers, when the DIE states it.
+    fn die_byte_size(&self, mut key: DieKey) -> Option<u64> {
+        const MAX_DEPTH: usize = 16;
+        for _ in 0..MAX_DEPTH {
+            let entry = self
+                .units
+                .get(key.unit)?
+                .entry(gimli::UnitOffset(key.offset))
+                .ok()?;
+            if let Some(size) = entry
+                .attr(gimli::DW_AT_byte_size)
+                .and_then(gimli::Attribute::udata_value)
+            {
+                return Some(size);
+            }
+            if !matches!(
+                entry.tag(),
+                gimli::DW_TAG_typedef | gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type
+            ) {
+                return None;
+            }
+            key = die_reference_with_signatures(
+                entry.attr_value(gimli::DW_AT_type),
+                key.unit,
+                self.units,
+                self.type_signatures,
+            )
+            .ok()??;
+        }
+        None
     }
 
     /// The unsized array of bytes a pointer DIE's target holds, when that
