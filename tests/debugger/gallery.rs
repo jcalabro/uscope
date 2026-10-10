@@ -349,6 +349,13 @@ async fn check_truth(
             Err("is not listed".to_owned())
         };
     };
+    // A value uscope cannot show yet must say so.
+    if truth.kind == "unsupported" {
+        return match &variable.state {
+            VariableState::Unavailable(uscope::VariableUnavailableReason::Unsupported(_)) => Ok(()),
+            state => Err(format!("is not unsupported: {state:?}")),
+        };
+    }
     if let Some(checked) = check_variable(variable, truth, may_be_unavailable) {
         return checked;
     }
@@ -369,10 +376,22 @@ async fn check_truth(
             .iter()
             .find(|child| match &child.relationship {
                 ValueChildRelationship::Member(member) => member.name.as_deref() == Some(segment),
-                ValueChildRelationship::SliceElement { index }
-                | ValueChildRelationship::ArrayElement { index, .. } => {
-                    index.to_string() == segment
-                }
+                ValueChildRelationship::SliceElement { index } => index.to_string() == segment,
+                // An element is named by its zero-based index, or by its
+                // source indices in parentheses.
+                ValueChildRelationship::ArrayElement { index, indices } => segment
+                    .strip_prefix('(')
+                    .and_then(|rest| rest.strip_suffix(')'))
+                    .map_or_else(
+                        || index.to_string() == segment,
+                        |source| {
+                            source
+                                .split(',')
+                                .map(str::parse)
+                                .collect::<Result<Vec<i128>, _>>()
+                                == Ok(indices.to_vec())
+                        },
+                    ),
                 _ => false,
             })
             .ok_or_else(|| {
@@ -740,6 +759,22 @@ async fn odin_values_agree_with_their_program() {
             fixture,
             breakpoints: &["values::reached"],
             checkpoints: &["scalars", "records", "slices", "unions"],
+            optimized,
+            required: &[],
+            go: false,
+            unknown: &[],
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn fortran_values_agree_with_their_program() {
+    for (fixture, optimized) in [("values-fortran-o0", false), ("values-fortran-o2", true)] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["reached"],
+            checkpoints: &["scalars", "records", "strings"],
             optimized,
             required: &[],
             go: false,

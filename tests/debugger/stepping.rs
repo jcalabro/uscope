@@ -2282,3 +2282,55 @@ async fn odin_steps_into_a_procedure_and_back_to_its_caller() {
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
     }
 }
+
+/// gfortran's procedures step and unwind as C's do; its main program is
+/// `MAIN__`, whatever the program calls it.
+#[tokio::test]
+async fn fortran_steps_into_a_procedure_and_back_to_its_caller() {
+    for fixture in ["values-fortran-o0", "values-fortran-o2"] {
+        let mut scenario = Scenario::launch(fixture);
+        scenario.add_source_breakpoint("values.f90", 181).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        assert_eq!(
+            scenario.step_to_stop(StepKind::IntoSource).await,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            }
+        );
+        let entered = scenario
+            .operation("Fortran callee", scenario.handle().current_location())
+            .await;
+        assert_eq!(location_function(&entered), Some("add"), "{fixture}");
+        let trace = scenario
+            .operation("Fortran backtrace", scenario.handle().backtrace())
+            .await;
+        let names = trace
+            .frames
+            .iter()
+            .filter_map(|frame| frame.function.as_ref())
+            .map(|function| function.name.as_ref())
+            .collect::<Vec<_>>();
+        assert!(
+            names.starts_with(&["add", "MAIN__", "main"]),
+            "{fixture}: {trace:?}"
+        );
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Out).await,
+            StopReason::Step {
+                kind: StepKind::Out
+            }
+        );
+        let caller = scenario
+            .operation("Fortran caller", scenario.handle().current_location())
+            .await;
+        assert_eq!(location_function(&caller), Some("MAIN__"), "{fixture}");
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}

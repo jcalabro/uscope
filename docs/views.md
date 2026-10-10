@@ -841,6 +841,7 @@ are:
   An Odin union shows as the value it holds, or `nil`.
 - Odin's slices, strings, and dynamic arrays show as their elements or
   text, and a `cstring` as its text.
+- A Fortran `character(len=N)` shows as its text.
 - A Rust tuple shows as Rust writes it, `(1, "two", 3.5)`, and a tuple
   struct with its name, `Meters(7)` or `Wrapping(5)`.
 - A character of any width shows as its number and the character,

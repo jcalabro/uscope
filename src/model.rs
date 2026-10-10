@@ -942,6 +942,8 @@ pub enum SourceLanguage {
     Zig,
     /// Odin, whose units say they are C99.
     Odin,
+    /// Fortran, of any standard.
+    Fortran,
     /// Another language, by its DWARF language code.
     Other(u16),
     /// The unit does not say.

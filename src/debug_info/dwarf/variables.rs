@@ -392,6 +392,7 @@ pub(super) fn load_variable_info<'data>(
             continue;
         }
         let go = languages[unit_index] == Some(gimli::DW_LANG_Go);
+        let fortran = source_language(languages[unit_index], None) == SourceLanguage::Fortran;
         let rust = languages[unit_index] == Some(gimli::DW_LANG_Rust);
         // Go names the register ABI its x86-64 code calls with among the
         // flags of each unit's producer, as `go1.27.1; -N -l regabi`.
@@ -828,6 +829,7 @@ pub(super) fn load_variable_info<'data>(
                         VariableKind::Local => "variable",
                         VariableKind::Global => "global",
                     };
+                    let mut nameless = false;
                     let (name, name_error) = match string_with_origins(
                         dwarf,
                         units,
@@ -837,10 +839,14 @@ pub(super) fn load_variable_info<'data>(
                         gimli::DW_AT_name,
                     ) {
                         Ok(Some(name)) => (name, None),
-                        Ok(None) => (
-                            format!("<anonymous {object_name} at {:#x}>", entry.offset().0).into(),
-                            Some(Arc::from(format!("{object_name} has no name"))),
-                        ),
+                        Ok(None) => {
+                            nameless = true;
+                            (
+                                format!("<anonymous {object_name} at {:#x}>", entry.offset().0)
+                                    .into(),
+                                Some(Arc::from(format!("{object_name} has no name"))),
+                            )
+                        }
                         Err(error) => (
                             format!("<malformed {object_name} at {:#x}>", entry.offset().0).into(),
                             Some(error.to_string().into()),
@@ -908,8 +914,11 @@ pub(super) fn load_variable_info<'data>(
                         }
                         _ => (name, type_info, None),
                     };
-                    // Go starts the names of its own variables with
-                    // characters no Go identifier can. rustc's own are an
+                    // A variable with no name that says it is the
+                    // compiler's own, as gfortran's temporaries do, is no
+                    // defect. Go and gfortran start the names of their own
+                    // variables with characters no identifier of their
+                    // languages can begin with. rustc's own are an
                     // async body's temporaries and unnamed parameters, the
                     // `result` an await binds, and, in an `async fn`'s
                     // body, the fields of its future that captured its
@@ -922,7 +931,11 @@ pub(super) fn load_variable_info<'data>(
                         .as_ref()
                         .ok()
                         .and_then(|declared| declared.as_ref().map(|declared| declared.line));
-                    let hidden = (go && name.starts_with(['.', '#']))
+                    let compilers = (nameless
+                        && strict_flag(entry, gimli::DW_AT_artificial) == Ok(true))
+                        || (go && name.starts_with(['.', '#']))
+                        || (fortran && !name.starts_with(|c: char| c.is_ascii_alphabetic()));
+                    let hidden = compilers
                         || (scope.rust.is_some()
                             && (rust_temporary(&name, rust_unnamed)
                                 || (scope.rust == Some(RustScope::AsyncCaptures)
@@ -977,7 +990,7 @@ pub(super) fn load_variable_info<'data>(
                             .or(scope_error)
                             .or_else(|| scope.malformed.clone())
                             .or(chain_error)
-                            .or_else(|| name_error.filter(|_| !rust_unnamed)),
+                            .or_else(|| name_error.filter(|_| !rust_unnamed && !compilers)),
                     });
                 }
             }

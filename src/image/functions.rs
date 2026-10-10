@@ -220,7 +220,7 @@ const EVIDENCE: [BoundaryEvidence; 5] = [
     BoundaryEvidence::SectionStart,
     BoundaryEvidence::RangeEnd,
 ];
-const LANGUAGES: [SourceLanguage; 8] = [
+const LANGUAGES: [SourceLanguage; 9] = [
     SourceLanguage::C,
     SourceLanguage::Cpp,
     SourceLanguage::Rust,
@@ -229,6 +229,7 @@ const LANGUAGES: [SourceLanguage; 8] = [
     SourceLanguage::Other(0),
     SourceLanguage::Unknown,
     SourceLanguage::Odin,
+    SourceLanguage::Fortran,
 ];
 const OTHER_LANGUAGE: u8 = 5;
 
