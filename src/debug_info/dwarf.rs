@@ -2897,9 +2897,11 @@ fn unit_language(
         Some(gimli::AttributeValue::Language(language)) => Some(language),
         _ => units.inherited_language(unit_index),
     };
-    let zig = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?
-        .is_some_and(|producer| producer.starts_with("zig "));
-    Ok(variables::source_language(language, zig))
+    let producer = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?;
+    Ok(variables::source_language(
+        language,
+        variables::produced_language(producer.as_deref()),
+    ))
 }
 
 fn string_attribute(
