@@ -148,7 +148,7 @@ pub(super) const SCHEMA: &[TableSchema] = &[
     TableSchema {
         kind: TableKind::Functions,
         record: "FunctionRecord",
-        size: 56,
+        size: 57,
         fields: &[
             ("name", 0, 4),
             ("linkage_name", 4, 4),
@@ -164,6 +164,7 @@ pub(super) const SCHEMA: &[TableSchema] = &[
             ("other_language", 52, 2),
             ("language", 54, 1),
             ("role", 55, 1),
+            ("main_subprogram", 56, 1),
         ],
     },
     names(TableKind::FunctionNames),

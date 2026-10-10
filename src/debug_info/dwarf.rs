@@ -2300,6 +2300,8 @@ struct RawFunction {
     linkage_name: Option<Arc<str>>,
     /// Whether the DIE says the code only forwards to another function.
     trampoline: bool,
+    /// Whether the DIE says it is the program's main subprogram.
+    main_subprogram: bool,
     declaration: Option<SourceLocation>,
     call_site: Option<SourceLocation>,
     ranges: Vec<AddressRange<ImageAddress>>,
@@ -2389,6 +2391,7 @@ fn load_function_metadata<'data>(
             enclosing: None,
             coroutine: None,
             generics: Arc::from([]),
+            main_subprogram: origin.main_subprogram,
         });
         function_ids[definition] = Some(id);
     }
@@ -2831,6 +2834,9 @@ fn raw_function<'data>(
         linkage_name: string_attribute(dwarf, unit, entry, gimli::DW_AT_linkage_name)?,
         trampoline: entry
             .attr_value(gimli::DW_AT_trampoline)
+            .is_some_and(|value| value != gimli::AttributeValue::Flag(false)),
+        main_subprogram: entry
+            .attr_value(gimli::DW_AT_main_subprogram)
             .is_some_and(|value| value != gimli::AttributeValue::Flag(false)),
         declaration: entry_source_location(
             dwarf,

@@ -1690,6 +1690,7 @@ mod tests {
                 enclosing: None,
                 coroutine: None,
                 generics: std::sync::Arc::from([]),
+                main_subprogram: false,
             })
             .collect()
     }

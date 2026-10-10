@@ -85,6 +85,8 @@ pub struct FunctionRecord {
     pub other_language: U16,
     pub language: u8,
     pub role: u8,
+    /// 1 for the program's main subprogram, else 0.
+    pub main_subprogram: u8,
 }
 
 impl Record for FunctionRecord {
@@ -200,7 +202,7 @@ impl SharedRecord for Member {
 }
 
 const _: () = assert!(size_of::<LocationRecord>() == 20);
-const _: () = assert!(size_of::<FunctionRecord>() == 56);
+const _: () = assert!(size_of::<FunctionRecord>() == 57);
 const _: () = assert!(size_of::<InstanceRecord>() == 54);
 
 /// [`InstanceRecord::provenance`] for an instance without an entry.
@@ -316,6 +318,15 @@ pub fn add_to(
     Ok(())
 }
 
+/// The name a program's main subprogram also answers to.
+const MAIN: &str = "main";
+
+/// Whether the function index lists a function under [`MAIN`] as well as
+/// its own name: it is the program's main subprogram, named otherwise.
+fn aliased(main_subprogram: bool, name: &[u8]) -> bool {
+    main_subprogram && name != MAIN.as_bytes()
+}
+
 fn add_functions(
     builder: &mut Builder<'_>,
     strings: &mut StringsBuilder,
@@ -342,6 +353,10 @@ fn add_functions(
     for function in functions {
         let name = strings.push(&function.name).ok_or(TooMany)?;
         names.push((&*function.name, name, function.id.get()));
+        if aliased(function.main_subprogram, function.name.as_bytes()) {
+            let main = strings.push(MAIN).ok_or(TooMany)?;
+            names.push((MAIN, main, function.id.get()));
+        }
         let first_generic = number(generics.len())?;
         for (parameter, argument) in function.generics.iter() {
             generics.push(GenericRecord {
@@ -368,6 +383,7 @@ fn add_functions(
             other_language: other_language.into(),
             language,
             role: role_code(function.role),
+            main_subprogram: function.main_subprogram.into(),
         });
         first_instance += instance_count;
     }
@@ -521,10 +537,16 @@ impl<'a> FunctionView<'a> {
 
     /// The functions named `name`, in identifier order.
     pub fn named(self, name: &str) -> impl Iterator<Item = Function<'a>> + 'a {
-        index::named(self.strings, self.names, name).map(move |id| {
-            self.function(FunctionId::new(id))
-                .expect("validation checked the name index")
-        })
+        let found = |name| {
+            index::named(self.strings, self.names, name).map(move |id| {
+                self.function(FunctionId::new(id))
+                    .expect("validation checked the name index")
+            })
+        };
+        // `main` names a program's main subprogram rather than the C
+        // `main` its runtime calls it from.
+        let program = name == MAIN && found(name).any(Function::main_subprogram);
+        found(name).filter(move |function| !program || function.main_subprogram())
     }
 
     pub fn instance(self, id: CodeInstanceId) -> Option<CodeInstance<'a>> {
@@ -630,6 +652,13 @@ impl<'a> Function<'a> {
         language_of(self.record.language, self.record.other_language.get())
     }
 
+    /// Whether the function is the program's main subprogram, as
+    /// [`FunctionInfo::main_subprogram`] describes.
+    #[must_use]
+    pub const fn main_subprogram(self) -> bool {
+        self.record.main_subprogram == 1
+    }
+
     /// What the function is to unwinding and stepping.
     #[must_use]
     pub fn role(self) -> CodeRole {
@@ -699,6 +728,7 @@ impl<'a> Function<'a> {
                 .generics()
                 .map(|(name, argument)| (name.into(), argument))
                 .collect(),
+            main_subprogram: self.main_subprogram(),
         }
     }
 }
@@ -853,6 +883,7 @@ fn validate_functions(image: &Image) -> Result<(), String> {
                 && function.enclosing.get() as usize >= functions.len())
             || !valid_language(function.language, function.other_language.get())
             || !valid_role(function.role)
+            || function.main_subprogram > 1
             || function.generics.get() != next_generic
             || !span(function.generics, function.generic_count, generics.len())
             || function.instances.get() as usize != next_member
@@ -883,11 +914,20 @@ fn validate_functions(image: &Image) -> Result<(), String> {
         return Err("the function indexes do not cover their tables".into());
     }
     let names = image.shared::<NameEntry>(TableKind::FunctionNames);
-    if names.len() != functions.len()
+    let main = |function: &FunctionRecord| {
+        aliased(
+            function.main_subprogram == 1,
+            strings.bytes(StrId(function.name.get())),
+        )
+    };
+    let aliases = functions.iter().filter(|function| main(function)).count();
+    if names.len() != functions.len() + aliases
         || !index::valid_names(&strings, names, functions.len())
-        || !names
-            .iter()
-            .all(|entry| functions[entry.value.get() as usize].name == entry.name)
+        || !names.iter().all(|entry| {
+            let function = &functions[entry.value.get() as usize];
+            function.name == entry.name
+                || (main(function) && strings.bytes(StrId(entry.name.get())) == MAIN.as_bytes())
+        })
     {
         return Err("the function name index disagrees with the functions".into());
     }

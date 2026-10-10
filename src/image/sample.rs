@@ -214,6 +214,7 @@ pub(super) fn sample_functions() -> Vec<FunctionInfo> {
         enclosing: None,
         coroutine: None,
         generics: std::sync::Arc::from([]),
+        main_subprogram: false,
     };
     vec![
         FunctionInfo {
@@ -234,7 +235,10 @@ pub(super) fn sample_functions() -> Vec<FunctionInfo> {
             enclosing: Some(FunctionId::new(0)),
             ..function(1, "helper")
         },
-        function(2, "declared"),
+        FunctionInfo {
+            main_subprogram: true,
+            ..function(2, "declared")
+        },
         function(3, "main"),
     ]
 }
