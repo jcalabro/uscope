@@ -23,7 +23,9 @@ export type Command =
   | `pane${1 | 2 | 3 | 4 | 5 | 6 | 7}`
   | "viewSource"
   | "viewDisassembly"
-  | "viewMemory";
+  | "viewMemory"
+  | "viewDrawings"
+  | "reloadViews";
 
 /** What each command is called in the palette and the key help. */
 export const LABELS: Record<Command, string> = {
@@ -60,6 +62,8 @@ export const LABELS: Record<Command, string> = {
   viewSource: "Show source",
   viewDisassembly: "Show disassembly",
   viewMemory: "Show memory",
+  viewDrawings: "Show drawings",
+  reloadViews: "Reload views",
 };
 
 export interface Binding {
@@ -118,6 +122,7 @@ export const BINDINGS: readonly Binding[] = [
   { key: "s", alt: true, typing: false, command: "viewSource" },
   { key: "d", alt: true, typing: false, command: "viewDisassembly" },
   { key: "m", alt: true, typing: false, command: "viewMemory" },
+  { key: "v", alt: true, typing: false, command: "viewDrawings" },
 ];
 
 export interface KeyLike {

@@ -59,6 +59,7 @@ pub async fn draw(handle: &DebuggerHandle, request: &protocol::Draw) -> Result<D
             "a range of elements is drawn one element at a time",
         ));
     };
+    let value = pointee_with_drawings(handle, context, &request.path, value).await;
     let offered = match &value.state {
         VariableState::Available {
             presentation: Some(presentation),
@@ -142,6 +143,35 @@ pub async fn draw(handle: &DebuggerHandle, request: &protocol::Draw) -> Result<D
         },
         bytes,
     })
+}
+
+/// What a pointer at a value with drawings points to, as its row offers
+/// the target's drawings; any other value is drawn as it is.
+async fn pointee_with_drawings(
+    handle: &DebuggerHandle,
+    context: uscope::StopContext,
+    path: &str,
+    value: uscope::InspectedValue,
+) -> uscope::InspectedValue {
+    if let VariableState::Available {
+        value: VariableValue::Address(_),
+        ..
+    } = &value.state
+        && let Ok(pointee) = Expression::parse(&format!("*({path})"))
+        && let Ok(Evaluation::Value { value: pointee, .. }) = handle
+            .at(context)
+            .evaluate_with(&pointee, EvaluationMode::Read, input_limits())
+            .await
+        && let VariableState::Available {
+            presentation: Some(presentation),
+            ..
+        } = &pointee.state
+        && !presentation.visualizers.is_empty()
+    {
+        pointee
+    } else {
+        value
+    }
 }
 
 fn info(renderer: &uscope::Renderer) -> RendererInfo {

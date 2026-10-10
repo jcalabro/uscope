@@ -438,3 +438,38 @@ async fn reloading_views_reads_the_files_and_renderers_again() {
         &json!({"t": "bytes", "offset": 0, "length": 64})
     );
 }
+
+#[tokio::test]
+async fn a_pointer_offers_and_draws_the_drawings_of_what_it_points_to() {
+    let web = Web::start("pointer", &[&fixture("chess")]);
+    let mut tab = web.control("tab").await;
+    // make_move's `self` is a `&mut Board`.
+    let frame = stop_at(&mut tab, "main.rs:108").await;
+    let scopes = tab.ok("scopes", frame.clone()).await;
+    let arguments = &scopes["scopes"][0]["rows"];
+    let this = arguments
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|row| row["name"] == "self")
+        .expect("self");
+    assert_eq!(this["drawings"], json!(["chess-board", "bits"]), "{this}");
+    let watched = tab
+        .ok("evaluate", with(&frame, &json!({"expression": "self"})))
+        .await;
+    assert_eq!(watched["drawings"], json!(["chess-board", "bits"]));
+
+    let (drawing, _) = tab
+        .draw(with(
+            &frame,
+            &json!({"path": "self", "renderer": "chess-board"}),
+        ))
+        .await
+        .expect("draw what self points to");
+    assert_eq!(drawing["offered"], true);
+    assert_eq!(names(&drawing["inputs"]), ["squares", "turn"]);
+    assert_eq!(
+        input(&drawing, "turn"),
+        &json!({"t": "enum", "name": "White", "value": {"t": "int", "i": 0}})
+    );
+}

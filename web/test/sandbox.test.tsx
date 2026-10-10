@@ -9,20 +9,8 @@ import { validate } from "../src/visualize/picture";
 import { type DrawContext, type Outcome, Sandbox } from "../src/visualize/sandbox";
 import { buildSvg } from "../src/visualize/svg";
 import workerSource from "../src/visualize/worker.js?raw";
+import { palette } from "./palette";
 
-const palette = {
-  ink: "#1a2230",
-  ink2: "#4a5566",
-  ink3: "#7b8696",
-  paper: "#f5f6f8",
-  surface: "#ffffff",
-  line: "#dce1e8",
-  accent: "#2f56c9",
-  changed: "#b0500a",
-  good: "#1d8248",
-  bad: "#b42525",
-  series: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"],
-};
 const context: DrawContext = { previous: null, width: 400, theme: "light", palette };
 
 /** A renderer that draws one text: the JSON of what `body` returns. */

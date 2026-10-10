@@ -126,10 +126,11 @@ web-deps:
 web: web-deps
     cd web && ./node_modules/.bin/vite build --logLevel warn
 
-# Type-checks and lints the page and runs its tests outside a browser and
+# Type-checks and lints the page, checks renderers against sdk/web's
+# declarations, and runs the page's tests outside a browser and
 # its component tests in headless Chromium. Arguments go to Vitest.
 web-test *ARGS: web-deps
-    cd web && ./node_modules/.bin/tsc --noEmit && biome check src test e2e && ./node_modules/.bin/vitest run "$@"
+    cd web && ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/tsc -p ../sdk/web && biome check src test e2e && ./node_modules/.bin/vitest run "$@"
 
 # Drives the built page and real `uscope web` servers in Chromium and
 # Firefox. Arguments go to Playwright, e.g. `just web-e2e --project=chromium`.

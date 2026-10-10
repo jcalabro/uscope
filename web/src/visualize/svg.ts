@@ -98,6 +98,11 @@ function element(shape: Shape, onSelect: OnSelect | undefined): SVGElement {
     title.textContent = shape.title;
     node.prepend(title);
   }
+  // A shape that says nothing, such as a piece on its square, lets the
+  // pointer through to the shapes beneath it.
+  if (shape.type !== "group" && shape.title === undefined && shape.select === undefined) {
+    node.style.pointerEvents = "none";
+  }
   if (shape.select !== undefined && onSelect !== undefined) {
     const path = shape.select;
     node.setAttribute("tabindex", "0");

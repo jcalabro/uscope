@@ -10,6 +10,7 @@ import type { Children, Row } from "../protocol";
 import { useConnection, useModel } from "../store";
 import { flash } from "../tab";
 import { childKey, recall, toggled } from "../tree";
+import { DrawAs, pin } from "./Drawings";
 import { useLook } from "./navigation";
 import { useFocus } from "./Workspace";
 
@@ -183,13 +184,31 @@ function RowActions({ row }: { row: Row }) {
   const control = useModel(controls);
   const connection = useConnection();
   const look = useLook();
+  const path = row.path;
+  const draw = path !== null && at !== null && (
+    <>
+      {row.drawings.length > 0 && (
+        <button
+          type="button"
+          className="link-button"
+          aria-label={`Draw ${row.name}`}
+          title={`Draw with ${row.drawings.join(", ")}`}
+          onClick={() => look(pin({ path, renderer: null }), { replace: false })}
+        >
+          Draw
+        </button>
+      )}
+      <DrawAs path={path} />
+    </>
+  );
   if (!row.memory) {
-    return null;
+    return draw ? <span className="row-actions">{draw}</span> : null;
   }
   const memory = row.memoryBytes ? `${row.memory}:${row.memoryBytes}` : row.memory;
   const watchable = control && at && !stale && row.path !== null && row.memoryBytes !== null;
   return (
     <span className="row-actions">
+      {draw}
       <button
         type="button"
         className="icon"

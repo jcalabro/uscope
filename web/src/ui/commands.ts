@@ -23,10 +23,11 @@ const ACTIONS = new Set<string>([
   "overInstruction",
 ]);
 
-const VIEWS: Record<"viewSource" | "viewDisassembly" | "viewMemory", View> = {
+const VIEWS: Record<"viewSource" | "viewDisassembly" | "viewMemory" | "viewDrawings", View> = {
   viewSource: "source",
   viewDisassembly: "disassembly",
   viewMemory: "memory",
+  viewDrawings: "drawings",
 };
 
 /** Runs commands, returning whether the command did anything here. */
@@ -106,9 +107,13 @@ export function useCommands(): (command: Command) => boolean {
           flash(`Watching ${expression}`);
           return true;
         }
+        case "reloadViews":
+          void connection.request("reloadViews").catch((failure: Error) => flash(failure.message));
+          return true;
         case "viewSource":
         case "viewDisassembly":
-        case "viewMemory": {
+        case "viewMemory":
+        case "viewDrawings": {
           if (!current.session) {
             return false;
           }

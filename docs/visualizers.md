@@ -1,0 +1,342 @@
+# Visualizers
+
+A visualizer draws a value in the web page, `uscope web`: a chess position
+as a board, a framebuffer as an image, samples as a plot. A view says which
+of a value's data the drawing needs, with `visualize` (`docs/views.md`),
+and a **renderer**, a small JavaScript file, turns that data into a
+picture. The page runs the renderer in a sandbox, checks the picture, and
+draws it. The terminal and debug adapters never draw: a `visualize`
+changes nothing they show.
+
+Every renderer example on this page runs as one of uscope's tests.
+
+## A first drawing
+
+Conway's game of life keeps its board as bytes, one a cell:
+
+```c
+struct life {
+    int generation;
+    uint8_t cells[48][64];
+};
+```
+
+Next to a view file, `life.views`, that names what a drawing of a `struct
+life` needs:
+
+```text
+uscope-views 1
+
+# A life board, drawn from its cells' bytes by life.js beside this file.
+extend c life {
+    visualize "life" {
+        cells = bytes(&cells[0][0], sizeof(cells))
+        columns = 64
+        generation = generation
+    }
+}
+```
+
+goes the renderer that draws it, `life.js`, named for the drawing:
+
+```js
+// @ts-check
+// Draws a life board: one byte a cell, 1 for alive, row by row.
+uscope.draw(({ cells, columns, generation }, { previous }) => {
+  const rows = cells.length / columns;
+  const pixels = new Uint8ClampedArray(cells.length * 4);
+  for (let i = 0; i < cells.length; i++) {
+    const born = cells[i] === 1 && previous !== null && previous.cells[i] === 0;
+    const [r, g, b] = cells[i] !== 1 ? [238, 241, 245] : born ? [176, 80, 10] : [26, 34, 48];
+    pixels.set([r, g, b, 255], i * 4);
+  }
+  return uscope.picture({
+    width: columns * 6, height: rows * 6, caption: `generation ${generation}`,
+    shapes: [uscope.image({ x: 0, y: 0, width: columns * 6, height: rows * 6, pixels, columns, rows })],
+  });
+});
+```
+
+`uscope web --views life.views ./life` loads both. Stop anywhere a `struct
+life` is in scope, or a pointer to one, and press Alt+V: the Drawings view
+draws it, and draws it again at each stop, with the cells born since the
+stop before in orange. Edit `life.js` and run Reload views from the
+command palette (Ctrl+K) to see the change at once; nothing restarts.
+
+`extend` adds the drawing to whatever view presents the type, so `print
+life` in the terminal is unchanged. `cells = bytes(…)` hands over the
+board's 3,072 bytes in one read, as a `Uint8Array`.
+
+## The Drawings view
+
+The Drawings view (Alt+V, or Drawings beside Source, Disassembly, and
+Memory) shows a card for each argument and local of the frame shown that a
+view draws, then for each value pinned to it. A pointer draws as what it
+points to, so a `&mut Board` or a `struct life *` has its target's
+drawings. The number beside Drawings counts the cards.
+
+- **Draw** on a value row pins the value with the drawings its view
+  offers. **Draw as…** on any value row, or on a card, pins it with any
+  renderer; that renderer draws the value itself as its `values` input,
+  as `visualize "NAME" { values = self }` would.
+- **The link holds the view.** `view=drawings` shows it, and each pinned
+  value is `d=PATH` or `d=PATH~NAME` for a chosen renderer, so a link
+  shows the same drawings.
+- **A value with several drawings** shows each as a tab of its card.
+- **Across stops,** a card draws again at each stop the tab shows, and
+  hands the renderer what it drew at the stop before as `previous`, so it
+  can mark what changed. While the program runs, the last drawing stays,
+  dimmed, and says which stop it is of.
+- **Only cards on screen draw.** A card scrolled away draws when it comes
+  back.
+- **Parts.** A shape with `select` opens that part of the value as a row,
+  which can be expanded and watched, and its `title` is its tooltip and
+  accessible name.
+- **A card that cannot draw says why,** and draws nothing: an input that
+  could not be read, with which and why; a renderer that threw, with its
+  file, line, and message; one that took longer than 2 seconds, which is
+  stopped; a picture the page refuses, with which shape and why; and a
+  renderer nobody provides.
+
+## Inputs
+
+Each input of a `visualize` is evaluated as a view's field is, through
+every view, and arrives as a plain JavaScript value decided by its type
+alone, never by its value: a `uint64_t` is always a bigint, even when it
+is 3.
+
+| In the program | In the renderer | For example |
+|---|---|---|
+| `bool` | boolean | `true` |
+| integers of 32 bits or fewer, and integers the view writes, such as `64` | number | `-7` |
+| integers of 64 and 128 bits, pointers, addresses | bigint | `65280n` |
+| floats | number | `0.5`, `NaN` |
+| characters | a string of one character | `"A"` |
+| text: anything presented as text | string | `"e2e4"` |
+| strings the view writes | string | `"bottom-left"` |
+| enumerations | `{name, value}`; `name` is null when no enumerator matches | `{name: "White", value: 0}` |
+| sums: Rust enums, optionals, a view's variants | `{variant, value?}`: the payload's one field, a record of several, or none | `{variant: "Some", value: {…}}` |
+| records and a view's fields | an object | `{color: …, kind: …}` |
+| tuples | an array | `[1, "two"]` |
+| sequences of numbers: arrays, slices, and what views present as sequences | a typed array of the element's type | `Float64Array(1000000)` |
+| other sequences | an array; an array of several dimensions is an array of rows | `[{variant: "None"}, …]` |
+| maps | an array of `[key, value]` pairs, in the view's order | `[["GET", 3]]` |
+| `bytes(PTR, LEN)` | `Uint8Array` | `Uint8Array(3072)` |
+
+- **Never partial.** When any part of any input cannot be read, the
+  renderer is not called, and the card says which part and why. A renderer
+  never has to tell a real 0 from a missing one.
+- **Pointers stay addresses.** An input that wants what a pointer points
+  to says `*p`, or names a value a view presents.
+- **Bulk data is read at once.** `bytes(PTR, LEN)` is one read of memory,
+  and a sequence of numbers that lies in one run of memory, as an array's,
+  a `Vec`'s, or a `std::vector`'s elements do, is read at once too. Both
+  travel to the page as bytes, never as text.
+
+## Renderers
+
+A renderer is one script that calls `uscope.draw` once with a function.
+The function gets the inputs and a context, and returns a picture; it may
+be `async`. The only global it can use beyond the language and drawing is
+`uscope`.
+
+```text
+uscope.draw((input, context) => picture)
+
+context.previous   the inputs drawn for this value at the stop before, or null
+context.width      the CSS pixels the card offers; a picture is scaled to fit
+context.theme      "light" or "dark"
+```
+
+```uscope-renderer-example
+// A bar per value, from a zero baseline, with each value in its title.
+uscope.draw(({ values }) => {
+  const most = Math.max(1, ...Array.from(values, Math.abs));
+  const shapes = Array.from(values, (value, index) =>
+    uscope.rect({
+      x: index * 22, y: 100 - (Math.max(0, value) / most) * 100,
+      width: 20, height: (Math.abs(value) / most) * 100,
+      fill: uscope.theme.series[0], title: `[${index}] = ${value}`, select: `[${index}]`,
+    }),
+  );
+  return uscope.picture({ width: values.length * 22, height: 100, shapes, caption: `${values.length} values` });
+});
+---
+({ values: new Float64Array([3, 1, 4, 1, 5]) })
+```
+
+### Pictures and shapes
+
+`uscope.picture({width, height, shapes, caption?})` is a picture of
+`width` by `height` units, scaled to fit its card and never cropped. Its
+shapes are drawn in order, later ones on top.
+
+| Shape | Properties |
+|---|---|
+| `uscope.rect` | `x`, `y`, `width`, `height`, `radius?` |
+| `uscope.circle` | `x`, `y`, `r` |
+| `uscope.line` | `x1`, `y1`, `x2`, `y2` |
+| `uscope.polyline`, `uscope.polygon` | `points`: x0, y0, x1, y1, …, an array or a `Float32Array` or `Float64Array` |
+| `uscope.path` | `d`: SVG path data |
+| `uscope.text` | `x`, `y`, `text`, `size?`, `weight?` (`"normal"`, `"bold"`, or 100 to 900), `family?` (`"sans"` or `"mono"`), `anchor?` (`"start"`, `"middle"`, `"end"`), `baseline?` (`"auto"`, `"alphabetic"`, `"middle"`, `"central"`, `"hanging"`, `"ideographic"`) |
+| `uscope.group` | `shapes`; `x?` and `y?` move them, and `rotate?` (degrees, clockwise) and `scale?` turn and size them about that point |
+| `uscope.image` | `x`, `y`, `width`, `height`, and either `pixels` (RGBA, a `Uint8ClampedArray`), `columns`, and `rows`, or a `canvas`, an `OffscreenCanvas` the renderer drew; `smooth?` blends pixels when scaled, which stay sharp otherwise |
+
+Every shape also takes:
+
+- `fill` and `stroke`: a color, `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb()`,
+  `hsl()`, or a CSS color name. A shape with neither is drawn in the
+  page's ink, and lines and polylines by their stroke.
+- `strokeWidth`, `opacity` (0 to 1), and `dash`, the lengths of dashes and
+  gaps.
+- `title`: hover text, and the shape's accessible name, so a screen reader
+  reads `e4: White Pawn`.
+- `select`: a part of the drawn value, as member names, `.`, and indices:
+  `mailbox[21]`, `[3]`, or `a.b[2].c`. Clicking the shape, or pressing
+  Enter on it, opens that part as a row. It is a path, never an
+  expression: a renderer can never make the debugger evaluate anything
+  else.
+
+A shape with neither a `title` nor a `select` lets the pointer through to
+the shapes beneath it, so a piece drawn on a square leaves the square
+clickable.
+
+```uscope-renderer-example
+// Every kind of shape, in the page's colors.
+uscope.draw(() => {
+  const { series, ink2, changed } = uscope.theme;
+  const pixels = new Uint8ClampedArray([255, 0, 0, 255, 0, 0, 255, 255]);
+  const canvas = new OffscreenCanvas(8, 8);
+  const pen = canvas.getContext("2d");
+  if (pen) {
+    pen.fillStyle = series[1];
+    pen.fillRect(0, 0, 8, 4);
+  }
+  return uscope.picture({
+    width: 200, height: 60, caption: "shapes",
+    shapes: [
+      uscope.rect({ x: 0, y: 0, width: 20, height: 20, radius: 3, fill: series[0], title: "a rect" }),
+      uscope.circle({ x: 35, y: 10, r: 9, stroke: changed, strokeWidth: 2, fill: "none" }),
+      uscope.line({ x1: 50, y1: 0, x2: 70, y2: 20, dash: [3, 2] }),
+      uscope.polyline({ points: new Float64Array([75, 20, 80, 0, 85, 20]), stroke: series[2] }),
+      uscope.polygon({ points: [90, 20, 100, 0, 110, 20], fill: "rgb(40 120 200 / 50%)" }),
+      uscope.path({ d: "M115 20 Q125 0 135 20 Z", fill: "hsl(30 80% 50%)" }),
+      uscope.text({ x: 0, y: 40, text: "mono", family: "mono", size: 12, fill: ink2 }),
+      uscope.group({ x: 60, y: 30, rotate: 10, scale: 0.5, shapes: [uscope.rect({ x: 0, y: 0, width: 20, height: 20 })] }),
+      uscope.image({ x: 140, y: 0, width: 20, height: 10, pixels, columns: 2, rows: 1 }),
+      uscope.image({ x: 165, y: 0, width: 20, height: 20, canvas, smooth: true }),
+    ],
+  });
+});
+---
+({})
+```
+
+### Helpers
+
+- `uscope.theme` holds the page's colors in the theme it shows: `ink`,
+  `ink2`, `ink3`, `paper`, `surface`, `line`, `accent`, `changed`,
+  `good`, `bad`, and `series`, eight categorical colors in an order
+  checked for color-blind readers. A card draws again when the theme
+  changes.
+- `uscope.same(a, b)` compares two input values deeply, typed arrays and
+  bigints included, for marking what changed since `previous`.
+- `uscope.color.scale(t, from, to)` blends from `from` to `to`, two `#rgb`
+  or `#rrggbb` colors, `t` of the way, for heatmaps.
+
+```uscope-renderer-example
+// The squares that changed since the stop before, outlined.
+uscope.draw(({ cells }, { previous }) => {
+  const shapes = Array.from(cells, (cell, index) =>
+    uscope.rect({
+      x: index * 12, y: 0, width: 10, height: 10,
+      fill: uscope.color.scale(cell / 255, "#eef1f5", "#1a2230"),
+      stroke: previous !== null && !uscope.same(previous.cells[index], cell) ? uscope.theme.changed : undefined,
+    }),
+  );
+  return uscope.picture({ width: cells.length * 12, height: 10, shapes });
+});
+---
+({ cells: new Uint8Array([0, 128, 255]) })
+```
+
+### Errors
+
+The page names a renderer's own file and line when it fails, in Chromium
+and Firefox alike: a thrown error or a rejected promise shows as
+`life.js:12:5: TypeError: …`. A renderer that does not parse, or never
+calls `uscope.draw`, says so. A picture the page cannot show exactly as
+described is refused whole, naming the first shape at fault, such as
+`shape 3 (rect): fill is not a color`: unknown properties, numbers that
+are not finite, colors that are not colors, path data outside SVG's
+grammar, and pictures over the limits below.
+
+To have an editor check a renderer, start it with `// @ts-check` and give
+the editor `sdk/web/uscope-visualizer.d.ts`, which declares `uscope`.
+
+## Built-in renderers
+
+uscope builds in ten renderers, in `views/visualizers/`. Any `visualize`
+can name one, and Draw as… offers every one for any value. They are
+ordinary renderers, written against this page's API alone, so each is
+also an example to copy.
+
+| Renderer | Inputs |
+|---|---|
+| `line-plot` | `values`, or `series`, a map of names to values; `x?`, `log?` |
+| `bar-chart` | `values` and `labels?`, or `entries`, a map; `orientation?` (`"horizontal"` or `"vertical"`), `sort?` |
+| `scatter-plot` | `x`, `y`; `group?`, `labels?` |
+| `histogram` | `values`, raw samples, or `counts` and `edges`; `bins?`, `log?` |
+| `box-plot` | `groups`, a map or array of samples or of `{min, q1, median, q3, max}`; `mean?`, `error?`, `error_label?` |
+| `donut-chart` | `values` and `labels?`, or `entries` |
+| `heatmap` | `values` and `columns`, or an array of rows; `row_labels?`, `column_labels?`, `log?` |
+| `flame-graph` | `nodes`, records of `name`, `value`, and `parent`, or `stacks`, folded `a;b;c` text with counts |
+| `bitmap` | `pixels` and `columns`; `format?` (`"gray8"`, `"rgba8"`, `"rgb565"`, `"bits"`) |
+| `bits` | `values`, integers; `columns?`, `origin?` (`"top-left"` or `"bottom-left"`), `labels?` |
+
+## Where renderers come from
+
+A view calls the renderers of its own source before the built-in ones:
+
+- a view file's are `NAME.js` files beside it, read with it, and read
+  again by Reload views;
+- a module's own views call the renderers the module carries in its
+  `.debug_uscope_views` section. A C or C++ program carries one with
+  `USCOPE_VISUALIZER("board", "views/board.js");` from `uscope_views.h`,
+  and a Rust program with `uscope_views::uscope_visualizer!("board",
+  PATH);`;
+- the built-ins come last.
+
+`uscope views check PROGRAM` lists every renderer the views call, each as
+its JavaScript, and fails when a drawing does not bind, such as one whose
+input names no member. A renderer is never run outside the page: uscope
+has no JavaScript engine of its own.
+
+## What a renderer cannot do
+
+A renderer may be hostile, as one carried by a program someone sent you
+may be. The page runs each in a worker of its own, started by a hidden
+frame whose origin is opaque and whose policy allows no request at all,
+and the worker deletes every global but the language, timers, and drawing
+before it runs the renderer. So a renderer cannot:
+
+- send anything anywhere, nor load a script, font, or image;
+- reach the debugger, read memory, or ask for any value beyond its inputs;
+- read the page, its storage, or other tabs, or run code in the page;
+- make the debugger evaluate anything: `select` is a path;
+- hang the page: a draw that takes longer than 2 seconds is stopped.
+
+What it can do is draw a misleading picture of data you are already
+looking at; each card names its renderer and where it came from.
+
+## Limits
+
+| What | Limit |
+|---|---|
+| A renderer | 256 KiB |
+| A `visualize` | 64 inputs |
+| A drawing's inputs | 65,536 values, nested 16 deep |
+| `bytes(PTR, LEN)` | 16 MiB each, 64 MiB for one drawing |
+| Time to draw | 2 seconds |
+| A picture | 100,000 shapes, groups nested 32 deep, 4,096 characters of text each, 16 Mpx of images, 2,000,000 points |
+| Draws at once | 4 per tab |
