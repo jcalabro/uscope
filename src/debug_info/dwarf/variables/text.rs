@@ -476,8 +476,9 @@ impl DwarfVariableInfo {
         None
     }
 
-    /// Whether a type is Zig's NUL-terminated pointer to bytes,
-    /// `[*:0]const u8`, through typedefs and qualifiers.
+    /// Whether a type is a NUL-terminated pointer to bytes that its
+    /// language names as text, through typedefs and qualifiers: Zig's
+    /// `[*:0]const u8` and Odin's `cstring`.
     fn is_sentinel_text(&self, id: TypeId) -> bool {
         let mut current = id;
         for _ in 0..MAX_STRING_DEPTH {
@@ -494,11 +495,12 @@ impl DwarfVariableInfo {
                     target: Some(target),
                     ..
                 } => {
-                    return info
-                        .identity
-                        .as_ref()
-                        .is_some_and(|identity| identity.language == SourceLanguage::Zig)
-                        && info.name.starts_with("[*:0]")
+                    let named = match info.identity.as_ref().map(|identity| identity.language) {
+                        Some(SourceLanguage::Zig) => info.name.starts_with("[*:0]"),
+                        Some(SourceLanguage::Odin) => info.name.as_ref() == "cstring",
+                        _ => false,
+                    };
+                    return named
                         && self.value_shape(target.id).is_ok_and(|shape| {
                             shape.scalar().is_some_and(|base| {
                                 base.byte_size == 1 && base.encoding == BaseTypeEncoding::Unsigned

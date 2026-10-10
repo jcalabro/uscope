@@ -479,6 +479,25 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         TypeId::new(u32::try_from(self.entries.len()).expect("bounded type count fits u32"))
     }
 
+    /// A built type through the names typedefs give it.
+    fn unnamed(&self, mut id: TypeId) -> Option<&TypeInfo> {
+        for _ in 0..MAX_TYPE_RESOLUTION_DEPTH {
+            match self.entries.get(id.index())? {
+                TypeEntry::Resolved(TypeInfo {
+                    kind:
+                        TypeKind::Named {
+                            target: Some(target),
+                            ..
+                        },
+                    ..
+                }) => id = target.id,
+                TypeEntry::Resolved(info) => return Some(info),
+                TypeEntry::Building | TypeEntry::Malformed(_) => return None,
+            }
+        }
+        None
+    }
+
     /// The byte size of a built type, if it has one.
     fn byte_size_of(&self, id: TypeId) -> Option<u64> {
         match self.entries.get(id.index())? {
@@ -2925,15 +2944,116 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             }
         }
-        Ok(resolved(
-            reference,
-            name,
-            explicit_size,
-            TypeKind::Union {
+        let kind = self
+            .normalize_odin_union(unit_index, reference.id, &members, incomplete)
+            .unwrap_or_else(|| TypeKind::Union {
                 members: members.into(),
                 incomplete,
-            },
-        ))
+            });
+        Ok(resolved(reference, name, explicit_size, kind))
+    }
+
+    /// An Odin union as the variant its tag selects. Odin describes one as
+    /// a union of its `tag` and of each variant, named `v` and the tag value
+    /// that selects it; a tag no variant is named for, 0 unless the union is
+    /// `#no_nil`, is nil. A union without a tag, which holds one pointer
+    /// whose null is nil, stays a union.
+    fn normalize_odin_union(
+        &mut self,
+        unit_index: usize,
+        aggregate: TypeId,
+        members: &[RecordMember],
+        incomplete: bool,
+    ) -> Option<TypeKind> {
+        if incomplete || self.language(unit_index) != SourceLanguage::Odin {
+            return None;
+        }
+        let tag_index = members
+            .iter()
+            .position(|member| member.name.as_deref() == Some("tag"))?;
+        let tag = &members[tag_index];
+        let TypeKind::Base(base) = &self.unnamed(tag.type_ref.id)?.kind else {
+            return None;
+        };
+        let signed = match base.encoding {
+            BaseTypeEncoding::Signed => true,
+            BaseTypeEncoding::Unsigned => false,
+            _ => return None,
+        };
+        let value = |number: u64| {
+            if signed {
+                IntegerValue::Signed(i128::from(number))
+            } else {
+                IntegerValue::Unsigned(u128::from(number))
+            }
+        };
+        let mut variants = Vec::with_capacity(members.len());
+        let mut tags = Vec::with_capacity(members.len());
+        for (index, member) in members.iter().enumerate() {
+            if index == tag_index {
+                continue;
+            }
+            let number = member
+                .name
+                .as_deref()?
+                .strip_prefix('v')?
+                .parse::<u64>()
+                .ok()?;
+            if member.layout != RecordMemberLayout::ByteOffset(0) || tags.contains(&number) {
+                return None;
+            }
+            let TypeEntry::Resolved(info) = self.entries.get(member.type_ref.id.index())? else {
+                return None;
+            };
+            tags.push(number);
+            variants.push((
+                index,
+                Variant {
+                    name: Some(Arc::clone(&info.name)),
+                    selection: VariantSelection::Selectors(Arc::from([VariantSelector::Value(
+                        value(number),
+                    )])),
+                    members: Arc::from([member.clone()]),
+                },
+            ));
+        }
+        for metadata in &mut self.record_member_declarations {
+            if metadata.aggregate != aggregate {
+                continue;
+            }
+            if let AggregateMemberPath::Direct(index) = metadata.member {
+                metadata.member = if index == tag_index {
+                    AggregateMemberPath::Discriminant
+                } else {
+                    let variant = variants
+                        .iter()
+                        .position(|(member, _)| *member == index)
+                        .expect("every member but the tag is a variant");
+                    AggregateMemberPath::Variant { variant, member: 0 }
+                };
+            }
+        }
+        let mut variants = variants
+            .into_iter()
+            .map(|(_, variant)| variant)
+            .collect::<Vec<_>>();
+        if !tags.contains(&0) {
+            variants.push(Variant {
+                name: Some(Arc::from("nil")),
+                selection: VariantSelection::Selectors(Arc::from([VariantSelector::Value(value(
+                    0,
+                ))])),
+                members: Arc::from([]),
+            });
+        }
+        Some(TypeKind::Variant {
+            storage: VariantStorageKind::Union,
+            common_members: Arc::from([]),
+            bases: Arc::from([]),
+            discriminant: Box::new(VariantDiscriminant::Stored(tag.clone())),
+            variants: variants.into(),
+            incomplete: false,
+        })
     }
 
     fn record_member_layout(
@@ -3118,16 +3238,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let byte_size = explicit_size.ok_or("slice descriptor has no byte size")?;
         let unit = &self.units[unit_index];
         let address_size = u64::from(unit.encoding().address_size);
-        let field_names = match layout {
-            SliceLayout::Rust | SliceLayout::RustBytes(_) => &["data_ptr", "length"][..],
-            SliceLayout::Zig => &["ptr", "len"][..],
-            SliceLayout::Go => &["array", "len", "cap"][..],
-        };
-        let field_count = u64::try_from(field_names.len()).expect("slice field count fits u64");
-        let word_size = byte_size
-            .checked_div(field_count)
-            .ok_or("slice descriptor size is invalid")?;
-        if byte_size != word_size * field_count || word_size != address_size {
+        let field_names = layout.members();
+        let word_size = address_size;
+        if word_size == 0 || byte_size != word_size * layout.word_count() {
             return Ok(opaque(
                 reference,
                 name,
@@ -3169,21 +3282,23 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 "unrecognized slice descriptor layout",
             ));
         }
-        let element = self.slice_element(layout, fields[0].2)?;
-        for (_, _, field_type) in &fields[1..] {
-            let valid = self
-                .entries
-                .get(field_type.id.index())
-                .is_some_and(|entry| {
-                    matches!(entry, TypeEntry::Resolved(TypeInfo {
-                        kind: TypeKind::Base(BaseType {
-                            encoding: BaseTypeEncoding::Unsigned | BaseTypeEncoding::Signed,
-                            byte_size: size,
-                            ..
-                        }),
-                        ..
-                    }) if *size == word_size)
-                });
+        let words = layout.words();
+        let element = self.slice_element(layout, fields[usize::from(words.data)].2)?;
+        let counts = [Some(words.length), words.capacity];
+        for (_, _, field_type) in counts
+            .into_iter()
+            .flatten()
+            .map(|word| &fields[usize::from(word)])
+        {
+            // Odin names its integers, as `int`, by typedefs.
+            let valid = matches!(self.unnamed(field_type.id), Some(TypeInfo {
+                kind: TypeKind::Base(BaseType {
+                    encoding: BaseTypeEncoding::Unsigned | BaseTypeEncoding::Signed,
+                    byte_size: size,
+                    ..
+                }),
+                ..
+            }) if *size == word_size);
             if !valid {
                 return Err(
                     "slice length and capacity members must be target-sized unsigned integers"
@@ -3198,7 +3313,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             Some(byte_size),
             TypeKind::Slice {
                 element,
-                words: layout.words(),
+                words,
                 text,
             },
         ))
@@ -3247,14 +3362,38 @@ pub(super) enum SliceLayout {
     Zig,
     /// `{array, len, cap}`.
     Go,
+    /// `{data, len}`: Odin's slices and strings.
+    Odin,
+    /// `{data, len, cap, allocator}`: Odin's dynamic arrays, whose
+    /// allocator is two words.
+    OdinDynamic,
 }
 
 impl SliceLayout {
+    /// The descriptor's members, in order, each at the word of its index.
+    const fn members(self) -> &'static [&'static str] {
+        match self {
+            Self::Rust | Self::RustBytes(_) => &["data_ptr", "length"],
+            Self::Zig => &["ptr", "len"],
+            Self::Go => &["array", "len", "cap"],
+            Self::Odin => &["data", "len"],
+            Self::OdinDynamic => &["data", "len", "cap", "allocator"],
+        }
+    }
+
+    /// How many words the descriptor is.
+    const fn word_count(self) -> u64 {
+        match self {
+            Self::OdinDynamic => 5,
+            layout => layout.members().len() as u64,
+        }
+    }
+
     /// Which of the descriptor's words hold its parts.
     const fn words(self) -> SliceWords {
         match self {
-            Self::Rust | Self::RustBytes(_) | Self::Zig => SliceWords::POINTER_LENGTH,
-            Self::Go => SliceWords::POINTER_LENGTH_CAPACITY,
+            Self::Rust | Self::RustBytes(_) | Self::Zig | Self::Odin => SliceWords::POINTER_LENGTH,
+            Self::Go | Self::OdinDynamic => SliceWords::POINTER_LENGTH_CAPACITY,
         }
     }
 
@@ -3270,7 +3409,8 @@ impl SliceLayout {
             }
             Self::RustBytes(_) => true,
             Self::Zig => matches!(name, "[]const u8" | "[:0]const u8" | "[:0]u8"),
-            Self::Go => false,
+            Self::Odin => name == "string",
+            Self::Go | Self::OdinDynamic => false,
         }
     }
 }
@@ -3302,6 +3442,12 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             SourceLanguage::Zig => name
                 .is_some_and(|name| name.starts_with("[]") || name.starts_with("[:"))
                 .then_some(SliceLayout::Zig),
+            SourceLanguage::Odin => match name? {
+                "string" => Some(SliceLayout::Odin),
+                name if name.starts_with("[]") => Some(SliceLayout::Odin),
+                name if name.starts_with("[dynamic]") => Some(SliceLayout::OdinDynamic),
+                _ => None,
+            },
             SourceLanguage::Rust if !self.type_scopes.contains_key(&key) => {
                 let members = self.member_types(entry, key.unit)?;
                 let [(first, data), (second, _)] = members.as_slice() else {
@@ -3900,7 +4046,9 @@ fn named_type_relationship(tag: gimli::DwTag, language: SourceLanguage) -> Named
     }
     match language {
         SourceLanguage::C | SourceLanguage::Cpp => NamedTypeRelationship::Synonym,
-        SourceLanguage::Go => NamedTypeRelationship::Distinct,
+        // Odin's typedefs are its `distinct` types, and wrappers that name
+        // its own types, as `int`.
+        SourceLanguage::Go | SourceLanguage::Odin => NamedTypeRelationship::Distinct,
         SourceLanguage::Zig => NamedTypeRelationship::Encoding,
         _ => NamedTypeRelationship::Unspecified,
     }

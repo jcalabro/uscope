@@ -2,7 +2,7 @@
 
 uscope is a debugger for native programs on Linux x86-64, written in Rust.
 Use it from your terminal, or from your editor through the Debug Adapter
-Protocol. It debugs C, C++, Rust, Zig, and Go.
+Protocol. It debugs C, C++, Rust, Zig, Go, and Odin.
 
 ## Features
 
@@ -17,7 +17,8 @@ Protocol. It debugs C, C++, Rust, Zig, and Go.
 - **Expressions.** One expression language for every supported language, with
   exact integer arithmetic.
 - **Views.** Containers display as what they hold. A `Vec` shows its elements,
-  for the C++, Rust, Go, and Zig standard libraries and for your own types.
+  for the C++, Rust, Go, Zig, and Odin standard libraries and for your own
+  types.
 - **Language runtimes.** Go goroutines and async Rust tasks show up as threads
   and stacks you can step through, and panics stop the program where they
   happen.

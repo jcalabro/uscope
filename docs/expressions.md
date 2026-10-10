@@ -1,9 +1,9 @@
 # Expressions
 
 uscope reads expressions in one language for every program it debugs,
-whether it is written in C, C++, Rust, Go, or Zig. The language is small and
-exact, and the same everywhere: it has no per-language parsers, type checkers,
-or compilers behind it.
+whether it is written in C, C++, Rust, Go, Zig, or Odin. The language is small
+and exact, and the same everywhere: it has no per-language parsers, type
+checkers, or compilers behind it.
 
 Arithmetic gives the mathematically true answer, never a wrapped or
 promoted one, and bit operations keep their operand's width. Nothing converts

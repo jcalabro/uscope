@@ -95,6 +95,7 @@
           valgrind
           goStable
           zig
+          odin
           pkg-config
           util-linux
           nodejs_24

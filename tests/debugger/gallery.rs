@@ -732,3 +732,19 @@ async fn zig_returned_values_agree_with_their_program() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn odin_values_agree_with_their_program() {
+    for (fixture, optimized) in [("values-odin-o0", false), ("values-odin-o2", true)] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["values::reached"],
+            checkpoints: &["scalars", "records", "slices", "unions"],
+            optimized,
+            required: &[],
+            go: false,
+            unknown: &[],
+        })
+        .await;
+    }
+}

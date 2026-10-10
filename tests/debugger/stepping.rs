@@ -2223,3 +2223,62 @@ fn assert_inline_backtrace(fixture: &str, trace: &uscope::Backtrace) {
         [Some(7), Some(14), Some(28)]
     );
 }
+
+/// Odin's procedures are named by package, and step and unwind as C's do.
+#[tokio::test]
+async fn odin_steps_into_a_procedure_and_back_to_its_caller() {
+    for fixture in ["values-odin-o0", "values-odin-o2"] {
+        let mut scenario = Scenario::launch(fixture);
+        scenario.add_source_breakpoint("values.odin", 156).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        assert_eq!(
+            scenario.step_to_stop(StepKind::IntoSource).await,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            }
+        );
+        let entered = scenario
+            .operation("Odin callee", scenario.handle().current_location())
+            .await;
+        assert_eq!(
+            location_function(&entered),
+            Some("values::add"),
+            "{fixture}"
+        );
+        let trace = scenario
+            .operation("Odin backtrace", scenario.handle().backtrace())
+            .await;
+        let names = trace
+            .frames
+            .iter()
+            .filter_map(|frame| frame.function.as_ref())
+            .map(|function| function.name.as_ref())
+            .collect::<Vec<_>>();
+        assert!(
+            names.starts_with(&["values::add", "values::main"]),
+            "{fixture}: {trace:?}"
+        );
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Out).await,
+            StopReason::Step {
+                kind: StepKind::Out
+            }
+        );
+        let caller = scenario
+            .operation("Odin caller", scenario.handle().current_location())
+            .await;
+        assert_eq!(
+            location_function(&caller),
+            Some("values::main"),
+            "{fixture}"
+        );
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}

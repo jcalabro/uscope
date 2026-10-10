@@ -73,6 +73,7 @@ pub enum Language {
     Rust,
     Go,
     Zig,
+    Odin,
     /// Every language.
     Any,
 }
@@ -85,6 +86,7 @@ impl Language {
             "rust" => Self::Rust,
             "go" => Self::Go,
             "zig" => Self::Zig,
+            "odin" => Self::Odin,
             "any" => Self::Any,
             _ => return None,
         })

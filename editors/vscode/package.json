@@ -67,13 +67,14 @@
       { "language": "cpp" },
       { "language": "rust" },
       { "language": "go" },
-      { "language": "zig" }
+      { "language": "zig" },
+      { "language": "odin" }
     ],
     "debuggers": [
       {
         "type": "uscope",
         "label": "uscope",
-        "languages": ["c", "cpp", "rust", "go", "zig"],
+        "languages": ["c", "cpp", "rust", "go", "zig", "odin"],
         "variables": {
           "pickProcess": "uscope.pickProcess"
         },
