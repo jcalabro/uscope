@@ -231,3 +231,49 @@ async fn a_public_url_serves_everything_under_its_path_to_its_proxy_and_nothing_
     drop(client);
     assert!(web.interrupt().success());
 }
+
+/// Renderers run in a frame of their own whose origin is opaque, whose
+/// policy allows no request, and whose one script is named by a nonce
+/// chosen for each response.
+#[tokio::test]
+async fn the_renderers_frame_is_sandboxed_and_allows_no_request() {
+    let web = Web::start("frame", &[]);
+    let get = || {
+        web.http(&format!(
+            "GET /visualizer-frame HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            web.address
+        ))
+    };
+    let frame = get();
+    assert!(frame.starts_with("HTTP/1.1 200"), "{frame}");
+    let policy = frame
+        .lines()
+        .find_map(|line| line.strip_prefix("content-security-policy: "))
+        .expect("a policy");
+    for directive in [
+        "sandbox allow-scripts",
+        "default-src 'none'",
+        "worker-src blob:",
+        "frame-ancestors 'self'",
+        "'unsafe-eval'",
+    ] {
+        assert!(policy.contains(directive), "{directive} in {policy}");
+    }
+    let nonce = policy
+        .split("'nonce-")
+        .nth(1)
+        .and_then(|rest| rest.split('\'').next())
+        .expect("a nonce");
+    assert!(nonce.len() >= 32, "{nonce}");
+    assert!(
+        frame.contains(&format!("<script nonce=\"{nonce}\">")),
+        "{frame}"
+    );
+    assert_eq!(frame.matches("<script").count(), 1, "one script");
+    assert!(frame.contains("cache-control: no-store"), "{frame}");
+    assert!(!get().contains(nonce), "each response has its own nonce");
+
+    let rebound = web
+        .http("GET /visualizer-frame HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n");
+    assert!(rebound.starts_with("HTTP/1.1 421"), "{rebound}");
+}

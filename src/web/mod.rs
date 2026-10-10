@@ -10,6 +10,7 @@ mod auth;
 mod connection;
 mod describe;
 mod draw;
+mod frame;
 mod inspect;
 mod lowlevel;
 mod picker;
@@ -267,6 +268,7 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         .route("/api/ws", get(socket))
         .route("/api/login", post(login))
         .route("/api/check", post(check))
+        .route("/visualizer-frame", get(frame::frame))
         .fallback(get(page))
         .with_state(app);
     // Behind a proxy, nothing outside the public URL's path is served.
