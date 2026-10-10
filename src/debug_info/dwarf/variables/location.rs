@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use gimli::Reader as _;
 
-use crate::debug_info::dwarf::{DwarfError, Reader, Units, unit_dwarf};
+use crate::debug_info::dwarf::{DieWalk, DwarfError, Reader, Units, unit_dwarf};
 use crate::{AddressRange, ImageAddress, VariableUnavailableReason};
 
 use super::die::{ByteSize, base_type_encoding, byte_size_attribute};
@@ -366,8 +366,15 @@ pub(super) fn load_evaluation_units(
             language: units.inherited_language(index),
             ..EvaluationUnit::default()
         };
-        let mut entries = unit.entries();
-        while let Some(entry) = entries.next_dfs()? {
+        let mut walk = DieWalk::new(unit)?;
+        while let Some(die) = walk.next()? {
+            if !matches!(
+                die.tag,
+                gimli::DW_TAG_compile_unit | gimli::DW_TAG_base_type
+            ) {
+                continue;
+            }
+            let entry = walk.decode()?;
             if entry.tag() == gimli::DW_TAG_compile_unit {
                 if let Some(gimli::AttributeValue::Language(value)) =
                     entry.attr_value(gimli::DW_AT_language)

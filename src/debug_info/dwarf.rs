@@ -104,6 +104,79 @@ struct Units<'data> {
     inherited_languages: Vec<Option<gimli::DwLang>>,
 }
 
+/// A depth-first walk of one unit's DIEs that decodes only the DIEs its
+/// caller asks for.
+///
+/// Each DIE's depth, offset, and tag come from its abbreviation, without
+/// its attributes. Most walks act on a few tags, while most DIEs in a Rust
+/// or C++ program are members, parameters, and template arguments of
+/// types: decoding every attribute of every DIE, as gimli's cursor does,
+/// cost each of several walks over every unit far more than skipping them.
+/// A decoded DIE is read into one entry the walk reuses.
+pub(super) struct DieWalk<'a, 'data> {
+    raw: gimli::EntriesRaw<'a, Reader<'data>>,
+    entry: gimli::DebuggingInformationEntry<Reader<'data>>,
+    /// The DIE [`Self::next`] returned, until it is decoded or skipped.
+    pending: Option<(&'a gimli::Abbreviation, WalkedDie)>,
+}
+
+/// Where one DIE of a [`DieWalk`] is, and what it is.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WalkedDie {
+    /// The DIE's depth below the unit's root, which is at zero.
+    pub(super) depth: isize,
+    pub(super) offset: gimli::UnitOffset,
+    pub(super) tag: gimli::DwTag,
+}
+
+impl<'a, 'data> DieWalk<'a, 'data> {
+    /// A walk of every DIE of `unit`, from its root.
+    pub(super) fn new(unit: &'a gimli::Unit<Reader<'data>>) -> gimli::Result<Self> {
+        Ok(Self {
+            raw: unit.entries_raw(None)?,
+            entry: gimli::DebuggingInformationEntry::null(),
+            pending: None,
+        })
+    }
+
+    /// The next DIE, skipping the attributes of the one before unless it
+    /// was decoded, or `None` after the last.
+    pub(super) fn next(&mut self) -> gimli::Result<Option<WalkedDie>> {
+        if let Some((abbreviation, _)) = self.pending.take() {
+            self.raw.skip_attributes(abbreviation.attributes())?;
+        }
+        // Null entries end children, and pad the unit after its root's.
+        while !self.raw.is_empty() {
+            let depth = self.raw.next_depth();
+            let offset = self.raw.next_offset();
+            if let Some(abbreviation) = self.raw.read_abbreviation()? {
+                let die = WalkedDie {
+                    depth,
+                    offset,
+                    tag: abbreviation.tag(),
+                };
+                self.pending = Some((abbreviation, die));
+                return Ok(Some(die));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Decodes the DIE [`Self::next`] last returned.
+    pub(super) fn decode(
+        &mut self,
+    ) -> gimli::Result<&gimli::DebuggingInformationEntry<Reader<'data>>> {
+        let (abbreviation, die) = self.pending.take().expect("a DIE to decode");
+        self.entry.tag = abbreviation.tag();
+        self.entry.has_children = abbreviation.has_children();
+        self.entry.offset = die.offset;
+        self.entry.depth = die.depth;
+        self.raw
+            .read_attributes(abbreviation.attributes(), &mut self.entry.attrs)?;
+        Ok(&self.entry)
+    }
+}
+
 /// A DIE reference that leaves its unit: to a `.debug_info` offset in the
 /// unit's own file, or in the supplementary file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2521,6 +2594,22 @@ fn string_attribute(
         .transpose()
         .map_err(DwarfError::from)
         .map(|value| value.map(|value| Arc::<str>::from(text(value).as_ref())))
+}
+
+/// A string attribute as the section holds it, without copying it: for
+/// callers that only inspect a name, which need not allocate one.
+fn str_attribute<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    unit: &gimli::Unit<Reader<'data>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    attribute: gimli::DwAt,
+) -> std::result::Result<Option<Cow<'data, str>>, DwarfError> {
+    entry
+        .attr_value(attribute)
+        .map(|value| unit_dwarf(dwarf, unit).attr_string(unit, value))
+        .transpose()
+        .map_err(DwarfError::from)
+        .map(|value| value.map(text))
 }
 
 /// A DWARF string as text, replacing what is not UTF-8. Checking that it

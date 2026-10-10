@@ -19,7 +19,7 @@ use super::codec::{
     decode_address, decode_integer_value, decode_scalar, extract_bit_field, read_sleb128_i128,
     read_uleb128_u128,
 };
-use super::die::checked_reference_chain;
+use super::die::Seen;
 use super::evaluate::{
     EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, dwarf_value_bytes, evaluate,
     materialize_constant,
@@ -128,6 +128,7 @@ fn declaration_canonicalization_cannot_launder_a_non_type_reference() {
     };
     let signatures = HashMap::new();
     let pool = std::sync::Mutex::default();
+    let die_buffers = super::types::DieBuffers::default();
     let mut arena = TypeArenaBuilder::new(
         &dwarf,
         &units,
@@ -135,6 +136,7 @@ fn declaration_canonicalization_cannot_launder_a_non_type_reference() {
         ModuleImageId::new(0),
         ByteOrder::Little,
         &pool,
+        &die_buffers,
         crate::debug_info::dwarf::budget::LoadLimits::default().budget(0),
     );
 
@@ -241,21 +243,38 @@ fn zig_synthetic_variant_names_require_canonical_type_syntax() {
 }
 
 #[test]
-fn specification_chains_reject_cycles() {
-    let first = DieKey {
-        unit: 0,
-        offset: 0x10,
+fn reference_chains_stop_at_their_cycles_however_long() {
+    // Walks the chain 0 -> 1 -> ... -> length - 1 -> back_to, or to its end
+    // when there is no cycle, as origin chains walk references.
+    let walk = |length: usize, back_to: Option<usize>| {
+        let mut seen = Seen::default();
+        let mut current = Some(0);
+        let mut links = 0;
+        while let Some(offset) = current {
+            if !seen.insert(DieKey { unit: 0, offset }) {
+                return Err(links);
+            }
+            links += 1;
+            current = if offset + 1 < length {
+                Some(offset + 1)
+            } else {
+                back_to
+            };
+        }
+        Ok(links)
     };
-    let second = DieKey {
-        unit: 0,
-        offset: 0x20,
-    };
-    let references = HashMap::from_iter([(first, second), (second, first)]);
-
-    assert!(matches!(
-        checked_reference_chain(Some(first), |key| Ok(references.get(&key).copied())),
-        Err(DwarfError::ReferenceCycle)
-    ));
+    // The first links are compared in place and the rest kept in a set; a
+    // cycle closes wherever it closes, on either side of that boundary.
+    for length in [1, 2, 8, 9, 40] {
+        assert_eq!(walk(length, None), Ok(length));
+        for back_to in [0, length / 2, length - 1] {
+            assert_eq!(
+                walk(length, Some(back_to)),
+                Err(length),
+                "{length} links back to {back_to}"
+            );
+        }
+    }
 }
 
 #[test]

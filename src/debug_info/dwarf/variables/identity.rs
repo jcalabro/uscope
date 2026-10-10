@@ -318,15 +318,34 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
     ) -> (Vec<TypeArgument>, Option<usize>) {
         let mut arguments = Vec::new();
         let mut pack = None;
-        for child in self.child_entries(entry, unit_index) {
+        // Every named aggregate comes here, so its children, mostly its
+        // members, are read in place rather than cloned to find the few
+        // that are parameters.
+        let Ok(mut children) = self.children(unit_index, entry.offset()) else {
+            return (arguments, pack);
+        };
+        let mut read = 0;
+        while let Ok(Some(child)) = children.next_child() {
+            if read == MAX_RECORD_CHILDREN {
+                break;
+            }
+            read += 1;
             if child.tag() == gimli::DW_TAG_GNU_template_parameter_pack {
                 pack = pack.or(Some(arguments.len()));
-                for parameter in self.child_entries(&child, unit_index) {
-                    if let Some(argument) = self.parameter_argument(&parameter, unit_index) {
+                let Ok(mut parameters) = self.children(unit_index, child.offset()) else {
+                    continue;
+                };
+                let mut read = 0;
+                while let Ok(Some(parameter)) = parameters.next_child() {
+                    if read == MAX_RECORD_CHILDREN {
+                        break;
+                    }
+                    read += 1;
+                    if let Some(argument) = self.parameter_argument(parameter, unit_index) {
                         arguments.push(argument);
                     }
                 }
-            } else if let Some(argument) = self.parameter_argument(&child, unit_index) {
+            } else if let Some(argument) = self.parameter_argument(child, unit_index) {
                 arguments.push(argument);
             }
         }
@@ -347,14 +366,22 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 break;
             };
             let mut generics = Vec::new();
-            for child in self.child_entries(&entry, current.unit) {
+            let Ok(mut children) = self.children(current.unit, entry.offset()) else {
+                break;
+            };
+            let mut read = 0;
+            while let Ok(Some(child)) = children.next_child() {
+                if read == MAX_RECORD_CHILDREN {
+                    break;
+                }
+                read += 1;
                 if child.tag() != gimli::DW_TAG_template_type_parameter {
                     continue;
                 }
-                let name = string_attribute(self.dwarf, unit, &child, gimli::DW_AT_name)
+                let name = string_attribute(self.dwarf, unit, child, gimli::DW_AT_name)
                     .ok()
                     .flatten();
-                if let (Some(name), Ok(Some(target))) = (name, self.target(&child, current.unit)) {
+                if let (Some(name), Ok(Some(target))) = (name, self.target(child, current.unit)) {
                     generics.push((name, target.id));
                 }
             }
@@ -375,32 +402,6 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             }
         }
         Vec::new()
-    }
-
-    /// A DIE's children, bounded as a record's are.
-    fn child_entries(
-        &self,
-        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
-        unit_index: usize,
-    ) -> Vec<gimli::DebuggingInformationEntry<Reader<'data>>> {
-        let mut found = Vec::new();
-        let Some(unit) = self.units.get(unit_index) else {
-            return found;
-        };
-        let Ok(mut tree) = unit.entries_tree(Some(entry.offset())) else {
-            return found;
-        };
-        let Ok(root) = tree.root() else {
-            return found;
-        };
-        let mut children = root.children();
-        while let Ok(Some(child)) = children.next() {
-            if found.len() >= MAX_RECORD_CHILDREN {
-                break;
-            }
-            found.push(child.entry().clone());
-        }
-        found
     }
 
     /// The argument one template parameter DIE describes.

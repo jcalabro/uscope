@@ -225,43 +225,71 @@ pub(super) fn flag_with_origins(
 /// Follows `DW_AT_abstract_origin`/`DW_AT_specification` references
 /// transitively, rejecting cycles, so concrete inline-instance DIEs can
 /// inherit name, type, and declaration metadata from their origins.
+///
+/// Each origin is read once: reading a DIE decodes all its attributes into
+/// a vector of their own, and this runs for most DIEs a load reads.
 pub(super) fn origin_chain<'data>(
     units: &Units<'data>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
 ) -> std::result::Result<Vec<(usize, gimli::DebuggingInformationEntry<Reader<'data>>)>, DwarfError>
 {
-    let keys = checked_reference_chain(origin_reference(entry, unit_index, units)?, |key| {
+    let mut chain = Vec::new();
+    let mut seen = Seen::default();
+    let mut current = origin_reference(entry, unit_index, units)?;
+    while let Some(key) = current {
+        if !seen.insert(key) {
+            return Err(DwarfError::ReferenceCycle);
+        }
         let unit = units
             .get(key.unit)
             .ok_or(DwarfError::ReferenceOutsideUnits(key.offset))?;
         let origin = unit.entry(gimli::UnitOffset(key.offset))?;
-        origin_reference(&origin, key.unit, units)
-    })?;
-    let mut chain = Vec::with_capacity(keys.len());
-    for key in keys {
-        let unit = units
-            .get(key.unit)
-            .ok_or(DwarfError::ReferenceOutsideUnits(key.offset))?;
-        chain.push((key.unit, unit.entry(gimli::UnitOffset(key.offset))?));
+        current = origin_reference(&origin, key.unit, units)?;
+        chain.push((key.unit, origin));
     }
     Ok(chain)
 }
 
-pub(super) fn checked_reference_chain(
-    mut current: Option<DieKey>,
-    mut next: impl FnMut(DieKey) -> std::result::Result<Option<DieKey>, DwarfError>,
-) -> std::result::Result<Vec<DieKey>, DwarfError> {
-    let mut chain = Vec::new();
-    let mut visited = HashSet::new();
-    while let Some(key) = current {
-        if !visited.insert(key) {
-            return Err(DwarfError::ReferenceCycle);
+/// How many links [`Seen`] compares in place before it keeps a set.
+const SEEN_IN_PLACE: usize = 8;
+
+/// What a chain of references, between DIEs or types, has reached, to
+/// stop at a cycle.
+///
+/// Chains are nearly always one or two links, and a hash set allocates on
+/// its first insertion, so the first links are compared in place; a longer
+/// chain, which only malformed input makes, moves to a set so that it stays
+/// linear however long it is.
+pub(in crate::debug_info::dwarf) struct Seen<K = DieKey> {
+    few: [Option<K>; SEEN_IN_PLACE],
+    many: HashSet<K>,
+}
+
+impl<K> Default for Seen<K> {
+    fn default() -> Self {
+        Self {
+            few: [const { None }; SEEN_IN_PLACE],
+            many: HashSet::default(),
         }
-        current = next(key)?;
-        chain.push(key);
     }
-    Ok(chain)
+}
+
+impl<K: Copy + Eq + std::hash::Hash> Seen<K> {
+    /// Adds `key`, or returns false when the chain has reached it before.
+    pub(in crate::debug_info::dwarf) fn insert(&mut self, key: K) -> bool {
+        for slot in &mut self.few {
+            match slot {
+                Some(seen) if *seen == key => return false,
+                Some(_) => {}
+                None => {
+                    *slot = Some(key);
+                    return true;
+                }
+            }
+        }
+        self.many.insert(key)
+    }
 }
 
 fn origin_reference(
