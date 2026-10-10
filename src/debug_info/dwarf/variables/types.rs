@@ -795,6 +795,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             gimli::DW_TAG_string_type => {
                 self.build_string_type(entry, unit_index, reference, explicit_name, explicit_size)
             }
+            gimli::DW_TAG_subrange_type => {
+                self.build_subrange_type(entry, unit_index, reference, explicit_name, explicit_size)
+            }
             gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type => {
                 self.build_record_type(entry, unit_index, reference, explicit_name, explicit_size)
             }
@@ -3348,6 +3351,37 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         ))
     }
 
+    /// A subrange type, as Ada's `range -128 .. 127`, is a type of its own
+    /// that holds its base type's values within its bounds.
+    fn build_subrange_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+    ) -> Built {
+        let Some(target) = self.target(entry, unit_index)? else {
+            return Ok(opaque(
+                reference,
+                explicit_name.unwrap_or_else(|| Arc::from("<subrange>")),
+                explicit_size,
+                "subrange type names no base type",
+            ));
+        };
+        let byte_size = explicit_size.or_else(|| self.byte_size_of(target.id));
+        let name = explicit_name.unwrap_or_else(|| self.target_name(target));
+        Ok(resolved(
+            reference,
+            name,
+            byte_size,
+            TypeKind::Named {
+                target: Some(target),
+                relationship: NamedTypeRelationship::Distinct,
+            },
+        ))
+    }
+
     fn build_slice_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -4230,8 +4264,11 @@ fn named_type_relationship(tag: gimli::DwTag, language: SourceLanguage) -> Named
             NamedTypeRelationship::Synonym
         }
         // Odin's typedefs are its `distinct` types, and wrappers that name
-        // its own types, as `int`.
-        SourceLanguage::Go | SourceLanguage::Odin => NamedTypeRelationship::Distinct,
+        // its own types, as `int`; GNAT's name Ada's types, as an access
+        // type.
+        SourceLanguage::Go | SourceLanguage::Odin | SourceLanguage::Ada => {
+            NamedTypeRelationship::Distinct
+        }
         SourceLanguage::Zig => NamedTypeRelationship::Encoding,
         _ => NamedTypeRelationship::Unspecified,
     }

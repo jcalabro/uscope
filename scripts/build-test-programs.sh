@@ -13,6 +13,7 @@ readonly odin_fixtures_dir="${fixtures_dir}/odin"
 readonly fortran_fixtures_dir="${fixtures_dir}/fortran"
 readonly d_fixtures_dir="${fixtures_dir}/d"
 readonly nim_fixtures_dir="${fixtures_dir}/nim"
+readonly ada_fixtures_dir="${fixtures_dir}/ada"
 readonly suite_stamp="${output_dir}/.suite.stamp"
 readonly suite_outputs="${output_dir}/.suite.outputs"
 readonly frame_oracle_script=scripts/frame-variables-oracle.py
@@ -28,6 +29,7 @@ odin_version=""
 fortran_version=""
 d_version=""
 nim_version=""
+ada_version=""
 
 read_dash_version() {
     local tool="$1"
@@ -53,7 +55,7 @@ readonly max_jobs="${USCOPE_FIXTURE_JOBS:-$(nproc)}"
 readonly background_builders=" build_program build_fixture build_c_fixture_directory \
 build_cpp_fixture_directory build_cpp_fixture build_shared_fixture build_symbols_library \
 build_disassembly_fixture build_tls_modules_fixture build_rust_fixture build_go_fixture \
-build_go_command build_zig_fixture build_zig_self_hosted_fixture build_odin_fixture build_fortran_fixture build_d_fixture build_nim_fixture "
+build_go_command build_zig_fixture build_zig_self_hosted_fixture build_odin_fixture build_fortran_fixture build_d_fixture build_nim_fixture build_ada_fixture "
 # What each running job makes, by process ID, and the compiles among them.
 declare -A job_outputs=()
 declare -A build_jobs=()
@@ -798,6 +800,26 @@ build_nim_fixture() {
         "${command[@]}"
 }
 
+# Builds one Ada file with GNAT, keeping its objects and binder files
+# beside the program.
+build_ada_fixture() {
+    local source="$1"
+    local output="$2"
+    shift 2
+    # gnatbind writes its files where it runs.
+    local -a command=(
+        env -u NIX_CFLAGS_COMPILE -u NIX_CFLAGS_COMPILE_FOR_BUILD -C "${output}.objects"
+        gnatmake -q -g -gnat2022 -gnatwa -gnatwe "$@" -o "${PWD}/${output}" "${PWD}/${source}"
+    )
+    if [[ -z "$ada_version" ]]; then
+        ada_version=$(gnatmake --version | head -n 1)
+    fi
+    mkdir -p "${output}.objects"
+    run_cached_build "$source" "$output" \
+        "compiler=${ada_version}"$'\n'"target=x86_64-linux" \
+        "${command[@]}"
+}
+
 validation_is_cached() {
     wait_for "$1"
     local output="$1"
@@ -1058,7 +1080,7 @@ make_core() {
 suite_signature() {
     local -a paths=()
     local tool path
-    for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc cargo go zig odin gfortran ldc2 nim \
+    for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc cargo go zig odin gfortran ldc2 nim gnatmake \
         objdump gdb setarch dwz; do
         if path=$(type -P "$tool"); then
             paths+=("$path")
@@ -2569,6 +2591,10 @@ build_d_fixture "$d_fixtures_dir/containers.d" "$output_dir/containers-d-o2" -O2
 build_nim_fixture "$nim_fixtures_dir/values.nim" "$output_dir/values-nim-gcc-o0" --cc:gcc --opt:none
 build_nim_fixture "$nim_fixtures_dir/values.nim" "$output_dir/values-nim-clang-o2" --cc:clang \
     --opt:speed
+
+# Ada, through GNAT.
+build_ada_fixture "$ada_fixtures_dir/values.adb" "$output_dir/values-ada-o0" -O0
+build_ada_fixture "$ada_fixtures_dir/values.adb" "$output_dir/values-ada-o2" -O2
 
 # GNU objdump's decoding of every executable section, which differential tests
 # compare against uscope's disassembly. -z keeps the zero-filled runs objdump

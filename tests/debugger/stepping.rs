@@ -2432,3 +2432,46 @@ async fn nim_steps_into_a_procedure_and_back_to_its_caller() {
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
     }
 }
+
+/// GNAT's subprograms step and unwind as C's do, named as GNAT encodes
+/// them.
+#[tokio::test]
+async fn ada_steps_into_a_subprogram_and_back_to_its_caller() {
+    for fixture in ["values-ada-o0", "values-ada-o2"] {
+        let mut scenario = Scenario::launch(fixture);
+        scenario.add_source_breakpoint("values.adb", 165).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        assert_eq!(
+            scenario.step_to_stop(StepKind::IntoSource).await,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            }
+        );
+        let entered = scenario
+            .operation("Ada callee", scenario.handle().current_location())
+            .await;
+        assert_eq!(
+            location_function(&entered),
+            Some("values__add"),
+            "{fixture}"
+        );
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Out).await,
+            StopReason::Step {
+                kind: StepKind::Out
+            }
+        );
+        let caller = scenario
+            .operation("Ada caller", scenario.handle().current_location())
+            .await;
+        assert_eq!(location_function(&caller), Some("values"), "{fixture}");
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}

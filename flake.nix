@@ -56,6 +56,11 @@
       ldc2 = pkgs.writeShellScriptBin "ldc2" ''
         exec ${pkgs.ldc}/bin/ldc2 "$@"
       '';
+      # GNAT's gnatmake, which runs its own GCC, binder, and linker; the
+      # shell's GCC compiles no Ada.
+      gnatmake = pkgs.writeShellScriptBin "gnatmake" ''
+        PATH=${pkgs.gnat15}/bin:$PATH exec gnatmake "$@"
+      '';
       # The crates the tokio fixtures depend on, exactly as their lockfiles
       # name them, one for each tokio release they are built with, so that
       # building them fetches nothing.
@@ -109,6 +114,7 @@
           gfortran
           ldc2
           nim
+          gnatmake
           pkg-config
           util-linux
           nodejs_24
