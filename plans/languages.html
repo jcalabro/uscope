@@ -336,6 +336,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
             <li>Function names are Itanium-mangled, as <code>_ZN3nim4mainE</code>.</li>
             <li>Strings are <code>NimStringV2 {len, p}</code> with the bytes in <code>p-&gt;data</code>; sequences are <code>tySequence__<i>hash</i> {len, p}</code>, one type per element type.</li>
             <li>Locals carry numeric suffixes (<code>s_1</code>), and Nim's own temporaries are listed beside them.</li>
+            <li>Enums are typedefs of integers (<code>typedef NU8 tyEnum_Color__<i>hash</i></code>). Their enumerators' names are in no debug information, only in the code of the <code>$</code> Nim generates, so an enum shows as its number (see <a href="#deferred">Deferred</a>).</li>
           </ul>
         </div>
         <div class="card">
