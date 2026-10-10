@@ -10,6 +10,7 @@
 --  uscope writes the value.
 
 with Ada.Characters.Latin_1;
+with Ada.Command_Line;
 with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded;
 with Ada.Text_IO;
@@ -91,6 +92,39 @@ procedure Values is
       Keep (Total'Address);
       return Total;
    end Add;
+
+   --  What functions return: a checkpoint named `returned-` is about what
+   --  the function that reached it returns, which is named for the
+   --  function.
+   function Returns_Int (N : Integer) return Integer with No_Inline;
+   function Returns_Int (N : Integer) return Integer is
+      Value : constant Integer := N * (-11);
+   begin
+      Truth ("returned-int", "returns_int", "int", Decimal (Long_Long_Integer (Value)));
+      Reached ("returned-int");
+      return Value;
+   end Returns_Int;
+
+   function Returns_Float (N : Integer) return Long_Float with No_Inline;
+   function Returns_Float (N : Integer) return Long_Float is
+      Value : constant Long_Float := -6.5 * Long_Float (N);
+   begin
+      Truth ("returned-float", "returns_float", "f64", Hexadecimal (F64_Bits (Value)));
+      Reached ("returned-float");
+      return Value;
+   end Returns_Float;
+
+   function Returns_Boolean (N : Integer) return Boolean with No_Inline;
+   function Returns_Boolean (N : Integer) return Boolean is
+      Value : constant Boolean := N > 0;
+   begin
+      Truth ("returned-boolean", "returns_boolean", "summary", (if Value then "true" else "false"));
+      Reached ("returned-boolean");
+      return Value;
+   end Returns_Boolean;
+
+   --  Arguments the compiler cannot know.
+   N : constant Integer := Ada.Command_Line.Argument_Count + 3;
 
    procedure Scalars with No_Inline;
    procedure Scalars is
@@ -187,5 +221,14 @@ begin
    Strings;
    if Add (2, 3) /= 5 then
       raise Program_Error with "add";
+   end if;
+   if Returns_Int (N) /= N * (-11) then
+      raise Program_Error with "returns_int";
+   end if;
+   if Returns_Float (N) /= -6.5 * Long_Float (N) then
+      raise Program_Error with "returns_float";
+   end if;
+   if not Returns_Boolean (N) then
+      raise Program_Error with "returns_boolean";
    end if;
 end Values;

@@ -2482,24 +2482,41 @@ fn origin_role(origin: &RawFunction, name: &str, futures: &Futures) -> crate::Co
     }
 }
 
+/// What a function's language writes for a function whose DWARF name is
+/// an encoding: Nim names its procedures' C functions by their mangled
+/// names, and GNAT its subprograms by their scopes, encoded.
+fn written_name(language: SourceLanguage, name: &str) -> Option<String> {
+    match language {
+        SourceLanguage::Nim => crate::demangle::qualified_name(name),
+        SourceLanguage::Ada => crate::demangle::ada_name(name),
+        _ => None,
+    }
+}
+
+/// A function's own name, without the scopes its language qualifies it
+/// with, as C names a function: Nim's `values::add`, Odin's, and Ada's
+/// `values.add` are `add`. Other languages' DWARF names are their own.
+pub(super) fn own_name(language: SourceLanguage, name: &str) -> Option<String> {
+    let written = written_name(language, name);
+    let qualified = written.as_deref().unwrap_or(name);
+    let own = match language {
+        SourceLanguage::Nim | SourceLanguage::Odin => qualified.rsplit("::").next(),
+        SourceLanguage::Ada => qualified.rsplit('.').next(),
+        _ => None,
+    };
+    own.map(str::to_owned).or(written)
+}
+
 /// The name a function shows. Clang names the thunks a multiply inherited
 /// virtual function needs only by their linkage names, and the body of a
 /// Rust `async fn` or block shows as the function its programmer wrote.
 fn function_name(function: &RawFunction) -> Option<Arc<str>> {
-    // Nim names its procedures' C functions by their mangled names.
-    if function.language == SourceLanguage::Nim
-        && let Some(qualified) = function
-            .name
-            .as_deref()
-            .and_then(crate::demangle::qualified_name)
+    if let Some(written) = function
+        .name
+        .as_deref()
+        .and_then(|name| written_name(function.language, name))
     {
-        return Some(qualified.into());
-    }
-    // GNAT names its subprograms by their scopes, encoded.
-    if function.language == SourceLanguage::Ada
-        && let Some(decoded) = function.name.as_deref().and_then(crate::demangle::ada_name)
-    {
-        return Some(decoded.into());
+        return Some(written.into());
     }
     let name = function.name.clone().or_else(|| {
         function

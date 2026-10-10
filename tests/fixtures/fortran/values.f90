@@ -14,6 +14,7 @@ module values
   implicit none
   private
   public :: scalars, records, descriptors, strings, add
+  public :: returns_int, returns_double, returns_logical
 
   type :: point
     integer(int32) :: x, y
@@ -220,14 +221,50 @@ contains
     call keep(word); call keep(grown)
   end subroutine
 
+  ! What functions return: a checkpoint named `returned-` is about what the
+  ! function that reached it returns, which is named for the function.
+  function returns_int(n) result(value)
+    !GCC$ ATTRIBUTES noinline :: returns_int
+    integer, intent(in) :: n
+    integer :: value
+    value = n * (-11)
+    call truth('returned-int', 'returns_int', 'int', decimal(int(value, int64)))
+    call reached('returned-int')
+  end function
+
+  function returns_double(n) result(value)
+    !GCC$ ATTRIBUTES noinline :: returns_double
+    integer, intent(in) :: n
+    real(real64) :: value
+    value = -6.5_real64 * n
+    call truth('returned-double', 'returns_double', 'f64', f64_bits(value))
+    call reached('returned-double')
+  end function
+
+  function returns_logical(n) result(value)
+    !GCC$ ATTRIBUTES noinline :: returns_logical
+    integer, intent(in) :: n
+    logical :: value
+    value = n > 0
+    call truth('returned-logical', 'returns_logical', 'summary', 'true')
+    call reached('returned-logical')
+  end function
+
 end module
 
 program main
   use values
+  use, intrinsic :: iso_fortran_env, only: real64
   implicit none
+  integer :: n
+  ! Arguments the compiler cannot know.
+  n = command_argument_count() + 3
   call scalars()
   call records()
   call descriptors()
   call strings()
   if (add(2, 3) /= 5) error stop 'add'
+  if (returns_int(n) /= -11 * n) error stop 'returns_int'
+  if (returns_double(n) /= -6.5_real64 * n) error stop 'returns_double'
+  if (.not. returns_logical(n)) error stop 'returns_logical'
 end program

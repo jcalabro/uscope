@@ -226,6 +226,8 @@ fn system_v_returns<'data>(
         .ok()
         .flatten()
         .unwrap_or_else(|| Arc::from("returned"));
+    // Named for the function, as C's are.
+    let name = super::own_name(language, &name).map_or(name, Arc::from);
     let rewritten = std::iter::once(entry)
         .chain(chain.iter().map(|(_, origin)| origin))
         .any(|entry| {
@@ -419,6 +421,10 @@ pub(super) fn load_variable_info<'data>(
                     | SourceLanguage::Rust
                     | SourceLanguage::Zig
                     | SourceLanguage::Nim
+                    | SourceLanguage::Odin
+                    | SourceLanguage::Fortran
+                    | SourceLanguage::D
+                    | SourceLanguage::Ada
             );
         let fused_blocks = if go {
             fused_block_ranges(dwarf, unit, &catalog.code)?

@@ -2229,7 +2229,7 @@ fn assert_inline_backtrace(fixture: &str, trace: &uscope::Backtrace) {
 async fn odin_steps_into_a_procedure_and_back_to_its_caller() {
     for fixture in ["values-odin-o0", "values-odin-o2"] {
         let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("values.odin", 156).await;
+        scenario.add_source_breakpoint("values.odin", 182).await;
         assert!(matches!(
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
@@ -2299,7 +2299,7 @@ async fn fortran_steps_into_a_procedure_and_back_to_its_caller() {
             .operation("Fortran main", scenario.handle().current_location())
             .await;
         assert_eq!(location_function(&started), Some("MAIN__"), "{fixture}");
-        scenario.add_source_breakpoint("values.f90", 232).await;
+        scenario.add_source_breakpoint("values.f90", 266).await;
         assert!(matches!(
             scenario.resume_to_stop().await,
             StopReason::Breakpoint { .. }
@@ -2351,7 +2351,7 @@ async fn fortran_steps_into_a_procedure_and_back_to_its_caller() {
 async fn d_steps_into_a_function_and_back_to_its_caller() {
     for fixture in ["values-d-o0", "values-d-o2"] {
         let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("values.d", 181).await;
+        scenario.add_source_breakpoint("values.d", 209).await;
         assert!(matches!(
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
@@ -2459,7 +2459,7 @@ async fn nim_steps_into_a_procedure_and_back_to_its_caller() {
 async fn ada_steps_into_a_subprogram_and_back_to_its_caller() {
     for fixture in ["values-ada-o0", "values-ada-o2"] {
         let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("values.adb", 188).await;
+        scenario.add_source_breakpoint("values.adb", 222).await;
         assert!(matches!(
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
