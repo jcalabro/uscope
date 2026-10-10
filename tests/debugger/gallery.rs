@@ -802,3 +802,19 @@ async fn d_values_agree_with_their_program() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn nim_values_agree_with_their_program() {
+    for (fixture, optimized) in [("values-nim-gcc-o0", false), ("values-nim-clang-o2", true)] {
+        check_gallery(&Gallery {
+            fixture,
+            breakpoints: &["values::reached"],
+            checkpoints: &["scalars", "records", "strings"],
+            optimized,
+            required: &[],
+            reserved: &["colontmp", "nimErr_", "FR_"],
+            unknown: &[],
+        })
+        .await;
+    }
+}

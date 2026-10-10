@@ -404,7 +404,7 @@ impl DwarfVariableInfo {
                 return self.rust_pair_parts(ty);
             }
             TypeKind::Record { .. } | TypeKind::Union { .. } => match language {
-                SourceLanguage::C => true,
+                SourceLanguage::C | SourceLanguage::Nim => true,
                 SourceLanguage::Cpp => match self.type_facts().passed_by_value(id) {
                     Some(true) => true,
                     Some(false) => return Ok(memory),

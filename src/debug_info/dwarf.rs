@@ -2483,6 +2483,15 @@ fn origin_role(origin: &RawFunction, name: &str, futures: &Futures) -> crate::Co
 /// virtual function needs only by their linkage names, and the body of a
 /// Rust `async fn` or block shows as the function its programmer wrote.
 fn function_name(function: &RawFunction) -> Option<Arc<str>> {
+    // Nim names its procedures' C functions by their mangled names.
+    if function.language == SourceLanguage::Nim
+        && let Some(qualified) = function
+            .name
+            .as_deref()
+            .and_then(crate::demangle::qualified_name)
+    {
+        return Some(qualified.into());
+    }
     let name = function.name.clone().or_else(|| {
         function
             .linkage_name
@@ -2898,9 +2907,10 @@ fn unit_language(
         _ => units.inherited_language(unit_index),
     };
     let producer = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?;
+    let name = str_attribute(dwarf, unit, root, gimli::DW_AT_name)?;
     Ok(variables::source_language(
         language,
-        variables::produced_language(producer.as_deref()),
+        variables::produced_language(producer.as_deref(), name.as_deref()),
     ))
 }
 

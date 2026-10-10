@@ -314,12 +314,15 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         Some(gimli::AttributeValue::Language(language)) => Some(language),
                         _ => units.inherited_language(unit_index),
                     };
-                    produced = produced_language(
+                    let text = |attribute| {
                         entry
-                            .attr_value(gimli::DW_AT_producer)
+                            .attr_value(attribute)
                             .and_then(|value| unit_dwarf(dwarf, unit).attr_string(unit, value).ok())
-                            .map(|producer| producer.to_string_lossy())
-                            .as_deref(),
+                            .map(|text| text.to_string_lossy())
+                    };
+                    produced = produced_language(
+                        text(gimli::DW_AT_producer).as_deref(),
+                        text(gimli::DW_AT_name).as_deref(),
                     );
                     cpp = source_language(language, produced) == SourceLanguage::Cpp;
                     d = source_language(language, produced) == SourceLanguage::D;
@@ -3878,6 +3881,7 @@ fn default_lower_bound(language: Option<gimli::DwLang>, source: SourceLanguage) 
             | SourceLanguage::Go
             | SourceLanguage::Zig
             | SourceLanguage::Odin
+            | SourceLanguage::Nim
     ) {
         return Some(0);
     }
@@ -4221,7 +4225,10 @@ fn named_type_relationship(tag: gimli::DwTag, language: SourceLanguage) -> Named
         return NamedTypeRelationship::Synonym;
     }
     match language {
-        SourceLanguage::C | SourceLanguage::Cpp => NamedTypeRelationship::Synonym,
+        // Nim's are the C typedefs it compiles to.
+        SourceLanguage::C | SourceLanguage::Cpp | SourceLanguage::Nim => {
+            NamedTypeRelationship::Synonym
+        }
         // Odin's typedefs are its `distinct` types, and wrappers that name
         // its own types, as `int`.
         SourceLanguage::Go | SourceLanguage::Odin => NamedTypeRelationship::Distinct,

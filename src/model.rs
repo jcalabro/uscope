@@ -952,6 +952,8 @@ pub enum SourceLanguage {
     Fortran,
     /// D.
     D,
+    /// Nim, whose units are the C it compiles each module to.
+    Nim,
     /// Another language, by its DWARF language code.
     Other(u16),
     /// The unit does not say.

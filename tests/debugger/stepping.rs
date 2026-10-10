@@ -2385,3 +2385,50 @@ async fn d_steps_into_a_function_and_back_to_its_caller() {
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
     }
 }
+
+/// Nim's procedures step and unwind as the C they compile to does, named
+/// as Nim names them.
+#[tokio::test]
+async fn nim_steps_into_a_procedure_and_back_to_its_caller() {
+    for fixture in ["values-nim-gcc-o0", "values-nim-clang-o2"] {
+        let mut scenario = Scenario::launch(fixture);
+        scenario.add_source_breakpoint("values.nim", 90).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        assert_eq!(
+            scenario.step_to_stop(StepKind::IntoSource).await,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            }
+        );
+        let entered = scenario
+            .operation("Nim callee", scenario.handle().current_location())
+            .await;
+        assert_eq!(
+            location_function(&entered),
+            Some("values::add"),
+            "{fixture}"
+        );
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Out).await,
+            StopReason::Step {
+                kind: StepKind::Out
+            }
+        );
+        let caller = scenario
+            .operation("Nim caller", scenario.handle().current_location())
+            .await;
+        assert_eq!(
+            location_function(&caller),
+            Some("NimMainModule"),
+            "{fixture}"
+        );
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
