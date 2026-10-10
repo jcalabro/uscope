@@ -1189,20 +1189,45 @@ fn load_image(
     );
 
     drop(phase);
-    let phase = crate::span!("variables");
-    let mut variables = variables::load_variable_info(
-        &dwarf,
-        &catalog,
-        target,
-        // The module's identifier is its binding's, not the image's.
-        crate::ModuleImageId::new(0),
-        variables::CodeMetadata {
-            instance_ids: &function_metadata.instance_ids,
+    // Unwinding and symbols need nothing the variables produce, and most of
+    // the variables' work runs on one thread, so they are read beside it.
+    let (variables, unwind_and_symbols) = rayon::join(
+        || {
+            let _phase = crate::span!("variables");
+            variables::load_variable_info(
+                &dwarf,
+                &catalog,
+                target,
+                // The module's identifier is its binding's, not the image's.
+                crate::ModuleImageId::new(0),
+                variables::CodeMetadata {
+                    instance_ids: &function_metadata.instance_ids,
+                },
+                &mut files,
+                limits.budget(input),
+            )
         },
-        &mut files,
-        limits.budget(input),
-    )
-    .map_err(|error| error.within(|| "its variables and types".to_owned()))?;
+        || {
+            let _phase = crate::span!("unwind_and_symbols");
+            let go_code = go_code_ranges(&dwarf, &catalog)?;
+            let go = go_table.as_ref().map(|table| {
+                let (bytes, facts) = table.source();
+                crate::image::unwind::GoTableData {
+                    bytes: Arc::clone(bytes),
+                    facts,
+                    frame_saves: super::gopclntab::frame_saves(table, code),
+                }
+            });
+            let unwind = load_unwind_info(&object, debug_object.as_ref(), target, go_code, go)?;
+            let symbols =
+                super::elf::load_symbols(&object, debug_object.as_ref(), &unwind.function_ranges());
+            Ok::<_, DwarfError>((unwind, symbols))
+        },
+    );
+    // The variables' failure is reported first, as when they were read first.
+    let mut variables =
+        variables.map_err(|error| error.within(|| "its variables and types".to_owned()))?;
+    let (unwind, mut symbols) = unwind_and_symbols?;
     for (instance, generics) in std::mem::take(&mut variables.function_generics) {
         if let Some(function) = function_metadata
             .code_instances
@@ -1212,7 +1237,6 @@ fn load_image(
             function_metadata.functions[function.index()].generics = generics;
         }
     }
-    drop(phase);
     let phase = crate::span!("resume_points");
     let coroutines = std::mem::take(&mut variables.coroutines);
     for (instance, ty) in &variables.coroutine_bodies {
@@ -1251,24 +1275,10 @@ fn load_image(
     #[cfg(not(target_arch = "x86_64"))]
     let held = Vec::new();
     drop(phase);
-    let phase = crate::span!("unwind_and_symbols");
-    let go_code = go_code_ranges(&dwarf, &catalog)?;
-    let go = go_table.as_ref().map(|table| {
-        let (bytes, facts) = table.source();
-        crate::image::unwind::GoTableData {
-            bytes: Arc::clone(bytes),
-            facts,
-            frame_saves: super::gopclntab::frame_saves(table, code),
-        }
-    });
-    let unwind = load_unwind_info(&object, debug_object.as_ref(), target, go_code, go)?;
-    let mut symbols =
-        super::elf::load_symbols(&object, debug_object.as_ref(), &unwind.function_ranges());
     symbols.sources.runtime_function_table = runtime_function_table;
     if let Some(table) = &go_table {
         assign_go_symbol_roles(table, &mut symbols.symbols);
     }
-    drop(phase);
     let phase = crate::span!("image_indexes");
     let image = crate::model::seal(
         target,

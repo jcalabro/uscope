@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use foldhash::{HashMap, HashMapExt};
+use rayon::prelude::*;
 
 use crate::eval::types::c_type_key_of_name;
 use crate::{
@@ -484,7 +485,7 @@ impl TypeIndex {
     pub fn build<'a>(
         image: Option<ModuleImageId>,
         count: usize,
-        info: impl Fn(usize) -> Option<&'a TypeInfo>,
+        info: impl Fn(usize) -> Option<&'a TypeInfo> + Sync,
     ) -> Self {
         Self::build_searching(image, count, |_| true, info)
     }
@@ -494,40 +495,36 @@ impl TypeIndex {
     pub fn build_searching<'a>(
         image: Option<ModuleImageId>,
         count: usize,
-        searchable: impl Fn(usize) -> bool,
-        info: impl Fn(usize) -> Option<&'a TypeInfo>,
+        searchable: impl Fn(usize) -> bool + Sync,
+        info: impl Fn(usize) -> Option<&'a TypeInfo> + Sync,
     ) -> Self {
-        let mut by_base = HashMap::<Arc<str>, Vec<TypeId>>::new();
-        let mut by_name = HashMap::<Arc<str>, Vec<TypeId>>::new();
-        for index in 0..count {
-            let Some(type_info) = info(index).filter(|_| searchable(index)) else {
-                continue;
-            };
-            let id = type_info.reference.id;
-            by_name
-                .entry(Arc::clone(&type_info.name))
-                .or_default()
-                .push(id);
-            if let Some(identity) = &type_info.identity {
-                by_base
-                    .entry(Arc::clone(&identity.base))
-                    .or_default()
-                    .push(id);
-                // A C base type is also under C's own spelling, whichever
-                // words the producer chose: `short int` is `short`.
-                if let Some(key) = c_type_key_of_name(&identity.base)
-                    && key != identity.base.as_ref()
-                {
-                    by_base.entry(Arc::from(key)).or_default().push(id);
-                }
-            }
-        }
+        // The names and the keys are indexed beside each other: the keys
+        // read no name, and each walk is serial.
+        let ((by_base, by_name), keys) = rayon::join(
+            || names_by_base(count, &searchable, &info),
+            || canonical_keys(count, &info),
+        );
         Self {
             image,
             by_base,
             by_name,
-            keys: canonical_keys(count, info),
+            keys,
         }
+    }
+
+    /// Frees the index on every worker: its keys and names are millions of
+    /// allocations, a fifth of a second to free on one thread.
+    pub fn free_in_parallel(self) {
+        let Self {
+            by_base,
+            by_name,
+            keys,
+            ..
+        } = self;
+        rayon::join(
+            || keys.into_par_iter().with_min_len(1 << 14).for_each(drop),
+            || rayon::join(|| drop(by_base), || drop(by_name)),
+        );
     }
 
     /// A type's identity as one string, which every type the same as it
@@ -655,6 +652,45 @@ pub trait NameIndex {
             .filter_map(|id| self.reference(id))
             .collect()
     }
+}
+
+/// The types `searchable` lets be found among `count`, by their identity's
+/// base names and by their names.
+#[expect(clippy::type_complexity, reason = "the two indexes a TypeIndex keeps")]
+fn names_by_base<'a>(
+    count: usize,
+    searchable: &impl Fn(usize) -> bool,
+    info: &impl Fn(usize) -> Option<&'a TypeInfo>,
+) -> (
+    HashMap<Arc<str>, Vec<TypeId>>,
+    HashMap<Arc<str>, Vec<TypeId>>,
+) {
+    let mut by_base = HashMap::<Arc<str>, Vec<TypeId>>::new();
+    let mut by_name = HashMap::<Arc<str>, Vec<TypeId>>::new();
+    for index in 0..count {
+        let Some(type_info) = info(index).filter(|_| searchable(index)) else {
+            continue;
+        };
+        let id = type_info.reference.id;
+        by_name
+            .entry(Arc::clone(&type_info.name))
+            .or_default()
+            .push(id);
+        if let Some(identity) = &type_info.identity {
+            by_base
+                .entry(Arc::clone(&identity.base))
+                .or_default()
+                .push(id);
+            // A C base type is also under C's own spelling, whichever
+            // words the producer chose: `short int` is `short`.
+            if let Some(key) = c_type_key_of_name(&identity.base)
+                && key != identity.base.as_ref()
+            {
+                by_base.entry(Arc::from(key)).or_default().push(id);
+            }
+        }
+    }
+    (by_base, by_name)
 }
 
 /// Each of `count` types' identity as one string, which every type the

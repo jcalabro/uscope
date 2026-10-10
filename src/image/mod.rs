@@ -159,7 +159,7 @@ pub struct Builder<'a> {
 /// The rows of one table, as the builder holds them until it seals.
 enum TableBytes<'a> {
     Borrowed(&'a [u8]),
-    Owned(Box<dyn AsBytes + 'a>),
+    Owned(Box<dyn AsBytes + Send + 'a>),
 }
 
 impl TableBytes<'_> {
@@ -204,7 +204,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Adds `T`'s table, taking its rows. Empty tables are left out.
-    pub fn owned_table<T: Record + 'a>(&mut self, rows: Vec<T>) -> &mut Self {
+    pub fn owned_table<T: Record + Send + 'a>(&mut self, rows: Vec<T>) -> &mut Self {
         if !rows.is_empty() {
             let count = rows.len();
             self.add(
@@ -238,7 +238,7 @@ impl<'a> Builder<'a> {
 
     /// Adds the table of `kind`, which holds `T`s, taking its rows. Empty
     /// tables are left out.
-    pub fn owned_shared<T: SharedRecord + 'a>(
+    pub fn owned_shared<T: SharedRecord + Send + 'a>(
         &mut self,
         kind: TableKind,
         rows: Vec<T>,
@@ -265,6 +265,15 @@ impl<'a> Builder<'a> {
         if !bytes.is_empty() {
             let length = bytes.len();
             self.add(kind, 1, length, TableBytes::Owned(Box::new(bytes)));
+        }
+        self
+    }
+
+    /// Adds every table `other` holds, which another thread may have built:
+    /// tables are laid out by kind, whatever order they are added in.
+    pub fn absorb(&mut self, other: Self) -> &mut Self {
+        for (kind, stride, count, bytes) in other.tables {
+            self.add(kind, stride, count, bytes);
         }
         self
     }

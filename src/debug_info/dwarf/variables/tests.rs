@@ -1621,6 +1621,82 @@ fn inline_cycle_analysis_distinguishes_storage_from_indirection() {
     assert!(inline_storage_cycle_nodes(&pointer_recursion).is_empty());
 }
 
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+    /// A type is in an inline-storage cycle exactly when it holds itself
+    /// through storage: when it reaches itself along members, never along
+    /// a pointer, an unbuilt type, or a reference past the graph.
+    #[test]
+    fn inline_cycles_are_the_types_that_hold_themselves(
+        shapes in proptest::collection::vec(
+            (0_u8..3, proptest::collection::vec(0_u32..14, 0..4)),
+            1..12,
+        ),
+    ) {
+        let types = shapes
+            .iter()
+            .enumerate()
+            .map(|(index, (shape, targets))| {
+                let id = u32::try_from(index).unwrap();
+                match shape {
+                    0 => TypeEntry::Malformed("unbuilt".into()),
+                    1 => node(id, "pointer", Some(8), TypeKind::Pointer {
+                        target: targets.first().map(|target| reference(*target)),
+                        address_class: 0,
+                    }),
+                    _ => node(id, "record", Some(8), TypeKind::Record {
+                        kind: RecordKind::Struct,
+                        members: targets
+                            .iter()
+                            .map(|target| RecordMember {
+                                name: None,
+                                type_ref: reference(*target),
+                                layout: RecordMemberLayout::ByteOffset(0),
+                                accessibility: Accessibility::Public,
+                                artificial: false,
+                                embedded: false,
+                                declaration: None,
+                            })
+                            .collect(),
+                        bases: Arc::default(),
+                        incomplete: false,
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+        // What each type holds in place: a record's members that exist.
+        let holds = |index: usize| -> Vec<usize> {
+            let (shape, targets) = &shapes[index];
+            if *shape < 2 {
+                return Vec::new();
+            }
+            targets
+                .iter()
+                .map(|target| *target as usize)
+                .filter(|target| *target < shapes.len())
+                .collect()
+        };
+        let holds_itself = |start: usize| {
+            let mut seen = vec![false; shapes.len()];
+            let mut stack = holds(start);
+            while let Some(node) = stack.pop() {
+                if node == start {
+                    return true;
+                }
+                if !std::mem::replace(&mut seen[node], true) {
+                    stack.extend(holds(node));
+                }
+            }
+            false
+        };
+        let mut found = inline_storage_cycle_nodes(&types);
+        found.sort_unstable();
+        let expected = (0..shapes.len()).filter(|index| holds_itself(*index)).collect::<Vec<_>>();
+        proptest::prop_assert_eq!(found, expected);
+    }
+}
+
 #[test]
 fn boolean_and_float_decoding_preserve_exact_representations() {
     let little = target(ByteOrder::Little);

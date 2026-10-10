@@ -3,6 +3,7 @@
 //! and every reference, flag, and index in the tables. Each check is one
 //! pass over a table, and no check recurses.
 
+use rayon::prelude::*;
 use zerocopy::FromBytes as _;
 
 use super::format::{self, DirectoryEntry, Header, TableKind, Trailer};
@@ -179,21 +180,22 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
     {
         return Err(malformed("a file names no path"));
     }
-    let phase = crate::span!("validate.lines");
-    let tables = Lines {
-        addresses: image.table(),
-        rows: image.table(),
-        extras: image.table(),
-        sequences: image.table(),
-        ranges: image.table(),
+    let lines = || {
+        let _phase = crate::span!("validate.lines");
+        let tables = Lines {
+            addresses: image.table(),
+            rows: image.table(),
+            extras: image.table(),
+            sequences: image.table(),
+            ranges: image.table(),
+        };
+        tables.rows(files.len())?;
+        tables.extras()?;
+        tables.sequences()?;
+        tables.ranges()?;
+        tables.statements(image.table())?;
+        tables.boundaries(image.table())
     };
-    tables.rows(files.len())?;
-    tables.extras()?;
-    tables.sequences()?;
-    tables.ranges()?;
-    tables.statements(image.table())?;
-    tables.boundaries(image.table())?;
-    drop(phase);
     let families: [(&str, Validation); 12] = [
         ("validate.symbols", super::symbols::validate),
         ("validate.functions", super::functions::validate),
@@ -208,11 +210,20 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
         ("validate.resumes", super::resumes::validate),
         ("validate.declarations", super::declarations::validate),
     ];
-    for (name, validate) in families {
-        let _phase = crate::profile::span(name, None, None);
-        validate(image).map_err(malformed)?;
-    }
-    Ok(())
+    // Each family reads only the image, so they are checked in parallel;
+    // the first to fail in this order is the error, as when they were
+    // checked in turn.
+    let (lines, families) = rayon::join(lines, || {
+        families
+            .par_iter()
+            .map(|(name, validate)| {
+                let _phase = crate::profile::span(name, None, None);
+                validate(image).map_err(malformed)
+            })
+            .collect::<Vec<_>>()
+    });
+    lines?;
+    families.into_iter().collect()
 }
 
 /// The line tables, checked against each other and their indexes. Each

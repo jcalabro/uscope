@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use foldhash::HashMap;
+use rayon::prelude::*;
 
 use crate::VariableKind;
 use crate::debug_info::dwarf::{
@@ -156,68 +157,25 @@ pub(super) fn load_globals<'data>(
 
     // Pass one records lexical ownership for every DIE. A later definition
     // may point backward to a declaration nested in a namespace or class.
-    for unit in units.iter() {
-        let mut unit_scopes = UnitScopes::default();
-        if !is_type_unit(unit) {
-            let mut walk = DieWalk::new(unit)?;
-            let mut scopes = Vec::<u32>::new();
-            while let Some(die) = walk.next()? {
-                let depth =
-                    usize::try_from(die.depth).map_err(|_| DwarfError::InvalidEntryDepth)?;
-                scopes.truncate(depth);
-                let parent = scopes.last().copied().unwrap_or(0);
-                let parent_scope = table.scope(parent);
-                let scope = match die.tag {
-                    gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine
-                        if !parent_scope.routine =>
-                    {
-                        let depth = parent_scope.depth;
-                        table.add(GlobalScope {
-                            parent,
-                            name: None,
-                            depth,
-                            routine: true,
-                        })
-                    }
-                    gimli::DW_TAG_namespace
-                    | gimli::DW_TAG_module
-                    | gimli::DW_TAG_class_type
-                    | gimli::DW_TAG_structure_type
-                    | gimli::DW_TAG_union_type => {
-                        let (depth, routine) = (parent_scope.depth + 1, parent_scope.routine);
-                        let name =
-                            match str_attribute(dwarf, unit, walk.decode()?, gimli::DW_AT_name) {
-                                Ok(Some(name)) => name,
-                                Ok(None) if die.tag == gimli::DW_TAG_namespace => {
-                                    Cow::Borrowed("{anonymous}")
-                                }
-                                Ok(None) => Cow::Borrowed("{anonymous type}"),
-                                Err(error) => Cow::Owned(format!("{{malformed scope: {error}}}")),
-                            };
-                        table.add(GlobalScope {
-                            parent,
-                            name: Some(name),
-                            depth,
-                            routine,
-                        })
-                    }
-                    _ => parent,
-                };
-                unit_scopes.offsets.push(die.offset.0);
-                unit_scopes.scopes.push(scope);
-                scopes.push(scope);
-            }
+    // Each unit numbers its own scopes in parallel, and they are numbered
+    // in unit order once all are read, as a serial pass numbered them.
+    let unit_tables = units
+        .par_iter()
+        .map(|unit| unit_scopes(dwarf, unit))
+        .collect::<Vec<_>>();
+    for unit_table in unit_tables {
+        let (scopes, mut unit_scopes) = unit_table?;
+        // A unit's scope `n` past its root is the table's `first + n - 1`.
+        let first = u32::try_from(table.scopes.len()).expect("scope count fits u32");
+        let global = |local: u32| if local == 0 { 0 } else { first + local - 1 };
+        for scope in scopes.into_iter().skip(1) {
+            table.add(GlobalScope {
+                parent: global(scope.parent),
+                ..scope
+            });
         }
-        // Entries follow one another, so their offsets are already in order.
-        if !unit_scopes.offsets.is_sorted() {
-            let mut pairs = unit_scopes
-                .offsets
-                .iter()
-                .copied()
-                .zip(unit_scopes.scopes.iter().copied())
-                .collect::<Vec<_>>();
-            pairs.sort_by_key(|(offset, _)| *offset);
-            (unit_scopes.offsets, unit_scopes.scopes) = pairs.into_iter().unzip();
+        for scope in &mut unit_scopes.scopes {
+            *scope = global(*scope);
         }
         table.units.push(unit_scopes);
     }
@@ -225,25 +183,17 @@ pub(super) fn load_globals<'data>(
     let mut globals = Vec::<Global>::new();
     let mut definitions = DefinitionIndex::default();
 
-    // Pass two resolves every non-routine data object independently.
-    for (unit_index, unit) in units.iter().enumerate() {
-        if is_type_unit(unit) {
-            continue;
-        }
-        let mut walk = DieWalk::new(unit)?;
-        while let Some(die) = walk.next()? {
-            if die.tag != gimli::DW_TAG_variable {
-                continue;
-            }
-            let key = DieKey {
-                unit: unit_index,
-                offset: die.offset.0,
-            };
-            let current_scope = table.get(key).unwrap_or(0);
-            if table.scope(current_scope).routine {
-                continue;
-            }
-            let entry = walk.decode()?;
+    // Pass two resolves every non-routine data object independently. Each
+    // unit is searched for them in parallel; what they name is resolved in
+    // unit order, which is the order types and files are numbered in.
+    let found = (0..units.len())
+        .into_par_iter()
+        .map(|unit_index| unit_globals(units, &table, unit_index))
+        .collect::<Vec<_>>();
+    for (unit_index, (found, error)) in found.into_iter().enumerate() {
+        let unit = &units[unit_index];
+        for (key, current_scope, entry) in found {
+            let entry = &entry;
 
             let (chain, chain_error) = match origin_chain(units, unit_index, entry) {
                 Ok(chain) => (chain, None),
@@ -374,9 +324,123 @@ pub(super) fn load_globals<'data>(
             });
             objects.push(object);
         }
+        // A unit that could not be read to its end fails the load once the
+        // globals before the failure are recorded, as in a serial pass.
+        if let Some(error) = error {
+            return Err(error);
+        }
     }
 
     Ok(globals)
+}
+
+/// One unit's scopes, its root first and each parent by its index there,
+/// and the scope of each of its DIEs.
+fn unit_scopes<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    unit: &gimli::Unit<Reader<'data>>,
+) -> std::result::Result<(Vec<GlobalScope<'data>>, UnitScopes), DwarfError> {
+    let mut table = vec![GlobalScope::default()];
+    let mut unit_scopes = UnitScopes::default();
+    if !is_type_unit(unit) {
+        let mut walk = DieWalk::new(unit)?;
+        let mut scopes = Vec::<u32>::new();
+        while let Some(die) = walk.next()? {
+            let depth = usize::try_from(die.depth).map_err(|_| DwarfError::InvalidEntryDepth)?;
+            scopes.truncate(depth);
+            let parent = scopes.last().copied().unwrap_or(0);
+            let parent_scope = &table[parent as usize];
+            let scope = match die.tag {
+                gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine
+                    if !parent_scope.routine =>
+                {
+                    let depth = parent_scope.depth;
+                    table.push(GlobalScope {
+                        parent,
+                        name: None,
+                        depth,
+                        routine: true,
+                    });
+                    u32::try_from(table.len() - 1).expect("scope count fits u32")
+                }
+                gimli::DW_TAG_namespace
+                | gimli::DW_TAG_module
+                | gimli::DW_TAG_class_type
+                | gimli::DW_TAG_structure_type
+                | gimli::DW_TAG_union_type => {
+                    let (depth, routine) = (parent_scope.depth + 1, parent_scope.routine);
+                    let name = match str_attribute(dwarf, unit, walk.decode()?, gimli::DW_AT_name) {
+                        Ok(Some(name)) => name,
+                        Ok(None) if die.tag == gimli::DW_TAG_namespace => {
+                            Cow::Borrowed("{anonymous}")
+                        }
+                        Ok(None) => Cow::Borrowed("{anonymous type}"),
+                        Err(error) => Cow::Owned(format!("{{malformed scope: {error}}}")),
+                    };
+                    table.push(GlobalScope {
+                        parent,
+                        name: Some(name),
+                        depth,
+                        routine,
+                    });
+                    u32::try_from(table.len() - 1).expect("scope count fits u32")
+                }
+                _ => parent,
+            };
+            unit_scopes.offsets.push(die.offset.0);
+            unit_scopes.scopes.push(scope);
+            scopes.push(scope);
+        }
+    }
+    // Entries follow one another, so their offsets are already in order.
+    if !unit_scopes.offsets.is_sorted() {
+        let mut pairs = unit_scopes
+            .offsets
+            .iter()
+            .copied()
+            .zip(unit_scopes.scopes.iter().copied())
+            .collect::<Vec<_>>();
+        pairs.sort_by_key(|(offset, _)| *offset);
+        (unit_scopes.offsets, unit_scopes.scopes) = pairs.into_iter().unzip();
+    }
+    Ok((table, unit_scopes))
+}
+
+/// A data object DIE outside any routine, its key, and its scope.
+type FoundGlobal<'data> = (DieKey, u32, gimli::DebuggingInformationEntry<Reader<'data>>);
+
+/// The data objects of unit `unit_index` outside any routine, in order,
+/// and the error that ended the search early, if one did.
+fn unit_globals<'data>(
+    units: &Units<'data>,
+    table: &ScopeTable<'data>,
+    unit_index: usize,
+) -> (Vec<FoundGlobal<'data>>, Option<DwarfError>) {
+    let unit = &units[unit_index];
+    let mut found = Vec::new();
+    if is_type_unit(unit) {
+        return (found, None);
+    }
+    let mut search = || {
+        let mut walk = DieWalk::new(unit)?;
+        while let Some(die) = walk.next()? {
+            if die.tag != gimli::DW_TAG_variable {
+                continue;
+            }
+            let key = DieKey {
+                unit: unit_index,
+                offset: die.offset.0,
+            };
+            let current_scope = table.get(key).unwrap_or(0);
+            if table.scope(current_scope).routine {
+                continue;
+            }
+            found.push((key, current_scope, walk.decode()?.clone()));
+        }
+        Ok::<_, DwarfError>(())
+    };
+    let error = search().err();
+    (found, error)
 }
 
 const fn value_rank(value: &Metadata<ValueDescription>) -> u8 {

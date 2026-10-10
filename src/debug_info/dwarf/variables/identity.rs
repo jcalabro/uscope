@@ -719,6 +719,7 @@ pub(super) fn resolve_parsed_arguments(
             resolve_argument(text, *language, &index, &lookup, &pointers, &alike)
         })
         .collect::<Vec<_>>();
+    index.free_in_parallel();
     let mut resolved = Vec::new();
     for pending in pending {
         let Some(TypeEntry::Resolved(info)) = entries.get(pending.entry) else {

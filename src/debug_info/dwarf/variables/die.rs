@@ -322,6 +322,42 @@ pub(super) fn declaration_with_origins<'data>(
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
     files: &mut Files,
 ) -> std::result::Result<Option<SourceLocation>, DwarfError> {
+    Ok(declared_source(dwarf, units, unit, entry, chain)?.map(|declared| declared.intern(files)))
+}
+
+/// Where a DIE says it is declared, with its file as a path that is not
+/// yet interned, so that declarations can be read in parallel and their
+/// files interned in order.
+pub(super) struct DeclaredSource {
+    path: std::path::PathBuf,
+    /// Whether the path is a type unit's, which names it as a suffix.
+    suffix: bool,
+    line: LineNumber,
+    column: Option<ColumnNumber>,
+}
+
+impl DeclaredSource {
+    pub(super) fn intern(self, files: &mut Files) -> SourceLocation {
+        SourceLocation {
+            file: if self.suffix {
+                files.intern_suffix(self.path)
+            } else {
+                files.intern(self.path)
+            },
+            line: self.line,
+            column: self.column,
+        }
+    }
+}
+
+/// [`declaration_with_origins`] without interning its file.
+pub(super) fn declared_source<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    units: &Units<'data>,
+    unit: &gimli::Unit<Reader<'data>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
+) -> std::result::Result<Option<DeclaredSource>, DwarfError> {
     // DWARF inherits declaration attributes individually: each of decl_file,
     // decl_line, and decl_column comes from the first DIE in the chain that
     // supplies it. decl_file indexes the line program of the unit that owns
@@ -354,14 +390,9 @@ pub(super) fn declaration_with_origins<'data>(
     let Some(file) = program.header().file(file_index) else {
         return Ok(None);
     };
-    let path = source_path(dwarf, file_unit, program.header(), file)?;
-    let file = if is_type_unit(file_unit) {
-        files.intern_suffix(path)
-    } else {
-        files.intern(path)
-    };
-    Ok(Some(SourceLocation {
-        file,
+    Ok(Some(DeclaredSource {
+        path: source_path(dwarf, file_unit, program.header(), file)?,
+        suffix: is_type_unit(file_unit),
         line,
         column: dies
             .iter()
