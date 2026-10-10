@@ -22,7 +22,7 @@ pub struct StringsBuilder {
 
 /// Rows pooled by their contents' hash. The first row with a hash is found
 /// by it; a later row whose hash collides is found by contents.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct Pooled {
     first: foldhash::HashMap<u64, u32>,
     collided: Vec<u32>,
