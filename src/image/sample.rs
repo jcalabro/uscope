@@ -398,12 +398,12 @@ pub(super) fn sample_packaged() -> Vec<Option<(&'static str, String)>> {
 #[expect(clippy::too_many_lines, reason = "one type of each kind and shape")]
 pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
     use crate::{
-        Accessibility, ArgumentOrigin, ArrayDimension, BaseClass, BaseClassVirtuality, BaseType,
-        BaseTypeEncoding, EnumerationOrigin, Enumerator, GoKind, GoTypeAttributes, IntegerValue,
-        ModuleImageId, NamedTypeRelationship, RecordKind, RecordMember, RecordMemberLayout,
-        ReferenceKind, TypeArgument, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode,
-        TypeReference, Variant, VariantDiscriminant, VariantSelection, VariantSelector,
-        VariantStorageKind,
+        Accessibility, ArgumentOrigin, ArrayDimension, ArrayOrdering, BaseClass,
+        BaseClassVirtuality, BaseType, BaseTypeEncoding, EnumerationOrigin, Enumerator, GoKind,
+        GoTypeAttributes, IntegerValue, ModuleImageId, NamedTypeRelationship, RecordKind,
+        RecordMember, RecordMemberLayout, ReferenceKind, TypeArgument, TypeIdentity, TypeInfo,
+        TypeKind, TypeModifier, TypeNode, TypeReference, Variant, VariantDiscriminant,
+        VariantSelection, VariantSelector, VariantStorageKind,
     };
     let reference = |id| TypeReference {
         image: ModuleImageId::new(0),
@@ -589,6 +589,7 @@ pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
                     },
                 ]
                 .into(),
+                ordering: ArrayOrdering::ColumnMajor,
             },
             None,
         ),

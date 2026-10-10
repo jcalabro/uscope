@@ -129,7 +129,7 @@ contains
     integer(int32), target :: shifted(-1:1)
     integer(int32), target :: grid(2, 3)
     integer(int32), allocatable, target :: heap(:)
-    integer :: i
+    integer :: i, j
     origin = point(3, -4)
     line = segment(point(1, 2), point(5, 6), 9_int8)
     numbers = [10, 20, 30]
@@ -148,8 +148,12 @@ contains
       call truth('records', 'shifted.('//decimal(int(i, int64))//')', 'int', &
                  decimal(int(shifted(i), int64)))
     end do
-    ! uscope does not lay out an array column by column yet.
-    call truth('records', 'grid', 'unsupported', '')
+    do j = 1, 3
+      do i = 1, 2
+        call truth('records', 'grid.('//decimal(int(i, int64))//','//decimal(int(j, int64))//')', &
+                   'int', decimal(int(grid(i, j), int64)))
+      end do
+    end do
     ! Nor an array whose descriptor the program fills at run time.
     call truth('records', 'heap', 'unsupported', '')
     call reached('records')

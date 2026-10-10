@@ -619,6 +619,7 @@ impl DwarfVariableInfo {
             TypeKind::Array {
                 element,
                 dimensions,
+                ..
             } => {
                 let count = dimensions
                     .iter()
@@ -752,6 +753,7 @@ impl Assignment {
             TypeKind::Array {
                 element,
                 dimensions,
+                ..
             } => match dimensions
                 .iter()
                 .try_fold(1_u64, |count, dimension| count.checked_mul(dimension.count))

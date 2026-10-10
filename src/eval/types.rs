@@ -182,6 +182,7 @@ fn program_category(types: &dyn TypeSource, ty: TypeReference) -> Category {
         TypeKind::Array {
             element,
             dimensions,
+            ..
         } => Category::Array {
             element: *element,
             dimensions: Arc::clone(dimensions),

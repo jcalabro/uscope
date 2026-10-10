@@ -786,6 +786,8 @@ pub enum TypeKind {
         element: TypeReference,
         /// Dimensions in source order.
         dimensions: Arc<[ArrayDimension]>,
+        /// Which dimension's elements are adjacent in memory.
+        ordering: ArrayOrdering,
     },
     /// A language slice descriptor with a runtime element count.
     Slice {
@@ -907,6 +909,16 @@ impl SliceWords {
     pub fn span(self) -> u64 {
         u64::from(self.data.max(self.length).max(self.capacity.unwrap_or(0))) + 1
     }
+}
+
+/// How an array of several dimensions lays out its elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArrayOrdering {
+    /// Row by row, the last index varying fastest, as C's arrays are.
+    RowMajor,
+    /// Column by column, the first index varying fastest, as Fortran's
+    /// arrays are.
+    ColumnMajor,
 }
 
 /// One statically known array dimension.

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use foldhash::{HashSet, HashSetExt};
 
-use crate::model::ArrayDimension;
+use crate::model::{ArrayDimension, ArrayOrdering};
 use crate::{
     BaseClass, BaseType, EnumerationOrigin, Enumerator, RecordMember, SliceWords, TypeId, TypeInfo,
     TypeKind, TypeModifier, TypeReference, Variant, VariantDiscriminant, VariantSelection,
@@ -29,6 +29,7 @@ pub(super) enum ValueShape {
     Array {
         element: TypeId,
         dimensions: Arc<[ArrayDimension]>,
+        ordering: ArrayOrdering,
         byte_size: u64,
     },
     Slice {
@@ -334,6 +335,7 @@ fn nested_value_shape(
         TypeKind::Array {
             element,
             dimensions,
+            ordering,
         } => {
             let element_shape = nested_value_shape(types, element.id, depth + 1)?;
             let mut count = 1_u64;
@@ -349,6 +351,7 @@ fn nested_value_shape(
             Ok(ValueShape::Array {
                 element: element.id,
                 dimensions: Arc::clone(dimensions),
+                ordering: *ordering,
                 byte_size,
             })
         }
