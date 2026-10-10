@@ -75,6 +75,36 @@ pub fn qualified_name(mangled: &str) -> Option<String> {
     Some(qualified.to_owned())
 }
 
+/// The name an Ada programmer writes for an entity GNAT named, when its
+/// encoding decodes exactly: scopes joined by `__`, which no Ada identifier
+/// holds, become dots, and an overload's number (`__2`) and a body's mark
+/// (`X`, `Xb`, `Xn`) are dropped. GNAT writes names in lower case and its
+/// other encodings in upper case or with `___`, so any other spelling is
+/// not decoded at all.
+pub fn ada_name(encoded: &str) -> Option<String> {
+    let name = ["Xb", "Xn", "X"]
+        .into_iter()
+        .find_map(|mark| encoded.strip_suffix(mark))
+        .unwrap_or(encoded);
+    let name = name
+        .rsplit_once("__")
+        .filter(|(_, number)| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .map_or(name, |(scoped, _)| scoped);
+    let identifier = |part: &str| {
+        part.starts_with(|first: char| first.is_ascii_lowercase())
+            && !part.ends_with('_')
+            && !part.contains("__")
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    };
+    name.split("__")
+        .all(identifier)
+        .then(|| name.replace("__", "."))
+}
+
 /// A demangled Rust function's path, with no generic arguments and an
 /// inherent method's type unwrapped: v0's
 /// `<tokio::runtime::park::CachedParkThread>::block_on::<F>` and legacy's
@@ -144,7 +174,7 @@ fn split_parameters(name: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{demangle, rust_path, spells};
+    use super::{ada_name, demangle, rust_path, spells};
 
     #[test]
     fn rust_paths_leave_out_generic_arguments_and_inherent_impls_brackets() {
@@ -232,6 +262,43 @@ mod tests {
             ("_ZZZZZZZZ", None),
         ] {
             assert_eq!(demangle(mangled).as_deref(), expected, "{mangled}");
+        }
+    }
+
+    #[test]
+    fn gnat_names_decode_exactly_or_not_at_all() {
+        for (encoded, expected) in [
+            ("values__reached", Some("values.reached")),
+            (
+                "ada__characters__handling__to_upper",
+                Some("ada.characters.handling.to_upper"),
+            ),
+            // An overload's number and a body's mark are not the name's.
+            (
+                "ada__characters__handling__to_upper__2",
+                Some("ada.characters.handling.to_upper"),
+            ),
+            (
+                "ada__exceptions__exception_data__append_info_natXn",
+                Some("ada.exceptions.exception_data.append_info_nat"),
+            ),
+            (
+                "ada__exceptions__exception_data__append_info_exception_name__2Xn",
+                Some("ada.exceptions.exception_data.append_info_exception_name"),
+            ),
+            ("values", Some("values")),
+            // Other encodings, and what no Ada name is, stay as GNAT wrote
+            // them.
+            ("ada__containers__Tcount_typeB", None),
+            ("ada__containers___elabs", None),
+            ("ada__characters__handling__to_string__L_6__T144b___L", None),
+            ("system__secondary_stack__ss_allocate__2__3", None),
+            ("_ada_values", None),
+            ("values__", None),
+            ("values__2", Some("values")),
+            ("main", Some("main")),
+        ] {
+            assert_eq!(ada_name(encoded).as_deref(), expected, "{encoded}");
         }
     }
 

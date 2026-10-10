@@ -2495,6 +2495,12 @@ fn function_name(function: &RawFunction) -> Option<Arc<str>> {
     {
         return Some(qualified.into());
     }
+    // GNAT names its subprograms by their scopes, encoded.
+    if function.language == SourceLanguage::Ada
+        && let Some(decoded) = function.name.as_deref().and_then(crate::demangle::ada_name)
+    {
+        return Some(decoded.into());
+    }
     let name = function.name.clone().or_else(|| {
         function
             .linkage_name

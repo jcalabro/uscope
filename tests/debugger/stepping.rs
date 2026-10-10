@@ -2443,8 +2443,7 @@ async fn nim_steps_into_a_procedure_and_back_to_its_caller() {
     }
 }
 
-/// GNAT's subprograms step and unwind as C's do, named as GNAT encodes
-/// them.
+/// GNAT's subprograms step and unwind as C's do, named as Ada names them.
 #[tokio::test]
 async fn ada_steps_into_a_subprogram_and_back_to_its_caller() {
     for fixture in ["values-ada-o0", "values-ada-o2"] {
@@ -2463,11 +2462,7 @@ async fn ada_steps_into_a_subprogram_and_back_to_its_caller() {
         let entered = scenario
             .operation("Ada callee", scenario.handle().current_location())
             .await;
-        assert_eq!(
-            location_function(&entered),
-            Some("values__add"),
-            "{fixture}"
-        );
+        assert_eq!(location_function(&entered), Some("values.add"), "{fixture}");
         assert_eq!(
             scenario.step_to_stop(StepKind::Out).await,
             StopReason::Step {
