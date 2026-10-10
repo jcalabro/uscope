@@ -52,7 +52,7 @@ uscope.draw(({ cells, columns, generation }, { previous }) => {
   }
   return uscope.picture({
     width: columns * 6, height: rows * 6, caption: `generation ${generation}`,
-    shapes: [uscope.image({ x: 0, y: 0, width: columns * 6, height: rows * 6, pixels, columns, rows })],
+    shapes: [uscope.image({ x: 0, y: 0, width: columns * 6, height: rows * 6, pixels, columns, rows, title: "cells" })],
   });
 });
 ```
@@ -82,16 +82,32 @@ drawings. The number beside Drawings counts the cards.
 - **The link holds the view.** `view=drawings` shows it, and each pinned
   value is `d=PATH` or `d=PATH~NAME` for a chosen renderer, so a link
   shows the same drawings.
-- **A value with several drawings** shows each as a tab of its card.
+- **A value with several drawings** shows each as a tab of its card, and
+  the tab chosen stays chosen at later stops.
 - **Across stops,** a card draws again at each stop the tab shows, and
   hands the renderer what it drew at the stop before as `previous`, so it
-  can mark what changed. While the program runs, the last drawing stays,
-  dimmed, and says which stop it is of.
+  can mark what changed. While the program runs, and until the next stop's
+  drawing is ready, the last drawing stays, dimmed, and says which stop it
+  is of.
+- **The latest stop wins.** When stops come faster than a card draws, as
+  while F10 is held, the card draws one stop at a time, at most once a
+  frame, skipping to the latest, and never replaces a drawing with one of
+  an earlier stop.
 - **Only cards on screen draw.** A card scrolled away draws when it comes
-  back.
+  back. A card draws again when its width changes, or the page's colors
+  do, the system's switch to dark included.
 - **Parts.** A shape with `select` opens that part of the value as a row,
   which can be expanded and watched, and its `title` is its tooltip and
-  accessible name.
+  accessible name. Over a titled image, the tooltip also names the pixel
+  under the pointer: `cells: column 31, row 20`.
+- **Table and Copy CSV.** Table lists every value the drawing's inputs
+  hold, a row each, as `cells[1311]` and `1`, a screenful at a time even
+  for a million. Copy CSV copies them as `path,value` lines. Both write
+  each number exactly: integers whole, and floats as the shortest text
+  that reads back as the same number, an `f32` as an `f32`. Captions
+  round to six digits; titles and the Table never do.
+- **Many shapes.** A picture of more than 2,000 shapes is drawn on a
+  canvas rather than as SVG, with the same tooltips and clicks.
 - **A card that cannot draw says why,** and draws nothing: an input that
   could not be read, with which and why; a renderer that threw, with its
   file, line, and message; one that took longer than 2 seconds, which is
@@ -127,7 +143,9 @@ is 3.
   renderer is not called, and the card says which part and why. A renderer
   never has to tell a real 0 from a missing one.
 - **Pointers stay addresses.** An input that wants what a pointer points
-  to says `*p`, or names a value a view presents.
+  to says `*p`, or names a value a view presents. A value a view
+  presents is what the view presents, even when it is stored as a
+  pointer, as a Go map is.
 - **Bulk data is read at once.** `bytes(PTR, LEN)` is one read of memory,
   and a sequence of numbers that lies in one run of memory, as an array's,
   a `Vec`'s, or a `std::vector`'s elements do, is read at once too. Both
@@ -144,19 +162,28 @@ be `async`. The only global it can use beyond the language and drawing is
 uscope.draw((input, context) => picture)
 
 context.previous   the inputs drawn for this value at the stop before, or null
+context.paths      the part of the drawn value each input is, or null
 context.width      the CSS pixels the card offers; a picture is scaled to fit
 context.theme      "light" or "dark"
 ```
 
+`context.paths` lets a renderer's shapes open the parts they draw
+wherever its inputs come from. An input written as members and indices of
+the value, such as `squares = mailbox`, has the path `"mailbox"`, so
+square 28 selects `${paths.squares}[28]`; the value itself, as `self` or
+as Draw as… hands it over, has `""`; anything else, such as `bytes(…)`,
+`len * 2`, or a string, has null, and has no parts to open.
+
 ```uscope-renderer-example
 // A bar per value, from a zero baseline, with each value in its title.
-uscope.draw(({ values }) => {
+uscope.draw(({ values }, { paths }) => {
   const most = Math.max(1, ...Array.from(values, Math.abs));
   const shapes = Array.from(values, (value, index) =>
     uscope.rect({
       x: index * 22, y: 100 - (Math.max(0, value) / most) * 100,
       width: 20, height: (Math.abs(value) / most) * 100,
-      fill: uscope.theme.series[0], title: `[${index}] = ${value}`, select: `[${index}]`,
+      fill: uscope.theme.series[0], title: `[${index}] = ${value}`,
+      select: paths.values === null ? undefined : `${paths.values}[${index}]`,
     }),
   );
   return uscope.picture({ width: values.length * 22, height: 100, shapes, caption: `${values.length} values` });
@@ -197,9 +224,10 @@ Every shape also takes:
   expression: a renderer can never make the debugger evaluate anything
   else.
 
-A shape with neither a `title` nor a `select` lets the pointer through to
-the shapes beneath it, so a piece drawn on a square leaves the square
-clickable.
+A shape with neither a `title` nor a `select`, in a group with neither,
+lets the pointer through to the shapes beneath it, so a piece drawn on a
+square leaves the square clickable, and marks drawn over a titled image
+leave its pixels named.
 
 ```uscope-renderer-example
 // Every kind of shape, in the page's colors.
@@ -234,7 +262,8 @@ uscope.draw(() => {
 
 ### Helpers
 
-- `uscope.theme` holds the page's colors in the theme it shows: `ink`,
+- `uscope.theme` holds the page's colors in the theme it shows, each
+  `#rrggbb`: `ink`,
   `ink2`, `ink3`, `paper`, `surface`, `line`, `accent`, `changed`,
   `good`, `bad`, and `series`, eight categorical colors in an order
   checked for color-blind readers. A card draws again when the theme
@@ -281,18 +310,18 @@ can name one, and Draw as… offers every one for any value. They are
 ordinary renderers, written against this page's API alone, so each is
 also an example to copy.
 
-| Renderer | Inputs |
-|---|---|
-| `line-plot` | `values`, or `series`, a map of names to values; `x?`, `log?` |
-| `bar-chart` | `values` and `labels?`, or `entries`, a map; `orientation?` (`"horizontal"` or `"vertical"`), `sort?` |
-| `scatter-plot` | `x`, `y`; `group?`, `labels?` |
-| `histogram` | `values`, raw samples, or `counts` and `edges`; `bins?`, `log?` |
-| `box-plot` | `groups`, a map or array of samples or of `{min, q1, median, q3, max}`; `mean?`, `error?`, `error_label?` |
-| `donut-chart` | `values` and `labels?`, or `entries` |
-| `heatmap` | `values` and `columns`, or an array of rows; `row_labels?`, `column_labels?`, `log?` |
-| `flame-graph` | `nodes`, records of `name`, `value`, and `parent`, or `stacks`, folded `a;b;c` text with counts |
-| `bitmap` | `pixels` and `columns`; `format?` (`"gray8"`, `"rgba8"`, `"rgb565"`, `"bits"`) |
-| `bits` | `values`, integers; `columns?`, `origin?` (`"top-left"` or `"bottom-left"`), `labels?` |
+| Renderer | Inputs | Draws |
+|---|---|---|
+| `line-plot` | `values`, or `series`, a map or record of up to 8 names to numbers; `x?`, `log?` | Past one value a pixel column, each column's first, lowest, highest, and last (M4), with a band for its range, so one spike in a million shows. NaN is a gap, ±∞ an arrow. A ghost is the line at the stop before. |
+| `bar-chart` | `values` with `labels?`, or `entries`, a map or record (as `values` may be); `orientation?` (`"horizontal"` or `"vertical"`), `sort?` (`"value"`, `"label"`, or `"none"`) | A map sorted by value, since its order may be random, past 40 entries folding into Other with their count and total; an array in the program's order. A tick marks each bar at the stop before. |
+| `scatter-plot` | `x` and `y`, or `values`, pairs or records of two numbers; `group?`, `labels?` | A dot per point, three groups in hues of their own; past 10,000, one image darker where more points fall. Up to 2,000 points, those that moved trail a line. |
+| `histogram` | `values`, raw samples, or `counts` and `edges`; `bins?`, `log?` | Freedman–Diaconis bins, exact p50, p90, and p99 (type 7), and an outline of the stop before's counts. |
+| `box-plot` | `groups` (or `values`), a map, record, or array of samples or of `{min, q1, median, q3, max}`; `labels?`; `error?`: `"sd"`, `"ci95"`, or numbers with `mean`; `error_label?` | Quartiles (type 7), Tukey whiskers, outliers, error bars beside each box, and a tick at each median of the stop before. |
+| `donut-chart` | `values` with `labels?`, or `entries` (as `values` may be); none negative | The seven largest shares and Other, each titled with its change since the stop before. |
+| `heatmap` | `values` and `columns`, or an array of rows; `row_labels?`, `column_labels?`, `scale?` (`"sequential"` or `"diverging"`), `log?` | Blue to red through gray when the values cross zero, NaN hatched, changed cells outlined; past 10,000 cells, one image of each pixel's largest cell. |
+| `flame-graph` | `nodes`, records of `name`, `value`, and `parent`, or `stacks`, `"a;b;c"` to counts as pairs or a map; `values` for either | An icicle, root on top, each frame as wide as its total, colored by name, with frames whose total changed outlined. |
+| `bitmap` | `pixels` (or `values`) and `columns`, or an array of rows; `format?` (`"gray8"`, `"rgba8"`, `"rgb565"`, `"bits"`) | The image at a whole zoom, sharp, with changed pixels outlined, or tinted when too small to outline. |
+| `bits` | `values`, one integer or up to 4,096; `columns?`, `origin?` (`"top-left"` or `"bottom-left"`), `labels?`, `width?` | Each integer as a grid of its bits, its width from its type, with flipped bits outlined and its value in hexadecimal. |
 
 ## Where renderers come from
 

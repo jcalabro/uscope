@@ -273,6 +273,13 @@ web-shot *PROGRAM: web build-test-programs
     cargo build --quiet --profile test
     cd web && node e2e/shots.ts "$@"
 
+# Times the metrics fixture's drawings with a million samples in headless
+# Chromium, from a stop to its picture, over ROUNDS stops each, with a release
+# build. Not part of the gate: the times depend on the machine.
+web-bench ROUNDS="5": web build-test-programs
+    cargo build --quiet --release
+    cd web && USCOPE_WEB_BINARY="$PWD/../target/release/uscope" USCOPE_CACHE_DIR="$PWD/../target/image-cache" node e2e/bench.ts "{{ROUNDS}}"
+
 # Drives PROGRAM through STEPS in headless Chromium, saving a screenshot after
 # each and printing the page's console: `just web-probe build/test-programs/basic
 # key:F9 key:F5 wait:Stopped`. See web/e2e/probe.ts for the steps.

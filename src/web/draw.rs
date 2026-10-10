@@ -81,24 +81,7 @@ pub async fn draw(handle: &DebuggerHandle, request: &protocol::Draw) -> Result<D
         let inputs = handle
             .visualizer_inputs(Arc::clone(&visualizer.inputs), input_limits())
             .await?;
-        let mut read = Vec::new();
-        for input in inputs.inputs.iter() {
-            let datum = match &input.value {
-                uscope::VisualizerValue::Value(value) => {
-                    walk.value(value.type_info.as_ref(), &value.state, &input.name, 0)
-                        .await
-                }
-                uscope::VisualizerValue::Bytes(bytes) => Ok(walk.bytes(bytes)),
-                uscope::VisualizerValue::Text(text) => Ok(Datum::Text {
-                    s: text.to_string(),
-                }),
-                uscope::VisualizerValue::Problem(problem) => {
-                    Err(format!("`{}`: {problem}", input.name))
-                }
-            };
-            read.push((input.name.to_string(), datum));
-        }
-        (Arc::clone(&visualizer.renderer), read)
+        (Arc::clone(&visualizer.renderer), walk.inputs(&inputs).await)
     } else {
         let renderer = handle
             .renderers()
@@ -115,13 +98,17 @@ pub async fn draw(handle: &DebuggerHandle, request: &protocol::Draw) -> Result<D
         let datum = walk
             .value(value.type_info.as_ref(), &value.state, "values", 0)
             .await;
-        (renderer, vec![("values".to_owned(), datum)])
+        // As `visualize "NAME" { values = self }`.
+        (
+            renderer,
+            vec![("values".to_owned(), datum, Some(String::new()))],
+        )
     };
     let mut problem = None;
     let mut drawn = Vec::new();
-    for (name, datum) in inputs {
+    for (name, datum, path) in inputs {
         match datum {
-            Ok(value) => drawn.push(DrawInput { name, value }),
+            Ok(value) => drawn.push(DrawInput { name, value, path }),
             Err(reason) => {
                 problem = Some(reason);
                 break;
@@ -253,6 +240,36 @@ impl Walk<'_> {
         Ok(())
     }
 
+    /// A view's inputs, each by name, as read or why not, with the part of
+    /// the drawn value it is.
+    async fn inputs(
+        &mut self,
+        inputs: &uscope::VisualizerInputs,
+    ) -> Vec<(String, Walked, Option<String>)> {
+        let mut read = Vec::new();
+        for input in inputs.inputs.iter() {
+            let datum = match &input.value {
+                uscope::VisualizerValue::Value(value) => {
+                    self.value(value.type_info.as_ref(), &value.state, &input.name, 0)
+                        .await
+                }
+                uscope::VisualizerValue::Bytes(bytes) => Ok(self.bytes(bytes)),
+                uscope::VisualizerValue::Text(text) => Ok(Datum::Text {
+                    s: text.to_string(),
+                }),
+                uscope::VisualizerValue::Problem(problem) => {
+                    Err(format!("`{}`: {problem}", input.name))
+                }
+            };
+            read.push((
+                input.name.to_string(),
+                datum,
+                input.path.as_deref().map(str::to_owned),
+            ));
+        }
+        read
+    }
+
     /// One value, as its type decides.
     fn value<'b>(
         &'b mut self,
@@ -294,23 +311,11 @@ impl Walk<'_> {
                     }
                 };
             }
-            // Pointers stay addresses: the walk follows none.
-            match raw {
-                VariableValue::Address(address) => {
-                    return Ok(Datum::Big {
-                        big: address.address.get().to_string(),
-                    });
-                }
-                VariableValue::Function { code, .. } => {
-                    return Ok(Datum::Big {
-                        big: code.map_or(0, uscope::VirtualAddress::get).to_string(),
-                    });
-                }
-                VariableValue::Variant { active, .. } => {
-                    return self.sum(active.as_deref(), children, path, depth).await;
-                }
-                _ => {}
+            if let VariableValue::Variant { active, .. } = raw {
+                return self.sum(active.as_deref(), children, path, depth).await;
             }
+            // A view decides first: a Go map or a smart pointer is stored as an
+            // address but presents what it holds.
             if let Some(presentation) = presentation {
                 match presentation.shape {
                     PresentedShape::Raw => {
@@ -347,6 +352,20 @@ impl Walk<'_> {
                     }
                     _ => return Err(format!("`{path}`: a value of this kind cannot be drawn")),
                 }
+            }
+            // Pointers no view presents stay addresses: the walk follows none.
+            match raw {
+                VariableValue::Address(address) => {
+                    return Ok(Datum::Big {
+                        big: address.address.get().to_string(),
+                    });
+                }
+                VariableValue::Function { code, .. } => {
+                    return Ok(Datum::Big {
+                        big: code.map_or(0, uscope::VirtualAddress::get).to_string(),
+                    });
+                }
+                _ => {}
             }
             self.stored(type_info, raw, children, path, depth).await
         })

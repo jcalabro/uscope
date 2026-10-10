@@ -10,11 +10,16 @@ const out = path.join(root, "target", "web-shots");
 const program = process.argv[2] ?? fixture("kvstore");
 const widths = [1440, 1024, 720];
 
-async function shoot(page: Page, name: string): Promise<void> {
+/** Shoots each scheme at each width. Drawings draw again in a new scheme's
+ * colors and at a new width, so a page with them waits `settle` ms. */
+async function shoot(page: Page, name: string, settle = 0): Promise<void> {
   for (const scheme of ["dark", "light"] as const) {
     await page.emulateMedia({ colorScheme: scheme });
     for (const width of widths) {
       await page.setViewportSize({ width, height: 800 });
+      if (settle > 0) {
+        await page.waitForTimeout(settle);
+      }
       await page.screenshot({ path: path.join(out, `${name}-${scheme}-${width}.png`) });
     }
   }
@@ -76,8 +81,38 @@ try {
   await page.keyboard.press("Shift+F5");
   await status.getByText("Exited").waitFor();
   await shoot(page, "8-exited");
+
+  await shootDrawings(page);
 } finally {
   await browser.close();
   await server.stop();
+}
+
+/** The Drawings view of the metrics fixture after two ticks, so each chart
+ * shows the stop before. */
+async function shootDrawings(page: Page): Promise<void> {
+  const views = path.join(root, "tests/fixtures/c/metrics/metrics.views");
+  const metrics = await startUscope(["--views", views, fixture("metrics")], "");
+  try {
+    await page.setViewportSize({ width: 1440, height: 800 });
+    await page.goto(metrics.link);
+    await page.waitForURL(/\/s\//);
+    const adder = page.getByRole("textbox", { name: "Add a breakpoint" });
+    await adder.fill("metrics.c:119");
+    await adder.press("Enter");
+    await adder.press("Escape");
+    for (const stop of ["#2", "#3"]) {
+      await page.keyboard.press("F5");
+      await page.getByTestId("stops").getByText(stop).waitFor();
+    }
+    await page.keyboard.press("Alt+v");
+    const board = page.getByRole("region", { name: "Drawing of m", exact: true });
+    await board.locator(".drawing-caption").waitFor();
+    await shoot(page, "9-drawings", 400);
+    await board.getByRole("button", { name: "heatmap", exact: true }).click();
+    await shoot(page, "10-drawings-heatmap", 400);
+  } finally {
+    await metrics.stop();
+  }
 }
 console.log(`screenshots in ${out}`);

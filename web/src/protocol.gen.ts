@@ -777,7 +777,11 @@ problem: string | null,
  */
 bytes: number, };
 
-export type DrawInput = { name: string, value: Datum, };
+export type DrawInput = { name: string, value: Datum, 
+/**
+ * The part of the drawn value the input is, when it is one.
+ */
+path: string | null, };
 
 export type Datum = { "t": "bool", b: boolean, } | { "t": "int", i: number, } | { "t": "big", big: string, } | { "t": "float", f: string, } | { "t": "text", s: string, } | { "t": "enum", name: string | null, value: Datum, } | { "t": "sum", variant: string, value: Datum | null, } | { "t": "record", members: Array<[string, Datum]>, } | { "t": "list", items: Array<Datum>, } | { "t": "numbers", kind: NumberKind, offset: number, count: number, } | { "t": "bytes", offset: number, length: number, } | { "t": "entries", entries: Array<[Datum, Datum]>, } | { "t": "null" };
 

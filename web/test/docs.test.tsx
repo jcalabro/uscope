@@ -2,50 +2,21 @@
 // returns a picture the page accepts, and the tutorial's files are the
 // fixture's, so the reference cannot drift from what uscope does.
 
-import { afterEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import { validate } from "../src/visualize/picture";
-import workerSource from "../src/visualize/worker.js?raw";
-import { palette } from "./palette";
+import { run as runRenderer } from "./renderer";
 
 const docs = await commands.readFile("../docs/visualizers.md");
 
-const workers: Worker[] = [];
-afterEach(() => {
-  for (const worker of workers.splice(0)) {
-    worker.terminate();
-  }
-});
-
-/** What `source` returns for `input`: the worker's answer to one draw. */
-async function run(source: string, input: unknown): Promise<Record<string, unknown>> {
-  const url = URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" }));
-  const worker = new Worker(url);
-  workers.push(worker);
-  const answers: Record<string, unknown>[] = [];
-  let wake = () => {};
-  worker.addEventListener("message", (event) => {
-    answers.push(event.data);
-    wake();
+/** What `source` returns for `input`, which is also its previous input, as
+ * if each input were the value's member of the same name. */
+function run(source: string, input: unknown): Promise<Record<string, unknown>> {
+  return runRenderer(source, input, {
+    previous: input,
+    paths: Object.fromEntries(Object.keys(input as object).map((name) => [name, name])),
+    width: 600,
   });
-  const next = async () => {
-    while (answers.length === 0) {
-      await new Promise<void>((resolve) => {
-        wake = resolve;
-      });
-    }
-    return answers.shift() as Record<string, unknown>;
-  };
-  worker.postMessage({ type: "load", source, name: "example" });
-  const loaded = await next();
-  expect(loaded.error, JSON.stringify(loaded.error)).toBeNull();
-  worker.postMessage({
-    type: "draw",
-    id: 1,
-    input,
-    context: { previous: input, width: 600, theme: "light", palette },
-  });
-  return next();
 }
 
 const examples = [

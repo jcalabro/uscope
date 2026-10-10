@@ -11,7 +11,7 @@ import { buildSvg } from "../src/visualize/svg";
 import workerSource from "../src/visualize/worker.js?raw";
 import { palette } from "./palette";
 
-const context: DrawContext = { previous: null, width: 400, theme: "light", palette };
+const context: DrawContext = { previous: null, paths: {}, width: 400, theme: "light", palette };
 
 /** A renderer that draws one text: the JSON of what `body` returns. */
 const reporting = (body: string) => `
@@ -264,9 +264,9 @@ describe("the worker", () => {
     const answer = await probe.draw({});
     const picture = validate(answer.picture);
     expect(picture.shapes[0]).toMatchObject({ type: "image" });
-    const shape = picture.shapes[0] as { bitmap: ImageBitmap };
-    expect(shape.bitmap).toBeInstanceOf(ImageBitmap);
-    expect([shape.bitmap.width, shape.bitmap.height]).toEqual([2, 1]);
+    const shape = picture.shapes[0] as { rendered: ImageBitmap };
+    expect(shape.rendered).toBeInstanceOf(ImageBitmap);
+    expect([shape.rendered.width, shape.rendered.height]).toEqual([2, 1]);
   });
 });
 

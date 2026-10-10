@@ -277,7 +277,7 @@
     if (!(canvas instanceof OffscreenCanvas)) {
       throw new TypeError("uscope.image's canvas must be an OffscreenCanvas");
     }
-    return { ...rest, type: "image", bitmap: canvas.transferToImageBitmap() };
+    return { ...rest, type: "image", rendered: canvas.transferToImageBitmap() };
   }
 
   const uscope = freeze({

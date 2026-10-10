@@ -1245,6 +1245,8 @@ pub struct Drawing {
 pub struct DrawInput {
     pub name: String,
     pub value: Datum,
+    /// The part of the drawn value the input is, when it is one.
+    pub path: Option<String>,
 }
 
 /// A value as a renderer receives it, decided by its type alone.

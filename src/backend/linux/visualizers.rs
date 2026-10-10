@@ -51,7 +51,7 @@ impl<P: InspectionOps> Controller<P> {
         let mut read = 0_u64;
         let inputs = inputs
             .into_iter()
-            .map(|(name, input)| {
+            .map(|(name, input, path)| {
                 let value = match input {
                     Input::Value(value) => VisualizerValue::Value(value),
                     Input::Text(text) => VisualizerValue::Text(text),
@@ -62,7 +62,7 @@ impl<P: InspectionOps> Controller<P> {
                         }
                     }
                 };
-                VisualizerInput { name, value }
+                VisualizerInput { name, value, path }
             })
             .collect();
         Ok(VisualizerInputs {

@@ -2373,14 +2373,30 @@ kbd {
   background: var(--surface);
 }
 
+/* A narrow card wraps its header's end onto a line of its own rather than
+ * squeezing the tabs, which then never move as the header fills in, and
+ * wraps tabs that do not fit, each whole. */
 .drawing-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 4px 10px;
   min-height: 30px;
-  padding: 0 8px 0 10px;
+  padding: 3px 8px 3px 10px;
   border-bottom: 1px solid var(--line);
   font-size: 12px;
+}
+
+.drawing-head .segmented {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
+  margin-left: 0;
+}
+
+.drawing-head .segmented button {
+  flex: none;
+  white-space: nowrap;
 }
 
 .drawing-path {
@@ -2408,11 +2424,59 @@ kbd {
   overflow: hidden;
 }
 
+.picture-holder {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto;
+}
+
 .drawing-body svg {
   display: block;
   max-width: 100%;
   height: auto;
-  margin: 0 auto;
+}
+
+.drawing-tip {
+  position: absolute;
+  z-index: 2;
+  max-width: 320px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--ink);
+  color: var(--paper);
+  font: 11.5px / 16px var(--mono);
+  white-space: pre-wrap;
+  pointer-events: none;
+}
+
+.drawing-table {
+  overflow: auto;
+  border-top: 1px solid var(--line);
+}
+
+.drawing-table table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font: 12px var(--mono);
+}
+
+.drawing-table th {
+  position: sticky;
+  top: 0;
+  height: 22px;
+  padding: 0 10px;
+  background: var(--surface);
+  color: var(--ink-3);
+  font-weight: normal;
+  text-align: left;
+}
+
+.drawing-table td {
+  overflow: hidden;
+  padding: 0 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .drawing-body .selectable {

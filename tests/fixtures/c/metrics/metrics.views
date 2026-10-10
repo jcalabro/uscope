@@ -1,0 +1,36 @@
+uscope-views 1
+
+# A run of doubles at a pointer, read at once.
+view c samples {
+    show sequence(count) for i in range(count) => data[i]
+}
+
+# A server's metrics, drawn by the built-in renderers.
+extend c metrics {
+    visualize "line-plot" {
+        values = cpu
+    }
+    visualize "histogram" {
+        values = latency
+    }
+    visualize "box-plot" {
+        groups = endpoints
+        labels = endpoint_names
+        error = "sd"
+    }
+    visualize "scatter-plot" {
+        x = sizes
+        y = times
+    }
+    visualize "heatmap" {
+        values = misses
+        row_labels = core_names
+    }
+    visualize "bitmap" {
+        pixels = bytes(&framebuffer[0][0], sizeof(framebuffer))
+        columns = 64
+    }
+    visualize "bits" {
+        values = flags
+    }
+}
