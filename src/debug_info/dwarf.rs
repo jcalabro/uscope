@@ -1194,18 +1194,33 @@ fn load_image(
     let (variables, unwind_and_symbols) = rayon::join(
         || {
             let _phase = crate::span!("variables");
-            variables::load_variable_info(
-                &dwarf,
-                &catalog,
-                target,
-                // The module's identifier is its binding's, not the image's.
-                crate::ModuleImageId::new(0),
-                variables::CodeMetadata {
-                    instance_ids: &function_metadata.instance_ids,
-                },
-                &mut files,
-                limits.budget(input),
-            )
+            let read = |files: &mut Files, locals| {
+                variables::load_variable_info(
+                    &dwarf,
+                    &catalog,
+                    target,
+                    // The module's identifier is its binding's, not the image's.
+                    crate::ModuleImageId::new(0),
+                    variables::CodeMetadata {
+                        instance_ids: &function_metadata.instance_ids,
+                    },
+                    files,
+                    locals,
+                    limits.budget(input),
+                )
+            };
+            let known = files.paths().len();
+            match read(&mut files, variables::Locals::Read) {
+                // Locals are most of what a large program's debug
+                // information describes, and the rest may fit without them.
+                Err(error @ DwarfError::Budget { .. }) => {
+                    let _phase = crate::span!("variables.without_locals");
+                    files.truncate(known);
+                    read(&mut files, variables::Locals::LeftOut)
+                        .map(|variables| (variables, Some(error)))
+                }
+                read => read.map(|variables| (variables, None)),
+            }
         },
         || {
             let _phase = crate::span!("unwind_and_symbols");
@@ -1225,8 +1240,11 @@ fn load_image(
         },
     );
     // The variables' failure is reported first, as when they were read first.
-    let mut variables =
+    let (mut variables, locals_left_out) =
         variables.map_err(|error| error.within(|| "its variables and types".to_owned()))?;
+    let locals_left_out = locals_left_out.map(|error| -> Arc<str> {
+        format!("its locals and parameters were left out, as {error}").into()
+    });
     let (unwind, mut symbols) = unwind_and_symbols?;
     for (instance, generics) in std::mem::take(&mut variables.function_generics) {
         if let Some(function) = function_metadata
@@ -1311,12 +1329,19 @@ fn load_image(
             thread_locals: super::elf::load_thread_locals(&object),
             debug_information: match dwarf_use {
                 DwarfUse::Unusable(reason) => crate::DebugInformation::Unusable { reason },
-                DwarfUse::Read => match split_units(&dwarf, &catalog)? {
-                    Some(reason) => crate::DebugInformation::Incomplete { reason },
-                    None if catalog.units.is_empty() => crate::DebugInformation::Absent,
-                    None => crate::DebugInformation::Loaded,
+                DwarfUse::Read => match (split_units(&dwarf, &catalog)?, &locals_left_out) {
+                    (Some(split), Some(locals)) => crate::DebugInformation::Incomplete {
+                        reason: format!("{locals}; and {split}").into(),
+                    },
+                    (Some(reason), None) => crate::DebugInformation::Incomplete { reason },
+                    (None, Some(reason)) => crate::DebugInformation::Incomplete {
+                        reason: Arc::clone(reason),
+                    },
+                    (None, None) if catalog.units.is_empty() => crate::DebugInformation::Absent,
+                    (None, None) => crate::DebugInformation::Loaded,
                 },
             },
+            locals_left_out,
             debug_file: match separate {
                 Separate::None => None,
                 Separate::Used(file) => Some(crate::DebugFile::Used(Arc::new(file.path.clone()))),
@@ -4116,6 +4141,102 @@ mod tests {
         assert_eq!(
             within.image.debug_information(),
             crate::DebugInformation::Loaded
+        );
+    }
+
+    /// Debug information whose locals would take it past its budget loads
+    /// without them, keeping its functions, lines, globals, and the
+    /// coroutines async bodies run, and says why it has no locals.
+    #[test]
+    fn a_load_past_its_budget_leaves_its_locals_out_and_keeps_the_rest() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("build/test-programs/tokio-std-async-o0");
+        let data = fs::read(&path).expect("run `just build-test-programs`");
+        let load = |floor| {
+            load_debug_info(
+                &path,
+                &data,
+                crate::ModuleImageId::new(0),
+                &super::super::DebugFileSearch::default(),
+                LoadLimits {
+                    per_input_byte: 0,
+                    floor,
+                },
+                None,
+            )
+            .expect("a load")
+            .0
+        };
+        let full = load(u64::MAX);
+        assert_eq!(
+            full.image.debug_information(),
+            crate::DebugInformation::Loaded
+        );
+        // A budget too small for the locals but large enough for the rest.
+        let (mut small, mut large) = (0, 1 << 32);
+        let partial = loop {
+            assert!(small + 1 < large, "no budget leaves out only the locals");
+            let floor = small + (large - small) / 2;
+            let info = load(floor);
+            match info.image.debug_information() {
+                crate::DebugInformation::Loaded => large = floor,
+                crate::DebugInformation::Unusable { .. } => small = floor,
+                _ => break info,
+            }
+        };
+        let crate::DebugInformation::Incomplete { reason } = partial.image.debug_information()
+        else {
+            panic!("{:?}", partial.image.debug_information());
+        };
+        assert!(
+            reason.starts_with("its locals and parameters were left out, as the debug information needs more than its load budget of "),
+            "{reason}"
+        );
+        assert_eq!(partial.image.locals_left_out(), Some(reason.clone()));
+        assert_eq!(full.image.locals_left_out(), None);
+        let coroutines = |info: &DebugInfo| {
+            info.image
+                .functions()
+                .filter(|function| function.coroutine().is_some())
+                .count()
+        };
+        assert_ne!(coroutines(&full), 0);
+        assert_eq!(coroutines(&partial), coroutines(&full));
+        assert_eq!(
+            partial.image.functions().len(),
+            full.image.functions().len()
+        );
+        assert_eq!(
+            partial.image.statement_rows().count(),
+            full.image.statement_rows().count()
+        );
+        assert_ne!(partial.image.globals().len(), 0);
+        assert_eq!(partial.image.globals().len(), full.image.globals().len());
+        // A frame says why it shows no locals, rather than seeming to have
+        // none.
+        let run = full
+            .image
+            .functions_named("run")
+            .find(|function| {
+                function
+                    .linkage_name()
+                    .is_some_and(|name| name.contains("std_async"))
+            })
+            .and_then(|function| function.instances().next())
+            .expect("the fixture's run");
+        let address = run.ranges().next().expect("run's code").start;
+        let line = |info: &DebugInfo| info.image.source_location(address).map(|at| at.line);
+        assert!(line(&full).is_some());
+        assert_eq!(line(&partial), line(&full));
+        let visible = |info: &DebugInfo| info.variables.visible_object(address, None, "tasks");
+        assert!(visible(&full).is_ok(), "{:?}", visible(&full).err());
+        assert!(
+            matches!(
+                visible(&partial),
+                Err(crate::Error::LocalsLeftOut(ref why)) if *why == reason
+            ),
+            "{:?}",
+            visible(&partial)
         );
     }
 

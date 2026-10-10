@@ -207,7 +207,8 @@ fn the_schema_is_the_records_layout() {
             address_start,
             address_end,
             dwarf_reason,
-            dwarf
+            dwarf,
+            locals_reason
         ]
     );
     check!(
@@ -563,7 +564,7 @@ fn the_schema_is_the_records_layout() {
     // A change to any record changes this; bump the format with it.
     assert_eq!(
         schema::layout_fingerprint(),
-        0xb725_47a4_46d4_96d8,
+        0x9d76_e612_8220_067d,
         "the layout changed:\n{}",
         schema::schema_text()
     );
@@ -1929,10 +1930,15 @@ fn facts_read_back_with_thread_locals_by_name() {
             reason: "a unit is in a split DWARF file".into(),
         }
     );
+    assert_eq!(
+        view.locals_left_out().as_deref(),
+        Some("they exceed the budget")
+    );
     assert_eq!(image.bytes(TableKind::EmbeddedViews), b"views");
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "one case for each check")]
 fn validation_rejects_facts_that_disagree() {
     let facts = |change: fn(&mut [FactsRecord])| tampered(TableKind::Facts, change);
     let local = |change: fn(&mut [ThreadLocalRecord])| tampered(TableKind::ThreadLocals, change);
@@ -1990,6 +1996,16 @@ fn validation_rejects_facts_that_disagree() {
         (
             "a loaded DWARF's reason",
             facts(|f| f[0].dwarf = super::facts::DWARF_LOADED),
+            "facts are malformed",
+        ),
+        (
+            "locals left out without a reason",
+            facts(|f| f[0].locals_reason = NONE.into()),
+            "facts are malformed",
+        ),
+        (
+            "a reason for locals that were read",
+            facts(|f| f[0].flags &= !super::facts::fact_flags::LOCALS_LEFT_OUT),
             "facts are malformed",
         ),
         (

@@ -1226,6 +1226,7 @@ pub(super) fn seal(tables: &LineTables, files: &lines::Files) -> Result<Image, I
             debug_information: &crate::DebugInformation::Incomplete {
                 reason: "a unit is in a split DWARF file".into(),
             },
+            locals_left_out: Some("they exceed the budget"),
         },
     )
     .unwrap();

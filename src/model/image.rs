@@ -69,6 +69,9 @@ pub struct ModuleMetadata {
     pub debug_file: Option<crate::DebugFile>,
     /// What became of the image's DWARF.
     pub debug_information: crate::DebugInformation,
+    /// Why the DWARF's locals and parameters were left out, when they
+    /// were.
+    pub locals_left_out: Option<Arc<str>>,
     /// The bytes of the image's `.debug_uscope_views` section, which holds
     /// views for its own types; empty when it has none.
     pub embedded_views: Vec<u8>,
@@ -406,6 +409,7 @@ fn encode_strings_before_types<'a>(
             thread_locals: &metadata.thread_locals,
             debug_file: metadata.debug_file.as_ref(),
             debug_information: &metadata.debug_information,
+            locals_left_out: metadata.locals_left_out.as_deref(),
         },
     )
     .expect("the loader's facts fit an image");
@@ -622,6 +626,13 @@ impl ModuleImage {
     #[must_use]
     pub fn debug_information(&self) -> crate::DebugInformation {
         self.facts().debug_information()
+    }
+
+    /// Why the image's DWARF describes no locals or parameters of its
+    /// functions, when they were left out to load the rest.
+    #[must_use]
+    pub fn locals_left_out(&self) -> Option<Arc<str>> {
+        self.facts().locals_left_out()
     }
 
     /// The views the image carries for its own types.
