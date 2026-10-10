@@ -1,7 +1,8 @@
 # Visualizers
 
 A visualizer draws a value in the web page, `uscope web`: a chess position
-as a board, a framebuffer as an image, samples as a plot. A view says which
+as a board, a framebuffer as an image, samples as a plot, a mesh as a
+model you can turn. A view says which
 of a value's data the drawing needs, with `visualize` (`docs/views.md`),
 and a **renderer**, a small JavaScript file, turns that data into a
 picture. The page runs the renderer in a sandbox, checks the picture, and
@@ -113,6 +114,12 @@ drawings. The number beside Drawings counts the cards.
   file, line, and message; one that took longer than 2 seconds, which is
   stopped; a picture the page refuses, with which shape and why; and a
   renderer nobody provides.
+- **Live drawings,** such as a mesh, draw on a canvas that follows the
+  pointer while the card is on screen (see Live renderers). Clicking the
+  canvas gives it the keys, all but the debugger's function keys, and
+  Escape gives them back. A live renderer that stops answering for 2
+  seconds, or whose WebGL context is lost, is stopped, and its card
+  offers to restart it.
 
 ## Inputs
 
@@ -153,9 +160,9 @@ is 3.
 
 ## Renderers
 
-A renderer is one script that calls `uscope.draw` once with a function.
-The function gets the inputs and a context, and returns a picture; it may
-be `async`. The only global it can use beyond the language and drawing is
+A renderer is one script that calls `uscope.draw` once with a function,
+or `uscope.live` for a live drawing (see Live renderers). The function
+gets the inputs and a context, and returns a picture; it may be `async`. The only global it can use beyond the language and drawing is
 `uscope`.
 
 ```text
@@ -293,8 +300,8 @@ uscope.draw(({ cells }, { previous }) => {
 
 The page names a renderer's own file and line when it fails, in Chromium
 and Firefox alike: a thrown error or a rejected promise shows as
-`life.js:12:5: TypeError: …`. A renderer that does not parse, or never
-calls `uscope.draw`, says so. A picture the page cannot show exactly as
+`life.js:12:5: TypeError: …`. A renderer that does not parse, or calls
+neither `uscope.draw` nor `uscope.live`, says so. A picture the page cannot show exactly as
 described is refused whole, naming the first shape at fault, such as
 `shape 3 (rect): fill is not a color`: unknown properties, numbers that
 are not finite, colors that are not colors, path data outside SVG's
@@ -303,9 +310,97 @@ grammar, and pictures over the limits below.
 To have an editor check a renderer, start it with `// @ts-check` and give
 the editor `sdk/web/uscope-visualizer.d.ts`, which declares `uscope`.
 
+## Live renderers
+
+A picture is drawn once a stop. A **live** renderer instead keeps a
+canvas of its own while its card is on screen, and draws into it whenever
+it asks to: a model to turn, a level to fly through, bones to inspect. It
+calls `uscope.live` in place of `uscope.draw`, with a function that gets
+the canvas, an `OffscreenCanvas` sized to the card in device pixels, the
+first stop's inputs, and a context, and returns what it does next:
+
+```text
+uscope.live((canvas, input, context) => ({ frame, update, pointer, key, resize }))
+
+context            previous, paths, and theme, as a picture's, and width and
+                   height, the canvas's size in CSS pixels
+frame(time)        draw; the page shows the canvas when it returns
+update(input, context)   a new stop's inputs; a frame follows
+pointer(event)     {type, x, y, dx, dy, buttons, wheel, shift, ctrl, alt}, in
+                   the canvas's pixels; type is "down", "move", "up", "wheel",
+                   or "leave", and a wheel turned down is positive
+key(event)         {key, shift, ctrl, alt}, while the canvas has focus
+resize(width, height)    the canvas's new size in device pixels; a frame follows
+
+uscope.redraw()          ask for one more frame, as after a drag
+uscope.animate(on)       ask for a frame every display frame, or stop asking
+uscope.caption(text)     the card's caption
+uscope.hint(text)        the tooltip beside the pointer, or none with null
+uscope.select(path)      open a part of the value, as a shape's select does
+```
+
+Each function is optional, and each may be `async`. The canvas takes
+`getContext("webgl2")` or `getContext("2d")`; WebGPU is not offered.
+
+- **The page drives frames.** It calls `frame` from its own animation
+  frame, one at a time, only after the renderer starts, gets a new stop,
+  or is resized, after `uscope.redraw()`, and every frame while
+  `uscope.animate(true)` holds, and never while the card is off screen or
+  the tab hidden. Each frame reaches the page as an `ImageBitmap`, only
+  pixels.
+- **One worker for as long as the card is on screen.** A new stop calls
+  `update` in the same worker, so a camera stays where it was. Scrolling
+  the card away, closing the view, or switching programs ends the worker;
+  scrolling back starts a new one with the inputs of then.
+- **At most four run at once** in a tab; later cards wait for one to
+  leave the screen.
+- **A watchdog.** The page asks each live worker every second whether it
+  still answers, once its functions return. One that does not within 2
+  seconds, looping or awaiting what never settles, is ended, as is one
+  that throws or loses its WebGL context, and its card says why and
+  offers Restart.
+- Headless Firefox has no WebGL at all, so a WebGL renderer fails there
+  with its own message, as `mesh` says WebGL is unavailable.
+
+```uscope-live-example
+// A bar per value that follows the pointer: the bar under it is lit,
+// and named beside it.
+uscope.live((canvas, { values }) => {
+  const draw = canvas.getContext("2d");
+  let shown = values;
+  let lit = -1;
+  const width = () => canvas.width / Math.max(1, shown.length);
+  return {
+    frame() {
+      draw.fillStyle = uscope.theme.surface;
+      draw.fillRect(0, 0, canvas.width, canvas.height);
+      const most = Math.max(1, ...Array.from(shown, Math.abs));
+      shown.forEach((value, index) => {
+        const height = (Math.abs(value) / most) * canvas.height;
+        draw.fillStyle = index === lit ? uscope.theme.accent : uscope.theme.series[0];
+        draw.fillRect(index * width(), canvas.height - height, width() - 2, height);
+      });
+    },
+    update(next) {
+      shown = next.values;
+    },
+    pointer({ type, x }) {
+      const at = type === "leave" ? -1 : Math.floor(x / width());
+      if (at !== lit) {
+        lit = at;
+        uscope.hint(at >= 0 && at < shown.length ? `[${at}] = ${shown[at]}` : null);
+        uscope.redraw();
+      }
+    },
+  };
+});
+---
+({ values: new Float64Array([3, 1, 4, 1, 5]) })
+```
+
 ## Built-in renderers
 
-uscope builds in ten renderers, in `views/visualizers/`. Any `visualize`
+uscope builds in eleven renderers, in `views/visualizers/`. Any `visualize`
 can name one, and Draw as… offers every one for any value. They are
 ordinary renderers, written against this page's API alone, so each is
 also an example to copy.
@@ -322,6 +417,26 @@ also an example to copy.
 | `flame-graph` | `nodes`, records of `name`, `value`, and `parent`, or `stacks`, `"a;b;c"` to counts as pairs or a map; `values` for either | An icicle, root on top, each frame as wide as its total, colored by name, with frames whose total changed outlined. |
 | `bitmap` | `pixels` (or `values`) and `columns`, or an array of rows; `format?` (`"gray8"`, `"rgba8"`, `"rgb565"`, `"bits"`) | The image at a whole zoom, sharp, with changed pixels outlined, or tinted when too small to outline. |
 | `bits` | `values`, one integer or up to 4,096; `columns?`, `origin?` (`"top-left"` or `"bottom-left"`), `labels?`, `width?` | Each integer as a grid of its bits, its width from its type, with flipped bits outlined and its value in hexadecimal. |
+| `mesh` (live) | `vertices` (bytes), `stride`, `position`; `normal?`, `color?` (offsets in a vertex), `indices?` (bytes) with `index_size?` (2 or 4), `primitive?` (`"triangles"`, `"lines"`, `"points"`), `transform?` (16 numbers, column-major), `up?` (`"y"` or `"z"`) | A model in WebGL2, lit from the eye, so flipped normals show dark, or shaded by its faces without normals. Drag turns it, the wheel zooms, and W shows its wireframe; hover names the nearest vertex. A position that is not finite, or that its transform carries past a float's range, or an index past the last vertex, is named in the caption and nothing is drawn. |
+
+`mesh` reads a mesh where the program keeps it, with no JavaScript of
+your own. For a C++ engine's `std::vector<Vertex>` and indices:
+
+```text
+extend c++ engine::Mesh {
+    visualize "mesh" {
+        vertices = bytes(&vertices[0], len(vertices) * sizeof(engine::Vertex))
+        stride = sizeof(engine::Vertex)
+        position = offsetof(engine::Vertex, position)
+        normal = offsetof(engine::Vertex, normal)
+        indices = bytes(&indices[0], len(indices) * 4)
+        index_size = 4
+    }
+}
+```
+
+Only memory the process holds can be drawn: a mesh uploaded to the GPU
+and freed exists only there, so draw the copy the loader keeps.
 
 ## Where renderers come from
 
@@ -353,7 +468,11 @@ before it runs the renderer. So a renderer cannot:
 - reach the debugger, read memory, or ask for any value beyond its inputs;
 - read the page, its storage, or other tabs, or run code in the page;
 - make the debugger evaluate anything: `select` is a path;
-- hang the page: a draw that takes longer than 2 seconds is stopped.
+- hang the page: a draw that takes longer than 2 seconds is stopped, and
+  so is a live renderer that stops answering for 2 seconds.
+
+A live renderer is no different: its WebGL loads nothing, events reach it
+as numbers and flags, and its frames reach the page as pixels alone.
 
 What it can do is draw a misleading picture of data you are already
 looking at; each card names its renderer and where it came from.
@@ -365,7 +484,9 @@ looking at; each card names its renderer and where it came from.
 | A renderer | 256 KiB |
 | A `visualize` | 64 inputs |
 | A drawing's inputs | 65,536 values, nested 16 deep |
-| `bytes(PTR, LEN)` | 16 MiB each, 64 MiB for one drawing |
+| `bytes(PTR, LEN)` and numbers read at once | 64 MiB for one drawing |
 | Time to draw | 2 seconds |
 | A picture | 100,000 shapes, groups nested 32 deep, 4,096 characters of text each, 16 Mpx of images, 2,000,000 points |
 | Draws at once | 4 per tab |
+| Live renderers | 4 at once per tab, only on screen; ended after 2 seconds without an answer |
+| A live canvas | the card's width, at most 2 device pixels a CSS pixel and 4,096 pixels a side |

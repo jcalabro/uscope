@@ -2,7 +2,9 @@
 // what it needs from the global scope, deletes every global that is not on
 // its list, and only then evaluates the renderer's source, which so reaches
 // nothing but the language, drawing, and `uscope`. Pictures go back to the
-// frame as plain data; the page checks every shape before showing one.
+// frame as plain data; the page checks every shape before showing one. A
+// live renderer draws into a canvas of its own instead, and each frame goes
+// back as only its pixels, an ImageBitmap.
 //
 // This file is a classic script, never a module: Chromium refuses a module
 // worker from a blob in an opaque-origin frame.
@@ -11,6 +13,7 @@
   // Taken before the lockdown, which deletes them from the global scope.
   const post = self.postMessage.bind(self);
   const listen = self.addEventListener.bind(self);
+  const { addEventListener } = EventTarget.prototype;
   const evaluate = self.eval;
   const { defineProperty, freeze, getOwnPropertyDescriptor, getPrototypeOf, keys } = Object;
   const { deleteProperty, ownKeys } = Reflect;
@@ -180,6 +183,7 @@
 
   // The renderer API, `uscope`.
   let drawer = null;
+  let starter = null;
   let theme = freeze({});
 
   const shape = (type) => (properties) => ({ ...properties, type });
@@ -280,15 +284,43 @@
     return { ...rest, type: "image", rendered: canvas.transferToImageBitmap() };
   }
 
+  /** The most a caption or hint holds. */
+  const MOST_TEXT = 4096;
+  const text = (value) => String(value).slice(0, MOST_TEXT);
+
   const uscope = freeze({
     draw(render) {
       if (typeof render !== "function") {
         throw new TypeError("uscope.draw takes a function");
       }
-      if (drawer !== null) {
-        throw new Error("a renderer calls uscope.draw once");
+      if (drawer !== null || starter !== null) {
+        throw new Error("a renderer calls uscope.draw or uscope.live once");
       }
       drawer = render;
+    },
+    live(start) {
+      if (typeof start !== "function") {
+        throw new TypeError("uscope.live takes a function");
+      }
+      if (drawer !== null || starter !== null) {
+        throw new Error("a renderer calls uscope.draw or uscope.live once");
+      }
+      starter = start;
+    },
+    redraw() {
+      post({ type: "redraw" });
+    },
+    animate(on) {
+      post({ type: "animate", on: on === true });
+    },
+    caption(value) {
+      post({ type: "caption", text: text(value) });
+    },
+    hint(value) {
+      post({ type: "hint", text: value === null || value === undefined ? null : text(value) });
+    },
+    select(path) {
+      post({ type: "select", path: text(path) });
     },
     picture: shape("picture"),
     rect: shape("rect"),
@@ -316,18 +348,86 @@
     } catch (error) {
       return failure(error, file);
     }
-    if (drawer === null) {
-      return { message: "the renderer never calls uscope.draw", file, line: null, column: null };
+    if (drawer === null && starter === null) {
+      return {
+        message: "the renderer never calls uscope.draw or uscope.live",
+        file,
+        line: null,
+        column: null,
+      };
     }
     return null;
   }
 
+  /** Sets `uscope.theme` and returns what the renderer's function gets. */
+  function given(context) {
+    theme = freeze({ ...context.palette, series: freeze([...context.palette.series]) });
+    const { palette: _, ...rest } = context;
+    return freeze(rest);
+  }
+
+  // A live renderer's canvas and what its function returned.
+  let canvas = null;
+  let handlers = null;
+  // Live messages run one after another, each after the last finished.
+  let queue = Promise.resolve();
+
+  function lost(event) {
+    event.preventDefault?.();
+    post({ type: "lost" });
+  }
+
+  async function live(message) {
+    switch (message.type) {
+      case "live-start": {
+        canvas = new OffscreenCanvas(message.size.width, message.size.height);
+        // The lockdown took addEventListener from every EventTarget.
+        addEventListener.call(canvas, "webglcontextlost", lost);
+        addEventListener.call(canvas, "contextlost", lost);
+        handlers = (await starter(canvas, message.input, given(message.context))) ?? {};
+        return;
+      }
+      case "update":
+        await handlers?.update?.(message.input, given(message.context));
+        return;
+      case "resize":
+        canvas.width = message.width;
+        canvas.height = message.height;
+        await handlers?.resize?.(message.width, message.height);
+        return;
+      case "pointer":
+        await handlers?.pointer?.(freeze({ ...message.event }));
+        return;
+      case "key":
+        await handlers?.key?.(freeze({ ...message.event }));
+        return;
+      case "frame": {
+        await handlers?.frame?.(message.time);
+        let bitmap;
+        try {
+          bitmap = canvas.transferToImageBitmap();
+        } catch {
+          // A canvas no context has drawn on yet has no pixels to send.
+          post({ type: "frame", bitmap: null });
+          return;
+        }
+        post({ type: "frame", bitmap }, [bitmap]);
+        return;
+      }
+    }
+  }
+
+  const LIVE = new Set(["live-start", "update", "resize", "pointer", "key", "frame"]);
+
   async function draw(id, input, context) {
+    if (drawer === null) {
+      // A live renderer draws in its own canvas, which the page starts.
+      post({ type: "live", id });
+      return;
+    }
     let picture;
     try {
-      theme = freeze({ ...context.palette, series: freeze([...context.palette.series]) });
-      const { palette: _, ...given } = context;
-      picture = await drawer(input, freeze(given));
+      picture = await drawer(input, given(context));
     } catch (error) {
       post({ type: "error", id, error: failure(error, file) });
       return;
@@ -364,8 +464,18 @@
     if (message?.type === "load" && !loaded) {
       loaded = true;
       post({ type: "loaded", error: load(message.source, message.name) });
-    } else if (message?.type === "draw" && loaded && drawer !== null) {
+    } else if (message?.type === "draw" && loaded && (drawer !== null || starter !== null)) {
       draw(message.id, message.input, message.context);
+    } else if (message?.type === "ping") {
+      // The page's watchdog, answered after the live work before it: a
+      // renderer stuck in a loop, or awaiting what never settles, does not.
+      queue = queue.then(() => post({ type: "pong" }));
+    } else if (LIVE.has(message?.type) && loaded && starter !== null) {
+      queue = queue.then(() =>
+        live(message).catch((error) => {
+          post({ type: "error", id: null, error: failure(error, file) });
+        }),
+      );
     }
   });
 

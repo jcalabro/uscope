@@ -1,6 +1,8 @@
 // A hostile renderer: it tries every way out of the sandbox we know of and
 // draws what each attempt did, one text per probe, titled by its name. The
-// test writes its listeners' ports over HTTP_PORT and UDP_PORT.
+// test writes its listeners' ports over HTTP_PORT and UDP_PORT, and "live"
+// over MODE to run the probes in a live renderer with WebGL in use, which
+// says what each did in its caption.
 
 const http = "http://127.0.0.1:HTTP_PORT";
 const udp = Number("UDP_PORT");
@@ -89,13 +91,51 @@ const probes = {
   location: () => attempt(recovered("location"), () => String(recovered("location"))),
 };
 
-uscope.draw(async () => {
-  const shapes = [];
-  let y = 12;
+async function outcomes() {
+  const found = [];
   for (const [name, probe] of Object.entries(probes)) {
-    const outcome = await probe();
-    shapes.push(uscope.text({ x: 4, y, text: `${name}: ${outcome}`, title: name, family: "mono" }));
-    y += 14;
+    found.push(`${name}: ${await probe()}`);
   }
-  return uscope.picture({ width: 260, height: y, shapes, caption: "probes done" });
-});
+  return found;
+}
+
+const mode = String("MODE");
+if (mode === "live") {
+  uscope.live(async (canvas) => {
+    // A context drawing with the GPU while the probes run.
+    const gl = canvas.getContext("webgl2");
+    const kind = gl === null ? "2d" : "webgl2";
+    if (gl !== null) {
+      gl.clearColor(0, 0.5, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      const texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        1,
+        1,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        new Uint8Array(4),
+      );
+    } else {
+      canvas.getContext("2d")?.fillRect(0, 0, 1, 1);
+    }
+    uscope.caption([kind, ...(await outcomes()), "probes done"].join(" · "));
+    return { frame() {} };
+  });
+} else {
+  uscope.draw(async () => {
+    const shapes = [];
+    let y = 12;
+    for (const outcome of await outcomes()) {
+      const name = outcome.split(":")[0];
+      shapes.push(uscope.text({ x: 4, y, text: outcome, title: name, family: "mono" }));
+      y += 14;
+    }
+    return uscope.picture({ width: 260, height: y, shapes, caption: "probes done" });
+  });
+}

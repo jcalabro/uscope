@@ -7,14 +7,19 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import * as path from "node:path";
+import type { Locator, Page } from "@playwright/test";
 import { card, drawAt } from "./drawings";
-import { expect, expectErrors, fixture, join, test } from "./server";
+import { expect, expectErrors, fixture, join, test, type Uscope } from "./server";
 
-test("a hostile renderer reaches nothing outside its sandbox", async ({
-  page,
-  uscope,
-  browserName,
-}) => {
+/** Runs hostile.js, as a picture or live, with listeners recording what
+ * arrives; `outcomes` reads what each probe did from the card. */
+async function probe(
+  page: Page,
+  uscope: Uscope,
+  browserName: string,
+  mode: "picture" | "live",
+  outcomes: (drawn: Locator) => Promise<string[]>,
+): Promise<void> {
   // Firefox reports the import() its policy blocked.
   if (browserName === "firefox") {
     expectErrors(/Content-Security-Policy: .*import\.js/);
@@ -44,16 +49,17 @@ test("a hostile renderer reaches nothing outside its sandbox", async ({
     const source = await readFile(path.join(import.meta.dirname, "visualizers/hostile.js"), "utf8");
     await writeFile(
       path.join(directory, "hostile.js"),
-      source.replaceAll("HTTP_PORT", String(ports.http)).replaceAll("UDP_PORT", String(ports.udp)),
+      source
+        .replaceAll("HTTP_PORT", String(ports.http))
+        .replaceAll("UDP_PORT", String(ports.udp))
+        .replaceAll("MODE", mode),
     );
     const server = await uscope.start(["--views", views, fixture("life")]);
     await join(page, server.link);
     await drawAt(page, "life.c:59");
-    const drawn = card(page, "life");
-    await expect(drawn.locator(".drawing-caption")).toHaveText("probes done");
-    const outcomes = await drawn.locator("svg text").allTextContents();
-    expect(outcomes.length).toBeGreaterThan(15);
-    for (const outcome of outcomes) {
+    const found = await outcomes(card(page, "life"));
+    expect(found.length).toBeGreaterThan(15);
+    for (const outcome of found) {
       expect(outcome).toMatch(/: (absent|blocked)$/);
     }
 
@@ -69,4 +75,30 @@ test("a hostile renderer reaches nothing outside its sandbox", async ({
     http.close();
     udp.close();
   }
+}
+
+test("a hostile renderer reaches nothing outside its sandbox", async ({
+  page,
+  uscope,
+  browserName,
+}) => {
+  await probe(page, uscope, browserName, "picture", async (drawn) => {
+    await expect(drawn.locator(".drawing-caption")).toHaveText("probes done");
+    return drawn.locator("svg text").allTextContents();
+  });
+});
+
+test("a hostile live renderer reaches nothing, with WebGL in use", async ({
+  page,
+  uscope,
+  browserName,
+}) => {
+  await probe(page, uscope, browserName, "live", async (drawn) => {
+    const caption = drawn.locator(".drawing-caption");
+    await expect(caption).toHaveText(/ · probes done$/);
+    const [kind, ...found] = (await caption.textContent())?.split(" · ") ?? [];
+    // Headless Firefox has no WebGL; Chromium's runs on SwiftShader.
+    expect(kind).toBe(browserName === "firefox" ? "2d" : "webgl2");
+    return found.slice(0, -1);
+  });
 });

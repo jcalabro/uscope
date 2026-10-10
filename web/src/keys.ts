@@ -180,6 +180,10 @@ export function isTextBox(element: Element | null): boolean {
   if (element.closest("[data-keys=debugger]")) {
     return false;
   }
+  // A live drawing's canvas takes the letters, as a text box does.
+  if (element.closest("[data-keys=renderer]")) {
+    return true;
+  }
   if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
     return true;
   }

@@ -2436,6 +2436,27 @@ kbd {
   height: auto;
 }
 
+.drawing-body.live {
+  position: relative;
+  padding: 0;
+}
+
+.live-canvas {
+  display: block;
+  width: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+
+.live-canvas:active {
+  cursor: grabbing;
+}
+
+.live-canvas:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .drawing-tip {
   position: absolute;
   z-index: 2;

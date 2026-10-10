@@ -750,7 +750,7 @@ visualize "NAME" {
   file's are `NAME.js` files beside it, read with it; a module's own views
   call the renderers the module carries; and uscope builds in `line-plot`,
   `bar-chart`, `scatter-plot`, `histogram`, `box-plot`, `donut-chart`,
-  `heatmap`, `flame-graph`, `bitmap`, and `bits`, from
+  `heatmap`, `flame-graph`, `bitmap`, `bits`, and `mesh`, from
   `views/visualizers/`.
 - `uscope web --views FILE` loads a view file and the renderers beside it
   for the page, and the page's Reload views reads them again, so a
@@ -957,7 +957,8 @@ are:
   as a pointer to characters does, or why the view could not read it. A
   null pointer shows only its address.
 - An element of a value presented as a sequence is `v[i]`, and the count
-  of a sequence or map is `len(v)`, in any expression: `break f if
+  of a sequence or map is `len(v)`, in any expression, a view's own
+  included, though never through the view being bound: `break f if
   len(queue) > 100`. A Go channel is indexed this way too, though it is
   stored as a pointer, because Go never indexes one as a pointer. A value
   a view presents as another in memory, as `std::stack` is its container,
@@ -994,5 +995,5 @@ one to eight words.
 
 A renderer is at most 256 KiB, and a `visualize` takes at most 64 inputs.
 A drawing's inputs hold at most 65,536 values, nested at most 16 deep;
-each `bytes` reads at most 16 MiB, and one drawing at most 64 MiB in all.
+one drawing reads at most 64 MiB in all.
 What the page allows a renderer is in `docs/visualizers.md`.

@@ -349,10 +349,12 @@ extend c life {
         columns = 8
     }
     visualize "heatmap" {
-        values = bytes(&cells[0][0], 17000000)
+        values = bytes(&cells[0][0], 70000000)
     }
     visualize "bits" { values = bytes(0, 8) }
     visualize "nowhere" { values = generation }
+    # A view indexes its own type through no view, itself included.
+    visualize "line-plot" { values = self[0] }
 }
 "#,
     )
@@ -362,7 +364,8 @@ extend c life {
     let mut tab = web.control("tab").await;
     let frame = stop_at(&mut tab, "life.c:59").await;
 
-    // A drawing whose renderer does not exist is not offered.
+    // A drawing whose renderer does not exist, or that does not bind, is
+    // not offered.
     let life = tab
         .ok("evaluate", with(&frame, &json!({"expression": "life"})))
         .await;
@@ -370,7 +373,7 @@ extend c life {
 
     for (renderer, expected) in [
         ("bitmap", "0x10"),
-        ("heatmap", "an input may read at most 16777216"),
+        ("heatmap", "the drawing reads more than 67108864 bytes"),
         ("bits", "null pointer"),
     ] {
         let (drawing, bytes) = tab
@@ -427,6 +430,7 @@ async fn reloading_views_reads_the_files_and_renderers_again() {
             "heatmap",
             "histogram",
             "line-plot",
+            "mesh",
             "scatter-plot"
         ]
     );
@@ -524,4 +528,49 @@ async fn a_map_kept_behind_a_pointer_draws_as_its_entries() {
         entries.contains(&json!([{"t": "text", "s": "/api/search"}, {"t": "big", "big": "600"}])),
         "{entries:?}"
     );
+}
+
+#[tokio::test]
+async fn a_mesh_view_reads_its_vectors_storage_and_vertex_layout() {
+    let views = source("cpp/mesh/mesh.views");
+    let web = Web::start("mesh", &["--views", &views, &fixture("mesh")]);
+    let mut tab = web.control("tab").await;
+    let frame = stop_at(&mut tab, "mesh.cpp:124").await;
+    let draw = |path: &str| with(&frame, &json!({"path": path, "renderer": "mesh"}));
+    let (drawing, bytes) = tab.draw(draw("mesh")).await.expect("draw the torus");
+    // A vertex is a position and a normal, three floats each, and RGBA.
+    for (name, value) in [
+        ("stride", 28),
+        ("position", 0),
+        ("normal", 12),
+        ("color", 24),
+    ] {
+        assert_eq!(
+            input(&drawing, name),
+            &json!({"t": "int", "i": value}),
+            "{name}"
+        );
+    }
+    // Each vector's elements, as one read of its storage.
+    assert_eq!(
+        input(&drawing, "vertices"),
+        &json!({"t": "bytes", "offset": 0, "length": 1920 * 28})
+    );
+    assert_eq!(
+        input(&drawing, "indices"),
+        &json!({"t": "bytes", "offset": 1920 * 28, "length": 3840 * 3 * 4})
+    );
+    let first = bytes[..12]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|float| f32::from_le_bytes(*float))
+        .collect::<Vec<_>>();
+    // The first ring's first vertex sits on the torus's outer edge.
+    assert!(
+        (first[0] - 1.35).abs() < 0.06 && first[1].abs() < 1e-6,
+        "{first:?}"
+    );
+    let indices = bytes[1920 * 28..].as_chunks::<4>().0;
+    assert_eq!(u32::from_le_bytes(indices[1]), 41, "the first triangle");
 }

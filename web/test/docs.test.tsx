@@ -6,6 +6,7 @@ import { expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import { validate } from "../src/visualize/picture";
 import { run as runRenderer } from "./renderer";
+import { sandbox, Watched } from "./sandboxes";
 
 const docs = await commands.readFile("../docs/visualizers.md");
 
@@ -35,6 +36,38 @@ for (const [index, example] of examples.entries()) {
     expect(() => validate(answer.picture)).not.toThrow();
   });
 }
+
+const liveExamples = [
+  ...docs.matchAll(/```uscope-live-example\n([\s\S]*?)\n---\n([\s\S]*?)\n```/g),
+].map(([, source, input]) => ({ source: source as string, input: input as string }));
+
+for (const [index, example] of liveExamples.entries()) {
+  it(`runs live example ${index + 1} to frames that follow the pointer`, async () => {
+    const input = new Function(`return ${example.input};`)();
+    const live = new Watched(sandbox(), "card", example.source, input);
+    await live.expect("started");
+    live.session.frame(0);
+    expect((await live.expect("frame")).bitmap).toBeInstanceOf(ImageBitmap);
+    live.session.pointer({
+      type: "move",
+      x: 1,
+      y: 1,
+      dx: 0,
+      dy: 0,
+      buttons: 0,
+      wheel: 0,
+      shift: false,
+      ctrl: false,
+      alt: false,
+    });
+    expect((await live.expect("hint")).text).not.toBeNull();
+    await live.expect("redraw");
+  });
+}
+
+it("has a live example", () => {
+  expect(liveExamples).toHaveLength(1);
+});
 
 it("shows the life fixture's own files", async () => {
   const blocks = [...docs.matchAll(/```(?:js|text)\n([\s\S]*?)```/g)].map(([, body]) => body);
