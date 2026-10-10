@@ -1858,8 +1858,6 @@ fn bit_field_extraction_is_endian_aware_and_bounded() {
 /// local, a member, or a pointee of that type is.
 #[test]
 fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
-    use object::write::Object;
-
     let encoding = Encoding {
         format: Format::Dwarf32,
         version: 5,
@@ -1891,36 +1889,7 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
         gimli::DW_AT_location,
         WriteAttributeValue::Exprloc(location),
     );
-    let mut sections = Sections::new(EndianVec::new(LittleEndian));
-    written.write(&mut sections).expect("write test DWARF");
-
-    let mut elf = Object::new(
-        object::BinaryFormat::Elf,
-        object::Architecture::X86_64,
-        object::Endianness::Little,
-    );
-    let data = elf.add_section(Vec::new(), b".data".to_vec(), object::SectionKind::Data);
-    elf.append_section_data(data, &[0; 0x20], 8);
-    sections
-        .for_each(|id, section| -> std::result::Result<(), ()> {
-            if !section.slice().is_empty() {
-                let debug = elf.add_section(
-                    Vec::new(),
-                    id.name().as_bytes().to_vec(),
-                    object::SectionKind::Debug,
-                );
-                elf.append_section_data(debug, section.slice(), 1);
-            }
-            Ok(())
-        })
-        .expect("add the DWARF sections");
-    let bytes = elf.write().expect("write the test object");
-    let debug_info = crate::debug_info::load_program(
-        std::path::Path::new("malformed.o"),
-        &bytes,
-        &crate::debug_info::DebugFileSearch::default(),
-    )
-    .expect("load the test object");
+    let debug_info = load_test_object(&mut written);
     assert_eq!(debug_info.image.globals().len(), 1);
 
     let mut runtime = Runtime::new([]);
@@ -1952,6 +1921,143 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
             VariableMalformedKind::InvalidTypeGraph,
             "pointer type has a zero byte size"
         )
+    );
+}
+
+/// Loads written DWARF as an object of 0x20 bytes of data and of code,
+/// both at address zero.
+fn load_test_object(written: &mut WriteDwarf) -> crate::debug_info::DebugInfo {
+    use object::write::Object;
+
+    let mut sections = Sections::new(EndianVec::new(LittleEndian));
+    written.write(&mut sections).expect("write test DWARF");
+    let mut elf = Object::new(
+        object::BinaryFormat::Elf,
+        object::Architecture::X86_64,
+        object::Endianness::Little,
+    );
+    let data = elf.add_section(Vec::new(), b".data".to_vec(), object::SectionKind::Data);
+    elf.append_section_data(data, &[0; 0x20], 8);
+    let text = elf.add_section(Vec::new(), b".text".to_vec(), object::SectionKind::Text);
+    elf.append_section_data(text, &[0xc3; 0x20], 16);
+    sections
+        .for_each(|id, section| -> std::result::Result<(), ()> {
+            if !section.slice().is_empty() {
+                let debug = elf.add_section(
+                    Vec::new(),
+                    id.name().as_bytes().to_vec(),
+                    object::SectionKind::Debug,
+                );
+                elf.append_section_data(debug, section.slice(), 1);
+            }
+            Ok(())
+        })
+        .expect("add the DWARF sections");
+    let bytes = elf.write().expect("write the test object");
+    crate::debug_info::load_program(
+        std::path::Path::new("test.o"),
+        &bytes,
+        &crate::debug_info::DebugFileSearch::default(),
+    )
+    .expect("load the test object")
+}
+
+/// A variable the compiler made, with no name, is not listed, and not
+/// malformed; one with no name that is not the compiler's is malformed.
+#[test]
+fn a_nameless_artificial_variable_is_the_compilers_own() {
+    let encoding = Encoding {
+        format: Format::Dwarf32,
+        version: 5,
+        address_size: 8,
+    };
+    let mut written = WriteDwarf::new();
+    let unit_id = written.units.add(Unit::new(encoding, LineProgram::none()));
+    let unit = written.units.get_mut(unit_id);
+    let root = unit.root();
+    unit.get_mut(root).set(
+        gimli::DW_AT_language,
+        WriteAttributeValue::Language(gimli::DW_LANG_C11),
+    );
+    let int = unit.add(root, gimli::DW_TAG_base_type);
+    unit.get_mut(int).set(
+        gimli::DW_AT_name,
+        WriteAttributeValue::String(b"int".to_vec()),
+    );
+    unit.get_mut(int)
+        .set(gimli::DW_AT_byte_size, WriteAttributeValue::Udata(4));
+    unit.get_mut(int).set(
+        gimli::DW_AT_encoding,
+        WriteAttributeValue::Encoding(gimli::DW_ATE_signed),
+    );
+    let function = unit.add(root, gimli::DW_TAG_subprogram);
+    unit.get_mut(function).set(
+        gimli::DW_AT_name,
+        WriteAttributeValue::String(b"work".to_vec()),
+    );
+    unit.get_mut(function).set(
+        gimli::DW_AT_low_pc,
+        WriteAttributeValue::Address(gimli::write::Address::Constant(0)),
+    );
+    unit.get_mut(function)
+        .set(gimli::DW_AT_high_pc, WriteAttributeValue::Udata(0x20));
+    for (name, artificial) in [(Some("named"), false), (None, true), (None, false)] {
+        let variable = unit.add(function, gimli::DW_TAG_variable);
+        let variable = unit.get_mut(variable);
+        if let Some(name) = name {
+            variable.set(
+                gimli::DW_AT_name,
+                WriteAttributeValue::String(name.as_bytes().to_vec()),
+            );
+        }
+        if artificial {
+            variable.set(gimli::DW_AT_artificial, WriteAttributeValue::Flag(true));
+        }
+        variable.set(gimli::DW_AT_type, WriteAttributeValue::UnitRef(int));
+        let mut location = gimli::write::Expression::new();
+        location.op_addr(gimli::write::Address::Constant(0x10));
+        variable.set(
+            gimli::DW_AT_location,
+            WriteAttributeValue::Exprloc(location),
+        );
+    }
+    let debug_info = load_test_object(&mut written);
+
+    let mut runtime = Runtime::new([]);
+    runtime.memory = Some(Arc::from([0_u8; 0x20]));
+    let address = ImageAddress::new(0x8);
+    let variables = debug_info
+        .variables
+        .inspect(
+            address,
+            None,
+            &crate::VariableQuery::All,
+            crate::debug_info::VariableContext {
+                stop_id: crate::StopId::new(1),
+                context: crate::ThreadId::new(1).into(),
+                frame: crate::StackFrameId::new(0),
+                module: crate::ModuleId::new(0),
+                image: ModuleImageId::new(0),
+                address: None,
+            },
+            &mut runtime,
+            &mut InspectionBudget::default(),
+        )
+        .expect("list the function's variables");
+    let listed = variables
+        .iter()
+        .map(|variable| {
+            (
+                variable.name.as_ref(),
+                matches!(variable.state, VariableState::Malformed(_)),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert_eq!(listed[0], ("named", false));
+    assert!(
+        listed[1].0.starts_with("<anonymous variable") && listed[1].1,
+        "{listed:?}"
     );
 }
 

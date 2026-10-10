@@ -71,6 +71,8 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) limit_type: Option<TypeId>,
     /// The shared `void` that qualifiers and typedefs without a target name.
     pub(super) void_type: Option<TypeId>,
+    /// The character [`Self::character_type`] made, once it has.
+    pub(super) character_type: Option<TypeId>,
     pub(super) dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, ExpressionId>,
     /// Where every location is pooled.
     pub(super) pool: &'a std::sync::Mutex<super::location::LocationsBuilder>,
@@ -365,6 +367,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             byte_order,
             limit_type: None,
             void_type: None,
+            character_type: None,
             dynamic_record_layouts: HashMap::new(),
             pool,
             die_buffers,
@@ -574,6 +577,32 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         reference
     }
 
+    /// The one-byte character of a string type that names none.
+    fn character_type(&mut self) -> TypeReference {
+        let reference = TypeReference {
+            image: self.image,
+            id: self.character_type.unwrap_or_else(|| self.next_id()),
+        };
+        if self.character_type.is_none() {
+            let name: Arc<str> = "character".into();
+            self.entries.push(resolved(
+                reference,
+                Arc::clone(&name),
+                Some(1),
+                TypeKind::Base(BaseType {
+                    base_name: Arc::clone(&name),
+                    name,
+                    encoding: BaseTypeEncoding::UnsignedCharacter,
+                    byte_size: 1,
+                    bit_size: None,
+                }),
+            ));
+            self.explicit_names.insert(reference.id);
+            self.character_type = Some(reference.id);
+        }
+        reference
+    }
+
     fn canonical_type_key(&self, key: DieKey) -> std::result::Result<DieKey, Arc<str>> {
         let mut current = key;
         let mut visited = Seen::default();
@@ -745,6 +774,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 ),
             gimli::DW_TAG_array_type => {
                 self.build_array_type(entry, unit_index, reference, explicit_name, explicit_size)
+            }
+            gimli::DW_TAG_string_type => {
+                self.build_string_type(entry, unit_index, reference, explicit_name, explicit_size)
             }
             gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type => {
                 self.build_record_type(entry, unit_index, reference, explicit_name, explicit_size)
@@ -3214,6 +3246,21 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if dimensions.is_empty() {
             return Err("array type has no subrange dimensions".into());
         }
+        // Elements are laid out row by row; Fortran's go column by column
+        // unless the array says otherwise.
+        let column_major = match entry.attr_value(gimli::DW_AT_ordering) {
+            Some(gimli::AttributeValue::Ordering(ordering)) => ordering == gimli::DW_ORD_col_major,
+            Some(_) => return Err("array ordering has an invalid encoding".into()),
+            None => self.language(unit_index) == SourceLanguage::Fortran,
+        };
+        if column_major && dimensions.len() > 1 {
+            return Ok(opaque(
+                reference,
+                explicit_name.unwrap_or_else(|| Arc::from("<column-major array>")),
+                explicit_size,
+                "arrays laid out column by column are unsupported",
+            ));
+        }
         let name =
             explicit_name.unwrap_or_else(|| Arc::from(format!("{}[]", self.target_name(element))));
         // Producers rarely give a C array a size of its own: it is its
@@ -3234,6 +3281,52 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             TypeKind::Array {
                 element,
                 dimensions: dimensions.into(),
+            },
+        ))
+    }
+
+    /// A Fortran `character(len=N)`: N characters, counted from one, of
+    /// the type it names, or else of one byte each. A length the program
+    /// decides at run time is unsupported.
+    fn build_string_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+    ) -> Built {
+        // With a length of its own, a string's byte size is the length's.
+        let Some(byte_size) =
+            explicit_size.filter(|_| entry.attr(gimli::DW_AT_string_length).is_none())
+        else {
+            return Ok(opaque(
+                reference,
+                explicit_name.unwrap_or_else(|| Arc::from("character(len=:)")),
+                None,
+                "string length is decided at run time",
+            ));
+        };
+        let element = self
+            .target(entry, unit_index)?
+            .unwrap_or_else(|| self.character_type());
+        let count = self
+            .byte_size_of(element.id)
+            .filter(|&size| size > 0 && byte_size % size == 0)
+            .map(|size| byte_size / size)
+            .ok_or("string length is not a whole number of its characters")?;
+        let name = explicit_name.unwrap_or_else(|| Arc::from(format!("character(len={count})")));
+        self.explicit_names.insert(reference.id);
+        Ok(resolved(
+            reference,
+            name,
+            Some(byte_size),
+            TypeKind::Array {
+                element,
+                dimensions: Arc::from([ArrayDimension {
+                    lower_bound: 1,
+                    count,
+                }]),
             },
         ))
     }

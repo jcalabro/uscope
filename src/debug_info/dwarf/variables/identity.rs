@@ -145,6 +145,12 @@ pub(in crate::debug_info) const fn source_language(
         gimli::DW_LANG_Rust => SourceLanguage::Rust,
         gimli::DW_LANG_Go => SourceLanguage::Go,
         gimli::DW_LANG_Zig => SourceLanguage::Zig,
+        gimli::DW_LANG_Fortran77
+        | gimli::DW_LANG_Fortran90
+        | gimli::DW_LANG_Fortran95
+        | gimli::DW_LANG_Fortran03
+        | gimli::DW_LANG_Fortran08
+        | gimli::DW_LANG_Fortran18 => SourceLanguage::Fortran,
         other => SourceLanguage::Other(other.0),
     }
 }

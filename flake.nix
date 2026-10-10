@@ -46,6 +46,11 @@
       muslClang = pkgs.writeShellScriptBin "musl-clang" ''
         exec ${musl64.buildPackages.clang}/bin/x86_64-unknown-linux-musl-clang "$@"
       '';
+      # GNU Fortran, alone: its wrapper's own gcc and binutils would shadow
+      # the shell's.
+      gfortran = pkgs.writeShellScriptBin "gfortran" ''
+        exec ${pkgs.gfortran15}/bin/gfortran "$@"
+      '';
       # The crates the tokio fixtures depend on, exactly as their lockfiles
       # name them, one for each tokio release they are built with, so that
       # building them fetches nothing.
@@ -96,6 +101,7 @@
           goStable
           zig
           odin
+          gfortran
           pkg-config
           util-linux
           nodejs_24
