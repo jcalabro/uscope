@@ -569,6 +569,15 @@ pub(super) fn mapped_module_load_bias(mapping: &ModuleMapping) -> Result<u64> {
         if file_offset & PAGE_MASK != mapping.file_offset {
             continue;
         }
+        // Linkers such as mold start segments of different permissions in
+        // one page of the file; the mapping maps the one with its own.
+        let executable = matches!(
+            segment.flags(),
+            object::SegmentFlags::Elf { p_flags } if p_flags & object::elf::PF_X != 0
+        );
+        if executable != mapping.executable {
+            continue;
+        }
         let image_start = segment.address() & PAGE_MASK;
         return mapping
             .start
