@@ -42,11 +42,14 @@ fn malformed(text: impl Into<String>) -> ImageError {
 }
 
 /// Checks the header, trailer, and directory of an image of `F`, returning
-/// where each table is, by the kind's index.
-pub fn structure<F: Format>(
+/// where each table is, by the kind's index; `N` is `F::KINDS`, so that
+/// the directory needs no allocation.
+pub fn structure<F: Format, const N: usize>(
     bytes: &[u8],
     limits: Limits,
-) -> Result<Vec<Option<Placed>>, ImageError> {
+) -> Result<[Option<Placed>; N], ImageError> {
+    const { assert!(N > 0) };
+    assert_eq!(N, F::KINDS, "a directory has one slot per kind");
     let (header, _) = Header::ref_from_prefix(bytes).map_err(|_| ImageError::Truncated)?;
     if header.magic != F::MAGIC {
         return Err(ImageError::NotAnImage);
@@ -99,7 +102,7 @@ pub fn structure<F: Format>(
     }
     let entries = <[DirectoryEntry]>::ref_from_bytes(&bytes[size_of::<Header>()..directory_end])
         .map_err(|_| ImageError::Truncated)?;
-    let mut tables = vec![None; F::KINDS];
+    let mut tables = [None; N];
     let mut previous_kind = None;
     let mut previous_end = directory_end;
     for entry in entries {

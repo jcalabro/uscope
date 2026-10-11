@@ -59,10 +59,7 @@ pub(super) fn structure(
     bytes: &[u8],
     limits: Limits,
 ) -> Result<[Option<Placed>; TableKind::COUNT], ImageError> {
-    let tables = super::container::structure::<super::DebugImage>(bytes, limits)?;
-    Ok(tables
-        .try_into()
-        .expect("the container places one table per kind"))
+    super::container::structure::<super::DebugImage, { TableKind::COUNT }>(bytes, limits)
 }
 
 /// Checks every table's contents.
