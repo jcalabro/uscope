@@ -109,6 +109,10 @@ impl<P: InspectionOps> InspectionOps for Recorded<P> {
         self.0.read_memory_word(pid, address)
     }
 
+    fn read_block(&self, pid: Pid, address: u64, size: usize) -> Option<Vec<u8>> {
+        self.0.read_block(pid, address, size)
+    }
+
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
         self.0.registers(pid)
     }

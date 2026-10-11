@@ -877,16 +877,34 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             lost.push(address);
         }
-        for (&address, site) in &inferior.breakpoints {
-            if !site.installed || lost.contains(&address) {
-                continue;
-            }
-            let byte = memory_byte(&self.ptrace, pid, address.get())?;
-            // A trap over a trap cannot tell whether the memory changed.
-            if byte != Some(BREAKPOINT_OPCODE)
-                && (byte.is_none() || site.original_byte != BREAKPOINT_OPCODE)
-            {
-                lost.push(address);
+        let installed = inferior
+            .breakpoints
+            .iter()
+            .filter(|&(address, site)| site.installed && !lost.contains(address))
+            .map(|(&address, site)| (address, site.original_byte))
+            .collect::<Vec<_>>();
+        // A process may have thousands of sites, most sharing a page with
+        // others, which one read covers.
+        let page = |address: VirtualAddress| address.get() / PAGE_BYTES;
+        for sites in installed.chunk_by(|(one, _), (other, _)| page(*one) == page(*other)) {
+            let (first, end) = (sites[0].0.get(), sites[sites.len() - 1].0.get() + 1);
+            let block = usize::try_from(end - first)
+                .ok()
+                .and_then(|size| self.ptrace.read_block(pid, first, size));
+            for &(address, original_byte) in sites {
+                let byte = match &block {
+                    Some(bytes) => Some(
+                        bytes[usize::try_from(address.get() - first)
+                            .expect("an offset within a page fits usize")],
+                    ),
+                    None => memory_byte(&self.ptrace, pid, address.get())?,
+                };
+                // A trap over a trap cannot tell whether the memory changed.
+                if byte != Some(BREAKPOINT_OPCODE)
+                    && (byte.is_none() || original_byte != BREAKPOINT_OPCODE)
+                {
+                    lost.push(address);
+                }
             }
         }
 
@@ -942,6 +960,9 @@ pub(super) struct MovedCode {
     pub(super) from: std::ops::Range<u64>,
     pub(super) to: u64,
 }
+
+/// The size of the pages [`Controller::reconcile_sites`] reads at once.
+const PAGE_BYTES: u64 = 4096;
 
 /// The byte at `address`, or `None` where no memory is mapped.
 fn memory_byte(ptrace: &impl LinuxTraceOps, pid: Pid, address: u64) -> Result<Option<u8>> {
