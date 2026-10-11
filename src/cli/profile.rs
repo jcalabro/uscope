@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use uscope::profiler::budget::Budget;
-use uscope::profiler::{Preset, Profile, RecordOptions, SampleSource, StackCopy, StackView, Watch};
+use uscope::profiler::{
+    Preset, Profile, RecordOptions, SampleSource, Save, StackCopy, StackView, Watch,
+};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum PresetArg {
@@ -62,6 +64,11 @@ pub struct RecordArgs {
     /// Stop recording after SECONDS; a started program is then killed.
     #[arg(long, value_name = "SECONDS")]
     duration: Option<f64>,
+    /// Keep only the last SECONDS of the recording. SIGUSR2 saves the
+    /// window as it is to FILE-1.usprof, FILE-2.usprof, and so on, as the
+    /// recording goes on; FILE gets the last window.
+    #[arg(long, value_name = "SECONDS")]
+    window: Option<f64>,
     /// The program to record and its arguments.
     #[arg(last = true, required_unless_present = "pid", value_name = "PROGRAM")]
     command: Vec<OsString>,
@@ -138,10 +145,17 @@ fn record(args: &RecordArgs) -> Result<i32> {
             ..Budget::PRODUCTION
         });
     }
+    if let Some(seconds) = args.window {
+        options.window = Some(Duration::try_from_secs_f64(seconds).context("--window")?);
+    }
     let stop = Arc::new(AtomicBool::new(false));
+    let trigger = Arc::new(AtomicBool::new(false));
     // Ctrl-C reaches a started program too, which ends as it chooses; an
     // attached one goes on, and the recording stops.
-    stop_on_interrupt(args.pid.is_some().then(|| Arc::clone(&stop)))?;
+    handle_signals(
+        args.pid.is_some().then(|| Arc::clone(&stop)),
+        Arc::clone(&trigger),
+    )?;
     if let Some(seconds) = args.duration {
         let duration = Duration::try_from_secs_f64(seconds).context("--duration")?;
         let stop = Arc::clone(&stop);
@@ -150,10 +164,34 @@ fn record(args: &RecordArgs) -> Result<i32> {
             stop.store(true, Ordering::Relaxed);
         });
     }
+    let mut saves = 0;
+    let mut save = |profile: Profile| {
+        saves += 1;
+        let path = numbered(&args.output, saves);
+        match profile.write(&path) {
+            Ok(()) => eprintln!(
+                "uscope: saved {} samples of the window to {}",
+                profile.samples(),
+                path.display()
+            ),
+            Err(error) => eprintln!("uscope: writing {} failed: {error}", path.display()),
+        }
+    };
+    if let Some(window) = options.window {
+        eprintln!(
+            "uscope: keeping the last {:.3} s; `kill -USR2 {}` saves it",
+            window.as_secs_f64(),
+            std::process::id()
+        );
+    }
     let mut watch = Watch {
         every: Duration::MAX,
         publish: &mut |_| {},
         stop: &stop,
+        save: options.window.is_some().then_some(Save {
+            trigger: &trigger,
+            to: &mut save,
+        }),
     };
     let (profile, code) = if let Some(pid) = args.pid {
         let attachment = uscope::profiler::record_attached(pid, &options, &mut watch)?;
@@ -179,20 +217,35 @@ fn record(args: &RecordArgs) -> Result<i32> {
     Ok(code)
 }
 
-/// Keeps Ctrl-C from ending uscope, setting `stop` if there is one.
-fn stop_on_interrupt(stop: Option<Arc<AtomicBool>>) -> Result<()> {
+/// `path` with `-number` before its extension.
+fn numbered(path: &std::path::Path, number: u32) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let name = path.extension().map_or_else(
+        || format!("{stem}-{number}"),
+        |extension| format!("{stem}-{number}.{}", extension.to_string_lossy()),
+    );
+    path.with_file_name(name)
+}
+
+/// Keeps Ctrl-C from ending uscope, setting `stop` if there is one, and
+/// sets `trigger` at each SIGUSR2.
+fn handle_signals(stop: Option<Arc<AtomicBool>>, trigger: Arc<AtomicBool>) -> Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
     let (installed, ready) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let handled = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .build()
             .and_then(|runtime| {
-                let interrupts = runtime.block_on(async {
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                let signals = runtime.block_on(async {
+                    Ok::<_, std::io::Error>((
+                        signal(SignalKind::interrupt())?,
+                        signal(SignalKind::user_defined2())?,
+                    ))
                 })?;
-                Ok((runtime, interrupts))
+                Ok((runtime, signals))
             });
-        let (runtime, mut interrupts) = match handled {
+        let (runtime, (mut interrupts, mut triggers)) = match handled {
             Ok(handled) => handled,
             Err(error) => {
                 let _ = installed.send(Err(error));
@@ -201,9 +254,15 @@ fn stop_on_interrupt(stop: Option<Arc<AtomicBool>>) -> Result<()> {
         };
         let _ = installed.send(Ok(()));
         runtime.block_on(async {
-            while interrupts.recv().await.is_some() {
-                if let Some(stop) = &stop {
-                    stop.store(true, Ordering::Relaxed);
+            loop {
+                tokio::select! {
+                    Some(()) = interrupts.recv() => {
+                        if let Some(stop) = &stop {
+                            stop.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    Some(()) = triggers.recv() => trigger.store(true, Ordering::Relaxed),
+                    else => break,
                 }
             }
         });
@@ -212,7 +271,7 @@ fn stop_on_interrupt(stop: Option<Arc<AtomicBool>>) -> Result<()> {
     ready
         .recv()
         .context("starting a signal handler")?
-        .context("handling Ctrl-C")
+        .context("handling signals")
 }
 
 #[expect(
@@ -375,6 +434,9 @@ fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
     if lost > 0 {
         writeln!(out, "The kernel dropped {lost} samples.")?;
     }
+    if let Some(window) = profile.setting("window").filter(|window| *window != "all") {
+        writeln!(out, "The recording kept {window} it reached.")?;
+    }
     let counted = profile.counted();
     let paused = !profile.gaps().is_empty();
     if unit == "nanoseconds" && counted > total {
@@ -401,4 +463,169 @@ fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// A debugging session's profile of its program: recording on a thread of
+/// its own, or recorded.
+#[derive(Default)]
+pub struct Profiling {
+    recording: Option<SessionRecording>,
+    recorded: Option<Profile>,
+}
+
+struct SessionRecording {
+    stop: Arc<AtomicBool>,
+    trigger: Arc<AtomicBool>,
+    saved: std::sync::mpsc::Receiver<Profile>,
+    thread: std::thread::JoinHandle<Result<Profile, String>>,
+}
+
+impl SessionRecording {
+    /// The profile so far: the window as it is, or all of it once the
+    /// recording has ended.
+    fn so_far(&self) -> Option<Profile> {
+        self.trigger.store(true, Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && !self.thread.is_finished() {
+            if let Ok(profile) = self.saved.recv_timeout(Duration::from_millis(10)) {
+                return Some(profile);
+            }
+        }
+        None
+    }
+}
+
+impl Profiling {
+    /// Takes the recording's profile once it has ended.
+    fn settle(&mut self) -> Result<()> {
+        if self
+            .recording
+            .as_ref()
+            .is_some_and(|recording| recording.thread.is_finished())
+        {
+            self.end()?;
+        }
+        Ok(())
+    }
+
+    /// Ends the recording, keeping its profile.
+    fn end(&mut self) -> Result<()> {
+        if let Some(recording) = self.recording.take() {
+            recording.stop.store(true, Ordering::Relaxed);
+            let profile = recording
+                .thread
+                .join()
+                .map_err(|_| anyhow::anyhow!("the profiler panicked"))?
+                .map_err(|error| anyhow::anyhow!("profiling failed: {error}"))?;
+            self.recorded = Some(profile);
+        }
+        Ok(())
+    }
+}
+
+impl super::Cli {
+    /// `profile start|stop|save`: samples the session's program from
+    /// outside, as `uscope record --pid` does, while it runs.
+    pub(super) async fn profile(&self, arguments: &[&str]) -> Result<String> {
+        let live = if arguments.first() == Some(&"start") {
+            self.live_process().await
+        } else {
+            None
+        };
+        self.profiling
+            .lock()
+            .expect("profiling lock")
+            .command(arguments, live)
+    }
+}
+
+impl Profiling {
+    /// Runs one `profile` command; `live` is the process to start on.
+    fn command(&mut self, arguments: &[&str], live: Option<uscope::ProcessId>) -> Result<String> {
+        self.settle()?;
+        match arguments {
+            ["start", window @ ..] if window.len() <= 1 => {
+                anyhow::ensure!(
+                    self.recording.is_none(),
+                    "already profiling; `profile stop` ends it"
+                );
+                let Some(pid) = live else {
+                    anyhow::bail!("no program is running to profile");
+                };
+                let pid = u32::try_from(pid.get()).context("the program's process id")?;
+                let mut options = RecordOptions::default();
+                if let [seconds] = window {
+                    let seconds: f64 = seconds.parse().context("a window in seconds")?;
+                    options.window =
+                        Some(Duration::try_from_secs_f64(seconds).context("a window in seconds")?);
+                }
+                self.recording = Some(start_recording(pid, options));
+                self.recorded = None;
+                Ok(format!(
+                    "Profiling process {pid}{}.\n",
+                    window
+                        .first()
+                        .map(|seconds| format!(", keeping the last {seconds} s"))
+                        .unwrap_or_default()
+                ))
+            }
+            ["stop"] => {
+                anyhow::ensure!(
+                    self.recording.is_some() || self.recorded.is_some(),
+                    "not profiling; `profile start` begins"
+                );
+                self.end()?;
+                let samples = self.recorded.as_ref().map_or(0, Profile::samples);
+                Ok(format!("Profiled {samples} samples.\n"))
+            }
+            ["save", file] => {
+                let profile = self.recording.as_ref().and_then(SessionRecording::so_far);
+                self.settle()?;
+                let Some(profile) = profile.or_else(|| self.recorded.clone()) else {
+                    anyhow::bail!("nothing has been profiled; `profile start` begins");
+                };
+                profile
+                    .write(std::path::Path::new(file))
+                    .with_context(|| format!("writing {file}"))?;
+                Ok(format!("Saved {} samples to {file}.\n", profile.samples()))
+            }
+            _ => anyhow::bail!("usage: profile start|stop|save [window-seconds|file]"),
+        }
+    }
+}
+
+/// Records `pid` on a thread of its own until it exits or is stopped.
+fn start_recording(pid: u32, options: RecordOptions) -> SessionRecording {
+    let stop = Arc::new(AtomicBool::new(false));
+    let trigger = Arc::new(AtomicBool::new(false));
+    let (send, saved) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn({
+        let (stop, trigger) = (Arc::clone(&stop), Arc::clone(&trigger));
+        move || {
+            let mut save = |profile| {
+                let _ = send.send(profile);
+            };
+            uscope::profiler::record_attached(
+                pid,
+                &options,
+                &mut Watch {
+                    every: Duration::MAX,
+                    publish: &mut |_| {},
+                    stop: &stop,
+                    save: Some(Save {
+                        trigger: &trigger,
+                        to: &mut save,
+                    }),
+                },
+            )
+            .map(|attachment| attachment.profile)
+            .map_err(|error| error.to_string())
+        }
+    });
+    SessionRecording {
+        stop,
+        trigger,
+        saved,
+        thread,
+    }
 }

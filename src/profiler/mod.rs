@@ -8,7 +8,7 @@ mod frame_pointers;
 mod record;
 mod session;
 
-pub use session::{Attachment, Recording, Watch, record, record_attached, record_watched};
+pub use session::{Attachment, Recording, Save, Watch, record, record_attached, record_watched};
 
 pub use crate::analysis::{
     CallTree, Cost, Costs, Granularity, KeyKind, Keys, OffCpuLane, Query, Transform,
@@ -139,6 +139,9 @@ pub struct RecordOptions {
     /// The CPU time uscope may spend recording, which it holds to by
     /// sampling less of each period: none bounds it.
     pub budget: Option<budget::Budget>,
+    /// Keeps only what happened in the last span this long, which a
+    /// trigger saves: a recording's memory then holds no more.
+    pub window: Option<std::time::Duration>,
     /// Directories searched for separate debug files.
     pub debug_directories: Vec<PathBuf>,
 }
@@ -156,6 +159,7 @@ impl RecordOptions {
             max_events: 16_384,
             off_cpu: preset.off_cpu(),
             budget: preset.budget(),
+            window: None,
             debug_directories: Vec::new(),
         }
     }

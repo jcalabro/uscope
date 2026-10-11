@@ -197,6 +197,16 @@ impl Profiles {
         if let Some(symbol) = spec.function.filter(|symbol| !symbol.trim().is_empty()) {
             options.source = SampleSource::Function { symbol };
         }
+        if let Some(seconds) = spec.window {
+            options.window = Some(
+                std::time::Duration::try_from_secs_f64(seconds)
+                    .ok()
+                    .filter(|window| !window.is_zero())
+                    .ok_or_else(|| {
+                        Failure::new(ErrorKind::Invalid, "a window is a number of seconds")
+                    })?,
+            );
+        }
         let count = self.recorded.fetch_add(1, Ordering::Relaxed);
         let id = format!(
             "{:016x}",
@@ -269,6 +279,8 @@ impl Profiles {
                     }
                 },
                 stop,
+                // The page saves what it shows: with a window, the window.
+                save: None,
             },
         );
         match recorded {

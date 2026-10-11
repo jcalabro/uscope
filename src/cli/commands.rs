@@ -85,6 +85,7 @@ pub enum Command {
     Threads,
     Thread,
     Save,
+    Profile,
     Tasks,
     Task,
     Clear,
@@ -515,6 +516,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Write the commands that recreate the breakpoints, for -c"
     ),
     command!(
+        Profile,
+        "profile",
+        [],
+        "profile start|stop|save [window-seconds|file]",
+        "Sample where the program spends CPU time as it runs: start, keeping only the last seconds when given; save a file of it so far, which at a stop is the window before it; stop"
+    ),
+    command!(
         Tasks,
         "tasks",
         [],
@@ -733,6 +741,7 @@ impl Cli {
             Command::Thread => self.select_thread(arguments[0]).await?,
             Command::Tasks => self.tasks(line, &arguments, spec).await?,
             Command::Task => self.task(line, &arguments).await?,
+            Command::Profile => self.profile(&arguments).await?,
             Command::Clear => return Ok(Control::ClearScreen),
             Command::Help => self.help(first)?,
             Command::Quit => return Ok(Control::Quit),

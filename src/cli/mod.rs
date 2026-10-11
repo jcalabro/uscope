@@ -242,6 +242,9 @@ pub struct Cli {
     /// Source files lexed for highlighting, by path, with when each was
     /// modified.
     highlights: std::sync::Mutex<Highlights>,
+    /// The program's profile, recording or recorded, boxed as a profile is
+    /// large.
+    profiling: std::sync::Mutex<Box<profile::Profiling>>,
 }
 
 /// A source file's lines, each with its highlighted spans.
@@ -285,6 +288,7 @@ impl Cli {
             highlights: std::sync::Mutex::default(),
             completion_code: std::sync::Mutex::default(),
             completion_names: std::sync::Mutex::default(),
+            profiling: std::sync::Mutex::default(),
         }
     }
 

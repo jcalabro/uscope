@@ -408,6 +408,53 @@ impl CaptureBuilder {
         });
     }
 
+    /// Forgets every row of what happened before `time`, as a rolling
+    /// window does, and cuts the spans that cross it there. What rows
+    /// refer to, such as threads, frames, and stacks, stays, and so do the
+    /// counts.
+    pub fn forget_before(&mut self, time: i64) {
+        for samples in &mut self.samples {
+            samples.retain(|sample| sample.time.get() >= time);
+        }
+        for intervals in &mut self.off_cpu {
+            intervals.retain_mut(|interval| {
+                let start = interval.time.get();
+                let end = start.saturating_add_unsigned(interval.duration.get());
+                if start < time && end > time {
+                    interval.time = time.into();
+                    interval.duration = end.abs_diff(time).into();
+                }
+                end > time
+            });
+        }
+        self.gaps.retain_mut(|gap| {
+            if gap.start.get() < time {
+                gap.start = time.min(gap.end.get()).into();
+            }
+            gap.end.get() > time
+        });
+        for zones in self.zones.values_mut() {
+            zones.retain(|zone| zone.end.get() >= time);
+        }
+        self.plots.retain(|plot| plot.time.get() >= time);
+        self.markers.retain(|marker| marker.time.get() >= time);
+        self.task_waits.retain(|wait| wait.time.get() >= time);
+    }
+
+    /// Every count, by kind.
+    pub const fn accounts(&self) -> &BTreeMap<u32, u64> {
+        &self.accounts
+    }
+
+    /// Takes `base` from every count, so that they count only what came
+    /// after it.
+    pub fn discount(&mut self, base: &BTreeMap<u32, u64>) {
+        for (kind, value) in &mut self.accounts {
+            *value = value.saturating_sub(base.get(kind).copied().unwrap_or(0));
+        }
+        self.accounts.retain(|_, value| *value > 0);
+    }
+
     /// Records where a task waited.
     pub fn task_wait(&mut self, task: u32, time: i64, weight: u64, stack: u32, state: &str) {
         let state = self.string(state);

@@ -79,6 +79,27 @@ Sampling paused for 1.389 s of the 3.453 s recorded, to hold uscope to 5% of a C
 lifts it. A recording without one that uses more than 5% of a CPU says
 that `--preset prod` would hold it to 1%.
 
+## A rolling window
+
+```sh
+uscope record --window 30 -o app.usprof -- ./app
+kill -USR2 <uscope's pid>   # writes app-1.usprof, then app-2.usprof, ...
+```
+
+`--window SECONDS` keeps only the last part of a recording, so it can run
+for as long as the program does in bounded memory. SIGUSR2 writes the
+window as it is to a numbered file, and recording goes on; the output file
+gets the last window. Each window's counts, of lost samples, CPU time, and
+truncations, are of that window alone. Recording from the page takes a
+window too, and Save writes the window the page shows.
+
+The window moves by eighths of itself, so a window holds between its
+length and an eighth more. Frames, stacks, and modules stay for the whole
+recording, as they grow with the program's code rather than with time.
+
+A debugging session can profile its program with `profile start
+[seconds]`; see [cli.md](cli.md#profiling).
+
 ## Time off the CPU
 
 With off-CPU recording on, the kernel reports each time a thread leaves its

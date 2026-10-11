@@ -999,7 +999,12 @@ environment: Array<[string, string]>, preset: RecordPreset,
 /**
  * Samples each call of the function this names instead of CPU time.
  */
-function?: string | null, };
+function?: string | null, 
+/**
+ * Keeps only the last this many seconds, which the page then shows
+ * and saves.
+ */
+window?: number | null, };
 
 export type RecordPreset = "production" | "development" | "maximum";
 

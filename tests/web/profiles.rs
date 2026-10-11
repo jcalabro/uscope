@@ -302,6 +302,21 @@ async fn a_server_that_ends_ends_its_recordings_programs() {
 }
 
 #[tokio::test]
+async fn a_recording_window_must_be_a_number_of_seconds() {
+    let web = Web::start("record-window", &[]);
+    let mut tab = web.control("tab").await;
+    let (kind, message) = tab
+        .request(
+            "recordProfile",
+            json!({"program": Scenario::fixture("spin"), "window": -1.0}),
+        )
+        .await
+        .expect_err("a negative window");
+    assert_eq!(kind, "invalid");
+    assert!(message.contains("a number of seconds"), "{message}");
+}
+
+#[tokio::test]
 async fn a_program_that_cannot_start_fails_its_recording() {
     let web = Web::start("record-missing", &[]);
     let mut tab = web.control("tab").await;

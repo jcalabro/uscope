@@ -5082,6 +5082,84 @@ fn timings_report_each_stop_and_request() {
     }
 }
 
+/// A debugging session profiles its program from outside as it runs: a
+/// stopped program adds no samples, and what it runs after does.
+#[test]
+fn a_session_profiles_its_program_while_it_runs() {
+    let scratch = support::ScratchDir::new("cli-profile");
+    let stopped = scratch.path().join("stopped.usprof");
+    let ran = scratch.path().join("ran.usprof");
+    let stdout = batch(
+        &[
+            "build/test-programs/profile-stacks-gcc-o0",
+            "--",
+            "20000000",
+        ],
+        &[
+            "break leaf",
+            "run",
+            "profile start",
+            &format!("profile save {}", stopped.display()),
+            "delete 1",
+            "continue",
+            &format!("profile save {}", ran.display()),
+            "profile stop",
+        ],
+    );
+    assert!(stdout.contains("Profiling process "), "{stdout}");
+    assert!(
+        stdout.contains(&format!("Saved 0 samples to {}.", stopped.display())),
+        "{stdout}"
+    );
+    let profiled = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Profiled ")?.strip_suffix(" samples."))
+        .and_then(|count| count.parse::<u64>().ok())
+        .expect("a count of samples");
+    assert!(profiled > 0, "{stdout}");
+    let report = assert_success(uscope(&["report", &ran.to_string_lossy()]));
+    assert!(report.contains("leaf"), "{report}");
+}
+
+#[test]
+fn a_signal_saves_a_recordings_window_as_it_goes_on() {
+    let scratch = support::ScratchDir::new("cli-window");
+    let profile = scratch.path().join("phases.usprof");
+    let mut recording = uscope_command()
+        .args(["record", "--window", "0.1", "-o"])
+        .arg(&profile)
+        .arg("--")
+        .arg(fixture("build/test-programs/profile-phases"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run uscope record");
+    let mut lines = BufReader::new(recording.stderr.take().expect("stderr")).lines();
+    let mut line = || lines.next().expect("a line").expect("read a line");
+    assert!(line().contains("saves it"));
+    // Until a saved window holds the first phase, which runs until the
+    // program is released.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut signals = 0;
+    loop {
+        assert!(Instant::now() < deadline, "no window held the first phase");
+        kill(Pid::from_raw(recording.id().cast_signed()), Signal::SIGUSR2).expect("signal");
+        signals += 1;
+        let window = scratch.path().join(format!("phases-{signals}.usprof"));
+        assert!(line().ends_with(&window.display().to_string()));
+        if assert_success(uscope(&["report", &window.to_string_lossy()])).contains("first") {
+            break;
+        }
+    }
+    let mut stdin = recording.stdin.take().expect("stdin");
+    stdin.write_all(b"x").expect("release the program");
+    drop(stdin);
+    assert!(recording.wait().expect("wait").success());
+    let last = assert_success(uscope(&["report", &profile.to_string_lossy()]));
+    assert!(last.contains("second") && !last.contains("first"), "{last}");
+}
+
 #[test]
 fn record_writes_a_profile_that_report_summarizes() {
     let scratch = support::ScratchDir::new("cli-record");

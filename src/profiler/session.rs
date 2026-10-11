@@ -41,6 +41,7 @@ pub fn record(command: Command, options: &RecordOptions) -> Result<Recording, Re
             every: Duration::MAX,
             publish: &mut |_| {},
             stop: &stop,
+            save: None,
         },
     )
 }
@@ -56,6 +57,16 @@ pub struct Watch<'a> {
     /// Ends the recording once set: a program the recording started is
     /// killed, and one it attached to goes on without it.
     pub stop: &'a AtomicBool,
+    /// Saves the profile so far when triggered, as the recording goes on.
+    pub save: Option<Save<'a>>,
+}
+
+/// A trigger, and what takes the profile when it fires: with a rolling
+/// window, the window as it is.
+pub struct Save<'a> {
+    /// Fires once set, and is cleared as the profile is taken.
+    pub trigger: &'a AtomicBool,
+    pub to: &'a mut dyn FnMut(Profile),
 }
 
 /// Records `command` as [`record`] does, publishing the profile so far as
@@ -102,8 +113,8 @@ pub fn record_watched(
         &mut processor,
         &mut events,
         watch,
+        options,
         started,
-        options.budget,
         || exit.is_finished(),
         || {
             record!("record: stopping, killing {pid}");
@@ -167,8 +178,8 @@ pub fn record_attached(
         &mut processor,
         &mut events,
         watch,
+        options,
         true,
-        options.budget,
         || process.exited(),
         || {
             record!("record: stopping, detaching from {pid}");
@@ -221,6 +232,13 @@ fn settings(
         ("stack copy", stack_copy),
         ("off-CPU", if options.off_cpu { "on" } else { "off" }.into()),
         (
+            "window",
+            options.window.map_or_else(
+                || "all".into(),
+                |window| format!("the last {:.3} s", window.as_secs_f64()),
+            ),
+        ),
+        (
             "budget",
             options.budget.map_or_else(
                 || "none".into(),
@@ -232,22 +250,29 @@ fn settings(
     }
 }
 
-/// Drains `events` into `processor` until `ended`, publishing as `watch`
-/// asks, and holding to `budget`, once the program has started. When
-/// `watch` stops the recording, `stop` ends it at once when it says so, or
-/// else waits for `ended`.
+/// Drains `events` into `processor` until `ended`, publishing and saving
+/// as `watch` asks, and holding to the budget and window of `options`,
+/// once the program has started. When `watch` stops the recording, `stop`
+/// ends it at once when it says so, or else waits for `ended`.
 fn drive(
     processor: &mut record::Processor,
     events: &mut perf::Events,
     watch: &mut Watch<'_>,
+    options: &RecordOptions,
     started: bool,
-    budget: Option<Budget>,
     mut ended: impl FnMut() -> bool,
     mut stop: impl FnMut() -> bool,
 ) {
-    let mut pacer = budget
+    let mut pacer = options
+        .budget
         .filter(|_| started)
         .map(|budget| Pacer::new(budget, monotonic(), processor));
+    // A window moves by eighths of itself.
+    let marks = options.window.map(|window| {
+        processor.keep_window(window);
+        (window / 8).max(Duration::from_millis(10))
+    });
+    let mut marked = std::time::Instant::now();
     if started {
         (watch.publish)(Profile {
             capture: processor.snapshot(),
@@ -283,6 +308,22 @@ fn drive(
         processor.ingest(&buffer, (!finished).then_some(watermark));
         if finished {
             break;
+        }
+        if let Some(every) = marks
+            && marked.elapsed() >= every
+        {
+            processor.counts(events.counts());
+            processor.mark();
+            marked = std::time::Instant::now();
+        }
+        if let Some(save) = &mut watch.save
+            && save.trigger.swap(false, Ordering::Relaxed)
+        {
+            processor.counts(events.counts());
+            record!("record: triggered");
+            (save.to)(Profile {
+                capture: processor.snapshot(),
+            });
         }
         if started && published.elapsed() >= wait {
             processor.counts(events.counts());

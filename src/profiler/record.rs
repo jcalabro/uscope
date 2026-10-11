@@ -94,6 +94,17 @@ pub struct Processor {
     /// loading images has taken of it since.
     began: std::time::Duration,
     loading: std::time::Duration,
+    /// The time every record up to has been processed.
+    processed: u64,
+    window: Option<Window>,
+}
+
+/// A rolling window: how long it is, and its marks, each a moment and the
+/// counts at it, oldest first. The oldest mark the window has passed is
+/// its start: nothing before it is kept, and nothing it counted counts.
+struct Window {
+    length: u64,
+    marks: std::collections::VecDeque<(u64, BTreeMap<u32, u64>)>,
 }
 
 impl Processor {
@@ -122,6 +133,8 @@ impl Processor {
             gaps_end: 0,
             began: thread_cpu(),
             loading: std::time::Duration::ZERO,
+            processed: 0,
+            window: None,
         }
     }
 
@@ -249,6 +262,44 @@ impl Processor {
             }
         }
         self.order = order;
+        self.processed = watermark.unwrap_or(self.latest).max(self.processed);
+    }
+
+    /// Keeps only a rolling window of `length` of what happens, from
+    /// marks taken as [`Processor::mark`] is called.
+    pub fn keep_window(&mut self, length: std::time::Duration) {
+        self.window = Some(Window {
+            length: u64::try_from(length.as_nanos()).unwrap_or(u64::MAX),
+            marks: std::collections::VecDeque::new(),
+        });
+    }
+
+    /// Marks the counts where every record has been processed, and moves
+    /// a window's start up to the latest mark it has passed, forgetting
+    /// what came before. The events' counts must be current.
+    pub fn mark(&mut self) {
+        let Some(window) = &mut self.window else {
+            return;
+        };
+        let now = self.processed;
+        window
+            .marks
+            .push_back((now, self.builder.accounts().clone()));
+        let passed = now.saturating_sub(window.length);
+        while window.marks.get(1).is_some_and(|(time, _)| *time <= passed) {
+            window.marks.pop_front();
+        }
+        if let Some(&(start, _)) = window.marks.front().filter(|(time, _)| *time <= passed) {
+            self.builder.forget_before(start.cast_signed());
+            self.first = Some(start);
+        }
+    }
+
+    /// Where a window starts, and the counts there.
+    fn window_start(&self) -> Option<&(u64, BTreeMap<u32, u64>)> {
+        let window = self.window.as_ref()?;
+        let passed = self.processed.saturating_sub(window.length);
+        window.marks.front().filter(|(time, _)| *time <= passed)
     }
 
     fn process(&mut self, record: decode::Record<'_>) {
@@ -530,7 +581,7 @@ impl Processor {
     pub fn snapshot(&mut self) -> Capture {
         self.symbolize_new();
         let mut builder = self.builder.clone();
-        self.still_off(&mut builder);
+        self.close(&mut builder);
         builder.finish()
     }
 
@@ -540,13 +591,14 @@ impl Processor {
         self.ingest(&[], None);
         self.symbolize_new();
         let mut builder = std::mem::take(&mut self.builder);
-        self.still_off(&mut builder);
+        self.close(&mut builder);
         builder.finish()
     }
 
     /// Ends each interval of a thread still off its CPU where the
-    /// recording has reached, and charges the CPU time recording took.
-    fn still_off(&self, builder: &mut CaptureBuilder) {
+    /// recording has reached, charges the CPU time recording took, and
+    /// cuts a window's rows and counts to its start.
+    fn close(&self, builder: &mut CaptureBuilder) {
         for &(thread, left, preempted) in self.switched_out.values() {
             let back = self.latest.min(self.next_gap(left));
             builder.off_cpu(
@@ -566,6 +618,11 @@ impl Processor {
         ] {
             let charged = builder.account(kind as u32);
             builder.count(kind as u32, nanoseconds(total).saturating_sub(charged));
+        }
+        if let Some((start, counts)) = self.window_start() {
+            builder.forget_before(start.cast_signed());
+            builder.discount(counts);
+            builder.setting("start", &start.to_string());
         }
     }
 

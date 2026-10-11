@@ -806,6 +806,21 @@ selects the frame that panicked or faulted, below the runtime's own. A
 breakpoint instruction of the program's own, such as Go's
 `runtime.Breakpoint()`, stops too, and the program goes on past it.
 
+### Profiling
+
+`profile start` samples where the running program spends its CPU time, from
+outside it, as `uscope record --pid` does; [profiling.md](profiling.md)
+says what a profile holds. A stopped program runs nothing, so it adds no
+samples, and the profile covers the time between stops.
+
+| Command | |
+| --- | --- |
+| `profile start` [*seconds*] | Begin; with *seconds*, keep only the last that many. |
+| `profile save` *file* | Write the profile so far, which with a window at a stop is the window before it. |
+| `profile stop` | End, keeping the profile for `profile save`. |
+
+Profiling ends by itself when the program exits.
+
 ## Core dumps
 
 `--core` opens a dump written by the kernel or gdb's `gcore` as one permanent

@@ -291,11 +291,14 @@ function RecordForm() {
   });
   const [preset, setPreset] = useState<RecordPreset>("development");
   const [function_, setFunction] = useState("");
+  const [window_, setWindow] = useState("");
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const words = splitWords(form.arguments);
   const environment = parseEnvironment(form.environment);
-  const valid = form.program.trim() !== "" && words.ok && environment.ok;
+  const seconds = window_.trim() === "" ? null : Number(window_);
+  const validWindow = seconds === null || (Number.isFinite(seconds) && seconds > 0);
+  const valid = form.program.trim() !== "" && words.ok && environment.ok && validWindow;
 
   const record = async (event: FormEvent) => {
     event.preventDefault();
@@ -312,6 +315,7 @@ function RecordForm() {
         environment: environment.pairs,
         preset,
         function: function_.trim() || null,
+        window: seconds,
       });
       void navigate({ to: "/profile/$profile", params: { profile: started.profile } });
     } catch (failure) {
@@ -406,6 +410,24 @@ function RecordForm() {
               onChange={(event) => setFunction(event.target.value)}
               placeholder="app::handle"
               spellCheck={false}
+            />
+          )}
+        </Field>
+      </div>
+      <div className="two">
+        <Field
+          label="Keep the last"
+          note="Seconds of the recording to keep, which the page shows and saves; empty keeps all of it."
+        >
+          {(id) => (
+            <input
+              id={id}
+              className="input"
+              value={window_}
+              onChange={(event) => setWindow(event.target.value)}
+              placeholder="all"
+              inputMode="decimal"
+              aria-invalid={!validWindow}
             />
           )}
         </Field>

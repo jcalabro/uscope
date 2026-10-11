@@ -700,6 +700,11 @@ pub struct RecordProfile {
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub function: Option<String>,
+    /// Keeps only the last this many seconds, which the page then shows
+    /// and saves.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub window: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]

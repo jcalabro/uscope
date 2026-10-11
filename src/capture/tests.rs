@@ -118,6 +118,48 @@ fn a_capture_seals_reads_back_and_files_merge_chunks_by_identity() {
     assert_eq!((read.chunks, read.truncated), (1, true));
 }
 
+/// Forgetting what came before a moment keeps every row from it on, cuts
+/// the spans that cross it there, and keeps what rows refer to.
+#[test]
+fn a_builder_forgets_rows_before_a_moment() {
+    let mut builder = CaptureBuilder::new();
+    let thread = builder.thread(1, 1, 0);
+    let frame = builder.frame(FrameKind::Native, NONE, 0x10, 0);
+    let stack = builder.stack(&[frame]);
+    for time in [1, 5, 9] {
+        builder.sample(thread, time, 1, stack, NONE);
+    }
+    builder.off_cpu(thread, 2, 2, false);
+    builder.off_cpu(thread, 4, 4, true);
+    builder.gap(1, 2, GapReason::Budget);
+    builder.gap(3, 7, GapReason::Budget);
+    builder.marker(3, MarkerKind::Budget, "before");
+    builder.marker(6, MarkerKind::Budget, "after");
+    builder.forget_before(5);
+    let capture = builder.finish();
+    assert_eq!(capture.validate(), Ok(()));
+    let times = |rows: &[Sample]| rows.iter().map(|row| row.time.get()).collect::<Vec<_>>();
+    assert_eq!(times(&capture.samples), [5, 9]);
+    assert_eq!(
+        capture
+            .off_cpu
+            .iter()
+            .map(|row| (row.time.get(), row.duration.get(), row.preempted))
+            .collect::<Vec<_>>(),
+        [(5, 3, 1)]
+    );
+    assert_eq!(
+        capture
+            .gaps
+            .iter()
+            .map(|gap| (gap.start.get(), gap.end.get()))
+            .collect::<Vec<_>>(),
+        [(5, 7)]
+    );
+    assert_eq!(capture.markers.len(), 1);
+    assert_eq!(capture.stacks.len(), 1);
+}
+
 #[test]
 fn validation_rejects_every_out_of_bounds_reference() {
     let valid = sample_capture(0);

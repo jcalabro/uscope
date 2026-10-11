@@ -1,14 +1,16 @@
 mod support;
 
+use std::io::Write as _;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use support::Scenario;
 use uscope::profiler::budget::Budget;
 use uscope::profiler::{
-    Attachment, CallNode, DEEP_STACK_COPY, Preset, RecordError, RecordOptions, SMALL_STACK_COPY,
-    SampleSource, SampledStack, StackCopy, StackEnding, StackView, Watch, record, record_attached,
-    record_watched,
+    Attachment, CallNode, DEEP_STACK_COPY, Preset, Profile, RecordError, RecordOptions,
+    SMALL_STACK_COPY, SampleSource, SampledStack, Save, StackCopy, StackEnding, StackView, Watch,
+    record, record_attached, record_watched,
 };
 
 /// The profile-stacks fixture across languages, compilers, optimization,
@@ -350,6 +352,7 @@ fn a_watched_recording_publishes_as_it_goes_and_stops_when_asked() {
                         let _ = published.send((profile.samples(), pid));
                     },
                     stop: &stop,
+                    save: None,
                 },
             )
         }
@@ -586,6 +589,80 @@ fn a_recording_over_its_budget_pauses_between_samples_and_says_so() {
     }
 }
 
+/// Every function on any sample's stack.
+fn on_stacks(profile: &Profile) -> std::collections::BTreeSet<String> {
+    profile
+        .stacks()
+        .into_iter()
+        .flat_map(|stack| stack.functions)
+        .collect()
+}
+
+/// A rolling window keeps only its last span. A trigger saves the window
+/// as it is while the recording goes on, and the recording ends with the
+/// window it reached, counting only what that holds.
+#[test]
+fn a_rolling_window_saves_on_a_trigger_and_keeps_only_its_last_span() {
+    let (reader, mut writer) = std::io::pipe().expect("pipe");
+    let mut command = Command::new(Scenario::fixture("profile-phases"));
+    command
+        .stdin(reader)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let window = Duration::from_millis(100);
+    let options = RecordOptions {
+        window: Some(window),
+        ..RecordOptions::default()
+    };
+    let (trigger, stop) = (AtomicBool::new(false), AtomicBool::new(false));
+    let mut saved = Vec::new();
+    let recording = record_watched(
+        command,
+        &options,
+        &mut Watch {
+            every: Duration::from_millis(20),
+            publish: &mut |profile| {
+                if on_stacks(&profile).contains("first") {
+                    trigger.store(true, Ordering::Relaxed);
+                }
+            },
+            stop: &stop,
+            save: Some(Save {
+                trigger: &trigger,
+                to: &mut |profile| {
+                    // The second phase begins only once the first is saved.
+                    if saved.is_empty() {
+                        writer.write_all(b"x").expect("release the program");
+                    }
+                    saved.push(profile);
+                },
+            }),
+        },
+    )
+    .expect("record");
+    assert!(recording.status.success(), "{}", recording.status);
+    let (during, after) = (on_stacks(&saved[0]), on_stacks(&recording.profile));
+    assert!(
+        during.contains("first") && !during.contains("second"),
+        "{during:?}"
+    );
+    assert!(
+        after.contains("second") && !after.contains("first"),
+        "{after:?}"
+    );
+    let profile = &recording.profile;
+    let (start, end) = profile.span();
+    let span = u64::try_from(end - start).expect("ordered");
+    assert!(span >= u64::try_from(window.as_nanos()).expect("short"));
+    assert!(profile.stacks().iter().all(|stack| stack.time >= start));
+    // One thread ran, so the window cannot count more than its own span.
+    assert!(
+        profile.counted() > 0 && profile.counted() <= span + 50_000_000,
+        "counted {} in {span}",
+        profile.counted()
+    );
+}
+
 #[test]
 fn a_profile_says_how_much_cpu_time_its_samples_cover() {
     // At 49 samples a second, a thread's time on each CPU is sampled
@@ -712,6 +789,7 @@ fn attach_and_release(
                 every: std::time::Duration::MAX,
                 publish: &mut publish,
                 stop: &stop,
+                save: None,
             };
             record_attached(pid, options, &mut watch)
         });
