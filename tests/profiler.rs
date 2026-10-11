@@ -704,7 +704,9 @@ fn segments_tile_a_recording_and_read_back_as_one() {
         ..RecordOptions::default()
     };
     let (trigger, stop) = (AtomicBool::new(false), AtomicBool::new(false));
-    let mut segments = Vec::new();
+    let mut segments: Vec<Profile> = Vec::new();
+    // The first segment that saw the helper thread wait to be released.
+    let mut blocked = None;
     let recording = record_watched(
         command,
         &options,
@@ -715,8 +717,12 @@ fn segments_tile_a_recording_and_read_back_as_one() {
             save: Some(Save {
                 trigger: &trigger,
                 to: &mut |profile| {
-                    // The helper thread blocks across the first cuts.
-                    if segments.len() == 3 {
+                    // Once the helper thread waits, three cuts cross its
+                    // wait before it is released.
+                    if blocked.is_none() && !profile.off_cpu().is_empty() {
+                        blocked = Some(segments.len());
+                    }
+                    if blocked.is_some_and(|first| segments.len() == first + 3) {
                         writer.write_all(b"x").expect("release the program");
                     }
                     segments.push(profile);
@@ -760,9 +766,10 @@ fn segments_tile_a_recording_and_read_back_as_one() {
             .write_segment(scratch.path(), Duration::from_secs(3600))
             .expect("write the segment");
     }
-    // The helper thread waited through the first cuts.
+    // The helper thread's wait is in each segment it spanned.
+    let first = blocked.expect("a segment saw the helper thread wait");
     assert!(
-        segments[..3]
+        segments[first..=first + 3]
             .iter()
             .all(|segment| !segment.off_cpu().is_empty())
     );
