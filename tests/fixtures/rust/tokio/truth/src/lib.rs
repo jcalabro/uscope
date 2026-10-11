@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::io::Write;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// What one task reported.
 #[derive(Default)]
@@ -28,6 +29,10 @@ struct Task {
 }
 
 static TASKS: Mutex<BTreeMap<u64, Task>> = Mutex::new(BTreeMap::new());
+/// How many of the tasks hold an await, changed only under `TASKS`'s
+/// lock: [`all_parked`] counts them without walking every task while the
+/// tasks wait for the lock.
+static PARKED: AtomicUsize = AtomicUsize::new(0);
 
 fn with_task<T>(id: u64, update: impl FnOnce(&mut Task) -> T) -> T {
     let mut tasks = TASKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -54,10 +59,10 @@ pub fn start() -> u64 {
 
 /// Removes a task whose body has ended.
 pub fn end(me: u64) {
-    TASKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&me);
+    let mut tasks = TASKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if tasks.remove(&me).is_some_and(|task| !task.awaits.is_empty()) {
+        PARKED.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Records that the task is on this thread now.
@@ -85,6 +90,9 @@ impl Drop for At {
     fn drop(&mut self) {
         with_task(self.me, |task| {
             task.awaits.pop();
+            if task.awaits.is_empty() {
+                PARKED.fetch_sub(1, Ordering::Relaxed);
+            }
             task.thread = gettid();
         });
     }
@@ -93,7 +101,12 @@ impl Drop for At {
 /// Marks the await the task is about to make.
 #[must_use]
 pub fn at(me: u64, tag: &'static str) -> At {
-    with_task(me, |task| task.awaits.push(tag));
+    with_task(me, |task| {
+        if task.awaits.is_empty() {
+            PARKED.fetch_add(1, Ordering::Relaxed);
+        }
+        task.awaits.push(tag);
+    });
     At { me }
 }
 
@@ -123,7 +136,7 @@ pub fn parked_at(tag: &str) -> usize {
 /// Whether every task registered has an await registered.
 pub fn all_parked(expected: usize) -> bool {
     let tasks = TASKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    tasks.len() == expected && tasks.values().all(|task| !task.awaits.is_empty())
+    tasks.len() == expected && PARKED.load(Ordering::Relaxed) == expected
 }
 
 /// Whether every worker of the runtime is parked: an odd park count
