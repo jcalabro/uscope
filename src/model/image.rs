@@ -532,6 +532,9 @@ pub struct ModuleImage {
     /// The functions that run each coroutine type, by the type's identity,
     /// built on the first search for one.
     coroutine_functions: std::sync::OnceLock<HashMap<u32, Vec<FunctionId>>>,
+    /// Where each out-of-line instance of a function that begins a panic
+    /// begins, found on the first search.
+    panic_entries: std::sync::OnceLock<Arc<[ImageAddress]>>,
     /// Globals by every selector naming one, built on the first search by
     /// one.
     globals_by_selector: std::sync::OnceLock<BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>>,
@@ -583,6 +586,7 @@ impl ModuleImage {
         Ok(Self {
             symbols_by_last_part: std::sync::OnceLock::new(),
             coroutine_functions: std::sync::OnceLock::new(),
+            panic_entries: std::sync::OnceLock::new(),
             globals_by_selector: std::sync::OnceLock::new(),
             id: binding.id,
             path: Arc::clone(&binding.path),
@@ -1323,7 +1327,7 @@ impl ModuleImage {
     }
 
     /// The instances whose code contains `address`.
-    fn instances_containing(
+    pub(crate) fn instances_containing(
         &self,
         address: ImageAddress,
     ) -> impl Iterator<Item = CodeInstance<'_>> {
@@ -1446,6 +1450,26 @@ impl ModuleImage {
     /// C++ overloads and same-named static functions of different files.
     pub fn functions_named<'a>(&'a self, name: &str) -> impl Iterator<Item = Function<'a>> + 'a {
         self.function_view().named(name)
+    }
+
+    /// The functions whose own name is `name`, in identifier order: unlike
+    /// [`Self::functions_named`], `main` names only functions called that.
+    pub fn functions_called<'a>(&'a self, name: &str) -> impl Iterator<Item = Function<'a>> + 'a {
+        self.function_view().called(name)
+    }
+
+    /// Where each out-of-line instance of a function that begins a panic
+    /// begins, in no particular order.
+    pub fn panic_entries(&self) -> &[ImageAddress] {
+        self.panic_entries.get_or_init(|| {
+            self.functions()
+                .filter(|function| function.role() == CodeRole::Panic)
+                .flat_map(|function| self.instances_for_function(function.id()))
+                .filter(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine))
+                .filter_map(|instance| instance.ranges().next())
+                .map(|range| range.start)
+                .collect()
+        })
     }
 
     /// Every linker symbol with the supplied name.
@@ -1703,17 +1727,19 @@ fn instruction_starts(metadata: &ModuleMetadata) -> Vec<(ImageAddress, crate::Bo
 /// Matches an absolute path exactly and a relative path as a suffix of whole
 /// components, ignoring `.` components such as a leading `./`.
 fn path_matches(candidate: &Path, requested: &Path) -> bool {
-    fn significant(path: &Path) -> Vec<std::path::Component<'_>> {
+    // Last component first, which tells most files apart at once.
+    fn significant(path: &Path) -> impl Iterator<Item = std::path::Component<'_>> {
         path.components()
+            .rev()
             .filter(|component| *component != std::path::Component::CurDir)
-            .collect()
     }
 
     if requested.is_absolute() {
         return candidate == requested;
     }
-    let (candidate, requested) = (significant(candidate), significant(requested));
-    !requested.is_empty() && candidate.ends_with(&requested)
+    let mut candidate = significant(candidate);
+    let mut requested = significant(requested).peekable();
+    requested.peek().is_some() && requested.all(|component| candidate.next() == Some(component))
 }
 
 #[cfg(test)]

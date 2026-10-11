@@ -369,12 +369,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             .flat_map(|module| {
                 module
                     .image
-                    .functions()
-                    .filter(|function| function.role() == CodeRole::Panic)
-                    .flat_map(|function| module.image.instances_for_function(function.id()))
-                    .filter(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine))
-                    .filter_map(|instance| instance.ranges().next())
-                    .filter_map(|range| module.loaded.virtual_address(range.start).ok())
+                    .panic_entries()
+                    .iter()
+                    .filter_map(|&entry| module.loaded.virtual_address(entry).ok())
                     .collect::<Vec<_>>()
             })
             .collect()

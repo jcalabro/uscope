@@ -62,20 +62,23 @@ const MAX_MESSAGE: u64 = 1 << 16;
 
 /// The standard library's runtime, when the module carries it.
 pub fn detect(image: &Arc<dyn RuntimeImage + Send + Sync>) -> Option<Arc<dyn RuntimeModel>> {
+    // Only Rust's code is searched for its panic function: finding it
+    // demangles every symbol of the image.
     let rust = image
         .producers()
         .iter()
         .any(|producer| producer.contains("(rustc version "));
+    if !rust {
+        return None;
+    }
     let panic = image.function_answering("__rustc::rust_panic")?;
-    rust.then(|| {
-        Arc::new(RustRuntime {
-            image: Arc::clone(image),
-            hooks: [RuntimeHook {
-                filter: &PANIC,
-                address: panic.address,
-            }],
-        }) as Arc<dyn RuntimeModel>
-    })
+    Some(Arc::new(RustRuntime {
+        image: Arc::clone(image),
+        hooks: [RuntimeHook {
+            filter: &PANIC,
+            address: panic.address,
+        }],
+    }))
 }
 
 #[derive(Debug)]

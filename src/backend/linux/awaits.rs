@@ -972,11 +972,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .and_then(|address| module.loaded.virtual_address(address).ok())
         };
         // Each codegen unit may have a copy of its own.
-        for function in module
-            .image
-            .functions()
-            .filter(|function| *function.name() == *name)
-        {
+        for function in module.image.functions_called(&name) {
             for instance in module.image.instances_for_function(function.id()) {
                 let copies = if matches!(instance.kind(), crate::CodeInstanceKind::OutOfLine) {
                     &mut named

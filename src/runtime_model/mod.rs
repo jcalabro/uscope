@@ -647,8 +647,7 @@ impl RuntimeImage for ModuleImage {
     /// Where a function breakpoint enters the function, once that is past
     /// its first instruction.
     fn function_entries(&self, name: &str) -> Vec<ImageAddress> {
-        self.functions()
-            .filter(|function| *function.name() == *name)
+        self.functions_called(name)
             .flat_map(|function| self.instances_for_function(function.id()))
             .filter(|instance| matches!(instance.kind(), crate::CodeInstanceKind::OutOfLine))
             .filter_map(|instance| instance.ranges().map(|range| range.start).min())

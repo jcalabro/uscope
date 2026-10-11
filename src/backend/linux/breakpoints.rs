@@ -1032,10 +1032,9 @@ fn resolve_in_image(
             let mut seen = BTreeSet::new();
             let mut locations = Vec::new();
             for address in addresses {
-                let code_instances = image
-                    .code_instances()
-                    .filter(|instance| instance.contains(address))
-                    .collect::<Vec<_>>();
+                let mut code_instances = image.instances_containing(address).collect::<Vec<_>>();
+                code_instances.sort_unstable_by_key(|instance| instance.id());
+                code_instances.dedup_by_key(|instance| instance.id());
                 let innermost = code_instances
                     .iter()
                     .find(|instance| {

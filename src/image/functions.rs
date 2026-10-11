@@ -555,6 +555,21 @@ impl<'a> FunctionView<'a> {
         found(name).filter(move |function| !program || function.main_subprogram())
     }
 
+    /// The functions whose own name is `name`, in identifier order: unlike
+    /// [`Self::named`], `main` names only functions called that.
+    pub fn called(self, name: &str) -> impl Iterator<Item = Function<'a>> + 'a {
+        let mut ids = index::named(self.strings, self.names, name).collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        let name = name.to_owned();
+        ids.into_iter()
+            .map(move |id| {
+                self.function(FunctionId::new(id))
+                    .expect("validation checked the name index")
+            })
+            .filter(move |function| function.name() == name)
+    }
+
     pub fn instance(self, id: CodeInstanceId) -> Option<CodeInstance<'a>> {
         Some(CodeInstance {
             view: self,
