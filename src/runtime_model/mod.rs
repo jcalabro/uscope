@@ -321,6 +321,19 @@ pub struct RuntimeSignals {
     pub handled: &'static [i32],
 }
 
+/// A runtime a module carries that its model cannot bind against the
+/// module's debug information.
+#[derive(Debug, Clone)]
+pub struct Unbound {
+    /// Why it cannot be bound, as when the debug information is stripped.
+    pub reason: Arc<str>,
+    /// The signals the runtime tolerates arriving late, as
+    /// [`RuntimeSignals::deferrable`] says: how the runtime uses them holds
+    /// without its data described, and one delivered while the debugger
+    /// runs a thread alone may wait for threads it holds.
+    pub deferrable: &'static [i32],
+}
+
 /// A runtime function that reports an exception as it is entered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeHook {
@@ -590,7 +603,7 @@ pub enum TaskEnd {
 /// a model knows.
 pub fn detect(
     image: &Arc<dyn RuntimeImage + Send + Sync>,
-) -> Vec<Result<Arc<dyn RuntimeModel>, Arc<str>>> {
+) -> Vec<Result<Arc<dyn RuntimeModel>, Unbound>> {
     go::detect(Arc::clone(image))
         .into_iter()
         .chain(rust::detect(image).map(Ok))

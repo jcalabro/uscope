@@ -53,7 +53,7 @@ pub(super) struct BoundRuntime {
 pub(super) type RuntimeCache = std::cell::RefCell<
     std::collections::BTreeMap<
         crate::ModuleImageId,
-        Vec<std::result::Result<Arc<dyn RuntimeModel>, Arc<str>>>,
+        Vec<std::result::Result<Arc<dyn RuntimeModel>, runtime_model::Unbound>>,
     >,
 >;
 
@@ -167,7 +167,7 @@ impl<P: InspectionOps> Controller<P> {
     pub(super) fn unbound_runtimes(&self, inferior: &Inferior) -> Vec<Arc<str>> {
         self.loaded_images(inferior)
             .flat_map(|(_, image)| self.bind_runtimes(image))
-            .filter_map(std::result::Result::err)
+            .filter_map(|runtime| Some(runtime.err()?.reason))
             .collect()
     }
 
@@ -186,7 +186,7 @@ impl<P: InspectionOps> Controller<P> {
     fn bind_runtimes(
         &self,
         image: &Arc<ModuleImage>,
-    ) -> Vec<std::result::Result<Arc<dyn RuntimeModel>, Arc<str>>> {
+    ) -> Vec<std::result::Result<Arc<dyn RuntimeModel>, runtime_model::Unbound>> {
         self.runtime_models
             .borrow_mut()
             .entry(image.id())
@@ -712,14 +712,17 @@ impl<P: InspectionOps> Controller<P> {
 impl<P: InspectionOps> Controller<P> {
     /// Whether a runtime in the process tolerates `signal` arriving late.
     pub(super) fn defers(&self, signal: Signal) -> bool {
+        // A runtime that cannot be bound uses signals as it does bound.
         self.inferior.as_ref().is_some_and(|inferior| {
-            self.runtimes(inferior).iter().any(|runtime| {
-                runtime
-                    .model
-                    .signals()
-                    .deferrable
-                    .contains(&signal.number())
-            })
+            self.loaded_images(inferior)
+                .flat_map(|(_, image)| self.bind_runtimes(image))
+                .any(|runtime| {
+                    let deferrable = match &runtime {
+                        Ok(model) => model.signals().deferrable,
+                        Err(unbound) => unbound.deferrable,
+                    };
+                    deferrable.contains(&signal.number())
+                })
         })
     }
 }

@@ -15,7 +15,7 @@ use layout::{Goroutines, Labels, Layout, Missing, Threads};
 use super::{
     CodeAddress, Crossing, DynamicValue, Partial, RuntimeException, RuntimeHook, RuntimeImage,
     RuntimeModel, RuntimeSignals, RuntimeStop, RuntimeTask, StartedTask, StoredValue, TaskContext,
-    TaskLabels, TaskPage, TaskRef, TaskStarter, ThreadActivity,
+    TaskLabels, TaskPage, TaskRef, TaskStarter, ThreadActivity, Unbound,
 };
 use crate::unwind::RegisterFile;
 use crate::{
@@ -43,6 +43,13 @@ const SIGURG: i32 = 23;
 const SIGBUS: i32 = 7;
 const SIGFPE: i32 = 8;
 const SIGSEGV: i32 = 11;
+/// How the runtime uses signals. A fault in Go code becomes a panic, and
+/// the runtime preempts with SIGURG, which may arrive whenever it still
+/// wants to preempt.
+const SIGNALS: RuntimeSignals = RuntimeSignals {
+    deferrable: &[SIGURG],
+    handled: &[SIGBUS, SIGFPE, SIGSEGV],
+};
 /// Why goroutines cannot be read from a program without debug information.
 const STRIPPED: &str = "the program has no debug information describing Go's runtime";
 /// The first release whose runtime the model can read at all.
@@ -60,7 +67,7 @@ const MAX_LABELS: u64 = 64;
 /// The Go runtime in an image whose units Go compiled.
 pub fn detect(
     image: Arc<dyn RuntimeImage + Send + Sync>,
-) -> Option<Result<Arc<dyn RuntimeModel>, Arc<str>>> {
+) -> Option<Result<Arc<dyn RuntimeModel>, Unbound>> {
     let Some(version) = image
         .producers()
         .iter()
@@ -68,12 +75,22 @@ pub fn detect(
     else {
         // A program whose debug information was stripped still names the
         // runtime's code in Go's own function table, but nothing describes
-        // the runtime's data.
-        return image
-            .has_function("runtime.goexit")
-            .then(|| Err(STRIPPED.into()));
+        // the runtime's data. It still preempts with signals.
+        return image.has_function("runtime.goexit").then(|| {
+            Err(Unbound {
+                reason: STRIPPED.into(),
+                deferrable: SIGNALS.deferrable,
+            })
+        });
     };
-    Some(GoRuntime::bind(image, version).map(|model| Arc::new(model) as Arc<dyn RuntimeModel>))
+    Some(
+        GoRuntime::bind(image, version)
+            .map(|model| Arc::new(model) as Arc<dyn RuntimeModel>)
+            .map_err(|reason| Unbound {
+                reason,
+                deferrable: SIGNALS.deferrable,
+            }),
+    )
 }
 
 /// The release in a Go producer, such as `Go cmd/compile go1.27.1; regabi`.
@@ -595,14 +612,9 @@ impl RuntimeModel for GoRuntime {
         }
     }
 
-    /// The runtime preempts a goroutine with SIGURG, and rechecks that it
-    /// still wants to whenever one arrives. A fault in Go code becomes a
-    /// panic, and one the runtime cannot turn into a panic is fatal.
+    /// A fault the runtime cannot turn into a panic is fatal.
     fn signals(&self) -> RuntimeSignals {
-        RuntimeSignals {
-            deferrable: &[SIGURG],
-            handled: &[SIGBUS, SIGFPE, SIGSEGV],
-        }
+        SIGNALS
     }
 
     fn hooks(&self) -> &[RuntimeHook] {

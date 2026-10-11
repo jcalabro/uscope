@@ -2,7 +2,8 @@
 //! one stepping over a breakpoint, or stepping by itself. The runtime sends
 //! them to a goroutine locked to its thread, which parks until stopped
 //! threads restart the world if it takes one, so each must wait for the
-//! next continue.
+//! next continue. A stripped build waits too: its runtime's data is not
+//! described, but its use of signals is the same.
 
 use tokio::sync::broadcast::{Receiver, error::TryRecvError};
 use uscope::{
@@ -11,7 +12,9 @@ use uscope::{
 
 use crate::support::{self, Scenario};
 
-const BUILDS: [&str; 2] = ["spin-go-o0", "spin-go-o2"];
+const BUILDS: [&str; 3] = ["spin-go-o0", "spin-go-o2", STRIPPED];
+/// A build without debug information, whose goroutines no check can read.
+const STRIPPED: &str = "spin-go-stripped";
 
 /// How many times each test runs the spinning thread alone.
 const ROUNDS: usize = 100;
@@ -19,7 +22,11 @@ const ROUNDS: usize = 100;
 /// A program spinning at a breakpoint in its loop, with SIGURG reported so
 /// a test can tell the runtime sent it.
 async fn spinning(fixture: &str) -> (Scenario, Receiver<DebuggerEvent>, VirtualAddress) {
-    let mut scenario = crate::invariants::checked(fixture);
+    let mut scenario = if fixture == STRIPPED {
+        Scenario::launch(fixture)
+    } else {
+        crate::invariants::checked(fixture)
+    };
     scenario
         .operation(
             "report SIGURG",

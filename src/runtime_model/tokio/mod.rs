@@ -89,16 +89,17 @@ const STARTERS: [(&str, &str, bool); 3] = [
 /// tokio, in an image that has its thread-local context.
 pub fn detect(
     image: &Arc<dyn RuntimeImage + Send + Sync>,
-) -> Option<Result<Arc<dyn RuntimeModel>, Arc<str>>> {
+) -> Option<Result<Arc<dyn RuntimeModel>, super::Unbound>> {
     // A program stripped of its symbols shows no sign of tokio.
     let tls = image.thread_local_within(
         "tokio::runtime::context::CONTEXT",
         "__RUST_STD_INTERNAL_VAL",
     )?;
     if let Err(reason) = tls {
-        return Some(Err(
-            format!("tokio's context cannot be found: {reason}").into()
-        ));
+        return Some(Err(super::Unbound {
+            reason: format!("tokio's context cannot be found: {reason}").into(),
+            deferrable: &[],
+        }));
     }
     Some(Ok(Arc::new(TokioRuntime::bind(Arc::clone(image)))))
 }
