@@ -14,6 +14,9 @@ use crate::backend::sim_edge::Truth;
 
 const BREAKPOINT: u8 = 0xcc;
 
+/// The bytes of code [`code_integrity`] compares at once.
+const LINE: usize = 64;
+
 /// Code integrity: every byte of executable memory holds the image's
 /// original, or `0xcc` exactly where the controller says it installed a
 /// trap over that original.
@@ -55,22 +58,27 @@ pub fn code_integrity(kernel: &Kernel, truth: &Truth, image: &Image) -> Result<(
         }
         let current = process
             .space
-            .peek_bytes(page_address, original_page.len())
+            .peek_page(page_address)
             .ok_or_else(|| format!("code page {page_address:#x} is no longer mapped"))?;
-        if current[..] == original_page[..] {
-            continue;
-        }
-        for (offset, (&now, &was)) in current.iter().zip(original_page.iter()).enumerate() {
+        // Most of a page with traps in it is unchanged, which comparing it a
+        // line at a time skips quickly.
+        let lines = current.chunks(LINE).zip(original_page.chunks(LINE));
+        for (line, (now, was)) in lines.enumerate() {
             if now == was {
                 continue;
             }
-            let address = page_address + offset as u64;
-            let site = truth.sites.get(&address);
-            if now != BREAKPOINT || !site.is_some_and(|site| site.installed) {
-                return Err(format!(
-                    "code at {address:#x} is {now:#04x}, but the program has {was:#04x} there \
-                     and the controller's site is {site:?}"
-                ));
+            for (offset, (&now, &was)) in now.iter().zip(was).enumerate() {
+                if now == was {
+                    continue;
+                }
+                let address = page_address + (line * LINE + offset) as u64;
+                let site = truth.sites.get(&address);
+                if now != BREAKPOINT || !site.is_some_and(|site| site.installed) {
+                    return Err(format!(
+                        "code at {address:#x} is {now:#04x}, but the program has {was:#04x} \
+                         there and the controller's site is {site:?}"
+                    ));
+                }
             }
         }
     }

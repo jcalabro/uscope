@@ -523,7 +523,7 @@ impl<'a> World<'a> {
         if self.machine.sabotage != Some(Sabotage::ResumeBehindTheController)
             || self
                 .controller()
-                .is_none_or(|controller| controller.truth().public_stop.is_none())
+                .is_none_or(|controller| controller.public_stop().is_none())
         {
             return;
         }
@@ -953,10 +953,7 @@ impl<'a> World<'a> {
             }
         }
         let kernel = self.machine.kernel.borrow();
-        let Some(tgid) = self
-            .controller()
-            .and_then(|controller| controller.truth().inferior)
-        else {
+        let Some(tgid) = self.controller().and_then(SimController::inferior) else {
             return Ok(Vec::new());
         };
         let Some(process) = kernel.processes.get(&tgid) else {
@@ -995,9 +992,7 @@ impl<'a> World<'a> {
             return;
         }
         let mut kernel = self.machine.kernel.borrow_mut();
-        let tgid = self
-            .controller()
-            .and_then(|controller| controller.truth().inferior);
+        let tgid = self.controller().and_then(SimController::inferior);
         self.baselines
             .retain(|id, _| watches.iter().any(|watch| watch.id == *id));
         for watch in &watches {
@@ -1073,11 +1068,11 @@ impl<'a> World<'a> {
 
     /// Whether `stop` is still published, and its process is not ending.
     fn still_at(&self, stop: crate::StopId) -> bool {
-        let Some(truth) = self.controller().map(SimController::truth) else {
+        let Some(controller) = self.controller() else {
             return false;
         };
-        truth.public_stop == Some(stop.get())
-            && truth.inferior.is_some_and(|tgid| {
+        controller.public_stop() == Some(stop.get())
+            && controller.inferior().is_some_and(|tgid| {
                 self.machine
                     .kernel
                     .borrow()
@@ -1135,9 +1130,7 @@ impl<'a> World<'a> {
         let (Some(begun), Some(tracking)) = (begun, tracking) else {
             return Ok(());
         };
-        let stop = self
-            .controller()
-            .and_then(|controller| controller.truth().public_stop);
+        let stop = self.controller().and_then(SimController::public_stop);
         if begun.kind == crate::StepKind::Advance {
             let stopped = stop.is_some_and(|stop| self.still_at(crate::StopId::new(stop)));
             let judged = semantics::advance(
@@ -1252,9 +1245,10 @@ impl<'a> World<'a> {
             kernel.debugged = debugged;
         }
         drop(kernel);
-        if let Some(truth) = truth {
-            self.account_watches(&truth)?;
+        if let Some(truth) = &truth {
+            self.account_watches(truth)?;
         }
+        let mut first = truth;
         let kernel = self.machine.kernel.borrow();
         oracles::unseen_hits(&kernel)
             .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
@@ -1262,7 +1256,10 @@ impl<'a> World<'a> {
             let Some(controller) = &session.controller else {
                 continue;
             };
-            let truth = controller.truth();
+            let truth = match first.take() {
+                Some(truth) if id == FIRST => truth,
+                _ => controller.truth(),
+            };
             oracles::code_integrity(&kernel, &truth, &self.variant.image)
                 .map_err(|message| Failure::debugger("code integrity", message))?;
             oracles::site_ownership(&kernel, &truth)

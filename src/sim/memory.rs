@@ -290,6 +290,16 @@ impl AddressSpace {
         })
     }
 
+    /// The page starting at `address`, a page boundary, as a debugger
+    /// reads it, if it is mapped: a page never written reads as zeros.
+    #[must_use]
+    pub fn peek_page(&self, address: u64) -> Option<&Page> {
+        static ZEROS: Page = [0; PAGE_BYTES];
+        debug_assert_eq!(address % PAGE_SIZE, 0, "{address:#x} starts no page");
+        self.mapped(address, PAGE_SIZE)
+            .then(|| self.page(address).map_or(&ZEROS, |page| &**page))
+    }
+
     /// The contents of the page at `address`, if it was ever written or
     /// shared in.
     #[must_use]

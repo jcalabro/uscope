@@ -846,6 +846,28 @@ impl SimController {
         self.controller.handle_message(delivery.message)
     }
 
+    /// The process the controller debugs, as [`Truth::inferior`] says,
+    /// without building the rest.
+    #[must_use]
+    pub fn inferior(&self) -> Option<Tid> {
+        self.controller
+            .inferior
+            .as_ref()
+            .map(|inferior| inferior.tgid.as_raw())
+    }
+
+    /// The published stop, as [`Truth::public_stop`] says, without
+    /// building the rest.
+    #[must_use]
+    pub fn public_stop(&self) -> Option<u64> {
+        self.controller
+            .inferior
+            .as_ref()?
+            .public_stop
+            .as_ref()
+            .map(|stop| stop.id.get())
+    }
+
     /// The controller's beliefs about the inferior.
     #[must_use]
     pub fn truth(&self) -> Truth {

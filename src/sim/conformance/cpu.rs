@@ -47,20 +47,50 @@ const TRAP: u64 = 1 << 8;
 #[test]
 fn the_interpreter_executes_every_golden_program_as_the_cpu_does() {
     let corpus = Corpus::load().expect("load the golden corpus");
-    let mut checked = 0;
-    for program in &corpus.programs {
-        for variant in &program.variants {
-            for run in &program.runs {
-                match lockstep(variant, &run.arguments) {
-                    Ok(steps) => checked += steps,
-                    Err(divergence) => panic!(
-                        "{} {:?} diverged from the CPU: {divergence}",
-                        variant.name, run.arguments
-                    ),
-                }
-            }
-        }
-    }
+    let runs = corpus
+        .programs
+        .iter()
+        .flat_map(|program| {
+            program
+                .variants
+                .iter()
+                .flat_map(|variant| program.runs.iter().map(move |run| (variant, run)))
+        })
+        .collect::<Vec<_>>();
+    // Each run waits on single steps far more than it computes, so runs
+    // share the CPUs: each on a thread of its own, which traces what it
+    // spawns and waits for its own tracees alone.
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(1, |count| count.get().min(4));
+    let checked = std::thread::scope(|scope| {
+        let workers = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut checked = 0;
+                    while let Some(&(variant, run)) =
+                        runs.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                    {
+                        match lockstep(variant, &run.arguments) {
+                            Ok(steps) => checked += steps,
+                            Err(divergence) => panic!(
+                                "{} {:?} diverged from the CPU: {divergence}",
+                                variant.name, run.arguments
+                            ),
+                        }
+                    }
+                    checked
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .sum::<u64>()
+    });
     assert!(checked > 0, "no instruction was checked");
 }
 
