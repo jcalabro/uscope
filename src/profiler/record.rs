@@ -58,6 +58,18 @@ struct ProcessState {
     threads: BTreeSet<u32>,
 }
 
+/// When one task snapshot held the program stopped, and the task row of
+/// each task by where its runtime kept it.
+struct Located {
+    start: i64,
+    end: i64,
+    tasks: HashMap<u64, u32>,
+}
+
+/// The snapshots a recording keeps to claim samples by: records may come
+/// a drain or two after the snapshot that follows them.
+const LOCATED_KEPT: usize = 4;
+
 /// Builds a capture from perf records as they are drained.
 pub struct Processor {
     builder: CaptureBuilder,
@@ -98,6 +110,12 @@ pub struct Processor {
     /// The time every record up to has been processed.
     processed: u64,
     window: Option<Window>,
+    /// The process task snapshots read, the last few snapshots, and each
+    /// sample no snapshot after it has claimed yet whose code kept its task
+    /// in a register: its thread, time, and the register's value.
+    tasks_of: Option<u32>,
+    located: std::collections::VecDeque<Located>,
+    unclaimed: Vec<(u32, i64, u64)>,
 }
 
 /// A rolling window: how long it is, and its marks, each a moment and the
@@ -136,6 +154,9 @@ impl Processor {
             loading: std::time::Duration::ZERO,
             processed: 0,
             window: None,
+            tasks_of: None,
+            located: std::collections::VecDeque::new(),
+            unclaimed: Vec::new(),
         }
     }
 
@@ -550,6 +571,9 @@ impl Processor {
             },
             self.limit,
         );
+        if let Some(leaf) = frames.first() {
+            self.note_task(sample.pid, thread, time, leaf, &owners);
+        }
         self.frames.clear();
         for frame in &frames {
             let id = match frame.module.map(|module| owners[module]) {
@@ -637,6 +661,38 @@ impl Processor {
             .gap(start.cast_signed(), end.cast_signed(), reason);
     }
 
+    /// Notes the task a sample of process `pid` ran, when a task snapshot
+    /// may name it: the value of the register its innermost frame's code
+    /// keeps the runtime's current task in.
+    fn note_task(
+        &mut self,
+        pid: u32,
+        thread: u32,
+        time: i64,
+        leaf: &crate::unwind::sample::SampledFrame,
+        owners: &[Mapped],
+    ) {
+        if self.tasks_of != Some(pid) {
+            return;
+        }
+        let Some(owner) = leaf.module.map(|module| owners[module]) else {
+            return;
+        };
+        let address = ImageAddress::new(leaf.address.get().wrapping_sub(owner.loaded.load_bias));
+        let register = self.images[owner.image]
+            .info
+            .as_ref()
+            .and_then(|info| info.unwind.task_register(address));
+        let value = register.and_then(|register| {
+            self.registers
+                .iter()
+                .find_map(|(number, value)| (*number == register).then_some(*value))
+        });
+        if let Some(object) = value {
+            self.unclaimed.push((thread, time, object));
+        }
+    }
+
     /// Records a task snapshot that held the program stopped from `start`
     /// to `end`: each waiting task's stack, standing for `weight`
     /// nanoseconds of waiting.
@@ -663,6 +719,7 @@ impl Processor {
                 .count(AccountKind::SnapshotFailures as u32, more);
         }
         let time = start.cast_signed();
+        self.claim(pid, (time, end.cast_signed()), snapshot);
         for task in &snapshot.waiting {
             self.frames.clear();
             for frame in &task.frames {
@@ -682,6 +739,47 @@ impl Processor {
             self.builder
                 .task_wait(row, time, weight, stack, &task.state);
         }
+    }
+
+    /// Keeps where a snapshot that held the program stopped from `start`
+    /// to `end` found each task, and gives each sample it follows the task
+    /// its register named, when the snapshots either side of the sample
+    /// find that task where it was: the runtime may reuse a task's memory
+    /// for another once it exits.
+    fn claim(&mut self, pid: u32, (start, end): (i64, i64), snapshot: &Snapshot) {
+        let mut tasks = HashMap::default();
+        for task in &snapshot.located {
+            let row = self.builder.task(task.noun, task.number, start);
+            if task.labels.is_some() {
+                self.builder
+                    .describe_task(row, NONE, task.labels.as_deref());
+            }
+            tasks.insert(task.object, row);
+        }
+        if self.located.len() == LOCATED_KEPT {
+            self.located.pop_front();
+        }
+        self.located.push_back(Located { start, end, tasks });
+        self.tasks_of = Some(pid);
+        let mut claimed = 0;
+        let mut waiting = Vec::new();
+        for (thread, at, object) in std::mem::take(&mut self.unclaimed) {
+            if at >= start {
+                waiting.push((thread, at, object));
+                continue;
+            }
+            // A sample older than every snapshot kept is never claimed.
+            let before = self.located.iter().rev().find(|located| located.end <= at);
+            let after = self.located.iter().find(|located| located.start > at);
+            if let (Some(before), Some(after)) = (before, after)
+                && let Some(&task) = before.tasks.get(&object)
+                && after.tasks.get(&object) == Some(&task)
+            {
+                claimed += self.builder.claim(thread, at, task);
+            }
+        }
+        self.unclaimed = waiting;
+        self.builder.count(AccountKind::TaskSamples as u32, claimed);
     }
 
     /// Records that a task snapshot at `time` failed, or missed tasks, and

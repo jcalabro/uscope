@@ -276,6 +276,24 @@ impl CaptureBuilder {
         });
     }
 
+    /// Gives a thread's samples at `time` the task they ran, and says how
+    /// many it gave. Samples come in time order, so the search runs back
+    /// from the latest.
+    pub fn claim(&mut self, thread: u32, time: i64, task: u32) -> u64 {
+        let mut claimed = 0;
+        for sample in self.samples[thread as usize].iter_mut().rev() {
+            let at = sample.time.get();
+            if at < time {
+                break;
+            }
+            if at == time && sample.task.get() == NONE {
+                sample.task = task.into();
+                claimed += 1;
+            }
+        }
+        claimed
+    }
+
     /// Records that a thread spent `duration` nanoseconds off its CPU from
     /// `time`, preempted or blocked.
     pub fn off_cpu(&mut self, thread: u32, time: i64, duration: u64, preempted: bool) {

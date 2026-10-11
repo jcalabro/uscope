@@ -267,6 +267,21 @@ snapshots are off unless asked for, and need the same permission to trace
 the program as the debugger does. A snapshot that fails, or misses tasks
 it could not read, says why in the report.
 
+Snapshots also say which task each CPU sample ran. Go's compiled code
+keeps the running goroutine's `g` in a register, which every sample
+copies, and each snapshot lists where every goroutine's `g` is. A sample
+names a goroutine only when the snapshots before and after it both find
+that goroutine at its `g`, as the runtime reuses a `g` once its goroutine
+exits; a sample of assembly, C, or the runtime's own stacks names none.
+The goroutine then carries the labels the program gave it with
+`pprof.Do` or `pprof.SetGoroutineLabels`. The report says how many
+samples know their task; those before the first snapshot and after the
+last know none:
+
+```
+819 of the 949 samples ran a task the snapshots either side of them agree on.
+```
+
 ## Exploring a profile in the browser
 
 ```sh

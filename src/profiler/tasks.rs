@@ -47,9 +47,20 @@ pub enum WaitFrame {
     Truncated(Truncation),
 }
 
-/// One snapshot's waiting tasks, and why it may miss some.
+/// Where a task's runtime keeps it, as a snapshot found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    pub object: u64,
+    pub noun: &'static str,
+    pub number: u64,
+    pub labels: Option<String>,
+}
+
+/// One snapshot's tasks, where each waits, and why it may miss some.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
+    /// Every task the runtime keeps somewhere, running or not.
+    pub located: Vec<Located>,
     pub waiting: Vec<Waiting>,
     /// Each task it could not read, or part of the runtime's tasks, and
     /// why.
@@ -124,6 +135,16 @@ async fn read(handle: &DebuggerHandle, stop: StopId) -> Result<Snapshot, crate::
         snapshot
             .problems
             .extend(page.gaps.iter().map(ToString::to_string));
+        snapshot
+            .located
+            .extend(page.tasks.iter().filter_map(|task| {
+                Some(Located {
+                    object: task.object?.get(),
+                    noun: task.noun,
+                    number: task.id.number,
+                    labels: labels(task),
+                })
+            }));
         for task in page.tasks.iter().filter(|task| waits(task)) {
             let context = StopContext {
                 stop,

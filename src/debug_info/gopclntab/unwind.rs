@@ -81,6 +81,15 @@ impl GoUnwind {
         self.function(address).is_some()
     }
 
+    /// Whether Go compiled the code at an image address, rather than
+    /// assembled it: compiled code follows the register ABI, which keeps
+    /// the goroutine's `g` in R14 throughout, where assembly may overwrite
+    /// it. Every release whose table this reads has that ABI.
+    pub fn compiled(&self, address: u64) -> bool {
+        self.function(address)
+            .is_some_and(|(_, function)| !function.facts.assembly)
+    }
+
     /// How far SP is below its value at the function's entry.
     fn sp_delta(
         &self,

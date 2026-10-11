@@ -434,6 +434,12 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             seconds(held),
             held as f64 / 1e6 / snapshots as f64,
         )?;
+        writeln!(
+            out,
+            "{} of the {} samples ran a task the snapshots either side of them agree on.",
+            profile.task_samples(),
+            profile.samples()
+        )?;
     }
     let problems = profile.task_snapshot_problems();
     if let Some((_, first)) = problems.first() {

@@ -1986,6 +1986,13 @@ impl UnwindInfo for DwarfUnwindInfo {
             .and_then(|go| go.frame_pointer_rule(address.get()))
             .unwrap_or_else(|| crate::unwind::frame_pointer_rule(self, address))
     }
+
+    fn task_register(&self, address: ImageAddress) -> Option<u16> {
+        const R14: u16 = 14;
+        self.go()
+            .is_some_and(|go| go.compiled(address.get()))
+            .then_some(R14)
+    }
 }
 
 fn cfa_from_section<'data, S>(

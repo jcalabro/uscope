@@ -440,6 +440,8 @@ pub enum AccountKind {
     Snapshots = 17,
     /// Task snapshots that failed, and tasks a snapshot could not read.
     SnapshotFailures = 18,
+    /// Samples task snapshots gave the task they ran.
+    TaskSamples = 19,
 }
 
 /// A count of something the views must show.

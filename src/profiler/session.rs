@@ -398,7 +398,7 @@ impl Snapshots {
     fn when_due(
         &mut self,
         processor: &mut record::Processor,
-        events: &perf::Events,
+        events: &mut perf::Events,
         sampling: bool,
     ) {
         if std::time::Instant::now() < self.next {
@@ -428,6 +428,11 @@ impl Snapshots {
         let start = monotonic();
         let taken = snapshotter.take();
         let end = monotonic();
+        // With the events off, every record from before the pause is in
+        // the rings, and the snapshot claims each sample before it.
+        let mut records = Vec::new();
+        events.drain(&mut records);
+        processor.ingest(&records, Some(start));
         if sampling {
             events.enable(true);
         }

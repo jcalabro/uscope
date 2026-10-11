@@ -320,6 +320,10 @@ pub struct TaskSnapshot {
     /// as Go's profiler labels, or the tokio runtime that holds it in a
     /// process with several.
     pub labels: Arc<[(Arc<str>, Arc<str>)]>,
+    /// Where the runtime keeps the task at this stop, such as a goroutine's
+    /// `g`. A runtime may reuse the memory for another task once this one
+    /// exits.
+    pub object: Option<VirtualAddress>,
 }
 
 /// Whose stack a frame is on.

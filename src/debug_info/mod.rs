@@ -508,6 +508,13 @@ pub trait UnwindInfo: Send + Sync {
     fn frame_pointer_rule(&self, address: ImageAddress) -> FramePointerRule {
         crate::unwind::frame_pointer_rule(self, address)
     }
+
+    /// The register, by its DWARF number, in which the code at `address`
+    /// keeps its runtime's current task: Go's compiled code keeps the
+    /// goroutine's `g` in R14. Other code keeps none.
+    fn task_register(&self, _address: ImageAddress) -> Option<u16> {
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]

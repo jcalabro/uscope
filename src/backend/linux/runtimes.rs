@@ -491,6 +491,7 @@ impl<P: InspectionOps> Controller<P> {
             parent: task.parent.map(id),
             internal: task.internal,
             labels: task.labels.clone().into(),
+            object: (task.locator != 0).then(|| VirtualAddress::new(task.locator)),
         }
     }
 

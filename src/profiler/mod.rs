@@ -233,6 +233,19 @@ pub struct SampledStack {
     /// its own; a frame without symbols is its module's address.
     pub functions: Vec<String>,
     pub ending: StackEnding,
+    /// The number of the task it ran, when task snapshots before and after
+    /// it agree on which that was.
+    pub task: Option<u64>,
+}
+
+/// A task of a language runtime that task snapshots found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileTask {
+    /// What its runtime calls a task, and its number.
+    pub noun: String,
+    pub number: u64,
+    /// The labels the program gave it, such as Go's profiler labels.
+    pub labels: Vec<(String, String)>,
 }
 
 /// Where a task waited at a task snapshot.
@@ -628,7 +641,12 @@ impl Profile {
             let pid = capture.processes[thread.process.get() as usize].pid.get();
             for sample in capture.thread_samples(range) {
                 let (functions, ending) = self.names(sample.stack.get());
+                let task = capture
+                    .tasks
+                    .get(sample.task.get() as usize)
+                    .map(|task| task.number.get());
                 stacks.push(SampledStack {
+                    task,
                     pid,
                     tid,
                     time: sample.time.get(),
@@ -662,6 +680,38 @@ impl Profile {
                 }
             })
             .collect()
+    }
+
+    /// Every task task snapshots found, with its labels.
+    #[must_use]
+    pub fn tasks(&self) -> Vec<ProfileTask> {
+        let capture = &self.capture;
+        capture
+            .tasks
+            .iter()
+            .map(|task| {
+                let labels = match task.labels.get() {
+                    NONE => Vec::new(),
+                    labels => capture
+                        .string(labels)
+                        .lines()
+                        .filter_map(|line| line.split_once('='))
+                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                        .collect(),
+                };
+                ProfileTask {
+                    noun: capture.string(task.runtime.get()).to_owned(),
+                    number: task.number.get(),
+                    labels,
+                }
+            })
+            .collect()
+    }
+
+    /// How many samples task snapshots gave the task they ran.
+    #[must_use]
+    pub fn task_samples(&self) -> u64 {
+        self.capture.account(AccountKind::TaskSamples as u32)
     }
 
     /// How many task snapshots were taken, how many nanoseconds they held
