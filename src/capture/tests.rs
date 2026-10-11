@@ -43,12 +43,13 @@ fn sample_capture(offset: i64) -> Capture {
     let site = builder.site("handle", "app.rs", 9, module, 1);
     builder.zone(
         worker,
-        0,
         Zone {
             start: (offset + 3).into(),
             end: (offset + 9).into(),
             site: site.into(),
             flags: 0.into(),
+            value: NONE.into(),
+            reserved: 0.into(),
         },
     );
     builder.finish()

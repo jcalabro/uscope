@@ -33,7 +33,7 @@ pub struct CaptureFormat;
 
 /// What a capture's tables mean: bump it with any change to what is
 /// stored.
-pub const CAPTURE_REVISION: u32 = 6;
+pub const CAPTURE_REVISION: u32 = 7;
 
 impl Format for CaptureFormat {
     type Kind = CaptureTable;
@@ -430,6 +430,10 @@ impl Capture {
             if zone.end.get() < zone.start.get() {
                 return Err("a zone ends before it begins".into());
             }
+            if zone.flags.get() & !ZONE_FLAGS != 0 || zone.reserved.get() != 0 {
+                return Err("a zone has unknown flags".into());
+            }
+            string(zone.value.get(), "a label's value")?;
         }
         for plot in &self.plots {
             index(plot.site.get(), self.sites.len(), "a plot's site")?;

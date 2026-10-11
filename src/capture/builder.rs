@@ -49,7 +49,8 @@ pub struct CaptureBuilder {
     functions: Vec<Function>,
     function_index: HashMap<(u32, u32, u32, u32), u32>,
     sites: Vec<Site>,
-    zones: BTreeMap<(u32, u32), Vec<Zone>>,
+    /// Each thread's zones, whose depths their nesting gives.
+    zones: BTreeMap<u32, Vec<Zone>>,
     plots: Vec<Plot>,
     markers: Vec<Marker>,
     tasks: Vec<Task>,
@@ -385,9 +386,39 @@ impl CaptureBuilder {
         site
     }
 
-    /// Records a zone of a thread at a depth.
-    pub fn zone(&mut self, thread: u32, depth: u32, zone: Zone) {
-        self.zones.entry((thread, depth)).or_default().push(zone);
+    /// Records a zone of a thread, at the depth its nesting in the
+    /// thread's other zones gives it.
+    pub fn zone(&mut self, thread: u32, zone: Zone) {
+        self.zones.entry(thread).or_default().push(zone);
+    }
+
+    /// Records a value of the series a site plots.
+    pub fn plot(&mut self, thread: u32, site: u32, time: i64, value: f64) {
+        self.plots.push(Plot {
+            time: time.into(),
+            value: value.to_bits().into(),
+            site: site.into(),
+            thread: thread.into(),
+        });
+    }
+
+    /// Marks an instant of a thread, from a site.
+    pub fn thread_marker(
+        &mut self,
+        (thread, site): (u32, u32),
+        time: i64,
+        kind: MarkerKind,
+        text: Option<&str>,
+    ) {
+        let text = self.optional(text);
+        self.markers.push(Marker {
+            time: time.into(),
+            thread: thread.into(),
+            site: site.into(),
+            text: text.into(),
+            kind: kind as u8,
+            reserved: [0; 3],
+        });
     }
 
     /// The task a runtime numbers `number`, first seen at `time`.
@@ -682,11 +713,13 @@ impl CaptureBuilder {
             let thread = map.threads[range.thread.get() as usize];
             let start = range.start.get() as usize;
             for zone in &capture.zones[start..start + range.count.get() as usize] {
+                let value = self.copy_string(capture, zone.value.get());
                 let zone = Zone {
                     site: map.sites[zone.site.get() as usize].into(),
+                    value: value.into(),
                     ..*zone
                 };
-                self.zone(thread, range.depth.get(), zone);
+                self.zone(thread, zone);
             }
         }
         for plot in &capture.plots {
@@ -750,15 +783,16 @@ impl CaptureBuilder {
         };
         let mut zones = Vec::new();
         let mut zone_ranges = Vec::new();
-        for ((thread, depth), mut group) in self.zones {
-            group.sort_by_key(|zone| (zone.start.get(), zone.end.get()));
-            zone_ranges.push(ZoneRange {
-                thread: thread.into(),
-                depth: depth.into(),
-                start: index(zones.len()).into(),
-                count: index(group.len()).into(),
-            });
-            zones.extend(group);
+        for (thread, group) in self.zones {
+            for (depth, group) in depths(group).into_iter().enumerate() {
+                zone_ranges.push(ZoneRange {
+                    thread: thread.into(),
+                    depth: index(depth).into(),
+                    start: index(zones.len()).into(),
+                    count: index(group.len()).into(),
+                });
+                zones.extend(group);
+            }
         }
         let mut plots = self.plots;
         plots.sort_by_key(|plot| (plot.site.get(), plot.time.get()));
@@ -816,6 +850,38 @@ impl CaptureBuilder {
             gaps,
         }
     }
+}
+
+/// A thread's zones by depth, each depth's by start: a zone is one deeper
+/// than the latest zone that began before it and ends after it begins.
+/// Zones that cross rather than nest go deeper still, so that no two of one
+/// depth overlap.
+/// Of two zones with one span, the one recorded later holds the other, as a
+/// zone that holds another ends after it.
+fn depths(zones: Vec<Zone>) -> Vec<Vec<Zone>> {
+    let mut zones: Vec<(usize, Zone)> = zones.into_iter().enumerate().collect();
+    zones.sort_by_key(|(order, zone)| {
+        (
+            zone.start.get(),
+            std::cmp::Reverse(zone.end.get()),
+            std::cmp::Reverse(*order),
+        )
+    });
+    let zones = zones.into_iter().map(|(_, zone)| zone);
+    let mut depths: Vec<Vec<Zone>> = Vec::new();
+    let mut open: Vec<i64> = Vec::new();
+    for zone in zones {
+        while open.last().is_some_and(|&end| end <= zone.start.get()) {
+            open.pop();
+        }
+        let depth = open.len();
+        open.push(zone.end.get());
+        if depth == depths.len() {
+            depths.push(Vec::new());
+        }
+        depths[depth].push(zone);
+    }
+    depths
 }
 
 fn index(position: usize) -> u32 {

@@ -12,7 +12,8 @@ use super::format::plural;
 use anyhow::{Context, Result};
 use uscope::profiler::budget::Budget;
 use uscope::profiler::{
-    GapReason, Preset, Profile, RecordOptions, SampleSource, Save, StackCopy, StackView, Watch,
+    GapReason, Preset, ProbeSelection, Profile, RecordOptions, SampleSource, Save, StackCopy,
+    StackView, Watch,
 };
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -75,6 +76,16 @@ pub struct RecordArgs {
     /// recording goes on; FILE gets the last window.
     #[arg(long, value_name = "SECONDS")]
     window: Option<f64>,
+    /// The instrumentation sites to switch on in a program built with
+    /// uscope's probes SDK: all, off, or names separated by commas, where a
+    /// name that ends in `*` is a prefix.
+    #[arg(long, value_name = "SITES", default_value = "all")]
+    probes: String,
+    /// How long the program goes on writing its instrumentation once uscope
+    /// stops reading it, as when uscope is killed, before it switches it
+    /// off.
+    #[arg(long, value_name = "SECONDS", default_value_t = 10.0)]
+    probe_timeout: f64,
     /// The program to record and its arguments.
     #[arg(last = true, required_unless_present = "pid", value_name = "PROGRAM")]
     command: Vec<OsString>,
@@ -160,6 +171,13 @@ fn options(args: &RecordArgs) -> Result<RecordOptions> {
     if let Some(seconds) = args.window {
         options.window = Some(Duration::try_from_secs_f64(seconds).context("--window")?);
     }
+    options.probes = match args.probes.as_str() {
+        "all" => ProbeSelection::All,
+        "off" => ProbeSelection::Off,
+        names => ProbeSelection::Named(names.split(',').map(str::to_owned).collect()),
+    };
+    options.probe_timeout =
+        Duration::try_from_secs_f64(args.probe_timeout).context("--probe-timeout")?;
     Ok(options)
 }
 
@@ -504,6 +522,76 @@ fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             seconds(blocked + preempted),
             seconds(blocked),
             seconds(preempted)
+        )?;
+    }
+    instrumentation(profile, out)
+}
+
+/// What the program's instrumentation recorded, by site, and what of it
+/// was lost.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "times need no more precision than f64's"
+)]
+fn instrumentation(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
+    for (_, problem) in profile.probe_problems() {
+        writeln!(out, "{problem}.")?;
+    }
+    let counts = profile.probe_counts();
+    if counts.events == 0 && !counts.lost() {
+        return Ok(());
+    }
+    let zones = profile.zones();
+    // Each site's zones: how many, their total and longest time, and how
+    // many are flagged.
+    let mut sites: std::collections::BTreeMap<&str, (u64, u64, u64, u64)> =
+        std::collections::BTreeMap::new();
+    for zone in &zones {
+        let site = sites.entry(zone.name.as_str()).or_default();
+        let length = u64::try_from(zone.end - zone.start).unwrap_or(0);
+        site.0 += 1;
+        site.1 += length;
+        site.2 = site.2.max(length);
+        site.3 += u64::from(zone.flags != 0);
+    }
+    writeln!(
+        out,
+        "Instrumentation: {}, in {} from {}.",
+        plural(counts.events, "event"),
+        plural(zones.len() as u64, "zone"),
+        plural(sites.len() as u64, "site")
+    )?;
+    let lost = [
+        (counts.overwritten, "overwritten before uscope read them"),
+        (counts.no_ring, "events found no ring to take them"),
+        (
+            counts.interrupted,
+            "events were dropped by a signal handler that interrupted a write",
+        ),
+        (counts.malformed, "records broke the probes ABI"),
+    ];
+    for (count, what) in lost.into_iter().filter(|(count, _)| *count > 0) {
+        let what = if what.starts_with("overwritten") {
+            format!("{} {what}", plural(count, "record"))
+        } else {
+            format!("{count} {what}")
+        };
+        writeln!(out, "  {what}; zones they cut short are flagged.")?;
+    }
+    let mut by_total: Vec<_> = sites.into_iter().collect();
+    by_total.sort_by(|a, b| b.1.1.cmp(&a.1.1).then(a.0.cmp(b.0)));
+    writeln!(
+        out,
+        "  {:>8} {:>12} {:>12} {:>12} {:>7}  zone",
+        "count", "total ms", "mean us", "max us", "flagged"
+    )?;
+    for (name, (count, total, longest, flagged)) in by_total.iter().take(20) {
+        writeln!(
+            out,
+            "  {count:>8} {:>12.3} {:>12.3} {:>12.3} {flagged:>7}  {name}",
+            *total as f64 / 1e6,
+            *total as f64 / 1e3 / *count as f64,
+            *longest as f64 / 1e3,
         )?;
     }
     Ok(())

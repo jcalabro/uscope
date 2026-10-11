@@ -282,6 +282,58 @@ last know none:
 819 of the 949 samples ran a task the snapshots either side of them agree on.
 ```
 
+## Instrumentation
+
+Samples say where time goes on average; instrumentation says how long each
+request, frame, or query took. The Rust crate in `sdk/rust-probes` marks
+spans and moments in the program's own code:
+
+```rust
+fn handle(request: &Request) -> Response {
+    let _zone = uscope_probes::zone!("handle");
+    let _route = uscope_probes::label!("route", request.route());
+    let rows = query(request);
+    uscope_probes::plot!("rows", rows.len() as f64);
+    if rows.is_empty() {
+        uscope_probes::message!("no rows for {}", request.id());
+    }
+    render(rows)
+}
+```
+
+`zone!` is a span of the thread's time until its guard drops, and
+`label!` a span that labels it `key=value`. `plot!` adds a value to a
+series, `message!` marks the thread's timeline with text, `frame!` marks
+the end of a frame, and `trigger!` saves a rolling window as SIGUSR2
+does. Built without the crate's `enabled` feature, every macro is gone.
+
+Each site is static data in the program's file, which uscope reads, so
+the program never sends a name. A site is off until a recording switches
+it on, and costs a load and a branch while off. An on zone writes two
+16-byte records into its thread's ring in the program's own memory,
+which uscope reads from outside about every 10 ms: the program never
+waits, takes a lock, or makes a system call to record. `--probes` chooses
+the sites by name, such as `--probes 'db::*,handle'`, or `off`.
+
+A thread that writes faster than uscope reads overwrites its oldest
+records, and every record lost is counted. A zone whose begin or end was
+lost, or whose begin and end do not nest, is kept and flagged rather than
+repaired. The report lists each site's zones:
+
+```
+Instrumentation: 4077 events, in 2039 zones from 1 site.
+  395923 records overwritten before uscope read them; zones they cut short are flagged.
+     count     total ms      mean us       max us flagged  zone
+      2039        0.014        0.007        0.011       1  tick
+```
+
+A program that exits while uscope reads it waits up to a second for the
+last of its records to be read. One whose recorder dies goes on writing
+until it has not heard from uscope for `--probe-timeout` seconds, ten by
+default, then switches every site off. A forked child records nothing.
+Zones share the samples' clock: uscope converts the time-stamp counter
+the threads read to `CLOCK_MONOTONIC` where the kernel keeps time by it.
+
 ## Exploring a profile in the browser
 
 ```sh

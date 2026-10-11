@@ -1964,9 +1964,14 @@ dependencies = [
  "ts-rs",
  "twox-hash",
  "ureq",
+ "uscope-probes",
  "wasmi",
  "zerocopy",
 ]
+
+[[package]]
+name = "uscope-probes"
+version = "0.1.0"
 
 [[package]]
 name = "utf8-zero"

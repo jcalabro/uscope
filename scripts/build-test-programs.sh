@@ -1798,6 +1798,14 @@ run_cached_build "$rust_fixtures_dir/embedded-views" "$output_dir/embedded-views
     --crate-name embedded_views \
     --extern "uscope_views=$output_dir/libuscope_views.rlib" \
     "$rust_fixtures_dir/embedded-views/main.rs" -o "$output_dir/embedded-views-rust"
+# The probes SDK, switched on, and a program instrumented with it.
+run_cached_build sdk/rust-probes "$output_dir/libuscope_probes.rlib" "$rust_sdk_metadata" \
+    rustc --edition=2024 -D warnings -C opt-level=2 --crate-type rlib --crate-name uscope_probes \
+    --cfg 'feature="enabled"' sdk/rust-probes/src/lib.rs -o "$output_dir/libuscope_probes.rlib"
+run_cached_build "$rust_fixtures_dir/probes" "$output_dir/probes" "$rust_sdk_metadata" \
+    rustc --edition=2024 -D warnings -C debuginfo=2 -C opt-level=2 --crate-name probes \
+    --extern "uscope_probes=$output_dir/libuscope_probes.rlib" \
+    "$rust_fixtures_dir/probes/main.rs" -o "$output_dir/probes"
 # A chess position that carries its views and the renderer that draws it.
 run_cached_build "$rust_fixtures_dir/chess" "$output_dir/chess" \
     "$rust_sdk_metadata" \

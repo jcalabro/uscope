@@ -1503,6 +1503,7 @@ dependencies = [
  "toml",
  "twox-hash",
  "ureq",
+ "uscope-probes",
  "wasmi",
  "zerocopy",
 ]
@@ -1518,6 +1519,10 @@ dependencies = [
  "tokio",
  "uscope",
 ]
+
+[[package]]
+name = "uscope-probes"
+version = "0.1.0"
 
 [[package]]
 name = "utf8-zero"

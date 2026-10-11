@@ -8,9 +8,9 @@ use std::time::Duration;
 use support::Scenario;
 use uscope::profiler::budget::Budget;
 use uscope::profiler::{
-    Attachment, CallNode, DEEP_STACK_COPY, Preset, Profile, RecordError, RecordOptions,
-    SMALL_STACK_COPY, SampleSource, SampledStack, Save, StackCopy, StackEnding, StackView, Watch,
-    record, record_attached, record_watched,
+    Attachment, CallNode, DEEP_STACK_COPY, MarkerKind, Preset, ProbeSelection, Profile,
+    RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource, SampledStack, Save, StackCopy,
+    StackEnding, StackView, Watch, record, record_attached, record_watched,
 };
 
 /// The profile-stacks fixture across languages, compilers, optimization,
@@ -1190,4 +1190,217 @@ fn task_snapshots_follow_a_tokio_tasks_awaits() {
         assert_eq!(wait.ending, StackEnding::Complete, "{wait:?}");
         assert!(wait.weight > 0, "{wait:?}");
     }
+}
+
+/// Records the probes fixture with `arguments`, and what it printed.
+fn record_probes(arguments: &[&str], options: &RecordOptions) -> (Profile, String) {
+    let (mut reader, writer) = std::io::pipe().expect("pipe");
+    let mut command = Command::new(Scenario::fixture("probes"));
+    command
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(writer)
+        .stderr(Stdio::null());
+    let recording = record(command, options).expect("record");
+    assert!(recording.status.success(), "{}", recording.status);
+    let mut printed = String::new();
+    std::io::Read::read_to_string(&mut reader, &mut printed).expect("read what it printed");
+    (recording.profile, printed)
+}
+
+/// Each depth's zones of one thread, as names, and labels as `key=value`.
+fn zone_depths(profile: &Profile, tid: u32) -> Vec<Vec<String>> {
+    let mut depths: Vec<Vec<String>> = Vec::new();
+    for zone in profile.zones().into_iter().filter(|zone| zone.tid == tid) {
+        let depth = zone.depth as usize;
+        depths.resize_with(depths.len().max(depth + 1), Vec::new);
+        depths[depth].push(match zone.value {
+            Some(value) => format!("{}={value}", zone.name),
+            None => zone.name,
+        });
+    }
+    depths
+}
+
+/// Zones and labels nest exactly as the program's scopes did, each thread
+/// its own tree, on the clock its samples share, and the program's plots,
+/// messages, and frames land on its thread.
+#[test]
+fn instrumented_zones_nest_exactly_as_the_program_ran_them() {
+    let (profile, _) = record_probes(&["zones"], &RecordOptions::default());
+    let counts = profile.probe_counts();
+    assert!(!counts.lost(), "{counts:?}");
+    let zones = profile.zones();
+    let tid = |name: &str| {
+        zones
+            .iter()
+            .find(|zone| zone.name == name)
+            .map(|zone| zone.tid)
+            .expect("its zone")
+    };
+    assert_eq!(
+        zone_depths(&profile, tid("outer")),
+        [
+            vec!["round=0", "round=1", "round=2"],
+            vec!["outer"; 3],
+            ["a", "b"].repeat(3),
+            vec!["leaf"; 3],
+        ]
+    );
+    assert_eq!(
+        zone_depths(&profile, tid("work")),
+        [vec!["work"], vec!["step"; 2]]
+    );
+    assert_ne!(tid("outer"), tid("work"));
+    // Each zone lies in the one that holds it, and in the recording.
+    let (start, end) = profile.span();
+    for zone in &zones {
+        assert_eq!(zone.flags, 0, "{zone:?}");
+        assert!(
+            start <= zone.start && zone.end <= end,
+            "{zone:?} beyond {start}..{end}"
+        );
+        if zone.depth > 0 {
+            assert!(
+                zones.iter().any(|parent| parent.tid == zone.tid
+                    && parent.depth + 1 == zone.depth
+                    && parent.start <= zone.start
+                    && zone.end <= parent.end),
+                "{zone:?} lies in no zone"
+            );
+        }
+    }
+    let plotted: Vec<f64> = profile.plots().iter().map(|plot| plot.value).collect();
+    assert_eq!(plotted, [0.0, 1.0, 2.0]);
+    let markers = profile.program_markers();
+    let messages: Vec<&str> = markers
+        .iter()
+        .filter_map(|marker| marker.text.as_deref())
+        .collect();
+    assert_eq!(messages, ["round 0 of 3", "round 1 of 3", "round 2 of 3"]);
+    let frames = markers
+        .iter()
+        .filter(|marker| marker.kind == MarkerKind::Frame && marker.name == "frame")
+        .count();
+    assert_eq!(frames, 3);
+    assert!(markers.iter().all(|marker| marker.tid == tid("outer")));
+}
+
+/// A thread that writes faster than uscope reads overwrites its oldest
+/// records. Every record is read or counted lost, and every event read is
+/// in a zone: a whole one, or one flagged for the end it lost.
+#[test]
+fn every_instrumentation_record_is_read_or_counted_lost() {
+    let options = RecordOptions {
+        off_cpu: false,
+        ..RecordOptions::default()
+    };
+    let (profile, _) = record_probes(&["burst", "200000"], &options);
+    let counts = profile.probe_counts();
+    assert_eq!(counts.events + counts.overwritten, 400_000, "{counts:?}");
+    assert_eq!(
+        (counts.no_ring, counts.interrupted, counts.malformed),
+        (0, 0, 0)
+    );
+    let zones = profile.zones();
+    let whole = zones.iter().filter(|zone| zone.flags == 0).count() as u64;
+    let flagged = zones.len() as u64 - whole;
+    assert_eq!(2 * whole + flagged, counts.events, "{counts:?}");
+    assert!(zones.iter().all(|zone| zone.name == "tick"));
+}
+
+/// Threads that come and go reuse the rings of those that went: each
+/// thread's zone is whole, and any no ring could take is counted.
+#[test]
+fn threads_that_come_and_go_each_keep_their_zones() {
+    let options = RecordOptions {
+        off_cpu: false,
+        ..RecordOptions::default()
+    };
+    let (profile, _) = record_probes(&["churn", "2000"], &options);
+    let counts = profile.probe_counts();
+    let lives: Vec<_> = profile
+        .zones()
+        .into_iter()
+        .filter(|zone| zone.name == "life")
+        .collect();
+    assert!(lives.iter().all(|zone| zone.flags == 0 && zone.depth == 0));
+    let threads: std::collections::BTreeSet<u32> = lives.iter().map(|zone| zone.tid).collect();
+    assert_eq!(threads.len(), lives.len());
+    assert_eq!(lives.len() as u64 + counts.no_ring / 2, 2000, "{counts:?}");
+    assert_eq!((counts.overwritten, counts.malformed), (0, 0));
+}
+
+/// A forked child records nothing: it is not listened to, and its sites
+/// are off, while its parent's zone around the fork stays whole.
+#[test]
+fn a_forked_child_writes_no_instrumentation() {
+    let (profile, printed) = record_probes(&["fork"], &RecordOptions::default());
+    assert_eq!(printed, "child listening: false\n");
+    let zones = profile.zones();
+    let names: Vec<&str> = zones.iter().map(|zone| zone.name.as_str()).collect();
+    assert_eq!(names, ["parent"]);
+    assert_eq!(zones[0].flags, 0);
+    assert!(!profile.probe_counts().lost());
+}
+
+/// A program's trigger saves the window as it is, as the recording goes
+/// on.
+#[test]
+fn a_programs_trigger_saves_the_window() {
+    let mut command = Command::new(Scenario::fixture("probes"));
+    command
+        .arg("zones")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let options = RecordOptions {
+        window: Some(Duration::from_secs(10)),
+        ..RecordOptions::default()
+    };
+    let (trigger, stop) = (AtomicBool::new(false), AtomicBool::new(false));
+    let mut saved = Vec::new();
+    let recording = record_watched(
+        command,
+        &options,
+        &mut Watch {
+            every: Duration::from_millis(20),
+            publish: &mut |_| {},
+            stop: &stop,
+            save: Some(Save {
+                trigger: &trigger,
+                to: &mut |profile| saved.push(profile),
+            }),
+        },
+    )
+    .expect("record");
+    assert!(recording.status.success(), "{}", recording.status);
+    assert_eq!(saved.len(), 1);
+    let markers = saved[0].program_markers();
+    let triggers: Vec<&str> = markers
+        .iter()
+        .filter(|marker| marker.kind == MarkerKind::Trigger)
+        .map(|marker| marker.name.as_str())
+        .collect();
+    assert_eq!(triggers, ["done"]);
+    let outer = saved[0]
+        .zones()
+        .into_iter()
+        .filter(|zone| zone.name == "outer")
+        .count();
+    assert_eq!(outer, 3);
+}
+
+/// Only the sites asked for are switched on.
+#[test]
+fn a_recording_switches_on_only_the_sites_it_names() {
+    let options = RecordOptions {
+        probes: ProbeSelection::Named(vec!["outer".into(), "le*".into()]),
+        ..RecordOptions::default()
+    };
+    let (profile, _) = record_probes(&["zones"], &options);
+    let names: std::collections::BTreeSet<String> =
+        profile.zones().into_iter().map(|zone| zone.name).collect();
+    assert_eq!(names, ["leaf".to_owned(), "outer".to_owned()].into());
+    assert!(profile.plots().is_empty() && profile.program_markers().is_empty());
 }

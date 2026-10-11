@@ -44,9 +44,11 @@ pub enum CaptureTable {
     OffCpuRanges = 16,
     /// Instrumentation sites.
     Sites = 17,
-    /// Instrumented zones, thread by thread, depth by depth, by start.
+    /// Instrumented zones and labels, thread by thread, depth by depth, by
+    /// start.
     Zones = 18,
-    /// Where each thread's zones are at each depth.
+    /// Where each thread's zones are at each depth: how many zones of the
+    /// thread hold each.
     ZoneRanges = 19,
     /// Values of plotted series, by series and time.
     Plots = 20,
@@ -442,6 +444,18 @@ pub enum AccountKind {
     SnapshotFailures = 18,
     /// Samples task snapshots gave the task they ran.
     TaskSamples = 19,
+    /// Instrumentation events read.
+    ProbeEvents = 20,
+    /// Instrumentation records a thread overwrote before uscope read them.
+    ProbeOverwritten = 21,
+    /// Instrumentation events no ring could take: the program had no ring
+    /// left for a thread, or a thread recorded after it began exiting.
+    ProbeNoRing = 22,
+    /// Instrumentation events a signal handler raised while its thread was
+    /// writing one, which it dropped.
+    ProbeInterrupted = 23,
+    /// Instrumentation records that broke the ABI, and rings that did.
+    ProbeMalformed = 24,
 }
 
 /// A count of something the views must show.
@@ -465,12 +479,13 @@ pub struct Site {
     pub file: U32,
     pub line: U32,
     pub module: U32,
-    /// The site record's kind byte.
+    /// The site record's kind: an `abi::SITE_` constant of
+    /// `uscope-probes`.
     pub kind: u8,
     pub reserved: [u8; 3],
 }
 
-/// One instrumented zone.
+/// One instrumented zone, or one label's span.
 #[repr(C)]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
@@ -479,9 +494,22 @@ pub struct Zone {
     pub start: I64,
     pub end: I64,
     pub site: U32,
-    /// Zone flags.
+    /// `ZONE_` flags.
     pub flags: U32,
+    /// A label's value, as a string, or [`NONE`].
+    pub value: U32,
+    pub reserved: U32,
 }
+
+/// Its begin was lost: it starts where its thread's records were lost.
+pub const ZONE_BEGAN_UNSEEN: u32 = 1;
+/// Its end was not seen: it ends where its thread's records were lost or
+/// ended, or where a zone around it ended.
+pub const ZONE_ENDED_UNSEEN: u32 = 2;
+/// Its begin and end do not nest: a zone around it ended first, or no
+/// begin matched its end.
+pub const ZONE_MISMATCHED: u32 = 4;
+pub const ZONE_FLAGS: u32 = ZONE_BEGAN_UNSEEN | ZONE_ENDED_UNSEEN | ZONE_MISMATCHED;
 
 /// Where one thread's zones of one depth are.
 #[repr(C)]
@@ -533,13 +561,27 @@ pub enum MarkerKind {
     /// A task snapshot failed, or could not read some tasks; the text
     /// says why.
     TaskSnapshot = 2,
+    /// A program's message, on its thread.
+    Message = 3,
+    /// The end of a program's frame.
+    Frame = 4,
+    /// A program asked for the window to be saved.
+    Trigger = 5,
+    /// uscope could not read a module's instrumentation; the text says
+    /// why.
+    Probes = 6,
 }
 
 impl MarkerKind {
+    #[must_use]
     pub const fn from_number(number: u8) -> Option<Self> {
         match number {
             1 => Some(Self::Budget),
             2 => Some(Self::TaskSnapshot),
+            3 => Some(Self::Message),
+            4 => Some(Self::Frame),
+            5 => Some(Self::Trigger),
+            6 => Some(Self::Probes),
             _ => None,
         }
     }
@@ -668,4 +710,4 @@ const _: () = assert!(size_of::<Frame>() == 16);
 const _: () = assert!(size_of::<Stack>() == 8);
 const _: () = assert!(size_of::<Sample>() == 24);
 const _: () = assert!(size_of::<OffCpu>() == 17);
-const _: () = assert!(size_of::<Zone>() == 24);
+const _: () = assert!(size_of::<Zone>() == 32);

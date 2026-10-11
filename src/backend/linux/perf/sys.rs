@@ -299,3 +299,9 @@ pub fn poll(rings: &[Ring], timeout: std::time::Duration) {
         libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout);
     }
 }
+
+/// The time-stamp counter.
+pub fn tsc() -> u64 {
+    // SAFETY: every x86-64 processor reads its time-stamp counter.
+    unsafe { core::arch::x86_64::_rdtsc() }
+}

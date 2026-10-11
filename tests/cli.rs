@@ -5160,6 +5160,32 @@ fn a_signal_saves_a_recordings_window_as_it_goes_on() {
     assert!(last.contains("second") && !last.contains("first"), "{last}");
 }
 
+/// A program whose recorder dies goes on writing its instrumentation only
+/// until it stops hearing from it, then switches every site off.
+#[test]
+fn instrumentation_switches_itself_off_once_its_recorder_dies() {
+    let scratch = support::ScratchDir::new("cli-probes-quiet");
+    let mut program = support::ExternalProcess::spawn_command(
+        Command::new(fixture("build/test-programs/probes")).arg("quiet"),
+    );
+    let pid = program.process_id().get().to_string();
+    let mut recorder = uscope_command()
+        .args(["record", "--pid", &pid, "--probe-timeout", "0.2", "-o"])
+        .arg(scratch.path().join("quiet.usprof"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("run uscope record");
+    let mut lines = BufReader::new(program.take_stdout()).lines();
+    let mut line = || lines.next().and_then(Result::ok);
+    assert_eq!(line().as_deref(), Some("listening"));
+    recorder.kill().expect("kill uscope");
+    recorder.wait().expect("reap uscope");
+    assert_eq!(line().as_deref(), Some("quiet"));
+    assert!(program.wait().success());
+}
+
 #[test]
 fn record_writes_a_profile_that_report_summarizes() {
     let scratch = support::ScratchDir::new("cli-record");

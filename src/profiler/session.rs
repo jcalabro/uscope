@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use super::budget::{Budget, Controller, Observation, STEPS};
 use super::calls::{self, Calls};
+use super::collector::{Collector, ProbeSelection};
 use super::record::{self, Sites};
 use super::tasks::{Snapshot, Snapshotter};
 use super::{
@@ -246,6 +247,7 @@ fn settings(
                 |every| format!("every {:.3} s", every.as_secs_f64()),
             ),
         ),
+        ("probes", options.probes.to_string()),
         (
             "budget",
             options.budget.map_or_else(
@@ -279,6 +281,9 @@ fn drive(
     let mut snapshots = started
         .zip(options.task_snapshots)
         .map(|(pid, every)| Snapshots::new(pid, every, options));
+    let mut probes = started
+        .filter(|_| options.probes != ProbeSelection::Off)
+        .map(|pid| Collector::new(pid, options.probes.clone(), options.probe_timeout));
     let started = started.is_some();
     // A window moves by eighths of itself.
     let marks = options.window.map(|window| {
@@ -319,6 +324,13 @@ fn drive(
             buffer.len()
         );
         processor.ingest(&buffer, (!finished).then_some(watermark));
+        if let Some(probes) = &mut probes {
+            if finished {
+                probes.finish(processor, !ended());
+            } else {
+                probes.drain(processor);
+            }
+        }
         if finished {
             break;
         }
@@ -333,8 +345,10 @@ fn drive(
             processor.mark();
             marked = std::time::Instant::now();
         }
+        // A program's trigger saves the window as uscope's does.
+        let triggered = processor.take_triggered();
         if let Some(save) = &mut watch.save
-            && save.trigger.swap(false, Ordering::Relaxed)
+            && (save.trigger.swap(false, Ordering::Relaxed) || triggered)
         {
             processor.counts(events.counts());
             record!("record: triggered");

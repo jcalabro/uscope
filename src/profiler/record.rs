@@ -9,7 +9,9 @@ use std::sync::Arc;
 use foldhash::HashMap;
 
 use super::calls::Branch;
+use super::collector::Found;
 use super::frame_pointers::{CallSites, call_sites};
+use super::probes::{self, Event, SiteRecord, Stacks};
 use super::tasks::{Snapshot, WaitFrame};
 use crate::backend::perf::{self, decode};
 use crate::capture::builder::LineInput;
@@ -41,6 +43,8 @@ struct Image {
     id: ModuleImageId,
     /// The capture's module.
     module: u32,
+    /// Its instrumentation, if its file has any.
+    probes: Option<Arc<probes::Table>>,
 }
 
 /// One executable mapping of a process.
@@ -116,6 +120,12 @@ pub struct Processor {
     tasks_of: Option<u32>,
     located: std::collections::VecDeque<Located>,
     unclaimed: Vec<(u32, i64, u64)>,
+    /// Each process's modules with instrumentation, once mapped, and those
+    /// the collector has not taken yet.
+    probes_mapped: BTreeSet<(u32, usize)>,
+    probes_found: Vec<(u32, Found)>,
+    stacks: Stacks,
+    triggered: bool,
 }
 
 /// A rolling window: how long it is, and its marks, each a moment and the
@@ -157,6 +167,10 @@ impl Processor {
             tasks_of: None,
             located: std::collections::VecDeque::new(),
             unclaimed: Vec::new(),
+            probes_mapped: BTreeSet::new(),
+            probes_found: Vec::new(),
+            stacks: Stacks::default(),
+            triggered: false,
         }
     }
 
@@ -433,6 +447,16 @@ impl Processor {
         let Some((image, bias)) = image else {
             return;
         };
+        if let Some(table) = &self.images[image].probes
+            && self.probes_mapped.insert((mmap.pid, image))
+        {
+            let found = Found {
+                module: self.images[image].module,
+                bias,
+                table: Arc::clone(table),
+            };
+            self.probes_found.push((mmap.pid, found));
+        }
         let loaded = LoadedModule {
             id: ModuleId::new(self.next_module),
             image: self.images[image].id,
@@ -497,11 +521,14 @@ impl Processor {
 
     fn load_image(&mut self, path: &std::path::Path, data: Option<Vec<u8>>) -> usize {
         let id = ModuleImageId::new(u32::try_from(self.images.len()).unwrap_or(u32::MAX));
-        let build_id = data.as_ref().and_then(|data| {
-            object::File::parse(data.as_slice())
-                .ok()
-                .and_then(|file| object::Object::build_id(&file).ok().flatten().map(hex))
-        });
+        let parsed = data
+            .as_ref()
+            .and_then(|data| object::File::parse(data.as_slice()).ok());
+        let build_id = parsed
+            .as_ref()
+            .and_then(|file| object::Object::build_id(file).ok().flatten().map(hex));
+        let probes = parsed.as_ref().map(probes::table);
+        drop(parsed);
         let digest = data.as_deref().map_or([0; 16], |data| {
             twox_hash::XxHash3_128::oneshot(data).to_le_bytes()
         });
@@ -512,8 +539,26 @@ impl Processor {
         let info = data.and_then(|data| {
             crate::debug_info::load_module_bytes(path, &data, id, &self.search).ok()
         });
+        let probes = match probes {
+            Some(Ok(table)) => table.map(Arc::new),
+            Some(Err(why)) => {
+                let text = format!(
+                    "{}: its instrumentation cannot be read: {why}",
+                    path.display()
+                );
+                self.builder
+                    .marker(self.latest.cast_signed(), MarkerKind::Probes, &text);
+                None
+            }
+            None => None,
+        };
         let image = self.images.len();
-        self.images.push(Image { info, id, module });
+        self.images.push(Image {
+            info,
+            id,
+            module,
+            probes,
+        });
         image
     }
 
@@ -620,10 +665,11 @@ impl Processor {
         builder.finish()
     }
 
-    /// Ends each interval of a thread still off its CPU where the
-    /// recording has reached, charges the CPU time recording took, and
-    /// cuts a window's rows and counts to its start.
+    /// Ends each interval of a thread still off its CPU, and each zone
+    /// still open, where the recording has reached, charges the CPU time
+    /// recording took, and cuts a window's rows and counts to its start.
     fn close(&self, builder: &mut CaptureBuilder) {
+        self.stacks.close(builder, self.latest.cast_signed());
         for &(thread, left, preempted) in self.switched_out.values() {
             let back = self.latest.min(self.next_gap(left));
             builder.off_cpu(
@@ -649,6 +695,49 @@ impl Processor {
             builder.discount(counts);
             builder.setting("start", &start.to_string());
         }
+    }
+
+    /// The modules with instrumentation process `pid` has mapped since
+    /// last asked.
+    pub fn found_probes(&mut self, pid: u32) -> Vec<Found> {
+        let (found, others) = std::mem::take(&mut self.probes_found)
+            .into_iter()
+            .partition(|(process, _)| *process == pid);
+        self.probes_found = others;
+        found.into_iter().map(|(_, found)| found).collect()
+    }
+
+    /// The row of a module's site.
+    pub fn probe_site(&mut self, module: u32, site: &SiteRecord) -> u32 {
+        self.builder
+            .site(&site.name, &site.file, site.line, module, site.kind)
+    }
+
+    /// The row of a thread whose ring holds instrumentation.
+    pub fn probe_thread(&mut self, pid: u32, tid: u32) -> u32 {
+        self.thread(pid, tid, self.latest.cast_signed())
+    }
+
+    /// Says that a thread's records were lost before its next.
+    pub fn probe_lost(&mut self, thread: u32) {
+        self.stacks.lost(thread);
+    }
+
+    /// Applies one of a thread's instrumentation events, in its order.
+    pub fn probe_event(&mut self, thread: u32, event: &Event<'_>) {
+        self.triggered |= event.kind == uscope_probes::abi::TRIGGER;
+        self.stacks.apply(&mut self.builder, thread, event);
+    }
+
+    /// Ends a thread's open zones where its records end.
+    pub fn probe_thread_ended(&mut self, thread: u32) {
+        self.stacks.ended(&mut self.builder, thread);
+    }
+
+    /// Whether the program asked for the window to be saved since last
+    /// asked.
+    pub const fn take_triggered(&mut self) -> bool {
+        std::mem::replace(&mut self.triggered, false)
     }
 
     /// Records that every event was off from `start` to `end`, and why. A

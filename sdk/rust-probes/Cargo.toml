@@ -1,0 +1,12 @@
+[package]
+name = "uscope-probes"
+version = "0.1.0"
+edition = "2024"
+description = "Zones, plots, messages, labels, and triggers that uscope records"
+license = "MIT OR Apache-2.0"
+
+[features]
+# Without it, every macro expands to nothing.
+enabled = []
+
+[dependencies]

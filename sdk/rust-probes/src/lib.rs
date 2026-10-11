@@ -1,0 +1,344 @@
+//! Instrumentation that uscope records: zones, frames, plots, messages,
+//! labels, and triggers.
+//!
+//! Each macro's site is static data in the `uscope_sites` section, which
+//! uscope reads from the program's file, so the program never sends a
+//! name. A site is off until uscope switches it on by writing its state
+//! byte, and an off site costs a load and a branch. An on site writes a
+//! 16-byte record, or a few, into its thread's ring in the program's own
+//! memory, which uscope reads from outside. The writer never waits: it
+//! overwrites the oldest records when uscope falls behind, and uscope
+//! counts every one. Nothing breaks if uscope goes away; once it stops
+//! saying it is there, every site switches itself off.
+//!
+//! Without the `enabled` feature every macro expands to nothing, and its
+//! arguments are checked but never evaluated.
+//!
+//! A thread's first event takes it a ring, which allocates, so a signal
+//! handler should not be where a thread first records.
+//!
+//! ```ignore
+//! fn handle(request: &Request) -> Response {
+//!     let _zone = uscope_probes::zone!("handle");
+//!     let _route = uscope_probes::label!("route", request.route());
+//!     let rows = { let _zone = uscope_probes::zone!("query"); query(request) };
+//!     uscope_probes::plot!("rows", rows.len() as f64);
+//!     if rows.is_empty() {
+//!         uscope_probes::message!("no rows for {}", request.id());
+//!     }
+//!     render(rows)
+//! }
+//! ```
+//!
+//! The ABI is the records in [`abi`] and nothing Rust-specific, so that
+//! another language can write it.
+
+#![cfg_attr(not(feature = "enabled"), no_std)]
+
+/// The records uscope reads, by their byte layout. Every field is little
+/// endian.
+pub mod abi {
+    /// The control block, one per program, in `uscope_probe_control`:
+    ///
+    /// | Offset | Field |
+    /// | --- | --- |
+    /// | 0 | magic `USCOPEPR` |
+    /// | 8 | ABI version, `u16` |
+    /// | 10 | clock, `u16`: a `CLOCK_` constant, set by uscope |
+    /// | 12 | enable, `u32`: set by uscope |
+    /// | 16 | ring size, `u32`, as a power of two of records: set by uscope |
+    /// | 20 | rings, `u32`: how many of the registry's slots threads took |
+    /// | 24 | heartbeat, `u64`: uscope's `CLOCK_MONOTONIC`, written as it reads |
+    /// | 32 | events no ring could take, `u64` |
+    /// | 40 | the registry's length, `u32`: [`MOST_RINGS`] |
+    /// | 44 | exiting, `u32`: set as the program exits |
+    /// | 48 | flushed, `u32`: set by uscope once it has read every ring since |
+    /// | 52 | timeout, `u32`: milliseconds without a heartbeat before every site switches itself off, set by uscope; zero is [`STALE_NANOSECONDS`] |
+    /// | 64 | the registry: each ring's address, `u64`, or zero |
+    ///
+    /// A thread sets a ring's slot after it counts it in `rings`, so a slot
+    /// below `rings` may still be zero. A program that exits while uscope
+    /// reads it waits, up to [`EXIT_WAIT_NANOSECONDS`], for uscope to say it
+    /// has read every ring, so that the last records are not lost with it.
+    pub const MAGIC: [u8; 8] = *b"USCOPEPR";
+    pub const ABI: u16 = 1;
+    /// Record times are nanoseconds of `CLOCK_MONOTONIC`.
+    pub const CLOCK_MONOTONIC: u16 = 1;
+    /// Record times are the time-stamp counter's.
+    pub const CLOCK_TSC: u16 = 2;
+    pub const CONTROL_SIZE: usize = 64;
+
+    /// A site, 32 bytes, in `uscope_sites`; its offsets are from the
+    /// field that holds them:
+    ///
+    /// | Offset | Field |
+    /// | --- | --- |
+    /// | 0 | version, `u8`: [`SITE_VERSION`] |
+    /// | 1 | kind, `u8`: a `SITE_` constant |
+    /// | 2 | flags, `u16` |
+    /// | 4 | line, `u32` |
+    /// | 8 | name, `i32` offset, and 12 its length, `u32` |
+    /// | 16 | file, `i32` offset, and 20 its length, `u32` |
+    /// | 24 | state byte, `i32` offset: zero is off |
+    pub const SITE_VERSION: u8 = 1;
+    pub const SITE_SIZE: usize = 32;
+    /// The SDK's own site, which keeps the section present.
+    pub const SITE_NONE: u8 = 0;
+    pub const SITE_ZONE: u8 = 1;
+    pub const SITE_FRAME: u8 = 2;
+    pub const SITE_PLOT: u8 = 3;
+    pub const SITE_MESSAGE: u8 = 4;
+    pub const SITE_LABEL: u8 = 5;
+    pub const SITE_TRIGGER: u8 = 6;
+
+    /// A ring: a 128-byte header, then `2^size` records of 16 bytes:
+    ///
+    /// | Offset | Field |
+    /// | --- | --- |
+    /// | 0 | magic, `u32`: [`RING_MAGIC`] |
+    /// | 4 | version, `u8` |
+    /// | 5 | size, `u8`, as a power of two of records |
+    /// | 6 | clock, `u8`: the control block's when the thread took the ring |
+    /// | 8 | thread id, `u32` |
+    /// | 12 | state, `u32`: a `RING_` constant |
+    /// | 16 | events dropped because a signal handler interrupted a write, `u64` |
+    /// | 64 | head, `u64`: the position the next record takes |
+    pub const RING_MAGIC: u32 = u32::from_le_bytes(*b"USRG");
+    pub const RING_VERSION: u8 = 1;
+    pub const RING_HEADER: usize = 128;
+    pub const RING_FREE: u32 = 0;
+    pub const RING_ACTIVE: u32 = 1;
+    /// Its thread exited: once uscope has read it, uscope frees it.
+    pub const RING_RETIRED: u32 = 2;
+    /// A thread is taking it.
+    pub const RING_CLAIMED: u32 = 3;
+    pub const DEFAULT_RING_SIZE: u32 = 12;
+    pub const LEAST_RING_SIZE: u32 = 6;
+    pub const MOST_RING_SIZE: u32 = 20;
+    pub const MOST_RINGS: usize = 1024;
+
+    /// A record, 16 bytes: time `u64`, site `u32` (its state byte's offset
+    /// from the control block), kind `u8`, and an argument, `u24`. A plot's
+    /// value, and a message's or label's bytes, take the records after it,
+    /// each of kind [`CONTINUED`] and fifteen bytes of the rest: bytes 0 to
+    /// 12, then 13 to 16.
+    pub const RECORD: usize = 16;
+    pub const ZONE_BEGIN: u8 = 1;
+    pub const ZONE_END: u8 = 2;
+    pub const FRAME: u8 = 3;
+    /// The next record holds the value, an `f64`.
+    pub const PLOT: u8 = 4;
+    /// The argument is the text's length; its bytes follow.
+    pub const MESSAGE: u8 = 5;
+    /// The argument is the value's length; its bytes follow.
+    pub const LABEL_BEGIN: u8 = 6;
+    pub const LABEL_END: u8 = 7;
+    pub const TRIGGER: u8 = 8;
+    /// More of the record before it.
+    pub const CONTINUED: u8 = 9;
+    /// The longest message or label value.
+    pub const MOST_TEXT: usize = 256;
+
+    /// How long uscope may go without a heartbeat before every site
+    /// switches itself off, unless it says otherwise.
+    pub const STALE_NANOSECONDS: u64 = 10_000_000_000;
+    /// How old a heartbeat may be for an exiting program to wait for
+    /// uscope, and how long it waits at most.
+    pub const FRESH_NANOSECONDS: u64 = 1_000_000_000;
+    pub const EXIT_WAIT_NANOSECONDS: u64 = 1_000_000_000;
+}
+
+#[cfg(feature = "enabled")]
+mod probes;
+
+/// Whether uscope is recording the program's instrumentation: every site
+/// it chose is on.
+#[cfg(not(feature = "enabled"))]
+#[must_use]
+pub const fn listening() -> bool {
+    false
+}
+#[cfg(feature = "enabled")]
+#[doc(hidden)]
+pub use probes::*;
+
+/// A span of the thread's time, from here until the guard drops.
+#[cfg(feature = "enabled")]
+#[macro_export]
+macro_rules! zone {
+    ($name:literal) => {
+        $crate::Zone::begin($crate::__site!($crate::abi::SITE_ZONE, $name))
+    };
+}
+
+/// A span of the thread's time, from here until the guard drops.
+#[cfg(not(feature = "enabled"))]
+#[macro_export]
+macro_rules! zone {
+    ($name:literal) => {
+        ()
+    };
+}
+
+/// The end of a frame, for a program that works in frames.
+#[cfg(feature = "enabled")]
+#[macro_export]
+macro_rules! frame {
+    () => {
+        $crate::frame!("frame")
+    };
+    ($name:literal) => {
+        $crate::__event($crate::__site!($crate::abi::SITE_FRAME, $name), $crate::abi::FRAME)
+    };
+}
+
+/// The end of a frame, for a program that works in frames.
+#[cfg(not(feature = "enabled"))]
+#[macro_export]
+macro_rules! frame {
+    ($($name:literal)?) => {
+        ()
+    };
+}
+
+/// A value of the series `name`, as an `f64`.
+#[cfg(feature = "enabled")]
+#[macro_export]
+macro_rules! plot {
+    ($name:literal, $value:expr) => {{
+        let state = $crate::__site!($crate::abi::SITE_PLOT, $name);
+        if $crate::__on(state) {
+            $crate::__plot(state, $value);
+        }
+    }};
+}
+
+/// A value of the series `name`, as an `f64`.
+#[cfg(not(feature = "enabled"))]
+#[macro_export]
+macro_rules! plot {
+    ($name:literal, $value:expr) => {
+        if false {
+            let _: f64 = $value;
+        }
+    };
+}
+
+/// A message on the thread's timeline, formatted only while its site is
+/// on, and cut to 256 bytes.
+#[cfg(feature = "enabled")]
+#[macro_export]
+macro_rules! message {
+    ($format:literal $($arguments:tt)*) => {{
+        let state = $crate::__site!($crate::abi::SITE_MESSAGE, $format);
+        if $crate::__on(state) {
+            $crate::__message(state, ::core::format_args!($format $($arguments)*));
+        }
+    }};
+}
+
+/// A message on the thread's timeline, formatted only while its site is
+/// on, and cut to 256 bytes.
+#[cfg(not(feature = "enabled"))]
+#[macro_export]
+macro_rules! message {
+    ($format:literal $($arguments:tt)*) => {
+        if false {
+            let _ = ::core::format_args!($format $($arguments)*);
+        }
+    };
+}
+
+/// Labels the thread's time `key=value` until the guard drops: samples
+/// and zones inside it carry the label. The value is formatted only while
+/// the site is on, and cut to 256 bytes.
+#[cfg(feature = "enabled")]
+#[macro_export]
+macro_rules! label {
+    ($key:literal, $value:expr) => {
+        $crate::Label::begin($crate::__site!($crate::abi::SITE_LABEL, $key), &$value)
+    };
+}
+
+/// Labels the thread's time `key=value` until the guard drops.
+#[cfg(not(feature = "enabled"))]
+#[macro_export]
+macro_rules! label {
+    ($key:literal, $value:expr) => {
+        if false {
+            let _ = &$value;
+        }
+    };
+}
+
+/// Asks uscope to save the recording's window around this moment, when it
+/// keeps one.
+#[cfg(feature = "enabled")]
+#[macro_export]
+macro_rules! trigger {
+    ($why:literal) => {
+        $crate::__event($crate::__site!($crate::abi::SITE_TRIGGER, $why), $crate::abi::TRIGGER)
+    };
+}
+
+/// Asks uscope to save the recording's window around this moment.
+#[cfg(not(feature = "enabled"))]
+#[macro_export]
+macro_rules! trigger {
+    ($why:literal) => {
+        ()
+    };
+}
+
+/// A site of `kind` named `name`, here: its record goes into the
+/// `uscope_sites` section, and the expression is its state byte.
+#[cfg(feature = "enabled")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __site {
+    ($kind:expr, $name:expr) => {{
+        // A block holds no assembly, but a module in it does.
+        mod site {
+            pub static STATE: ::core::sync::atomic::AtomicU8 =
+                ::core::sync::atomic::AtomicU8::new(0);
+            static NAME: [u8; $name.len()] = $crate::__bytes($name);
+            static FILE: [u8; ::core::file!().len()] = $crate::__bytes(::core::file!());
+            ::core::arch::global_asm!(
+                ".pushsection uscope_sites,\"aR\",@progbits",
+                ".balign 8",
+                ".byte {version}, {kind}",
+                ".short 0",
+                ".long {line}",
+                ".long {name} - .",
+                ".long {name_length}",
+                ".long {file} - .",
+                ".long {file_length}",
+                ".long {state} - .",
+                ".long 0",
+                ".popsection",
+                version = const $crate::abi::SITE_VERSION,
+                kind = const $kind,
+                line = const ::core::line!(),
+                name = sym NAME,
+                name_length = const $name.len(),
+                file = sym FILE,
+                file_length = const ::core::file!().len(),
+                state = sym STATE,
+            );
+        }
+        &site::STATE
+    }};
+}
+
+/// The bytes of `text`, as a site's name or file.
+#[doc(hidden)]
+#[must_use]
+pub const fn __bytes<const N: usize>(text: &str) -> [u8; N] {
+    let mut bytes = [0; N];
+    let mut index = 0;
+    while index < N {
+        bytes[index] = text.as_bytes()[index];
+        index += 1;
+    }
+    bytes
+}

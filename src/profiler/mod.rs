@@ -4,17 +4,26 @@
 
 pub mod budget;
 mod calls;
+mod collector;
 mod frame_pointers;
+mod probes;
 mod record;
 mod session;
 mod tasks;
+mod zones;
 
 pub use crate::capture::records::GapReason;
 
 /// The task row of a sample no task snapshot named, as queries and lanes
 /// give it.
 pub const NO_TASK: u32 = NONE;
+pub use crate::capture::records::MarkerKind;
+pub use collector::ProbeSelection;
 pub use session::{Attachment, Recording, Save, Watch, record, record_attached, record_watched};
+pub use zones::{
+    PlotValue, ProbeCounts, ProfileZone, ProgramMarker, ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN,
+    ZONE_MISMATCHED,
+};
 
 pub use crate::analysis::{
     CallTree, Cost, Costs, Granularity, KeyKind, Keys, Lanes, OffCpuLane, Query, Source, Transform,
@@ -23,7 +32,7 @@ pub use crate::analysis::{
 use std::path::{Path, PathBuf};
 
 use crate::backend::perf;
-use crate::capture::records::{AccountKind, FrameKind, MarkerKind, NONE, Truncation};
+use crate::capture::records::{AccountKind, FrameKind, NONE, Truncation};
 use crate::capture::{Capture, file};
 
 /// How much a recording costs the program, and how much it sees.
@@ -151,6 +160,13 @@ pub struct RecordOptions {
     /// How often to stop the program, through the debugger's attach, to
     /// read where its tasks wait: none never does.
     pub task_snapshots: Option<std::time::Duration>,
+    /// The instrumentation sites to switch on in a program built with
+    /// uscope's probes SDK.
+    pub probes: ProbeSelection,
+    /// How long a program goes on writing its instrumentation once uscope
+    /// stops reading it, as when uscope is killed, before it switches
+    /// every site off.
+    pub probe_timeout: std::time::Duration,
     /// Directories searched for separate debug files.
     pub debug_directories: Vec<PathBuf>,
 }
@@ -170,6 +186,8 @@ impl RecordOptions {
             budget: preset.budget(),
             window: None,
             task_snapshots: None,
+            probes: ProbeSelection::All,
+            probe_timeout: std::time::Duration::from_secs(10),
             debug_directories: Vec::new(),
         }
     }

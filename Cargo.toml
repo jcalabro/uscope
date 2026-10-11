@@ -78,6 +78,9 @@ foldhash = "0.2"
 zerocopy = { version = "0.8", features = ["alloc", "derive"] }
 rayon = "1.11"
 twox-hash = { version = "2.1", default-features = false, features = ["std", "xxhash3_64", "xxhash3_128"] }
+# The instrumentation ABI, which the collector reads: the SDK without its
+# `enabled` feature is that and nothing else.
+uscope-probes = { path = "sdk/rust-probes" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cpp_demangle = "0.5"

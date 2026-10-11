@@ -724,3 +724,67 @@ pub fn mappings(pid: u32) -> std::io::Result<Vec<Mapped>> {
     }
     Ok(mappings)
 }
+
+/// Reads process `pid`'s memory at `address` into `buffer`, from outside
+/// it: how many bytes it read, which a mapping's end may cut short.
+pub fn read_memory(pid: u32, address: u64, buffer: &mut [u8]) -> std::io::Result<usize> {
+    let remote = [nix::sys::uio::RemoteIoVec {
+        base: usize::try_from(address).map_err(std::io::Error::other)?,
+        len: buffer.len(),
+    }];
+    let mut local = [std::io::IoSliceMut::new(buffer)];
+    nix::sys::uio::process_vm_readv(
+        nix::unistd::Pid::from_raw(pid.cast_signed()),
+        &mut local,
+        &remote,
+    )
+    .map_err(std::io::Error::from)
+}
+
+/// Writes `bytes` to process `pid`'s memory at `address`, from outside it.
+pub fn write_memory(pid: u32, address: u64, bytes: &[u8]) -> std::io::Result<()> {
+    let remote = [nix::sys::uio::RemoteIoVec {
+        base: usize::try_from(address).map_err(std::io::Error::other)?,
+        len: bytes.len(),
+    }];
+    let written = nix::sys::uio::process_vm_writev(
+        nix::unistd::Pid::from_raw(pid.cast_signed()),
+        &[std::io::IoSlice::new(bytes)],
+        &remote,
+    )?;
+    if written == bytes.len() {
+        Ok(())
+    } else {
+        Err(std::io::Error::from(std::io::ErrorKind::WriteZero))
+    }
+}
+
+/// Whether the kernel keeps time by the time-stamp counter, which it does
+/// only where the counter is invariant and synchronized across CPUs, so
+/// that every thread's counter is one clock.
+pub fn tsc_is_the_clock() -> bool {
+    std::fs::read_to_string("/sys/devices/system/clocksource/clocksource0/current_clocksource")
+        .is_ok_and(|source| source.trim() == "tsc")
+}
+
+/// The time-stamp counter and `CLOCK_MONOTONIC` at one moment: the
+/// closest of a few readings of the counter between two of the clock.
+pub fn tsc_anchor() -> (u64, u64) {
+    let monotonic = || {
+        nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC).map_or(0, |time| {
+            u64::try_from(time.tv_sec()).unwrap_or(0) * 1_000_000_000
+                + u64::try_from(time.tv_nsec()).unwrap_or(0)
+        })
+    };
+    let mut best = (u64::MAX, 0, 0);
+    for _ in 0..4 {
+        let before = monotonic();
+        let tsc = sys::tsc();
+        let after = monotonic();
+        let width = after.saturating_sub(before);
+        if width < best.0 {
+            best = (width, tsc, before + width / 2);
+        }
+    }
+    (best.1, best.2)
+}
