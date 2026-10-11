@@ -114,6 +114,9 @@ pub struct Processor {
     /// The time every record up to has been processed.
     processed: u64,
     window: Option<Window>,
+    /// Where the segment being recorded starts, and the counts there, once
+    /// the recording has been cut into segments.
+    segment: Option<(u64, BTreeMap<u32, u64>)>,
     /// The process task snapshots read, the last few snapshots, and each
     /// sample no snapshot after it has claimed yet whose code kept its task
     /// in a register: its thread, time, and the register's value.
@@ -166,6 +169,7 @@ impl Processor {
             loading: std::time::Duration::ZERO,
             processed: 0,
             window: None,
+            segment: None,
             tasks_of: None,
             located: std::collections::VecDeque::new(),
             unclaimed: Vec::new(),
@@ -654,7 +658,8 @@ impl Processor {
     pub fn snapshot(&mut self) -> Capture {
         self.symbolize_new();
         let mut builder = self.builder.clone();
-        self.close(&mut builder);
+        self.close(&mut builder, self.latest);
+        self.cut(&mut builder);
         builder.finish()
     }
 
@@ -664,17 +669,38 @@ impl Processor {
         self.ingest(&[], None);
         self.symbolize_new();
         let mut builder = std::mem::take(&mut self.builder);
-        self.close(&mut builder);
+        self.close(&mut builder, self.latest);
+        self.cut(&mut builder);
+        builder.finish()
+    }
+
+    /// The segment since the last, or since the recording began, up to
+    /// where every record has been processed, which begins the next: a
+    /// complete capture of that span alone, every frame symbolized. What
+    /// spans the cut, a thread off its CPU or an open zone, is in each
+    /// segment for the part of it there. The events' counts must be
+    /// current.
+    pub fn segment(&mut self) -> Capture {
+        self.symbolize_new();
+        let end = self.processed;
+        let mut builder = self.builder.clone();
+        self.close(&mut builder, end);
+        let counts = builder.accounts().clone();
+        self.cut(&mut builder);
+        builder.forget_from(end.cast_signed());
+        builder.setting("end", &end.to_string());
+        self.builder.forget_before(end.cast_signed());
+        self.segment = Some((end, counts));
+        self.first = Some(end);
         builder.finish()
     }
 
     /// Ends each interval of a thread still off its CPU, and each zone
-    /// still open, where the recording has reached, charges the CPU time
-    /// recording took, and cuts a window's rows and counts to its start.
-    fn close(&self, builder: &mut CaptureBuilder) {
-        self.stacks.close(builder, self.latest.cast_signed());
+    /// still open, at `end`, and charges the CPU time recording took.
+    fn close(&self, builder: &mut CaptureBuilder, end: u64) {
+        self.stacks.close(builder, end.cast_signed());
         for &(thread, left, preempted) in self.switched_out.values() {
-            let back = self.latest.min(self.next_gap(left));
+            let back = end.min(self.next_gap(left));
             builder.off_cpu(
                 thread,
                 left.cast_signed(),
@@ -693,7 +719,11 @@ impl Processor {
             let charged = builder.account(kind as u32);
             builder.count(kind as u32, nanoseconds(total).saturating_sub(charged));
         }
-        if let Some((start, counts)) = self.window_start() {
+    }
+
+    /// Cuts a window's rows and counts, or a segment's, to its start.
+    fn cut(&self, builder: &mut CaptureBuilder) {
+        if let Some((start, counts)) = self.window_start().or(self.segment.as_ref()) {
             builder.forget_before(start.cast_signed());
             builder.discount(counts);
             builder.setting("start", &start.to_string());

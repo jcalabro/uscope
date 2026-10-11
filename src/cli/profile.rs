@@ -90,6 +90,29 @@ pub struct RecordArgs {
     /// recording goes on; FILE gets the last window.
     #[arg(long, value_name = "SECONDS")]
     window: Option<f64>,
+    /// Record without end into DIR, as a segment file every --segment,
+    /// each a complete profile of its span, deleting segments older than
+    /// --keep. SIGUSR2 ends a segment early. `uscope report DIR` and
+    /// `uscope web DIR` read them as one profile.
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["window", "output"])]
+    continuous: Option<PathBuf>,
+    /// How long each segment of --continuous lasts, in seconds.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value = "60",
+        requires = "continuous"
+    )]
+    segment: f64,
+    /// How long --continuous keeps segments: seconds, or a number of
+    /// minutes, hours, or days, such as 30m, 24h, or 7d.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        default_value = "24h",
+        requires = "continuous"
+    )]
+    keep: String,
     /// The instrumentation sites to switch on in a program built with
     /// uscope's probes SDK: all, off, or names separated by commas, where a
     /// name that ends in `*` is a prefix.
@@ -110,7 +133,7 @@ pub struct RecordArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct ReportArgs {
-    /// The profile to report.
+    /// The profile to report, or a directory of --continuous segments.
     file: PathBuf,
     /// Show the call tree instead of the most expensive functions.
     #[arg(long)]
@@ -327,6 +350,11 @@ fn options(args: &RecordArgs) -> Result<RecordOptions> {
     if let Some(seconds) = args.window {
         options.window = Some(Duration::try_from_secs_f64(seconds).context("--window")?);
     }
+    if args.continuous.is_some() {
+        let every = Duration::try_from_secs_f64(args.segment).context("--segment")?;
+        anyhow::ensure!(!every.is_zero(), "--segment is a number of seconds");
+        options.segment = Some(every);
+    }
     options.probes = match args.probes.as_str() {
         "all" => ProbeSelection::All,
         "off" => ProbeSelection::Off,
@@ -356,8 +384,32 @@ fn record(args: &RecordArgs) -> Result<i32> {
             stop.store(true, Ordering::Relaxed);
         });
     }
+    let continuous = match &args.continuous {
+        Some(directory) => {
+            std::fs::create_dir_all(directory)
+                .with_context(|| format!("creating {}", directory.display()))?;
+            let keep = duration(&args.keep).context("--keep")?;
+            eprintln!(
+                "uscope: writing a segment every {} s to {}, keeping {}",
+                args.segment,
+                directory.display(),
+                args.keep
+            );
+            Some((directory.as_path(), keep))
+        }
+        None => None,
+    };
     let mut saves = 0;
     let mut save = |profile: Profile| {
+        if let Some((directory, keep)) = continuous {
+            if let Err(error) = profile.write_segment(directory, keep) {
+                eprintln!(
+                    "uscope: writing a segment to {} failed: {error}",
+                    directory.display()
+                );
+            }
+            return;
+        }
         saves += 1;
         let path = numbered(&args.output, saves);
         match profile.write(&path) {
@@ -380,7 +432,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
         every: Duration::MAX,
         publish: &mut |_| {},
         stop: &stop,
-        save: options.window.is_some().then_some(Save {
+        save: (options.window.is_some() || continuous.is_some()).then_some(Save {
             trigger: &trigger,
             to: &mut save,
         }),
@@ -394,19 +446,44 @@ fn record(args: &RecordArgs) -> Result<i32> {
         let recording = uscope::profiler::record_watched(command, &options, &mut watch)?;
         (recording.profile, recording.status.code().unwrap_or(1))
     };
-    profile
-        .write(&args.output)
-        .with_context(|| format!("writing {}", args.output.display()))?;
-    eprintln!(
-        "uscope: recorded {} samples to {}",
-        profile.samples(),
-        args.output.display()
-    );
+    if let Some((directory, keep)) = continuous {
+        let path = profile
+            .write_segment(directory, keep)
+            .with_context(|| format!("writing a segment to {}", directory.display()))?;
+        eprintln!("uscope: recorded the last segment to {}", path.display());
+    } else {
+        profile
+            .write(&args.output)
+            .with_context(|| format!("writing {}", args.output.display()))?;
+        eprintln!(
+            "uscope: recorded {} samples to {}",
+            profile.samples(),
+            args.output.display()
+        );
+    }
     let lost = profile.lost_samples();
     if lost > 0 {
         eprintln!("uscope: the kernel dropped {lost} samples");
     }
     Ok(code)
+}
+
+/// A duration in seconds, or with a unit: `90`, `30m`, `24h`, or `7d`.
+fn duration(text: &str) -> Result<Duration> {
+    let (number, unit) = match text.char_indices().last() {
+        Some((at, unit @ ('s' | 'm' | 'h' | 'd'))) => (&text[..at], unit),
+        _ => (text, 's'),
+    };
+    let scale = match unit {
+        'm' => 60.0,
+        'h' => 3600.0,
+        'd' => 86400.0,
+        _ => 1.0,
+    };
+    let number: f64 = number
+        .parse()
+        .with_context(|| format!("{text} is not a duration, such as 90, 30m, 24h, or 7d"))?;
+    Ok(Duration::try_from_secs_f64(number * scale)?)
 }
 
 /// `path` with `-number` before its extension.

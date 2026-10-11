@@ -68,7 +68,22 @@ impl Profiles {
 
     /// Serves the profile in `bytes`, read from `path`, returning its id.
     pub fn add(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<String> {
-        let mut read = Profile::import(bytes)?;
+        let id = format!("{:016x}", twox_hash::XxHash3_64::oneshot(bytes));
+        Ok(self.add_read(path, Profile::import(bytes)?, id))
+    }
+
+    /// Serves the segments of a continuous recording in `directory` as one
+    /// profile, as they are now, returning its id.
+    pub fn add_segments(&self, directory: &Path) -> anyhow::Result<String> {
+        let read = Profile::read_segments(directory)?;
+        let id = format!(
+            "{:016x}",
+            twox_hash::XxHash3_64::oneshot(directory.as_os_str().as_encoded_bytes())
+        );
+        Ok(self.add_read(directory, read, id))
+    }
+
+    fn add_read(&self, path: &Path, mut read: uscope::profiler::ReadProfile, id: String) -> String {
         if read.truncated {
             eprintln!(
                 "warning: {} was cut short; serving the part that was complete",
@@ -82,7 +97,6 @@ impl Profiles {
                 eprintln!("note: {} keeps its addresses: {why}", module.module);
             }
         }
-        let id = format!("{:016x}", twox_hash::XxHash3_64::oneshot(bytes));
         let name = path.file_name().map_or_else(
             || path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
@@ -97,7 +111,7 @@ impl Profiles {
             },
             read.profile,
         );
-        Ok(id)
+        id
     }
 
     /// Serves `profile` as `info` says, replacing what its id served.

@@ -100,6 +100,28 @@ recording, as they grow with the program's code rather than with time.
 A debugging session can profile its program with `profile start
 [seconds]`; see [cli.md](cli.md#profiling).
 
+## Continuous recording
+
+```sh
+uscope record --preset prod --continuous /var/lib/uscope/app --keep 24h --pid <pid>
+uscope report /var/lib/uscope/app
+uscope web /var/lib/uscope/app
+```
+
+`--continuous DIR` records without end, writing a segment file to DIR
+every `--segment SECONDS`, 60 by default, and deleting each segment that
+ended longer ago than `--keep`: seconds, or `30m`, `24h`, or `7d`. Each
+segment is a complete profile of its span alone, named by the
+milliseconds since the Unix epoch at which it ended, and written whole or
+not at all, so a crash loses at most the segment being recorded. SIGUSR2
+ends a segment early. Segments tile the recording: what spans a cut, a
+thread off its CPU or an open zone, is in each segment for the part of it
+there, and a zone cut short says its begin or end was not seen.
+
+A report, the page, `symbolize`, and `export` read a directory as one
+profile of every segment in it, as it is when read. To store a fleet's
+profiles elsewhere, export each segment to pprof.
+
 ## Time off the CPU
 
 With off-CPU recording on, the kernel reports each time a thread leaves its

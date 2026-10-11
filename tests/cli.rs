@@ -5324,6 +5324,62 @@ fn a_signal_saves_a_recordings_window_as_it_goes_on() {
     assert!(last.contains("second") && !last.contains("first"), "{last}");
 }
 
+/// A continuous recording writes a segment file as each segment ends, or
+/// as a signal ends one early, and a report of the directory reads them
+/// all as one profile.
+#[test]
+fn a_continuous_recording_writes_segments_that_report_reads_as_one() {
+    let scratch = support::ScratchDir::new("cli-continuous");
+    let directory = scratch.path().join("segments");
+    let mut recording = uscope_command()
+        .args([
+            "record",
+            "--segment",
+            "3600",
+            "--keep",
+            "1h",
+            "--continuous",
+        ])
+        .arg(&directory)
+        .arg("--")
+        .arg(fixture("build/test-programs/profile-phases"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run uscope record");
+    let mut lines = BufReader::new(recording.stderr.take().expect("stderr")).lines();
+    let line = lines.next().expect("a line").expect("read a line");
+    assert!(line.contains("writing a segment every 3600 s"), "{line}");
+    let segments = || {
+        std::fs::read_dir(&directory)
+            .expect("the directory")
+            .filter(|entry| {
+                entry.as_ref().is_ok_and(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "usprof")
+                })
+            })
+            .count()
+    };
+    kill(Pid::from_raw(recording.id().cast_signed()), Signal::SIGUSR2).expect("signal");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while segments() == 0 {
+        assert!(Instant::now() < deadline, "the signal wrote no segment");
+        std::thread::yield_now();
+    }
+    // The second phase runs 300 ms, and the last segment holds it.
+    let mut stdin = recording.stdin.take().expect("stdin");
+    stdin.write_all(b"x").expect("release the program");
+    drop(stdin);
+    assert!(recording.wait().expect("wait").success());
+    assert_eq!(segments(), 2);
+    let report = assert_success(uscope(&["report", &directory.to_string_lossy()]));
+    assert!(report.contains("second"), "{report}");
+}
+
 /// A program whose recorder dies goes on writing its instrumentation only
 /// until it stops hearing from it, then switches every site off.
 #[test]

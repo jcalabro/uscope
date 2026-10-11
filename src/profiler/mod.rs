@@ -10,6 +10,7 @@ mod formats;
 mod frame_pointers;
 mod probes;
 mod record;
+mod segments;
 mod session;
 mod symbols;
 mod tasks;
@@ -167,6 +168,11 @@ pub struct RecordOptions {
     /// Keeps only what happened in the last span this long, which a
     /// trigger saves: a recording's memory then holds no more.
     pub window: Option<std::time::Duration>,
+    /// Cuts the recording into segments this long, without a window: each
+    /// is a complete profile of its span alone, which the watch's save
+    /// takes as it ends, or early when triggered. The recording's own
+    /// profile is the last.
+    pub segment: Option<std::time::Duration>,
     /// How often to stop the program, through the debugger's attach, to
     /// read where its tasks wait: none never does.
     pub task_snapshots: Option<std::time::Duration>,
@@ -202,6 +208,7 @@ impl RecordOptions {
             off_cpu: preset.off_cpu(),
             budget: preset.budget(),
             window: None,
+            segment: None,
             task_snapshots: None,
             live_snapshots: false,
             probes: ProbeSelection::All,
@@ -382,8 +389,12 @@ pub struct ReadProfile {
 }
 
 impl Profile {
-    /// Reads a profile file, in any format [`Profile::import`] reads.
+    /// Reads a profile file, in any format [`Profile::import`] reads, or a
+    /// directory of a continuous recording's segments.
     pub fn read(path: &Path) -> Result<ReadProfile, ProfileFileError> {
+        if path.is_dir() {
+            return Self::read_segments(path);
+        }
         Self::import(&std::fs::read(path)?)
     }
 

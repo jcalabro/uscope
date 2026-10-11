@@ -506,7 +506,8 @@ pub struct Zone {
     pub reserved: U32,
 }
 
-/// Its begin was lost: it starts where its thread's records were lost.
+/// Its begin was lost, or came before the capture: it starts where its
+/// thread's records were lost, or where the capture does.
 pub const ZONE_BEGAN_UNSEEN: u32 = 1;
 /// Its end was not seen: it ends where its thread's records were lost or
 /// ended, or where a zone around it ended.

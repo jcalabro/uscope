@@ -64,7 +64,8 @@ pub struct Watch<'a> {
 }
 
 /// A trigger, and what takes the profile when it fires: with a rolling
-/// window, the window as it is.
+/// window, the window as it is, and with segments, the segment so far,
+/// which ends there. Segments are saved as each ends too.
 pub struct Save<'a> {
     /// Fires once set, and is cleared as the profile is taken.
     pub trigger: &'a AtomicBool,
@@ -244,6 +245,16 @@ fn settings(
             ),
         ),
         (
+            "segments",
+            options
+                .segment
+                .filter(|_| options.window.is_none())
+                .map_or_else(
+                    || "off".into(),
+                    |every| format!("every {:.3} s", every.as_secs_f64()),
+                ),
+        ),
+        (
             "task snapshots",
             options.task_snapshots.map_or_else(
                 || "off".into(),
@@ -301,6 +312,8 @@ fn drive(
         (window / 8).max(Duration::from_millis(10))
     });
     let mut marked = std::time::Instant::now();
+    let segment = options.segment.filter(|_| options.window.is_none());
+    let mut segmented = std::time::Instant::now();
     if started {
         (watch.publish)(Profile {
             capture: processor.snapshot(),
@@ -357,14 +370,19 @@ fn drive(
         }
         // A program's trigger saves the window as uscope's does.
         let triggered = processor.take_triggered();
-        if let Some(save) = &mut watch.save
-            && (save.trigger.swap(false, Ordering::Relaxed) || triggered)
-        {
-            processor.counts(events.counts());
-            record!("record: triggered");
-            (save.to)(Profile {
-                capture: processor.snapshot(),
-            });
+        if let Some(save) = &mut watch.save {
+            let due = segment.is_some_and(|every| segmented.elapsed() >= every);
+            if save.trigger.swap(false, Ordering::Relaxed) || triggered || due {
+                processor.counts(events.counts());
+                record!("record: saved, segment due {due}");
+                let capture = if segment.is_some() {
+                    segmented = std::time::Instant::now();
+                    processor.segment()
+                } else {
+                    processor.snapshot()
+                };
+                (save.to)(Profile { capture });
+            }
         }
         if started && published.elapsed() >= wait {
             processor.counts(events.counts());

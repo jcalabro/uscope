@@ -350,6 +350,12 @@ fn what_to_serve(
 
 /// Serves `path` when it is a profile, returning its id; a program is not.
 fn open_profile(profiles: &profiles::Profiles, path: &std::path::Path) -> Result<Option<String>> {
+    if path.is_dir() {
+        let id = profiles
+            .add_segments(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        return Ok(Some(id));
+    }
     // Only a regular file is read here: a program may be one that blocks
     // its reader, such as a FIFO, which the page is served while loading.
     if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {

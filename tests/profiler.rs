@@ -687,6 +687,135 @@ fn a_rolling_window_saves_on_a_trigger_and_keeps_only_its_last_span() {
     );
 }
 
+/// A recording cut into segments tiles its time with them: each holds
+/// only its own span's samples, time off a CPU, and counts, an interval
+/// that spans a cut counting in each segment for its part there, and the
+/// directory they are written to reads as all of them at once.
+#[test]
+fn segments_tile_a_recording_and_read_back_as_one() {
+    let (reader, mut writer) = std::io::pipe().expect("pipe");
+    let mut command = Command::new(Scenario::fixture("profile-phases"));
+    command
+        .stdin(reader)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let options = RecordOptions {
+        segment: Some(Duration::from_millis(40)),
+        ..RecordOptions::default()
+    };
+    let (trigger, stop) = (AtomicBool::new(false), AtomicBool::new(false));
+    let mut segments = Vec::new();
+    let recording = record_watched(
+        command,
+        &options,
+        &mut Watch {
+            every: Duration::MAX,
+            publish: &mut |_| {},
+            stop: &stop,
+            save: Some(Save {
+                trigger: &trigger,
+                to: &mut |profile| {
+                    // The helper thread blocks across the first cuts.
+                    if segments.len() == 3 {
+                        writer.write_all(b"x").expect("release the program");
+                    }
+                    segments.push(profile);
+                },
+            }),
+        },
+    )
+    .expect("record");
+    assert!(recording.status.success(), "{}", recording.status);
+    segments.push(recording.profile);
+    assert!(segments.len() > 4, "{}", segments.len());
+    let scratch = support::ScratchDir::new("profiler-segments");
+    for (number, segment) in segments.iter().enumerate() {
+        let (start, end) = segment.span();
+        assert!(start <= end, "segment {number}: {start} {end}");
+        if let Some(next) = segments.get(number + 1) {
+            assert_eq!(
+                end,
+                next.span().0,
+                "segment {number} ends where the next starts"
+            );
+        }
+        // Each holds what happened from its start up to the next's.
+        let last = number + 1 == segments.len();
+        let within = |time: i64| start <= time && (time < end || last && time == end);
+        assert!(segment.stacks().iter().all(|stack| within(stack.time)));
+        assert!(segment.off_cpu().iter().all(|interval| {
+            within(interval.time)
+                && interval.time + i64::try_from(interval.duration).expect("short") <= end
+        }));
+        // uscope records on one thread, which runs no longer than a span,
+        // give or take where the cut fell between drains; the first also
+        // holds what came before the program's first record.
+        let span = u64::try_from(end - start).expect("ordered");
+        let (recorder, _) = segment.recorder_cpu();
+        assert!(
+            number == 0 || recorder <= span + 20_000_000,
+            "segment {number} took {recorder} ns of uscope's CPU time in {span}"
+        );
+        segment
+            .write_segment(scratch.path(), Duration::from_secs(3600))
+            .expect("write the segment");
+    }
+    // The helper thread waited through the first cuts.
+    assert!(
+        segments[..3]
+            .iter()
+            .all(|segment| !segment.off_cpu().is_empty())
+    );
+    let all = Profile::read(scratch.path())
+        .expect("read the directory")
+        .profile;
+    let sum = |measure: fn(&Profile) -> u64| segments.iter().map(measure).sum::<u64>();
+    assert_eq!(
+        all.samples() as u64,
+        sum(|profile| profile.samples() as u64)
+    );
+    assert_eq!(all.counted(), sum(Profile::counted));
+    let off_cpu = |profile: &Profile| {
+        profile
+            .off_cpu()
+            .iter()
+            .map(|interval| interval.duration)
+            .sum::<u64>()
+    };
+    assert_eq!(off_cpu(&all), sum(off_cpu));
+    assert_eq!(
+        all.span(),
+        (segments[0].span().0, segments[segments.len() - 1].span().1)
+    );
+    let functions = on_stacks(&all);
+    assert!(
+        functions.contains("first") && functions.contains("second"),
+        "{functions:?}"
+    );
+}
+
+/// Writing a segment deletes each segment that ended longer ago than is
+/// kept, and nothing else in the directory.
+#[test]
+fn a_segment_deletes_only_segments_older_than_kept() {
+    let scratch = support::ScratchDir::new("profiler-keep");
+    let old = scratch.path().join("0000000000000001.usprof");
+    let other = scratch.path().join("notes.txt");
+    std::fs::write(&old, b"").expect("an old segment");
+    std::fs::write(&other, b"").expect("another file");
+    let profile = Profile::import(b"main;work 3\n")
+        .expect("a profile")
+        .profile;
+    let written = profile
+        .write_segment(scratch.path(), Duration::from_secs(3600))
+        .expect("write the segment");
+    assert!(!old.exists() && other.exists() && written.exists());
+    let read = Profile::read(scratch.path())
+        .expect("read the directory")
+        .profile;
+    assert_eq!(read.samples(), profile.samples());
+}
+
 #[test]
 fn a_profile_says_how_much_cpu_time_its_samples_cover() {
     // At 49 samples a second, a thread's time on each CPU is sampled

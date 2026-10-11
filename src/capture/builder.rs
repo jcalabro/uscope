@@ -8,7 +8,7 @@ use super::Capture;
 use super::records::{
     Account, Frame, FrameKind, Function, Gap, GapReason, Line, Mapping, Marker, MarkerKind, Module,
     NONE, OffCpu, Plot, Process, Range, Sample, Setting, Site, Stack, Task, TaskWait, Thread,
-    ThreadRange, Truncation, Zone, ZoneRange,
+    ThreadRange, Truncation, ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, Zone, ZoneRange,
 };
 use crate::image::{StrId, StringsBuilder};
 
@@ -501,12 +501,54 @@ impl CaptureBuilder {
             }
             gap.end.get() > time
         });
+        // A zone open at the cut keeps the part after it, as an interval
+        // off a CPU does, beginning unseen.
         for zones in self.zones.values_mut() {
-            zones.retain(|zone| zone.end.get() >= time);
+            zones.retain_mut(|zone| {
+                let (start, end) = (zone.start.get(), zone.end.get());
+                if start < time && end > time {
+                    zone.start = time.into();
+                    zone.flags = (zone.flags.get() | ZONE_BEGAN_UNSEEN).into();
+                }
+                end > time || start >= time
+            });
         }
         self.plots.retain(|plot| plot.time.get() >= time);
         self.markers.retain(|marker| marker.time.get() >= time);
         self.task_waits.retain(|wait| wait.time.get() >= time);
+    }
+
+    /// Forgets every row of what happened at `time` or after, as a segment
+    /// that ends there does, and cuts the spans that cross it there.
+    pub fn forget_from(&mut self, time: i64) {
+        for samples in &mut self.samples {
+            samples.retain(|sample| sample.time.get() < time);
+        }
+        for intervals in &mut self.off_cpu {
+            intervals.retain_mut(|interval| {
+                let start = interval.time.get();
+                let length = time.saturating_sub(start).max(0).unsigned_abs();
+                interval.duration = interval.duration.get().min(length).into();
+                start < time
+            });
+        }
+        self.gaps.retain_mut(|gap| {
+            gap.end = gap.end.get().min(time).into();
+            gap.start.get() < time
+        });
+        // A zone open at the cut keeps the part before it, ending unseen.
+        for zones in self.zones.values_mut() {
+            zones.retain_mut(|zone| {
+                if zone.end.get() > time {
+                    zone.end = time.into();
+                    zone.flags = (zone.flags.get() | ZONE_ENDED_UNSEEN).into();
+                }
+                zone.start.get() < time
+            });
+        }
+        self.plots.retain(|plot| plot.time.get() < time);
+        self.markers.retain(|marker| marker.time.get() < time);
+        self.task_waits.retain(|wait| wait.time.get() < time);
     }
 
     /// Every count, by kind.

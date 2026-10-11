@@ -231,6 +231,37 @@ async fn tree(tab: &mut Client, query: Value) -> Vec<(Vec<String>, u64, u64)> {
     nodes(&answer, &bytes)
 }
 
+/// A directory of a continuous recording's segments is served as one
+/// profile holding every segment's samples.
+#[tokio::test]
+async fn a_directory_of_segments_is_served_as_one_profile() {
+    let scratch = ScratchDir::new("web-segments");
+    let calls = uscope::profiler::Profile::read(&record_calls(&scratch))
+        .expect("read the profile")
+        .profile;
+    let directory = scratch.path().join("segments");
+    std::fs::create_dir(&directory).expect("a directory");
+    for _ in 0..2 {
+        calls
+            .write_segment(&directory, Duration::from_secs(3600))
+            .expect("write a segment");
+    }
+    let web = Web::start("profile", &[directory.to_str().expect("a path")]);
+    let mut tab = web.control("tab").await;
+    let listed = tab
+        .expect("the profiles", |message| message["type"] == "profiles")
+        .await;
+    assert_eq!(listed["profiles"][0]["name"], "segments");
+    let id = listed["profiles"][0]["id"].as_str().expect("an id");
+    let summary = tab.ok("profile", json!({"profile": id})).await;
+    assert_eq!(summary["samples"], 12, "{summary}");
+    assert_eq!(
+        summary["threads"].as_array().map(Vec::len),
+        Some(2),
+        "{summary}"
+    );
+}
+
 #[tokio::test]
 async fn a_profile_is_served_as_trees_functions_and_a_timeline() {
     let scratch = ScratchDir::new("web-profile");
