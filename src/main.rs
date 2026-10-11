@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 
 // Each thread counts its allocations for `--timings`.
 #[global_allocator]
-static ALLOCATOR: uscope::profile::alloc::Counting<uscope::profile::alloc::Selected> =
-    uscope::profile::alloc::selected();
+static ALLOCATOR: uscope::timings::alloc::Counting<uscope::timings::alloc::Selected> =
+    uscope::timings::alloc::selected();
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use uscope::Debugger;
 
@@ -273,7 +273,7 @@ fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsSt
 }
 
 fn main() -> ExitCode {
-    uscope::profile::alloc::return_freed_memory_promptly();
+    uscope::timings::alloc::return_freed_memory_promptly();
     // The terminal launcher must stay single-threaded, so it runs before the
     // runtime starts its threads.
     if std::env::args_os()
@@ -389,7 +389,7 @@ async fn async_main() -> ExitCode {
     }
     let recording = match &args.timings {
         Some(_) => {
-            match uscope::profile::Recording::start(uscope::profile::Options { instructions: true })
+            match uscope::timings::Recording::start(uscope::timings::Options { instructions: true })
             {
                 Ok(recording) => Some(recording),
                 Err(error) => {

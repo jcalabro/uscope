@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use serde::{Deserialize, Serialize};
 
-use crate::profile::{Options, Recording, Report};
+use crate::timings::{Options, Recording, Report};
 
 /// One load of one program, measured in a process of its own.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,18 +32,18 @@ pub struct Measured {
 /// Loads `path` as the debugger loads a module, recording what it costs.
 pub fn measure_load(path: &Path, instructions: bool) -> anyhow::Result<Measured> {
     let recording = Recording::start(Options { instructions })?;
-    let before = crate::profile::alloc::totals();
+    let before = crate::timings::alloc::totals();
     let loaded = crate::debug_info::load_module(
         path,
         crate::ModuleImageId::new(0),
         &crate::debug_info::DebugFileSearch::default(),
     );
-    let retained = crate::profile::alloc::totals().since(&before).live_bytes;
+    let retained = crate::timings::alloc::totals().since(&before).live_bytes;
     let report = recording.finish();
     let counted = report.summary.allocations.is_some();
     let mut retained_parts = Vec::new();
     let outcome = loaded.map(|loaded| {
-        let live = || crate::profile::alloc::totals().live_bytes;
+        let live = || crate::timings::alloc::totals().live_bytes;
         let mut freed = |name: &str, part: Box<dyn FnOnce() + '_>| {
             let held = live();
             part();

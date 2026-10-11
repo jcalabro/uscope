@@ -139,7 +139,7 @@ mod allocator {
 
     use std::alloc::{GlobalAlloc, Layout, System};
 
-    use crate::profile::alloc::{Counting, PEAK_GRANULARITY, start_totals, stop_totals, totals};
+    use crate::timings::alloc::{Counting, PEAK_GRANULARITY, start_totals, stop_totals, totals};
 
     /// Allocates from the system, but refuses to grow any block.
     struct NoGrowth;

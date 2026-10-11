@@ -475,7 +475,7 @@ impl Cli {
 
     async fn run_inputs(&self, args: &Session) -> Result<()> {
         // The program is loaded and the session can take its first command.
-        uscope::profile::mark("ready");
+        uscope::timings::mark("ready");
         self.announce(args)?;
         for warning in self.debug_information_warnings().await {
             self.warn(&warning);

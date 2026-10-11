@@ -211,7 +211,7 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
         ("validate.declarations", super::declarations::validate),
     ];
     let family = |&(name, validate): &(&'static str, Validation)| {
-        let _phase = crate::profile::span(name, None, None);
+        let _phase = crate::timings::span(name, None, None);
         validate(image).map_err(malformed)
     };
     // Each family reads only the image, so a large image's are checked in

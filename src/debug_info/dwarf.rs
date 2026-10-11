@@ -4231,7 +4231,7 @@ mod tests {
             assert!(!serial.is_empty(), "{fixture}");
             for jobs in [2, 8] {
                 let recording =
-                    crate::profile::Recording::start(crate::profile::Options::default())
+                    crate::timings::Recording::start(crate::timings::Options::default())
                         .expect("no other recording");
                 let apart = load(jobs);
                 let report = recording.finish();

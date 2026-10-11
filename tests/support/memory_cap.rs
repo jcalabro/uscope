@@ -16,13 +16,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mimalloc::MiMalloc;
 
-use uscope::profile::alloc::Counting;
+use uscope::timings::alloc::Counting;
 
 #[allow(
     unused_imports,
     reason = "only some test processes measure their allocations"
 )]
-pub use uscope::profile::alloc::{Allocated, start_totals, stop_totals, totals};
+pub use uscope::timings::alloc::{Allocated, start_totals, stop_totals, totals};
 
 /// The most live heap one test process may hold, several times the heaviest
 /// test's.
@@ -34,7 +34,7 @@ const CAP_BYTES: usize = 1 << 30;
     reason = "only some test processes measure their allocations"
 )]
 pub fn allocated() -> Allocated {
-    uscope::profile::alloc::thread_allocated()
+    uscope::timings::alloc::thread_allocated()
 }
 
 struct CappedAllocator {

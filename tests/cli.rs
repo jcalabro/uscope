@@ -5070,7 +5070,7 @@ fn timings_report_each_stop_and_request() {
         "backtrace",
         BASIC,
     ]));
-    let report: uscope::profile::Report =
+    let report: uscope::timings::Report =
         serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
     let phases = report
         .phases

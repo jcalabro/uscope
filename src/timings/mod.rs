@@ -511,16 +511,16 @@ fn add_to(counters: &mut Vec<(&'static str, u64)>, name: &'static str, amount: u
 #[doc(hidden)]
 macro_rules! span {
     (parent = $parent:expr, $name:literal) => {
-        $crate::profile::span($name, $parent, None)
+        $crate::timings::span($name, $parent, None)
     };
     (parent = $parent:expr, $name:literal, $($label:tt)+) => {
-        $crate::profile::span($name, $parent, Some(&|| ::std::format!($($label)+)))
+        $crate::timings::span($name, $parent, Some(&|| ::std::format!($($label)+)))
     };
     ($name:literal) => {
-        $crate::profile::span($name, None, None)
+        $crate::timings::span($name, None, None)
     };
     ($name:literal, $($label:tt)+) => {
-        $crate::profile::span($name, None, Some(&|| ::std::format!($($label)+)))
+        $crate::timings::span($name, None, Some(&|| ::std::format!($($label)+)))
     };
 }
 
@@ -529,7 +529,7 @@ macro_rules! span {
 #[doc(hidden)]
 macro_rules! count {
     ($name:literal, $amount:expr) => {
-        $crate::profile::count(
+        $crate::timings::count(
             $name,
             ::core::convert::TryInto::try_into($amount).unwrap_or(u64::MAX),
         )

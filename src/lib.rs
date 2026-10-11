@@ -30,7 +30,6 @@ pub mod cache;
 mod inspection;
 pub(crate) mod model;
 pub mod pool;
-pub mod profile;
 mod protocol;
 mod runtime_model;
 #[cfg(any(test, feature = "sim"))]
@@ -39,6 +38,7 @@ pub mod sim;
 mod source_map;
 #[cfg(test)]
 mod test_memory;
+pub mod timings;
 #[cfg(feature = "tools")]
 #[doc(hidden)]
 pub mod tools;

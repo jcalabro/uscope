@@ -11,14 +11,14 @@ use std::process::{Command, ExitCode};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use uscope::profile::Report;
+use uscope::timings::Report;
 use uscope::tools::Measured;
 use uscope::tools::dump::{Options as DumpOptions, Section};
 
 // Allocates as uscope does, so that loads cost what they cost there.
 #[global_allocator]
-static ALLOCATOR: uscope::profile::alloc::Counting<uscope::profile::alloc::Selected> =
-    uscope::profile::alloc::selected();
+static ALLOCATOR: uscope::timings::alloc::Counting<uscope::timings::alloc::Selected> =
+    uscope::timings::alloc::selected();
 
 #[derive(Parser)]
 #[command(about = "uscope's developer tools")]
@@ -131,7 +131,7 @@ enum Corpus {
 }
 
 fn main() -> ExitCode {
-    uscope::profile::alloc::return_freed_memory_promptly();
+    uscope::timings::alloc::return_freed_memory_promptly();
     match run(Args::parse()) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
