@@ -581,8 +581,8 @@ details[open] summary { margin-bottom: 10px; }
           <li><b>The collector's own cost is small</b> with a lean reader: 0.03–0.15 µs per sample, and 0.11–0.42 µs with an 8 KiB stack copy, before unwinding. Most of <span class="mono">perf record</span>'s CPU goes into its end-of-run build-id pass, which uscope does not need, because MMAP2 carries build ids.</li>
           <li><b>Presets:</b>
             <ul>
-              <li><span class="mono">prod</span> (49 Hz, 512 B copy) predicts under 0.1% on the target.</li>
-              <li><span class="mono">dev</span> (999 Hz, 16 KiB copy) predicts about 0.3–0.4%.</li>
+              <li><span class="mono">prod</span> (49 Hz, 512 B copy) predicts under 0.1% on the target; measured end to end, under 0.2% (<a href="#measurements">below</a>).</li>
+              <li><span class="mono">dev</span> (999 Hz, 16 KiB copy) predicts about 0.3–0.4%; measured, at most 0.6%.</li>
               <li><span class="mono">max</span> (9999 Hz) predicts 1–2%.</li>
             </ul>
             The kernel refuses rates above 38 000 Hz here.</li>
@@ -622,7 +622,8 @@ details[open] summary { margin-bottom: 10px; }
           <li><b>Frameless leaves are 30–40% of system library functions.</b> Samples landing in them lose their caller to a plain walk, which is why leaf repair from a small stack copy is the default even in <span class="mono">prod</span>.</li>
           <li><b>No library on this host has <span class="mono">.sframe</span></b>. <span class="mono">gcc -Wa,--gsframe</span> emits v3, but only for the program's own objects.</li>
           <li><b>nix-built executables carry no build id</b>, and neither does the vDSO. Module identity falls back to the image cache's content key, plus path and inode.</li>
-          <li><b>Go has no <span class="mono">.eh_frame</span></b>, and its <span class="mono">.debug_frame</span> CFI is rsp-based, so Go images are classified and confirmed from pclntab, as uscope's Go unwinder already reads them, never from CFI.</li>
+          <li><b>Go has no <span class="mono">.eh_frame</span></b>, and its <span class="mono">.debug_frame</span> CFI is rsp-based, so Go images are classified and confirmed from pclntab, as uscope's Go unwinder already reads them, never from CFI. 86% of Go 1.27's symbols begin <span class="mono">push rbp; mov rbp, rsp</span>; the rest are NOSPLIT and assembly leaves.</li>
+          <li><b>Rust's prebuilt std keeps frame pointers, but generic std, core, and alloc code instantiated in the user's crate follows the user's flags</b>: in the repo's tokio fixtures, built without <span class="mono">force-frame-pointers</span>, 20% (o0) to 57% (o3) of std's code there and 9–27% of core's keeps them.</li>
         </ul>
       </div>
       <h3>Instrumentation and clocks</h3>
@@ -636,10 +637,34 @@ details[open] summary { margin-bottom: 10px; }
       </div>
       <div class="prose">
         <ul>
-          <li><b>Clock reads:</b> <span class="mono">rdtsc</span> 7.0 ns, <span class="mono">lfence; rdtsc</span> 11.3, <span class="mono">rdtscp</span> 12.9, vDSO <span class="mono">CLOCK_MONOTONIC</span> 15.9, <span class="mono">Instant::now</span> 16.6. Raw TSC halves the zone cost.</li>
+          <li><b>Clock reads:</b> <span class="mono">rdtsc</span> 7.0 ns, <span class="mono">lfence; rdtsc</span> 11.3, <span class="mono">rdtscp</span> 12.9, vDSO <span class="mono">CLOCK_MONOTONIC</span> 15.9, <span class="mono">Instant::now</span> 16.6, and <span class="mono">CLOCK_MONOTONIC_COARSE</span> 2.2, which ticks too slowly for zones. Raw TSC halves the zone cost.</li>
           <li><b>The kind of TLS does not matter</b>: lazy, const, or <span class="mono">#[thread_local]</span> all measure the same. There is no cross-thread penalty at 16 threads.</li>
           <li><b>A reader polling the ring costs the writer 70%</b> through cache-line sharing. Draining in batches every 10–50 ms with <span class="mono">process_vm_readv</span>, as D3 chooses, keeps the reader off the writer's lines.</li>
           <li><b>The perf mmap page</b> reports <span class="mono">cap_user_time_zero = 1</span> (<span class="mono">time_shift 31</span>, <span class="mono">time_mult 500353371</span>), so the exact TSC-to-perf-clock conversion is available unprivileged.</li>
+        </ul>
+      </div>
+      <h3>What uscope costs, end to end</h3>
+      <div class="prose">
+        <p>The tables above measured perf and small probes before uscope existed, and predicted what its presets would cost. <span class="mono">just profile-overhead</span> measures uscope itself, the whole pipeline included, on the P8 reference workloads. Each workload counts its own work in a 3 s window that begins 1 s after recording is on, so setting up and finishing a recording cost it nothing. Each runs bare, under <span class="mono">prod</span>, and under <span class="mono">dev</span>, five times, interleaved. The program runs on four physical cores of its own; uscope and the server's clients run on the other cores that share its last-level cache. The runs are in <span class="mono">bench/overhead.json</span>.</p>
+      </div>
+      <div class="scroller">
+        <table class="data">
+          <thead><tr><th>Workload</th><th class="n">prod cost</th><th class="n">dev cost</th><th class="n">Bare noise</th><th class="n">p99 of 32 requests (bare → prod / dev)</th><th class="n">uscope CPU (prod / dev)</th><th class="n">uscope memory (prod / dev)</th></tr></thead>
+          <tbody>
+            <tr><td>C, 4 threads</td><td class="n good">+0.04%</td><td class="n">+0.24%</td><td class="n">0.26%</td><td class="n">—</td><td class="n">0.39% / 8.7%</td><td class="n">0 / 16 MiB</td></tr>
+            <tr><td>Go, 4 goroutines, allocating</td><td class="n good">+0.19%</td><td class="n">+0.19%</td><td class="n">0.22%</td><td class="n">—</td><td class="n">0.44% / 7.3%</td><td class="n">27 / 36 MiB</td></tr>
+            <tr><td>tokio server, 1.6M requests/s</td><td class="n good">+0.12%</td><td class="n">+0.60%</td><td class="n">11%*</td><td class="n">119 → 116 / 119 µs</td><td class="n">0.35% / 0.97%</td><td class="n">67 / 64 MiB</td></tr>
+            <tr><td>Rust, ~10 µs zones listened to</td><td class="n good">−0.18%</td><td class="n">−0.03%</td><td class="n">0.30%</td><td class="n">—</td><td class="n">1.3% / 2.9%</td><td class="n">25 / 20 MiB</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="prose">
+        <ul>
+          <li><b>The prediction held.</b> <span class="mono">prod</span> costs every workload under 0.2%, within or near each one's noise, and uscope under 0.5% of one CPU, 1.3% with probes. <span class="mono">dev</span> costs at most 0.6%, at 7–9% of a CPU. Cost is the median rate's fall from bare; noise is the range of bare's runs over their median. <span class="mono">--check 1</span> fails unless <span class="mono">prod</span> stays under 1%.</li>
+          <li>* <b>One round ran slower for every setup alike</b>, about 10% for the server, which is what interleaving is for: the medians are unmoved.</li>
+          <li><b>Three things moved rates by more than recording did</b>, so the bench removes each. Unpinned, four Go threads land on shared or separate cores, and the rate splits 4% between the two. Clients across the last-level cache from their server are slower still. A server answering one request at a time idles between requests, and sampling interrupts keep its cores from sleeping, so recording made it up to 4% <i>faster</i>. Clients therefore keep 32 requests outstanding, and the server sets <span class="mono">TCP_NODELAY</span>.</li>
+          <li><b>Memory</b> is how much more uscope's process held at its peak than when the recording began. Most of it is the program's debug information; with <span class="mono">--symbols later</span> a production host reads none.</li>
+          <li><b>Cost is work done, not CPU time used.</b> As the first experiments found, the time the sampling interrupt takes does not show as the target's system time.</li>
         </ul>
       </div>
       <h3>What an unprivileged user can open (paranoid 2)</h3>
@@ -1293,12 +1318,12 @@ if latency &gt; budget { trigger!("slow request"); }
           <tr><td>P7.3</td><td>Ring reader interleavings against a golden ABI writer.</td><td><span class="st cut">cut</span></td><td>The probes reader's proptest already reads a ring at every record-copy interleaving against a reference writer of the ABI, checking for whole events and exact loss accounting. A simulated golden writer would need <span class="mono">process_vm_readv</span> modeled and adds nothing while the Rust SDK is the only writer, which the fixture tests run for real.</td></tr>
         </tbody></table></div></div>
 
-      <div class="phase"><header><span class="pid">P8</span><h3>Production deployment</h3><span class="st todo">todo</span></header>
+      <div class="phase"><header><span class="pid">P8</span><h3>Production deployment</h3><span class="st done">done</span></header>
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
           <tr><td>P8.1</td><td><span class="mono">--system</span> whole-host profiling (CAP_PERFMON), container paths, <span class="mono">--symbols=later</span>, symbolizing at view time through debuginfod.</td><td><span class="st done">done</span></td><td><span class="mono">--symbols later</span> keeps modules' identities and frames' addresses. <span class="mono">Profile::symbolize</span> rebuilds the capture through <span class="mono">absorb</span> and names each module's frames from its file while its digest matches, or else from the file its build id names in the debug directories or from debuginfod. <span class="mono">report</span> and <span class="mono">web</span> do this with local files on open; <span class="mono">uscope symbolize</span> writes the result, with <span class="mono">--debug-dir</span> and <span class="mono">--debuginfod</span>. Container paths were in place; a test now binds another file over libc's path in a user and mount namespace, so only <span class="mono">/proc/PID/root</span> reaches it. <span class="mono">--system</span> was cut: it needs CAP_PERFMON, which no test can hold, and the eBPF unwinder in future work suits whole-host profiling better.</td></tr>
           <tr><td>P8.2</td><td>Continuous mode with retention; queries across segment files.</td><td><span class="st done">done</span></td><td><span class="mono">--continuous DIR --segment S --keep 24h</span>. The processor cuts a segment where every record has been processed: it closes open intervals and zones there, discounts the counts at the previous cut, and forgets what came before. A zone clipped at a cut is flagged as begun unseen. Segments are written to a temporary name and renamed, named by their end in Unix milliseconds, and retention deletes only files with segment names. <span class="mono">Profile::read</span> of a directory absorbs every segment, so report, export, symbolize, and the web server read one. SIGUSR2 cuts a segment early.</td></tr>
           <tr><td>P8.3</td><td>Stopless validated task snapshots (A5).</td><td><span class="st done">done</span></td><td><span class="mono">--live-snapshots</span> reads tasks through the runtime models over <span class="mono">process_vm_readv</span>, keeping a task only when its context and every stack page or future read the same twice; changed tasks are counted. Thread pointers, which tokio needs, are learned by a stopped snapshot and cached by (tid, start time); a thread not learned makes the snapshot give way to a stopped one.</td></tr>
-          <tr><td>P8.4</td><td><span class="mono">profile-overhead</span> benches and baselines; deployment docs (systemd unit, capabilities, Kubernetes).</td><td><span class="st todo">todo</span></td><td></td></tr>
+          <tr><td>P8.4</td><td><span class="mono">profile-overhead</span> benches and baselines; deployment docs (systemd unit, capabilities, Kubernetes).</td><td><span class="st done">done</span></td><td><span class="mono">uscope-tools overhead</span>, behind <span class="mono">just profile-overhead</span>, runs four reference workloads bare and under each preset, interleaved: CPU-bound C, allocating Go, a tokio line server under a load generator, and Rust with probes zones. Each counts its own work in a window once recording is on, pinned to cores of its own. It reports cost against bare's noise, the server's p99, and uscope's CPU and memory, compares with <span class="mono">bench/overhead.json</span>, and <span class="mono">--check 1</span> fails if <span class="mono">prod</span> costs any workload 1%. Measured: <span class="mono">prod</span> under 0.2% everywhere (<a href="#measurements">Measurements</a>). It stays out of the gate because it takes minutes. <span class="mono">docs/profiling.md</span> gains "Running in production": permissions, a systemd unit, and a Kubernetes sidecar.</td></tr>
         </tbody></table></div>
         <p class="exit">Exit: the <span class="mono">prod</span> preset measured under 1% throughput cost on every reference workload.</p></div>
     </section>
@@ -1349,7 +1374,7 @@ if latency &gt; budget { trigger!("slow request"); }
         <article class="card"><header><span class="id">Q1</span><h3>What the Rust SDK covers</h3></header>
           <p>The request says "a Rust SDK for doing sampling profiling". Sampling needs no SDK, so this plan reads it as the program-side SDK: zones, labels, frames, plots, triggers, and optionally task-poll hooks, all of which also enrich samples. If you meant an in-process sampler library, like pprof-rs, the plan would need a different SDK. D1 argues against one.</p></article>
         <article class="card"><header><span class="id">Q2</span><h3>Default rates</h3></header>
-          <p>49 Hz for <span class="mono">prod</span> and 999 Hz for <span class="mono">dev</span> are proposals. On this machine they cost under 0.1% and about 0.4%. Is 49 Hz enough fidelity for production, or should it be 99 Hz (≈0.15%)? The reference workloads in P8 settle it for real.</p></article>
+          <p>49 Hz for <span class="mono">prod</span> and 999 Hz for <span class="mono">dev</span> are proposals. On this machine they cost under 0.1% and about 0.4%. Is 49 Hz enough fidelity for production, or should it be 99 Hz (≈0.15%)? The reference workloads in P8 settle it for real. <i>Measured in P8.4: <span class="mono">prod</span> costs under 0.2% and <span class="mono">dev</span> at most 0.6% end to end. 99 Hz fits in <span class="mono">prod</span>'s budget, and the rate stays 49 Hz until fidelity asks for more.</i></p></article>
         <article class="card"><header><span class="id">Q3</span><h3>Stop-the-world task snapshots</h3></header>
           <p>Are they acceptable in <span class="mono">dev</span> before the stopless mode exists, or should waits wait for P8?</p></article>
         <article class="card"><header><span class="id">Q4</span><h3>The file extension</h3></header>

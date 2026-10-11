@@ -122,6 +122,113 @@ A report, the page, `symbolize`, and `export` read a directory as one
 profile of every segment in it, as it is when read. To store a fleet's
 profiles elsewhere, export each segment to pprof.
 
+## Running in production
+
+`--preset prod` samples 49 times a second, copies as little stack as
+unwinds the program, records no time off the CPU, and holds uscope to 1%
+of a CPU. `just profile-overhead` measures what it costs on reference
+workloads, each counting its own work in a window once recording is on:
+CPU-bound C on four threads, four Go goroutines that allocate, a tokio
+line server answering four clients, and Rust whose zones of about 10 µs
+each uscope listens to. On a 32-CPU machine it cost:
+
+| Workload | prod cost | dev cost | Noise | uscope CPU, prod / dev |
+|---|---|---|---|---|
+| C, 4 threads | +0.04% | +0.24% | 0.26% | 0.39% / 8.7% |
+| Go, 4 goroutines | +0.19% | +0.19% | 0.22% | 0.44% / 7.3% |
+| tokio server, 1.6M requests/s | +0.12% | +0.60% | 11% | 0.35% / 0.97% |
+| Rust, zones listened to | −0.18% | −0.03% | 0.30% | 1.3% / 2.9% |
+
+Cost is how much less work the program did than bare, by medians of five
+interleaved runs; noise is the range of the bare runs. The program runs on
+four cores of its own and uscope on the others that share its cache, since
+where threads land moves a rate more than recording does. The server's
+noise is one round that ran slower for every setup alike. uscope's process
+also held 0–67 MiB more at its peak than when recording began.
+
+`bench/overhead.json` holds those runs; `just profile-overhead --compare
+bench/overhead.json` shows what a change moved, and `--check 1` fails
+unless prod costs every workload under 1%. The memory is uscope's whole
+process, most of it the program's debug information, which a host that
+keeps none avoids with `--symbols later` (see [Symbols from
+elsewhere](#symbols-from-elsewhere)).
+
+What uscope needs of the host:
+
+- **Sampling.** Recording a process of uscope's own user needs nothing but
+  `kernel.perf_event_paranoid` at 2 or less. A host that sets it higher,
+  as Debian's kernels may, needs `CAP_PERFMON`. A process of another user
+  needs `CAP_SYS_PTRACE`, as reading its threads, mappings, and files
+  through `/proc` does.
+- **Task snapshots** attach as the debugger does, and live ones read the
+  program's memory, which Yama limits as it limits attaching: at
+  `kernel.yama.ptrace_scope` 1, Ubuntu's default, a process uscope did not
+  start needs `CAP_SYS_PTRACE`.
+- **Descriptors and locked memory.** An attach holds an event for each
+  thread on each CPU, and uscope raises its descriptor limit to the hard
+  limit. Each event's ring is locked memory; rings past the user's limit
+  are made smaller, down to two samples, and the profile records the size
+  it got, so raise `LimitMEMLOCK` to keep them whole.
+
+A systemd unit that records a service continuously, starting again with
+it:
+
+```ini
+[Unit]
+Description=uscope continuous profile of app
+After=app.service
+BindsTo=app.service
+
+[Service]
+ExecStart=/bin/sh -c 'exec uscope record --preset prod --symbols later \
+    --continuous /var/lib/uscope/app --keep 24h \
+    --pid "$(systemctl show --property MainPID --value app.service)"'
+Restart=always
+RestartSec=5
+User=app
+StateDirectory=uscope/app
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=app.service
+```
+
+Run as the service's own user, it needs no capability. Run as another,
+add `AmbientCapabilities=CAP_SYS_PTRACE`, and `CAP_PERFMON` where
+`perf_event_paranoid` asks for it.
+
+On Kubernetes, uscope runs as a sidecar in the pod's process namespace,
+writing segments to a volume. The program is read through
+`/proc/PID/root`, so the sidecar's image needs only uscope.
+`perf_event_paranoid` is the node's, and container runtimes' default
+seccomp profiles refuse `perf_event_open` to a container without
+`CAP_PERFMON` or `CAP_SYS_ADMIN`:
+
+```yaml
+spec:
+  shareProcessNamespace: true
+  containers:
+    - name: app
+      image: registry.example/app
+    - name: uscope
+      image: registry.example/uscope
+      command: ["/bin/sh", "-c"]
+      args:
+        - until pid="$(pgrep -o -x app)"; do sleep 1; done;
+          exec uscope record --preset prod --symbols later
+          --continuous /profiles --keep 24h --pid "$pid"
+      securityContext:
+        capabilities:
+          add: ["SYS_PTRACE", "PERFMON"]
+      volumeMounts:
+        - name: profiles
+          mountPath: /profiles
+  volumes:
+    - name: profiles
+      emptyDir: {}
+```
+
 ## Time off the CPU
 
 With off-CPU recording on, the kernel reports each time a thread leaves its

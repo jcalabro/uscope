@@ -21,6 +21,9 @@ fn answer(line: &str, served: u64) -> String {
 
 /// Answers a connection's lines until the client closes it.
 async fn serve(stream: TcpStream, served: Arc<AtomicU64>) {
+    // Each answer goes out as it is written, not after the client's
+    // acknowledgement of the one before, when a client asks many at once.
+    stream.set_nodelay(true).ok();
     let connection = stream.as_raw_fd();
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();

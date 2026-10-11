@@ -716,7 +716,7 @@ async fn a_profile_serves_its_zones_folded_to_a_width_and_measured() {
             .collect::<Vec<_>>()
     };
     assert_eq!(depth_of("round=1"), [0]);
-    assert_eq!(depth_of("leaf"), [3, 3, 3]);
+    assert_eq!(depth_of("leaf"), [3, 3, 3], "{drawn:?}");
     assert_eq!(answer["marks"].as_array().map(Vec::len), Some(7));
     // Each round's plotted value, in a bin of its own.
     let plots = answer["plots"].as_array().expect("plots");

@@ -191,6 +191,14 @@ bench *ARGS: build-test-programs
     cargo build --quiet --release --features tools --bin uscope-tools
     ./scripts/contained.sh ./target/release/uscope-tools bench "$@"
 
+# Runs reference workloads bare and under each preset, interleaved, and
+# prints what recording cost each, in minutes. Compare with the recorded
+# baseline with `--compare bench/overhead.json`, record one with `--out`,
+# and fail unless prod costs every workload under 1% with `--check 1`.
+profile-overhead *ARGS: build-test-programs
+    cargo build --quiet --release --features tools --bin uscope-tools
+    ./scripts/contained.sh ./target/release/uscope-tools overhead "$@"
+
 # The seconds-long benchmark `just all` runs: it fails when loading the
 # small programs allocates more than bench/baseline.json records. Record a
 # deliberate change with `just bench-smoke --record bench/baseline.json`.

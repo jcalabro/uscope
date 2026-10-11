@@ -3,6 +3,7 @@
 //! and filling the image cache.
 
 pub mod dump;
+pub mod overhead;
 
 use std::path::{Path, PathBuf};
 

@@ -7,6 +7,7 @@ use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -82,6 +83,9 @@ enum Tool {
     /// Load each program of a pinned corpus in processes of their own, and
     /// report what loading costs.
     Bench(BenchArgs),
+    /// Run reference workloads bare and under each preset, and report what
+    /// recording cost them.
+    Overhead(OverheadArgs),
     /// Group the blocks a DHAT profile records by the first uscope function
     /// that allocated them.
     Heap {
@@ -91,6 +95,35 @@ enum Tool {
         #[arg(long, default_value_t = 25)]
         rows: usize,
     },
+}
+
+#[derive(clap::Args)]
+struct OverheadArgs {
+    /// Where the built fixtures are.
+    #[arg(long, default_value = "build/test-programs")]
+    programs: PathBuf,
+    /// Runs of each workload under each setup.
+    #[arg(long, default_value_t = 5)]
+    runs: usize,
+    /// Seconds a program runs, once recording is on, before its rate is
+    /// counted.
+    #[arg(long, default_value_t = 1.0)]
+    warmup: f64,
+    /// Seconds its rate is counted.
+    #[arg(long, default_value_t = 3.0)]
+    window: f64,
+    /// Only these workloads: c, go, tokio, or probes.
+    #[arg(long, value_delimiter = ',')]
+    only: Vec<String>,
+    /// Write every run as JSON to FILE.
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+    /// Compare with the runs a saved report holds.
+    #[arg(long, value_name = "BASE")]
+    compare: Option<PathBuf>,
+    /// Fail unless the prod preset costs every workload less than PERCENT.
+    #[arg(long, value_name = "PERCENT")]
+    check: Option<f64>,
 }
 
 #[derive(clap::Args)]
@@ -234,11 +267,94 @@ fn run(args: Args) -> Result<bool> {
                 None => vec![1, jobs],
             },
         ),
+        Tool::Overhead(overhead) => run_overhead(&overhead),
         Tool::Heap { profile, rows } => {
             print!("{}", heap_text(&profile, rows)?);
             Ok(true)
         }
     }
+}
+
+fn run_overhead(args: &OverheadArgs) -> Result<bool> {
+    use uscope::tools::overhead;
+    let options = overhead::Options {
+        programs: args.programs.clone(),
+        runs: args.runs,
+        warmup: Duration::try_from_secs_f64(args.warmup)?,
+        window: Duration::try_from_secs_f64(args.window)?,
+        only: args.only.clone(),
+    };
+    let runs = overhead::measure(&options, |run| {
+        eprintln!("{} {}: {:.1}/s", run.workload, run.setup, run.rate);
+    })?;
+    if let Some(out) = &args.out {
+        std::fs::write(out, serde_json::to_string_pretty(&runs)?)?;
+    }
+    let summaries = overhead::summarize(&runs);
+    let base = match &args.compare {
+        Some(path) => Some(overhead::summarize(&serde_json::from_slice::<
+            Vec<overhead::Run>,
+        >(&std::fs::read(path)?)?)),
+        None => None,
+    };
+    print!("{}", overhead_table(&summaries, base.as_deref()));
+    let Some(limit) = args.check else {
+        return Ok(true);
+    };
+    let over: Vec<_> = summaries
+        .iter()
+        .filter(|summary| summary.setup == "prod" && summary.cost_percent >= limit)
+        .collect();
+    for summary in &over {
+        eprintln!(
+            "error: prod costs {} {:.2}%, not less than {limit}%",
+            summary.workload, summary.cost_percent
+        );
+    }
+    Ok(over.is_empty())
+}
+
+/// The summaries as a table, each cost beside the base's when given.
+fn overhead_table(
+    summaries: &[uscope::tools::overhead::Summary],
+    base: Option<&[uscope::tools::overhead::Summary]>,
+) -> String {
+    use std::fmt::Write as _;
+    let mut table = String::from(
+        "workload  setup        rate/s     cost   noise      p99   uscope cpu     memory\n",
+    );
+    for summary in summaries {
+        let was = base.and_then(|base| {
+            base.iter()
+                .find(|old| old.workload == summary.workload && old.setup == summary.setup)
+        });
+        let cost = was.map_or_else(
+            || format!("{:+6.2}%", summary.cost_percent),
+            |was| {
+                format!(
+                    "{:+6.2}% (was {:+.2}%)",
+                    summary.cost_percent, was.cost_percent
+                )
+            },
+        );
+        let p99 = summary.p99_ns.map_or_else(
+            || "-".to_owned(),
+            |p99| format!("{}.{} us", p99 / 1000, p99 % 1000 / 100),
+        );
+        let cpu = summary
+            .recorder_cpu
+            .map_or_else(|| "-".to_owned(), |cpu| format!("{:.2}%", cpu * 100.0));
+        let rss = summary
+            .recording_bytes
+            .map_or_else(|| "-".to_owned(), |rss| format!("{} MiB", rss >> 20));
+        writeln!(
+            table,
+            "{:<9} {:<6} {:>12.1} {cost} {:>6.2}% {p99:>8} {cpu:>12} {rss:>10}",
+            summary.workload, summary.setup, summary.rate, summary.noise_percent
+        )
+        .expect("writing to a string");
+    }
+    table
 }
 
 /// A DHAT profile, as `dhat.out` holds it.

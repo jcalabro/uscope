@@ -2094,6 +2094,9 @@ build_fixture gcc "$c_fixtures_dir/profile-phases.c" "$output_dir/profile-phases
 # Threads that block and threads preempted, for off-CPU intervals.
 build_fixture gcc "$c_fixtures_dir/profile-offcpu.c" "$output_dir/profile-offcpu" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie -pthread
+# Steady work whose rate measures what recording costs.
+build_fixture gcc "$c_fixtures_dir/overhead.c" "$output_dir/overhead" \
+    -O2 -g3 -fno-omit-frame-pointer -fPIE -pie -pthread
 # Static programs, whose code auto mode can judge before they run.
 build_fixture musl-gcc "$c_fixtures_dir/profile-stacks.c" "$output_dir/profile-stacks-musl" \
     -O2 -g3 -fno-omit-frame-pointer -static -pthread
@@ -2284,6 +2287,7 @@ build_go_fixture "$go_fixtures_dir/spin" "$output_dir/spin-go-o2"
 build_go_fixture "$go_fixtures_dir/waits" "$output_dir/profile-go-waits"
 # The profiler's goroutine stacks, optimized and not, PIE and not.
 build_go_fixture "$go_fixtures_dir/profile" "$output_dir/profile-go-o2"
+build_go_fixture "$go_fixtures_dir/overhead" "$output_dir/overhead-go"
 build_go_fixture "$go_fixtures_dir/profile" "$output_dir/profile-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 # Stripped of DWARF and symbols, so no model describes its runtime's data.

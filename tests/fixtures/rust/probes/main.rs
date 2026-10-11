@@ -11,6 +11,8 @@
 //!   sites switch themselves off.
 //! - `cost COUNT`: times COUNT zones as they are, off unless uscope reads;
 //!   `cost-on COUNT` waits until it does.
+//! - `rate`: zones without end, a line for every hundred, listened to or
+//!   not.
 
 use std::io::Write as _;
 use std::time::{Duration, Instant};
@@ -25,6 +27,10 @@ fn main() {
     }
     if arguments[1] == "cost" {
         cost(count());
+        return;
+    }
+    if arguments[1] == "rate" {
+        rate();
         return;
     }
     wait_until_listening();
@@ -139,6 +145,24 @@ fn cost(count: u64) {
     let each = started.elapsed().as_secs_f64() * 1e9 / count as f64;
     let state = if uscope_probes::listening() { "on" } else { "off" };
     println!("a zone {state}: {each:.2} ns");
+}
+
+/// Steady work for measuring what recording costs: units of a hundred
+/// zones, each around some microseconds of work, as instrumentation would
+/// mark a request's steps, a line written as each unit ends, whether or
+/// not uscope listens. A measurer counts the lines in a window.
+fn rate() {
+    let mut out = std::io::stdout();
+    loop {
+        for round in 0..100 {
+            let _zone = zone!("rate");
+            std::hint::black_box(spin(50_000 + round));
+        }
+        // Writing fails once the measurer stops reading.
+        if writeln!(out, "u").is_err() {
+            return;
+        }
+    }
 }
 
 fn spin(rounds: u64) -> u64 {
