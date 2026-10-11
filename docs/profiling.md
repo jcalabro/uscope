@@ -425,6 +425,33 @@ cut short still reads: `report` says so and shows every part that was
 complete. `uscope record` writes its profile when the program exits. The
 format is versioned, and uscope says when it cannot read a file's version.
 
+## Symbols from elsewhere
+
+```sh
+uscope record --symbols later -o app.usprof --pid 1234     # on the host
+uscope symbolize app.usprof --debug-dir ./debug            # anywhere else
+uscope symbolize app.usprof --debuginfod                   # or from debuginfod
+```
+
+A production host often keeps no debug information. Unwinding needs
+none: the call-frame information it reads is in every program's own
+`.eh_frame`. `--symbols later` keeps the profile to what the host has,
+each module's path, build id, and digest, and each frame's address in
+its module, and gives no frame a name.
+
+Wherever the profile is opened, `report` and `web` name the frames of
+each module whose file is still there with the bytes recorded, from that
+file and the debug directories, and note each module they cannot.
+`uscope symbolize` writes names into the file for good. It finds a module
+whose file is gone or changed by its build id, under each `--debug-dir`'s
+`.build-id` directory and the system's, and with `--debuginfod`, from the
+servers `DEBUGINFOD_URLS` lists, which then learn the build ids. A module
+found nowhere keeps its addresses, and `symbolize` says why:
+
+```
+/srv/app/server: keeps its addresses: its file is gone, and no debug directory or server has its build id
+```
+
 ## Other tools' formats
 
 ```sh

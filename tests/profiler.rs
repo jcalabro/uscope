@@ -886,6 +886,77 @@ fn an_attach_follows_threads_that_began_before_it_and_after() {
     }
 }
 
+/// A program in a mount namespace of its own, as in a container, whose C
+/// library there is another file than the host's at the same path, has
+/// that library read through its root: its frames are named and unwound.
+#[test]
+fn an_attach_reads_a_contained_programs_library_through_its_root() {
+    let scratch = support::ScratchDir::new("profiler-container");
+    let copy = scratch.path().join("libc.so.6");
+    let mut process = support::ExternalProcess::spawn_command(
+        Command::new("unshare")
+            .args(["--user", "--map-root-user", "--mount", "sh", "-c"])
+            .arg(concat!(
+                r#"library=$(ldd "$2" | sed -n 's/.*libc\.so\.6 => \([^ ]*\).*/\1/p') && "#,
+                r#"cp "$library" "$1" && mount --bind "$1" "$library" && exec "$2""#,
+            ))
+            .arg("sh")
+            .arg(&copy)
+            .arg(Scenario::fixture("profile-attach-gcc-o0")),
+    );
+    let maps = std::fs::read_to_string(format!("/proc/{}/maps", process.process_id().get()))
+        .expect("the program's maps");
+    let mapped = maps
+        .lines()
+        .find(|line| line.ends_with("/libc.so.6"))
+        .expect("the program maps a C library")
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let host = std::fs::metadata(mapped[5]).expect("the host's file at that path");
+    assert_ne!(
+        std::os::unix::fs::MetadataExt::ino(&host).to_string(),
+        mapped[4],
+        "the program maps the host's library"
+    );
+    let attachment = attach_and_release(&mut process, &calls_of("leaf"), false).expect("attach");
+    assert!(process.wait().success());
+    let mut stacks: Vec<Vec<String>> = attachment
+        .profile
+        .stacks()
+        .into_iter()
+        .map(|stack| {
+            assert_eq!(stack.ending, StackEnding::Complete, "{stack:?}");
+            stack.functions
+        })
+        .collect();
+    stacks.sort();
+    stacks.dedup();
+    let named =
+        |names: &[&str]| -> Vec<String> { names.iter().map(|name| (*name).to_owned()).collect() };
+    assert_eq!(
+        stacks,
+        [
+            named(&[
+                "leaf",
+                "middle",
+                "outer",
+                "main",
+                "__libc_start_call_main",
+                "__libc_start_main",
+                "_start"
+            ]),
+            named(&[
+                "leaf",
+                "middle",
+                "outer",
+                "worker",
+                "start_thread",
+                "__GI___clone3"
+            ]),
+        ]
+    );
+}
+
 #[test]
 fn an_attach_past_its_event_budget_is_refused_with_the_count() {
     let mut process = support::ExternalProcess::spawn(&Scenario::fixture("profile-attach-gcc-o0"));
@@ -1521,4 +1592,71 @@ fn a_recording_switches_on_only_the_sites_it_names() {
         profile.zones().into_iter().map(|zone| zone.name).collect();
     assert_eq!(names, ["leaf".to_owned(), "outer".to_owned()].into());
     assert!(profile.plots().is_empty() && profile.program_markers().is_empty());
+}
+
+/// A profile recorded with its symbols left for later holds only build
+/// ids and addresses. Opened where its program's file is gone, a module
+/// keeps its addresses and says why, until a debug directory holds a file
+/// with its build id, from which its frames get their names.
+#[test]
+fn symbols_left_for_later_come_from_a_debug_file_with_the_build_id() {
+    let scratch = support::ScratchDir::new("profiler-symbols-later");
+    let program = scratch.path().join("basic");
+    std::fs::copy(Scenario::fixture("split/basic-build-id.full"), &program)
+        .expect("copy the program");
+    let options = RecordOptions {
+        symbols_later: true,
+        ..calls_of("breakpoint_target")
+    };
+    let mut command = Command::new(&program);
+    command.stdin(Stdio::null()).stdout(Stdio::null());
+    let mut profile = record(command, &options).expect("record").profile;
+    std::fs::remove_file(&program).expect("delete the program");
+    let named = |profile: &Profile| {
+        profile
+            .stacks()
+            .into_iter()
+            .map(|stack| stack.functions.into_iter().take(2).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    };
+    assert!(profile.symbols_later());
+    assert!(
+        named(&profile).iter().flatten().all(|name| name != "main"),
+        "{:?}",
+        named(&profile)
+    );
+
+    let basic = |found: &[uscope::profiler::ModuleSymbols]| {
+        found
+            .iter()
+            .find(|module| module.module.ends_with("/basic"))
+            .cloned()
+            .expect("the program's module")
+    };
+    let found = profile.symbolize(&uscope::DebugFileOptions::default());
+    assert_eq!(
+        basic(&found).source,
+        Err("its file is gone, and no debug directory or server has its build id".to_owned())
+    );
+
+    let root = Scenario::fixture("split/debug-root");
+    let found = profile.symbolize(&uscope::DebugFileOptions {
+        directories: vec![root.clone()],
+        ..uscope::DebugFileOptions::default()
+    });
+    let module = basic(&found);
+    assert!(
+        module
+            .source
+            .as_ref()
+            .is_ok_and(|file| file.starts_with(&root)),
+        "{module:?}"
+    );
+    // The function, main at each of its two calls, and _start.
+    assert_eq!(module.frames, 4, "{module:?}");
+    assert_eq!(
+        named(&profile),
+        vec![vec!["breakpoint_target".to_owned(), "main".to_owned()]; 2]
+    );
+    assert!(!profile.symbols_later());
 }

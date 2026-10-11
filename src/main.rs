@@ -270,6 +270,8 @@ enum Tool {
     /// Write a profile in another format: pprof, folded stacks, or a
     /// Chrome trace, or read one of theirs.
     Convert(cli::profile::ConvertArgs),
+    /// Give a profile recorded with `--symbols later` its source lines.
+    Symbolize(cli::profile::SymbolizeArgs),
 }
 
 fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsString), String> {
@@ -385,6 +387,7 @@ async fn async_main() -> ExitCode {
         Some(Tool::Record(record)) => return cli::profile::run_record(record),
         Some(Tool::Report(report)) => return cli::profile::run_report(report),
         Some(Tool::Convert(convert)) => return cli::profile::run_convert(convert),
+        Some(Tool::Symbolize(symbolize)) => return cli::profile::run_symbolize(symbolize),
         Some(Tool::Config(config)) => {
             return match run_config(config) {
                 Ok(true) => ExitCode::SUCCESS,

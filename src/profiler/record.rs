@@ -126,6 +126,8 @@ pub struct Processor {
     probes_found: Vec<(u32, Found)>,
     stacks: Stacks,
     triggered: bool,
+    /// Whether frames are left for a viewer to symbolize.
+    symbols_later: bool,
 }
 
 /// A rolling window: how long it is, and its marks, each a moment and the
@@ -171,6 +173,7 @@ impl Processor {
             probes_found: Vec::new(),
             stacks: Stacks::default(),
             triggered: false,
+            symbols_later: false,
         }
     }
 
@@ -910,6 +913,13 @@ impl Processor {
         self.loading
     }
 
+    /// Leaves every frame without lines, for a viewer to symbolize from
+    /// its module's build id and address.
+    pub fn symbols_later(&mut self) {
+        self.symbols_later = true;
+        self.builder.setting("symbols", "later");
+    }
+
     /// Gives each frame not yet symbolized its lines, and the capture its
     /// span so far.
     fn symbolize_new(&mut self) {
@@ -917,6 +927,9 @@ impl Processor {
         self.builder.setting("start", &start.to_string());
         let end = self.latest.max(self.gaps_end);
         self.builder.setting("end", &end.to_string());
+        if self.symbols_later {
+            return;
+        }
         let images: BTreeMap<u32, usize> = self
             .images
             .iter()
@@ -958,7 +971,7 @@ impl Processor {
 }
 
 /// One source line of a frame, owned until the builder interns it.
-struct OwnedLine {
+pub(super) struct OwnedLine {
     function: Arc<str>,
     file: Option<String>,
     line: u32,
@@ -968,7 +981,7 @@ struct OwnedLine {
 }
 
 impl OwnedLine {
-    fn input(&self) -> LineInput<'_> {
+    pub(super) fn input(&self) -> LineInput<'_> {
         LineInput {
             function: &self.function,
             file: self.file.as_deref(),
@@ -985,7 +998,7 @@ impl OwnedLine {
 
 /// The source lines of the code at `address`, innermost inlined function
 /// first, ending with the function the code physically belongs to.
-fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
+pub(super) fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
     let location = image.locate(address);
     let path = |file| {
         image

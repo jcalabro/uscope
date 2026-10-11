@@ -21,6 +21,63 @@ const FRAMES_CORE: &str = "build/test-programs/frames-gcc-o0.core";
 /// A profile converts to pprof, which Go's own tool reads, and to folded
 /// stacks, each holding every stack's weight; a name with no format is
 /// refused.
+/// `record --symbols later` keeps frames as addresses. `report` gives
+/// them the lines this host's files hold and notes the modules it cannot,
+/// and `symbolize` writes in what a debug directory holds.
+#[test]
+fn symbolize_writes_in_symbols_a_recording_left_for_later() {
+    let scratch = support::ScratchDir::new("cli-symbolize");
+    let program = scratch.path().join("basic");
+    std::fs::copy(
+        fixture("build/test-programs/split/basic-build-id.full"),
+        &program,
+    )
+    .expect("copy the program");
+    let profile = scratch.path().join("basic.usprof");
+    let recorded = uscope_command()
+        .args([
+            "record",
+            "--symbols",
+            "later",
+            "--function",
+            "breakpoint_target",
+            "-o",
+        ])
+        .arg(&profile)
+        .arg("--")
+        .arg(&program)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run uscope record");
+    assert!(recorded.status.success(), "{recorded:?}");
+    std::fs::remove_file(&program).expect("delete the program");
+    let profile = profile.to_string_lossy().into_owned();
+
+    let unnamed = assert_success(uscope(&["report", &profile]));
+    assert!(
+        unnamed.contains(
+            "basic keeps its addresses: its file is gone, and no debug directory or server has \
+             its build id"
+        ),
+        "{unnamed}"
+    );
+    assert!(!unnamed.contains("breakpoint_target"), "{unnamed}");
+
+    let root = fixture("build/test-programs/split/debug-root");
+    let symbolized = uscope(&[
+        "symbolize",
+        &profile,
+        "--debug-dir",
+        &root.to_string_lossy(),
+    ]);
+    assert!(symbolized.status.success(), "{symbolized:?}");
+    let said = String::from_utf8_lossy(&symbolized.stderr);
+    assert!(said.contains("basic: 4 frames from "), "{said}");
+    let named = assert_success(uscope(&["report", &profile]));
+    assert!(!named.contains("keeps its addresses"), "{named}");
+    assert_in_order(&named, &["breakpoint_target", "main"]);
+}
+
 #[test]
 fn convert_writes_what_go_and_flame_graph_tools_read() {
     let scratch = support::ScratchDir::new("cli-convert");

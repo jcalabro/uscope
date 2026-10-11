@@ -68,12 +68,19 @@ impl Profiles {
 
     /// Serves the profile in `bytes`, read from `path`, returning its id.
     pub fn add(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<String> {
-        let read = Profile::import(bytes)?;
+        let mut read = Profile::import(bytes)?;
         if read.truncated {
             eprintln!(
                 "warning: {} was cut short; serving the part that was complete",
                 path.display()
             );
+        }
+        // A profile recorded with its symbols left for later gets those
+        // this host's files and debug directories hold.
+        for module in read.profile.symbolize(&uscope::DebugFileOptions::default()) {
+            if let Err(why) = &module.source {
+                eprintln!("note: {} keeps its addresses: {why}", module.module);
+            }
         }
         let id = format!("{:016x}", twox_hash::XxHash3_64::oneshot(bytes));
         let name = path.file_name().map_or_else(

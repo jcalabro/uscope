@@ -150,6 +150,24 @@ impl DebugFileSearch {
         }
     }
 
+    /// The file with build-id `build_id`, under the debug directories or
+    /// from a server, for a module whose own file is not at hand, as when a
+    /// profile recorded on another host is opened.
+    pub fn with_build_id(&self, build_id: &[u8]) -> Option<DebugFile> {
+        if build_id.len() < 2 {
+            return None;
+        }
+        let describes = |data: &[u8]| {
+            object::File::parse(data)
+                .ok()
+                .and_then(|file| file.build_id().ok().flatten().map(<[u8]>::to_vec))
+                .as_deref()
+                == Some(build_id)
+        };
+        self.by_build_id(build_id, describes)
+            .or_else(|| self.download(build_id, describes))
+    }
+
     /// The file a module's build-id names under the debug directories, or
     /// else one its debug link names, that `consider` accepts.
     fn find_named(

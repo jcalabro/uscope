@@ -28,6 +28,15 @@ pub enum PresetArg {
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum SymbolsArg {
+    /// From the debug information on this host, as the recording ends.
+    Now,
+    /// Wherever the profile is opened, from the modules' build ids: this
+    /// host keeps only build ids and addresses.
+    Later,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum OnOff {
     On,
     Off,
@@ -86,6 +95,9 @@ pub struct RecordArgs {
     /// off.
     #[arg(long, value_name = "SECONDS", default_value_t = 10.0)]
     probe_timeout: f64,
+    /// When frames get their source lines.
+    #[arg(long, value_enum, default_value = "now")]
+    symbols: SymbolsArg,
     /// The program to record and its arguments.
     #[arg(last = true, required_unless_present = "pid", value_name = "PROGRAM")]
     command: Vec<OsString>,
@@ -107,6 +119,23 @@ pub struct ReportArgs {
     /// Hide call-tree nodes below this percentage of the total.
     #[arg(long, value_name = "PERCENT", default_value_t = 1.0)]
     min_percent: f64,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SymbolizeArgs {
+    /// The profile to give source lines.
+    file: PathBuf,
+    /// Write the profile to FILE rather than over the one read.
+    #[arg(short, long, value_name = "FILE")]
+    output: Option<PathBuf>,
+    /// A directory of separate debug files, searched by build id before
+    /// the system's.
+    #[arg(long = "debug-dir", value_name = "DIR")]
+    debug_dirs: Vec<PathBuf>,
+    /// Ask the debuginfod servers `DEBUGINFOD_URLS` lists for the debug
+    /// files no directory holds, sending them the modules' build ids.
+    #[arg(long)]
+    debuginfod: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -170,6 +199,63 @@ fn convert(args: &ConvertArgs) -> Result<()> {
         Format::Chrome => "instrumentation and threads, without samples",
     };
     eprintln!("note: {} holds {kept}", args.output.display());
+    Ok(())
+}
+
+/// Runs `uscope symbolize`.
+pub fn run_symbolize(args: &SymbolizeArgs) -> std::process::ExitCode {
+    match symbolize(args) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn symbolize(args: &SymbolizeArgs) -> Result<()> {
+    let output = args.output.as_ref().unwrap_or(&args.file);
+    let read =
+        Profile::read(&args.file).with_context(|| format!("reading {}", args.file.display()))?;
+    anyhow::ensure!(
+        !read.truncated,
+        "{} was cut short; symbolizing would keep only its complete part",
+        args.file.display()
+    );
+    let mut profile = read.profile;
+    let found = profile.symbolize(&uscope::DebugFileOptions {
+        directories: args.debug_dirs.clone(),
+        debuginfod: args.debuginfod,
+        ..uscope::DebugFileOptions::default()
+    });
+    if found.is_empty() {
+        eprintln!("note: every frame of {} has its lines", args.file.display());
+    }
+    for module in &found {
+        match &module.source {
+            Ok(source) => eprintln!(
+                "{}: {} from {}",
+                module.module,
+                plural(module.frames, "frame"),
+                source.display()
+            ),
+            Err(why) => eprintln!("{}: keeps its addresses: {why}", module.module),
+        }
+    }
+    profile
+        .write(output)
+        .with_context(|| format!("writing {}", output.display()))
+}
+
+/// Gives a profile recorded without symbols the lines this host's own
+/// files and debug directories hold, writing a note for each module they
+/// do not.
+pub fn symbolize_here(profile: &mut Profile, out: &mut impl std::io::Write) -> Result<()> {
+    for module in profile.symbolize(&uscope::DebugFileOptions::default()) {
+        if let Err(why) = &module.source {
+            writeln!(out, "note: {} keeps its addresses: {why}", module.module)?;
+        }
+    }
     Ok(())
 }
 
@@ -242,6 +328,7 @@ fn options(args: &RecordArgs) -> Result<RecordOptions> {
     };
     options.probe_timeout =
         Duration::try_from_secs_f64(args.probe_timeout).context("--probe-timeout")?;
+    options.symbols_later = matches!(args.symbols, SymbolsArg::Later);
     Ok(options)
 }
 
@@ -380,7 +467,7 @@ fn handle_signals(stop: Option<Arc<AtomicBool>>, trigger: Arc<AtomicBool>) -> Re
 fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
     let read =
         Profile::read(&args.file).with_context(|| format!("reading {}", args.file.display()))?;
-    let profile = read.profile;
+    let mut profile = read.profile;
     let view = if args.native {
         StackView::Native
     } else {
@@ -392,6 +479,7 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
             "The file was cut short; this is the part that was complete."
         )?;
     }
+    symbolize_here(&mut profile, out)?;
     summary(&profile, out)?;
     let total = profile.total_weight();
     let percent = |value: u64| {

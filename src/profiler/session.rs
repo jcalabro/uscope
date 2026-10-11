@@ -205,6 +205,9 @@ fn processor(options: &RecordOptions, breakpoint: Option<Calls>) -> record::Proc
         ..crate::DebugFileOptions::default()
     });
     let mut processor = record::Processor::new(search, options.max_frames);
+    if options.symbols_later {
+        processor.symbols_later();
+    }
     if let Some(calls) = breakpoint
         && let Some(branch) = calls.repeats_when
     {

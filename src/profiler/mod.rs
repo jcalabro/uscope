@@ -11,6 +11,7 @@ mod frame_pointers;
 mod probes;
 mod record;
 mod session;
+mod symbols;
 mod tasks;
 mod zones;
 
@@ -26,6 +27,7 @@ pub use annotate::{CodeBlock, Disassembly, InstructionCost, LineCost, LineCosts}
 pub use collector::ProbeSelection;
 pub use formats::Format;
 pub use session::{Attachment, Recording, Save, Watch, record, record_attached, record_watched};
+pub use symbols::ModuleSymbols;
 pub use zones::{
     PlotValue, ProbeCounts, ProfileZone, ProgramMarker, ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN,
     ZONE_MISMATCHED, ZoneSite,
@@ -177,6 +179,10 @@ pub struct RecordOptions {
     pub probe_timeout: std::time::Duration,
     /// Directories searched for separate debug files.
     pub debug_directories: Vec<PathBuf>,
+    /// Whether to leave symbolizing to whoever opens the profile, which
+    /// then holds only modules' build ids and addresses: for hosts that
+    /// keep no debug information.
+    pub symbols_later: bool,
 }
 
 impl RecordOptions {
@@ -197,6 +203,7 @@ impl RecordOptions {
             probes: ProbeSelection::All,
             probe_timeout: std::time::Duration::from_secs(10),
             debug_directories: Vec::new(),
+            symbols_later: false,
         }
     }
 }
