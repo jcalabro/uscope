@@ -487,9 +487,10 @@ fn labels(capture: &Capture) -> Found<'_> {
             ));
         }
     }
-    // Of spans that begin together, the inner, shorter one comes after.
+    // Of spans that begin together, the inner, shorter one comes after,
+    // and of two alike, the deeper, as each thread's depths came in order.
     for spans in &mut found.spans {
-        spans.sort_unstable_by_key(|&(start, end, label)| (start, std::cmp::Reverse(end), label));
+        spans.sort_by_key(|&(start, end, _)| (start, std::cmp::Reverse(end)));
     }
     for (task, record) in capture.tasks.iter().enumerate() {
         if record.labels.get() == NONE {

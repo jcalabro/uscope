@@ -637,13 +637,15 @@ proptest! {
         let capture = labeled(&spans, &samples);
         let keys = Keys::new(&capture, Granularity::Function);
         // The innermost route a sample carries: the latest-starting span
-        // that covers it, of two that start together the shorter.
+        // that covers it, of two that start together the shorter, and of
+        // two alike the first recorded, which the capture nests inside.
         let route = |&(thread, time, _, _): &Sample| {
             spans
                 .iter()
-                .filter(|(on, start, length, _)| *on == thread && *start <= time && time < start + length)
-                .max_by_key(|(_, start, length, value)| (*start, std::cmp::Reverse(*length), *value))
-                .map(|(_, _, _, value)| *value)
+                .enumerate()
+                .filter(|(_, (on, start, length, _))| *on == thread && *start <= time && time < start + length)
+                .max_by_key(|(order, (_, start, length, _))| (*start, std::cmp::Reverse(*length), std::cmp::Reverse(*order)))
+                .map(|(_, (_, _, _, value))| *value)
         };
         let carries = |sample: &Sample, value: u32| {
             spans.iter().any(|(on, start, length, carried)| {
