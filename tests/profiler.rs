@@ -8,9 +8,9 @@ use std::time::Duration;
 use support::Scenario;
 use uscope::profiler::budget::Budget;
 use uscope::profiler::{
-    Attachment, CallNode, DEEP_STACK_COPY, MarkerKind, Preset, ProbeSelection, Profile,
-    RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource, SampledStack, Save, StackCopy,
-    StackEnding, StackView, Watch, record, record_attached, record_watched,
+    Attachment, CallNode, DEEP_STACK_COPY, Granularity, MarkerKind, Preset, ProbeSelection,
+    Profile, Query, RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource, SampledStack, Save,
+    StackCopy, StackEnding, StackView, Watch, record, record_attached, record_watched,
 };
 
 /// The profile-stacks fixture across languages, compilers, optimization,
@@ -957,6 +957,47 @@ fn clock_samples_are_valid_stacks_and_survive_a_file() {
             "{variant}: the file holds the whole profile"
         );
     }
+}
+
+/// A Go program's own pprof profiles read as exactly what it recorded:
+/// every one of its allocations, in bytes, and its parked goroutines,
+/// under the label they were started in.
+#[test]
+fn a_go_programs_own_profiles_read_as_it_wrote_them() {
+    let scratch = support::ScratchDir::new("go-pprof");
+    let allocs = scratch.path().join("allocs.pb.gz");
+    let goroutines = scratch.path().join("goroutine.pb.gz");
+    let status = Command::new(Scenario::fixture("pprof-files"))
+        .arg(&allocs)
+        .arg(&goroutines)
+        .status()
+        .expect("run the fixture");
+    assert!(status.success());
+
+    let allocs = Profile::read(&allocs).expect("the allocations").profile;
+    assert_eq!(allocs.setting("weight"), Some("bytes"));
+    assert!(!allocs.timed());
+    let top = allocs.top(StackView::Native);
+    let allocate = top
+        .iter()
+        .find(|cost| cost.name == "main.allocate")
+        .unwrap_or_else(|| panic!("main.allocate in {top:?}"));
+    assert_eq!(allocate.own, 64_000);
+
+    let goroutines = Profile::read(&goroutines).expect("the goroutines").profile;
+    assert_eq!(goroutines.setting("weight"), Some("goroutine"));
+    let keys = goroutines.keys(Granularity::Function);
+    let parked = keys.aggregate(&Query {
+        labels: vec![("worker".to_owned(), "parked".to_owned())],
+        ..Query::default()
+    });
+    assert_eq!(parked.weight, 3);
+    let park = goroutines
+        .top(StackView::Native)
+        .into_iter()
+        .find(|cost| cost.name == "main.park")
+        .expect("main.park");
+    assert_eq!(park.total, 3);
 }
 
 #[test]

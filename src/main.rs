@@ -267,6 +267,9 @@ enum Tool {
     Record(cli::profile::RecordArgs),
     /// Summarize a recorded profile.
     Report(cli::profile::ReportArgs),
+    /// Write a profile in another format: pprof, folded stacks, or a
+    /// Chrome trace, or read one of theirs.
+    Convert(cli::profile::ConvertArgs),
 }
 
 fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsString), String> {
@@ -381,6 +384,7 @@ async fn async_main() -> ExitCode {
         }
         Some(Tool::Record(record)) => return cli::profile::run_record(record),
         Some(Tool::Report(report)) => return cli::profile::run_report(report),
+        Some(Tool::Convert(convert)) => return cli::profile::run_convert(convert),
         Some(Tool::Config(config)) => {
             return match run_config(config) {
                 Ok(true) => ExitCode::SUCCESS,

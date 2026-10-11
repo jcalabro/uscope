@@ -1,5 +1,5 @@
-//! `uscope record` and `uscope report`: the sampling profiler from the
-//! command line.
+//! `uscope record`, `uscope report`, and `uscope convert`: the sampling
+//! profiler from the command line.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -12,8 +12,8 @@ use super::format::plural;
 use anyhow::{Context, Result};
 use uscope::profiler::budget::Budget;
 use uscope::profiler::{
-    GapReason, Preset, ProbeSelection, Profile, RecordOptions, SampleSource, Save, StackCopy,
-    StackView, Watch,
+    Format, GapReason, Preset, ProbeSelection, Profile, RecordOptions, SampleSource, Save,
+    StackCopy, StackView, Watch,
 };
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -107,6 +107,70 @@ pub struct ReportArgs {
     /// Hide call-tree nodes below this percentage of the total.
     #[arg(long, value_name = "PERCENT", default_value_t = 1.0)]
     min_percent: f64,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ConvertArgs {
+    /// The profile to read: uscope's own, pprof's, gzipped or not, or
+    /// folded stacks.
+    input: PathBuf,
+    /// Where to write it, in the format its name says: `.usprof`,
+    /// `.pb.gz` or `.pprof`, `.folded`, or `.json` for a Chrome trace.
+    output: PathBuf,
+    /// The format to write, whatever the output's name: usprof, pprof,
+    /// folded, or chrome.
+    #[arg(long, value_name = "FORMAT")]
+    to: Option<Format>,
+    /// Write the frames threads ran, not each async task's own stack.
+    #[arg(long)]
+    native: bool,
+}
+
+/// Runs `uscope convert`.
+pub fn run_convert(args: &ConvertArgs) -> std::process::ExitCode {
+    match convert(args) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn convert(args: &ConvertArgs) -> Result<()> {
+    let format = args
+        .to
+        .or_else(|| Format::of_path(&args.output))
+        .with_context(|| {
+            format!(
+                "{} does not say which format to write; choose one with --to",
+                args.output.display()
+            )
+        })?;
+    let read =
+        Profile::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
+    if read.truncated {
+        eprintln!(
+            "warning: {} was cut short; converting the part that was complete",
+            args.input.display()
+        );
+    }
+    let view = if args.native {
+        StackView::Native
+    } else {
+        StackView::Logical
+    };
+    let bytes = read.profile.export(format, view);
+    std::fs::write(&args.output, bytes)
+        .with_context(|| format!("writing {}", args.output.display()))?;
+    let kept = match format {
+        Format::Usprof => return Ok(()),
+        Format::Pprof => "stacks and their weights, without times, threads, or instrumentation",
+        Format::Folded => "stacks and their weights only",
+        Format::Chrome => "instrumentation and threads, without samples",
+    };
+    eprintln!("note: {} holds {kept}", args.output.display());
+    Ok(())
 }
 
 /// Runs `uscope record`, exiting as the program did.
@@ -484,7 +548,7 @@ fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
     let unit = profile.setting("weight").unwrap_or("nanoseconds");
     let weight = |value: u64| match unit {
         "nanoseconds" => format!("{:.3} s", value as f64 / 1e9),
-        _ => format!("{value} executions"),
+        unit => format!("{value} {unit}"),
     };
     writeln!(
         out,
@@ -492,6 +556,10 @@ fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
         profile.samples(),
         weight(total)
     )?;
+    if !profile.timed() {
+        let source = profile.setting("source").unwrap_or("its file");
+        writeln!(out, "Read from {source}, which keeps no times or threads.")?;
+    }
     let lost = profile.lost_samples();
     if lost > 0 {
         writeln!(out, "The kernel dropped {lost} samples.")?;

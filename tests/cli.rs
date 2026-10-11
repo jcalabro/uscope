@@ -18,6 +18,113 @@ const BASIC: &str = "build/test-programs/basic";
 const SEGV_CORE: &str = "build/test-programs/crash-gcc-o0-segv.core";
 const FRAMES_CORE: &str = "build/test-programs/frames-gcc-o0.core";
 
+/// A profile converts to pprof, which Go's own tool reads, and to folded
+/// stacks, each holding every stack's weight; a name with no format is
+/// refused.
+#[test]
+fn convert_writes_what_go_and_flame_graph_tools_read() {
+    let scratch = support::ScratchDir::new("cli-convert");
+    let profile = scratch.path().join("leaf.usprof");
+    let recorded = uscope_command()
+        .args(["record", "--function", "leaf", "-o"])
+        .arg(&profile)
+        .arg("--")
+        .arg(fixture("build/test-programs/profile-stacks-gcc-o0"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("run uscope record");
+    assert!(recorded.status.success());
+    let profile = profile.to_string_lossy().into_owned();
+
+    let pprof = scratch.path().join("leaf.pb.gz");
+    let converted = uscope(&["convert", &profile, &pprof.to_string_lossy()]);
+    assert!(converted.status.success());
+    assert!(String::from_utf8_lossy(&converted.stderr).contains("without times, threads"));
+    let raw = Command::new(fixture("build/test-programs/pprof"))
+        .args(["-raw", "-symbolize=none"])
+        .arg(&pprof)
+        .output()
+        .expect("run Go's pprof");
+    let raw = String::from_utf8_lossy(&raw.stdout).into_owned();
+    let samples: u64 = raw
+        .lines()
+        .skip_while(|line| *line != "executions/count")
+        .skip(1)
+        .take_while(|line| !line.starts_with("Locations"))
+        .filter_map(|line| line.trim().split_once(':')?.0.parse::<u64>().ok())
+        .sum();
+    assert_eq!(samples, 6, "{raw}");
+    assert!(raw.contains(" leaf "), "{raw}");
+    let back = assert_success(uscope(&["report", &pprof.to_string_lossy()]));
+    assert_in_order(
+        &back,
+        &[
+            "6 executions",
+            "which keeps no times or threads",
+            "100.00% 100.00%  leaf",
+        ],
+    );
+
+    let folded = scratch.path().join("leaf.folded");
+    assert_success(uscope(&["convert", &profile, &folded.to_string_lossy()]));
+    let folded = std::fs::read_to_string(&folded).expect("the folded stacks");
+    let mut weight = 0;
+    for line in folded.lines() {
+        let (stack, count) = line.rsplit_once(' ').expect("a weight");
+        assert!(stack.ends_with(";leaf"), "{line}");
+        weight += count.parse::<u64>().expect("a number");
+    }
+    assert_eq!(weight, 6, "{folded}");
+
+    let refused = uscope(&["convert", &profile, "out.bin"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("choose one with --to"));
+}
+
+/// A Chrome trace holds the program's zones, labels, and marks.
+#[test]
+fn convert_writes_instrumentation_as_a_chrome_trace() {
+    let scratch = support::ScratchDir::new("cli-chrome");
+    let profile = scratch.path().join("zones.usprof");
+    let recorded = uscope_command()
+        .args(["record", "-o"])
+        .arg(&profile)
+        .arg("--")
+        .arg(fixture("build/test-programs/probes"))
+        .arg("zones")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run uscope record");
+    assert!(recorded.status.success());
+    let trace = scratch.path().join("zones.json");
+    assert!(
+        uscope(&[
+            "convert",
+            &profile.to_string_lossy(),
+            &trace.to_string_lossy()
+        ])
+        .status
+        .success()
+    );
+    let trace: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&trace).expect("the trace")).expect("JSON");
+    let events = trace["traceEvents"].as_array().expect("events");
+    let named = |phase: &str, name: &str| {
+        events
+            .iter()
+            .filter(|event| event["ph"] == phase && event["name"] == name)
+            .count()
+    };
+    assert_eq!(named("X", "outer"), 3);
+    assert_eq!(named("X", "round=1"), 1);
+    assert_eq!(named("i", "done"), 1);
+    assert!(
+        events
+            .iter()
+            .all(|event| event["ph"] != "X" || event["dur"].as_f64() >= Some(0.0))
+    );
+}
+
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name)
 }

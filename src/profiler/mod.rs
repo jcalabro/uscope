@@ -5,6 +5,7 @@
 pub mod budget;
 mod calls;
 mod collector;
+mod formats;
 mod frame_pointers;
 mod probes;
 mod record;
@@ -19,6 +20,7 @@ pub use crate::capture::records::GapReason;
 pub const NO_TASK: u32 = NONE;
 pub use crate::capture::records::MarkerKind;
 pub use collector::ProbeSelection;
+pub use formats::Format;
 pub use session::{Attachment, Recording, Save, Watch, record, record_attached, record_watched};
 pub use zones::{
     PlotValue, ProbeCounts, ProfileZone, ProgramMarker, ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN,
@@ -364,9 +366,9 @@ pub struct ReadProfile {
 }
 
 impl Profile {
-    /// Reads a profile file.
+    /// Reads a profile file, in any format [`Profile::import`] reads.
     pub fn read(path: &Path) -> Result<ReadProfile, ProfileFileError> {
-        Self::from_bytes(&std::fs::read(path)?)
+        Self::import(&std::fs::read(path)?)
     }
 
     /// Whether `bytes` begin as a profile file does.

@@ -10,6 +10,7 @@ import {
   untransformed,
   validateProfileLook,
 } from "../src/profile/look";
+import { formatWeight } from "../src/profile/paint";
 import { type CallTree, decodeTree, findPath, hit, layout, pathOf } from "../src/profile/tree";
 import { blockAt, decodeZones, plotPath, tracks } from "../src/profile/zones";
 import type { ProfileKey, ProfileTree, ServerMessage } from "../src/protocol";
@@ -272,5 +273,17 @@ describe("a zones answer", () => {
     expect(plotPath([[0, 3, 3, 3, 3]], 0, 1, 10, 20, 3, 3)).toBe(
       "M0.0 10.0L0.0 10.0L0.0 10.0L0.0 10.0",
     );
+  });
+});
+
+describe("a weight", () => {
+  it("reads in its unit: time, bytes, executions, or what a profile counts", () => {
+    expect(formatWeight(1_500_000, "nanoseconds")).toBe("1.50 ms");
+    expect(formatWeight(64_000, "bytes")).toBe("62.5 KiB");
+    expect(formatWeight(512, "bytes")).toBe("512 B");
+    expect(formatWeight(1, "executions")).toBe("1 execution");
+    expect(formatWeight(3, "goroutine")).toBe("3 goroutines");
+    expect(formatWeight(1, "goroutine")).toBe("1 goroutine");
+    expect(formatWeight(1200, "samples")).toBe("1,200 samples");
   });
 });

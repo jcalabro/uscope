@@ -228,3 +228,22 @@ test("a program's zones show in tracks, and Find Zone measures one and filters b
   await expect(page).toHaveURL(/bl=round/);
   await expect(page.getByRole("combobox", { name: "Root by label" })).toHaveValue("round");
 });
+
+test("a Go program's own pprof profile opens in its unit, without a timeline", async ({
+  page,
+  uscope,
+}, info) => {
+  const allocs = info.outputPath("allocs.pb.gz");
+  execFileSync(fixture("pprof-files"), [allocs, info.outputPath("goroutine.pb.gz")], {
+    stdio: "ignore",
+  });
+  const served = await uscope.start([allocs]);
+  await join(page, served.link);
+  await expect(page.getByTestId("untimed")).toContainText("pprof's alloc_space (bytes)");
+  await page.getByRole("button", { name: "Functions" }).click();
+  const allocate = page
+    .getByRole("listbox", { name: "Functions" })
+    .getByRole("option")
+    .filter({ hasText: "main.allocate" });
+  await expect(allocate).toHaveAttribute("title", "62.5 KiB");
+});

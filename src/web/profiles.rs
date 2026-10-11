@@ -67,7 +67,7 @@ impl Profiles {
 
     /// Serves the profile in `bytes`, read from `path`, returning its id.
     pub fn add(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<String> {
-        let read = Profile::from_bytes(bytes)?;
+        let read = Profile::import(bytes)?;
         if read.truncated {
             eprintln!(
                 "warning: {} was cut short; serving the part that was complete",
@@ -417,6 +417,8 @@ fn summary(entry: &Entry) -> ProfileSummary {
             .setting("weight")
             .unwrap_or("nanoseconds")
             .to_owned(),
+        source: profile.setting("source").map(str::to_owned),
+        timed: profile.timed(),
         samples: profile.samples() as u64,
         weight: profile.total_weight(),
         duration: end - start,

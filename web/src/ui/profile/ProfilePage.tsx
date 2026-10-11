@@ -81,7 +81,14 @@ export function ProfilePage() {
       <div className="profile" data-testid="profile">
         {info ? <Recording info={info} /> : null}
         <ProfileHead />
-        <Timeline />
+        {focus.summary.timed ? (
+          <Timeline />
+        ) : (
+          <div className="profile-untimed muted" data-testid="untimed">
+            Read from {focus.summary.source ?? "a file"}, which keeps no times or threads: this
+            profile has no timeline.
+          </div>
+        )}
         <div className="profile-view">
           {view === "zones" ? (
             <ZonesView />
@@ -131,7 +138,7 @@ function ProfileHead() {
           {program ?? summary.name}
         </span>
         <span className="muted">
-          {summary.name} · {formatDuration(summary.duration)} ·{" "}
+          {summary.name} · {summary.timed ? `${formatDuration(summary.duration)} · ` : ""}
           {summary.samples.toLocaleString("en-US")} samples
         </span>
       </div>

@@ -4,12 +4,33 @@
 
 import type { ProfileKey } from "../protocol";
 
-/** A weight in its unit: CPU time, or executions counted. */
+/** A weight in its unit: CPU time, bytes, or a count of what the
+ * profile counts, such as executions or an imported profile's goroutines. */
 export function formatWeight(weight: number, unit: string): string {
-  if (unit !== "nanoseconds") {
-    return `${Math.round(weight).toLocaleString("en-US")} ${weight === 1 ? "execution" : "executions"}`;
+  if (unit === "nanoseconds") {
+    return formatDuration(weight);
   }
-  return formatDuration(weight);
+  if (unit === "bytes") {
+    return formatBytes(weight);
+  }
+  const count = Math.round(weight).toLocaleString("en-US");
+  const one = unit.endsWith("s") ? unit.slice(0, -1) : unit;
+  return `${count} ${weight === 1 ? one : unit.endsWith("s") ? unit : `${unit}s`}`;
+}
+
+/** Bytes, in the largest binary unit that keeps them above one. */
+export function formatBytes(bytes: number): string {
+  const units: [number, string][] = [
+    [2 ** 30, "GiB"],
+    [2 ** 20, "MiB"],
+    [2 ** 10, "KiB"],
+  ];
+  for (const [size, name] of units) {
+    if (Math.abs(bytes) >= size) {
+      return `${(bytes / size).toPrecision(3)} ${name}`;
+    }
+  }
+  return `${Math.round(bytes)} B`;
 }
 
 /** Nanoseconds, in the largest unit that keeps them above one. */

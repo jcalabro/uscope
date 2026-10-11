@@ -405,3 +405,33 @@ A profile is a file of sealed parts followed by an index of them. A file
 cut short still reads: `report` says so and shows every part that was
 complete. `uscope record` writes its profile when the program exits. The
 format is versioned, and uscope says when it cannot read a file's version.
+
+## Other tools' formats
+
+```sh
+uscope convert app.usprof app.pb.gz      # pprof, for go tool pprof and Pyroscope
+uscope convert app.usprof app.folded     # folded stacks, for FlameGraph and speedscope
+uscope convert app.usprof app.json       # a Chrome trace of its zones, for Perfetto
+uscope web cpu.pprof                     # Go's own profiles open as uscope's do
+```
+
+`uscope convert` writes the format the output's name says, or the one
+`--to` names, and reads uscope's profiles, pprof's, gzipped or not, and
+folded stacks. So do `uscope report` and `uscope web`. Each other format
+holds less than uscope's does, and `convert` says what it leaves out:
+
+- **pprof** holds each stack and its weight, from the same call tree the
+  views show, with `--native` choosing native stacks over tasks'. Times,
+  threads, labels, and instrumentation stay behind.
+- **Folded stacks** hold each stack's functions and weight, and nothing
+  else. A `;` in a name, as in `[u8; 4]`, is written `:`, which the
+  format can hold.
+- **A Chrome trace** holds the instrumentation: each thread's zones and
+  labels, and the program's marks. Samples stay behind.
+
+A pprof profile read in weighs its samples by its default sample type, as
+Go's tools do: bytes for a heap profile, goroutines for a goroutine
+profile, and nanoseconds for a CPU profile. Its samples' labels label
+their tasks, so `worker=parked` filters them in every view. Neither pprof
+nor folded stacks keep when a sample was taken or on which thread, so
+such a profile has no timeline, and its views say so.

@@ -938,9 +938,19 @@ export type ProfileSummary = { id: string, name: string,
  */
 program: string | null, 
 /**
- * What a sample weighs: `nanoseconds` of CPU time, or `executions`.
+ * What a sample weighs: `nanoseconds` of CPU time, `executions`,
+ * `bytes`, or what an imported profile counts.
  */
-unit: string, samples: number, weight: number, 
+unit: string, 
+/**
+ * What made the samples, such as a clock or an imported pprof file.
+ */
+source: string | null, 
+/**
+ * Whether the samples carry their times and threads, which an
+ * imported pprof or folded profile's do not.
+ */
+timed: boolean, samples: number, weight: number, 
 /**
  * Nanoseconds from the first sample to the last.
  */

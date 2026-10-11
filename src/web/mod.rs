@@ -343,10 +343,10 @@ fn open_profile(profiles: &profiles::Profiles, path: &std::path::Path) -> Result
         return Ok(None);
     }
     let mut magic = [0; 8];
-    let is_profile = std::fs::File::open(path)
-        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut magic))
-        .is_ok_and(|()| uscope::profiler::Profile::is_profile(&magic));
-    if !is_profile {
+    let read = std::fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read(&mut file, &mut magic))
+        .unwrap_or(0);
+    if uscope::profiler::Format::of_file(path, &magic[..read]).is_none() {
         return Ok(None);
     }
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;

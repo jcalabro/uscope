@@ -852,8 +852,14 @@ pub struct ProfileSummary {
     pub name: String,
     /// The program recorded.
     pub program: Option<String>,
-    /// What a sample weighs: `nanoseconds` of CPU time, or `executions`.
+    /// What a sample weighs: `nanoseconds` of CPU time, `executions`,
+    /// `bytes`, or what an imported profile counts.
     pub unit: String,
+    /// What made the samples, such as a clock or an imported pprof file.
+    pub source: Option<String>,
+    /// Whether the samples carry their times and threads, which an
+    /// imported pprof or folded profile's do not.
+    pub timed: bool,
     pub samples: u64,
     pub weight: u64,
     /// Nanoseconds from the first sample to the last.

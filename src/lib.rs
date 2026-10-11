@@ -281,6 +281,18 @@ pub fn fuzz_capture(data: &[u8]) {
     }
 }
 
+/// Reads a profile in any format uscope imports, and writes one it accepts
+/// in every format, for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_profile_import(data: &[u8]) {
+    if let Ok(read) = profiler::Profile::import(data) {
+        for format in profiler::Format::ALL {
+            let _ = read.profile.export(format, profiler::StackView::Logical);
+        }
+    }
+}
+
 /// Exercises debug-register planning invariants for the fuzz harness.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
