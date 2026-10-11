@@ -176,9 +176,41 @@ macro_rules! zone {
 #[macro_export]
 macro_rules! zone {
     ($name:literal) => {
-        ()
+        $crate::__off()
     };
 }
+
+/// What [`zone!`] and [`label!`] give when built off: nothing, bound to
+/// its thread as their guards are, so a program builds alike either way.
+#[cfg(not(feature = "enabled"))]
+#[doc(hidden)]
+#[must_use]
+pub struct Off(core::marker::PhantomData<*const ()>);
+
+#[cfg(not(feature = "enabled"))]
+#[doc(hidden)]
+#[inline(always)]
+pub const fn __off() -> Off {
+    Off(core::marker::PhantomData)
+}
+
+/// A zone or label is a span of one thread, so its guard cannot move to
+/// another, as across an `.await` that resumes elsewhere: this fails to
+/// compile if one could, as two impls would then apply.
+const _: fn() = || {
+    trait NotSend<Which> {
+        fn check() {}
+    }
+    impl<T: ?Sized> NotSend<()> for T {}
+    impl<T: ?Sized + Send> NotSend<u8> for T {}
+    #[cfg(feature = "enabled")]
+    {
+        <Zone as NotSend<_>>::check();
+        <Label as NotSend<_>>::check();
+    }
+    #[cfg(not(feature = "enabled"))]
+    <Off as NotSend<_>>::check();
+};
 
 /// The end of a frame, for a program that works in frames.
 #[cfg(feature = "enabled")]
@@ -264,11 +296,12 @@ macro_rules! label {
 #[cfg(not(feature = "enabled"))]
 #[macro_export]
 macro_rules! label {
-    ($key:literal, $value:expr) => {
+    ($key:literal, $value:expr) => {{
         if false {
             let _ = &$value;
         }
-    };
+        $crate::__off()
+    }};
 }
 
 /// Asks uscope to save the recording's window around this moment, when it

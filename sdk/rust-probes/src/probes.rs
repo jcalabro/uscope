@@ -3,6 +3,7 @@
 
 use core::cell::Cell;
 use core::fmt;
+use core::marker::PhantomData;
 use core::ptr;
 use core::sync::atomic::{
     AtomicPtr, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering, compiler_fence,
@@ -111,15 +112,19 @@ pub fn __on(state: &AtomicU8) -> bool {
     state.load(Ordering::Relaxed) != 0
 }
 
+/// What keeps a guard on the thread it began on, whose ring it ends in.
+type ThreadBound = PhantomData<*const ()>;
+
 /// The zone [`zone!`](crate::zone) opens, which ends when it drops.
 #[must_use = "a zone ends when its guard drops"]
-pub struct Zone(Option<&'static AtomicU8>);
+pub struct Zone(Option<&'static AtomicU8>, ThreadBound);
 
 impl Zone {
     #[doc(hidden)]
     #[inline(always)]
     pub fn begin(state: &'static AtomicU8) -> Self {
-        Self((__on(state) && write(state, abi::ZONE_BEGIN, 0, &[])).then_some(state))
+        let began = __on(state) && write(state, abi::ZONE_BEGIN, 0, &[]);
+        Self(began.then_some(state), PhantomData)
     }
 }
 
@@ -135,13 +140,14 @@ impl Drop for Zone {
 
 /// The label [`label!`](crate::label) opens, which ends when it drops.
 #[must_use = "a label ends when its guard drops"]
-pub struct Label(Option<&'static AtomicU8>);
+pub struct Label(Option<&'static AtomicU8>, ThreadBound);
 
 impl Label {
     #[doc(hidden)]
     #[inline(always)]
     pub fn begin(state: &'static AtomicU8, value: &dyn fmt::Display) -> Self {
-        Self((__on(state) && text(state, abi::LABEL_BEGIN, format_args!("{value}"))).then_some(state))
+        let began = __on(state) && text(state, abi::LABEL_BEGIN, format_args!("{value}"));
+        Self(began.then_some(state), PhantomData)
     }
 }
 

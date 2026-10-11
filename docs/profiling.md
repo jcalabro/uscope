@@ -318,7 +318,9 @@ the sites by name, such as `--probes 'db::*,handle'`, or `off`.
 A thread that writes faster than uscope reads overwrites its oldest
 records, and every record lost is counted. A zone whose begin or end was
 lost, or whose begin and end do not nest, is kept and flagged rather than
-repaired. The report lists each site's zones:
+repaired. A zone or label is a span of one thread, so its guard is not
+`Send`: a future that holds one across an `.await` cannot be spawned
+where it might resume on another thread. End it before awaiting. The report lists each site's zones:
 
 ```
 Instrumentation: 4077 events, in 2039 zones from 1 site.
