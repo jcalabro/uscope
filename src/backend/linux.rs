@@ -61,6 +61,7 @@ use tls::TlsModule;
 
 mod activation;
 mod async_frames;
+pub use async_frames::resume_address;
 mod awaits;
 mod breakpoints;
 mod callers;

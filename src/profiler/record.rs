@@ -796,9 +796,29 @@ impl Processor {
         snapshot: &Snapshot,
     ) {
         self.gap(start, end, GapReason::TaskSnapshot);
-        self.builder.count(AccountKind::Snapshots as u32, 1);
         self.builder
             .count(AccountKind::SnapshotPause as u32, end.saturating_sub(start));
+        self.tasks(pid, (start, end), weight, snapshot);
+    }
+
+    /// Records a task snapshot read from `start` to `end` while the
+    /// program ran.
+    pub fn live_task_snapshot(
+        &mut self,
+        pid: u32,
+        (start, end): (u64, u64),
+        weight: u64,
+        snapshot: &Snapshot,
+    ) {
+        self.builder.count(AccountKind::LiveSnapshots as u32, 1);
+        self.builder
+            .count(AccountKind::SnapshotChanged as u32, snapshot.changed);
+        self.tasks(pid, (start, end), weight, snapshot);
+    }
+
+    /// Records a snapshot's tasks and problems.
+    fn tasks(&mut self, pid: u32, (start, end): (u64, u64), weight: u64, snapshot: &Snapshot) {
+        self.builder.count(AccountKind::Snapshots as u32, 1);
         if let Some(first) = snapshot.problems.first() {
             let more = snapshot.problems.len() - 1;
             let text = match more {

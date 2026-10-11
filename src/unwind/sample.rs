@@ -99,7 +99,7 @@ pub fn unwind_sample(
     sample: SampledState<'_>,
     limit: usize,
 ) -> (Vec<SampledFrame>, StackEnd) {
-    let mut registers = RegisterFile::new(sample.registers.iter().copied());
+    let registers = RegisterFile::new(sample.registers.iter().copied());
     let Some(instruction) = registers
         .get(RETURN_ADDRESS)
         .or_else(|| sample.chain.first().copied())
@@ -110,12 +110,78 @@ pub fn unwind_sample(
         start: registers.get(RSP).unwrap_or(0),
         bytes: sample.stack,
     };
+    let walked = walk_cfi(modules, instruction, registers, &mut memory, limit);
+    if walked.certain {
+        return (frames(walked.unwound), walked.end);
+    }
+    let (mut unwound, cfi_end) = (walked.unwound, walked.end);
 
-    // Call-frame information over the copy.
+    // The kernel's chain from the deepest frame that keeps the chain.
+    let Some((kept, link)) = splice(modules, rules, &unwound, sample, &mut memory) else {
+        return (frames(unwound), cfi_end);
+    };
+    unwound.truncate(kept + 1);
+    let mut frames = frames(unwound);
+    let end = follow_chain(modules, rules, &mut frames, &sample.chain[link..], limit);
+    (frames, end)
+}
+
+/// Unwinds a stack by call-frame information alone from `registers`,
+/// reading it from `memory` as it goes: a parked task's, whose registers
+/// its runtime saved, read while the program runs. A word `memory` cannot
+/// read ends the stack as unreadable.
+pub fn unwind_memory(
+    modules: &[UnwindModule<'_>],
+    registers: &[(u16, u64)],
+    memory: &mut dyn MemoryReader,
+    limit: usize,
+) -> (Vec<SampledFrame>, StackEnd) {
+    let registers = RegisterFile::new(registers.iter().copied());
+    let Some(instruction) = registers.get(RETURN_ADDRESS) else {
+        return (Vec::new(), StackEnd::Truncated(Truncation::NoStack, None));
+    };
+    let walked = walk_cfi(modules, instruction, registers, memory, limit);
+    let end = match walked.end {
+        StackEnd::Truncated(Truncation::StackCopyExhausted, module) => {
+            StackEnd::Truncated(Truncation::Unreadable, module)
+        }
+        end => end,
+    };
+    (frames(walked.unwound), end)
+}
+
+/// What call-frame information found of a stack: the frames it reached,
+/// and how it ended, which is `certain` unless the kernel's chain may
+/// still reach further.
+struct Walked {
+    unwound: Vec<Unwound>,
+    end: StackEnd,
+    certain: bool,
+}
+
+impl Walked {
+    const fn certain(unwound: Vec<Unwound>, end: StackEnd) -> Self {
+        Self {
+            unwound,
+            end,
+            certain: true,
+        }
+    }
+}
+
+/// Unwinds by call-frame information from `instruction` with `registers`,
+/// reading the stack from `memory`, collecting at most `limit` frames.
+fn walk_cfi(
+    modules: &[UnwindModule<'_>],
+    instruction: u64,
+    mut registers: RegisterFile,
+    memory: &mut dyn MemoryReader,
+    limit: usize,
+) -> Walked {
     let mut unwound: Vec<Unwound> = Vec::new();
     let mut address = VirtualAddress::new(instruction);
     let mut previous_cfa = None;
-    let cfi_end = loop {
+    let end = loop {
         let found = unwind_module_for(modules, address);
         let module = found.map(|(module, _)| module);
         let index = module.and_then(|found| {
@@ -135,13 +201,10 @@ pub fn unwind_sample(
             frame_pointer: registers.get(RBP),
         });
         if unwound.len() >= limit {
-            return (
-                frames(unwound),
-                StackEnd::Truncated(Truncation::DepthLimit, None),
-            );
+            return Walked::certain(unwound, StackEnd::Truncated(Truncation::DepthLimit, None));
         }
         if role == CodeRole::Outermost {
-            return (frames(unwound), StackEnd::Complete);
+            return Walked::certain(unwound, StackEnd::Complete);
         }
         // A switch's frame lies on the stack it switched from, which its
         // stack pointer no longer names: only the kernel's chain, through
@@ -152,9 +215,11 @@ pub fn unwind_sample(
         let Some((module, image_address)) = found else {
             break StackEnd::Truncated(Truncation::UnmappedAddress, None);
         };
-        let step = match module.unwind.unwind(image_address, &registers, &mut memory) {
+        let step = match module.unwind.unwind(image_address, &registers, memory) {
             Ok(step) => step,
-            Err(UnwindTermination::Complete) => return (frames(unwound), StackEnd::Complete),
+            Err(UnwindTermination::Complete) => {
+                return Walked::certain(unwound, StackEnd::Complete);
+            }
             Err(UnwindTermination::NoUnwindInfo { .. }) => {
                 break StackEnd::Truncated(Truncation::NoUnwindInfo, index);
             }
@@ -164,7 +229,7 @@ pub fn unwind_sample(
             Err(_) => break StackEnd::Truncated(Truncation::InvalidCaller, index),
         };
         let caller = match step.registers.get(RETURN_ADDRESS) {
-            None | Some(0) => return (frames(unwound), StackEnd::Complete),
+            None | Some(0) => return Walked::certain(unwound, StackEnd::Complete),
             Some(caller) => caller,
         };
         // A caller in the same frame as its callee would repeat forever.
@@ -180,7 +245,7 @@ pub fn unwind_sample(
             let interrupted = step
                 .registers
                 .get(RSP)
-                .and_then(|context| interrupted_registers(context, &mut memory));
+                .and_then(|context| interrupted_registers(context, memory));
             let Some(interrupted) = interrupted else {
                 break StackEnd::Truncated(Truncation::StackCopyExhausted, None);
             };
@@ -195,15 +260,11 @@ pub fn unwind_sample(
         };
         registers = step.registers;
     };
-
-    // The kernel's chain from the deepest frame that keeps the chain.
-    let Some((kept, link)) = splice(modules, rules, &unwound, sample, &mut memory) else {
-        return (frames(unwound), cfi_end);
-    };
-    unwound.truncate(kept + 1);
-    let mut frames = frames(unwound);
-    let end = follow_chain(modules, rules, &mut frames, &sample.chain[link..], limit);
-    (frames, end)
+    Walked {
+        unwound,
+        end,
+        certain: false,
+    }
 }
 
 /// The frame of the signal trampoline at `caller`, if a trampoline is

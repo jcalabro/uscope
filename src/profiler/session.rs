@@ -247,7 +247,14 @@ fn settings(
             "task snapshots",
             options.task_snapshots.map_or_else(
                 || "off".into(),
-                |every| format!("every {:.3} s", every.as_secs_f64()),
+                |every| {
+                    let live = if options.live_snapshots {
+                        ", as the program runs"
+                    } else {
+                        ""
+                    };
+                    format!("every {:.3} s{live}", every.as_secs_f64())
+                },
             ),
         ),
         ("probes", options.probes.to_string()),
@@ -381,6 +388,7 @@ fn drive(
 struct Snapshots {
     pid: u32,
     every: Duration,
+    live: bool,
     loading: Option<std::thread::JoinHandle<Result<Snapshotter, RecordError>>>,
     snapshotter: Option<Snapshotter>,
     next: std::time::Instant,
@@ -403,6 +411,7 @@ impl Snapshots {
         Self {
             pid,
             every,
+            live: options.live_snapshots,
             loading,
             snapshotter: None,
             next: std::time::Instant::now() + every,
@@ -436,14 +445,27 @@ impl Snapshots {
                 ),
             }
         }
-        let Some(snapshotter) = &self.snapshotter else {
+        let Some(snapshotter) = &mut self.snapshotter else {
             return;
         };
+        if self.live {
+            // The program runs on, and the samples it writes meanwhile
+            // arrive as any do.
+            let start = monotonic();
+            if let Some(snapshot) = snapshotter.take_live() {
+                let end = monotonic();
+                self.next = std::time::Instant::now() + self.every;
+                let weight = start.saturating_sub(self.previous);
+                processor.live_task_snapshot(self.pid, (start, end), weight, &snapshot);
+                self.previous = start;
+                return;
+            }
+        }
         if sampling {
             events.enable(false);
         }
         let start = monotonic();
-        let taken = snapshotter.take();
+        let taken = snapshotter.take(self.live);
         let end = monotonic();
         // With the events off, every record from before the pause is in
         // the rings, and the snapshot claims each sample before it.

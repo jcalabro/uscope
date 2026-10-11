@@ -267,6 +267,23 @@ snapshots are off unless asked for, and need the same permission to trace
 the program as the debugger does. A snapshot that fails, or misses tasks
 it could not read, says why in the report.
 
+`--live-snapshots` reads the same from the program's memory as it runs,
+without stopping it. A task may move while it is read, so each is read
+twice: its saved registers or the future it awaits, and every page of its
+stack or every future of its chain, must read the same both times, or the
+task is left out of that snapshot and counted. A live snapshot is
+consistent for each task it keeps, not across tasks. It reads no running
+thread's registers but one: tokio is found through each thread's
+thread-local storage, which needs the thread's thread pointer. A thread
+keeps that for life, so the first snapshot, and the first after a new
+thread starts, stops the program to learn them; Go's goroutines need none,
+and a Go program is never stopped:
+
+```
+40 task snapshots read where its tasks wait as it ran, leaving out 2 tasks that changed while read.
+1 task snapshot held the program stopped for 0.005 s, 5.0 ms each, to learn its threads and read where its tasks wait.
+```
+
 Snapshots also say which task each CPU sample ran. Go's compiled code
 keeps the running goroutine's `g` in a register, which every sample
 copies, and each snapshot lists where every goroutine's `g` is. A sample

@@ -1206,6 +1206,7 @@ fn task_snapshots_find_each_goroutine_where_it_waits_or_runs() {
     // The program waits until two snapshots have seen every receiver.
     let recording = snapshot_until(
         Command::new(Scenario::fixture("profile-go-waits")),
+        false,
         |profile| receiving(profile).len() >= 2,
     );
     let profile = &recording;
@@ -1215,26 +1216,7 @@ fn task_snapshots_find_each_goroutine_where_it_waits_or_runs() {
         "{taken} {paused} {failed}"
     );
     assert!(receiving(profile).len() >= 2, "{:#?}", profile.task_waits());
-    for wait in profile.task_waits() {
-        if wait
-            .functions
-            .iter()
-            .any(|function| function == "main.receive")
-        {
-            assert_eq!(wait.state, "chan receive", "{wait:?}");
-            let ends = (wait.functions.first(), wait.functions.last());
-            assert_eq!(
-                ends,
-                (
-                    Some(&"runtime.gopark".into()),
-                    Some(&"runtime.goexit".into())
-                ),
-                "{wait:?}"
-            );
-            assert!(wait.weight > 0, "{wait:?}");
-            assert_eq!(wait.ending, StackEnding::Complete, "{wait:?}");
-        }
-    }
+    assert_receivers_wait(profile);
     let gaps = profile.gaps();
     let inside = |time: i64| gaps.iter().any(|(start, end)| *start < time && time < *end);
     if let Some(stack) = profile.stacks().iter().find(|stack| inside(stack.time)) {
@@ -1258,23 +1240,6 @@ fn task_snapshots_find_each_goroutine_where_it_waits_or_runs() {
         })
         .collect();
     assert!(!spun.is_empty());
-    eprintln!(
-        "DEBUG gaps {:?}",
-        gaps.iter()
-            .map(|(s, e)| ((s - first) / 1000, (e - first) / 1000))
-            .collect::<Vec<_>>()
-    );
-    eprintln!(
-        "DEBUG receiving {:?}",
-        found.iter().map(|t| (t - first) / 1000).collect::<Vec<_>>()
-    );
-    eprintln!(
-        "DEBUG none {:?}",
-        spun.iter()
-            .filter(|s| s.task.is_none())
-            .map(|s| (s.time - first) / 1000)
-            .collect::<Vec<_>>()
-    );
     let spinner = spun[0].task.expect("the spinner's task");
     assert!(
         spun.iter().all(|stack| stack.task == Some(spinner)),
@@ -1291,9 +1256,55 @@ fn task_snapshots_find_each_goroutine_where_it_waits_or_runs() {
     assert!(profile.task_samples() >= spun.len() as u64);
 }
 
-/// Records `command` with a task snapshot every 50 ms, holding it until a
-/// profile so far is `ready`, then writing a line to release it.
-fn snapshot_until(mut command: Command, ready: impl Fn(&Profile) -> bool) -> Profile {
+/// Each goroutine waiting in `main.receive` waits on its channel, from
+/// `runtime.gopark` out to `runtime.goexit`.
+fn assert_receivers_wait(profile: &Profile) {
+    for wait in profile.task_waits() {
+        if wait
+            .functions
+            .iter()
+            .any(|function| function == "main.receive")
+        {
+            assert_eq!(wait.state, "chan receive", "{wait:?}");
+            let ends = (wait.functions.first(), wait.functions.last());
+            assert_eq!(
+                ends,
+                (
+                    Some(&"runtime.gopark".into()),
+                    Some(&"runtime.goexit".into())
+                ),
+                "{wait:?}"
+            );
+            assert!(wait.weight > 0, "{wait:?}");
+            assert_eq!(wait.ending, StackEnding::Complete, "{wait:?}");
+        }
+    }
+}
+
+/// Live task snapshots read the same waits from the running program,
+/// never stopping it: no pause, and no gap in its samples.
+#[test]
+fn live_task_snapshots_find_goroutines_waiting_without_a_pause() {
+    let profile = snapshot_until(
+        Command::new(Scenario::fixture("profile-go-waits")),
+        true,
+        |profile| receiving(profile).len() >= 2,
+    );
+    let (taken, paused, failed) = profile.task_snapshots();
+    assert!(
+        taken >= 2 && paused == 0 && failed == 0,
+        "{taken} {paused} {failed}: {:?}",
+        profile.task_snapshot_problems()
+    );
+    assert!(profile.gaps().is_empty(), "{:?}", profile.gaps());
+    assert_eq!(profile.live_snapshots().0, taken);
+    assert_receivers_wait(&profile);
+}
+
+/// Records `command` with a task snapshot every 50 ms, `live` or stopping
+/// it, holding it until a profile so far is `ready`, then writing a line
+/// to release it.
+fn snapshot_until(mut command: Command, live: bool, ready: impl Fn(&Profile) -> bool) -> Profile {
     let (reader, mut writer) = std::io::pipe().expect("pipe");
     command
         .stdin(reader)
@@ -1301,6 +1312,7 @@ fn snapshot_until(mut command: Command, ready: impl Fn(&Profile) -> bool) -> Pro
         .stderr(Stdio::null());
     let options = RecordOptions {
         task_snapshots: Some(Duration::from_millis(50)),
+        live_snapshots: live,
         ..RecordOptions::default()
     };
     let stop = AtomicBool::new(false);
@@ -1347,9 +1359,16 @@ fn receiving(profile: &Profile) -> Vec<i64> {
 }
 
 /// A task snapshot reads a suspended tokio task's chain of awaits: the
-/// future it awaits, then each async function out to its root.
+/// future it awaits, then each async function out to its root, whether it
+/// stops the program or reads it live.
 #[test]
 fn task_snapshots_follow_a_tokio_tasks_awaits() {
+    for live in [false, true] {
+        follows_a_tokio_tasks_awaits(live);
+    }
+}
+
+fn follows_a_tokio_tasks_awaits(live: bool) {
     let at_gate = |profile: &Profile| {
         profile
             .task_waits()
@@ -1363,7 +1382,22 @@ fn task_snapshots_follow_a_tokio_tasks_awaits() {
     };
     let mut command = Command::new(Scenario::fixture("tokio-cancel-o0"));
     command.arg("hold");
-    let profile = snapshot_until(command, |profile| !at_gate(profile).is_empty());
+    // Tokio is found through its threads' thread pointers, which a live
+    // recording's first snapshot stops the program to learn: more
+    // snapshots than stopped it finding the task means a live one did.
+    let found = |profile: &Profile| {
+        let times: std::collections::BTreeSet<i64> =
+            at_gate(profile).iter().map(|wait| wait.time).collect();
+        let (taken, _, _) = profile.task_snapshots();
+        let stopped = taken - profile.live_snapshots().0;
+        times.len() as u64 > if live { stopped } else { 0 }
+    };
+    let profile = snapshot_until(command, live, found);
+    let (taken, _, failed) = profile.task_snapshots();
+    let (read_live, _) = profile.live_snapshots();
+    assert_eq!(failed, 0, "{:?}", profile.task_snapshot_problems());
+    assert_eq!(read_live > 0, live, "{taken} {read_live}");
+    assert!(taken > read_live, "{taken} {read_live}");
     let waits = at_gate(&profile);
     assert!(!waits.is_empty());
     for wait in waits {

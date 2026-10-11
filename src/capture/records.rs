@@ -456,6 +456,11 @@ pub enum AccountKind {
     ProbeInterrupted = 23,
     /// Instrumentation records that broke the ABI, and rings that did.
     ProbeMalformed = 24,
+    /// Waiting tasks live task snapshots left out because they changed
+    /// while read.
+    SnapshotChanged = 25,
+    /// Task snapshots read while the program ran.
+    LiveSnapshots = 26,
 }
 
 /// A count of something the views must show.

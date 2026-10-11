@@ -170,6 +170,9 @@ pub struct RecordOptions {
     /// How often to stop the program, through the debugger's attach, to
     /// read where its tasks wait: none never does.
     pub task_snapshots: Option<std::time::Duration>,
+    /// Whether task snapshots read the program as it runs, without
+    /// stopping it, leaving out each task that changes while read.
+    pub live_snapshots: bool,
     /// The instrumentation sites to switch on in a program built with
     /// uscope's probes SDK.
     pub probes: ProbeSelection,
@@ -200,6 +203,7 @@ impl RecordOptions {
             budget: preset.budget(),
             window: None,
             task_snapshots: None,
+            live_snapshots: false,
             probes: ProbeSelection::All,
             probe_timeout: std::time::Duration::from_secs(10),
             debug_directories: Vec::new(),
@@ -786,6 +790,17 @@ impl Profile {
             account(AccountKind::Snapshots),
             account(AccountKind::SnapshotPause),
             account(AccountKind::SnapshotFailures),
+        )
+    }
+
+    /// How many task snapshots read the program as it ran, and how many
+    /// waiting tasks they left out because they changed while read.
+    #[must_use]
+    pub fn live_snapshots(&self) -> (u64, u64) {
+        let account = |kind: AccountKind| self.capture.account(kind as u32);
+        (
+            account(AccountKind::LiveSnapshots),
+            account(AccountKind::SnapshotChanged),
         )
     }
 

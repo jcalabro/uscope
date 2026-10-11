@@ -80,6 +80,11 @@ pub struct RecordArgs {
     /// the report says for how long.
     #[arg(long, value_name = "SECONDS")]
     task_snapshots: Option<f64>,
+    /// Read task snapshots from the program's memory as it runs, without
+    /// stopping it. A task that changes while read is left out, and the
+    /// report counts those.
+    #[arg(long, requires = "task_snapshots")]
+    live_snapshots: bool,
     /// Keep only the last SECONDS of the recording. SIGUSR2 saves the
     /// window as it is to FILE-1.usprof, FILE-2.usprof, and so on, as the
     /// recording goes on; FILE gets the last window.
@@ -317,6 +322,7 @@ fn options(args: &RecordArgs) -> Result<RecordOptions> {
         let every = Duration::try_from_secs_f64(seconds).context("--task-snapshots")?;
         anyhow::ensure!(!every.is_zero(), "--task-snapshots is a number of seconds");
         options.task_snapshots = Some(every);
+        options.live_snapshots = args.live_snapshots;
     }
     if let Some(seconds) = args.window {
         options.window = Some(Duration::try_from_secs_f64(seconds).context("--window")?);
@@ -596,14 +602,31 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
         )?;
     }
     let (snapshots, held, _) = profile.task_snapshots();
-    if snapshots > 0 {
+    let (live, changed) = profile.live_snapshots();
+    if live > 0 {
         writeln!(
             out,
-            "{} held the program stopped for {:.3} s, {:.1} ms each, to read where its tasks wait.",
-            plural(snapshots, "task snapshot"),
-            seconds(held),
-            held as f64 / 1e6 / snapshots as f64,
+            "{} read where its tasks wait as it ran, leaving out {} that changed while read.",
+            plural(live, "task snapshot"),
+            plural(changed, "task"),
         )?;
+    }
+    let stopped = snapshots - live;
+    if stopped > 0 {
+        let why = if live > 0 {
+            "to learn its threads and read where its tasks wait"
+        } else {
+            "to read where its tasks wait"
+        };
+        writeln!(
+            out,
+            "{} held the program stopped for {:.3} s, {:.1} ms each, {why}.",
+            plural(stopped, "task snapshot"),
+            seconds(held),
+            held as f64 / 1e6 / stopped as f64,
+        )?;
+    }
+    if snapshots > 0 {
         writeln!(
             out,
             "{} of the {} samples ran a task the snapshots either side of them agree on.",

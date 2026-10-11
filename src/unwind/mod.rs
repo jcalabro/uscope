@@ -120,7 +120,7 @@ pub struct FrameContext {
 }
 
 /// Register values by DWARF number. An absent register is unknown.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterFile {
     values: BTreeMap<u16, u64>,
 }
@@ -142,6 +142,13 @@ impl RegisterFile {
 
     pub fn remove(&mut self, register: u16) {
         self.values.remove(&register);
+    }
+
+    /// Every known register and its value, by number.
+    pub fn iter(&self) -> impl Iterator<Item = (u16, u64)> + '_ {
+        self.values
+            .iter()
+            .map(|(&register, &value)| (register, value))
     }
 }
 
