@@ -98,12 +98,15 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     /// passed by value, in registers where it fits, rather than by
     /// reference to a copy.
     pub(super) passed_by_value: Layered<HashMap<TypeId, bool>>,
-    /// The one unit whose types this arena builds, when it builds one
-    /// unit's apart from the others'.
-    pub(super) home_unit: Option<usize>,
-    /// Whether it was asked for a type of another unit, which a walk of
+    /// The group whose units' types this arena builds, when it builds one
+    /// group's apart from the others', and each unit's group.
+    pub(super) home: Option<(usize, &'a [usize])>,
+    /// Whether it was asked for a type of another group, which a walk of
     /// every unit in order may have built before this one.
     pub(super) foreign: bool,
+    /// The DIEs it took for another's type, in order, when it builds one
+    /// group's.
+    pub(super) aliases: Vec<DieKey>,
 }
 
 /// What the type arena's prepass found in every unit.
@@ -548,8 +551,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             complex_parts: HashMap::new(),
             passed_by_value: Layered::default(),
             go_dict_indices: Layered::default(),
-            home_unit: None,
+            home: None,
             foreign: false,
+            aliases: Vec::new(),
         };
         // Types in one scope share its segments, so each distinct list is
         // resolved once, in parallel, as a path may name another unit's
@@ -725,7 +729,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if let Some(id) = self.by_die.get(&key) {
             return *id;
         }
-        if self.home_unit.is_some_and(|home| home != key.unit) {
+        if let Some((home, groups)) = self.home
+            && groups.get(key.unit) != Some(&home)
+        {
             self.foreign = true;
         }
         let canonical = self.canonical_type_key(key);
@@ -734,6 +740,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         {
             let id = self.resolve(canonical);
             self.by_die.insert(key, id);
+            if self.home.is_some() {
+                self.aliases.push(key);
+            }
             return id;
         }
         if self.budget.charge("types", size_of::<TypeEntry>()).is_err() {

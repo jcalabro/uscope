@@ -105,6 +105,16 @@ impl Meter {
         }
     }
 
+    /// What this meter spent since it had spent `mark`, as a meter of its
+    /// own that refused what this one has.
+    pub const fn since(&self, mark: u64) -> Self {
+        Self {
+            limit: self.limit,
+            spent: self.spent - mark,
+            exceeded: self.exceeded,
+        }
+    }
+
     /// Charges what `apart`, split from this meter, spent, when it refused
     /// nothing and what it spent is still left here; otherwise nothing.
     pub fn absorb(&mut self, apart: &Self) -> bool {

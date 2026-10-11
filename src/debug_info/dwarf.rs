@@ -563,6 +563,36 @@ impl<'data> Units<'data> {
         index >= self.first_supplementary
     }
 
+    /// Each unit's group, named by its first unit: units whose DIEs refer
+    /// to one another's, directly or through other units, share one, so a
+    /// unit reaches only its group's DIEs.
+    fn groups(&self) -> std::result::Result<Vec<usize>, DwarfError> {
+        let outward = first_error(self.units.par_iter().map(outward_references).collect())?;
+        let mut parents = (0..self.units.len()).collect::<Vec<_>>();
+        let root = |parents: &mut Vec<usize>, mut unit: usize| {
+            while parents[unit] != unit {
+                parents[unit] = parents[parents[unit]];
+                unit = parents[unit];
+            }
+            unit
+        };
+        for (unit, references) in outward.iter().enumerate() {
+            for &reference in references {
+                let target = match reference {
+                    Outward::Own(offset) => self.containing(offset, self.is_supplementary(unit)),
+                    Outward::Supplementary(offset) => self.containing(offset, true),
+                };
+                if let Some(target) = target {
+                    let (from, to) = (root(&mut parents, unit), root(&mut parents, target.unit));
+                    parents[from.max(to)] = from.min(to);
+                }
+            }
+        }
+        Ok((0..self.units.len())
+            .map(|unit| root(&mut parents, unit))
+            .collect())
+    }
+
     /// The language the unit at `index` takes from the units referring to
     /// it, having none of its own.
     fn inherited_language(&self, index: usize) -> Option<gimli::DwLang> {
@@ -2370,6 +2400,22 @@ impl<V> DieMap<V> {
         }
     }
 
+    fn remove(&mut self, key: &DieKey) -> Option<V> {
+        self.units.get_mut(key.unit)?.remove(&key.offset)
+    }
+
+    /// Every entry, in no order.
+    fn into_entries(self) -> impl Iterator<Item = (DieKey, V)> {
+        self.units
+            .into_iter()
+            .enumerate()
+            .flat_map(|(unit, entries)| {
+                entries
+                    .into_iter()
+                    .map(move |(offset, value)| (DieKey { unit, offset }, value))
+            })
+    }
+
     /// Adds every entry of `other`, whose entries replace these.
     fn extend(&mut self, other: Self) {
         if other.units.len() > self.units.len() {
@@ -4055,8 +4101,9 @@ mod tests {
 
     /// Loading on one worker, two, or eight builds a byte-identical image.
     /// One worker walks the units in order; more walk them apart and add
-    /// what each built in order, or walk them in order again when a unit
-    /// reaches another's types, as Go's and Zig's do.
+    /// what each built in order. Units that reach each other's types, as
+    /// Go's and Zig's do, are walked in order with each other, apart from
+    /// the rest.
     #[test]
     fn every_number_of_workers_loads_the_same_image() {
         for fixture in [
@@ -4091,9 +4138,16 @@ mod tests {
             let serial = load(1);
             assert!(!serial.is_empty(), "{fixture}");
             for jobs in [2, 8] {
-                assert!(
-                    load(jobs) == serial,
-                    "{fixture} differs with {jobs} workers"
+                let recording =
+                    crate::profile::Recording::start(crate::profile::Options::default())
+                        .expect("no other recording");
+                let apart = load(jobs);
+                let report = recording.finish();
+                assert!(apart == serial, "{fixture} differs with {jobs} workers");
+                assert_eq!(
+                    report.counters.get("units_walked_in_order"),
+                    None,
+                    "{fixture} walks its units apart with {jobs} workers"
                 );
             }
         }
