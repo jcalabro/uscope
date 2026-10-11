@@ -5376,7 +5376,9 @@ fn a_continuous_recording_writes_segments_that_report_reads_as_one() {
     drop(stdin);
     assert!(recording.wait().expect("wait").success());
     assert_eq!(segments(), 2);
-    let report = assert_success(uscope(&["report", &directory.to_string_lossy()]));
+    // The second phase's time is mostly in the clock it reads, so it is a
+    // caller in the call tree rather than a function of its own.
+    let report = assert_success(uscope(&["report", "--tree", &directory.to_string_lossy()]));
     assert!(report.contains("second"), "{report}");
 }
 
