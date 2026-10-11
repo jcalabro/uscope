@@ -349,8 +349,9 @@ impl Profile {
     /// What each function costs, most expensive first.
     #[must_use]
     pub fn top(&self) -> Vec<FunctionCost> {
-        let keys = crate::analysis::Keys::new(&self.capture);
-        crate::analysis::top(&self.capture, &keys)
+        let keys =
+            crate::analysis::Keys::new(&self.capture, crate::analysis::Granularity::Function);
+        crate::analysis::functions(&self.capture, &keys, &crate::analysis::Query::default())
             .into_iter()
             .map(|cost| FunctionCost {
                 name: keys.name(cost.key),
@@ -364,14 +365,16 @@ impl Profile {
     /// their children.
     #[must_use]
     pub fn call_tree(&self) -> Vec<CallNode> {
-        let keys = crate::analysis::Keys::new(&self.capture);
-        crate::analysis::tree(&self.capture, &keys)
-            .into_iter()
+        let keys =
+            crate::analysis::Keys::new(&self.capture, crate::analysis::Granularity::Function);
+        let tree =
+            crate::analysis::aggregate(&self.capture, &keys, &crate::analysis::Query::default());
+        (0..tree.len())
             .map(|node| CallNode {
-                parent: (node.parent != NONE).then_some(node.parent as usize),
-                name: keys.name(node.key),
-                own: node.own,
-                total: node.total,
+                parent: (tree.parent[node] != NONE).then_some(tree.parent[node] as usize),
+                name: keys.name(tree.key[node]),
+                own: tree.own[node],
+                total: tree.total[node],
             })
             .collect()
     }

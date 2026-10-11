@@ -274,9 +274,10 @@ pub fn fuzz_perf_records(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_capture(data: &[u8]) {
     if let Ok(read) = capture::file::read(data) {
-        let keys = analysis::Keys::new(&read.capture);
-        let _ = analysis::top(&read.capture, &keys);
-        let _ = analysis::tree(&read.capture, &keys);
+        let keys = analysis::Keys::new(&read.capture, analysis::Granularity::Function);
+        let everything = analysis::Query::default();
+        let _ = analysis::aggregate(&read.capture, &keys, &everything);
+        let _ = analysis::functions(&read.capture, &keys, &everything);
     }
 }
 
