@@ -2991,3 +2991,15 @@ kbd {
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
 }
+
+.percent.change {
+  width: 72px;
+}
+
+.percent.change.up {
+  color: var(--changed);
+}
+
+.percent.change.down {
+  color: var(--accent);
+}

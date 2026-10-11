@@ -390,6 +390,18 @@ taken while it was open on their thread, or carried by their task, so
 roots each path at its value of a label key, and samples without one at
 `[no round]`. A zone flagged as cut short says what of it was not seen.
 
+**Compare with** diffs the view against a base: the selected range, which
+then becomes the base while another range is chosen, or another profile
+the server serves, as `uscope web new.usprof old.usprof` serves two. The
+flame graph keeps the current profile's shape and colors each frame by
+how its share of the samples changed: red where it grew, blue where it
+shrank, as strong as the change. The call tree and functions show each
+change in percentage points, and functions sort by it, so that what a
+change made slower comes first. Frames match by name, so a base may be
+another build. A base in another profile keeps the view's transforms
+and labels but cannot keep its thread or task filters, whose rows are
+this profile's, and says so.
+
 Everything the page shows is in its address, so a reload or a shared link
 opens the same view of the same profile.
 

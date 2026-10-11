@@ -305,8 +305,64 @@ function ProfileHead() {
             </option>
           ))}
         </select>
+        <Compare />
       </div>
     </div>
+  );
+}
+
+/** What a diff compares with: another range of this profile, chosen from
+ * the selection, or another profile served; a chip once chosen. */
+function Compare() {
+  const { profile, look, setLook } = useProfile();
+  const profiles = useModel((model) => model.profiles);
+  const others = profiles.filter((each) => each.id !== profile);
+  const baseRange = look.br ? parseRange(look.br) : null;
+  if (look.bp || baseRange) {
+    const of =
+      look.bp && look.bp !== profile
+        ? (others.find((each) => each.id === look.bp)?.name ?? look.bp)
+        : "this profile";
+    const during = baseRange
+      ? ` ${formatDuration(baseRange[0])} – ${formatDuration(baseRange[1])}`
+      : "";
+    return (
+      <Chip
+        label={`diff with ${of}${during}`}
+        title="Red grew and blue shrank against this base"
+        remove={() =>
+          setLook((look) => withLook(withLook(look, "bp", undefined), "br", undefined), true)
+        }
+      />
+    );
+  }
+  if (!look.range && others.length === 0) {
+    return null;
+  }
+  return (
+    <select
+      className="input profile-by"
+      aria-label="Compare with"
+      value=""
+      onChange={(event) => {
+        const chosen = event.target.value;
+        setLook(
+          (look) =>
+            chosen === "range"
+              ? withLook(withLook(look, "br", look.range), "range", undefined)
+              : withLook(look, "bp", chosen || undefined),
+          true,
+        );
+      }}
+    >
+      <option value="">no diff</option>
+      {look.range ? <option value="range">diff with the selected range</option> : null}
+      {others.map((each) => (
+        <option key={each.id} value={each.id}>
+          diff with {each.name}
+        </option>
+      ))}
+    </select>
   );
 }
 

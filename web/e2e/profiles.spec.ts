@@ -247,3 +247,53 @@ test("a Go program's own pprof profile opens in its unit, without a timeline", a
     .filter({ hasText: "main.allocate" });
   await expect(allocate).toHaveAttribute("title", "62.5 KiB");
 });
+
+test("a profile is diffed with a range of its own, and with another profile", async ({
+  page,
+  uscope,
+}, info) => {
+  const recorded = (symbol: string, name: string) => {
+    const file = info.outputPath(name);
+    execFileSync(
+      path.join(root, "target", "debug", "uscope"),
+      ["record", "-o", file, "--function", symbol, "--", fixture("profile-stacks-gcc-o0"), "1"],
+      { stdio: "ignore" },
+    );
+    return file;
+  };
+  const served = await uscope.start([
+    recorded("leaf", "calls.usprof"),
+    recorded("middle", "middle.usprof"),
+  ]);
+  await join(page, served.link);
+
+  // The selected range becomes the base, and nothing changed against it.
+  const lanes = page.getByTestId("timeline").getByRole("img");
+  const area = await lanes.boundingBox();
+  if (!area) {
+    throw new Error("the timeline has no box");
+  }
+  await page.mouse.move(area.x + 1, area.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(area.x + area.width - 1, area.y + 4, { steps: 4 });
+  await page.mouse.up();
+  await expect(page).toHaveURL(/range=\d+-\d+/);
+  const compare = page.getByRole("combobox", { name: "Compare with" });
+  await compare.selectOption("range");
+  await expect(page).toHaveURL(/br=\d+-\d+/);
+  await expect(page).not.toHaveURL(/[?&]range=/);
+  await page.getByRole("button", { name: "Functions" }).click();
+  const functions = page.getByRole("listbox", { name: "Functions" });
+  const row = (name: string) =>
+    functions.getByRole("option").filter({ has: page.getByText(name, { exact: true }) });
+  await expect(row("leaf")).toContainText("±0");
+
+  // Against the calls of middle, leaf is all new and middle all gone.
+  await page.getByRole("button", { name: /^Remove diff with this profile/ }).click();
+  await expect(page).not.toHaveURL(/br=/);
+  await compare.selectOption({ label: "diff with middle.usprof" });
+  await expect(page).toHaveURL(/bp=[0-9a-f]{16}/);
+  await expect(row("leaf")).toContainText("+100.0 pp");
+  await expect(row("middle")).toContainText("−100.0 pp");
+  await expect(page.getByRole("button", { name: "by change" })).toBeVisible();
+});

@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { transformed, withLook } from "../../profile/look";
-import { fill, formatPercent, formatWeight } from "../../profile/paint";
+import {
+  diffFill,
+  fill,
+  formatChange,
+  formatPercent,
+  formatWeight,
+  shareChange,
+} from "../../profile/paint";
 import {
   type CallTree,
   decodeTree,
@@ -164,7 +171,15 @@ function FlameGraph({
       const y = rect.depth * ROW;
       const key = tree.keys[tree.key[rect.node] ?? 0];
       context.globalAlpha = matched && !matched.has(rect.node) ? 0.35 : 1;
-      context.fillStyle = key ? fill(key, dark) : surface;
+      context.fillStyle = tree.baseTotal
+        ? diffFill(
+            (tree.total[rect.node] ?? 0) / Math.max(tree.weight, 1),
+            (tree.baseTotal[rect.node] ?? 0) / Math.max(tree.baseWeight ?? 0, 1),
+            dark,
+          )
+        : key
+          ? fill(key, dark)
+          : surface;
       context.fillRect(x, y, Math.max(w - 1, 0.5), ROW - 1);
       if (w > 28) {
         context.fillStyle = ink;
@@ -213,6 +228,19 @@ function FlameGraph({
             {formatPercent(tree.total[shown] ?? 0, tree.weight)} total,{" "}
             {formatPercent(tree.own[shown] ?? 0, tree.weight)} own
           </div>
+          {tree.baseTotal ? (
+            <div className="muted">
+              base {formatPercent(tree.baseTotal[shown] ?? 0, tree.baseWeight ?? 0)} total ·{" "}
+              {formatChange(
+                shareChange(
+                  tree.total[shown] ?? 0,
+                  tree.weight,
+                  tree.baseTotal[shown] ?? 0,
+                  tree.baseWeight ?? 0,
+                ),
+              )}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>

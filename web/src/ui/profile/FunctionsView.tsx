@@ -1,9 +1,9 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useMemo, useRef, useState } from "react";
-import { formatPercent, formatWeight } from "../../profile/paint";
+import { formatPercent, formatWeight, shareChange } from "../../profile/paint";
 import type { ProfileQuery } from "../../protocol";
 import { useAnswer, useProfile } from "./context";
-import { TreeRows, useTree } from "./TreeView";
+import { Change, TreeRows, useTree } from "./TreeView";
 
 const ROW = 20;
 
@@ -28,6 +28,7 @@ export function FunctionsView() {
   });
   const weight = answer.data?.weight ?? 0;
   const keys = answer.data?.keys ?? [];
+  const base = answer.data?.base ?? null;
   return (
     <div className="profile-functions">
       <div className="pane grow">
@@ -42,7 +43,7 @@ export function FunctionsView() {
                 aria-pressed={order === each}
                 onClick={() => setOrder(each)}
               >
-                by {each}
+                by {each === "own" && base ? "change" : each}
               </button>
             ))}
           </div>
@@ -82,6 +83,9 @@ export function FunctionsView() {
                   >
                     <span className="percent">{formatPercent(row.own, weight)}</span>
                     <span className="percent dim">{formatPercent(row.total, weight)}</span>
+                    {base ? (
+                      <Change points={shareChange(row.own, weight, row.baseOwn, base.weight)} />
+                    ) : null}
                     <span className="name">{key.name}</span>
                     {key.module ? <span className="end">{key.module}</span> : null}
                   </div>

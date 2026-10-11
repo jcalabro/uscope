@@ -15,18 +15,168 @@ use crate::web::{Client, Web};
 /// A profile of each of the six calls of `leaf` in the stacks fixture:
 /// three on the main thread and three on its worker.
 fn record_calls(scratch: &ScratchDir) -> std::path::PathBuf {
+    record_calls_of(scratch, "leaf", "calls.usprof")
+}
+
+/// A profile of each call of `symbol` in the stacks fixture, in `name`.
+fn record_calls_of(scratch: &ScratchDir, symbol: &str, name: &str) -> std::path::PathBuf {
     let mut command = Command::new(Scenario::fixture("profile-stacks-gcc-o0"));
     command.arg("1").stdout(Stdio::null());
     let options = RecordOptions {
         source: SampleSource::Function {
-            symbol: "leaf".into(),
+            symbol: symbol.into(),
         },
         ..RecordOptions::default()
     };
     let recording = record(command, &options).expect("record");
-    let path = scratch.path().join("calls.usprof");
+    let path = scratch.path().join(name);
     recording.profile.write(&path).expect("write the profile");
     path
+}
+
+/// A diff's nodes: each one's path of names from the root, and its own
+/// weight now and in the base.
+fn diff_nodes(tree: &Value, bytes: &[u8]) -> Vec<(Vec<String>, u64, u64)> {
+    let count = usize::try_from(tree["nodes"].as_u64().expect("a count")).expect("a count");
+    assert_eq!(bytes.len(), count * 40, "six columns of {count} nodes");
+    let mut nodes = nodes(tree, &bytes[..count * 24]);
+    let base_own = bytes[count * 24..][..count * 8].as_chunks::<8>().0;
+    for (node, word) in nodes.iter_mut().zip(base_own) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "weights are whole"
+        )]
+        let weight = f64::from_le_bytes(*word) as u64;
+        node.2 = weight;
+    }
+    nodes
+}
+
+/// A tree or functions answer with a base holds both profiles' weights,
+/// against another profile or a profile's own other self; a base in
+/// another profile cannot keep this one's thread filter.
+#[tokio::test]
+async fn a_profile_diffs_against_another_and_against_itself() {
+    let scratch = ScratchDir::new("web-diff");
+    let leaf = record_calls(&scratch);
+    let middle = record_calls_of(&scratch, "middle", "middle.usprof");
+    let web = Web::start(
+        "profile",
+        &[
+            leaf.to_str().expect("a path"),
+            middle.to_str().expect("a path"),
+        ],
+    );
+    let mut tab = web.control("tab").await;
+    let listed = tab
+        .expect("both profiles", |message| {
+            message["type"] == "profiles" && message["profiles"].as_array().map(Vec::len) == Some(2)
+        })
+        .await;
+    let id = |name: &str| {
+        listed["profiles"]
+            .as_array()
+            .expect("profiles")
+            .iter()
+            .find(|profile| profile["name"] == name)
+            .and_then(|profile| profile["id"].as_str())
+            .expect("an id")
+            .to_owned()
+    };
+    let (leaf, middle) = (id("calls.usprof"), id("middle.usprof"));
+
+    // Against itself, nothing changed anywhere.
+    let (answer, bytes) = tab
+        .with_bytes(
+            "profileTree",
+            json!({"profile": leaf, "base": {"profile": leaf}}),
+        )
+        .await
+        .expect("a diff");
+    assert_eq!(answer["base"]["weight"], 6);
+    let same = diff_nodes(&answer, &bytes);
+    assert!(same.iter().all(|(_, own, base)| own == base), "{same:?}");
+
+    // Against the calls of middle, each profile's weight is on its paths.
+    let (answer, bytes) = tab
+        .with_bytes(
+            "profileTree",
+            json!({"profile": leaf, "base": {"profile": middle}}),
+        )
+        .await
+        .expect("a diff");
+    let diff = diff_nodes(&answer, &bytes);
+    let base_weight = answer["base"]["weight"].as_u64().expect("a weight");
+    assert!(base_weight > 0);
+    assert_eq!(diff.iter().map(|(_, own, _)| own).sum::<u64>(), 6);
+    assert_eq!(
+        diff.iter().map(|(_, _, base)| base).sum::<u64>(),
+        base_weight
+    );
+    for (path, own, base) in &diff {
+        let last = path.last().map(String::as_str);
+        assert!(*own == 0 || last == Some("leaf"), "{path:?}");
+        assert!(*base == 0 || last == Some("middle"), "{path:?}");
+    }
+    assert!(diff.iter().any(|(path, own, base)| *own == 0
+        && *base > 0
+        && path.last().is_some_and(|name| name == "middle")));
+
+    let functions = tab
+        .ok(
+            "profileFunctions",
+            json!({"profile": leaf, "base": {"profile": middle}}),
+        )
+        .await;
+    let row = |name: &str| {
+        functions["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|row| {
+                let key = usize::try_from(row["key"].as_u64().expect("a key")).expect("a key");
+                functions["keys"][key]["name"] == name
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} in {functions}"))
+    };
+    assert_eq!(
+        (&row("leaf")["own"], &row("leaf")["baseOwn"]),
+        (&json!(6), &json!(0))
+    );
+    assert_eq!(row("middle")["baseOwn"], base_weight);
+
+    focus_and_refusal(&mut tab, &leaf, &middle).await;
+}
+
+/// A focus on what the base never ran leaves it nothing, not an error; a
+/// base in another profile cannot keep this one's thread filter.
+async fn focus_and_refusal(tab: &mut Client, leaf: &str, middle: &str) {
+    let (answer, _) = tab
+        .with_bytes(
+            "profileTree",
+            json!({
+                "profile": leaf,
+                "transforms": [{"op": "focus", "name": "leaf"}],
+                "base": {"profile": middle},
+            }),
+        )
+        .await
+        .expect("a focused diff");
+    assert_eq!(
+        (&answer["weight"], &answer["base"]["weight"]),
+        (&json!(6), &json!(0))
+    );
+
+    let refused = tab
+        .request(
+            "profileTree",
+            json!({"profile": leaf, "threads": [0], "base": {"profile": middle}}),
+        )
+        .await
+        .expect_err("a thread filter of another profile");
+    assert!(refused.1.contains("thread or task filter"), "{refused:?}");
 }
 
 /// A call tree's nodes, from its answer and the columns before it: each

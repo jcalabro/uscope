@@ -18,6 +18,8 @@ pub use crate::capture::records::GapReason;
 /// The task row of a sample no task snapshot named, as queries and lanes
 /// give it.
 pub const NO_TASK: u32 = NONE;
+/// A key no path holds: a focus on it keeps nothing.
+pub const NO_KEY: u32 = NONE;
 pub use crate::capture::records::MarkerKind;
 pub use collector::ProbeSelection;
 pub use formats::Format;
@@ -28,8 +30,9 @@ pub use zones::{
 };
 
 pub use crate::analysis::{
-    CallTree, Cost, Costs, Granularity, KeyKind, Keys, Lanes, OffCpuLane, PlotBin, PlotSeries,
-    Query, Source, Transform, ZoneAt, ZoneBlock, ZoneStats,
+    CallTree, Cost, Costs, DiffCost, DiffTree, Granularity, KeyKind, Keys, Lanes, OffCpuLane,
+    PlotBin, PlotSeries, Query, Side, Source, Transform, ZoneAt, ZoneBlock, ZoneStats, diff_costs,
+    diff_trees,
 };
 
 use std::path::{Path, PathBuf};

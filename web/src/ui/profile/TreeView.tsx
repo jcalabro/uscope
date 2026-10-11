@@ -1,6 +1,6 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useMemo, useRef, useState } from "react";
-import { formatPercent } from "../../profile/paint";
+import { formatChange, formatPercent, shareChange } from "../../profile/paint";
 import { type CallTree, decodeTree, nameOf } from "../../profile/tree";
 import type { ProfileQuery } from "../../protocol";
 import { useAnswer, useProfile } from "./context";
@@ -135,6 +135,16 @@ export function TreeRows({ tree: fetched, label }: { tree: Fetched; label: strin
                   <span className="percent dim">
                     {formatPercent(tree.own[node] ?? 0, tree.weight)}
                   </span>
+                  {tree.baseTotal ? (
+                    <Change
+                      points={shareChange(
+                        tree.total[node] ?? 0,
+                        tree.weight,
+                        tree.baseTotal[node] ?? 0,
+                        tree.baseWeight ?? 0,
+                      )}
+                    />
+                  ) : null}
                   <span style={{ width: (tree.depth[node] ?? 0) * 12, flex: "none" }} />
                   <button
                     type="button"
@@ -157,5 +167,15 @@ export function TreeRows({ tree: fetched, label }: { tree: Fetched; label: strin
           : null}
       </div>
     </div>
+  );
+}
+
+/** A share's change from a diff's base, colored as the flame graph is. */
+export function Change({ points }: { points: number | null }) {
+  const way = points === null || Math.abs(points) < 0.005 ? "" : points > 0 ? "up" : "down";
+  return (
+    <span className={`percent change ${way}`} title="Change in share from the base">
+      {formatChange(points)}
+    </span>
   );
 }

@@ -18,6 +18,41 @@ export function formatWeight(weight: number, unit: string): string {
   return `${count} ${weight === 1 ? one : unit.endsWith("s") ? unit : `${unit}s`}`;
 }
 
+/** A diff's fill for a frame's share of its samples now and in the base:
+ * red where it grew, blue where it shrank, as strong as the change is to
+ * the larger share, and grey where it held. */
+export function diffFill(share: number, baseShare: number, dark: boolean): string {
+  const larger = Math.max(share, baseShare);
+  const change = larger > 0 ? (share - baseShare) / larger : 0;
+  const strength = Math.min(Math.abs(change), 1);
+  if (strength < 0.02) {
+    return dark ? "hsl(0, 0%, 30%)" : "hsl(0, 0%, 84%)";
+  }
+  const hue = change > 0 ? 0 : 215;
+  const lightness = dark ? 30 - 10 * strength : 86 - 36 * strength;
+  return `hsl(${hue}, ${Math.round(40 + 40 * strength)}%, ${lightness.toFixed(1)}%)`;
+}
+
+/** How a share of the samples changed from the base's, in percentage
+ * points, or `null` when either side weighs nothing. */
+export function shareChange(
+  part: number,
+  whole: number,
+  basePart: number,
+  baseWhole: number,
+): number | null {
+  return whole > 0 && baseWhole > 0 ? (part / whole - basePart / baseWhole) * 100 : null;
+}
+
+/** A change in percentage points, signed. */
+export function formatChange(points: number | null): string {
+  if (points === null) {
+    return "–";
+  }
+  const shown = Math.abs(points) >= 10 ? points.toFixed(1) : points.toFixed(2);
+  return Number(shown) === 0 ? "±0" : `${points > 0 ? "+" : "−"}${shown.replace("-", "")} pp`;
+}
+
 /** Bytes, in the largest binary unit that keeps them above one. */
 export function formatBytes(bytes: number): string {
   const units: [number, string][] = [

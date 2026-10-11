@@ -782,6 +782,30 @@ pub struct ProfileQuery {
     pub native: bool,
     #[serde(default)]
     pub granularity: ProfileGranularity,
+    /// What a tree or functions answer compares itself with.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub base: Option<ProfileBase>,
+}
+
+/// What a diff compares a query with: the same query of another range of
+/// its profile, or of another profile.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileBase {
+    pub profile: String,
+    /// Nanoseconds from that profile's start, or all of it.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub range: Option<[i64; 2]>,
+}
+
+/// What a diff's base weighs.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileBaseWeight {
+    pub weight: u64,
+    pub samples: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -1118,6 +1142,9 @@ pub struct ProfileTree {
     pub weight: u64,
     pub samples: u64,
     pub keys: Vec<ProfileKey>,
+    /// For a diff, its base's weight, whose own and total weights by node
+    /// follow the columns as two more of `f64`s.
+    pub base: Option<ProfileBaseWeight>,
 }
 
 /// What a node or row stands for.
@@ -1156,18 +1183,24 @@ pub enum ProfileKeyKind {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileFunctions {
     pub weight: u64,
-    /// Most own weight first.
+    /// Most own weight first, or, for a diff, most changed share first.
     pub rows: Vec<ProfileCost>,
     pub keys: Vec<ProfileKey>,
+    /// For a diff, its base's weight.
+    pub base: Option<ProfileBaseWeight>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileCost {
     /// An index into `keys`.
     pub key: u32,
     pub own: u64,
     pub total: u64,
+    /// For a diff, the key's weights in its base.
+    pub base_own: u64,
+    pub base_total: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2167,6 +2200,8 @@ mod tests {
         ProfileZonesQuery::decl,
         ProfileZones::decl,
         ProfileMark::decl,
+        ProfileBase::decl,
+        ProfileBaseWeight::decl,
         ProfilePlot::decl,
         ProfileMarkKind::decl,
         ProfileZoneStatsQuery::decl,

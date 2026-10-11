@@ -13,15 +13,16 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{oneshot, watch};
 use uscope::profiler::{
-    GapReason, Granularity, KeyKind, Keys, Lanes, MarkerKind, NO_TASK, Preset, Profile, Query,
-    RecordOptions, SampleSource, Source, Transform, Watch, record_watched,
+    DiffCost, GapReason, Granularity, KeyKind, Keys, Lanes, MarkerKind, NO_KEY, NO_TASK, Preset,
+    Profile, Query, RecordOptions, SampleSource, Side, Source, Transform, Watch, diff_costs,
+    diff_trees, record_watched,
 };
 
 use super::protocol::{
-    self, ErrorKind, ProfileCost, ProfileFunctions, ProfileGranularity, ProfileInfo, ProfileKey,
-    ProfileKeyKind, ProfileLane, ProfileList, ProfileQuery, ProfileSetting, ProfileSource,
-    ProfileSummary, ProfileTimeline, ProfileTree, RecordPreset, RecordProfile, RecordStarted,
-    Request, Role, TransformOp,
+    self, ErrorKind, ProfileBaseWeight, ProfileCost, ProfileFunctions, ProfileGranularity,
+    ProfileInfo, ProfileKey, ProfileKeyKind, ProfileLane, ProfileList, ProfileQuery,
+    ProfileSetting, ProfileSource, ProfileSummary, ProfileTimeline, ProfileTree, RecordPreset,
+    RecordProfile, RecordStarted, Request, Role, TransformOp,
 };
 use super::session::Failure;
 
@@ -311,57 +312,154 @@ impl Profiles {
             .ok_or_else(|| Failure::new(ErrorKind::Invalid, format!("no profile {id}")))
     }
 
+    /// A query's base, read with the query's own filters and transforms.
+    fn base(&self, query: &ProfileQuery) -> Result<Option<(Arc<Entry>, ProfileQuery)>, Failure> {
+        let Some(base) = &query.base else {
+            return Ok(None);
+        };
+        if base.profile != query.profile && (query.threads.is_some() || query.tasks.is_some()) {
+            return Err(Failure::new(
+                ErrorKind::Invalid,
+                "a diff with another profile cannot keep a thread or task filter, \
+                 whose rows are this profile's",
+            ));
+        }
+        let mut of_base = query.clone();
+        of_base.profile.clone_from(&base.profile);
+        of_base.range = base.range;
+        of_base.base = None;
+        if base.profile != query.profile {
+            of_base.threads = None;
+            of_base.tasks = None;
+        }
+        Ok(Some((self.entry(&base.profile)?, of_base)))
+    }
+
+    fn tree(&self, query: &ProfileQuery) -> Result<(Value, Vec<u8>), Failure> {
+        let entry = self.entry(&query.profile)?;
+        let granularity = granularity(query.granularity);
+        let keys = entry.profile.keys(granularity);
+        let tree = keys.aggregate(&resolve(&entry.profile, &keys, query)?);
+        let base = self.base(query)?;
+        let base_keys = base
+            .as_ref()
+            .map(|(base, _)| base.profile.keys(granularity));
+        let mut bytes = Vec::new();
+        let (nodes, base_weight, keys) = if let (Some((base, of_base)), Some(base_keys)) =
+            (&base, &base_keys)
+        {
+            let base_tree = base_keys.aggregate(&resolve_base(&base.profile, base_keys, of_base)?);
+            let diff = diff_trees((&keys, &tree), (base_keys, &base_tree));
+            let mut named = Named::with_base(&keys, base_keys);
+            let columns = [&diff.own, &diff.total, &diff.base_own, &diff.base_total];
+            for weights in &columns[..2] {
+                put_weights(&mut bytes, weights);
+            }
+            for (key, side) in diff.key.iter().zip(&diff.side) {
+                bytes.extend_from_slice(&named.index_on(*side, *key).to_le_bytes());
+            }
+            for depth in &diff.depth {
+                bytes.extend_from_slice(&depth.to_le_bytes());
+            }
+            for weights in &columns[2..] {
+                put_weights(&mut bytes, weights);
+            }
+            let weight = ProfileBaseWeight {
+                weight: base_tree.weight,
+                samples: base_tree.samples,
+            };
+            (diff.len(), Some(weight), named.keys)
+        } else {
+            let mut named = Named::new(&keys);
+            put_weights(&mut bytes, &tree.own);
+            put_weights(&mut bytes, &tree.total);
+            for key in &tree.key {
+                bytes.extend_from_slice(&named.index(*key).to_le_bytes());
+            }
+            for depth in &tree.depth {
+                bytes.extend_from_slice(&depth.to_le_bytes());
+            }
+            (tree.len(), None, named.keys)
+        };
+        let answer = ProfileTree {
+            nodes: u32::try_from(nodes).unwrap_or(u32::MAX),
+            weight: tree.weight,
+            samples: tree.samples,
+            keys,
+            base: base_weight,
+        };
+        Ok((to_value(&answer), bytes))
+    }
+
+    fn functions(&self, query: &ProfileQuery) -> Result<ProfileFunctions, Failure> {
+        let entry = self.entry(&query.profile)?;
+        let granularity = granularity(query.granularity);
+        let keys = entry.profile.keys(granularity);
+        let costs = keys.functions(&resolve(&entry.profile, &keys, query)?);
+        let Some((base, of_base)) = self.base(query)? else {
+            let mut named = Named::new(&keys);
+            let rows = costs
+                .rows
+                .iter()
+                .map(|cost| ProfileCost {
+                    key: named.index(cost.key),
+                    own: cost.own,
+                    total: cost.total,
+                    base_own: 0,
+                    base_total: 0,
+                })
+                .collect();
+            return Ok(ProfileFunctions {
+                weight: costs.weight,
+                rows,
+                keys: named.keys,
+                base: None,
+            });
+        };
+        let base_keys = base.profile.keys(granularity);
+        let base_costs = base_keys.functions(&resolve_base(&base.profile, &base_keys, &of_base)?);
+        let mut diff = diff_costs((&keys, &costs), (&base_keys, &base_costs));
+        // Most changed share of the samples first.
+        let share = |weight: u64, of: u64| {
+            if of == 0 {
+                0.0
+            } else {
+                exact(weight) / exact(of)
+            }
+        };
+        let change = |cost: &DiffCost| {
+            (share(cost.own, costs.weight) - share(cost.base_own, base_costs.weight)).abs()
+        };
+        diff.sort_by(|a, b| change(b).total_cmp(&change(a)));
+        let mut named = Named::with_base(&keys, &base_keys);
+        let rows = diff
+            .iter()
+            .map(|cost| ProfileCost {
+                key: named.index_on(cost.side, cost.key),
+                own: cost.own,
+                total: cost.total,
+                base_own: cost.base_own,
+                base_total: cost.base_total,
+            })
+            .collect();
+        Ok(ProfileFunctions {
+            weight: costs.weight,
+            rows,
+            keys: named.keys,
+            base: Some(ProfileBaseWeight {
+                weight: base_costs.weight,
+                samples: 0,
+            }),
+        })
+    }
+
     fn answer(&self, request: Request) -> Result<(Value, Vec<u8>), Failure> {
         match request {
             Request::Profile(protocol::ProfileRef { profile, .. }) => {
                 Ok(json(&summary(&*self.entry(&profile)?)))
             }
-            Request::ProfileTree(query) => {
-                let entry = self.entry(&query.profile)?;
-                let keys = entry.profile.keys(granularity(query.granularity));
-                let tree = keys.aggregate(&resolve(&entry.profile, &keys, &query)?);
-                let mut named = Named::new(&keys);
-                let mut bytes = Vec::with_capacity(tree.len() * 24);
-                for weights in [&tree.own, &tree.total] {
-                    for weight in weights {
-                        bytes.extend_from_slice(&exact(*weight).to_le_bytes());
-                    }
-                }
-                for key in &tree.key {
-                    bytes.extend_from_slice(&named.index(*key).to_le_bytes());
-                }
-                for depth in &tree.depth {
-                    bytes.extend_from_slice(&depth.to_le_bytes());
-                }
-                let answer = ProfileTree {
-                    nodes: u32::try_from(tree.len()).unwrap_or(u32::MAX),
-                    weight: tree.weight,
-                    samples: tree.samples,
-                    keys: named.keys,
-                };
-                Ok((to_value(&answer), bytes))
-            }
-            Request::ProfileFunctions(query) => {
-                let entry = self.entry(&query.profile)?;
-                let keys = entry.profile.keys(granularity(query.granularity));
-                let resolved = resolve(&entry.profile, &keys, &query)?;
-                let costs = keys.functions(&resolved);
-                let mut named = Named::new(&keys);
-                let rows = costs
-                    .rows
-                    .iter()
-                    .map(|cost| ProfileCost {
-                        key: named.index(cost.key),
-                        own: cost.own,
-                        total: cost.total,
-                    })
-                    .collect();
-                Ok(json(&ProfileFunctions {
-                    weight: costs.weight,
-                    rows,
-                    keys: named.keys,
-                }))
-            }
+            Request::ProfileTree(query) => self.tree(&query),
+            Request::ProfileFunctions(query) => self.functions(&query).map(|answer| json(&answer)),
             Request::ProfileTimeline(timeline) => {
                 let entry = self.entry(&timeline.query.profile)?;
                 Ok(json(&timeline_of(&entry.profile, &timeline)?))
@@ -545,10 +643,35 @@ const fn granularity(granularity: ProfileGranularity) -> Granularity {
 /// keys. A name no key has is an error rather than a transform that
 /// silently does nothing, and so is a focus on a name several keys share.
 fn resolve(profile: &Profile, keys: &Keys<'_>, query: &ProfileQuery) -> Result<Query, Failure> {
+    resolve_in(profile, keys, query, false)
+}
+
+/// Resolves a query in a diff's base, where a name the base lacks is no
+/// error: a focus on it keeps nothing, and the others change nothing.
+fn resolve_base(
+    profile: &Profile,
+    keys: &Keys<'_>,
+    query: &ProfileQuery,
+) -> Result<Query, Failure> {
+    resolve_in(profile, keys, query, true)
+}
+
+fn resolve_in(
+    profile: &Profile,
+    keys: &Keys<'_>,
+    query: &ProfileQuery,
+    base: bool,
+) -> Result<Query, Failure> {
     let (start, _) = profile.span();
     let mut transforms = Vec::new();
     for transform in &query.transforms {
         let named = keys.named(&transform.name);
+        if named.is_empty() && base {
+            if transform.op == TransformOp::Focus {
+                transforms.push(Transform::Focus(NO_KEY));
+            }
+            continue;
+        }
         if named.is_empty() {
             return Err(Failure::new(
                 ErrorKind::Invalid,
@@ -814,7 +937,9 @@ const fn exact_time(time: i64) -> f64 {
 /// The keys an answer names, each once, in the order first named.
 struct Named<'a, 'k> {
     keys_of: &'a Keys<'k>,
-    indices: BTreeMap<u32, u32>,
+    /// A diff's base's keys, which its nodes from the base name.
+    base_of: Option<&'a Keys<'k>>,
+    indices: BTreeMap<(bool, u32), u32>,
     keys: Vec<ProfileKey>,
 }
 
@@ -822,16 +947,34 @@ impl<'a, 'k> Named<'a, 'k> {
     const fn new(keys_of: &'a Keys<'k>) -> Self {
         Self {
             keys_of,
+            base_of: None,
+            indices: BTreeMap::new(),
+            keys: Vec::new(),
+        }
+    }
+
+    const fn with_base(keys_of: &'a Keys<'k>, base_of: &'a Keys<'k>) -> Self {
+        Self {
+            keys_of,
+            base_of: Some(base_of),
             indices: BTreeMap::new(),
             keys: Vec::new(),
         }
     }
 
     fn index(&mut self, key: u32) -> u32 {
-        if let Some(index) = self.indices.get(&key) {
+        self.index_on(Side::Current, key)
+    }
+
+    fn index_on(&mut self, side: Side, key: u32) -> u32 {
+        let from_base = side == Side::Base;
+        if let Some(index) = self.indices.get(&(from_base, key)) {
             return *index;
         }
-        let keys = self.keys_of;
+        let keys = match (side, self.base_of) {
+            (Side::Base, Some(base)) => base,
+            _ => self.keys_of,
+        };
         let index = u32::try_from(self.keys.len()).unwrap_or(u32::MAX);
         let location = keys.location(key);
         self.keys.push(ProfileKey {
@@ -849,8 +992,15 @@ impl<'a, 'k> Named<'a, 'k> {
             file: location.map(|(file, _)| file.to_owned()),
             line: location.map(|(_, line)| line),
         });
-        self.indices.insert(key, index);
+        self.indices.insert((from_base, key), index);
         index
+    }
+}
+
+/// Weights as a column of little-endian `f64`s.
+fn put_weights(bytes: &mut Vec<u8>, weights: &[u64]) {
+    for weight in weights {
+        bytes.extend_from_slice(&exact(*weight).to_le_bytes());
     }
 }
 

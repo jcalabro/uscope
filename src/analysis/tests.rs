@@ -758,3 +758,122 @@ fn a_plot_keeps_each_bins_extremes_and_counts_what_it_cannot_draw() {
     let only = plot_series(&capture, (0, 50), Some(&[two]), 1);
     assert_eq!((only.len(), only[0].values, only[0].unshown), (1, 1, 1));
 }
+
+/// A capture of one thread's samples of stacks of [`FUNCTIONS`], innermost
+/// first.
+fn stacks_of(samples: &[(Vec<usize>, u64)]) -> Capture {
+    let mut builder = CaptureBuilder::new();
+    let module = builder.module("/bin/app", None, [0; 16], 0);
+    let thread = builder.thread(1, 1, 0);
+    let frames: Vec<u32> = (0..FUNCTIONS.len())
+        .map(|at| {
+            let frame = builder.frame(FrameKind::Native, module, 0x10 * at as u64, 0);
+            builder.symbolize(frame, module, &[line(FUNCTIONS[at])]);
+            frame
+        })
+        .collect();
+    for (time, (stack, weight)) in samples.iter().enumerate() {
+        let stack: Vec<u32> = stack.iter().map(|&at| frames[at]).collect();
+        let stack = builder.stack(&stack);
+        builder.sample(
+            thread,
+            i64::try_from(time).unwrap_or(0),
+            *weight,
+            stack,
+            NONE,
+        );
+    }
+    builder.finish()
+}
+
+/// Each path's weight, outermost name first.
+fn path_weights(samples: &[(Vec<usize>, u64)]) -> BTreeMap<Vec<&'static str>, u64> {
+    let mut paths = BTreeMap::new();
+    for (stack, weight) in samples {
+        let path = stack.iter().rev().map(|&at| FUNCTIONS[at]).collect();
+        *paths.entry(path).or_default() += weight;
+    }
+    paths
+}
+
+fn weighted_stacks() -> impl Strategy<Value = Vec<(Vec<usize>, u64)>> {
+    proptest::collection::vec(
+        (
+            proptest::collection::vec(0..FUNCTIONS.len(), 1..5),
+            1..100_u64,
+        ),
+        0..20,
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Two profiles' trees merge into one whose every path holds exactly
+    /// each profile's weight there, whichever has it, nested as trees are;
+    /// and their costs merge so that each function's are each profile's.
+    #[test]
+    fn a_diff_holds_each_profiles_weight_on_every_path(
+        ours in weighted_stacks(),
+        theirs in weighted_stacks(),
+    ) {
+        let (current, base) = (stacks_of(&ours), stacks_of(&theirs));
+        let (current_keys, base_keys) = (
+            Keys::new(&current, Granularity::Function),
+            Keys::new(&base, Granularity::Function),
+        );
+        let everything = Query::default();
+        let diff = diff_trees(
+            (&current_keys, &current_keys.aggregate(&everything)),
+            (&base_keys, &base_keys.aggregate(&everything)),
+        );
+        let name = |node: usize| match diff.side[node] {
+            Side::Current => current_keys.name(diff.key[node]),
+            Side::Base => base_keys.name(diff.key[node]),
+        };
+        let (mut now, mut before) = (BTreeMap::new(), BTreeMap::new());
+        for node in 0..diff.len() {
+            let mut path = Vec::new();
+            let mut at = index(node);
+            while at != NONE {
+                path.push(name(at as usize));
+                at = diff.parent[at as usize];
+            }
+            path.reverse();
+            let shown: Vec<&'static str> = path
+                .iter()
+                .map(|name| *FUNCTIONS.iter().find(|known| *known == name).expect("a function"))
+                .collect();
+            prop_assert!(!now.contains_key(&shown), "{:?} is merged once", shown);
+            if diff.own[node] > 0 {
+                now.insert(shown.clone(), diff.own[node]);
+            }
+            if diff.base_own[node] > 0 {
+                before.insert(shown, diff.base_own[node]);
+            }
+            let inner = (node + 1..diff.end[node] as usize).filter(|&child| diff.parent[child] == index(node));
+            let (total, base_total) = inner.fold((diff.own[node], diff.base_own[node]), |sum, child| {
+                (sum.0 + diff.total[child], sum.1 + diff.base_total[child])
+            });
+            prop_assert_eq!((diff.total[node], diff.base_total[node]), (total, base_total));
+            prop_assert!((node + 1..diff.end[node] as usize).all(|inside| diff.depth[inside] > diff.depth[node]));
+        }
+        prop_assert_eq!(now, path_weights(&ours));
+        prop_assert_eq!(before, path_weights(&theirs));
+
+        let costs = diff_costs(
+            (&current_keys, &current_keys.functions(&everything)),
+            (&base_keys, &base_keys.functions(&everything)),
+        );
+        for cost in costs {
+            let name = match cost.side {
+                Side::Current => current_keys.name(cost.key),
+                Side::Base => base_keys.name(cost.key),
+            };
+            let own = |samples: &[(Vec<usize>, u64)]| -> u64 {
+                samples.iter().filter(|(stack, _)| FUNCTIONS[stack[0]] == name).map(|(_, weight)| weight).sum()
+            };
+            prop_assert_eq!((cost.own, cost.base_own), (own(&ours), own(&theirs)), "{}", name);
+        }
+    }
+}

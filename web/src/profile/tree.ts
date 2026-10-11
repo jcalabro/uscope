@@ -19,15 +19,21 @@ export interface CallTree {
   /** The weight of every sample the query kept. */
   weight: number;
   samples: number;
+  /** For a diff, each node's weights in the base, and the base's. */
+  baseOwn: Float64Array | null;
+  baseTotal: Float64Array | null;
+  baseWeight: number | null;
 }
 
 /** Decodes an answer and the columns sent before it: own and total
- * weights as little-endian `f64`s, then keys and depths as `u32`s. */
+ * weights as little-endian `f64`s, then keys and depths as `u32`s, and
+ * for a diff, the base's own and total weights as `f64`s. */
 export function decodeTree(answer: ProfileTree, payload: Uint8Array | undefined): CallTree {
   const count = answer.nodes;
   const bytes = payload ?? new Uint8Array();
-  if (bytes.byteLength !== count * 24) {
-    throw new Error(`a tree of ${count} nodes needs ${count * 24} bytes, not ${bytes.byteLength}`);
+  const size = count * (answer.base ? 40 : 24);
+  if (bytes.byteLength !== size) {
+    throw new Error(`a tree of ${count} nodes needs ${size} bytes, not ${bytes.byteLength}`);
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const own = new Float64Array(count);
@@ -58,6 +64,10 @@ export function decodeTree(answer: ProfileTree, payload: Uint8Array | undefined)
   for (const node of open) {
     end[node] = count;
   }
+  const baseColumn = (column: number) =>
+    Float64Array.from({ length: count }, (_, node) =>
+      view.getFloat64(count * 24 + (column * count + node) * 8, true),
+    );
   return {
     count,
     own,
@@ -69,6 +79,9 @@ export function decodeTree(answer: ProfileTree, payload: Uint8Array | undefined)
     keys: answer.keys,
     weight: answer.weight,
     samples: answer.samples,
+    baseOwn: answer.base ? baseColumn(0) : null,
+    baseTotal: answer.base ? baseColumn(1) : null,
+    baseWeight: answer.base?.weight ?? null,
   };
 }
 

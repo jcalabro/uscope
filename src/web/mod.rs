@@ -60,6 +60,10 @@ pub struct WebArgs {
     #[arg(value_name = "EXECUTABLE")]
     executable: Option<PathBuf>,
 
+    /// More profiles to serve beside the first, to compare it with.
+    #[arg(value_name = "PROFILE", conflicts_with_all = ["attach", "core"])]
+    more_profiles: Vec<PathBuf>,
+
     /// Attach to a running process.
     #[arg(short = 'p', long, value_name = "PID", conflicts_with_all = ["core", "executable"])]
     attach: Option<u64>,
@@ -328,6 +332,15 @@ fn what_to_serve(
         Some(path) if args.core.is_none() => open_profile(profiles, path)?,
         _ => None,
     };
+    for path in &args.more_profiles {
+        anyhow::ensure!(
+            profile.is_some(),
+            "{} is not a profile, so it takes its arguments after --",
+            args.executable.as_deref().unwrap_or(path).display()
+        );
+        open_profile(profiles, path)?
+            .with_context(|| format!("{} is not a profile", path.display()))?;
+    }
     Ok(if profile.is_some() {
         (None, profile)
     } else {

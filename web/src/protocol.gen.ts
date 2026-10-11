@@ -867,7 +867,11 @@ invert: boolean,
 /**
  * The frames threads ran, rather than each async task's own stack.
  */
-native: boolean, granularity: ProfileGranularity, };
+native: boolean, granularity: ProfileGranularity, 
+/**
+ * What a tree or functions answer compares itself with.
+ */
+base?: ProfileBase | null, };
 
 export type ProfileTransform = { op: TransformOp, name: string, };
 
@@ -930,7 +934,11 @@ invert: boolean,
 /**
  * The frames threads ran, rather than each async task's own stack.
  */
-native: boolean, granularity: ProfileGranularity, };
+native: boolean, granularity: ProfileGranularity, 
+/**
+ * What a tree or functions answer compares itself with.
+ */
+base?: ProfileBase | null, };
 
 export type ProfileSummary = { id: string, name: string, 
 /**
@@ -1032,7 +1040,12 @@ export type ProfileTree = { nodes: number,
 /**
  * The weight of every sample the query kept.
  */
-weight: number, samples: number, keys: Array<ProfileKey>, };
+weight: number, samples: number, keys: Array<ProfileKey>, 
+/**
+ * For a diff, its base's weight, whose own and total weights by node
+ * follow the columns as two more of `f64`s.
+ */
+base: ProfileBaseWeight | null, };
 
 export type ProfileKey = { 
 /**
@@ -1065,15 +1078,23 @@ export type ProfileSource = "samples" | "waits";
 
 export type ProfileFunctions = { weight: number, 
 /**
- * Most own weight first.
+ * Most own weight first, or, for a diff, most changed share first.
  */
-rows: Array<ProfileCost>, keys: Array<ProfileKey>, };
+rows: Array<ProfileCost>, keys: Array<ProfileKey>, 
+/**
+ * For a diff, its base's weight.
+ */
+base: ProfileBaseWeight | null, };
 
 export type ProfileCost = { 
 /**
  * An index into `keys`.
  */
-key: number, own: number, total: number, };
+key: number, own: number, total: number, 
+/**
+ * For a diff, the key's weights in its base.
+ */
+baseOwn: number, baseTotal: number, };
 
 export type ProfileTimeline = { 
 /**
@@ -1159,6 +1180,14 @@ time: number, kind: ProfileMarkKind,
  * Its site's name.
  */
 name: string, text: string | null, };
+
+export type ProfileBase = { profile: string, 
+/**
+ * Nanoseconds from that profile's start, or all of it.
+ */
+range?: [number, number] | null, };
+
+export type ProfileBaseWeight = { weight: number, samples: number, };
 
 export type ProfilePlot = { name: string, 
 /**

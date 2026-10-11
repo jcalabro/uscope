@@ -9,12 +9,14 @@
 //! without symbols stands for itself, and a truncation for its reason.
 //! Each is a dense key.
 
+pub mod diff;
 pub mod keys;
 pub mod query;
 #[cfg(test)]
 mod tests;
 pub mod zones;
 
+pub use diff::{DiffCost, DiffTree, Side, diff_costs, diff_trees};
 pub use keys::{Granularity, KeyKind, Keys};
 pub use query::{
     CallTree, Cost, Costs, Lanes, OffCpuLane, Query, Source, Transform, aggregate, density,

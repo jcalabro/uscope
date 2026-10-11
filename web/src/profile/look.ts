@@ -41,6 +41,11 @@ export interface ProfileLook {
   fn?: string;
   /** The flame graph's zoomed node, by its path of names from the root. */
   z?: string[];
+  /** The profile a diff compares with, by its id; this one when absent and
+   * `br` is set. */
+  bp?: string;
+  /** The range of the base profile a diff compares with, `START-END`. */
+  br?: string;
 }
 
 const VIEWS: readonly ProfileView[] = ["flame", "tree", "functions", "zones"];
@@ -117,6 +122,14 @@ export function validateProfileLook(search: Record<string, unknown>): ProfileLoo
   if (z) {
     look.z = z;
   }
+  const bp = text("bp");
+  if (bp) {
+    look.bp = bp;
+  }
+  const br = text("br");
+  if (br && parseRange(br)) {
+    look.br = br;
+  }
   return look;
 }
 
@@ -152,6 +165,11 @@ export function formatTransform(transform: ProfileTransform): string {
 /** The query a look asks of `profile`. */
 export function queryOf(profile: string, look: ProfileLook): ProfileQuery {
   const range = look.range ? parseRange(look.range) : null;
+  const baseRange = look.br ? parseRange(look.br) : null;
+  const base =
+    look.bp || baseRange
+      ? { profile: look.bp ?? profile, ...(baseRange ? { range: baseRange } : {}) }
+      : null;
   return {
     profile,
     ...(range ? { range } : {}),
@@ -168,6 +186,7 @@ export function queryOf(profile: string, look: ProfileLook): ProfileQuery {
     invert: look.invert === "1",
     native: look.native === "1",
     granularity: look.by ?? "function",
+    ...(base ? { base } : {}),
   };
 }
 

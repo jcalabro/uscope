@@ -10,7 +10,7 @@ import {
   untransformed,
   validateProfileLook,
 } from "../src/profile/look";
-import { formatWeight } from "../src/profile/paint";
+import { diffFill, formatWeight } from "../src/profile/paint";
 import { type CallTree, decodeTree, findPath, hit, layout, pathOf } from "../src/profile/tree";
 import { blockAt, decodeZones, plotPath, tracks } from "../src/profile/zones";
 import type { ProfileKey, ProfileTree, ServerMessage } from "../src/protocol";
@@ -38,6 +38,8 @@ describe("a profile's address", () => {
       by: "line",
       fn: "app::db::decode",
       z: ["main", "a & b", "c=d?"],
+      bp: "f00d",
+      br: "5-90",
     };
     expect(roundTrip(look)).toEqual(look);
     expect(queryOf("p", look)).toEqual({
@@ -56,7 +58,10 @@ describe("a profile's address", () => {
       invert: true,
       native: true,
       granularity: "line",
+      base: { profile: "f00d", range: [5, 90] },
     });
+    // A base range alone is of the profile itself.
+    expect(queryOf("p", { br: "5-90" }).base).toEqual({ profile: "p", range: [5, 90] });
   });
 
   it("drops what it cannot mean", () => {
@@ -73,6 +78,8 @@ describe("a profile's address", () => {
         tf: ["spin:main", ":main", "merge:"],
         invert: "yes",
         by: "function",
+        bp: "",
+        br: "9-3",
       }),
     ).toEqual({});
     expect(queryOf("p", {})).toEqual({
@@ -116,7 +123,7 @@ function encode(nodes: [string, number, number, number][]): CallTree {
     view.setUint32(count * 20 + node * 4, depth, true);
   }
   const weight = nodes.filter(([, , , depth]) => depth === 0).reduce((sum, [, , t]) => sum + t, 0);
-  const answer: ProfileTree = { nodes: count, weight, samples: weight, keys };
+  const answer: ProfileTree = { nodes: count, weight, samples: weight, keys, base: null };
   return decodeTree(answer, bytes);
 }
 
@@ -168,8 +175,43 @@ describe("a call tree's geometry", () => {
   });
 
   it("refuses columns that do not fit the tree", () => {
-    const answer: ProfileTree = { nodes: 2, weight: 1, samples: 1, keys: [] };
+    const answer: ProfileTree = { nodes: 2, weight: 1, samples: 1, keys: [], base: null };
     expect(() => decodeTree(answer, new Uint8Array(24))).toThrow(/48 bytes/);
+  });
+
+  it("decodes a diff's base weights after its own columns", () => {
+    const bytes = new Uint8Array(40);
+    const view = new DataView(bytes.buffer);
+    view.setFloat64(0, 3, true);
+    view.setFloat64(8, 3, true);
+    view.setFloat64(24, 1, true);
+    view.setFloat64(32, 5, true);
+    const keys: ProfileKey[] = [
+      { name: "a", kind: "function", module: null, file: null, line: null },
+    ];
+    const answer: ProfileTree = {
+      nodes: 1,
+      weight: 3,
+      samples: 3,
+      keys,
+      base: { weight: 5, samples: 5 },
+    };
+    const diff = decodeTree(answer, bytes);
+    expect([diff.own[0], diff.baseOwn?.[0], diff.baseTotal?.[0], diff.baseWeight]).toEqual([
+      3, 1, 5, 5,
+    ]);
+    expect(() => decodeTree(answer, bytes.slice(0, 24))).toThrow(/40 bytes/);
+  });
+});
+
+describe("a diff's colors", () => {
+  it("are red where a share grew, blue where it shrank, stronger the more", () => {
+    expect(diffFill(0.5, 0.5, false)).toBe(diffFill(0.2, 0.2, false));
+    const hueOf = (fill: string) => Number(/^hsl\((\d+)/.exec(fill)?.[1]);
+    const lightness = (fill: string) => Number(/(\d+(?:\.\d+)?)%\)$/.exec(fill)?.[1]);
+    expect(hueOf(diffFill(0.5, 0.25, false))).toBe(0);
+    expect(hueOf(diffFill(0.25, 0.5, false))).toBe(215);
+    expect(lightness(diffFill(0.5, 0, false))).toBeLessThan(lightness(diffFill(0.5, 0.4, false)));
   });
 });
 
