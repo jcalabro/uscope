@@ -1914,6 +1914,10 @@ impl VariableInfo for DwarfVariableInfo {
         self.value_child_page(reference, offset, limit, runtime, budget)
     }
 
+    fn may_describe_call_site(&self, return_address: ImageAddress) -> bool {
+        self.calls().returning_to(return_address).next().is_some()
+    }
+
     fn call_site(
         &self,
         return_address: ImageAddress,

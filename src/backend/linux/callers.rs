@@ -234,6 +234,11 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             .loaded
             .image_address(return_address)
             .map_err(|_| unavailable(EntryValueUnavailableReason::NoCallSite))?;
+        // Reading the caller's frame costs far more than asking whether a
+        // call returns where it does.
+        if !caller.variables.may_describe_call_site(caller_return) {
+            return Err(unavailable(EntryValueUnavailableReason::NoCallSite));
+        }
         let caller_at = FrameAt {
             activation: caller_index,
             code: Some((caller.loaded.id, caller_code)),

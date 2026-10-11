@@ -629,7 +629,7 @@ fn count_chains(
 
 impl DwarfVariableInfo {
     /// The image's calls, once [`Self::bind`] has given the image.
-    fn calls(&self) -> CallView<'_> {
+    pub(super) fn calls(&self) -> CallView<'_> {
         CallView::new(self.types.tables())
     }
 

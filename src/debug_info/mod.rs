@@ -446,6 +446,14 @@ pub trait VariableInfo: Send + Sync {
         budget: &mut InspectionBudget,
     ) -> Result<ValueChildPage>;
 
+    /// Whether a call that returns to `return_address` may be described,
+    /// which is cheaper to ask than [`Self::call_site`]: when this is
+    /// false, that finds none.
+    fn may_describe_call_site(&self, return_address: ImageAddress) -> bool {
+        let _ = return_address;
+        true
+    }
+
     /// The call that returns to `return_address`, when one is described,
     /// with its target computed in the calling frame `runtime` reads.
     fn call_site(
