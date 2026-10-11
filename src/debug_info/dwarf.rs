@@ -2084,7 +2084,17 @@ where
         encoding: fde.cie().encoding(),
     };
     for &(register, ref rule) in row.registers() {
-        rules.apply(&mut caller, memory, register.0, rule)?;
+        match rules.apply(&mut caller, memory, register.0, rule) {
+            // A register saved where memory cannot be read is unknown in
+            // the caller, as an undefined one is: an epilogue's rules may
+            // still name a slot it popped, below a sample's copy. Only the
+            // return address, without which there is no caller, ends the
+            // unwind.
+            Err(UnwindTermination::MemoryReadFailed { .. }) if register.0 != return_register => {
+                caller.remove(register.0);
+            }
+            result => result?,
+        }
     }
     caller.set(7, cfa.get());
 

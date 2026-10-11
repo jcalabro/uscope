@@ -342,3 +342,102 @@ fn follow_chain(
     }
     StackEnd::Truncated(Truncation::ChainEnded, None)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use iced_x86::{Decoder, DecoderOptions, Mnemonic, Register};
+    use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+
+    use super::*;
+    use crate::{LoadedModule, ModuleId, ModuleImageId};
+
+    /// A sample in an epilogue, after a register was popped whose rules
+    /// still name its slot, now below the stack pointer and outside the
+    /// copy: the caller is found all the same, and the stack is whole.
+    #[test]
+    fn a_register_saved_below_the_copy_still_leaves_its_caller_found() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("build/golden/stores/stores-clang-O2");
+        let data = std::fs::read(&path).expect("build the golden programs");
+        let info = crate::debug_info::load_bytes(&path, &data).expect("load its debug information");
+        let file = object::File::parse(&*data).expect("parse it");
+        let text = file.section_by_name(".text").expect("a text section");
+        let instructions = Decoder::with_ip(
+            64,
+            text.data().expect("text bytes"),
+            text.address(),
+            DecoderOptions::NONE,
+        )
+        .iter()
+        .collect::<Vec<_>>();
+        let symbol = |name: &str| {
+            file.symbols()
+                .find(|symbol| symbol.name() == Ok(name))
+                .expect("the symbol")
+                .address()
+        };
+        let after = |start: u64, found: &dyn Fn(&iced_x86::Instruction) -> bool| {
+            instructions
+                .iter()
+                .skip_while(|instruction| instruction.ip() < start)
+                .find(|instruction| found(instruction))
+                .expect("the instruction")
+                .ip()
+        };
+        // `work` pops rbx, then r14, under rules that still find rbx below.
+        let pop = |register| {
+            move |instruction: &iced_x86::Instruction| {
+                instruction.mnemonic() == Mnemonic::Pop && instruction.op0_register() == register
+            }
+        };
+        let rip = after(
+            after(symbol("work"), &pop(Register::RBX)),
+            &pop(Register::R14),
+        );
+        let call = after(symbol("rt_thread_start"), &|instruction| {
+            instruction.mnemonic() == Mnemonic::Call
+        });
+        let returns_to = instructions
+            .iter()
+            .find(|instruction| instruction.ip() == call)
+            .expect("the call")
+            .next_ip();
+
+        // The copy holds r14, r15, the caller's rbp, and the return address.
+        let sp = 0x7000_0000_u64;
+        let stack = [7, 8, 0, returns_to]
+            .iter()
+            .flat_map(|word: &u64| word.to_le_bytes())
+            .collect::<Vec<_>>();
+        let registers = [(RETURN_ADDRESS, rip), (RSP, sp), (RBP, sp + 16)];
+        let modules = [UnwindModule {
+            loaded: LoadedModule {
+                id: ModuleId::new(1),
+                image: ModuleImageId::new(1),
+                load_bias: 0,
+            },
+            image: &info.image,
+            unwind: info.unwind.as_ref(),
+        }];
+        let (frames, end) = unwind_sample(
+            &modules,
+            &mut FrameRules::default(),
+            SampledState {
+                registers: &registers,
+                stack: &stack,
+                chain: &[rip, returns_to],
+            },
+            16,
+        );
+        let addresses = frames
+            .iter()
+            .map(|frame| frame.address.get())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (addresses, end),
+            (vec![rip, returns_to - 1], StackEnd::Complete)
+        );
+    }
+}
