@@ -9,6 +9,7 @@ pub mod config;
 pub mod format;
 pub mod help;
 mod highlight;
+pub mod profile;
 mod repl;
 mod saved;
 pub mod session;

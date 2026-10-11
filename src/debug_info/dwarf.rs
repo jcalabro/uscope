@@ -16,7 +16,7 @@ use super::separate::Supplementary;
 use super::{DebugInfo, UnwindInfo};
 use crate::image::lines::{Files, LineTables, Row, StatementsByAddress};
 use crate::model::{Binding, ModuleMetadata};
-use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
+use crate::unwind::{FramePointerRule, MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     AddressRange, Architecture, BreakpointEntry, ByteOrder, CodeInstanceId, CodeInstanceInfo,
     CodeInstanceKind, ColumnNumber, EmbeddedSymbolTable, EntryProvenance, Error, FunctionId,
@@ -1978,6 +1978,13 @@ impl UnwindInfo for DwarfUnwindInfo {
             go.recover_frame_pointer(address.get(), registers, &mut step, memory);
             step
         })
+    }
+
+    fn frame_pointer_rule(&self, address: ImageAddress) -> FramePointerRule {
+        // Go's rules find the frame by SP, but its prologue keeps the chain.
+        self.go()
+            .and_then(|go| go.frame_pointer_rule(address.get()))
+            .unwrap_or_else(|| crate::unwind::frame_pointer_rule(self, address))
     }
 }
 

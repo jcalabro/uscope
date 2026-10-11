@@ -2040,6 +2040,27 @@ for variant in gcc-o2:gcc:-gdwarf-5 gcc-o2-dwarf4:gcc:-gdwarf-4 clang-o2:clang:-
     require_tail_jump "$output_dir/tail-frames-$name" middle leaf
     require_tail_jump "$output_dir/tail-frames-$name" either leaf
 done
+# The profiler's exact stacks, across the frame-pointer and PIE matrix.
+for variant in \
+    gcc-o0:gcc:-O0:-fno-omit-frame-pointer:-fPIE:-pie \
+    gcc-o2-nofp:gcc:-O2:-fomit-frame-pointer:-fPIE:-pie \
+    clang-o2:clang:-O2:-fno-omit-frame-pointer:-fno-pie:-no-pie \
+    clang-o2-nofp:clang:-O2:-fomit-frame-pointer:-fPIE:-pie; do
+    IFS=: read -r name compiler level frames code link <<<"$variant"
+    build_fixture "$compiler" "$c_fixtures_dir/profile-stacks.c" "$output_dir/profile-stacks-$name" \
+        "$level" -g3 "$frames" "$code" "$link" -pthread
+done
+# mold places segments at virtual addresses other than their file offsets.
+build_fixture gcc "$c_fixtures_dir/profile-stacks.c" "$output_dir/profile-stacks-gcc-mold" \
+    -O2 -g3 -fno-omit-frame-pointer -fPIE -pie -fuse-ld=mold -pthread
+build_cpp_fixture g++ "$cpp_fixtures_dir/profile-stacks.cpp" "$output_dir/profile-stacks-cpp-gcc-o2-nofp" \
+    -O2 -g3 -fomit-frame-pointer -fPIE -pie -pthread
+build_cpp_fixture clang++ "$cpp_fixtures_dir/profile-stacks.cpp" "$output_dir/profile-stacks-cpp-clang-o0" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie -pthread
+build_rust_fixture "$rust_fixtures_dir/profile-stacks.rs" "$output_dir/profile-stacks-rust-o0" \
+    -C opt-level=0 -C force-frame-pointers=yes
+build_rust_fixture "$rust_fixtures_dir/profile-stacks.rs" "$output_dir/profile-stacks-rust-o2-nofp" \
+    -C opt-level=2 -C force-frame-pointers=no
 build_fixture gcc "$c_fixtures_dir/step-over-libc.c" "$output_dir/step-over-libc" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/orphan-frames.c" "$output_dir/orphan-frames" \

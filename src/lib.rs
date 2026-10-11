@@ -13,7 +13,9 @@ macro_rules! record {
 #[cfg(test)]
 extern crate self as uscope;
 
+mod analysis;
 mod backend;
+pub(crate) mod capture;
 mod condition;
 mod debug_info;
 mod demangle;
@@ -30,6 +32,7 @@ pub mod cache;
 mod inspection;
 pub(crate) mod model;
 pub mod pool;
+pub mod profiler;
 mod protocol;
 mod runtime_model;
 #[cfg(any(test, feature = "sim"))]
@@ -257,6 +260,24 @@ pub fn fuzz_core_dump(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_image(data: &[u8]) {
     image::sample::fuzz(data);
+}
+
+/// Decodes perf ring records for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_perf_records(data: &[u8]) {
+    backend::perf::decode::fuzz(data);
+}
+
+/// Reads a capture file, and queries one it accepts, for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_capture(data: &[u8]) {
+    if let Ok(read) = capture::file::read(data) {
+        let keys = analysis::Keys::new(&read.capture);
+        let _ = analysis::top(&read.capture, &keys);
+        let _ = analysis::tree(&read.capture, &keys);
+    }
 }
 
 /// Exercises debug-register planning invariants for the fuzz harness.

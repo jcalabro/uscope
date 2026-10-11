@@ -6,7 +6,7 @@ use std::sync::Arc;
 use nix::libc;
 use nix::unistd::Pid;
 
-use crate::debug_info::{TailJump, UnwindInfo, VariableRuntimeError};
+use crate::debug_info::{TailJump, VariableRuntimeError};
 use crate::model::FrameMetadata;
 use crate::protocol::{FramePresentation, PresentedFrame, StepKind, StopId, StopReason};
 use crate::runtime_model::{Crossing, futures};
@@ -14,6 +14,7 @@ use crate::unwind::{
     CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, MemoryReader, RegisterFile,
     collect_frames,
 };
+pub(super) use crate::unwind::{UnwindModule, unwind_module_for};
 use crate::{
     AddressDescription, Backtrace, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceKind,
     CodeRole, Error, ExecutionContext, ExecutionLocation, FrameKind, ImageAddress, ImageLocation,
@@ -1211,14 +1212,6 @@ fn push_code_frames(
     Ok(())
 }
 
-/// One loaded module's address mapping, metadata, and call-frame information.
-#[derive(Clone, Copy)]
-pub(super) struct UnwindModule<'a> {
-    pub(super) loaded: LoadedModule,
-    pub(super) image: &'a ModuleImage,
-    pub(super) unwind: &'a dyn UnwindInfo,
-}
-
 /// One physical activation and the registers it held: the thread's own
 /// for the innermost activation, otherwise those the unwinder reconstructed.
 #[derive(Clone)]
@@ -1375,24 +1368,6 @@ pub(super) struct ResolvedFrame {
     /// the frame's stack pointer: only the frame's callees use it, so a
     /// pointer of the frame's to it is stale.
     pub(super) below_stack_pointer: Option<std::ops::Range<u64>>,
-}
-
-/// Finds the module whose image describes `address`.
-///
-/// A process address space cannot map two images at one address, so the
-/// first describing module is the only one.
-pub(super) fn unwind_module_for<'a>(
-    modules: &[UnwindModule<'a>],
-    address: VirtualAddress,
-) -> Option<(UnwindModule<'a>, ImageAddress)> {
-    modules.iter().find_map(|module| {
-        module
-            .loaded
-            .image_address(address)
-            .ok()
-            .filter(|image_address| module.image.contains_address(*image_address))
-            .map(|image_address| (*module, image_address))
-    })
 }
 
 /// Describes a process address by the module whose image covers it.

@@ -130,7 +130,10 @@ fn languages_stay_at_their_seams() {
         "web",
         "present",
         "runtime_model",
-        "unwind.rs",
+        "unwind",
+        "analysis",
+        "capture",
+        "profiler",
         "protocol.rs",
         "lib.rs",
     ] {

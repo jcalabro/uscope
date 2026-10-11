@@ -84,6 +84,7 @@ mod native;
 #[cfg(test)]
 pub mod native_tracee;
 mod new_task;
+pub mod perf;
 mod post_mortem;
 mod presentation;
 #[cfg(debug_assertions)]

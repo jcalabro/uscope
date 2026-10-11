@@ -3,9 +3,92 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::{UnwindTermination, VirtualAddress};
+use crate::debug_info::UnwindInfo;
+use crate::{ImageAddress, LoadedModule, ModuleImage, UnwindTermination, VirtualAddress};
+
+pub mod sample;
 
 pub const DEFAULT_MAX_FRAMES: usize = 256;
+
+/// One loaded module's address mapping, metadata, and call-frame information.
+#[derive(Clone, Copy)]
+pub struct UnwindModule<'a> {
+    pub loaded: LoadedModule,
+    pub image: &'a ModuleImage,
+    pub unwind: &'a dyn UnwindInfo,
+}
+
+/// Finds the module whose image describes `address`.
+///
+/// A process address space cannot map two images at one address, so the
+/// first describing module is the only one.
+pub fn unwind_module_for<'a>(
+    modules: &[UnwindModule<'a>],
+    address: VirtualAddress,
+) -> Option<(UnwindModule<'a>, ImageAddress)> {
+    modules.iter().find_map(|module| {
+        module
+            .loaded
+            .image_address(address)
+            .ok()
+            .filter(|image_address| module.image.contains_address(*image_address))
+            .map(|image_address| (*module, image_address))
+    })
+}
+
+/// Whether a frame keeps the frame-pointer chain at an instruction: its
+/// rbp holds the address of the word where it saved its caller's, with its
+/// return address in the word above, as a walk of the chain assumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FramePointerRule {
+    Kept,
+    /// The function's rules find its frame some other way.
+    NotKept,
+    /// The frame has no caller.
+    Outermost,
+    NoUnwindInfo,
+}
+
+/// Decides a [`FramePointerRule`] by unwinding with registers and memory
+/// made up for the test: only rbp is known, and every word of memory holds
+/// a value its address names. The frame keeps the chain exactly when its
+/// rules find the frame from rbp, its caller's rbp in the word rbp points
+/// to, and its return address in the next.
+pub fn frame_pointer_rule<U: UnwindInfo + ?Sized>(
+    unwind: &U,
+    address: ImageAddress,
+) -> FramePointerRule {
+    /// A frame pointer no real frame has.
+    const FRAME: u64 = 0x4000_0000_0000_0000;
+    struct Named;
+    impl MemoryReader for Named {
+        fn read_u64(&mut self, address: VirtualAddress) -> Option<u64> {
+            Some(!address.get())
+        }
+    }
+    let registers = RegisterFile::new([(RBP, FRAME)]);
+    match unwind.unwind(address, &registers, &mut Named) {
+        Ok(step) => match step.registers.get(RETURN_ADDRESS) {
+            None => FramePointerRule::Outermost,
+            Some(caller)
+                if step.cfa.get() == FRAME + 16
+                    && caller == !(FRAME + 8)
+                    && step.registers.get(RBP) == Some(!FRAME) =>
+            {
+                FramePointerRule::Kept
+            }
+            Some(_) => FramePointerRule::NotKept,
+        },
+        Err(UnwindTermination::Complete) => FramePointerRule::Outermost,
+        Err(UnwindTermination::NoUnwindInfo { .. }) => FramePointerRule::NoUnwindInfo,
+        Err(_) => FramePointerRule::NotKept,
+    }
+}
+
+/// DWARF register numbers on x86-64.
+pub const RBP: u16 = 6;
+pub const RSP: u16 = 7;
+pub const RETURN_ADDRESS: u16 = 16;
 
 /// What the unwinder knows about one frame.
 #[derive(Debug, Clone)]

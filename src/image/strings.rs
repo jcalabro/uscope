@@ -163,7 +163,7 @@ impl<'a> Paths<'a> {
 /// pool is valid as a whole: one pass, where checking each string found
 /// its end and started again, a third of what reading a cached image
 /// took.
-pub(super) fn valid_pool(pool: &[u8], utf8: bool) -> bool {
+pub fn valid_pool(pool: &[u8], utf8: bool) -> bool {
     if pool.last().is_some_and(|last| *last != 0) {
         return false;
     }
@@ -172,7 +172,7 @@ pub(super) fn valid_pool(pool: &[u8], utf8: bool) -> bool {
 
 /// Whether `offset` names a string in a valid pool: inside it, and, for a
 /// UTF-8 pool, at a character boundary.
-pub(super) fn valid_reference(pool: &[u8], offset: u32, utf8: bool) -> bool {
+pub fn valid_reference(pool: &[u8], offset: u32, utf8: bool) -> bool {
     let Some(&byte) = pool.get(offset as usize) else {
         return false;
     };

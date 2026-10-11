@@ -263,6 +263,10 @@ enum Tool {
     Web(Box<web::WebArgs>),
     /// Show, check, and create settings files, and trust projects.
     Config(ConfigArgs),
+    /// Record where a program spends its time, from outside it.
+    Record(cli::profile::RecordArgs),
+    /// Summarize a recorded profile.
+    Report(cli::profile::ReportArgs),
 }
 
 fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsString), String> {
@@ -375,6 +379,8 @@ async fn async_main() -> ExitCode {
                 }
             };
         }
+        Some(Tool::Record(record)) => return cli::profile::run_record(record),
+        Some(Tool::Report(report)) => return cli::profile::run_report(report),
         Some(Tool::Config(config)) => {
             return match run_config(config) {
                 Ok(true) => ExitCode::SUCCESS,

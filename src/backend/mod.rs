@@ -17,6 +17,7 @@ use crate::{Error, ProcessId, Result};
 pub use linux::PostMortemSession;
 #[cfg(test)]
 pub use linux::native_tracee;
+pub use linux::perf;
 #[cfg(any(test, feature = "sim"))]
 pub use linux::sim_edge;
 

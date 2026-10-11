@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use super::{GoFunction, GoTable};
-use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
+use crate::unwind::{FramePointerRule, MemoryReader, RegisterFile, UnwindStep};
 use crate::{UnwindTermination, VirtualAddress};
 
 /// DWARF register numbers on x86-64.
@@ -187,6 +187,25 @@ impl GoUnwind {
             CallerFramePointer::Unchanged
         } else {
             CallerFramePointer::Unknown
+        })
+    }
+
+    /// Whether the Go frame executing `address` keeps the frame-pointer
+    /// chain, or `None` when Go did not compile the code there. Its rbp is
+    /// the word below its return address once the prologue saved the
+    /// caller's there; compiled Go code keeps no other value in it.
+    pub fn frame_pointer_rule(&self, address: u64) -> Option<FramePointerRule> {
+        let (index, function) = self.function(address)?;
+        let saved = self
+            .frame_pointer_saved
+            .get(index)
+            .and_then(Option::as_ref)
+            .is_some_and(|saved| saved.contains(&address));
+        let delta = self.sp_delta(function, address).ok();
+        Some(if saved && delta.is_some_and(|delta| delta >= 8) {
+            FramePointerRule::Kept
+        } else {
+            FramePointerRule::NotKept
         })
     }
 

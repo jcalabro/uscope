@@ -98,3 +98,17 @@ path = "fuzz_targets/image.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "perf-records"
+path = "fuzz_targets/perf_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "capture"
+path = "fuzz_targets/capture.rs"
+test = false
+doc = false
+bench = false

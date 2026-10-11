@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use crate::inspection::InspectionBudget;
 use crate::model::ValueStorage;
-use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
+use crate::unwind::{FramePointerRule, MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     CodeInstanceId, DereferenceReference, DereferencedValue, GlobalVariableId, ImageAddress,
     InspectedValue, ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StackFrameId,
@@ -502,6 +502,12 @@ pub trait UnwindInfo: Send + Sync {
         registers: &RegisterFile,
         memory: &mut dyn MemoryReader,
     ) -> std::result::Result<UnwindStep, UnwindTermination>;
+
+    /// Whether the frame executing `address` keeps the frame-pointer
+    /// chain there, so that a walk of the chain finds its caller.
+    fn frame_pointer_rule(&self, address: ImageAddress) -> FramePointerRule {
+        crate::unwind::frame_pointer_rule(self, address)
+    }
 }
 
 #[cfg(target_os = "linux")]

@@ -5081,3 +5081,49 @@ fn timings_report_each_stop_and_request() {
         assert!(phases.contains(phase), "{phase} in {phases:?}");
     }
 }
+
+#[test]
+fn record_writes_a_profile_that_report_summarizes() {
+    let scratch = support::ScratchDir::new("cli-record");
+    let profile = scratch.path().join("leaf.usprof");
+    let program = fixture("build/test-programs/profile-stacks-gcc-o0");
+    let recorded = uscope_command()
+        .args(["record", "--function", "leaf", "-o"])
+        .arg(&profile)
+        .arg("--")
+        .arg(&program)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run uscope record");
+    assert!(
+        recorded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    assert!(String::from_utf8_lossy(&recorded.stderr).contains("recorded 6 samples"));
+
+    let top = assert_success(uscope(&["report", &profile.to_string_lossy()]));
+    assert_in_order(
+        &top,
+        &[
+            "6 samples, 6 executions",
+            "    own   total  function",
+            "100.00% 100.00%  leaf",
+            "  0.00% 100.00%  middle",
+            "  0.00% 100.00%  outer",
+        ],
+    );
+    let tree = assert_success(uscope(&["report", "--tree", &profile.to_string_lossy()]));
+    for line in [
+        " 50.00%   0.00%  _start",
+        " 50.00%   0.00%                  descend",
+        " 50.00%  50.00%                        leaf",
+        " 50.00%   0.00%  __GI___clone3",
+        " 50.00%  50.00%            leaf",
+    ] {
+        assert!(
+            tree.lines().any(|candidate| candidate == line),
+            "{line:?} in\n{tree}"
+        );
+    }
+}

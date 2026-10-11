@@ -41,7 +41,9 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 pub use backing::AlignedBytes;
 pub use format::TableKind;
-pub use strings::{PathId, Paths, PathsBuilder, Strings, StringsBuilder};
+pub use strings::{
+    PathId, Paths, PathsBuilder, StrId, Strings, StringsBuilder, valid_pool, valid_reference,
+};
 pub use validate::{ImageError, Limits};
 
 use container::{Format, TableBytes, Tables};

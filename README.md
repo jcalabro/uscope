@@ -23,6 +23,9 @@ and Ada.
 - **Language runtimes.** Go goroutines and async Rust tasks show up as threads
   and stacks you can step through, and panics stop the program where they
   happen.
+- **Profiling.** `uscope record` samples where a program spends its time
+  from outside it, with stacks that are exact or say why they stop, and
+  `uscope report` summarizes the profile.
 - **Honest output.** When a value is optimized out or memory cannot be read,
   uscope says so instead of guessing.
 
@@ -74,6 +77,7 @@ uscope dap                         # serve DAP on stdio
 - [Views](docs/views.md): how containers are presented, and
   [writing your own](docs/writing-views.md).
 - [Editors and DAP](docs/dap.md): setup for VS Code, Neovim, and others.
+- [Profiling](docs/profiling.md): recording and reading profiles.
 - [Go](docs/go.md) and [async Rust and tokio](docs/tokio.md): how uscope
   handles goroutines and tasks.
 - [AGENTS.md](AGENTS.md): architecture and development rules for contributors.
