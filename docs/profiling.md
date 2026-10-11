@@ -309,7 +309,8 @@ does. Built without the crate's `enabled` feature, every macro is gone.
 
 Each site is static data in the program's file, which uscope reads, so
 the program never sends a name. A site is off until a recording switches
-it on, and costs a load and a branch while off. An on zone writes two
+it on, and costs a load and a branch while off, about 0.2 ns; on, a zone
+costs about 13 ns (`just probe-cost`). An on zone writes two
 16-byte records into its thread's ring in the program's own memory,
 which uscope reads from outside about every 10 ms: the program never
 waits, takes a lock, or makes a system call to record. `--probes` chooses

@@ -9,6 +9,8 @@
 //! - `fork`: a zone around a forked child, whose own zone records nothing.
 //! - `quiet`: says it is ready to be attached to, then zones until the
 //!   sites switch themselves off.
+//! - `cost COUNT`: times COUNT zones as they are, off unless uscope reads;
+//!   `cost-on COUNT` waits until it does.
 
 use std::io::Write as _;
 use std::time::{Duration, Instant};
@@ -21,6 +23,10 @@ fn main() {
     if arguments[1] == "quiet" {
         println!("READY");
     }
+    if arguments[1] == "cost" {
+        cost(count());
+        return;
+    }
     wait_until_listening();
     match arguments[1].as_str() {
         "zones" => zones(),
@@ -28,6 +34,7 @@ fn main() {
         "churn" => churn(count()),
         "fork" => forked(),
         "quiet" => quiet(),
+        "cost-on" => cost(count()),
         mode => panic!("unknown mode {mode}"),
     }
 }
@@ -121,6 +128,17 @@ fn quiet() {
         std::hint::black_box(spin(10));
     }
     println!("quiet");
+}
+
+fn cost(count: u64) {
+    let started = Instant::now();
+    for _ in 0..count {
+        let _tick = zone!("cost");
+    }
+    #[expect(clippy::cast_precision_loss, reason = "a mean")]
+    let each = started.elapsed().as_secs_f64() * 1e9 / count as f64;
+    let state = if uscope_probes::listening() { "on" } else { "off" };
+    println!("a zone {state}: {each:.2} ns");
 }
 
 fn spin(rounds: u64) -> u64 {

@@ -133,7 +133,7 @@ impl Drop for Zone {
     fn drop(&mut self) {
         // A zone that began ends, whether or not its site is still on.
         if let Some(state) = self.0 {
-            write(state, abi::ZONE_END, 0, &[]);
+            end(state, abi::ZONE_END);
         }
     }
 }
@@ -155,9 +155,16 @@ impl Drop for Label {
     #[inline(always)]
     fn drop(&mut self) {
         if let Some(state) = self.0 {
-            write(state, abi::LABEL_END, 0, &[]);
+            end(state, abi::LABEL_END);
         }
     }
+}
+
+/// Ends a zone or label out of line, so that a guard whose site was off
+/// drops to one test, which the compiler then inlines.
+#[inline(never)]
+fn end(state: &'static AtomicU8, kind: u8) {
+    write(state, kind, 0, &[]);
 }
 
 #[doc(hidden)]

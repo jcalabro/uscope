@@ -244,6 +244,13 @@ profile-counters PROGRAM:
     cargo build --quiet --profile profiling --features tools --bin uscope-tools
     perf stat -e instructions:u,cycles:u,cache-references:u,cache-misses:u,branch-misses:u ./target/profiling/uscope-tools load "$1" >/dev/null
 
+# Times one instrumented zone in a release build of uscope: with its site
+# off, as when nothing records, and on, as uscope reads it.
+probe-cost COUNT="100000000": build-test-programs
+    cargo build --quiet --release --bin uscope
+    ./build/test-programs/probes cost {{COUNT}}
+    ./target/release/uscope record -o /dev/null -- ./build/test-programs/probes cost-on {{COUNT}} | grep 'a zone'
+
 # Runs one fuzz target: expression-parse, dwarf-expression, core-dump, dispatch,
 # elf-symbols, gopclntab, disassembly, debug-register-plan, dap-transport,
 # dap-request, views, image, perf-records, or capture. Arguments go to libFuzzer.
