@@ -50,6 +50,22 @@ pub fn structure<F: Format, const N: usize>(
 ) -> Result<[Option<Placed>; N], ImageError> {
     const { assert!(N > 0) };
     assert_eq!(N, F::KINDS, "a directory has one slot per kind");
+    let header = check_header::<F>(bytes, limits)?;
+    let trailer_start = bytes
+        .len()
+        .checked_sub(size_of::<Trailer>())
+        .filter(|start| *start >= size_of::<Header>())
+        .ok_or(ImageError::Truncated)?;
+    let trailer =
+        Trailer::ref_from_bytes(&bytes[trailer_start..]).map_err(|_| ImageError::Truncated)?;
+    if trailer.checksum.get() != twox_hash::XxHash3_64::oneshot(&bytes[..trailer_start]) {
+        return Err(ImageError::Checksum);
+    }
+    check_directory::<F, N>(bytes, header, trailer_start)
+}
+
+/// Checks what the header says of the image as a whole.
+fn check_header<F: Format>(bytes: &[u8], limits: Limits) -> Result<&Header, ImageError> {
     let (header, _) = Header::ref_from_prefix(bytes).map_err(|_| ImageError::Truncated)?;
     if header.magic != F::MAGIC {
         return Err(ImageError::NotAnImage);
@@ -79,17 +95,16 @@ pub fn structure<F: Format, const N: usize>(
     if target_of(header).is_none() || header.flags != 0 || header.reserved != [0; 24] {
         return Err(malformed("the header has fields it does not define"));
     }
-    let trailer_start = bytes
-        .len()
-        .checked_sub(size_of::<Trailer>())
-        .filter(|start| *start >= size_of::<Header>())
-        .ok_or(ImageError::Truncated)?;
-    let trailer =
-        Trailer::ref_from_bytes(&bytes[trailer_start..]).map_err(|_| ImageError::Truncated)?;
-    if trailer.checksum.get() != twox_hash::XxHash3_64::oneshot(&bytes[..trailer_start]) {
-        return Err(ImageError::Checksum);
-    }
+    Ok(header)
+}
 
+/// Checks the directory between the header and the trailer, returning
+/// where each table is.
+fn check_directory<F: Format, const N: usize>(
+    bytes: &[u8],
+    header: &Header,
+    trailer_start: usize,
+) -> Result<[Option<Placed>; N], ImageError> {
     let count = header.tables.get() as usize;
     if count > F::KINDS {
         return Err(malformed(
