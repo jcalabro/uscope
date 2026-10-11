@@ -49,6 +49,10 @@ pub enum OpenError {
     Event { cpu: u32, source: std::io::Error },
     #[error("mapping a perf ring failed: {0}")]
     Ring(std::io::Error),
+    #[error(
+        "this user's memory for perf rings is in use: {pages} pages per CPU, the fewest that hold two samples, do not fit"
+    )]
+    RingBudget { pages: usize },
     #[error("reading the online CPUs failed: {0}")]
     Cpus(std::io::Error),
 }
@@ -60,8 +64,24 @@ pub struct Events {
     pages: usize,
 }
 
-/// The smallest rings worth sampling into.
-const MIN_PAGES: usize = 4;
+/// The most bytes a sample of `stack_bytes` can take: its fixed fields,
+/// the deepest chain with its context markers, every register, and the
+/// stack with its sizes.
+const fn max_sample_bytes(stack_bytes: u32) -> usize {
+    const FIXED: usize = 8 * 8;
+    const CHAIN: usize = 8 * (1 + 127 + 8);
+    const REGISTERS: usize = 8 * (1 + decode::REGISTERS.count_ones() as usize);
+    FIXED + CHAIN + REGISTERS + 16 + stack_bytes as usize
+}
+
+/// The fewest data pages, a power of two, that hold two of the largest
+/// samples: a ring that holds none would lose every sample, and one that
+/// holds a single sample loses the next before it can be drained.
+fn min_pages(stack_bytes: u32) -> usize {
+    (2 * max_sample_bytes(stack_bytes))
+        .div_ceil(sys::page_size())
+        .next_power_of_two()
+}
 
 impl Events {
     /// Opens disabled events for `pid`, its threads, and its children,
@@ -85,8 +105,7 @@ impl Events {
                 | flag::EXCLUDE_CALLCHAIN_KERNEL
                 | flag::USE_CLOCKID
                 | flag::WATERMARK,
-            wakeup_watermark: u32::try_from(options.ring_pages * sys::page_size() / 4)
-                .unwrap_or(u32::MAX),
+            read_format: sys::FORMAT_LOST,
             sample_regs_user: decode::REGISTERS,
             sample_stack_user: options.stack_bytes,
             clockid: libc::CLOCK_MONOTONIC,
@@ -108,27 +127,19 @@ impl Events {
             }
         }
         let pid = i32::try_from(pid).map_err(|_| OpenError::Cpus(std::io::Error::other("pid")))?;
-        let mut fds = Vec::new();
-        for cpu in online_cpus().map_err(OpenError::Cpus)? {
-            let fd = sys::open(&attr, pid, i32::try_from(cpu).unwrap_or(i32::MAX)).map_err(
-                |source| match source.raw_os_error() {
-                    Some(libc::EACCES | libc::EPERM) => OpenError::Denied {
-                        paranoid: std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
-                            .map_or_else(|_| "unknown".into(), |text| text.trim().to_owned()),
-                        source,
-                    },
-                    _ => OpenError::Event { cpu, source },
-                },
-            )?;
-            fds.push(fd);
-        }
+        let cpus = online_cpus().map_err(OpenError::Cpus)?;
         // The kernel lets a user lock only so much memory for rings, which
-        // other recordings may be using: rings that do not fit are halved.
-        let mut pages = options.ring_pages.next_power_of_two();
+        // other recordings may be using: rings that do not fit are halved,
+        // down to the fewest that hold two samples. Each size opens its
+        // events afresh, as they wake their reader a quarter of the way in.
+        let fewest = min_pages(options.stack_bytes);
+        let mut pages = options.ring_pages.next_power_of_two().max(fewest);
         loop {
-            let rings: std::io::Result<Vec<sys::Ring>> = fds
-                .iter()
-                .map(|fd| sys::Ring::map(fd.try_clone()?, pages))
+            attr.wakeup_watermark =
+                u32::try_from(pages * sys::page_size() / 4).unwrap_or(u32::MAX);
+            let rings: std::io::Result<Vec<sys::Ring>> = open_each(&attr, pid, &cpus)?
+                .into_iter()
+                .map(|fd| sys::Ring::map(fd, pages))
                 .collect();
             match rings {
                 Ok(rings) => {
@@ -138,7 +149,10 @@ impl Events {
                     );
                     return Ok(Self { rings, pages });
                 }
-                Err(error) if error.raw_os_error() == Some(libc::EPERM) && pages > MIN_PAGES => {
+                Err(error) if error.raw_os_error() == Some(libc::EPERM) => {
+                    if pages == fewest {
+                        return Err(OpenError::RingBudget { pages });
+                    }
                     pages /= 2;
                 }
                 Err(error) => return Err(OpenError::Ring(error)),
@@ -162,12 +176,38 @@ impl Events {
         sys::poll(&self.rings, timeout);
     }
 
+    /// How many samples the events have lost so far, exactly.
+    pub fn lost(&self) -> u64 {
+        self.rings
+            .iter()
+            .filter_map(|ring| sys::lost(ring.fd()).ok())
+            .sum()
+    }
+
     /// Stops every event sampling.
     pub fn disable(&self) {
         for ring in &self.rings {
             let _ = sys::enable(ring.fd(), false);
         }
     }
+}
+
+/// One event of `attr` for `pid` on each of `cpus`.
+fn open_each(attr: &sys::Attr, pid: i32, cpus: &[u32]) -> Result<Vec<OwnedFd>, OpenError> {
+    cpus.iter()
+        .map(|&cpu| {
+            sys::open(attr, pid, i32::try_from(cpu).unwrap_or(i32::MAX)).map_err(|source| {
+                match source.raw_os_error() {
+                    Some(libc::EACCES | libc::EPERM) => OpenError::Denied {
+                        paranoid: std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
+                            .map_or_else(|_| "unknown".into(), |text| text.trim().to_owned()),
+                        source,
+                    },
+                    _ => OpenError::Event { cpu, source },
+                }
+            })
+        })
+        .collect()
 }
 
 /// The CPUs `/sys` lists online, as `0-3,8` lists them.

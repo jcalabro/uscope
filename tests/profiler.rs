@@ -216,11 +216,16 @@ fn an_async_tasks_samples_show_its_own_stack_of_awaits() {
     for variant in ["o0", "o3"] {
         let mut command = Command::new(Scenario::fixture(&format!("tokio-profile-{variant}")));
         command.stdout(Stdio::null());
-        let recording = record(command, &calls_of("profile::work")).expect("record");
+        // Rings too small for more than a few samples lose most calls.
+        let options = RecordOptions {
+            ring_pages: 1,
+            ..calls_of("profile::work")
+        };
+        let recording = record(command, &options).expect("record");
         assert!(recording.status.success());
         let profile = &recording.profile;
-        // Four tasks call work five times each. A full ring drops calls,
-        // and counts each one dropped.
+        // Four tasks call work five times each, and every call a full ring
+        // drops is counted.
         let recorded = profile.total_weight();
         assert!(recorded > 0, "{variant}");
         assert_eq!(recorded + profile.lost_samples(), 20, "{variant}");

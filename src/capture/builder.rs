@@ -262,6 +262,11 @@ impl CaptureBuilder {
         }
     }
 
+    /// A count so far.
+    pub fn account(&self, kind: u32) -> u64 {
+        self.accounts.get(&kind).copied().unwrap_or(0)
+    }
+
     /// Whether `frame` has its lines.
     pub fn symbolized(&self, frame: u32) -> bool {
         self.symbols.contains_key(&frame)

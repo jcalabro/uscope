@@ -91,6 +91,13 @@ impl Processor {
         &mut self.builder
     }
 
+    /// Takes the events' count of samples lost so far.
+    pub fn lost(&mut self, total: u64) {
+        let counted = self.builder.account(AccountKind::LostSamples as u32);
+        self.builder
+            .count(AccountKind::LostSamples as u32, total.saturating_sub(counted));
+    }
+
     /// Processes the records in `batch` and those held back before, in
     /// time order, up to `watermark`; holds back the rest. Rings are
     /// drained one after another, so a record of one may be written after
@@ -177,13 +184,13 @@ impl Processor {
                     self.builder.process_exit(pid, at);
                 }
             }
-            decode::Record::Lost { count, .. } => {
-                self.builder.count(AccountKind::LostSamples as u32, count);
-            }
+            // A loss record says only what its ring lost since it last had
+            // room, and a ring that never has room again never says: the
+            // events' own counts are exact, and `lost` takes them.
             decode::Record::Throttle { .. } => {
                 self.builder.count(AccountKind::Throttles as u32, 1);
             }
-            decode::Record::Other { .. } => {}
+            decode::Record::Lost { .. } | decode::Record::Other { .. } => {}
         }
     }
 

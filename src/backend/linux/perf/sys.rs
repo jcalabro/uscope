@@ -78,6 +78,23 @@ const FLAG_FD_CLOEXEC: libc::c_ulong = 1 << 3;
 const IOC_ENABLE: libc::c_ulong = 0x2400;
 const IOC_DISABLE: libc::c_ulong = 0x2401;
 
+/// `read_format`: each read also gives how many samples the event lost.
+pub const FORMAT_LOST: u64 = 1 << 4;
+
+/// What an event with [`FORMAT_LOST`] has lost: every sample its own
+/// events and those it is inherited by found no room for, whether or not
+/// a loss record has said so yet.
+pub fn lost(fd: &OwnedFd) -> std::io::Result<u64> {
+    let mut values = [0_u64; 2];
+    // SAFETY: the buffer holds the two words this read format reads, and
+    // outlives the call.
+    let read = unsafe { libc::read(fd.as_raw_fd(), values.as_mut_ptr().cast(), 16) };
+    if read != 16 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(values[1])
+}
+
 /// Opens an event for `pid` on `cpu`.
 pub fn open(attr: &Attr, pid: i32, cpu: i32) -> std::io::Result<OwnedFd> {
     // SAFETY: `attr` is a valid, initialized perf_event_attr of the size

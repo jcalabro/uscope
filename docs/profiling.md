@@ -32,7 +32,10 @@ calls exactly; the program then runs without address randomization.
 The kernel must let the user sample their own processes:
 `/proc/sys/kernel/perf_event_paranoid` must be 2 or less, as it is by
 default. Rings that would lock more memory than the kernel allows the user
-are made smaller, and the profile records the size it got.
+are made smaller, down to the size that holds two samples, and the profile
+records the size it got. A sample that finds its ring full is lost, and
+the profile counts every one: the count comes from the kernel's events,
+which count losses a ring never reports.
 
 ## What a stack means
 

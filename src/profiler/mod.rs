@@ -87,6 +87,9 @@ pub struct RecordOptions {
     pub stack_bytes: u32,
     /// The most frames a stack keeps.
     pub max_frames: usize,
+    /// Pages each CPU's ring holds: the most a burst of samples can write
+    /// before they are drained. Fewer lose more samples, every one counted.
+    pub ring_pages: usize,
     /// Directories searched for separate debug files.
     pub debug_directories: Vec<PathBuf>,
 }
@@ -100,6 +103,7 @@ impl RecordOptions {
             },
             stack_bytes: preset.stack_bytes(),
             max_frames: 512,
+            ring_pages: 128,
             debug_directories: Vec::new(),
         }
     }
@@ -182,7 +186,7 @@ pub fn record_watched(
     let events = perf::EventOptions {
         source,
         stack_bytes: options.stack_bytes.next_multiple_of(8),
-        ring_pages: 128,
+        ring_pages: options.ring_pages,
     };
     let launch = perf::LaunchOptions {
         no_address_randomization: breakpoint.is_some(),
@@ -248,6 +252,7 @@ pub fn record_watched(
             break;
         }
         if started && published.elapsed() >= wait {
+            processor.lost(events.lost());
             (watch.publish)(Profile {
                 capture: processor.snapshot(),
             });
@@ -256,6 +261,7 @@ pub fn record_watched(
         }
     }
     events.disable();
+    processor.lost(events.lost());
     let status = exit
         .join()
         .unwrap_or_else(|_| Err(std::io::Error::other("the program's waiter panicked")))
