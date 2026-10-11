@@ -1,8 +1,9 @@
 # uscope
 
 uscope is a debugger for native programs on Linux x86-64, written in Rust.
-Use it from your terminal, or from your editor through the Debug Adapter
-Protocol. It debugs C, C++, Rust, Zig, Go, Odin, Fortran, D, Nim, and Ada.
+Use it from your terminal, browser, or from your editor through the Debug
+Adapter Protocol. It debugs C, C++, Rust, Zig, Go, Odin, Fortran, D, Nim,
+and Ada.
 
 ## Features
 
