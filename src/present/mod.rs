@@ -93,6 +93,9 @@ pub struct Details {
     pub text_view: bool,
     /// Whether the value is a record, union, or variant.
     pub aggregate: bool,
+    /// The renderers of the drawings its view offers, each once, which only
+    /// the web page draws.
+    pub drawings: Vec<Arc<str>>,
 }
 
 /// How a row expands.
@@ -123,6 +126,18 @@ pub struct Counts {
 pub enum Listed {
     Value(Box<Row>),
     Truncated(String),
+}
+
+/// The renderers of the drawings a presentation offers, each once.
+#[must_use]
+pub fn drawings(presentation: &uscope::Presentation) -> Vec<Arc<str>> {
+    let mut names = Vec::<Arc<str>>::new();
+    for visualizer in presentation.visualizers.iter() {
+        if !names.contains(&visualizer.renderer.name) {
+            names.push(Arc::clone(&visualizer.renderer.name));
+        }
+    }
+    names
 }
 
 /// The part of a listing a request asks for.
@@ -277,6 +292,7 @@ impl Presenter<'_> {
                             | VariableValue::Union
                             | VariableValue::Variant { .. }
                     ),
+                    drawings: presented.map_or_else(Vec::new, drawings),
                 })
             }
             _ => None,
@@ -927,6 +943,8 @@ mod tests {
             children: ValueChildren::NotApplicable,
             problem: None,
             number: None,
+            presented: None,
+            visualizers: Arc::from([]),
         };
         let state = VariableState::Available {
             source: VariableValueSource::Computed,

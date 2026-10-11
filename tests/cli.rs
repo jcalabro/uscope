@@ -2468,6 +2468,82 @@ fn views_check_and_explain_a_programs_types_without_a_process() {
     );
 }
 
+/// A view's drawings are only drawn by the web page, but `views check`
+/// and `views explain` show them, and the renderers they name, and a
+/// drawing that does not bind fails the check.
+#[test]
+fn views_check_and_explain_show_drawings_and_their_renderers() {
+    let directory = support::ScratchDir::new("cli-views-drawings");
+    let views = directory.path().join("plots.views");
+    fs::write(
+        &views,
+        "uscope-views 1\nextend rust chess::Board {\n    visualize \"plot\" { values = nothing }\n    visualize \"line-plot\" { values = colors }\n}\n",
+    )
+    .expect("write the views");
+    fs::write(
+        directory.path().join("plot.js"),
+        "uscope.draw(() => null);\n",
+    )
+    .expect("write the renderer");
+    let program = concat!(env!("CARGO_MANIFEST_DIR"), "/build/test-programs/chess");
+    let run = |arguments: &[&std::ffi::OsStr]| {
+        uscope_command()
+            .current_dir(directory.path())
+            .env("XDG_CONFIG_HOME", directory.path().join("config"))
+            .arg("views")
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run uscope views")
+    };
+    // The program carries its views and the renderer they name.
+    let clean = run(&["check".as_ref(), program.as_ref()]);
+    assert_in_order(
+        &assert_success(clean),
+        &[
+            "extended, with no view presenting them:",
+            "Board by chess.views[0]:4 `extend rust chess::Board`",
+            "renderers, which only the web page runs:",
+            "chess-board (chess.views[1]):",
+            "    // Draws a chess position",
+        ],
+    );
+    let explained = run(&[
+        "explain".as_ref(),
+        program.as_ref(),
+        "chess::Board".as_ref(),
+    ]);
+    assert_in_order(
+        &assert_success(explained),
+        &[
+            "no view presents it; an `extend` binds",
+            "drawings, which only the web page draws:",
+            "chess-board(squares, turn) by chess.views[0]:4 `extend rust chess::Board`, with the renderer from chess.views[1]",
+            "bits(values, origin) by chess.views[0]:4 `extend rust chess::Board`, with the renderer from built-in",
+        ],
+    );
+    let failed = run(&[
+        "check".as_ref(),
+        program.as_ref(),
+        "--views".as_ref(),
+        views.as_os_str(),
+    ]);
+    assert!(!failed.status.success(), "{failed:?}");
+    assert_in_order(
+        &String::from_utf8_lossy(&failed.stdout),
+        &[
+            "drawings that do not bind:",
+            "plot by ",
+            "plots.views:2 `extend rust chess::Board`, line 3: `nothing` is neither a member of `Board`",
+            "renderers, which only the web page runs:",
+            "plot (",
+            "plot.js):",
+            "    uscope.draw(() => null);",
+            "chess-board (chess.views[1]):",
+        ],
+    );
+}
+
 /// A kernel beside a view file is loaded with it, as `NAME.wasm`; the runs
 /// a presentation takes are recorded, and replay with no program; and
 /// `views check` shows each kernel as the source it is built from.

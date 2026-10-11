@@ -1,0 +1,13 @@
+uscope-views 1
+
+# Draw a board in the web page, and each side's bitboard as bits.
+extend rust chess::Board {
+    visualize "chess-board" {
+        squares = mailbox
+        turn = side_to_move
+    }
+    visualize "bits" {
+        values = colors
+        origin = "bottom-left"
+    }
+}

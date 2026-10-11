@@ -126,10 +126,11 @@ web-deps:
 web: web-deps
     cd web && ./node_modules/.bin/vite build --logLevel warn
 
-# Type-checks and lints the page and runs its tests outside a browser and
+# Type-checks and lints the page, checks renderers against sdk/web's
+# declarations, and runs the page's tests outside a browser and
 # its component tests in headless Chromium. Arguments go to Vitest.
 web-test *ARGS: web-deps
-    cd web && ./node_modules/.bin/tsc --noEmit && biome check src test e2e && ./node_modules/.bin/vitest run "$@"
+    cd web && ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/tsc -p ../sdk/web && biome check src test e2e && ./node_modules/.bin/vitest run "$@"
 
 # Drives the built page and real `uscope web` servers in Chromium and
 # Firefox. Arguments go to Playwright, e.g. `just web-e2e --project=chromium`.
@@ -271,6 +272,13 @@ uat-nvim NVIM_DAP DIR="target/uat": build
 web-shot *PROGRAM: web build-test-programs
     cargo build --quiet --profile test
     cd web && node e2e/shots.ts "$@"
+
+# Times the metrics fixture's drawings with a million samples in headless
+# Chromium, from a stop to its picture, over ROUNDS stops each, with a release
+# build. Not part of the gate: the times depend on the machine.
+web-bench ROUNDS="5": web build-test-programs
+    cargo build --quiet --release
+    cd web && USCOPE_WEB_BINARY="$PWD/../target/release/uscope" USCOPE_CACHE_DIR="$PWD/../target/image-cache" node e2e/bench.ts "{{ROUNDS}}"
 
 # Drives PROGRAM through STEPS in headless Chromium, saving a screenshot after
 # each and printing the page's console: `just web-probe build/test-programs/basic

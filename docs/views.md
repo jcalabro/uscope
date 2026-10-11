@@ -711,6 +711,68 @@ v => children: [0] = 10, [1] = 20, [2] = 30, room = 1, [raw]
 something => {kind: 0x1, value: 7}
 ```
 
+## Visualizers
+
+`visualize` gives a value a drawing in the web page, `uscope web`: a
+chess position as a board, a framebuffer as an image, samples as a plot.
+The view says which data the drawing needs; a **renderer**, a small
+JavaScript file, turns that data into shapes (`docs/visualizers.md`). The
+terminal and debug adapters never draw, and a `visualize` changes nothing
+they show.
+
+```text
+visualize "NAME"                       # one input, `values = self`
+visualize "NAME" {
+    INPUT = EXPR                       # separated by line ends or commas
+    INPUT = EXPR or EXPR …             # the first alternative that binds, as `let`
+    INPUT = bytes(PTR, LEN)            # LEN bytes at PTR, read at once
+    INPUT = "TEXT"                     # a string, handed over as written
+}
+```
+
+- A view or an `extend` may hold any number of `visualize`s. Each that
+  binds offers its drawing, in the order the files and views give them, so
+  an `extend` adds a drawing to any type, one a built-in view presents
+  included.
+- Each input is evaluated as a field is, with `self`, the view's `let`s,
+  and its captured arguments in scope, through every view: a `Vec` arrives
+  as its elements and a `String` as text. Inputs bind with the view, so an
+  input that names no member leaves that `visualize` unbound, which `info
+  view` and `views check` say, and the rest of the view still presents.
+- `bytes(PTR, LEN)` hands over bulk data such as pixels or samples: `LEN`
+  bytes of memory at `PTR`, read at once rather than element by element.
+  A sequence of numbers that lies in one run of memory, as an array's or a
+  `Vec`'s elements do, is read at once too.
+- A string in double quotes is handed over as written, for a renderer's
+  options: `origin = "bottom-left"`.
+- `NAME` names a renderer, 1 to 64 letters, digits, `_`, and `-`. A view
+  calls the renderers of its own source before the built-in ones: a view
+  file's are `NAME.js` files beside it, read with it; a module's own views
+  call the renderers the module carries; and uscope builds in `line-plot`,
+  `bar-chart`, `scatter-plot`, `histogram`, `box-plot`, `donut-chart`,
+  `heatmap`, `flame-graph`, `bitmap`, `bits`, and `mesh`, from
+  `views/visualizers/`.
+- `uscope web --views FILE` loads a view file and the renderers beside it
+  for the page, and the page's Reload views reads them again, so a
+  renderer can be written while the program is stopped.
+
+```uscope-view-example
+uscope-views 1
+view c intvec {
+    show sequence(n) for i in range(n) => data[i]
+    visualize "line-plot" { values = self }
+    visualize "bitmap" {
+        pixels = bytes(data, n * 4)
+        columns = cap
+    }
+    visualize "nowhere"
+    visualize "line-plot" { values = elements }
+}
+---
+v => visualizers: line-plot(values), bitmap(pixels, columns)
+v => unbound visualizers: `nowhere`: no renderer has that name; `line-plot`: `elements` is neither a member of `intvec` nor a name the view declares
+```
+
 ## Summaries
 
 A presented value's summary is one line in one style for every language:
@@ -722,9 +784,9 @@ elements, as `len=3 [1, 2, 3]`, and a map's and its first entries, as
 
 A type's view is the first that binds, from these sources in order:
 
-1. **The session's files**: those given with `--views FILE` or the debug
-   adapter's `viewFiles`, and those `views load FILE` loads, the latest
-   first. `views clear` forgets those loaded, and `views` lists them all.
+1. **The session's files**: those given with `--views FILE`, to the
+   terminal or `uscope web`, or the debug adapter's `viewFiles`, and
+   those `views load FILE` loads, the latest first. `views clear` forgets those loaded, and `views` lists them all.
 2. **The project's and the user's files**: every `*.views` file in
    `.uscope/views` at the project root, then in
    `$XDG_CONFIG_HOME/uscope/views` (or `~/.config/uscope/views`), each
@@ -748,7 +810,10 @@ file scope, and a kernel by writing `USCOPE_KERNEL("tree",
 link to it, and its module. A Rust program, with the `uscope-views` crate
 in `sdk/rust`, writes
 `uscope_views::uscope_views_file!(concat!(env!("CARGO_MANIFEST_DIR"), "/app.views"));`
-and `uscope_views::uscope_kernel!("tree", SOURCE, MODULE);`. Both read the
+and `uscope_views::uscope_kernel!("tree", SOURCE, MODULE);`. A renderer
+is carried with `USCOPE_VISUALIZER("board", "views/board.js");` or
+`uscope_views::uscope_visualizer!("board", PATH);`, its name and its
+JavaScript, and draws the values of the module's own views. Both read the
 files when the program is built, into a section that is not loaded when it
 runs and that `strip --strip-debug` removes with the rest of the debug
 information.
@@ -756,7 +821,8 @@ information.
 The section holds records, each a kind, a format (1), a 32-bit
 little-endian length, and that many bytes; zero bytes between records are
 padding. A view file is kind 1. A kernel is kind 2: a 16-bit length and
-the kernel's name, a 32-bit length and its source, and its module.
+the kernel's name, a 32-bit length and its source, and its module. A
+renderer is kind 3: a 16-bit length and its name, and its JavaScript.
 
 The built-in views cover:
 
@@ -882,13 +948,17 @@ are:
   pattern names. Without a session, `uscope views explain PROGRAM TYPE`
   and `uscope views check PROGRAM` do so from the program's debug
   information alone; `views check` fails when a view loaded for the
-  session or carried by the program presents no type, or binds no type it
-  names.
+  session or carried by the program presents no type, binds no type it
+  names, or has a drawing that does not bind. `views check` also shows
+  each renderer the views call as its JavaScript, to be reviewed as that,
+  and `info view` and `views explain` list a value's drawings, though only
+  the web page draws them.
 - A pointer to a value presented as text shows the text after its address,
   as a pointer to characters does, or why the view could not read it. A
   null pointer shows only its address.
 - An element of a value presented as a sequence is `v[i]`, and the count
-  of a sequence or map is `len(v)`, in any expression: `break f if
+  of a sequence or map is `len(v)`, in any expression, a view's own
+  included, though never through the view being bound: `break f if
   len(queue) > 100`. A Go channel is indexed this way too, though it is
   stored as a pointer, because Go never indexes one as a pointer. A value
   a view presents as another in memory, as `std::stack` is its container,
@@ -922,3 +992,8 @@ generates at most 16,777,216 elements. A kernel is at most 256 KiB, its
 memory at most 4 MiB, its calls nest at most 1024 deep, and each read it
 makes is at most 64 KiB; it takes at most 32 arguments, and its items are
 one to eight words.
+
+A renderer is at most 256 KiB, and a `visualize` takes at most 64 inputs.
+A drawing's inputs hold at most 65,536 values, nested at most 16 deep;
+one drawing reads at most 64 MiB in all.
+What the page allows a renderer is in `docs/visualizers.md`.

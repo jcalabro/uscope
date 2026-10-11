@@ -54,6 +54,7 @@ export function forget(before: Marks, after: Marks, answers: Cache, values: Reca
       "readMemory ",
       "registers ",
       "tasks ",
+      "draw ",
     ]) {
       answers.forget(method);
     }
@@ -62,9 +63,12 @@ export function forget(before: Marks, after: Marks, answers: Cache, values: Reca
     // Code is memory too.
     answers.forget("disassemble ");
   }
-  // Signal policies change without a stop.
+  // Signal policies change without a stop, and reloading views changes how
+  // values are presented and drawn.
   if (before.settings !== after.settings) {
-    answers.forget("signals ");
+    for (const method of ["signals ", "scopes ", "children ", "evaluate ", "draw ", "renderers "]) {
+      answers.forget(method);
+    }
   }
   return false;
 }

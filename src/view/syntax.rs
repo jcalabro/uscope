@@ -45,6 +45,12 @@ pub const MAX_CLAUSES: usize = 4;
 /// What a kernel's name may be, which is also the name of its file.
 pub const KERNEL_NAME: &str = "a kernel's name is 1 to 64 letters, digits, `_`, and `-`";
 
+/// What a renderer's name may be, which is also the name of its file.
+pub const RENDERER_NAME: &str = "a renderer's name is 1 to 64 letters, digits, `_`, and `-`";
+
+/// How many inputs one `visualize` may name.
+pub const MAX_INPUTS: usize = 64;
+
 /// Whether `name` may name a kernel: see [`KERNEL_NAME`].
 #[must_use]
 pub fn is_kernel_name(name: &str) -> bool {
@@ -55,13 +61,30 @@ pub fn is_kernel_name(name: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || "_-".contains(character))
 }
 
+/// Whether `name` may name a renderer: see [`RENDERER_NAME`].
+#[must_use]
+pub fn is_renderer_name(name: &str) -> bool {
+    is_kernel_name(name)
+}
+
 /// Words that end an expression, so a member with one of these names must
 /// be written in backticks.
 const STOP_WORDS: [&str; 5] = ["or", "for", "if", "else", "let"];
 
 /// Words that begin a statement.
-const STATEMENTS: [&str; 12] = [
-    "let", "type", "check", "summary", "field", "show", "if", "match", "hide", "format", "view",
+const STATEMENTS: [&str; 13] = [
+    "let",
+    "type",
+    "check",
+    "summary",
+    "field",
+    "show",
+    "if",
+    "match",
+    "hide",
+    "format",
+    "visualize",
+    "view",
     "extend",
 ];
 
@@ -172,6 +195,18 @@ impl View {
         }
         names
     }
+
+    /// The names of the renderers the view's `visualize` statements call.
+    #[must_use]
+    pub fn renderer_names(&self) -> Vec<&str> {
+        self.statements
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::Visualize(visualize) => Some(visualize.name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// An expression and the line it was written on.
@@ -245,6 +280,38 @@ pub enum Statement {
         format: Format,
         line: u32,
     },
+    /// `visualize "NAME" { INPUT = EXPR, … }`: a drawing the web page
+    /// makes of the value with the renderer `NAME`.
+    Visualize(Visualize),
+}
+
+/// A `visualize` statement: the renderer it calls and the inputs it hands
+/// it.
+#[derive(Debug, Clone)]
+pub struct Visualize {
+    pub name: String,
+    pub line: u32,
+    pub inputs: Vec<Input>,
+}
+
+/// One input of a `visualize`: the name the renderer reads it by, and
+/// what it is.
+#[derive(Debug, Clone)]
+pub struct Input {
+    pub name: String,
+    pub line: u32,
+    pub value: InputValue,
+}
+
+/// What an input hands the renderer.
+#[derive(Debug, Clone)]
+pub enum InputValue {
+    /// A value, by the first alternative that binds.
+    Value(Vec<Expr>),
+    /// `bytes(PTR, LEN)`: `LEN` bytes of memory at `PTR`, read at once.
+    Bytes { pointer: Expr, length: Expr },
+    /// A string in double quotes, which the renderer gets as it is.
+    Text(String),
 }
 
 /// How `format` writes a value.
@@ -500,6 +567,9 @@ struct Parser<'a> {
     position: usize,
     /// The offset of each line's first byte.
     lines: Vec<usize>,
+    /// Whether the expressions read are members of braces, which end at a
+    /// line that begins the next member.
+    members: bool,
 }
 
 type Parsed<T> = Result<T, Error>;
@@ -527,6 +597,7 @@ impl<'a> Parser<'a> {
             text,
             position: 0,
             lines,
+            members: false,
         }
     }
 
@@ -881,6 +952,10 @@ impl<'a> Parser<'a> {
                     line,
                 })
             }
+            "visualize" => {
+                self.position += keyword.len();
+                Ok(Statement::Visualize(self.visualize(line)?))
+            }
             "format" => {
                 self.position += keyword.len();
                 let names = self.names("a member's or field's name")?;
@@ -894,9 +969,99 @@ impl<'a> Parser<'a> {
                 })
             }
             _ => Err(self.unexpected(
-                "a statement: `let`, `type`, `check`, `summary`, `field`, `show`, `hide`, or `format`",
+                "a statement: `let`, `type`, `check`, `summary`, `field`, `show`, `hide`, `format`, or `visualize`",
             )),
         }
+    }
+
+    /// What follows `visualize`: the renderer's name, then its inputs in
+    /// braces, separated by line ends or commas. Without braces, the one
+    /// input is `values = self`.
+    fn visualize(&mut self, line: u32) -> Parsed<Visualize> {
+        self.skip_inline();
+        let start = self.position;
+        let name = self.string()?;
+        if !is_renderer_name(&name) {
+            return Err(self.error_at(start, RENDERER_NAME.to_owned()));
+        }
+        self.skip_inline();
+        if !self.eat("{") {
+            return Ok(Visualize {
+                name,
+                line,
+                inputs: vec![Input {
+                    name: "values".to_owned(),
+                    line,
+                    value: InputValue::Value(vec![self.synthetic_self(start)?]),
+                }],
+            });
+        }
+        let mut inputs: Vec<Input> = Vec::new();
+        loop {
+            self.skip_blank();
+            if self.eat("}") {
+                return Ok(Visualize { name, line, inputs });
+            }
+            if inputs.len() == MAX_INPUTS {
+                return Err(self.error(format!(
+                    "a `visualize` may name at most {MAX_INPUTS} inputs"
+                )));
+            }
+            let start = self.position;
+            let input = self.name("an input's name")?;
+            if inputs.iter().any(|existing| existing.name == input) {
+                return Err(self.error_at(start, format!("the drawing has two inputs `{input}`")));
+            }
+            self.skip_inline();
+            self.expect("=", "after the input's name")?;
+            self.skip_inline();
+            let input_line = self.location(start).0;
+            let value = if self.peek() == Some(b'"') {
+                InputValue::Text(self.string()?)
+            } else if self.eat_call("bytes")? {
+                self.skip_blank();
+                let pointer = self.member_expression()?;
+                self.skip_blank();
+                self.expect(",", "between the pointer and the length")?;
+                self.skip_blank();
+                let length = self.member_expression()?;
+                self.close_call("bytes")?;
+                InputValue::Bytes { pointer, length }
+            } else {
+                let mut alternatives = vec![self.member_expression()?];
+                while self.eat_word_after_blank("or") {
+                    alternatives.push(self.member_expression()?);
+                }
+                InputValue::Value(alternatives)
+            };
+            inputs.push(Input {
+                name: input,
+                line: input_line,
+                value,
+            });
+            self.skip_inline();
+            self.eat(",");
+        }
+    }
+
+    /// `self`, as the expression of the input a `visualize` without
+    /// braces hands its renderer.
+    fn synthetic_self(&self, at: usize) -> Parsed<Expr> {
+        Expression::parse_view("self")
+            .map(|expression| Expr {
+                expression,
+                line: self.location(at).0,
+            })
+            .map_err(|error| self.error_at(at, error.to_string()))
+    }
+
+    /// An expression that is one member of braces, which also ends at a line
+    /// that begins the next member, `NAME =`.
+    fn member_expression(&mut self) -> Parsed<Expr> {
+        let members = std::mem::replace(&mut self.members, true);
+        let expression = self.expression();
+        self.members = members;
+        expression
     }
 
     /// `NAME, …`: one or more names.
@@ -1203,7 +1368,7 @@ impl<'a> Parser<'a> {
             }
             self.skip_inline();
             self.expect("=", "after the member's name")?;
-            members.push((name, self.expression()?));
+            members.push((name, self.member_expression()?));
             self.skip_blank();
             self.eat(",");
         }
@@ -1706,6 +1871,14 @@ impl<'a> Parser<'a> {
                 .bytes()
                 .take_while(|byte| is_word_continue(*byte))
                 .count();
+            // In braces of members, a line that begins `NAME =` begins the
+            // next member.
+            if self.members && length > 0 {
+                let after = trimmed[length..].trim_start_matches([' ', '\t']);
+                if after.starts_with('=') && !after.starts_with("==") && !after.starts_with("=>") {
+                    return true;
+                }
+            }
             return STATEMENTS.contains(&&trimmed[..length]);
         }
     }

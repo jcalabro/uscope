@@ -436,7 +436,13 @@ impl Cli {
             .iter()
             .map(|file| (file.name.as_str(), file.text.as_str()))
             .collect::<Vec<_>>();
-        match self.debugger.load_views(&files, &kernels).await {
+        let mut renderers = Vec::<uscope::view_files::RendererFile>::new();
+        for renderer in sources.iter().flat_map(|file| &file.renderers) {
+            if !renderers.iter().any(|loaded| loaded.path == renderer.path) {
+                renderers.push(renderer.clone());
+            }
+        }
+        match self.debugger.load_views(&files, &kernels, &renderers).await {
             Ok(errors) => errors.iter().map(ToString::to_string).collect(),
             Err(error) => vec![error.to_string()],
         }

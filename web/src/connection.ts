@@ -16,6 +16,8 @@ import {
 export interface TransportHandlers {
   open(): void;
   message(text: string): void;
+  /** A binary frame: an answer's bytes, sent just before the answer. */
+  binary?(data: ArrayBuffer): void;
   close(): void;
 }
 
@@ -52,6 +54,8 @@ export class Connection {
   #attempt = 0;
   #nextId = 1;
   #pending = new Map<number, Pending>();
+  /** Bytes sent ahead of the answers they belong to, by request. */
+  #binary = new Map<number, Uint8Array>();
   #timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: ConnectionOptions) {
@@ -116,8 +120,21 @@ export class Connection {
         this.#open = true;
       },
       message: (text) => this.#receive(text),
+      binary: (data) => this.#receiveBinary(data),
       close: () => this.#closed(),
     });
+  }
+
+  /** Keeps a frame of bytes, an 8-byte little-endian request id and the
+   * bytes, for the answer that follows it. */
+  #receiveBinary(data: ArrayBuffer): void {
+    if (data.byteLength < 8) {
+      return;
+    }
+    const id = Number(new DataView(data).getBigUint64(0, true));
+    if (this.#pending.has(id)) {
+      this.#binary.set(id, new Uint8Array(data, 8));
+    }
   }
 
   #receive(text: string): void {
@@ -137,10 +154,16 @@ export class Connection {
     }
     if (message.type === "result" || message.type === "error") {
       const pending = this.#pending.get(message.id);
+      const payload = this.#binary.get(message.id);
+      this.#binary.delete(message.id);
       if (pending) {
         this.#pending.delete(message.id);
         if (message.type === "result") {
-          pending.resolve(message.result);
+          pending.resolve(
+            payload && typeof message.result === "object" && message.result !== null
+              ? { ...message.result, payload }
+              : message.result,
+          );
         } else {
           pending.reject(new RequestError(message.error.kind, message.error.message));
         }
@@ -177,6 +200,7 @@ export class Connection {
       pending.reject(new RequestError("disconnected", "the connection to uscope closed"));
     }
     this.#pending.clear();
+    this.#binary.clear();
   }
 }
 
@@ -184,10 +208,13 @@ export class Connection {
 export const browserConnect: Connect = (handlers) => {
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${scheme}//${location.host}${base}api/ws`);
+  socket.binaryType = "arraybuffer";
   socket.addEventListener("open", () => handlers.open());
   socket.addEventListener("message", (event) => {
     if (typeof event.data === "string") {
       handlers.message(event.data);
+    } else if (event.data instanceof ArrayBuffer) {
+      handlers.binary?.(event.data);
     }
   });
   socket.addEventListener("close", () => handlers.close());

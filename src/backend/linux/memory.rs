@@ -89,6 +89,52 @@ pub(super) fn read_logical_memory(
     })
 }
 
+/// Reads `size` bytes at once, as stored, with every installed breakpoint's
+/// trap hidden: in one read where the target allows it, or a word at a
+/// time, so a read that cannot be made in one says how far it got.
+pub(super) fn read_logical_block(
+    ptrace: &impl InspectionOps,
+    pid: Pid,
+    breakpoints: &BTreeMap<VirtualAddress, BreakpointSite>,
+    address: VirtualAddress,
+    size: usize,
+) -> Result<LogicalMemoryRead> {
+    let end = address
+        .get()
+        .checked_add(u64::try_from(size).map_err(|_| Error::AddressOverflow)?)
+        .ok_or(Error::AddressOverflow)?;
+    if let Some(mut bytes) = ptrace.read_block(pid, address.get(), size) {
+        for (site_address, site) in breakpoints.range(address..VirtualAddress::new(end)) {
+            if site.installed {
+                let offset = usize::try_from(site_address.get() - address.get())
+                    .expect("an offset within the read fits usize");
+                bytes[offset] = site.original_byte;
+            }
+        }
+        return Ok(LogicalMemoryRead {
+            bytes,
+            completion: MemoryReadCompletion::Complete,
+        });
+    }
+    let mut bytes = Vec::with_capacity(size);
+    while bytes.len() < size {
+        let next = address.get() + bytes.len() as u64;
+        let chunk = (size - bytes.len()).min(MAX_LOGICAL_MEMORY_READ);
+        let read = read_logical_memory(ptrace, pid, breakpoints, VirtualAddress::new(next), chunk)?;
+        bytes.extend_from_slice(&read.bytes);
+        if let MemoryReadCompletion::Incomplete { .. } = read.completion {
+            return Ok(LogicalMemoryRead {
+                bytes,
+                completion: read.completion,
+            });
+        }
+    }
+    Ok(LogicalMemoryRead {
+        bytes,
+        completion: MemoryReadCompletion::Complete,
+    })
+}
+
 pub(super) fn read_logical_memory_with(
     address: VirtualAddress,
     size: usize,

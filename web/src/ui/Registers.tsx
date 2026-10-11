@@ -23,6 +23,7 @@ function row(register: Register, innermost: boolean): Row {
     memory: null,
     memoryBytes: null,
     truncated: false,
+    drawings: [],
   };
 }
 

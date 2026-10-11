@@ -100,6 +100,7 @@ mod step_targets;
 mod stepping;
 mod tls;
 mod vdso;
+mod visualizers;
 mod watchpoints;
 mod writes;
 
@@ -1856,6 +1857,32 @@ impl<P: InspectionOps> Controller<P> {
                 } else {
                     let _ = reply.send(result);
                 }
+            }
+            Request::VisualizerInputs {
+                reference,
+                limits,
+                reply,
+            } => {
+                let result = self.visualizer_inputs(&reference, limits);
+                if matches!(result, Err(Error::Interrupted)) {
+                    self.serve_later(Request::VisualizerInputs {
+                        reference,
+                        limits,
+                        reply,
+                    });
+                } else {
+                    let _ = reply.send(result);
+                }
+            }
+            Request::Numbers {
+                reference,
+                most_bytes,
+                reply,
+            } => {
+                let _ = reply.send(self.numbers(&reference, most_bytes));
+            }
+            Request::Renderers { reply } => {
+                let _ = reply.send(Ok(self.renderers()));
             }
             Request::Globals { query, reply } => {
                 let _ = reply.send(self.globals(&query));

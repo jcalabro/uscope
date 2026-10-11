@@ -112,7 +112,10 @@ export const test = base.extend<{ program: string[]; uscope: Uscope; quiet: unde
       context.pages().forEach(watch);
       context.on("page", watch);
       await use(undefined);
-      expect(errors).toEqual(expectedErrors.get(test.info().testId) ?? []);
+      const expected = (expectedErrors.get(test.info().testId) ?? []).map((error) =>
+        typeof error === "string" ? error : expect.stringMatching(error),
+      );
+      expect(errors).toEqual(expected);
     },
     { auto: true },
   ],
@@ -149,10 +152,11 @@ export const test = base.extend<{ program: string[]; uscope: Uscope; quiet: unde
   },
 });
 
-const expectedErrors = new Map<string, string[]>();
+const expectedErrors = new Map<string, (string | RegExp)[]>();
 
-/** Declares the errors this test's pages will show, in order. */
-export function expectErrors(...errors: string[]): void {
+/** Declares the errors this test's pages will show, in order, as text or
+ * as patterns. */
+export function expectErrors(...errors: (string | RegExp)[]): void {
   expectedErrors.set(test.info().testId, errors);
 }
 

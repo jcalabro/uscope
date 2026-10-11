@@ -1064,7 +1064,7 @@ view rust alloc::vec::Vec<T, _> {{
             "load views",
             scenario
                 .handle()
-                .load_views(&[("costly.views", &views)], &[]),
+                .load_views(&[("costly.views", &views)], &[], &[]),
         )
         .await;
     assert!(errors.is_empty(), "{errors:?}");
@@ -1152,6 +1152,7 @@ view rust nowhere {
 ",
                 )],
                 &[],
+                &[],
             ),
         )
         .await;
@@ -1211,7 +1212,7 @@ view rust nowhere {
     );
     // Restoring the built-in views presents the vector again.
     scenario
-        .operation("unload views", scenario.handle().load_views(&[], &[]))
+        .operation("unload views", scenario.handle().load_views(&[], &[], &[]))
         .await;
     assert_eq!(
         summary(&evaluate(&scenario, "ints").await),

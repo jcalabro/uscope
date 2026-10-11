@@ -51,6 +51,11 @@ pub(super) trait InspectionOps {
         self.read_word(pid, address)
             .map_err(MemoryAccessError::Fatal)
     }
+    /// Reads `size` bytes at `address` at once, or `None` when this
+    /// target reads only a word at a time or cannot read all of them.
+    fn read_block(&self, _pid: Pid, _address: u64, _size: usize) -> Option<Vec<u8>> {
+        None
+    }
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct>;
     fn floating_registers(&self, _pid: Pid) -> Result<Fxsave> {
         Err(backend_error(LinuxError::UnsupportedFloatingRegisters))
@@ -285,6 +290,15 @@ impl InspectionOps for LinuxPtrace {
                 error,
             )))),
         }
+    }
+
+    fn read_block(&self, pid: Pid, address: u64, size: usize) -> Option<Vec<u8>> {
+        use std::os::unix::fs::FileExt as _;
+        self.assert_owner_thread();
+        let file = std::fs::File::open(format!("/proc/{pid}/mem")).ok()?;
+        let mut bytes = vec![0; size];
+        file.read_exact_at(&mut bytes, address).ok()?;
+        Some(bytes)
     }
 
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
