@@ -533,33 +533,8 @@ fn hex(bytes: &[u8]) -> String {
 
 /// The CRC-32 a `.gnu_debuglink` records: the IEEE polynomial, reflected,
 /// as zlib computes it.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the table's indices are below 256"
-)]
 fn crc32(data: &[u8]) -> u32 {
-    const TABLE: [u32; 256] = {
-        let mut table = [0_u32; 256];
-        let mut index = 0;
-        while index < 256 {
-            let mut value = index as u32;
-            let mut bit = 0;
-            while bit < 8 {
-                value = if value & 1 == 0 {
-                    value >> 1
-                } else {
-                    (value >> 1) ^ 0xedb8_8320
-                };
-                bit += 1;
-            }
-            table[index] = value;
-            index += 1;
-        }
-        table
-    };
-    !data.iter().fold(!0_u32, |crc, &byte| {
-        TABLE[((crc ^ u32::from(byte)) & 0xff) as usize] ^ (crc >> 8)
-    })
+    crc32fast::hash(data)
 }
 
 #[cfg(test)]
@@ -574,5 +549,8 @@ mod tests {
             crc32(b"The quick brown fox jumps over the lazy dog"),
             0x414f_a339
         );
+        // Long enough for the vectorized path a large debug file takes.
+        let long = (0..=250_u8).cycle().take(1 << 16).collect::<Vec<_>>();
+        assert_eq!(crc32(&long), 0x7faa_50d3);
     }
 }
