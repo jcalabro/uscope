@@ -13,6 +13,7 @@
 
 pub mod backing;
 pub mod calls;
+pub mod container;
 pub mod declarations;
 pub mod facts;
 mod format;
@@ -43,7 +44,7 @@ pub use format::TableKind;
 pub use strings::{PathId, Paths, PathsBuilder, Strings, StringsBuilder};
 pub use validate::{ImageError, Limits};
 
-use format::{DirectoryEntry, Header, Trailer};
+use container::{Format, TableBytes, Tables};
 
 /// The index that stands for no row in any table's reference column.
 pub const NONE: u32 = u32::MAX;
@@ -64,9 +65,9 @@ pub trait SharedRecord: FromBytes + IntoBytes + KnownLayout + Immutable + Unalig
 
 /// Where one table is in an image.
 #[derive(Debug, Clone, Copy)]
-struct Placed {
-    offset: usize,
-    length: usize,
+pub struct Placed {
+    pub(crate) offset: usize,
+    pub(crate) length: usize,
 }
 
 /// What an image's bytes mean beyond the inputs they were built from: the
@@ -98,9 +99,7 @@ impl Image {
 
     /// The target the image describes.
     pub fn target(&self) -> crate::TargetDescription {
-        let (header, _) = format::Header::ref_from_prefix(self.as_bytes())
-            .expect("validation checked the header");
-        schema::target_of(header).expect("validation checked the target")
+        container::target(self.as_bytes())
     }
 
     /// The whole image, as a cache writes it.
@@ -153,32 +152,37 @@ impl Image {
 /// a second allocation, of the whole image while it was sealed.
 pub struct Builder<'a> {
     target: crate::TargetDescription,
-    tables: Vec<(TableKind, usize, usize, TableBytes<'a>)>,
+    tables: Tables<'a, DebugImage>,
 }
 
-/// The rows of one table, as the builder holds them until it seals.
-enum TableBytes<'a> {
-    Borrowed(&'a [u8]),
-    Owned(Box<dyn AsBytes + Send + 'a>),
-}
+/// Debug information as an image: the format of [`Image`].
+#[derive(Debug)]
+pub struct DebugImage;
 
-impl TableBytes<'_> {
-    fn bytes(&self) -> &[u8] {
-        match self {
-            Self::Borrowed(bytes) => bytes,
-            Self::Owned(rows) => rows.bytes(),
-        }
+impl Format for DebugImage {
+    type Kind = TableKind;
+    const MAGIC: [u8; 8] = format::MAGIC;
+    const REVISION: u32 = format::NORMALIZATION_REVISION;
+    const KINDS: usize = TableKind::COUNT;
+
+    fn fingerprint() -> u64 {
+        schema::layout_fingerprint()
     }
-}
 
-/// Owned rows, as bytes.
-trait AsBytes {
-    fn bytes(&self) -> &[u8];
-}
+    fn kind(number: u32) -> Option<TableKind> {
+        TableKind::from_number(number)
+    }
 
-impl<T: IntoBytes + Immutable> AsBytes for Vec<T> {
-    fn bytes(&self) -> &[u8] {
-        self.as_slice().as_bytes()
+    fn number(kind: TableKind) -> u32 {
+        kind as u32
+    }
+
+    fn index(kind: TableKind) -> usize {
+        kind.index()
+    }
+
+    fn stride(kind: TableKind) -> usize {
+        schema::stride(kind)
     }
 }
 
@@ -186,7 +190,7 @@ impl<'a> Builder<'a> {
     pub const fn new(target: crate::TargetDescription) -> Self {
         Self {
             target,
-            tables: Vec::new(),
+            tables: Tables::new(),
         }
     }
 
@@ -272,72 +276,17 @@ impl<'a> Builder<'a> {
     /// Adds every table `other` holds, which another thread may have built:
     /// tables are laid out by kind, whatever order they are added in.
     pub fn absorb(&mut self, other: Self) -> &mut Self {
-        for (kind, stride, count, bytes) in other.tables {
-            self.add(kind, stride, count, bytes);
-        }
+        self.tables.absorb(other.tables);
         self
     }
 
     fn add(&mut self, kind: TableKind, stride: usize, count: usize, bytes: TableBytes<'a>) {
-        assert!(
-            self.tables.iter().all(|(added, ..)| *added != kind),
-            "{kind:?} is added once"
-        );
-        self.tables.push((kind, stride, count, bytes));
+        self.tables.add(kind, stride, count, bytes);
     }
 
     /// Lays out the tables, seals them with the trailer's checksum, and
     /// validates the result as a reader would.
-    pub fn seal(mut self, limits: Limits) -> Result<Image, ImageError> {
-        self.tables.sort_by_key(|(kind, ..)| *kind);
-        let directory_start = size_of::<Header>();
-        let directory_length = self.tables.len() * size_of::<DirectoryEntry>();
-        let mut offset =
-            format::aligned(directory_start + directory_length).ok_or(ImageError::TooLarge)?;
-        let mut entries = Vec::with_capacity(self.tables.len());
-        let mut offsets = Vec::with_capacity(self.tables.len());
-        for (kind, stride, count, bytes) in &self.tables {
-            let bytes = bytes.bytes();
-            offsets.push(offset);
-            entries.push(DirectoryEntry {
-                kind: (*kind as u32).into(),
-                stride: u32::try_from(*stride)
-                    .map_err(|_| ImageError::TooLarge)?
-                    .into(),
-                count: (*count as u64).into(),
-                offset: (offset as u64).into(),
-                length: (bytes.len() as u64).into(),
-            });
-            offset = format::aligned(
-                offset
-                    .checked_add(bytes.len())
-                    .ok_or(ImageError::TooLarge)?,
-            )
-            .ok_or(ImageError::TooLarge)?;
-        }
-        let length = offset
-            .checked_add(size_of::<Trailer>())
-            .ok_or(ImageError::TooLarge)?;
-        let mut header = schema::header(self.target, length, entries.len())?;
-        header.magic = format::MAGIC;
-        let mut bytes = AlignedBytes::zeroed(length).ok_or(ImageError::TooLarge)?;
-        let buffer = bytes.as_mut_bytes();
-        buffer[..directory_start].copy_from_slice(header.as_bytes());
-        buffer[directory_start..directory_start + directory_length]
-            .copy_from_slice(entries.as_bytes());
-        // Each table is freed once copied, so the tables and the image
-        // are not all held at once.
-        for ((_, _, _, table), start) in self.tables.into_iter().zip(offsets) {
-            let rows = table.bytes();
-            buffer[start..start + rows.len()].copy_from_slice(rows);
-        }
-        let checksum = twox_hash::XxHash3_64::oneshot(&buffer[..offset]);
-        buffer[offset..].copy_from_slice(
-            Trailer {
-                checksum: checksum.into(),
-            }
-            .as_bytes(),
-        );
-        Image::from_bytes(bytes, limits)
+    pub fn seal(self, limits: Limits) -> Result<Image, ImageError> {
+        Image::from_bytes(self.tables.seal(self.target)?, limits)
     }
 }

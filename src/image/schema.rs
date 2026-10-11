@@ -4,10 +4,8 @@
 
 use std::sync::OnceLock;
 
-use super::format::{self, Header, TableKind};
+use super::format::{self, TableKind};
 use super::lines;
-use super::validate::ImageError;
-use crate::{Architecture, ByteOrder, PointerWidth, TargetDescription};
 
 /// One field of a record: its name, offset, and size.
 pub(super) type Field = (&'static str, usize, usize);
@@ -861,56 +859,3 @@ pub(super) fn stride(kind: TableKind) -> usize {
 
 const _: () = assert!(size_of::<lines::LineExtra>() == 44);
 const _: () = assert!(size_of::<lines::StatementKey>() == 16);
-
-/// A new image's header, but for its magic, which sealing writes last.
-pub(super) fn header(
-    target: TargetDescription,
-    length: usize,
-    tables: usize,
-) -> Result<Header, ImageError> {
-    Ok(Header {
-        magic: [0; 8],
-        format: format::FORMAT_VERSION.into(),
-        normalization: format::NORMALIZATION_REVISION.into(),
-        layout: layout_fingerprint().into(),
-        length: (length as u64).into(),
-        tables: u32::try_from(tables)
-            .map_err(|_| ImageError::TooLarge)?
-            .into(),
-        architecture: match target.architecture {
-            Architecture::X86_64 => 1,
-            Architecture::Aarch64 => 2,
-        },
-        byte_order: match target.byte_order {
-            ByteOrder::Little => 1,
-            ByteOrder::Big => 2,
-        },
-        address_size: target.pointer_width.bytes(),
-        flags: 0,
-        reserved: [0; 24],
-    })
-}
-
-/// The target a header describes, or `None` for one it cannot.
-pub(super) const fn target_of(header: &Header) -> Option<TargetDescription> {
-    let architecture = match header.architecture {
-        1 => Architecture::X86_64,
-        2 => Architecture::Aarch64,
-        _ => return None,
-    };
-    let byte_order = match header.byte_order {
-        1 => ByteOrder::Little,
-        2 => ByteOrder::Big,
-        _ => return None,
-    };
-    let pointer_width = match header.address_size {
-        4 => PointerWidth::Bits32,
-        8 => PointerWidth::Bits64,
-        _ => return None,
-    };
-    Some(TargetDescription {
-        architecture,
-        byte_order,
-        pointer_width,
-    })
-}

@@ -4,14 +4,13 @@
 //! pass over a table, and no check recurses.
 
 use rayon::prelude::*;
-use zerocopy::FromBytes as _;
 
-use super::format::{self, DirectoryEntry, Header, TableKind, Trailer};
+use super::format::TableKind;
 use super::lines::{
     self, ControlBoundary, FileRecord, LineExtra, LineRange, LineRow, LineSequence, RowAddress,
     StatementKey, row_flags,
 };
-use super::{Image, MAX_ROWS, NONE, Placed, schema, strings};
+use super::{Image, NONE, Placed, strings};
 
 /// Why bytes are not a usable image.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -60,107 +59,10 @@ pub(super) fn structure(
     bytes: &[u8],
     limits: Limits,
 ) -> Result<[Option<Placed>; TableKind::COUNT], ImageError> {
-    let (header, _) = Header::ref_from_prefix(bytes).map_err(|_| ImageError::Truncated)?;
-    if header.magic != format::MAGIC {
-        return Err(ImageError::NotAnImage);
-    }
-    if header.format.get() != format::FORMAT_VERSION {
-        return Err(ImageError::Format {
-            found: header.format.get(),
-            expected: format::FORMAT_VERSION,
-        });
-    }
-    if header.normalization.get() != format::NORMALIZATION_REVISION {
-        return Err(ImageError::Normalization {
-            found: header.normalization.get(),
-            expected: format::NORMALIZATION_REVISION,
-        });
-    }
-    if header.layout.get() != schema::layout_fingerprint() {
-        return Err(ImageError::Layout);
-    }
-    let length = header.length.get();
-    if length > limits.bytes {
-        return Err(ImageError::TooLarge);
-    }
-    if length != bytes.len() as u64 {
-        return Err(ImageError::Truncated);
-    }
-    if schema::target_of(header).is_none() || header.flags != 0 || header.reserved != [0; 24] {
-        return Err(malformed("the header has fields it does not define"));
-    }
-    let trailer_start = bytes
-        .len()
-        .checked_sub(size_of::<Trailer>())
-        .filter(|start| *start >= size_of::<Header>())
-        .ok_or(ImageError::Truncated)?;
-    let trailer =
-        Trailer::ref_from_bytes(&bytes[trailer_start..]).map_err(|_| ImageError::Truncated)?;
-    if trailer.checksum.get() != twox_hash::XxHash3_64::oneshot(&bytes[..trailer_start]) {
-        return Err(ImageError::Checksum);
-    }
-
-    let count = header.tables.get() as usize;
-    if count > TableKind::COUNT {
-        return Err(malformed(
-            "the directory lists more tables than there are kinds",
-        ));
-    }
-    let directory_end = size_of::<Header>() + count * size_of::<DirectoryEntry>();
-    if directory_end > trailer_start {
-        return Err(ImageError::Truncated);
-    }
-    let entries = <[DirectoryEntry]>::ref_from_bytes(&bytes[size_of::<Header>()..directory_end])
-        .map_err(|_| ImageError::Truncated)?;
-    let mut tables = [None; TableKind::COUNT];
-    let mut previous_kind = None;
-    let mut previous_end = directory_end;
-    for entry in entries {
-        let kind = TableKind::from_number(entry.kind.get())
-            .ok_or_else(|| malformed(format!("unknown table kind {}", entry.kind.get())))?;
-        if previous_kind.is_some_and(|previous| previous >= kind) {
-            return Err(malformed("tables are out of order or repeated"));
-        }
-        previous_kind = Some(kind);
-        let stride = entry.stride.get() as usize;
-        if stride != schema::stride(kind) {
-            return Err(malformed(format!("{kind:?} has the wrong record size")));
-        }
-        let rows = entry.count.get();
-        if rows == 0 || rows > MAX_ROWS {
-            return Err(malformed(format!("{kind:?} has {rows} rows")));
-        }
-        let table_length = (stride as u64)
-            .checked_mul(rows)
-            .filter(|table_length| *table_length == entry.length.get())
-            .ok_or_else(|| malformed(format!("{kind:?}'s length disagrees with its rows")))?;
-        let offset = entry.offset.get();
-        let end = offset
-            .checked_add(table_length)
-            .filter(|end| *end <= trailer_start as u64)
-            .ok_or(ImageError::Truncated)?;
-        let (Ok(offset), Ok(end)) = (usize::try_from(offset), usize::try_from(end)) else {
-            return Err(ImageError::TooLarge);
-        };
-        if offset % format::TABLE_ALIGNMENT != 0 || offset < previous_end {
-            return Err(malformed(format!("{kind:?} is misplaced")));
-        }
-        if bytes[previous_end..offset].iter().any(|byte| *byte != 0) {
-            return Err(malformed("padding between tables is not zero"));
-        }
-        previous_end = end;
-        tables[kind.index()] = Some(Placed {
-            offset,
-            length: end - offset,
-        });
-    }
-    if bytes[previous_end..trailer_start]
-        .iter()
-        .any(|byte| *byte != 0)
-    {
-        return Err(malformed("padding before the trailer is not zero"));
-    }
-    Ok(tables)
+    let tables = super::container::structure::<super::DebugImage>(bytes, limits)?;
+    Ok(tables
+        .try_into()
+        .expect("the container places one table per kind"))
 }
 
 /// Checks every table's contents.
