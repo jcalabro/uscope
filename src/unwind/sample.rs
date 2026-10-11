@@ -14,7 +14,7 @@ use foldhash::HashMap;
 
 use super::{
     FramePointerRule, MemoryReader, RBP, RETURN_ADDRESS, RSP, RegisterFile, UnwindModule,
-    unwind_module_for,
+    interrupted_registers, unwind_module_for,
 };
 use crate::capture::records::Truncation;
 use crate::{CodeRole, ModuleImageId, UnwindTermination, VirtualAddress};
@@ -143,6 +143,12 @@ pub fn unwind_sample(
         if role == CodeRole::Outermost {
             return (frames(unwound), StackEnd::Complete);
         }
+        // A switch's frame lies on the stack it switched from, which its
+        // stack pointer no longer names: only the kernel's chain, through
+        // the frame pointer the switch kept, reaches its caller.
+        if role == CodeRole::StackSwitch {
+            break StackEnd::Truncated(Truncation::StackSwitch, index);
+        }
         let Some((module, image_address)) = found else {
             break StackEnd::Truncated(Truncation::UnmappedAddress, None);
         };
@@ -166,6 +172,22 @@ pub fn unwind_sample(
             break StackEnd::Truncated(Truncation::InvalidCaller, index);
         }
         previous_cfa = Some(step.cfa);
+        // A signal handler returns to the trampoline that restores what it
+        // interrupted: its frame, at its first instruction, and then the
+        // interrupted instruction, with the registers the kernel saved.
+        if let Some(trampoline) = signal_trampoline(modules, caller, &step.registers) {
+            unwound.push(trampoline);
+            let interrupted = step
+                .registers
+                .get(RSP)
+                .and_then(|context| interrupted_registers(context, &mut memory));
+            let Some(interrupted) = interrupted else {
+                break StackEnd::Truncated(Truncation::StackCopyExhausted, None);
+            };
+            address = VirtualAddress::new(interrupted.get(RETURN_ADDRESS).unwrap_or(0));
+            registers = interrupted;
+            continue;
+        }
         address = if step.signal_frame {
             VirtualAddress::new(caller)
         } else {
@@ -182,6 +204,26 @@ pub fn unwind_sample(
     let mut frames = frames(unwound);
     let end = follow_chain(modules, rules, &mut frames, &sample.chain[link..], limit);
     (frames, end)
+}
+
+/// The frame of the signal trampoline at `caller`, if a trampoline is
+/// there, with the registers of the handler it returns from.
+fn signal_trampoline(
+    modules: &[UnwindModule<'_>],
+    caller: u64,
+    registers: &RegisterFile,
+) -> Option<Unwound> {
+    let (module, image_address) = unwind_module_for(modules, VirtualAddress::new(caller))?;
+    (module.image.code_role(image_address) == CodeRole::SignalTrampoline).then(|| Unwound {
+        frame: SampledFrame {
+            address: VirtualAddress::new(caller),
+            module: modules
+                .iter()
+                .position(|candidate| candidate.loaded.id == module.loaded.id),
+            role: CodeRole::SignalTrampoline,
+        },
+        frame_pointer: registers.get(RBP),
+    })
 }
 
 fn frames(unwound: Vec<Unwound>) -> Vec<SampledFrame> {
@@ -278,7 +320,15 @@ fn follow_chain(
         if frames.len() >= limit {
             return StackEnd::Truncated(Truncation::DepthLimit, None);
         }
-        match rules.rule(&module, address) {
+        let kept = rules.rule(&module, address);
+        // A switch the chain does not carry on through ends the stack at
+        // the switch, whatever its frame keeps.
+        if role == CodeRole::StackSwitch
+            && !(kept == FramePointerRule::Kept && position + 1 < chain.len())
+        {
+            return StackEnd::Truncated(Truncation::StackSwitch, index);
+        }
+        match kept {
             FramePointerRule::Kept if position + 1 < chain.len() => {}
             FramePointerRule::Kept => return StackEnd::Truncated(Truncation::ChainEnded, index),
             FramePointerRule::Outermost => return StackEnd::Complete,

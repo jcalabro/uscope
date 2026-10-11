@@ -9,7 +9,7 @@ mod dwarf;
 #[cfg(target_os = "linux")]
 mod elf;
 #[cfg(target_os = "linux")]
-mod gopclntab;
+pub mod gopclntab;
 mod roles;
 #[cfg(target_os = "linux")]
 mod separate;

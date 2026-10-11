@@ -213,10 +213,13 @@ pub enum Truncation {
     InvalidCaller = 7,
     /// The sample carried no stack at all.
     NoStack = 8,
+    /// A runtime switched stacks, and neither the kernel's chain nor the
+    /// copy reaches the frames it switched from.
+    StackSwitch = 9,
 }
 
 impl Truncation {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::NoUnwindInfo,
         Self::FramePointerNotKept,
         Self::StackCopyExhausted,
@@ -225,6 +228,7 @@ impl Truncation {
         Self::ChainEnded,
         Self::InvalidCaller,
         Self::NoStack,
+        Self::StackSwitch,
     ];
 
     pub fn from_number(number: u64) -> Option<Self> {
@@ -242,6 +246,7 @@ impl Truncation {
             Self::ChainEnded => "frame chain ended",
             Self::InvalidCaller => "invalid caller",
             Self::NoStack => "no stack",
+            Self::StackSwitch => "frames before a stack switch not captured",
         }
     }
 }
@@ -387,6 +392,9 @@ pub enum AccountKind {
     /// Records the kernel wrote after later ones had been processed, which
     /// were applied late: a mapping's samples before it end unmapped.
     LateRecords = 11,
+    /// Breakpoint samples of an instruction that ran again within one
+    /// call, as a Go stack check does when it grows the stack.
+    Repeats = 12,
 }
 
 /// A count of something the views must show.

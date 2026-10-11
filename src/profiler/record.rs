@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use foldhash::HashMap;
 
+use super::calls::Branch;
 use super::frame_pointers::{CallSites, call_sites};
 use crate::backend::perf::{self, decode};
 use crate::capture::builder::LineInput;
@@ -61,6 +62,10 @@ pub struct Processor {
     search: DebugFileSearch,
     images: Vec<Image>,
     image_index: HashMap<(PathBuf, u64), usize>,
+    /// Whether the vDSO's image has been read, and if it could be, the
+    /// image and the address it links at.
+    vdso_read: bool,
+    vdso: Option<(usize, u64)>,
     processes: BTreeMap<u32, ProcessState>,
     next_module: u32,
     limit: usize,
@@ -71,6 +76,9 @@ pub struct Processor {
     first: Option<u64>,
     order: Vec<(u64, usize, usize)>,
     registers: Vec<(u16, u64)>,
+    /// A breakpoint's instruction and the branch that makes its samples
+    /// repeats, not calls.
+    repeats: Option<(u64, Branch)>,
     chain: Vec<u64>,
     frames: Vec<u32>,
 }
@@ -83,6 +91,8 @@ impl Processor {
             search,
             images: Vec::new(),
             image_index: HashMap::default(),
+            vdso_read: false,
+            vdso: None,
             processes: BTreeMap::new(),
             next_module: 0,
             limit,
@@ -90,7 +100,8 @@ impl Processor {
             latest: 0,
             first: None,
             order: Vec::new(),
-            registers: Vec::with_capacity(17),
+            registers: Vec::with_capacity(decode::DWARF_REGISTERS.len()),
+            repeats: None,
             chain: Vec::new(),
             frames: Vec::new(),
         }
@@ -125,6 +136,12 @@ impl Processor {
                 })
         });
         Some(Sites::Static(sites, function))
+    }
+
+    /// Drops the samples at the instruction at `address` that `branch`
+    /// takes, counting them as repeats.
+    pub const fn repeats_when(&mut self, address: u64, branch: Branch) {
+        self.repeats = Some((address, branch));
     }
 
     /// Takes the events' count of samples lost so far.
@@ -240,7 +257,12 @@ impl Processor {
     fn mmap(&mut self, mmap: &decode::Mmap<'_>) {
         let end = mmap.start.saturating_add(mmap.length);
         let process = self.builder.process(mmap.pid, mmap.time.cast_signed());
-        let image = perf::identify(mmap).map(|(path, bias)| (self.image(path, mmap.inode), bias));
+        let image = if perf::is_vdso(mmap) {
+            self.vdso()
+                .map(|(image, link)| (image, mmap.start.wrapping_sub(link)))
+        } else {
+            perf::identify(mmap).map(|(path, bias)| (self.image(path, mmap.inode), bias))
+        };
         let state = self.processes.entry(mmap.pid).or_default();
         // A mapping replaces whatever it overlaps.
         state
@@ -272,21 +294,45 @@ impl Processor {
         });
     }
 
+    /// The vDSO's image, which no file holds, and the address it links at.
+    fn vdso(&mut self) -> Option<(usize, u64)> {
+        if self.vdso_read {
+            return self.vdso;
+        }
+        self.vdso_read = true;
+        let vdso = perf::own_vdso().map(|(data, link)| {
+            (
+                self.add_image(std::path::Path::new("[vdso]"), Some(data)),
+                link,
+            )
+        });
+        self.vdso = vdso;
+        vdso
+    }
+
     /// The image of the file at `path`, loading it the first time.
     fn image(&mut self, path: PathBuf, inode: Option<u64>) -> usize {
         let key = (path, inode.unwrap_or(0));
         if let Some(&image) = self.image_index.get(&key) {
             return image;
         }
-        let path = &key.0;
+        let data = crate::image::backing::read_input(&key.0)
+            .ok()
+            .map(|(data, _)| data);
+        let image = self.add_image(&key.0, data);
+        self.image_index.insert(key, image);
+        image
+    }
+
+    /// Adds the image of a module whose file holds `data`, if it could be
+    /// read.
+    fn add_image(&mut self, path: &std::path::Path, data: Option<Vec<u8>>) -> usize {
         let id = ModuleImageId::new(u32::try_from(self.images.len()).unwrap_or(u32::MAX));
-        let (data, build_id) =
-            crate::image::backing::read_input(path).map_or((None, None), |(data, _)| {
-                let build_id = object::File::parse(data.as_slice())
-                    .ok()
-                    .and_then(|file| object::Object::build_id(&file).ok().flatten().map(hex));
-                (Some(data), build_id)
-            });
+        let build_id = data.as_ref().and_then(|data| {
+            object::File::parse(data.as_slice())
+                .ok()
+                .and_then(|file| object::Object::build_id(&file).ok().flatten().map(hex))
+        });
         let digest = data.as_deref().map_or([0; 16], |data| {
             twox_hash::XxHash3_128::oneshot(data).to_le_bytes()
         });
@@ -299,7 +345,6 @@ impl Processor {
         });
         let image = self.images.len();
         self.images.push(Image { info, id, module });
-        self.image_index.insert(key, image);
         image
     }
 
@@ -313,6 +358,18 @@ impl Processor {
                 .copied()
                 .zip(sample.registers.iter()),
         );
+        if let Some((address, branch)) = self.repeats {
+            let register = |number| {
+                self.registers
+                    .iter()
+                    .find_map(|(register, value)| (*register == number).then_some(*value))
+            };
+            let at = register(crate::unwind::RETURN_ADDRESS) == Some(address);
+            if at && register(decode::DWARF_FLAGS).is_some_and(|flags| branch.taken(flags)) {
+                self.builder.count(AccountKind::Repeats as u32, 1);
+                return;
+            }
+        }
         self.chain.clear();
         self.chain.extend(sample.user_chain());
         self.builder

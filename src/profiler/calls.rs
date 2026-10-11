@@ -1,0 +1,177 @@
+//! Where a breakpoint counts each call of a function exactly.
+//!
+//! A breakpoint samples each execution of one instruction, which is each
+//! call of a function where the function's first instruction runs once a
+//! call. A Go function's prologue does not: when the goroutine's stack has
+//! no room, it grows the stack with `runtime.morestack` and jumps back to
+//! its entry to check again. And the runtime may preempt a goroutine at
+//! most instructions and resume it there, running the instruction again.
+//! Only the stack check's branch is never a place to preempt, and it falls
+//! through once a call: a sample of it whose flags take the branch is a
+//! repeat, not a call.
+
+use std::collections::BTreeSet;
+use std::path::Path;
+
+use iced_x86::{ConditionCode, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic};
+use object::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
+
+use super::RecordError;
+
+/// The instruction a breakpoint samples to count a function's calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Calls {
+    /// The instruction's address, where the program loads without address
+    /// randomization.
+    pub address: u64,
+    /// The bias the program must load at for `address` to be right.
+    pub bias: u64,
+    /// When the instruction is a Go stack check's branch, the condition
+    /// under which it branches to grow the stack.
+    pub repeats_when: Option<Branch>,
+}
+
+/// A conditional branch's condition, by the flags it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Branch {
+    /// `jb`: the carry flag.
+    Below,
+    /// `jbe`: the carry or zero flag.
+    BelowOrEqual,
+}
+
+impl Branch {
+    /// Whether the branch is taken with `flags`.
+    pub const fn taken(self, flags: u64) -> bool {
+        const CARRY: u64 = 1;
+        const ZERO: u64 = 1 << 6;
+        match self {
+            Self::Below => flags & CARRY != 0,
+            Self::BelowOrEqual => flags & (CARRY | ZERO) != 0,
+        }
+    }
+}
+
+/// Where Linux loads a position-independent executable when it does not
+/// randomize: two thirds of a 47-bit address space, less its first
+/// segment's address, page aligned (`ELF_ET_DYN_BASE`).
+const UNRANDOMIZED_PIE_BASE: u64 = 0x5555_5555_4aaa;
+
+/// Where to count the calls of the function `symbol` names in `program`.
+pub fn plan(program: &Path, symbol: &str) -> Result<Calls, RecordError> {
+    let unreadable = |error: &dyn std::fmt::Display| RecordError::Program(error.to_string());
+    let program = super::which(program).ok_or_else(|| RecordError::Program("not found".into()))?;
+    let data = std::fs::read(&program).map_err(|error| unreadable(&error))?;
+    let file = object::File::parse(data.as_slice()).map_err(|error| unreadable(&error))?;
+    let bias = match file.kind() {
+        object::ObjectKind::Dynamic => {
+            let first = file.segments().map(|segment| segment.address()).min();
+            UNRANDOMIZED_PIE_BASE.wrapping_sub(first.unwrap_or(0)) & !0xfff
+        }
+        _ => 0,
+    };
+    // A symbol, or the name a profile shows for one.
+    let addresses: BTreeSet<u64> = file
+        .symbols()
+        .filter(|candidate| {
+            candidate.kind() == object::SymbolKind::Text
+                && candidate.name().is_ok_and(|name| {
+                    name == symbol
+                        || crate::demangle::qualified_name(name).is_some_and(|name| name == symbol)
+                })
+        })
+        .map(|found| found.address())
+        .collect();
+    let mut addresses = addresses.into_iter();
+    let entry = match (addresses.next(), addresses.len()) {
+        (None, _) => return Err(RecordError::NoSuchFunction(symbol.to_owned())),
+        (Some(entry), 0) => entry,
+        (Some(_), others) => {
+            return Err(RecordError::AmbiguousFunction {
+                name: symbol.to_owned(),
+                count: others + 1,
+            });
+        }
+    };
+    let Some(check) = stack_check(&file, entry) else {
+        return Ok(Calls {
+            address: entry,
+            bias,
+            repeats_when: None,
+        });
+    };
+    let uncountable = |why: &str| RecordError::Uncountable {
+        name: symbol.to_owned(),
+        why: why.to_owned(),
+    };
+    let repeats_when = match check.condition_code() {
+        ConditionCode::b => Branch::Below,
+        ConditionCode::be => Branch::BelowOrEqual,
+        _ => {
+            return Err(uncountable(
+                "its stack check branches on a condition uscope does not read",
+            ));
+        }
+    };
+    let table = crate::debug_info::gopclntab::load(&file)
+        .ok()
+        .flatten()
+        .ok_or_else(|| uncountable("its stack check is not in a Go function table"))?;
+    let function = table
+        .function_containing(entry)
+        .ok_or_else(|| uncountable("its stack check is not in a Go function table"))?;
+    if table.preemptible(function, check.ip()).unwrap_or(true) {
+        return Err(uncountable(
+            "the Go runtime may preempt it at its stack check",
+        ));
+    }
+    if table.restarts_at_entry(function).unwrap_or(true) {
+        return Err(uncountable("the Go runtime may restart it at its entry"));
+    }
+    Ok(Calls {
+        address: check.ip(),
+        bias,
+        repeats_when: Some(repeats_when),
+    })
+}
+
+/// The last conditional branch of the prologue at `entry` that leads to a
+/// block calling `runtime.morestack` and jumping back to `entry`.
+fn stack_check(file: &object::File<'_>, entry: u64) -> Option<Instruction> {
+    let (start, data) = file.sections().find_map(|section| {
+        let start = section.address();
+        let offset = usize::try_from(entry.checked_sub(start)?).ok()?;
+        let data = section.data().ok()?;
+        (offset < data.len()).then_some((start, data))
+    })?;
+    let decode = |at: u64| {
+        let offset = usize::try_from(at.wrapping_sub(start)).unwrap_or(usize::MAX);
+        let code = data.get(offset..).unwrap_or_default();
+        let mut decoder = Decoder::with_ip(64, code, at, DecoderOptions::NONE);
+        std::iter::from_fn(move || decoder.can_decode().then(|| decoder.decode()))
+    };
+    let grows_the_stack = |at: u64| {
+        let block: Vec<Instruction> = decode(at).take(8).collect();
+        let calls_morestack = block.iter().any(|instruction| {
+            instruction.mnemonic() == Mnemonic::Call
+                && file.symbols().any(|symbol| {
+                    symbol.address() == instruction.near_branch_target()
+                        && symbol
+                            .name()
+                            .is_ok_and(|name| name.starts_with("runtime.morestack"))
+                })
+        });
+        let returns_to_entry = block.iter().any(|instruction| {
+            instruction.flow_control() == FlowControl::UnconditionalBranch
+                && instruction.near_branch_target() == entry
+        });
+        calls_morestack && returns_to_entry
+    };
+    decode(entry)
+        .take(5)
+        .filter(|instruction| {
+            instruction.flow_control() == FlowControl::ConditionalBranch
+                && grows_the_stack(instruction.near_branch_target())
+        })
+        .last()
+}

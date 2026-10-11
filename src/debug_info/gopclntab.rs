@@ -33,6 +33,10 @@ const FUNC_SIZE: usize = 44;
 /// The size of one inline-tree entry, an `inlinedCall`.
 const INLINED_CALL_SIZE: usize = 16;
 
+/// `PCDATA_UnsafePoint`, the pc-value table saying where the runtime may
+/// preempt a goroutine asynchronously, and where it then resumes it.
+const PCDATA_UNSAFE_POINT: usize = 0;
+
 /// `PCDATA_InlTreeIndex`, the pc-value table giving the inline-tree entry
 /// at each instruction.
 const PCDATA_INLINE_TREE_INDEX: usize = 2;
@@ -610,6 +614,44 @@ impl GoTable {
             }
         }
         Ok(None)
+    }
+
+    /// Whether the runtime may preempt a goroutine asynchronously at an
+    /// address within the function: `false` where the compiler marked it
+    /// unsafe (`UnsafePointUnsafe`). Elsewhere a preempted goroutine
+    /// resumes at the address, at the start of a restartable sequence, or
+    /// at the function's entry.
+    pub fn preemptible(&self, function: &GoFunction, address: u64) -> Result<bool> {
+        /// `abi.UnsafePointUnsafe`.
+        const UNSAFE: i32 = -2;
+        if function.npcdata as usize <= PCDATA_UNSAFE_POINT {
+            return Ok(true);
+        }
+        let offset = read_u32(&self.data, function.pcdata + 4 * PCDATA_UNSAFE_POINT)
+            .expect("the record's pcdata is in bounds");
+        Ok(self.value_at(function, offset, address)? != Some(UNSAFE))
+    }
+
+    /// Whether the runtime may resume a goroutine it preempted in the
+    /// function at the function's entry (`UnsafePointRestartAtEntry`), so
+    /// that its prologue runs again.
+    pub fn restarts_at_entry(&self, function: &GoFunction) -> Result<bool> {
+        /// `abi.UnsafePointRestartAtEntry`.
+        const RESTART_AT_ENTRY: i32 = -5;
+        if function.npcdata as usize <= PCDATA_UNSAFE_POINT {
+            return Ok(false);
+        }
+        let offset = read_u32(&self.data, function.pcdata + 4 * PCDATA_UNSAFE_POINT)
+            .expect("the record's pcdata is in bounds");
+        let Some(runs) = self.runs(function, offset) else {
+            return Ok(false);
+        };
+        for run in clipped(runs, function)? {
+            if run.value == RESTART_AT_ENTRY {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The stack-pointer runs of a function: how far SP is below its value

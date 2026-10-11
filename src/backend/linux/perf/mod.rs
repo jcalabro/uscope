@@ -398,6 +398,25 @@ fn gate(
     }
 }
 
+/// The vDSO's image, read from this process's own memory, and the address
+/// it is linked at. The kernel maps the one image it holds into every
+/// 64-bit process, so this is every recorded program's vDSO too.
+pub fn own_vdso() -> Option<(Vec<u8>, u64)> {
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    let range = super::vdso::vdso_mapping(&maps)?;
+    let memory = std::fs::File::open("/proc/self/mem").ok()?;
+    let image = super::vdso::read_memory_image(range.start, range.end, |address, buffer| {
+        std::os::unix::fs::FileExt::read_exact_at(&memory, buffer, address).is_ok()
+    })
+    .ok()?;
+    Some((image.data, range.start.wrapping_sub(image.load_bias)))
+}
+
+/// Whether an executable mapping is the vDSO's.
+pub fn is_vdso(mmap: &decode::Mmap<'_>) -> bool {
+    mmap.executable && mmap.path == super::vdso::VDSO_NAME.as_bytes()
+}
+
 /// The file an executable mapping maps and its image's load bias, if the
 /// file at its path is still the one mapped.
 pub fn identify(mmap: &decode::Mmap<'_>) -> Option<(PathBuf, u64)> {

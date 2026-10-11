@@ -85,6 +85,27 @@ pub fn frame_pointer_rule<U: UnwindInfo + ?Sized>(
     }
 }
 
+/// Where Linux's x86-64 `ucontext` keeps the interrupted registers: its
+/// `uc_mcontext`, after `uc_flags`, `uc_link`, and `uc_stack`.
+pub const UCONTEXT_MCONTEXT: u64 = 40;
+
+/// The DWARF numbers of the general registers in the order the kernel's
+/// `sigcontext` saves them, from r8 to rip.
+pub const SIGCONTEXT_REGISTERS: [u16; 17] =
+    [8, 9, 10, 11, 12, 13, 14, 15, 5, 4, 6, 3, 1, 0, 2, 7, 16];
+
+/// The registers a signal interrupted, from the `ucontext` the kernel
+/// placed at `context`, the stack pointer of the trampoline its handler
+/// returns to; `None` if `memory` lacks any of them.
+pub fn interrupted_registers(context: u64, memory: &mut dyn MemoryReader) -> Option<RegisterFile> {
+    let mut registers = RegisterFile::new([]);
+    for (slot, register) in SIGCONTEXT_REGISTERS.iter().enumerate() {
+        let address = context + UCONTEXT_MCONTEXT + 8 * slot as u64;
+        registers.set(*register, memory.read_u64(VirtualAddress::new(address))?);
+    }
+    Some(registers)
+}
+
 /// DWARF register numbers on x86-64.
 pub const RBP: u16 = 6;
 pub const RSP: u16 = 7;

@@ -2051,6 +2051,13 @@ for variant in \
     build_fixture "$compiler" "$c_fixtures_dir/profile-stacks.c" "$output_dir/profile-stacks-$name" \
         "$level" -g3 "$frames" "$code" "$link" -pthread
 done
+# Signal handlers and the vDSO, which samples unwind through.
+build_fixture gcc "$c_fixtures_dir/profile-signals.c" "$output_dir/profile-signals-gcc-o0" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
+build_fixture clang "$c_fixtures_dir/profile-signals.c" "$output_dir/profile-signals-clang-o2-nofp" \
+    -O2 -g3 -fomit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/profile-vdso.c" "$output_dir/profile-vdso" \
+    -O2 -g3 -fno-omit-frame-pointer -fPIE -pie
 # Static programs, whose code auto mode can judge before they run.
 build_fixture musl-gcc "$c_fixtures_dir/profile-stacks.c" "$output_dir/profile-stacks-musl" \
     -O2 -g3 -fno-omit-frame-pointer -static -pthread
@@ -2233,6 +2240,10 @@ build_go_fixture "$go_fixtures_dir/stacks" "$output_dir/stacks-go-o2"
 build_go_fixture "$go_fixtures_dir/spin" "$output_dir/spin-go-o0" \
     "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/spin" "$output_dir/spin-go-o2"
+# The profiler's goroutine stacks, optimized and not, PIE and not.
+build_go_fixture "$go_fixtures_dir/profile" "$output_dir/profile-go-o2"
+build_go_fixture "$go_fixtures_dir/profile" "$output_dir/profile-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
 # Stripped of DWARF and symbols, so no model describes its runtime's data.
 build_go_fixture "$go_fixtures_dir/spin" "$output_dir/spin-go-stripped" "-ldflags=-s -w"
 build_go_fixture "$go_fixtures_dir/siblings" "$output_dir/siblings-go-o0" \

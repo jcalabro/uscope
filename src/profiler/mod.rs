@@ -2,12 +2,12 @@
 //! time, from outside the program, into a capture that can be saved,
 //! loaded, and queried.
 
+mod calls;
 mod frame_pointers;
 mod record;
 
 pub use crate::analysis::{CallTree, Cost, Costs, Granularity, KeyKind, Keys, Query, Transform};
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -148,6 +148,8 @@ pub enum RecordError {
     NoSuchFunction(String),
     #[error("{count} functions are named '{name}'; name one by its symbol")]
     AmbiguousFunction { name: String, count: usize },
+    #[error("the calls of '{name}' cannot be counted exactly: {why}")]
+    Uncountable { name: String, why: String },
     #[error("reading the program failed: {0}")]
     Program(String),
     #[error(
@@ -210,6 +212,11 @@ pub fn record_watched(
         ..crate::DebugFileOptions::default()
     });
     let mut processor = record::Processor::new(search, options.max_frames);
+    if let Some(calls) = breakpoint
+        && let Some(branch) = calls.repeats_when
+    {
+        processor.repeats_when(calls.address + calls.bias, branch);
+    }
     let (stack_bytes, stack_copy) = stack_copy(&mut processor, &program, options.stack);
     let events = perf::EventOptions {
         source,
@@ -293,8 +300,8 @@ pub fn record_watched(
     record!("record: the program ended: {status}");
     let capture = processor.finish();
     let profile = Profile { capture };
-    if let Some(expected) = breakpoint {
-        profile.check_bias(&program, expected)?;
+    if let Some(calls) = breakpoint {
+        profile.check_bias(&program, calls.bias)?;
     }
     Ok(Recording { profile, status })
 }
@@ -304,7 +311,7 @@ pub fn record_watched(
 fn perf_source(
     program: &Path,
     source: &SampleSource,
-) -> Result<(perf::Source, Option<u64>), RecordError> {
+) -> Result<(perf::Source, Option<calls::Calls>), RecordError> {
     Ok(match source {
         SampleSource::Clock { rate } => (
             perf::Source::Clock {
@@ -313,12 +320,12 @@ fn perf_source(
             None,
         ),
         SampleSource::Function { symbol } => {
-            let (address, bias) = function_address(program, symbol)?;
+            let calls = calls::plan(program, symbol)?;
             (
                 perf::Source::Breakpoint {
-                    address: address + bias,
+                    address: calls.address + calls.bias,
                 },
-                Some(bias),
+                Some(calls),
             )
         }
     })
@@ -375,44 +382,8 @@ fn query(view: StackView) -> Query {
     }
 }
 
-/// The image address of the function `symbol` names in `program`, and the
-/// bias the program loads at without address randomization.
-fn function_address(program: &Path, symbol: &str) -> Result<(u64, u64), RecordError> {
-    /// Where Linux loads a position-independent executable when it does
-    /// not randomize: two thirds of a 47-bit address space, page aligned.
-    const UNRANDOMIZED_PIE_BASE: u64 = 0x5555_5555_4000;
-    let program = which(program).ok_or_else(|| RecordError::Program("not found".into()))?;
-    let data = std::fs::read(&program).map_err(|error| RecordError::Program(error.to_string()))?;
-    let file = object::File::parse(data.as_slice())
-        .map_err(|error| RecordError::Program(error.to_string()))?;
-    let bias = match object::Object::kind(&file) {
-        object::ObjectKind::Dynamic => UNRANDOMIZED_PIE_BASE,
-        _ => 0,
-    };
-    // A symbol, or the name a profile shows for one.
-    let addresses: BTreeSet<u64> = object::Object::symbols(&file)
-        .filter(|candidate| {
-            object::ObjectSymbol::kind(candidate) == object::SymbolKind::Text
-                && object::ObjectSymbol::name(candidate).is_ok_and(|name| {
-                    name == symbol
-                        || crate::demangle::qualified_name(name).is_some_and(|name| name == symbol)
-                })
-        })
-        .map(|found| object::ObjectSymbol::address(&found))
-        .collect();
-    let mut addresses = addresses.into_iter();
-    match (addresses.next(), addresses.len()) {
-        (None, _) => Err(RecordError::NoSuchFunction(symbol.to_owned())),
-        (Some(address), 0) => Ok((address, bias)),
-        (Some(_), others) => Err(RecordError::AmbiguousFunction {
-            name: symbol.to_owned(),
-            count: others + 1,
-        }),
-    }
-}
-
 /// The file a command names, as `execvp` would find it.
-fn which(program: &Path) -> Option<PathBuf> {
+pub(super) fn which(program: &Path) -> Option<PathBuf> {
     if program.components().count() > 1 {
         return Some(program.to_owned());
     }

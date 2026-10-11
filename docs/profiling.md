@@ -36,7 +36,12 @@ calls without keeping the chain.
 
 `--rate HZ` and `--stack-bytes N` override a preset's numbers. `--function
 SYMBOL` samples each call of a function instead of CPU time, which counts
-calls exactly; the program then runs without address randomization.
+calls exactly; the program then runs without address randomization. A Go
+function's first instructions may run more than once a call, when it grows
+its stack or the runtime preempts it, so its calls are counted at its stack
+check's branch, which runs once a call without branching. The profile
+counts each repeat it sets aside, and a function the runtime may restart at
+its entry is refused.
 
 The kernel must let the user sample their own processes:
 `/proc/sys/kernel/perf_event_paranoid` must be 2 or less, as it is by
@@ -66,10 +71,35 @@ with one of these:
 | `[frame chain ended]` | The kernel's walk ended at a frame that is not outermost. |
 | `[invalid caller]` | Unwinding found a caller that cannot be one. |
 | `[depth limit]` | The stack was deeper than the deepest recorded. |
+| `[frames before a stack switch not captured]` | A runtime switched stacks, as Go does to run its scheduler, and neither the chain nor the copy reaches the stack it switched from. |
 
 Plain frame-pointer walking, as most profilers do, is wrong wherever a
 function without frame pointers sits between two that have them: the stack
 looks complete and skips callers. uscope never shows such a stack.
+
+A signal handler's stack goes on through the frame the signal interrupted,
+from the registers the kernel saved beside the handler's frames. Code in
+the vDSO, which no file holds, unwinds by the vDSO's own call-frame
+information: the kernel maps one image into every process. The vDSO names
+only its entry points, so its own functions show as `[vdso]+0x…`.
+
+Go runs some of its work on a thread's system stack. Where a goroutine
+switched there with `systemstack`, which keeps the frame pointer, its
+stack goes on into the goroutine's frames:
+
+```
+runtime.stopTheWorldWithSema
+runtime.gcStart.func2
+runtime.systemstack
+runtime.gcStart
+runtime.GC
+main.outer
+…
+runtime.goexit
+```
+
+The scheduler's own work, which `mcall` and `morestack` start after a
+goroutine gives up its thread, ends at the switch.
 
 Functions are named with their scopes (`app::server::handle`), and each
 function inlined into a frame is a frame of its own.

@@ -371,6 +371,184 @@ fn a_watched_recording_publishes_as_it_goes_and_stops_when_asked() {
     );
 }
 
+fn go_command(variant: &str, rounds: u32) -> Command {
+    let mut command = Command::new(Scenario::fixture(&format!("profile-go-{variant}")));
+    command
+        .arg(rounds.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+#[test]
+fn a_goroutines_calls_name_its_exact_stack_in_every_build() {
+    for variant in ["o0", "o2"] {
+        let recording = record(go_command(variant, 5), &calls_of("main.work")).expect("record");
+        assert!(recording.status.success());
+        let stacks = recording.profile.stacks();
+        // Four workers call work five times each.
+        assert_eq!(stacks.len(), 20, "{variant}");
+        for stack in &stacks {
+            assert_eq!(
+                stack.functions,
+                [
+                    "main.work",
+                    "main.outer",
+                    "main.worker",
+                    "main.main.gowrap1",
+                    "runtime.goexit"
+                ],
+                "{variant}"
+            );
+            assert_eq!(stack.ending, StackEnding::Complete, "{variant}");
+        }
+    }
+}
+
+#[test]
+fn a_stack_on_the_system_stack_goes_on_into_the_goroutine_that_switched() {
+    for variant in ["o0", "o2"] {
+        // Every collection stops the world from the system stack.
+        let options = calls_of("runtime.stopTheWorldWithSema");
+        let recording = record(go_command(variant, 32), &options).expect("record");
+        assert!(recording.status.success());
+        let mut ours = 0;
+        for stack in recording.profile.stacks() {
+            let context = format!("{variant}: {stack:?}");
+            let names = &stack.functions;
+            let switch = names.iter().position(|name| name == "runtime.systemstack");
+            let switch = switch.expect(&context);
+            if switch + 1 == names.len() {
+                // A switch the chain does not cross says so.
+                assert_eq!(
+                    stack.ending,
+                    StackEnding::Truncated("frames before a stack switch not captured".into()),
+                    "{context}"
+                );
+                continue;
+            }
+            // The closure the system stack ran is the switching function's.
+            let (closure, switcher) = (&names[switch - 1], &names[switch + 1]);
+            assert!(
+                closure.starts_with(&format!("{switcher}.func")),
+                "{context}"
+            );
+            assert_eq!(stack.ending, StackEnding::Complete, "{context}");
+            assert_eq!(
+                names.last().map(String::as_str),
+                Some("runtime.goexit"),
+                "{context}"
+            );
+            // A worker's collection begins on its own goroutine.
+            if switcher == "runtime.gcStart" && names.iter().any(|name| name == "main.worker") {
+                assert_eq!(
+                    names[names.len() - 4..],
+                    [
+                        "main.outer",
+                        "main.worker",
+                        "main.main.gowrap1",
+                        "runtime.goexit"
+                    ],
+                    "{context}"
+                );
+                ours += 1;
+            }
+        }
+        // The workers collect at least once.
+        assert!(ours > 0, "{variant}");
+    }
+}
+
+#[test]
+fn a_go_programs_complete_stacks_all_end_where_stacks_begin() {
+    let options = RecordOptions::preset(Preset::Maximum);
+    let recording = record(go_command("o2", 40), &options).expect("record");
+    assert!(recording.status.success());
+    for stack in recording.profile.stacks() {
+        if stack.ending == StackEnding::Complete {
+            let outermost = stack.functions.last().map(String::as_str);
+            assert!(
+                matches!(
+                    outermost,
+                    Some("runtime.goexit" | "runtime.mstart" | "runtime.rt0_go")
+                ),
+                "{stack:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_signal_handlers_stack_goes_on_through_what_the_signal_interrupted() {
+    for variant in ["gcc-o0", "clang-o2-nofp"] {
+        let mut command = Command::new(Scenario::fixture(&format!("profile-signals-{variant}")));
+        command.arg("3").stdout(Stdio::null());
+        let recording = record(command, &calls_of("on_signal")).expect("record");
+        assert!(recording.status.success(), "{variant}");
+        let stacks = recording.profile.stacks();
+        assert_eq!(stacks.len(), 3, "{variant}");
+        for stack in &stacks {
+            assert_eq!(
+                stack.functions,
+                [
+                    "on_signal",
+                    "__restore_rt",
+                    "__pthread_kill_implementation",
+                    "raise",
+                    "interrupted",
+                    "main",
+                    "__libc_start_call_main",
+                    "__libc_start_main",
+                    "_start"
+                ],
+                "{variant}"
+            );
+            assert_eq!(stack.ending, StackEnding::Complete, "{variant}");
+        }
+    }
+}
+
+#[test]
+fn a_stack_through_the_vdso_goes_on_to_its_callers() {
+    let mut command = Command::new(Scenario::fixture("profile-vdso"));
+    command.arg("2000000");
+    let recording = record(command, &RecordOptions::preset(Preset::Maximum)).expect("record");
+    assert!(recording.status.success());
+    let stacks = recording.profile.stacks();
+    let mut through = 0;
+    for stack in &stacks {
+        let context = format!("{stack:?}");
+        assert_ne!(
+            stack.ending,
+            StackEnding::Truncated("unmapped return address".into()),
+            "{context}"
+        );
+        // The vDSO exports only its entry points, so its own functions are
+        // known by address.
+        if stack.functions[0].starts_with("[vdso]+") {
+            let main = [
+                "read_clock",
+                "main",
+                "__libc_start_call_main",
+                "__libc_start_main",
+                "_start",
+            ];
+            let tail = &stack.functions[stack.functions.len().saturating_sub(main.len())..];
+            assert_eq!(tail, main, "{context}");
+            assert_eq!(stack.ending, StackEnding::Complete, "{context}");
+            through += 1;
+        }
+    }
+    // Reading the clock is all the program does.
+    assert!(
+        through > 0,
+        "{} samples, {} lost",
+        stacks.len(),
+        recording.profile.lost_samples()
+    );
+}
+
 #[test]
 fn clock_samples_are_valid_stacks_and_survive_a_file() {
     let scratch = support::ScratchDir::new("profiler-clock");
