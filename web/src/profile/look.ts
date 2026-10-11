@@ -46,6 +46,9 @@ export interface ProfileLook {
   bp?: string;
   /** The range of the base profile a diff compares with, `START-END`. */
   br?: string;
+  /** What the selected function shows: its source lines or its code,
+   * rather than its callers and callees. */
+  ann?: "lines" | "code";
 }
 
 const VIEWS: readonly ProfileView[] = ["flame", "tree", "functions", "zones"];
@@ -129,6 +132,10 @@ export function validateProfileLook(search: Record<string, unknown>): ProfileLoo
   const br = text("br");
   if (br && parseRange(br)) {
     look.br = br;
+  }
+  const ann = text("ann");
+  if (ann === "lines" || ann === "code") {
+    look.ann = ann;
   }
   return look;
 }

@@ -297,3 +297,36 @@ test("a profile is diffed with a range of its own, and with another profile", as
   await expect(row("middle")).toContainText("−100.0 pp");
   await expect(page.getByRole("button", { name: "by change" })).toBeVisible();
 });
+
+test("a function's samples show on its source lines and its instructions", async ({
+  page,
+  uscope,
+}, info) => {
+  const file = info.outputPath("calls.usprof");
+  execFileSync(
+    path.join(root, "target", "debug", "uscope"),
+    ["record", "-o", file, "--function", "leaf", "--", fixture("profile-stacks-gcc-o0"), "1"],
+    { stdio: "ignore" },
+  );
+  const served = await uscope.start([file]);
+  await join(page, served.link);
+  await page.getByRole("button", { name: "Functions" }).click();
+  await page
+    .getByRole("listbox", { name: "Functions" })
+    .getByRole("option")
+    .filter({ hasText: "leaf" })
+    .click();
+
+  // Every call of leaf is on one line of it, and on its first instruction.
+  await page.getByRole("button", { name: "Source", exact: true }).click();
+  await expect(page).toHaveURL(/ann=lines/);
+  const lines = page.getByTestId("source-lines");
+  await expect(lines.locator(".hot")).toHaveCount(1);
+  await expect(lines.locator(".hot")).toContainText("100.0%");
+  await page.getByRole("button", { name: "Assembly", exact: true }).click();
+  await expect(page).toHaveURL(/ann=code/);
+  const code = page.getByTestId("code");
+  await expect(code.locator(".annotated-head").first()).toContainText("leaf");
+  await expect(code.locator(".annotated-row").first()).toContainText("100.0%");
+  await expect(code.locator(".hot")).toHaveCount(1);
+});

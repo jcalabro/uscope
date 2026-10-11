@@ -1000,6 +1000,83 @@ fn a_go_programs_own_profiles_read_as_it_wrote_them() {
     assert_eq!(park.total, 3);
 }
 
+/// A function's samples land on its lines and its instructions: each call
+/// of leaf on leaf's first instruction and line, and on the calls in
+/// middle that made them; a file changed since its recording shows no
+/// code.
+#[test]
+fn a_functions_samples_land_on_its_lines_and_its_instructions() {
+    let scratch = support::ScratchDir::new("annotate");
+    let program = scratch.path().join("stacks");
+    std::fs::copy(Scenario::fixture("profile-stacks-gcc-o0"), &program).expect("copy");
+    let mut command = Command::new(&program);
+    command.arg("1").stdout(Stdio::null());
+    let profile = record(command, &calls_of("leaf")).expect("record").profile;
+    let everything = Query::default();
+
+    let lines = profile.line_costs(&everything, "leaf").lines;
+    assert_eq!(
+        lines.iter().map(|line| line.own).sum::<u64>(),
+        6,
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines.iter().filter(|line| line.own > 0).count(),
+        1,
+        "{lines:?}"
+    );
+
+    let code = profile
+        .disassemble(&everything, "leaf")
+        .expect("leaf's code");
+    let [leaf] = code.blocks.as_slice() else {
+        panic!("one block of leaf: {code:?}");
+    };
+    assert_eq!(leaf.symbol, "leaf");
+    assert_eq!(leaf.instructions[0].own, 6, "{leaf:?}");
+    assert!(
+        leaf.instructions[1..]
+            .iter()
+            .all(|instruction| instruction.total == 0)
+    );
+    assert!(code.unplaced.is_empty());
+
+    let middle = profile
+        .disassemble(&everything, "middle")
+        .expect("middle's code");
+    let calls: Vec<_> = middle.blocks[0]
+        .instructions
+        .iter()
+        .filter(|instruction| instruction.total > 0)
+        .collect();
+    assert!(
+        calls
+            .iter()
+            .all(|instruction| instruction.text.starts_with("call")),
+        "{calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .map(|instruction| instruction.total)
+            .sum::<u64>(),
+        6
+    );
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&program)
+        .expect("open");
+    file.write_all(b"\0").expect("change the program");
+    let changed = profile
+        .disassemble(&everything, "leaf")
+        .expect_err("a changed file");
+    assert!(
+        changed.contains("has changed since it was recorded"),
+        "{changed}"
+    );
+}
+
 #[test]
 fn a_program_that_cannot_start_fails_the_recording() {
     let missing = Command::new("/nonexistent/program");

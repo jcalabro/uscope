@@ -68,6 +68,8 @@ export interface Results {
   /** With the zone blocks' columns. */
   profileZones: P.ProfileZones & { payload?: Uint8Array };
   profileZoneStats: P.ProfileZoneStats;
+  profileLines: P.ProfileLines;
+  profileCode: P.ProfileCode;
   recordProfile: P.RecordStarted;
   stopRecording: null;
 }

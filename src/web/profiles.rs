@@ -468,6 +468,14 @@ impl Profiles {
                 let entry = self.entry(&query.profile)?;
                 Ok(zones(&entry.profile, &query))
             }
+            Request::ProfileLines(query) => {
+                let entry = self.entry(&query.query.profile)?;
+                Ok(json(&source(&entry.profile, &query)?))
+            }
+            Request::ProfileCode(query) => {
+                let entry = self.entry(&query.query.profile)?;
+                Ok(json(&code(&entry.profile, &query)?))
+            }
             Request::ProfileZoneStats(query) => {
                 let entry = self.entry(&query.profile)?;
                 Ok(json(&zone_stats(&entry.profile, &query)))
@@ -487,6 +495,8 @@ pub const fn is_profile_request(request: &Request) -> bool {
             | Request::ProfileTimeline(_)
             | Request::ProfileZones(_)
             | Request::ProfileZoneStats(_)
+            | Request::ProfileLines(_)
+            | Request::ProfileCode(_)
             | Request::RecordProfile(_)
             | Request::StopRecording(_)
     )
@@ -769,6 +779,122 @@ fn timeline_of(
     Ok(ProfileTimeline {
         range: [range.0 - start, range.1 - start],
         lanes,
+    })
+}
+
+/// The most of a source file served, and how many lines around a
+/// function's own are.
+const MOST_SOURCE_BYTES: u64 = 4 << 20;
+const SOURCE_MARGIN: u64 = 5;
+
+/// A function query's selection, its transforms left out.
+fn selection(profile: &Profile, query: &protocol::ProfileFunctionQuery) -> Result<Query, Failure> {
+    let mut plain = query.query.clone();
+    plain.transforms.clear();
+    plain.base = None;
+    let keys = profile.keys(granularity(plain.granularity));
+    resolve(profile, &keys, &plain)
+}
+
+/// A function's samples on its source lines, with the text around them.
+fn source(
+    profile: &Profile,
+    query: &protocol::ProfileFunctionQuery,
+) -> Result<protocol::ProfileLines, Failure> {
+    let costs = profile.line_costs(&selection(profile, query)?, &query.function);
+    let mut files: BTreeMap<Option<String>, Vec<[u64; 3]>> = BTreeMap::new();
+    for line in costs.lines {
+        files
+            .entry(line.file)
+            .or_default()
+            .push([u64::from(line.line), line.own, line.total]);
+    }
+    let files = files
+        .into_iter()
+        .map(|(path, lines)| {
+            let lowest = lines.iter().map(|line| line[0]).min().unwrap_or(1);
+            let highest = lines.iter().map(|line| line[0]).max().unwrap_or(1);
+            let first = lowest.saturating_sub(SOURCE_MARGIN).max(1);
+            let read = path.as_deref().map_or_else(
+                || Err("its lines name no file".to_owned()),
+                |path| source_lines(path, first, highest + SOURCE_MARGIN),
+            );
+            let (text, unread) = match read {
+                Ok(text) => (Some(text), None),
+                Err(why) => (None, Some(why)),
+            };
+            protocol::ProfileSourceFile {
+                path,
+                lines,
+                first: u32::try_from(first).unwrap_or(u32::MAX),
+                text,
+                unread,
+            }
+        })
+        .collect();
+    Ok(protocol::ProfileLines {
+        weight: costs.weight,
+        files,
+    })
+}
+
+/// Lines `first` to `last` of a source file, as it reads now.
+fn source_lines(path: &str, first: u64, last: u64) -> Result<Vec<String>, String> {
+    let size = std::fs::metadata(path)
+        .map_err(|error| format!("{path} cannot be read: {error}"))?
+        .len();
+    if size > MOST_SOURCE_BYTES {
+        return Err(format!("{path} is larger than {MOST_SOURCE_BYTES} bytes"));
+    }
+    let bytes = std::fs::read(path).map_err(|error| format!("{path} cannot be read: {error}"))?;
+    let skip = usize::try_from(first - 1).unwrap_or(usize::MAX);
+    let take = usize::try_from(last - first + 1).unwrap_or(usize::MAX);
+    Ok(String::from_utf8_lossy(&bytes)
+        .lines()
+        .skip(skip)
+        .take(take)
+        .map(str::to_owned)
+        .collect())
+}
+
+/// A function's samples on its instructions, or why its code is unknown.
+fn code(
+    profile: &Profile,
+    query: &protocol::ProfileFunctionQuery,
+) -> Result<protocol::ProfileCode, Failure> {
+    let selected = selection(profile, query)?;
+    Ok(match profile.disassemble(&selected, &query.function) {
+        Ok(code) => protocol::ProfileCode {
+            weight: code.weight,
+            module: Some(code.module),
+            blocks: code
+                .blocks
+                .into_iter()
+                .map(|block| protocol::ProfileCodeBlock {
+                    symbol: block.symbol,
+                    instructions: block
+                        .instructions
+                        .into_iter()
+                        .map(|instruction| protocol::ProfileInstruction {
+                            address: instruction.address,
+                            text: instruction.text,
+                            own: instruction.own,
+                            total: instruction.total,
+                        })
+                        .collect(),
+                    stopped: block.stopped,
+                })
+                .collect(),
+            unplaced: code.unplaced.into_iter().map(Into::into).collect(),
+            unavailable: None,
+        },
+        Err(why) => protocol::ProfileCode {
+            weight: 0,
+            module: None,
+            blocks: Vec::new(),
+            unplaced: Vec::new(),
+            unavailable: Some(why),
+        },
     })
 }
 

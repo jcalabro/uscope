@@ -150,6 +150,10 @@ pub enum Request {
     ProfileZones(ProfileZonesQuery),
     /// The spread of one site's zone lengths.
     ProfileZoneStats(ProfileZoneStatsQuery),
+    /// A function's samples on its source lines, with the lines' text.
+    ProfileLines(ProfileFunctionQuery),
+    /// A function's samples on its instructions.
+    ProfileCode(ProfileFunctionQuery),
     /// Records a program, publishing its profile as it goes.
     RecordProfile(RecordProfile),
     /// Ends a recording, killing its program.
@@ -853,6 +857,69 @@ pub enum ProfileGranularity {
     Line,
     /// Each instruction.
     Address,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileFunctionQuery {
+    /// Whose samples count; its transforms do not apply, as they name
+    /// what views show rather than lines or instructions.
+    #[serde(flatten)]
+    pub query: ProfileQuery,
+    pub function: String,
+}
+
+/// A function's samples on its source lines, by file.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileLines {
+    /// The weight of every sample selected.
+    pub weight: u64,
+    pub files: Vec<ProfileSourceFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileSourceFile {
+    pub path: Option<String>,
+    /// Each line with samples: its number, own weight, and total weight.
+    pub lines: Vec<[u64; 3]>,
+    /// The file's text from line `first`, around those lines, as the file
+    /// reads now; `None`, with why, when it cannot be read.
+    pub first: u32,
+    pub text: Option<Vec<String>>,
+    pub unread: Option<String>,
+}
+
+/// A function's samples on its instructions, or why its code is unknown.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileCode {
+    pub weight: u64,
+    pub module: Option<String>,
+    pub blocks: Vec<ProfileCodeBlock>,
+    /// Sampled addresses no decoded instruction holds: address, own, and
+    /// total.
+    pub unplaced: Vec<[u64; 3]>,
+    pub unavailable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileCodeBlock {
+    pub symbol: String,
+    pub instructions: Vec<ProfileInstruction>,
+    pub stopped: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileInstruction {
+    pub address: u64,
+    pub text: String,
+    pub own: u64,
+    pub total: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2200,6 +2267,12 @@ mod tests {
         ProfileZonesQuery::decl,
         ProfileZones::decl,
         ProfileMark::decl,
+        ProfileFunctionQuery::decl,
+        ProfileLines::decl,
+        ProfileSourceFile::decl,
+        ProfileCode::decl,
+        ProfileCodeBlock::decl,
+        ProfileInstruction::decl,
         ProfileBase::decl,
         ProfileBaseWeight::decl,
         ProfilePlot::decl,

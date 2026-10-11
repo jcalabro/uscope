@@ -390,6 +390,13 @@ taken while it was open on their thread, or carried by their task, so
 roots each path at its value of a label key, and samples without one at
 `[no round]`. A zone flagged as cut short says what of it was not seen.
 
+A function selected in **Functions** shows its callers and callees, or
+its samples on its **Source** lines, as the file reads now, or on its
+**Assembly**. Code is decoded from the module's file only when it is the
+very file the recording read, which its digest proves; otherwise the
+view says the file changed. A caller's samples land on the call it was
+in. These count every selected sample, without the view's transforms.
+
 **Compare with** diffs the view against a base: the selected range, which
 then becomes the base while another range is chosen, or another profile
 the server serves, as `uscope web new.usprof old.usprof` serves two. The

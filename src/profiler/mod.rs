@@ -2,6 +2,7 @@
 //! time, from outside the program, into a capture that can be saved,
 //! loaded, and queried.
 
+mod annotate;
 pub mod budget;
 mod calls;
 mod collector;
@@ -21,6 +22,7 @@ pub const NO_TASK: u32 = NONE;
 /// A key no path holds: a focus on it keeps nothing.
 pub const NO_KEY: u32 = NONE;
 pub use crate::capture::records::MarkerKind;
+pub use annotate::{CodeBlock, Disassembly, InstructionCost, LineCost, LineCosts};
 pub use collector::ProbeSelection;
 pub use formats::Format;
 pub use session::{Attachment, Recording, Save, Watch, record, record_attached, record_watched};

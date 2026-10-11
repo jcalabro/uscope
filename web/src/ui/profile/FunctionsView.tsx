@@ -1,5 +1,6 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useMemo, useRef, useState } from "react";
+import { withLook } from "../../profile/look";
 import { formatPercent, formatWeight, shareChange } from "../../profile/paint";
 import type { ProfileQuery } from "../../protocol";
 import { useAnswer, useProfile } from "./context";
@@ -95,7 +96,144 @@ export function FunctionsView() {
           </div>
         )}
       </div>
-      {look.fn ? <Sandwich query={query} name={look.fn} /> : null}
+      {look.fn ? <Selected name={look.fn} /> : null}
+    </div>
+  );
+}
+
+const PANELS = [
+  [undefined, "Callers and callees"],
+  ["lines", "Source"],
+  ["code", "Assembly"],
+] as const;
+
+/** The selected function: its callers and callees, or its samples on its
+ * source lines or on its instructions. */
+function Selected({ name }: { name: string }) {
+  const { query, look, setLook } = useProfile();
+  return (
+    <div className="profile-selected">
+      <div className="pane-head">
+        <div className="segmented">
+          {PANELS.map(([ann, label]) => (
+            <button
+              key={label}
+              type="button"
+              aria-pressed={look.ann === ann}
+              onClick={() => setLook((look) => withLook(look, "ann", ann), true)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {look.ann && query.transforms.length > 0 ? (
+          <span className="muted">Every selected sample counts here, without the transforms.</span>
+        ) : null}
+      </div>
+      {look.ann === "lines" ? (
+        <SourceLines name={name} />
+      ) : look.ann === "code" ? (
+        <Code name={name} />
+      ) : (
+        <Sandwich query={query} name={name} />
+      )}
+    </div>
+  );
+}
+
+/** A function's samples on its source lines, by file, as each reads now. */
+function SourceLines({ name }: { name: string }) {
+  const { query } = useProfile();
+  const answer = useAnswer(
+    "profileLines",
+    useMemo(() => ({ ...query, function: name }), [query, name]),
+  );
+  if (answer.error) {
+    return <div className="empty">{answer.error.message}</div>;
+  }
+  const weight = answer.data?.weight ?? 0;
+  return (
+    <div
+      className={`pane-body annotated ${answer.current ? "" : "stale"}`}
+      data-testid="source-lines"
+    >
+      {(answer.data?.files ?? []).map((file) => {
+        const costs = new Map(file.lines.map(([line, own, total]) => [line, [own, total]]));
+        return (
+          <div key={file.path ?? ""} className="annotated-file">
+            <div className="annotated-head mono">{file.path ?? "no file"}</div>
+            {file.text ? (
+              file.text.map((text, at) => {
+                const line = file.first + at;
+                const cost = costs.get(line);
+                return (
+                  <div key={line} className={`row annotated-row ${cost ? "hot" : ""}`}>
+                    <span className="percent">
+                      {cost ? formatPercent(cost[0] ?? 0, weight) : ""}
+                    </span>
+                    <span className="percent dim">
+                      {cost ? formatPercent(cost[1] ?? 0, weight) : ""}
+                    </span>
+                    <span className="line-number">{line}</span>
+                    <code>{text}</code>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="empty">{file.unread}</div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A function's samples on its instructions, or why its code is unknown. */
+function Code({ name }: { name: string }) {
+  const { query } = useProfile();
+  const answer = useAnswer(
+    "profileCode",
+    useMemo(() => ({ ...query, function: name }), [query, name]),
+  );
+  if (answer.error) {
+    return <div className="empty">{answer.error.message}</div>;
+  }
+  const code = answer.data;
+  if (code?.unavailable) {
+    return <div className="empty">{code.unavailable}</div>;
+  }
+  const weight = code?.weight ?? 0;
+  return (
+    <div className={`pane-body annotated ${answer.current ? "" : "stale"}`} data-testid="code">
+      {(code?.blocks ?? []).map((block) => (
+        <div key={block.symbol} className="annotated-file">
+          <div className="annotated-head mono">
+            {block.symbol} <span className="muted">{code?.module}</span>
+          </div>
+          {block.instructions.map((instruction) => (
+            <div
+              key={instruction.address}
+              className={`row annotated-row ${instruction.total > 0 ? "hot" : ""}`}
+            >
+              <span className="percent">
+                {instruction.own > 0 ? formatPercent(instruction.own, weight) : ""}
+              </span>
+              <span className="percent dim">
+                {instruction.total > 0 ? formatPercent(instruction.total, weight) : ""}
+              </span>
+              <span className="line-number">{instruction.address.toString(16)}</span>
+              <code>{instruction.text}</code>
+            </div>
+          ))}
+          {block.stopped ? <div className="empty">{block.stopped}</div> : null}
+        </div>
+      ))}
+      {(code?.unplaced.length ?? 0) > 0 ? (
+        <div className="empty">
+          {code?.unplaced.length} sampled addresses lie outside every decoded instruction.
+        </div>
+      ) : null}
     </div>
   );
 }

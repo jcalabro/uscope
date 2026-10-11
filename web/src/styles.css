@@ -3003,3 +3003,54 @@ kbd {
 .percent.change.down {
   color: var(--accent);
 }
+
+.profile-selected {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--line-strong);
+}
+
+.profile-selected > .profile-sandwich {
+  flex: 1;
+  min-height: 0;
+  border-top: 0;
+}
+
+.annotated {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font: 12px var(--mono);
+}
+
+.annotated-head {
+  position: sticky;
+  top: 0;
+  padding: 4px 8px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.annotated-row {
+  display: flex;
+  gap: 8px;
+  white-space: pre;
+}
+
+.annotated-row.hot {
+  background: color-mix(in srgb, var(--changed) 14%, transparent);
+}
+
+.annotated-row .line-number {
+  width: 64px;
+  flex: none;
+  text-align: right;
+  color: var(--ink-3);
+}
+
+.annotated-row .percent {
+  width: 52px;
+  flex: none;
+  text-align: right;
+}

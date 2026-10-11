@@ -40,6 +40,7 @@ describe("a profile's address", () => {
       z: ["main", "a & b", "c=d?"],
       bp: "f00d",
       br: "5-90",
+      ann: "code",
     };
     expect(roundTrip(look)).toEqual(look);
     expect(queryOf("p", look)).toEqual({
@@ -80,6 +81,7 @@ describe("a profile's address", () => {
         by: "function",
         bp: "",
         br: "9-3",
+        ann: "lines-of-code",
       }),
     ).toEqual({});
     expect(queryOf("p", {})).toEqual({

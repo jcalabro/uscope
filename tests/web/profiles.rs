@@ -737,3 +737,53 @@ async fn a_profile_serves_its_zones_folded_to_a_width_and_measured() {
         .await;
     assert!(failed.is_err());
 }
+
+/// A function's samples are served on its source lines, with the text
+/// around them, and on its instructions.
+#[tokio::test]
+async fn a_function_is_served_on_its_lines_and_its_instructions() {
+    let scratch = ScratchDir::new("web-annotate");
+    let path = record_calls(&scratch);
+    let web = Web::start("profile", &[path.to_str().expect("a path")]);
+    let mut tab = web.control("tab").await;
+    let listed = tab
+        .expect("the profiles", |message| message["type"] == "profiles")
+        .await;
+    let id = listed["profiles"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+
+    let lines = tab
+        .ok("profileLines", json!({"profile": id, "function": "leaf"}))
+        .await;
+    assert_eq!(lines["weight"], 6);
+    let file = &lines["files"][0];
+    let sampled = file["lines"].as_array().expect("lines");
+    assert_eq!(sampled.len(), 1, "{lines}");
+    assert_eq!(sampled[0][1], 6);
+    let first = file["first"].as_u64().expect("a first line");
+    let at = usize::try_from(sampled[0][0].as_u64().expect("a line") - first).expect("a line");
+    let text = file["text"].as_array().expect("the file's text");
+    assert!(
+        text[at]
+            .as_str()
+            .is_some_and(|line| !line.trim().is_empty()),
+        "{lines}"
+    );
+
+    let code = tab
+        .ok("profileCode", json!({"profile": id, "function": "leaf"}))
+        .await;
+    assert!(code["unavailable"].is_null(), "{code}");
+    assert_eq!(code["blocks"][0]["symbol"], "leaf");
+    assert_eq!(code["blocks"][0]["instructions"][0]["own"], 6);
+    let unknown = tab
+        .ok("profileCode", json!({"profile": id, "function": "nothing"}))
+        .await;
+    assert!(
+        unknown["unavailable"]
+            .as_str()
+            .is_some_and(|why| why.contains("no selected sample"))
+    );
+}
