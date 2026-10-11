@@ -872,18 +872,17 @@ fn load_debug_info(
     let built = |tables| {
         bind(&binding, Arc::new(tables)).expect("an image binds to the files it was built from")
     };
-    let rejected = rejected
-        .as_ref()
-        .map(|(file, reason)| (file, Arc::<str>::from(reason.as_str())));
+    let read = |separate: Option<&super::separate::DebugFile>, supplementary: &Supplementary| {
+        let rejected = rejected
+            .as_ref()
+            .map(|(file, reason)| (file, Arc::<str>::from(reason.as_str())));
+        read_debug_info(data, separate, rejected.as_ref(), supplementary, limits)
+    };
     let Some(cache) = cache else {
-        let tables = seal_debug_info(
-            data,
-            separate.as_ref(),
-            rejected.as_ref(),
-            &supplementary,
-            limits,
-        )?;
-        return Ok((built(tables), CacheOutcome::Off));
+        let read = read(separate.as_ref(), &supplementary)?;
+        // What the image was read from is not needed to seal it.
+        drop((separate, supplementary, rejected));
+        return Ok((built(read.seal()), CacheOutcome::Off));
     };
     let phase = crate::span!("cache.read");
     let mut inputs = vec![data];
@@ -914,13 +913,9 @@ fn load_debug_info(
     };
     drop(phase);
     crate::count!("cache_misses", 1);
-    let tables = seal_debug_info(
-        data,
-        separate.as_ref(),
-        rejected.as_ref(),
-        &supplementary,
-        limits,
-    )?;
+    let read = read(separate.as_ref(), &supplementary)?;
+    drop((separate, supplementary, rejected));
+    let tables = read.seal();
     let phase = crate::span!("cache.write");
     if let Err(error) = cache.put(key, &tables) {
         crate::cache::report(format_args!("{error}"));
@@ -929,21 +924,21 @@ fn load_debug_info(
     Ok((built(tables), outcome))
 }
 
-/// Seals an image of a file's debug information, from the separate debug
-/// file `separate` when one was found, with the dwz supplementary file its
+/// Reads what an image of a file's debug information holds, from the
+/// separate debug file `separate` when one was found, with the dwz supplementary file its
 /// DWARF shares. A separate debug file that cannot be loaded, or whose
 /// supplementary file was not found, leaves the image as its own file
 /// describes it, and DWARF of its own that cannot be read leaves it as its
 /// symbols and call-frame information describe it, with the reasons
 /// recorded. Without one, the file `rejected` names that describes another
 /// module is recorded with why.
-fn seal_debug_info(
+fn read_debug_info(
     data: &[u8],
     separate: Option<&super::separate::DebugFile>,
     rejected: Option<&(&super::separate::DebugFile, Arc<str>)>,
     supplementary: &Supplementary,
     limits: LoadLimits,
-) -> std::result::Result<crate::image::Image, DwarfError> {
+) -> std::result::Result<Read, DwarfError> {
     let none_found = || {
         rejected.map_or(Separate::None, |(file, reason)| {
             Separate::Unusable(&file.path, Arc::clone(reason))
@@ -1046,6 +1041,20 @@ enum Separate<'a> {
     Unusable(&'a Path, Arc<str>),
 }
 
+/// What an image holds, read from its sources, which need not outlive it.
+struct Read {
+    target: TargetDescription,
+    address_range: AddressRange<ImageAddress>,
+    metadata: ModuleMetadata,
+}
+
+impl Read {
+    fn seal(self) -> crate::image::Image {
+        let _phase = crate::span!("image_indexes");
+        crate::model::seal(self.target, self.address_range, self.metadata)
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one loader assembles every table of an image from its sources"
@@ -1056,7 +1065,7 @@ fn load_image(
     supplementary: Option<&super::separate::DebugFile>,
     dwarf_use: DwarfUse,
     limits: LoadLimits,
-) -> std::result::Result<crate::image::Image, DwarfError> {
+) -> std::result::Result<Read, DwarfError> {
     let object = parse_object(data)?;
     let target = target_description(&object)?;
     let debug_object = match &separate {
@@ -1099,9 +1108,13 @@ fn load_image(
         RunTimeEndian::Big
     };
 
-    let dwarf = sections.borrow_with_sup(supplementary_sections.as_ref(), |section| {
+    let mut dwarf = sections.borrow_with_sup(supplementary_sections.as_ref(), |section| {
         EndianSlice::new(section, endian)
     });
+    // Units a compiler emitted together share their abbreviations: each
+    // shared table is read and held once rather than for every unit, which
+    // was half a gigabyte for 14,000 units of 2,800 ThinLTO modules.
+    dwarf.populate_abbreviations_cache(gimli::AbbreviationsCacheStrategy::Duplicates);
     let mut files = Files::default();
     let mut line_tables = LineTables::default();
     let mut headers = Vec::new();
@@ -1237,6 +1250,7 @@ fn load_image(
                     files,
                     locals,
                     limits.budget(input),
+                    limits.walk_ahead,
                 )
             };
             let known = files.paths().len();
@@ -1327,11 +1341,10 @@ fn load_image(
     if let Some(table) = &go_table {
         assign_go_symbol_roles(table, &mut symbols.symbols);
     }
-    let phase = crate::span!("image_indexes");
-    let image = crate::model::seal(
+    Ok(Read {
         target,
-        image_address_range(&object)?,
-        ModuleMetadata {
+        address_range: image_address_range(&object)?,
+        metadata: ModuleMetadata {
             functions: function_metadata.functions,
             code_instances: function_metadata.code_instances,
             symbols: symbols.symbols,
@@ -1382,9 +1395,7 @@ fn load_image(
             },
             embedded_views: embedded_views(dwarf_object)?,
         },
-    );
-    drop(phase);
-    Ok(image)
+    })
 }
 
 /// The debug information `tables` describe for the module `binding`
@@ -2352,20 +2363,50 @@ struct DieKey {
 /// The variables walk reads one unit at a time, and nearly every reference
 /// stays in its unit, so the map of the unit being read stays in cache,
 /// where one map of every DIE in a large program misses on most lookups.
+/// A map holds the units from the least it has a DIE of to the greatest:
+/// one unit's walk names few, and a map for each of 14,000 units cost
+/// every walk's maps megabytes of empty ones.
 #[derive(Clone)]
 struct DieMap<V> {
+    /// The unit of the first map.
+    first: usize,
     units: Vec<HashMap<usize, V>>,
 }
 
 impl<V> Default for DieMap<V> {
     fn default() -> Self {
-        Self { units: Vec::new() }
+        Self {
+            first: 0,
+            units: Vec::new(),
+        }
     }
 }
 
 impl<V> DieMap<V> {
+    fn unit(&self, unit: usize) -> Option<&HashMap<usize, V>> {
+        self.units.get(unit.checked_sub(self.first)?)
+    }
+
+    /// The map of `unit`, made with those between it and the others.
+    fn unit_mut(&mut self, unit: usize) -> &mut HashMap<usize, V> {
+        if self.units.is_empty() {
+            self.first = unit;
+        } else if unit < self.first {
+            self.units.splice(
+                0..0,
+                std::iter::repeat_with(HashMap::new).take(self.first - unit),
+            );
+            self.first = unit;
+        }
+        let index = unit - self.first;
+        if index >= self.units.len() {
+            self.units.resize_with(index + 1, HashMap::new);
+        }
+        &mut self.units[index]
+    }
+
     fn get(&self, key: &DieKey) -> Option<&V> {
-        self.units.get(key.unit)?.get(&key.offset)
+        self.unit(key.unit)?.get(&key.offset)
     }
 
     fn contains_key(&self, key: &DieKey) -> bool {
@@ -2373,10 +2414,7 @@ impl<V> DieMap<V> {
     }
 
     fn insert(&mut self, key: DieKey, value: V) -> Option<V> {
-        if key.unit >= self.units.len() {
-            self.units.resize_with(key.unit + 1, HashMap::new);
-        }
-        self.units[key.unit].insert(key.offset, value)
+        self.unit_mut(key.unit).insert(key.offset, value)
     }
 
     fn is_empty(&self) -> bool {
@@ -2401,31 +2439,41 @@ impl<V> DieMap<V> {
     }
 
     fn remove(&mut self, key: &DieKey) -> Option<V> {
-        self.units.get_mut(key.unit)?.remove(&key.offset)
+        let index = key.unit.checked_sub(self.first)?;
+        self.units.get_mut(index)?.remove(&key.offset)
     }
 
     /// Every entry, in no order.
     fn into_entries(self) -> impl Iterator<Item = (DieKey, V)> {
+        let first = self.first;
         self.units
             .into_iter()
             .enumerate()
-            .flat_map(|(unit, entries)| {
-                entries
-                    .into_iter()
-                    .map(move |(offset, value)| (DieKey { unit, offset }, value))
+            .flat_map(move |(index, entries)| {
+                entries.into_iter().map(move |(offset, value)| {
+                    (
+                        DieKey {
+                            unit: first + index,
+                            offset,
+                        },
+                        value,
+                    )
+                })
             })
     }
 
     /// Adds every entry of `other`, whose entries replace these.
     fn extend(&mut self, other: Self) {
-        if other.units.len() > self.units.len() {
-            self.units.resize_with(other.units.len(), HashMap::new);
-        }
-        for (unit, other) in self.units.iter_mut().zip(other.units) {
+        let first = other.first;
+        for (index, entries) in other.units.into_iter().enumerate() {
+            if entries.is_empty() {
+                continue;
+            }
+            let unit = self.unit_mut(first + index);
             if unit.is_empty() {
-                *unit = other;
+                *unit = entries;
             } else {
-                unit.extend(other);
+                unit.extend(entries);
             }
         }
     }
@@ -2453,7 +2501,8 @@ struct RawFunction {
     main_subprogram: bool,
     declaration: Option<SourceLocation>,
     call_site: Option<SourceLocation>,
-    ranges: Vec<AddressRange<ImageAddress>>,
+    /// Its code, held once for its code instance too.
+    ranges: Arc<[AddressRange<ImageAddress>]>,
     entry: Option<ImageAddress>,
     /// The names of the namespaces enclosing the DIE, outermost first,
     /// joined by `::`, as Rust's debug information nests its functions.
@@ -2604,7 +2653,7 @@ fn code_instances(
                         call_site: function.call_site.clone(),
                     },
                 },
-                ranges: function.ranges.clone().into(),
+                ranges: Arc::clone(&function.ranges),
                 breakpoint_entry: breakpoint_entry(function),
             })
         })
@@ -3032,7 +3081,7 @@ fn raw_function<'data>(
             ],
             files,
         )?,
-        ranges: die_code_ranges(dwarf, unit, entry, &catalog.code)?,
+        ranges: die_code_ranges(dwarf, unit, entry, &catalog.code)?.into(),
         entry: entry
             .attr(gimli::DW_AT_entry_pc)
             .map(|attribute| unit_dwarf(dwarf, unit).attr_address(unit, attribute.value()))
@@ -4118,24 +4167,37 @@ mod tests {
                 .join("build/test-programs")
                 .join(fixture);
             let data = fs::read(&path).expect("run `just build-test-programs`");
-            let load = |jobs| {
+            let load_with = |jobs, limits| {
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(jobs)
                     .build()
                     .expect("a pool");
-                let info = pool
+                let (info, _) = pool
                     .install(|| {
-                        load_bytes(
+                        load_debug_info(
                             &path,
                             &data,
                             crate::ModuleImageId::new(0),
                             &super::super::DebugFileSearch::default(),
+                            limits,
+                            None,
                         )
                     })
                     .expect("load the fixture");
                 info.image.image_bytes().to_vec()
             };
+            let load = |jobs| load_with(jobs, LoadLimits::default());
             let serial = load(1);
+            // Walks that may run only one unit past those added wait on the
+            // adding, and build the same image.
+            let waiting = LoadLimits {
+                walk_ahead: 1,
+                ..LoadLimits::default()
+            };
+            assert!(
+                load_with(8, waiting) == serial,
+                "{fixture} differs walking one unit ahead"
+            );
             assert!(!serial.is_empty(), "{fixture}");
             for jobs in [2, 8] {
                 let recording =
@@ -4174,6 +4236,7 @@ mod tests {
         let small = LoadLimits {
             per_input_byte: 0,
             floor: 64 << 10,
+            ..LoadLimits::default()
         };
         let (over, _) = load(small).expect("a load past its budget");
         let crate::DebugInformation::Unusable { reason } = over.image.debug_information() else {
@@ -4215,6 +4278,7 @@ mod tests {
                 LoadLimits {
                     per_input_byte: 0,
                     floor,
+                    ..LoadLimits::default()
                 },
                 None,
             )

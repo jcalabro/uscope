@@ -1194,6 +1194,7 @@ impl DwarfVariableInfo {
             }
         };
         if let ValueDescription::Constant(constant) = &description {
+            let constant = &**constant;
             // An integer form holds at most 64 bits. Clang writes a wider
             // complex constant's real part alone that way, and the imaginary
             // part it leaves out is not zero.

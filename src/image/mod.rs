@@ -325,9 +325,11 @@ impl<'a> Builder<'a> {
         buffer[..directory_start].copy_from_slice(header.as_bytes());
         buffer[directory_start..directory_start + directory_length]
             .copy_from_slice(entries.as_bytes());
-        for ((_, _, _, table), start) in self.tables.iter().zip(offsets) {
-            let table = table.bytes();
-            buffer[start..start + table.len()].copy_from_slice(table);
+        // Each table is freed once copied, so the tables and the image
+        // are not all held at once.
+        for ((_, _, _, table), start) in self.tables.into_iter().zip(offsets) {
+            let rows = table.bytes();
+            buffer[start..start + rows.len()].copy_from_slice(rows);
         }
         let checksum = twox_hash::XxHash3_64::oneshot(&buffer[..offset]);
         buffer[offset..].copy_from_slice(

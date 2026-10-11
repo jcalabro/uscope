@@ -249,7 +249,6 @@ fn source_files(tables: &crate::image::Image) -> Arc<[SourceFile]> {
         .collect()
 }
 
-/// The image of a module's tables.
 /// Seals a module's metadata as an image.
 pub fn seal(
     target: TargetDescription,
@@ -258,41 +257,33 @@ pub fn seal(
 ) -> crate::image::Image {
     validate_dense_ids(&metadata);
     metadata.lines.clip_at(&function_starts(&metadata.symbols));
+    crate::count!("types", metadata.types.len());
     let phase = crate::span!("image.seal");
-    let tables = seal_image(target, address_range, &metadata);
+    let tables = seal_image(target, address_range, metadata);
     drop(phase);
     crate::count!("image_bytes", tables.as_bytes().len());
-    crate::count!("types", metadata.types.len());
-    drop_in_parallel(metadata);
     tables
 }
 
-/// Frees what was sealed. Its largest parts hold millions of allocations
-/// each, which took a fifth of a second to free in turn.
-fn drop_in_parallel(metadata: ModuleMetadata) {
-    let _phase = crate::span!("image.free_metadata");
-    let ModuleMetadata {
-        types,
-        variables,
-        functions,
-        code_instances,
-        lines,
-        ..
-    } = metadata;
-    rayon::scope(|scope| {
-        scope.spawn(move |_| drop(types));
-        scope.spawn(move |_| drop(variables));
-        scope.spawn(move |_| drop(functions));
-        scope.spawn(move |_| drop(code_instances));
-        scope.spawn(move |_| drop(lines));
-    });
+/// Frees what was sealed on a thread of its own. The loader's records hold
+/// millions of allocations, which took a fifth of a second to free in
+/// turn, and each is freed as soon as its tables are built, so that the
+/// records and the image are not all held at once; the loader's workers
+/// may all be busy.
+fn free<T: Send + 'static>(sealed: T) {
+    std::thread::spawn(move || drop(sealed));
 }
 
 fn seal_image(
     target: TargetDescription,
     address_range: AddressRange<ImageAddress>,
-    metadata: &ModuleMetadata,
+    mut metadata: ModuleMetadata,
 ) -> crate::image::Image {
+    let variables = std::mem::take(&mut metadata.variables);
+    let types = std::mem::take(&mut metadata.types);
+    let functions = std::mem::take(&mut metadata.functions);
+    let code_instances = std::mem::take(&mut metadata.code_instances);
+    let metadata = &metadata;
     // Strings are pooled in the order the tables are encoded, which names
     // each, so the tables that pool strings are encoded in turn on this
     // thread while those that pool none are built beside them. Tables are
@@ -304,12 +295,20 @@ fn seal_image(
             rayon::join(
                 || {
                     let _phase = crate::span!("image.type_classes");
-                    type_classes(&metadata.types)
+                    type_classes(&types)
                 },
-                || encode_without_strings(target, metadata),
+                || encode_without_strings(target, metadata, &code_instances),
             )
         },
-        || encode_strings_before_types(&mut builder, &mut strings, address_range, metadata),
+        || {
+            encode_strings_before_types(
+                &mut builder,
+                &mut strings,
+                address_range,
+                metadata,
+                variables,
+            );
+        },
     );
     builder.absorb(code);
     let phase = crate::span!("image.encode_types");
@@ -317,12 +316,13 @@ fn seal_image(
         &mut builder,
         &mut strings,
         &crate::image::types::Types {
-            nodes: &metadata.types,
+            nodes: &types,
             classes: &classes,
         },
     )
     .expect("the loader's types fit an image");
     drop(phase);
+    free(types);
     crate::image::packages::add_to(
         &mut builder,
         &mut strings,
@@ -330,16 +330,17 @@ fn seal_image(
             .packages
             .iter()
             .map(|package| (&*package.path, &*package.name)),
-        &locations::packaged_names(&metadata.functions, &metadata.packages),
+        &locations::packaged_names(&functions, &metadata.packages),
     )
     .expect("the loader's packages fit an image");
     crate::image::functions::add_functions_to(
         &mut builder,
         &mut strings,
-        &metadata.functions,
-        &metadata.code_instances,
+        &functions,
+        &code_instances,
     )
     .expect("the loader's functions fit an image");
+    free((functions, code_instances));
     if let Some(unwind) = &metadata.unwind {
         crate::image::unwind::add_to(&mut builder, &mut strings, unwind)
             .expect("the loader's call-frame information fits an image");
@@ -357,10 +358,11 @@ fn seal_image(
 
 /// The tables that pool no string: the lines, the files and their paths,
 /// the locations, and the code instances.
-fn encode_without_strings(
+fn encode_without_strings<'a>(
     target: TargetDescription,
-    metadata: &ModuleMetadata,
-) -> crate::image::Builder<'_> {
+    metadata: &'a ModuleMetadata,
+    code_instances: &[CodeInstanceInfo],
+) -> crate::image::Builder<'a> {
     let _phase = crate::span!("image.encode_without_strings");
     let mut builder = crate::image::Builder::new(target);
     let mut paths = crate::image::PathsBuilder::default();
@@ -373,9 +375,9 @@ fn encode_without_strings(
     crate::image::functions::add_code_to(
         &mut builder,
         &crate::image::functions::Code {
-            instances: &metadata.code_instances,
+            instances: code_instances,
             prologue_ends: &metadata.lines.prologue_ends(),
-            instruction_starts: &instruction_starts(metadata),
+            instruction_starts: &instruction_starts(metadata, code_instances),
         },
     )
     .expect("the loader's functions fit an image");
@@ -390,6 +392,7 @@ fn encode_strings_before_types<'a>(
     strings: &mut crate::image::StringsBuilder,
     address_range: AddressRange<ImageAddress>,
     metadata: &'a ModuleMetadata,
+    variables: crate::image::variables::Variables,
 ) {
     crate::image::symbols::add_to(
         builder,
@@ -414,9 +417,10 @@ fn encode_strings_before_types<'a>(
     )
     .expect("the loader's facts fit an image");
     let phase = crate::span!("image.encode_variables");
-    crate::image::variables::add_to(builder, strings, &metadata.variables)
+    crate::image::variables::add_to(builder, strings, &variables)
         .expect("the loader's data objects fit an image");
     drop(phase);
+    free(variables);
     crate::image::calls::add_to(builder, strings, &metadata.calls)
         .expect("the loader's calls fit an image");
     crate::image::type_facts::add_to(builder, strings, &metadata.type_facts)
@@ -1673,10 +1677,12 @@ impl ModuleImage {
 
 /// Collects the addresses debug information and code symbols prove begin
 /// instructions, keeping the strongest evidence for each address.
-fn instruction_starts(metadata: &ModuleMetadata) -> Vec<(ImageAddress, crate::BoundaryEvidence)> {
+fn instruction_starts(
+    metadata: &ModuleMetadata,
+    code_instances: &[CodeInstanceInfo],
+) -> Vec<(ImageAddress, crate::BoundaryEvidence)> {
     let mut starts = BTreeMap::new();
-    let functions = metadata
-        .code_instances
+    let functions = code_instances
         .iter()
         .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
         .flat_map(|instance| instance.ranges.iter())

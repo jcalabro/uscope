@@ -273,6 +273,7 @@ fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsSt
 }
 
 fn main() -> ExitCode {
+    uscope::profile::alloc::return_freed_memory_promptly();
     // The terminal launcher must stay single-threaded, so it runs before the
     // runtime starts its threads.
     if std::env::args_os()

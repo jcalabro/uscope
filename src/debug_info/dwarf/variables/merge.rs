@@ -12,7 +12,8 @@
 //! first unit reached them. A unit that does, or a load that runs out of
 //! its budget or fails, is walked again in order instead.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 
 use foldhash::HashMap;
 
@@ -673,6 +674,35 @@ impl Merge<'_, '_, '_> {
     }
 }
 
+/// How far past the units added a group's walk may begin: what is walked
+/// waits in memory until the units before it are added.
+struct Window {
+    added: Mutex<usize>,
+    progress: Condvar,
+    ahead: usize,
+}
+
+impl Window {
+    /// Waits until `group`, its first unit, is within the window, or the
+    /// walk is abandoned.
+    fn enter(&self, group: usize, abandoned: &AtomicBool) {
+        let added = self.added.lock().expect("loading does not panic");
+        drop(
+            self.progress
+                .wait_while(added, |added| {
+                    group >= *added + self.ahead && !abandoned.load(Ordering::Relaxed)
+                })
+                .expect("loading does not panic"),
+        );
+    }
+
+    /// Records that the units before `next` are added.
+    fn advance(&self, next: usize) {
+        *self.added.lock().expect("loading does not panic") = next;
+        self.progress.notify_all();
+    }
+}
+
 /// Units finished but not yet added, by unit.
 struct Finished {
     units: std::collections::BTreeMap<usize, Option<UnitWalk>>,
@@ -680,7 +710,8 @@ struct Finished {
 
 /// Walks every group of units at once and adds what each unit recorded to
 /// `walked`, `types`, `files`, and `pool` in unit order as soon as the
-/// units before it are added, as walking them in order would have.
+/// units before it are added, as walking them in order would have. Each
+/// worker walks at most `walk_ahead` units past those added.
 /// Returns `false`, having changed nothing, when walking them apart could
 /// differ from walking them in order.
 pub(super) fn walk_units_apart<'data>(
@@ -689,6 +720,7 @@ pub(super) fn walk_units_apart<'data>(
     types: &mut TypeArenaBuilder<'_, 'data>,
     files: &mut Files,
     pool: &Mutex<LocationsBuilder>,
+    walk_ahead: usize,
 ) -> bool {
     let units = &cx.catalog.units;
     // One worker would only add copying each unit's records, and a type
@@ -729,54 +761,44 @@ pub(super) fn walk_units_apart<'data>(
     let finished = Mutex::new(Finished {
         units: std::collections::BTreeMap::new(),
     });
-    let abandoned = std::sync::atomic::AtomicBool::new(false);
-    rayon::in_place_scope_fifo(|scope| {
-        for (group, group_units) in members.iter().enumerate() {
-            if group_units.is_empty() {
-                continue;
-            }
-            let (frozen, groups, merge, finished, abandoned) =
-                (&frozen, &groups, &merge, &finished, &abandoned);
-            scope.spawn_fifo(move |_| {
-                let walks = if abandoned.load(std::sync::atomic::Ordering::Relaxed) {
-                    group_units.iter().map(|unit| (*unit, None)).collect()
-                } else {
-                    walk_group(cx, frozen, (group, groups), group_units)
-                };
-                finished
-                    .lock()
-                    .expect("loading does not panic")
-                    .units
-                    .extend(walks);
-                // Whichever walk finishes adds what is ready, in order. One
-                // that finds another adding leaves its units to it, which
-                // looks again once it is done.
-                while let Ok(mut merge) = merge.try_lock() {
-                    loop {
-                        let next = merge.next;
-                        let Some(unit) = finished
-                            .lock()
-                            .expect("loading does not panic")
-                            .units
-                            .remove(&next)
-                        else {
-                            break;
-                        };
-                        merge.add(unit);
-                        if !merge.kept {
-                            abandoned.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                    let next = merge.next;
-                    drop(merge);
-                    if !finished
+    let abandoned = AtomicBool::new(false);
+    // Each worker claims the next group, in the order of their first
+    // units, which name them, and waits to walk one that begins too far
+    // past the units added: what is walked waits in memory until the units
+    // before it are added. The units the adding waits for are in groups
+    // claimed before, so they are walked meanwhile.
+    let order = members
+        .iter()
+        .enumerate()
+        .filter_map(|(group, units)| (!units.is_empty()).then_some(group))
+        .collect::<Vec<_>>();
+    let claimed = AtomicUsize::new(0);
+    let workers = rayon::current_num_threads();
+    let window = Window {
+        added: Mutex::new(0),
+        progress: Condvar::new(),
+        ahead: walk_ahead.saturating_mul(workers),
+    };
+    rayon::in_place_scope(|scope| {
+        for _ in 0..workers {
+            let (frozen, groups, members, order) = (&frozen, &groups, &members, &order);
+            let (merge, finished, abandoned) = (&merge, &finished, &abandoned);
+            let (claimed, window) = (&claimed, &window);
+            scope.spawn(move |_| {
+                while let Some(&group) = order.get(claimed.fetch_add(1, Ordering::Relaxed)) {
+                    window.enter(group, abandoned);
+                    let group_units = &members[group];
+                    let walks = if abandoned.load(Ordering::Relaxed) {
+                        group_units.iter().map(|unit| (*unit, None)).collect()
+                    } else {
+                        walk_group(cx, frozen, (group, groups), group_units)
+                    };
+                    finished
                         .lock()
                         .expect("loading does not panic")
                         .units
-                        .contains_key(&next)
-                    {
-                        break;
-                    }
+                        .extend(walks);
+                    add_ready(merge, finished, abandoned, window);
                 }
             });
         }
@@ -788,6 +810,44 @@ pub(super) fn walk_units_apart<'data>(
     }
     checkpoint.restore(merge.walked, merge.types, merge.files, merge.pool);
     false
+}
+
+/// Adds the finished units that are next, in order, unless another walk is
+/// adding them: that one looks again once it is done.
+fn add_ready(
+    merge: &Mutex<Merge<'_, '_, '_>>,
+    finished: &Mutex<Finished>,
+    abandoned: &AtomicBool,
+    window: &Window,
+) {
+    while let Ok(mut merge) = merge.try_lock() {
+        loop {
+            let next = merge.next;
+            let Some(unit) = finished
+                .lock()
+                .expect("loading does not panic")
+                .units
+                .remove(&next)
+            else {
+                break;
+            };
+            merge.add(unit);
+            if !merge.kept {
+                abandoned.store(true, Ordering::Relaxed);
+            }
+        }
+        let next = merge.next;
+        window.advance(next);
+        drop(merge);
+        if !finished
+            .lock()
+            .expect("loading does not panic")
+            .units
+            .contains_key(&next)
+        {
+            break;
+        }
+    }
 }
 
 /// Walks the units of one group in order on the frozen arena, apart from
@@ -810,10 +870,15 @@ fn walk_group<'data>(
     let mut types = frozen.split(home, &pools[0], &die_buffers);
     let mut walks = Vec::with_capacity(units.len());
     let mut cuts = Vec::with_capacity(units.len());
+    // The group's units share the names they hold.
+    let mut names = super::Names::default();
     for (&unit_index, pool) in units.iter().zip(&pools) {
         types.pool = pool;
         let mark = types.budget.spent();
-        let mut walked = Walked::default();
+        let mut walked = Walked {
+            names: std::mem::take(&mut names),
+            ..Walked::default()
+        };
         let mut files = Files::default();
         let result = walk_unit(
             cx,
@@ -823,6 +888,7 @@ fn walk_group<'data>(
             &mut files,
             &mut die::DeclaredFiles::default(),
         );
+        names = std::mem::take(&mut walked.names);
         let left = result.is_err() || types.foreign || types.budget.check().is_err();
         cuts.push(Cut {
             end: types.entries.len(),

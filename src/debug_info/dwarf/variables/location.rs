@@ -106,7 +106,7 @@ pub(super) fn copy_data_object_value(
     }
     if let Some(value) = entry.attr_value(gimli::DW_AT_const_value) {
         return match copy_constant(value) {
-            Ok(value) => Metadata::Value(ValueDescription::Constant(value)),
+            Ok(value) => Metadata::Value(ValueDescription::Constant(Box::new(value))),
             Err(error) => Metadata::Malformed(error),
         };
     }

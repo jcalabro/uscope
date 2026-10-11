@@ -49,7 +49,8 @@ pub enum ConstantValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueDescription {
     Location(LocationListId),
-    Constant(ConstantValue),
+    /// Boxed, as few data objects are constants and a value is wide.
+    Constant(Box<ConstantValue>),
 }
 
 /// A type, or why it is unknown.
@@ -76,8 +77,9 @@ pub struct DataObject {
     pub declaration: Option<SourceLocation>,
     /// The code of its scope.
     pub ranges: Arc<[AddressRange<ImageAddress>]>,
-    /// For a Go local, its declaration, past whose line it is visible.
-    pub go_declaration: Option<GoDeclaration>,
+    /// For a Go local, its declaration, past whose line it is visible;
+    /// boxed, as most data objects are not Go's.
+    pub go_declaration: Option<Box<GoDeclaration>>,
     /// The inline instance owning this variable, or `None` for the physical
     /// frame. Lookup only sees variables of the selected logical frame.
     pub instance: Option<CodeInstanceId>,
@@ -1181,9 +1183,9 @@ impl<'a> Object<'a> {
 
     pub fn value(self) -> Metadata<ValueDescription> {
         match self.record.value_kind {
-            value_kinds::CONSTANT => Metadata::Value(ValueDescription::Constant(
+            value_kinds::CONSTANT => Metadata::Value(ValueDescription::Constant(Box::new(
                 self.view.constant(self.record.value),
-            )),
+            ))),
             kind => match self.view.location(kind, self.record.value) {
                 Metadata::Value(list) => Metadata::Value(ValueDescription::Location(list)),
                 Metadata::Absent(absence) => Metadata::Absent(absence),

@@ -2460,7 +2460,8 @@ fn variables_read_back_as_they_were_encoded() {
         assert_eq!(object.kind(), expected.kind);
         assert_eq!(object.declaration(), expected.declaration);
         assert!(object.ranges().eq(expected.ranges.iter().copied()));
-        assert_eq!(object.go_declaration(), expected.go_declaration);
+        let go_declaration = object.go_declaration();
+        assert_eq!(go_declaration.as_ref(), expected.go_declaration.as_deref());
         assert_eq!(object.instance(), expected.instance);
         assert_eq!(object.lexical_depth(), expected.lexical_depth);
         assert_eq!(object.type_info(), expected.type_info);
@@ -2478,8 +2479,8 @@ fn variables_read_back_as_they_were_encoded() {
     assert_eq!(view.object(ObjectId(4)).location(), None);
     assert_eq!(
         view.object(ObjectId(4)).value(),
-        Metadata::Value(ValueDescription::Constant(ConstantValue::Unsigned(
-            u128::MAX - 1
+        Metadata::Value(ValueDescription::Constant(Box::new(
+            ConstantValue::Unsigned(u128::MAX - 1)
         )))
     );
     for (index, expected) in input.functions.iter().enumerate() {

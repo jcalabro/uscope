@@ -3017,19 +3017,22 @@ pub struct MemoryRead {
 
 /// A one-based source line number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LineNumber(u64);
+pub struct LineNumber(std::num::NonZeroU64);
 
 impl LineNumber {
     /// Creates a line number, returning `None` for zero.
     #[must_use]
     pub const fn new(value: u64) -> Option<Self> {
-        if value == 0 { None } else { Some(Self(value)) }
+        match std::num::NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 
     /// Returns the numeric line number.
     #[must_use]
     pub const fn get(self) -> u64 {
-        self.0
+        self.0.get()
     }
 }
 
@@ -3041,19 +3044,22 @@ impl fmt::Display for LineNumber {
 
 /// A one-based source column number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ColumnNumber(u64);
+pub struct ColumnNumber(std::num::NonZeroU64);
 
 impl ColumnNumber {
     /// Creates a column number, returning `None` for zero.
     #[must_use]
     pub const fn new(value: u64) -> Option<Self> {
-        if value == 0 { None } else { Some(Self(value)) }
+        match std::num::NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 
     /// Returns the numeric column number.
     #[must_use]
     pub const fn get(self) -> u64 {
-        self.0
+        self.0.get()
     }
 }
 
