@@ -632,6 +632,19 @@ impl GoTable {
         Ok(self.value_at(function, offset, address)? != Some(UNSAFE))
     }
 
+    /// Whether `address` begins a function a prologue calls to grow its
+    /// goroutine's stack: `runtime.morestack`, or one of the entries that
+    /// go on into it.
+    pub fn grows_stacks(&self, address: u64) -> bool {
+        self.function_containing(address).is_some_and(|function| {
+            function.entry == address
+                && (function.facts.special == Some(SpecialFunction::Morestack)
+                    || self
+                        .name(function)
+                        .is_ok_and(|name| name.starts_with("runtime.morestack")))
+        })
+    }
+
     /// Whether the runtime may resume a goroutine it preempted in the
     /// function at the function's entry (`UnsafePointRestartAtEntry`), so
     /// that its prologue runs again.

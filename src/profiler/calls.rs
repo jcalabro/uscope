@@ -17,6 +17,7 @@ use iced_x86::{ConditionCode, Decoder, DecoderOptions, FlowControl, Instruction,
 use object::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 
 use super::RecordError;
+use crate::debug_info::gopclntab::GoTable;
 
 /// The instruction a breakpoint samples to count a function's calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,12 +97,17 @@ pub fn plan(program: &Path, symbol: &str, bias: Option<u64>) -> Result<Calls, Re
             });
         }
     };
-    let Some(check) = stack_check(&file, entry) else {
-        return Ok(Calls {
-            address: entry,
-            bias,
-            repeats_when: None,
-        });
+    let plain = Calls {
+        address: entry,
+        bias,
+        repeats_when: None,
+    };
+    // Only Go grows stacks in its prologues.
+    let Some(table) = crate::debug_info::gopclntab::load(&file).ok().flatten() else {
+        return Ok(plain);
+    };
+    let Some(check) = stack_check(&file, &table, entry) else {
+        return Ok(plain);
     };
     let uncountable = |why: &str| RecordError::Uncountable {
         name: symbol.to_owned(),
@@ -116,10 +122,6 @@ pub fn plan(program: &Path, symbol: &str, bias: Option<u64>) -> Result<Calls, Re
             ));
         }
     };
-    let table = crate::debug_info::gopclntab::load(&file)
-        .ok()
-        .flatten()
-        .ok_or_else(|| uncountable("its stack check is not in a Go function table"))?;
     let function = table
         .function_containing(entry)
         .ok_or_else(|| uncountable("its stack check is not in a Go function table"))?;
@@ -139,8 +141,8 @@ pub fn plan(program: &Path, symbol: &str, bias: Option<u64>) -> Result<Calls, Re
 }
 
 /// The last conditional branch of the prologue at `entry` that leads to a
-/// block calling `runtime.morestack` and jumping back to `entry`.
-fn stack_check(file: &object::File<'_>, entry: u64) -> Option<Instruction> {
+/// block calling the runtime to grow the stack and jumping back to `entry`.
+fn stack_check(file: &object::File<'_>, table: &GoTable, entry: u64) -> Option<Instruction> {
     let (start, data) = file.sections().find_map(|section| {
         let start = section.address();
         let offset = usize::try_from(entry.checked_sub(start)?).ok()?;
@@ -157,12 +159,7 @@ fn stack_check(file: &object::File<'_>, entry: u64) -> Option<Instruction> {
         let block: Vec<Instruction> = decode(at).take(8).collect();
         let calls_morestack = block.iter().any(|instruction| {
             instruction.mnemonic() == Mnemonic::Call
-                && file.symbols().any(|symbol| {
-                    symbol.address() == instruction.near_branch_target()
-                        && symbol
-                            .name()
-                            .is_ok_and(|name| name.starts_with("runtime.morestack"))
-                })
+                && table.grows_stacks(instruction.near_branch_target())
         });
         let returns_to_entry = block.iter().any(|instruction| {
             instruction.flow_control() == FlowControl::UnconditionalBranch
