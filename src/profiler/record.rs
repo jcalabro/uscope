@@ -81,6 +81,9 @@ pub struct Processor {
     repeats: Option<(u64, Branch)>,
     chain: Vec<u64>,
     frames: Vec<u32>,
+    /// Each thread off its CPU since a switch: its row, when it left, and
+    /// whether it was preempted.
+    switched_out: BTreeMap<u32, (u32, u64, bool)>,
 }
 
 impl Processor {
@@ -104,6 +107,7 @@ impl Processor {
             repeats: None,
             chain: Vec::new(),
             frames: Vec::new(),
+            switched_out: BTreeMap::new(),
         }
     }
 
@@ -273,7 +277,26 @@ impl Processor {
                 }
                 self.thread(pid, tid, at);
             }
+            decode::Record::Switch {
+                pid,
+                tid,
+                out,
+                preempted,
+                ..
+            } => {
+                let thread = self.thread(pid, tid, at);
+                if out {
+                    self.switched_out.insert(tid, (thread, time, preempted));
+                } else if let Some((thread, left, preempted)) = self.switched_out.remove(&tid) {
+                    let duration = time.saturating_sub(left);
+                    self.builder
+                        .off_cpu(thread, left.cast_signed(), duration, preempted);
+                }
+                // A thread that comes back unseen leaving left before the
+                // recording could see it, so when is unknown.
+            }
             decode::Record::Exit { pid, tid, .. } => {
+                self.switched_out.remove(&tid);
                 self.builder.thread_exit(tid, at);
                 let ended = self.processes.get_mut(&pid).is_some_and(|process| {
                     process.threads.remove(&tid);
@@ -481,7 +504,9 @@ impl Processor {
     /// what a live view shows. Records held back stay held back.
     pub fn snapshot(&mut self) -> Capture {
         self.symbolize_new();
-        self.builder.clone().finish()
+        let mut builder = self.builder.clone();
+        self.still_off(&mut builder);
+        builder.finish()
     }
 
     /// The finished capture, every frame symbolized.
@@ -489,7 +514,18 @@ impl Processor {
         // Everything held back is processed now.
         self.ingest(&[], None);
         self.symbolize_new();
-        self.builder.finish()
+        let mut builder = std::mem::take(&mut self.builder);
+        self.still_off(&mut builder);
+        builder.finish()
+    }
+
+    /// Ends each interval of a thread still off its CPU where the
+    /// recording has reached.
+    fn still_off(&self, builder: &mut CaptureBuilder) {
+        for &(thread, left, preempted) in self.switched_out.values() {
+            let duration = self.latest.saturating_sub(left);
+            builder.off_cpu(thread, left.cast_signed(), duration, preempted);
+        }
     }
 
     /// Gives each frame not yet symbolized its lines, and the capture its

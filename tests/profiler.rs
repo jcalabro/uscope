@@ -56,12 +56,14 @@ fn command(variant: &str, iterations: u64) -> Command {
     command
 }
 
-/// Options that sample each call of the function `symbol` names.
+/// Options that sample each call of the function `symbol` names. A count
+/// is exact only while no sample is lost, so the rings carry nothing else.
 fn calls_of(symbol: &str) -> RecordOptions {
     RecordOptions {
         source: SampleSource::Function {
             symbol: symbol.into(),
         },
+        off_cpu: false,
         ..RecordOptions::default()
     }
 }
@@ -385,12 +387,25 @@ fn go_command(variant: &str, rounds: u32) -> Command {
 #[test]
 fn a_goroutines_calls_name_its_exact_stack_in_every_build() {
     for variant in ["o0", "o2"] {
-        let recording = record(go_command(variant, 5), &calls_of("main.work")).expect("record");
+        // Go keeps the frame-pointer chain, so a small copy unwinds it, and
+        // a burst of samples fits however small the rings must be.
+        let options = RecordOptions {
+            stack: StackCopy::Bytes(SMALL_STACK_COPY),
+            ..calls_of("main.work")
+        };
+        let recording = record(go_command(variant, 5), &options).expect("record");
         assert!(recording.status.success());
         let profile = &recording.profile;
         let stacks = profile.stacks();
         // Four workers call work five times each.
-        assert_eq!(stacks.len(), 20, "{variant}");
+        assert_eq!(
+            stacks.len(),
+            20,
+            "{variant}: lost {}, counted {}, repeats {}",
+            profile.lost_samples(),
+            profile.counted(),
+            profile.repeats()
+        );
         // Every execution of the instruction is a sample or a repeat.
         assert_eq!(profile.counted(), 20 + profile.repeats(), "{variant}");
         for stack in &stacks {
@@ -461,6 +476,70 @@ fn a_stack_on_the_system_stack_goes_on_into_the_goroutine_that_switched() {
         }
         // The workers collect at least once.
         assert!(ours > 0, "{variant}");
+    }
+}
+
+/// Each interval a thread spends off its CPU runs from leaving it to
+/// running again: a sleep blocks, sharing a CPU with another spinner
+/// preempts, and no sample of the thread falls in between.
+#[test]
+fn a_threads_time_off_its_cpu_is_each_sleep_and_each_preemption() {
+    let mut command = Command::new(Scenario::fixture("profile-offcpu"));
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let recording = record(command, &RecordOptions::default()).expect("record");
+    assert!(recording.status.success(), "{}", recording.status);
+    let profile = &recording.profile;
+    let named = |name: &str| -> Vec<u32> {
+        profile
+            .threads()
+            .iter()
+            .filter(|thread| thread.name.as_deref() == Some(name))
+            .map(|thread| thread.tid)
+            .collect()
+    };
+    let (sleeper, spinners) = (named("sleeper"), named("spinner"));
+    assert_eq!(
+        (sleeper.len(), spinners.len()),
+        (1, 2),
+        "{:?}",
+        profile.threads()
+    );
+    let intervals = profile.off_cpu();
+    // A nap's timer starts just before the thread leaves its CPU.
+    let naps = intervals
+        .iter()
+        .filter(|interval| {
+            interval.tid == sleeper[0] && !interval.preempted && interval.duration >= 19_000_000
+        })
+        .count();
+    assert!(naps >= 5, "{naps} naps of the sleeper's 5: {intervals:?}");
+    for spinner in spinners {
+        assert!(
+            intervals
+                .iter()
+                .any(|interval| interval.tid == spinner && interval.preempted),
+            "spinner {spinner} was never preempted: {intervals:?}"
+        );
+    }
+    let stacks = profile.stacks();
+    for interval in &intervals {
+        let end = interval.time + i64::try_from(interval.duration).expect("short");
+        let inside = stacks.iter().find(|stack| {
+            stack.tid == interval.tid && stack.time > interval.time && stack.time < end
+        });
+        assert!(
+            inside.is_none(),
+            "{inside:?} was sampled during {interval:?}"
+        );
+    }
+    for pair in intervals.windows(2) {
+        if pair[0].tid == pair[1].tid {
+            let end = pair[0].time + i64::try_from(pair[0].duration).expect("short");
+            assert!(end <= pair[1].time, "{pair:?} overlap");
+        }
     }
 }
 

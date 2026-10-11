@@ -33,7 +33,7 @@ pub struct CaptureFormat;
 
 /// What a capture's tables mean: bump it with any change to what is
 /// stored.
-pub const CAPTURE_REVISION: u32 = 3;
+pub const CAPTURE_REVISION: u32 = 4;
 
 impl Format for CaptureFormat {
     type Kind = CaptureTable;
@@ -82,7 +82,7 @@ pub struct Capture {
     pub lines: Vec<Line>,
     pub functions: Vec<Function>,
     pub accounting: Vec<Account>,
-    pub off_cpu: Vec<Sample>,
+    pub off_cpu: Vec<OffCpu>,
     pub off_cpu_ranges: Vec<ThreadRange>,
     pub sites: Vec<Site>,
     pub zones: Vec<Zone>,
@@ -128,7 +128,7 @@ impl Capture {
     }
 
     /// One thread's off-CPU intervals, in time order.
-    pub fn thread_off_cpu(&self, range: &ThreadRange) -> &[Sample] {
+    pub fn thread_off_cpu(&self, range: &ThreadRange) -> &[OffCpu] {
         rows(&self.off_cpu, range.start.get(), range.count.get())
     }
 
@@ -313,39 +313,52 @@ impl Capture {
                 return Err("a stack names no frame".into());
             }
         }
-        let grouped = |ranges: &[ThreadRange], rows: &[Sample], what: &str| {
-            let mut next = 0;
-            for range in ranges {
-                index(range.thread.get(), self.threads.len(), what)?;
-                if range.thread.get() == NONE || range.start.get() != next {
-                    return Err(format!("{what} ranges do not tile their table"));
+        // Rows grouped by thread, which `time` gives the time of.
+        let grouped =
+            |ranges: &[ThreadRange], rows: usize, time: &dyn Fn(usize) -> i64, what: &str| {
+                let mut next = 0;
+                for range in ranges {
+                    index(range.thread.get(), self.threads.len(), what)?;
+                    if range.thread.get() == NONE || range.start.get() != next {
+                        return Err(format!("{what} ranges do not tile their table"));
+                    }
+                    next = range
+                        .start
+                        .get()
+                        .checked_add(range.count.get())
+                        .ok_or_else(|| format!("{what} range overflows"))?;
+                    if next as usize > rows {
+                        return Err(format!("{what} range is out of bounds"));
+                    }
+                    let group = range.start.get() as usize..next as usize;
+                    if group.clone().skip(1).any(|row| time(row - 1) > time(row)) {
+                        return Err(format!("{what} are out of time order"));
+                    }
                 }
-                next = range
-                    .start
-                    .get()
-                    .checked_add(range.count.get())
-                    .ok_or_else(|| format!("{what} range overflows"))?;
-                let group = rows
-                    .get(range.start.get() as usize..next as usize)
-                    .ok_or_else(|| format!("{what} range is out of bounds"))?;
-                if group
-                    .windows(2)
-                    .any(|pair| pair[0].time.get() > pair[1].time.get())
-                {
-                    return Err(format!("{what} are out of time order"));
+                if next as usize != rows {
+                    return Err(format!("{what} ranges do not cover their table"));
                 }
-            }
-            if next as usize != rows.len() {
-                return Err(format!("{what} ranges do not cover their table"));
-            }
-            for sample in rows {
-                index(sample.stack.get(), self.stacks.len(), what)?;
-                index(sample.task.get(), self.tasks.len(), what)?;
-            }
-            Ok(())
-        };
-        grouped(&self.sample_ranges, &self.samples, "samples")?;
-        grouped(&self.off_cpu_ranges, &self.off_cpu, "off-CPU intervals")?;
+                Ok(())
+            };
+        grouped(
+            &self.sample_ranges,
+            self.samples.len(),
+            &|row| self.samples[row].time.get(),
+            "samples",
+        )?;
+        for sample in &self.samples {
+            index(sample.stack.get(), self.stacks.len(), "samples")?;
+            index(sample.task.get(), self.tasks.len(), "samples")?;
+        }
+        grouped(
+            &self.off_cpu_ranges,
+            self.off_cpu.len(),
+            &|row| self.off_cpu[row].time.get(),
+            "off-CPU intervals",
+        )?;
+        if self.off_cpu.iter().any(|interval| interval.preempted > 1) {
+            return Err("an off-CPU interval has an unknown cause".into());
+        }
         if !self.frame_symbols.is_empty() && self.frame_symbols.len() != self.frames.len() {
             return Err("symbols do not describe every frame".into());
         }

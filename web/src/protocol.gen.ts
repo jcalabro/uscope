@@ -916,7 +916,11 @@ truncations: Array<ProfileCount>,
  */
 settings: Array<ProfileSetting>, };
 
-export type ProfileThread = { row: number, pid: number, tid: number, name: string | null, samples: number, weight: number, };
+export type ProfileThread = { row: number, pid: number, tid: number, name: string | null, samples: number, weight: number, 
+/**
+ * Nanoseconds off its CPU, blocked and preempted.
+ */
+blocked: number, preempted: number, };
 
 export type ProfileCount = { what: string, count: number, };
 
@@ -962,7 +966,7 @@ export type ProfileTimeline = {
  */
 range: [number, number], lanes: Array<ProfileLane>, };
 
-export type ProfileLane = { thread: number, weights: Array<number>, };
+export type ProfileLane = { thread: number, weights: Array<number>, blocked: Array<number>, preempted: Array<number>, };
 
 export type RecordProfile = { program: string, arguments: Array<string>, 
 /**

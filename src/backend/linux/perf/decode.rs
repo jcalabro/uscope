@@ -37,7 +37,10 @@ const RECORD_LOST: u32 = 2;
 const RECORD_THROTTLE: u32 = 5;
 const RECORD_SAMPLE: u32 = 9;
 const RECORD_LOST_SAMPLES: u32 = 13;
+const RECORD_SWITCH: u32 = 14;
 const MISC_COMM_EXEC: u16 = 1 << 13;
+const MISC_SWITCH_OUT: u16 = 1 << 13;
+const MISC_SWITCH_OUT_PREEMPT: u16 = 1 << 14;
 const MISC_MMAP_BUILD_ID: u16 = 1 << 14;
 /// Callchain entries at or above this mark a context, not an address.
 const CONTEXT_MAX: u64 = (-4095_i64).cast_unsigned();
@@ -125,6 +128,15 @@ pub enum Record<'a> {
     Throttle {
         time: u64,
     },
+    /// A thread left its CPU, or came back to one. One that left while it
+    /// could still run was `preempted`; one that did not blocked.
+    Switch {
+        pid: u32,
+        tid: u32,
+        out: bool,
+        preempted: bool,
+        time: u64,
+    },
     /// A record the recorder does not use.
     Other {
         time: Option<u64>,
@@ -141,6 +153,7 @@ impl Record<'_> {
             | Self::Fork { time, .. }
             | Self::Exit { time, .. }
             | Self::Lost { time, .. }
+            | Self::Switch { time, .. }
             | Self::Throttle { time } => Some(*time),
             Self::Other { time } => *time,
         }
@@ -289,6 +302,14 @@ fn decode(kind: u32, misc: u16, body: &[u8]) -> Result<Record<'_>, Malformed> {
             time,
         },
         RECORD_THROTTLE => Record::Throttle { time },
+        // The thread is the sample_id's, which a switch record is all of.
+        RECORD_SWITCH => Record::Switch {
+            pid: u32::from_le_bytes(id[..4].try_into().expect("four bytes")),
+            tid: u32::from_le_bytes(id[4..8].try_into().expect("four bytes")),
+            out: misc & MISC_SWITCH_OUT != 0,
+            preempted: misc & MISC_SWITCH_OUT_PREEMPT != 0,
+            time,
+        },
         _ => Record::Other { time: Some(time) },
     })
 }

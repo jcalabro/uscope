@@ -2063,6 +2063,9 @@ build_fixture clang "$c_fixtures_dir/profile-signals.c" "$output_dir/profile-sig
     -O2 -g3 -fomit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/profile-vdso.c" "$output_dir/profile-vdso" \
     -O2 -g3 -fno-omit-frame-pointer -fPIE -pie
+# Threads that block and threads preempted, for off-CPU intervals.
+build_fixture gcc "$c_fixtures_dir/profile-offcpu.c" "$output_dir/profile-offcpu" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie -pthread
 # Static programs, whose code auto mode can judge before they run.
 build_fixture musl-gcc "$c_fixtures_dir/profile-stacks.c" "$output_dir/profile-stacks-musl" \
     -O2 -g3 -fno-omit-frame-pointer -static -pthread

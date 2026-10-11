@@ -360,11 +360,30 @@ impl Profiles {
                     .unwrap_or_else(|| (start, end.saturating_add(1)));
                 resolved.range = Some(range);
                 let buckets = timeline.buckets.clamp(1, MOST_BUCKETS) as usize;
-                let lanes = keys
+                let mut lanes: std::collections::BTreeMap<u32, ProfileLane> = keys
                     .density(&resolved, buckets)
                     .into_iter()
-                    .map(|(thread, weights)| ProfileLane { thread, weights })
+                    .map(|(thread, weights)| {
+                        let lane = ProfileLane {
+                            thread,
+                            weights,
+                            blocked: Vec::new(),
+                            preempted: Vec::new(),
+                        };
+                        (thread, lane)
+                    })
                     .collect();
+                for off in entry.profile.off_cpu_lanes(&resolved, buckets) {
+                    let lane = lanes.entry(off.thread).or_insert_with(|| ProfileLane {
+                        thread: off.thread,
+                        weights: Vec::new(),
+                        blocked: Vec::new(),
+                        preempted: Vec::new(),
+                    });
+                    lane.blocked = off.blocked;
+                    lane.preempted = off.preempted;
+                }
+                let lanes = lanes.into_values().collect();
                 Ok(json(&ProfileTimeline {
                     range: [range.0 - start, range.1 - start],
                     lanes,
@@ -424,6 +443,8 @@ fn summary(entry: &Entry) -> ProfileSummary {
                 name: thread.name,
                 samples: thread.samples,
                 weight: thread.weight,
+                blocked: thread.blocked,
+                preempted: thread.preempted,
             })
             .collect(),
         lost: profile.lost_samples(),

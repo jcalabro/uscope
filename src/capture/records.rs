@@ -37,7 +37,8 @@ pub enum CaptureTable {
     Functions = 13,
     /// Counts of what was lost, throttled, or truncated.
     Accounting = 14,
-    /// Intervals a thread spent off its CPU, thread by thread.
+    /// Intervals a thread spent off its CPU, thread by thread, each
+    /// thread's in time order.
     OffCpu = 15,
     /// Where each thread's off-CPU intervals are.
     OffCpuRanges = 16,
@@ -285,12 +286,25 @@ pub struct Stack {
 pub struct Sample {
     /// Nanoseconds on the capture's clock.
     pub time: I64,
-    /// Nanoseconds of CPU time, or of time off the CPU, the sample stands
-    /// for.
+    /// Nanoseconds of CPU time, or executions, the sample stands for.
     pub weight: U64,
     pub stack: U32,
     /// The task it ran, or [`NONE`].
     pub task: U32,
+}
+
+/// A span of time a thread spent off its CPU.
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
+pub struct OffCpu {
+    /// When it left its CPU, in nanoseconds on the capture's clock.
+    pub time: I64,
+    /// Nanoseconds until it ran again, or until the recording ended.
+    pub duration: U64,
+    /// One when it left while it could still run, zero when it blocked.
+    pub preempted: u8,
 }
 
 /// Where one thread's rows are in a table grouped by thread.
@@ -520,7 +534,6 @@ macro_rules! records {
             match table {
                 CaptureTable::Strings => 1,
                 CaptureTable::SampleRanges => size_of::<ThreadRange>(),
-                CaptureTable::OffCpu => size_of::<Sample>(),
                 CaptureTable::OffCpuRanges => size_of::<ThreadRange>(),
                 $(CaptureTable::$table => size_of::<$record>(),)*
             }
@@ -549,6 +562,7 @@ records! {
     Frame => Frames,
     Stack => Stacks,
     Sample => Samples,
+    OffCpu => OffCpu,
     Range => FrameSymbols,
     Line => Lines,
     Function => Functions,
@@ -565,4 +579,5 @@ records! {
 const _: () = assert!(size_of::<Frame>() == 16);
 const _: () = assert!(size_of::<Stack>() == 8);
 const _: () = assert!(size_of::<Sample>() == 24);
+const _: () = assert!(size_of::<OffCpu>() == 17);
 const _: () = assert!(size_of::<Zone>() == 24);

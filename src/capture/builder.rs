@@ -6,8 +6,9 @@ use foldhash::HashMap;
 
 use super::Capture;
 use super::records::{
-    Account, Frame, FrameKind, Function, Line, Mapping, Marker, Module, NONE, Plot, Process, Range,
-    Sample, Setting, Site, Stack, Task, TaskWait, Thread, ThreadRange, Truncation, Zone, ZoneRange,
+    Account, Frame, FrameKind, Function, Line, Mapping, Marker, Module, NONE, OffCpu, Plot,
+    Process, Range, Sample, Setting, Site, Stack, Task, TaskWait, Thread, ThreadRange, Truncation,
+    Zone, ZoneRange,
 };
 use crate::image::{StrId, StringsBuilder};
 
@@ -41,7 +42,7 @@ pub struct CaptureBuilder {
     stacks: Vec<Stack>,
     stack_index: HashMap<(u32, u32), u32>,
     samples: Vec<Vec<Sample>>,
-    off_cpu: Vec<Vec<Sample>>,
+    off_cpu: Vec<Vec<OffCpu>>,
     accounts: BTreeMap<u32, u64>,
     symbols: HashMap<u32, Range>,
     lines: Vec<Line>,
@@ -252,6 +253,16 @@ impl CaptureBuilder {
             weight: weight.into(),
             stack: stack.into(),
             task: task.into(),
+        });
+    }
+
+    /// Records that a thread spent `duration` nanoseconds off its CPU from
+    /// `time`, preempted or blocked.
+    pub fn off_cpu(&mut self, thread: u32, time: i64, duration: u64, preempted: bool) {
+        self.off_cpu[thread as usize].push(OffCpu {
+            time: time.into(),
+            duration: duration.into(),
+            preempted: preempted.into(),
         });
     }
 
@@ -555,7 +566,7 @@ impl CaptureBuilder {
         }
         for range in &capture.off_cpu_ranges {
             let thread = map.threads[range.thread.get() as usize] as usize;
-            self.off_cpu[thread].extend(capture.thread_off_cpu(range).iter().map(sample));
+            self.off_cpu[thread].extend_from_slice(capture.thread_off_cpu(range));
         }
         for account in &capture.accounting {
             self.count(account.kind.get(), account.value.get());
@@ -598,14 +609,14 @@ impl CaptureBuilder {
     /// The finished capture: each thread's rows in time order, zones by
     /// thread and depth.
     pub fn finish(self) -> Capture {
-        fn grouped(by_thread: Vec<Vec<Sample>>) -> (Vec<Sample>, Vec<ThreadRange>) {
+        fn grouped<T: Timed>(by_thread: Vec<Vec<T>>) -> (Vec<T>, Vec<ThreadRange>) {
             let mut rows = Vec::with_capacity(by_thread.iter().map(Vec::len).sum());
             let mut ranges = Vec::new();
             for (thread, mut samples) in by_thread.into_iter().enumerate() {
                 if samples.is_empty() {
                     continue;
                 }
-                samples.sort_by_key(|sample| sample.time.get());
+                samples.sort_by_key(T::time);
                 ranges.push(ThreadRange {
                     thread: index(thread).into(),
                     start: index(rows.len()).into(),
@@ -720,6 +731,23 @@ impl Remap {
 
     fn module(&self, id: u32) -> u32 {
         Self::get(&self.modules, id)
+    }
+}
+
+/// A row of a table grouped by thread and ordered by time.
+trait Timed {
+    fn time(&self) -> i64;
+}
+
+impl Timed for Sample {
+    fn time(&self) -> i64 {
+        self.time.get()
+    }
+}
+
+impl Timed for OffCpu {
+    fn time(&self) -> i64 {
+        self.time.get()
     }
 }
 

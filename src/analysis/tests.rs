@@ -285,6 +285,46 @@ fn density_buckets_kept_samples_by_thread_and_time() {
     assert_eq!(density(&capture, &keys, &without_b, 2), [(0, vec![1, 2])]);
 }
 
+#[test]
+fn off_cpu_time_falls_in_each_slice_it_overlaps() {
+    let mut builder = CaptureBuilder::new();
+    let (a, b) = (builder.thread(1, 1, 0), builder.thread(1, 2, 0));
+    builder.off_cpu(a, 5, 20, false);
+    builder.off_cpu(a, 30, 4, true);
+    builder.off_cpu(a, 45, 10, false);
+    builder.off_cpu(b, -5, 100, false);
+    let capture = builder.finish();
+    let query = Query {
+        range: Some((0, 40)),
+        ..Query::default()
+    };
+    // Slices of ten from 0; b was off from before the range to after it.
+    assert_eq!(
+        off_cpu(&capture, &query, 4),
+        [
+            OffCpuLane {
+                thread: a,
+                blocked: vec![5, 10, 5, 0],
+                preempted: vec![0, 0, 0, 4],
+            },
+            OffCpuLane {
+                thread: b,
+                blocked: vec![10; 4],
+                preempted: vec![0; 4],
+            },
+        ]
+    );
+    // Slices of an uneven range share it out without losing any.
+    let uneven = Query {
+        range: Some((0, 10)),
+        threads: Some(vec![b]),
+        ..Query::default()
+    };
+    let lanes = off_cpu(&capture, &uneven, 3);
+    assert_eq!(lanes.len(), 1);
+    assert_eq!(lanes[0].blocked.iter().sum::<u64>(), 10, "{lanes:?}");
+}
+
 /// The analysis is pure: it reads captures and nothing else, so a query
 /// answers the same wherever it runs. Tests are exempt.
 #[test]

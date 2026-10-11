@@ -60,6 +60,7 @@ pub mod flag {
     pub const MMAP2: u64 = 1 << 23;
     pub const COMM_EXEC: u64 = 1 << 24;
     pub const USE_CLOCKID: u64 = 1 << 25;
+    pub const CONTEXT_SWITCH: u64 = 1 << 26;
 }
 
 /// `perf_event_attr.sample_type` bits.

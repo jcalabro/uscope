@@ -33,6 +33,9 @@ pub struct EventOptions {
     pub stack_bytes: u32,
     /// Data pages of each ring, a power of two.
     pub ring_pages: usize,
+    /// Whether the rings also say each time a thread leaves its CPU and
+    /// comes back.
+    pub switches: bool,
 }
 
 /// Why events could not be opened.
@@ -257,6 +260,9 @@ fn attr(options: &EventOptions, start: u64) -> sys::Attr {
         sample_max_stack: 127,
         ..sys::Attr::default()
     };
+    if options.switches {
+        attr.flags |= flag::CONTEXT_SWITCH;
+    }
     match options.source {
         Source::Clock { period } => {
             attr.kind = sys::TYPE_SOFTWARE;

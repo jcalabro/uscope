@@ -88,6 +88,28 @@ test("a profile is explored, and its address opens the same view", async ({
   await expect(page.getByRole("button", { name: /^Remove .* – / })).toBeVisible();
 });
 
+test("each thread's lane says how long it was off its CPU", async ({ page, uscope }, info) => {
+  const file = info.outputPath("off-cpu.usprof");
+  execFileSync(
+    path.join(root, "target", "debug", "uscope"),
+    ["record", "-o", file, "--", fixture("profile-offcpu")],
+    { stdio: "ignore" },
+  );
+  const served = await uscope.start([file]);
+  await join(page, served.link);
+  const lanes = page.getByTestId("timeline");
+  // The sleeper naps five times for 20 ms; the spinners share one CPU.
+  await expect(lanes.getByRole("button", { name: /^sleeper/ })).toHaveAttribute(
+    "title",
+    /off its CPU (\d{3} ms|[\d.]+ s) blocked/,
+  );
+  const spinners = lanes.getByRole("button", { name: /^spinner/ });
+  await expect(spinners).toHaveCount(2);
+  for (const spinner of await spinners.all()) {
+    await expect(spinner).toHaveAttribute("title", /, (?!0 ns)[\d.]+ \S+ preempted$/);
+  }
+});
+
 test("a program recorded from the page grows live, stops, and saves", async ({ page, uscope }) => {
   await join(page, uscope.link);
   await page.goto(new URL("/pick?tab=profile", uscope.origin).href);

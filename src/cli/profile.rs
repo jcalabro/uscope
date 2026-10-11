@@ -22,6 +22,12 @@ pub enum PresetArg {
     Max,
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
+}
+
 #[derive(Debug, clap::Args)]
 pub struct RecordArgs {
     /// Write the profile to FILE.
@@ -36,6 +42,10 @@ pub struct RecordArgs {
     /// Bytes of stack each sample copies, over the preset's.
     #[arg(long, value_name = "BYTES")]
     stack_bytes: Option<u32>,
+    /// Record each interval a thread spends off its CPU, blocked or
+    /// preempted, over the preset's choice: on except in production.
+    #[arg(long, value_enum)]
+    off_cpu: Option<OnOff>,
     /// Sample each call of the function SYMBOL names, instead of CPU time.
     #[arg(long, value_name = "SYMBOL", conflicts_with = "rate")]
     function: Option<String>,
@@ -108,6 +118,9 @@ fn record(args: &RecordArgs) -> Result<i32> {
     }
     if let Some(bytes) = args.stack_bytes {
         options.stack = StackCopy::Bytes(bytes);
+    }
+    if let Some(off_cpu) = args.off_cpu {
+        options.off_cpu = matches!(off_cpu, OnOff::On);
     }
     let stop = Arc::new(AtomicBool::new(false));
     // Ctrl-C reaches a started program too, which ends as it chooses; an
@@ -306,6 +319,19 @@ fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             "The samples cover {:.0}% of the {} of CPU time the program ran.",
             total as f64 * 100.0 / counted as f64,
             weight(counted)
+        )?;
+    }
+    if profile.setting("off-CPU") == Some("on") {
+        let threads = profile.threads();
+        let blocked = threads.iter().map(|thread| thread.blocked).sum::<u64>();
+        let preempted = threads.iter().map(|thread| thread.preempted).sum::<u64>();
+        let seconds = |value: u64| format!("{:.3} s", value as f64 / 1e9);
+        writeln!(
+            out,
+            "Threads were off their CPUs for {}: {} blocked, {} preempted.",
+            seconds(blocked + preempted),
+            seconds(blocked),
+            seconds(preempted)
         )?;
     }
     Ok(())

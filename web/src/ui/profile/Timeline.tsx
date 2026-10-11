@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatRange, parseRange, withLook } from "../../profile/look";
 import { formatDuration } from "../../profile/paint";
+import type { ProfileLane, ProfileThread } from "../../protocol";
 import { token, useAnswer, useProfile } from "./context";
 
 /** One thread's lane, in CSS pixels. */
@@ -9,8 +10,10 @@ const LANE = 18;
 const NAMES = 180;
 
 /**
- * A lane per thread of how its kept samples fall over the whole profile.
- * Dragging selects a time range, which every view then reads; a click
+ * A lane per thread of how its kept samples fall over the whole profile,
+ * over bands of the time it spent off its CPU: grey where it blocked,
+ * amber where it was preempted, as strong as the share of the slice it
+ * was off. Dragging selects a time range, which every view then reads; a click
  * clears it. A thread's name selects or deselects it.
  */
 export function Timeline() {
@@ -59,14 +62,31 @@ export function Timeline() {
     element.height = Math.round(height * ratio);
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, plot, height);
-    const lanes = new Map((answer.data?.lanes ?? []).map((lane) => [lane.thread, lane.weights]));
-    const most = Math.max(1, ...[...lanes.values()].flat());
+    const lanes = new Map((answer.data?.lanes ?? []).map((lane) => [lane.thread, lane]));
+    const most = Math.max(1, ...[...lanes.values()].flatMap((lane) => lane.weights));
     const bar = token("--accent");
     const [start, end] = answer.data?.range ?? [0, span];
     const width = (plot * (end - start)) / span / Math.max(1, buckets);
+    const slice = Math.max(1, (end - start) / Math.max(1, buckets));
+    const bands: [keyof Pick<ProfileLane, "blocked" | "preempted">, string][] = [
+      ["blocked", token("--line-strong")],
+      ["preempted", token("--warn-line")],
+    ];
     for (const [index, thread] of threads.entries()) {
-      const weights = lanes.get(thread.row) ?? [];
-      context.globalAlpha = selected && !selected.has(thread.row) ? 0.3 : 0.85;
+      const lane = lanes.get(thread.row);
+      const dim = selected && !selected.has(thread.row) ? 0.3 : 1;
+      for (const [kind, color] of bands) {
+        context.fillStyle = color;
+        for (const [bucket, off] of (lane?.[kind] ?? []).entries()) {
+          if (off > 0) {
+            context.globalAlpha = dim * Math.min(1, off / slice);
+            const x = (plot * start) / span + bucket * width;
+            context.fillRect(x, index * LANE + 1, Math.max(width, 1), LANE - 2);
+          }
+        }
+      }
+      const weights = lane?.weights ?? [];
+      context.globalAlpha = dim * 0.85;
       context.fillStyle = bar;
       for (const [bucket, weight] of weights.entries()) {
         if (weight > 0) {
@@ -113,7 +133,7 @@ export function Timeline() {
             type="button"
             className={`lane-name ${selected?.has(thread.row) ? "selected" : ""}`}
             aria-pressed={selected?.has(thread.row) ?? false}
-            title={`pid ${thread.pid}, tid ${thread.tid}: ${thread.samples} samples`}
+            title={`pid ${thread.pid}, tid ${thread.tid}: ${thread.samples} samples${offCpu(thread)}`}
             onClick={() => toggle(thread.row)}
           >
             {thread.name ?? "thread"} <span className="dim">{thread.tid}</span>
@@ -125,7 +145,7 @@ export function Timeline() {
         className="lanes"
         style={{ width: plot, height }}
         role="img"
-        aria-label={`Samples over ${formatDuration(span)}`}
+        aria-label={`Samples and time off CPU over ${formatDuration(span)}`}
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
           const at = time(event);
@@ -151,4 +171,14 @@ export function Timeline() {
       />
     </div>
   );
+}
+
+/** What a lane's name says of its thread's time off its CPU, if any. */
+function offCpu(thread: ProfileThread): string {
+  if (thread.blocked === 0 && thread.preempted === 0) {
+    return "";
+  }
+  const blocked = formatDuration(thread.blocked);
+  const preempted = formatDuration(thread.preempted);
+  return `; off its CPU ${blocked} blocked, ${preempted} preempted`;
 }

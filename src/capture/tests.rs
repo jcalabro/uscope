@@ -31,6 +31,8 @@ fn sample_capture(offset: i64) -> Capture {
     builder.sample(main_thread, offset + 5, 1000, deep, NONE);
     builder.sample(main_thread, offset + 2, 1000, shallow, NONE);
     builder.sample(worker, offset + 3, 1000, broken, NONE);
+    builder.off_cpu(worker, offset + 4, 2, false);
+    builder.off_cpu(worker, offset + 1, 1, true);
     builder.count(AccountKind::LostSamples as u32, 2);
     let site = builder.site("handle", "app.rs", 9, module, 1);
     builder.zone(
@@ -117,6 +119,15 @@ fn validation_rejects_every_out_of_bounds_reference() {
     let mut broken = valid.clone();
     broken.samples.swap(0, 1);
     assert!(broken.validate().is_err(), "samples out of order");
+    let mut broken = valid.clone();
+    broken.off_cpu.swap(0, 1);
+    assert!(broken.validate().is_err(), "off-CPU intervals out of order");
+    let mut broken = valid.clone();
+    broken.off_cpu[0].preempted = 2;
+    assert!(
+        broken.validate().is_err(),
+        "an off-CPU interval of no cause"
+    );
     let mut broken = valid.clone();
     broken.frames[0].module = 9.into();
     assert!(broken.validate().is_err(), "a frame of no module");

@@ -72,6 +72,7 @@ pub fn record_watched(
         source,
         stack_bytes,
         ring_pages: options.ring_pages,
+        switches: options.off_cpu,
     };
     let launch = perf::LaunchOptions {
         no_address_randomization: breakpoint.is_some(),
@@ -140,6 +141,7 @@ pub fn record_attached(
         source,
         stack_bytes,
         ring_pages: options.ring_pages,
+        switches: options.off_cpu,
     };
     let perf::Attached {
         mut events,
@@ -213,6 +215,7 @@ fn settings(
         ("weight", options.source.unit().to_owned()),
         ("stack bytes", stack_bytes.to_string()),
         ("stack copy", stack_copy),
+        ("off-CPU", if options.off_cpu { "on" } else { "off" }.into()),
     ] {
         builder.setting(key, &value);
     }

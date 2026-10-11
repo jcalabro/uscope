@@ -356,6 +356,76 @@ pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Costs {
     }
 }
 
+/// One thread's nanoseconds off its CPU in each slice of a range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffCpuLane {
+    pub thread: u32,
+    pub blocked: Vec<u64>,
+    pub preempted: Vec<u64>,
+}
+
+/// How long each selected thread was off its CPU, blocked and preempted,
+/// in each of `buckets` equal slices of the query's range, per thread
+/// with any. Intervals have no stacks, so transforms do not apply.
+pub fn off_cpu(capture: &Capture, query: &Query, buckets: usize) -> Vec<OffCpuLane> {
+    let Some((start, end)) = query
+        .range
+        .filter(|(start, end)| end > start && buckets > 0)
+    else {
+        return Vec::new();
+    };
+    let span = u128::try_from(end - start).unwrap_or(1);
+    let count = buckets as u128;
+    // Slice `i` is [edge(i), edge(i + 1)).
+    let edge = |slice: usize| {
+        start + i64::try_from(slice as u128 * span / count).unwrap_or(i64::MAX - start)
+    };
+    let mut lanes = Vec::new();
+    for range in &capture.off_cpu_ranges {
+        let thread = range.thread.get();
+        if query
+            .threads
+            .as_ref()
+            .is_some_and(|threads| !threads.contains(&thread))
+        {
+            continue;
+        }
+        let mut lane = OffCpuLane {
+            thread,
+            blocked: vec![0; buckets],
+            preempted: vec![0; buckets],
+        };
+        let mut any = false;
+        for interval in capture.thread_off_cpu(range) {
+            let left = interval.time.get();
+            let back = left.saturating_add_unsigned(interval.duration.get());
+            let (from, to) = (left.max(start), back.min(end));
+            if from >= to {
+                continue;
+            }
+            let totals = if interval.preempted == 0 {
+                &mut lane.blocked
+            } else {
+                &mut lane.preempted
+            };
+            let offset = u128::try_from(from - start).unwrap_or(0);
+            let mut slice = usize::try_from(offset * count / span)
+                .unwrap_or(0)
+                .min(buckets - 1);
+            while slice < buckets && edge(slice) < to {
+                let overlap = to.min(edge(slice + 1)) - from.max(edge(slice));
+                totals[slice] += u64::try_from(overlap).unwrap_or(0);
+                slice += 1;
+            }
+            any = true;
+        }
+        if any {
+            lanes.push(lane);
+        }
+    }
+    lanes
+}
+
 /// How many kept samples, and their weight, fall in each of `buckets`
 /// equal slices of the query's range, per selected thread with any.
 pub fn density(

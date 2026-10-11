@@ -833,6 +833,9 @@ pub struct ProfileThread {
     pub name: Option<String>,
     pub samples: u64,
     pub weight: u64,
+    /// Nanoseconds off its CPU, blocked and preempted.
+    pub blocked: u64,
+    pub preempted: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -916,12 +919,15 @@ pub struct ProfileTimeline {
     pub lanes: Vec<ProfileLane>,
 }
 
-/// One thread's weight in each slice.
+/// One thread's weight in each slice, and the nanoseconds of each it
+/// spent off its CPU: each list empty when it has none.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileLane {
     pub thread: u32,
     pub weights: Vec<u64>,
+    pub blocked: Vec<u64>,
+    pub preempted: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

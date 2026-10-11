@@ -9,7 +9,9 @@ mod session;
 
 pub use session::{Attachment, Recording, Watch, record, record_attached, record_watched};
 
-pub use crate::analysis::{CallTree, Cost, Costs, Granularity, KeyKind, Keys, Query, Transform};
+pub use crate::analysis::{
+    CallTree, Cost, Costs, Granularity, KeyKind, Keys, OffCpuLane, Query, Transform,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +41,14 @@ impl Preset {
             Self::Development => 999,
             Self::Maximum => 9999,
         }
+    }
+
+    /// Whether a recording says when each thread leaves its CPU and comes
+    /// back: a record of every context switch, which a program that
+    /// switches often pays for.
+    #[must_use]
+    pub const fn off_cpu(self) -> bool {
+        !matches!(self, Self::Production)
     }
 
     /// How much stack each sample copies.
@@ -113,6 +123,8 @@ pub struct RecordOptions {
     pub ring_pages: usize,
     /// The most events an attach may open: one per thread per CPU.
     pub max_events: usize,
+    /// Whether to record each interval a thread spends off its CPU.
+    pub off_cpu: bool,
     /// Directories searched for separate debug files.
     pub debug_directories: Vec<PathBuf>,
 }
@@ -128,6 +140,7 @@ impl RecordOptions {
             max_frames: 512,
             ring_pages: 128,
             max_events: 16_384,
+            off_cpu: preset.off_cpu(),
             debug_directories: Vec::new(),
         }
     }
@@ -197,6 +210,19 @@ pub struct SampledStack {
     pub ending: StackEnding,
 }
 
+/// A span a thread spent off its CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OffCpuInterval {
+    pub pid: u32,
+    pub tid: u32,
+    /// When it left its CPU.
+    pub time: i64,
+    /// Nanoseconds until it ran again, or until the recording ended.
+    pub duration: u64,
+    /// Whether it left while it could still run, rather than blocking.
+    pub preempted: bool,
+}
+
 /// What a function costs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionCost {
@@ -218,7 +244,7 @@ pub enum StackView {
     Native,
 }
 
-/// A thread a profile sampled.
+/// A thread a profile sampled, or saw leave its CPU.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileThread {
     /// The thread's row, by which a [`Query`] selects it.
@@ -229,6 +255,9 @@ pub struct ProfileThread {
     pub name: Option<String>,
     pub samples: u64,
     pub weight: u64,
+    /// Nanoseconds it spent off its CPU, blocked and preempted.
+    pub blocked: u64,
+    pub preempted: u64,
 }
 
 /// A function called from its parent's node.
@@ -342,29 +371,47 @@ impl Profile {
         Keys::new(&self.capture, granularity)
     }
 
-    /// Each thread that was sampled, by its row, which queries name.
+    /// Each thread that was sampled or left its CPU, by its row, which
+    /// queries name.
     #[must_use]
     pub fn threads(&self) -> Vec<ProfileThread> {
         let capture = &self.capture;
-        capture
-            .sample_ranges
-            .iter()
-            .map(|range| {
-                let row = range.thread.get();
-                let thread = &capture.threads[row as usize];
-                let samples = capture.thread_samples(range);
-                ProfileThread {
-                    row,
-                    pid: capture.processes[thread.process.get() as usize].pid.get(),
-                    tid: thread.tid.get(),
-                    name: Some(capture.string(thread.name.get()))
-                        .filter(|name| !name.is_empty())
-                        .map(str::to_owned),
-                    samples: samples.len() as u64,
-                    weight: samples.iter().map(|sample| sample.weight.get()).sum(),
-                }
-            })
-            .collect()
+        let mut threads = std::collections::BTreeMap::<u32, ProfileThread>::new();
+        let new = |row: u32| {
+            let thread = &capture.threads[row as usize];
+            ProfileThread {
+                row,
+                pid: capture.processes[thread.process.get() as usize].pid.get(),
+                tid: thread.tid.get(),
+                name: Some(capture.string(thread.name.get()))
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned),
+                samples: 0,
+                weight: 0,
+                blocked: 0,
+                preempted: 0,
+            }
+        };
+        for range in &capture.sample_ranges {
+            let samples = capture.thread_samples(range);
+            let row = range.thread.get();
+            let thread = threads.entry(row).or_insert_with(|| new(row));
+            thread.samples = samples.len() as u64;
+            thread.weight = samples.iter().map(|sample| sample.weight.get()).sum();
+        }
+        for range in &capture.off_cpu_ranges {
+            let row = range.thread.get();
+            let thread = threads.entry(row).or_insert_with(|| new(row));
+            for interval in capture.thread_off_cpu(range) {
+                let total = if interval.preempted == 0 {
+                    &mut thread.blocked
+                } else {
+                    &mut thread.preempted
+                };
+                *total += interval.duration.get();
+            }
+        }
+        threads.into_values().collect()
     }
 
     /// How many times the kernel throttled sampling.
@@ -437,6 +484,37 @@ impl Profile {
             .into_iter()
             .map(|(reason, count)| (reason.describe().to_owned(), count))
             .collect()
+    }
+
+    /// How long each thread `query` selects was off its CPU in each of
+    /// `buckets` slices of its range.
+    #[must_use]
+    pub fn off_cpu_lanes(&self, query: &Query, buckets: usize) -> Vec<OffCpuLane> {
+        crate::analysis::off_cpu(&self.capture, query, buckets)
+    }
+
+    /// Every interval a thread spent off its CPU, by thread and then time.
+    #[must_use]
+    pub fn off_cpu(&self) -> Vec<OffCpuInterval> {
+        let capture = &self.capture;
+        let mut intervals = Vec::with_capacity(capture.off_cpu.len());
+        for range in &capture.off_cpu_ranges {
+            let thread = &capture.threads[range.thread.get() as usize];
+            let pid = capture.processes[thread.process.get() as usize].pid.get();
+            intervals.extend(
+                capture
+                    .thread_off_cpu(range)
+                    .iter()
+                    .map(|interval| OffCpuInterval {
+                        pid,
+                        tid: thread.tid.get(),
+                        time: interval.time.get(),
+                        duration: interval.duration.get(),
+                        preempted: interval.preempted != 0,
+                    }),
+            );
+        }
+        intervals
     }
 
     /// Every sample's stack, by thread and then time.

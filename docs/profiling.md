@@ -19,11 +19,11 @@ uscope report --tree app.usprof   # the call tree
 It follows every thread and every child process the program starts. A
 preset chooses how much to record:
 
-| Preset | Samples a second | Stack copied | For |
-| --- | --- | --- | --- |
-| `--preset prod` | 49 | auto | production: a fraction of a percent of one CPU |
-| `--preset dev` (the default) | 999 | 16 KiB | development: unwinds code without frame pointers |
-| `--preset max` | 9999 | 16 KiB | short runs that need every detail |
+| Preset | Samples a second | Stack copied | Off-CPU | For |
+| --- | --- | --- | --- | --- |
+| `--preset prod` | 49 | auto | off | production: a fraction of a percent of one CPU |
+| `--preset dev` (the default) | 999 | 16 KiB | on | development: unwinds code without frame pointers |
+| `--preset max` | 9999 | 16 KiB | on | short runs that need every detail |
 
 In auto mode a sample copies 512 bytes of stack when the frame-pointer
 chain carries every stack through the program, and 16 KiB otherwise. Before
@@ -50,6 +50,25 @@ are made smaller, down to the size that holds two samples, and the profile
 records the size it got. A sample that finds its ring full is lost, and
 the profile counts every one: the count comes from the kernel's events,
 which count losses a ring never reports.
+
+## Time off the CPU
+
+With off-CPU recording on, the kernel reports each time a thread leaves its
+CPU and each time it comes back. Each interval between the two is exact,
+and says whether the thread blocked, as in a sleep, a lock, or a read, or
+was preempted while it could still run, as when more threads want a CPU
+than there are. `report` totals them:
+
+```
+Threads were off their CPUs for 0.307 s: 0.205 s blocked, 0.101 s preempted.
+```
+
+An interval has no stack: seeing where a thread blocked needs the kernel's
+own stacks, which an unprivileged user cannot sample. An interval still
+open when the recording ends runs to its end, and one that began before
+the recording, which an attach meets, is left out, as when it began is
+unknown. `--off-cpu on|off` overrides the preset; a program that switches
+threads very often pays a little for each switch reported.
 
 ## Recording a running program
 
@@ -183,7 +202,9 @@ that opens it. The page has three views of the same query:
   its callers and its callees, merged from every place it is called.
 
 The timeline above the views has a lane for each thread, showing when its
-samples were taken. Dragging across it selects a time range, and choosing
+samples were taken over bands of its time off the CPU: grey where it
+blocked and amber where it was preempted, each as strong as the share of
+that slice it was off. A thread's name shows its totals. Dragging across it selects a time range, and choosing
 a thread's name selects that thread. A selected function can be focused
 (only samples through it, rooted at it), merged into its callers, dropped
 with every sample through it, or have its recursion collapsed. These
