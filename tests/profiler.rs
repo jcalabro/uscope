@@ -4,8 +4,8 @@ use std::process::{Command, Stdio};
 
 use support::Scenario;
 use uscope::profiler::{
-    CallNode, Preset, RecordOptions, SampleSource, SampledStack, StackEnding, StackView, Watch,
-    record, record_watched,
+    CallNode, DEEP_STACK_COPY, Preset, RecordOptions, SMALL_STACK_COPY, SampleSource, SampledStack,
+    StackCopy, StackEnding, StackView, Watch, record, record_watched,
 };
 
 /// The profile-stacks fixture across languages, compilers, optimization,
@@ -85,22 +85,18 @@ fn expected(stack: &SampledStack) -> Vec<&'static str> {
 #[test]
 fn a_function_breakpoint_records_its_exact_callers_in_every_build() {
     for (variant, frame_pointers) in VARIANTS {
-        for preset in [Preset::Development, Preset::Production] {
-            let mut options = RecordOptions::preset(preset);
-            options.source = SampleSource::Function {
-                symbol: "leaf".into(),
+        for copy in [DEEP_STACK_COPY, SMALL_STACK_COPY] {
+            let options = RecordOptions {
+                stack: StackCopy::Bytes(copy),
+                ..calls_of("leaf")
             };
             let recording = record(command(variant, 1), &options).expect("record");
             assert!(recording.status.success());
             let stacks = recording.profile.stacks();
-            assert_eq!(
-                stacks.len(),
-                6,
-                "{variant} {preset:?}: every call is a sample"
-            );
+            assert_eq!(stacks.len(), 6, "{variant} {copy}: every call is a sample");
             for stack in &stacks {
                 let expected = expected(stack);
-                let context = format!("{variant} {preset:?}: {stack:?}");
+                let context = format!("{variant} {copy}: {stack:?}");
                 // A stack is never wrong: what it has is exact, and where
                 // it stops short it says why.
                 match &stack.ending {
@@ -116,7 +112,7 @@ fn a_function_breakpoint_records_its_exact_callers_in_every_build() {
                 }
                 // A deep copy unwinds everything, and a small one does too
                 // where the kernel's chain continues it.
-                if preset == Preset::Development || frame_pointers {
+                if copy == DEEP_STACK_COPY || frame_pointers {
                     assert_eq!(stack.ending, StackEnding::Complete, "{context}");
                 } else if expected.contains(&"main") {
                     // The main thread's frames outgrow a small copy, so the
@@ -124,6 +120,61 @@ fn a_function_breakpoint_records_its_exact_callers_in_every_build() {
                     assert_ne!(stack.ending, StackEnding::Complete, "{context}");
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn auto_mode_copies_a_small_stack_only_where_the_chain_carries_every_stack() {
+    for (variant, bytes, why) in [
+        (
+            "musl",
+            SMALL_STACK_COPY,
+            "auto: the program keeps the frame-pointer chain where it calls",
+        ),
+        (
+            "musl-nofp",
+            DEEP_STACK_COPY,
+            "auto: main calls without keeping the frame-pointer chain",
+        ),
+        (
+            "gcc-o0",
+            DEEP_STACK_COPY,
+            "auto: the program loads libraries, which are known only once it runs",
+        ),
+    ] {
+        let options = RecordOptions {
+            stack: StackCopy::Auto,
+            ..calls_of("leaf")
+        };
+        let recording = record(command(variant, 1), &options).expect("record");
+        assert!(recording.status.success());
+        let profile = &recording.profile;
+        assert_eq!(
+            profile.setting("stack bytes"),
+            Some(bytes.to_string().as_str()),
+            "{variant}"
+        );
+        assert_eq!(profile.setting("stack copy"), Some(why), "{variant}");
+        // The copy auto mode chose unwinds what the deepest does.
+        let deep = RecordOptions {
+            stack: StackCopy::Bytes(DEEP_STACK_COPY),
+            ..options
+        };
+        let deep = record(command(variant, 1), &deep).expect("record");
+        let shapes = |stacks: Vec<SampledStack>| {
+            let mut shapes: Vec<_> = stacks
+                .into_iter()
+                .map(|stack| (stack.functions, stack.ending))
+                .collect();
+            shapes.sort();
+            shapes
+        };
+        let stacks = shapes(profile.stacks());
+        assert_eq!(stacks.len(), 6, "{variant}: every call is a sample");
+        assert_eq!(stacks, shapes(deep.profile.stacks()), "{variant}");
+        for (functions, _) in &stacks {
+            assert_eq!(functions[..3], ["leaf", "middle", "outer"], "{variant}");
         }
     }
 }
@@ -327,7 +378,7 @@ fn clock_samples_are_valid_stacks_and_survive_a_file() {
         let mut options = RecordOptions::preset(Preset::Maximum);
         // Deep enough for the fixture's stacks, and small enough that a
         // loaded machine drops few samples.
-        options.stack_bytes = if frame_pointers { 512 } else { 4096 };
+        options.stack = StackCopy::Bytes(if frame_pointers { 512 } else { 4096 });
         let recording = record(command(variant, 2_000_000), &options).expect("record");
         assert!(recording.status.success());
         let profile = recording.profile;

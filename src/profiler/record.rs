@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use foldhash::HashMap;
 
+use super::frame_pointers::{CallSites, call_sites};
 use crate::backend::perf::{self, decode};
 use crate::capture::builder::LineInput;
 use crate::capture::records::{AccountKind, FrameKind, Mapping, NONE, Truncation, role_number};
@@ -19,6 +20,14 @@ use crate::{
     CodeInstanceKind, CodeRole, ImageAddress, InlineFrameLookup, LoadedModule, ModuleId,
     ModuleImage, ModuleImageId,
 };
+
+/// How a program's call sites keep the frame-pointer chain.
+pub enum Sites {
+    /// It is linked dynamically, so its code is not all in its file.
+    Dynamic,
+    /// Its own file's, with the function of its first call that does not.
+    Static(CallSites, Option<String>),
+}
 
 /// A module file the recording mapped, loaded once for every mapping.
 struct Image {
@@ -91,11 +100,40 @@ impl Processor {
         &mut self.builder
     }
 
+    /// How the program at `path` keeps the frame-pointer chain, or `None`
+    /// if it cannot be read. Its image is loaded as its mapping will find
+    /// it, and loaded once.
+    pub fn call_sites(&mut self, path: &std::path::Path) -> Option<Sites> {
+        use std::os::unix::fs::MetadataExt;
+        let data = std::fs::read(path).ok()?;
+        let file = object::File::parse(data.as_slice()).ok()?;
+        if object::Object::section_by_name(&file, ".interp").is_some() {
+            return Some(Sites::Dynamic);
+        }
+        let inode = std::fs::metadata(path).ok()?.ino();
+        let image = self.image(path.to_owned(), Some(inode));
+        let info = self.images[image].info.as_ref()?;
+        let sites = call_sites(&data, &info.image, info.unwind.as_ref());
+        let function = sites.first_not_kept.and_then(|address| {
+            info.image
+                .symbols()
+                .take_while(|symbol| symbol.address().get() <= address)
+                .last()
+                .map(|symbol| {
+                    crate::demangle::qualified_name(symbol.name())
+                        .unwrap_or_else(|| symbol.name().to_owned())
+                })
+        });
+        Some(Sites::Static(sites, function))
+    }
+
     /// Takes the events' count of samples lost so far.
     pub fn lost(&mut self, total: u64) {
         let counted = self.builder.account(AccountKind::LostSamples as u32);
-        self.builder
-            .count(AccountKind::LostSamples as u32, total.saturating_sub(counted));
+        self.builder.count(
+            AccountKind::LostSamples as u32,
+            total.saturating_sub(counted),
+        );
     }
 
     /// Processes the records in `batch` and those held back before, in

@@ -135,8 +135,7 @@ impl Events {
         let fewest = min_pages(options.stack_bytes);
         let mut pages = options.ring_pages.next_power_of_two().max(fewest);
         loop {
-            attr.wakeup_watermark =
-                u32::try_from(pages * sys::page_size() / 4).unwrap_or(u32::MAX);
+            attr.wakeup_watermark = u32::try_from(pages * sys::page_size() / 4).unwrap_or(u32::MAX);
             let rings: std::io::Result<Vec<sys::Ring>> = open_each(&attr, pid, &cpus)?
                 .into_iter()
                 .map(|fd| sys::Ring::map(fd, pages))

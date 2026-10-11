@@ -21,9 +21,18 @@ preset chooses how much to record:
 
 | Preset | Samples a second | Stack copied | For |
 | --- | --- | --- | --- |
-| `--preset prod` | 49 | 512 bytes | production: a fraction of a percent of one CPU |
+| `--preset prod` | 49 | auto | production: a fraction of a percent of one CPU |
 | `--preset dev` (the default) | 999 | 16 KiB | development: unwinds code without frame pointers |
 | `--preset max` | 9999 | 16 KiB | short runs that need every detail |
+
+In auto mode a sample copies 512 bytes of stack when the frame-pointer
+chain carries every stack through the program, and 16 KiB otherwise. Before
+the program runs, uscope decodes every call instruction of a statically
+linked program and asks its call-frame information whether the calling
+frame keeps the chain. A program that loads libraries gets the deep copy,
+as its libraries are known only once it runs. The profile's `stack copy`
+setting says what auto mode chose, and why, naming the first function that
+calls without keeping the chain.
 
 `--rate HZ` and `--stack-bytes N` override a preset's numbers. `--function
 SYMBOL` samples each call of a function instead of CPU time, which counts

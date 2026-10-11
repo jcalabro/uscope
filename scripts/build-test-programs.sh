@@ -2051,6 +2051,11 @@ for variant in \
     build_fixture "$compiler" "$c_fixtures_dir/profile-stacks.c" "$output_dir/profile-stacks-$name" \
         "$level" -g3 "$frames" "$code" "$link" -pthread
 done
+# Static programs, whose code auto mode can judge before they run.
+build_fixture musl-gcc "$c_fixtures_dir/profile-stacks.c" "$output_dir/profile-stacks-musl" \
+    -O2 -g3 -fno-omit-frame-pointer -static -pthread
+build_fixture musl-gcc "$c_fixtures_dir/profile-stacks.c" "$output_dir/profile-stacks-musl-nofp" \
+    -O2 -g3 -fomit-frame-pointer -static -pthread
 # mold places segments at virtual addresses other than their file offsets.
 build_fixture gcc "$c_fixtures_dir/profile-stacks.c" "$output_dir/profile-stacks-gcc-mold" \
     -O2 -g3 -fno-omit-frame-pointer -fPIE -pie -fuse-ld=mold -pthread

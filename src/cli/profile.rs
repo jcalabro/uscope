@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use uscope::profiler::{Preset, Profile, RecordOptions, SampleSource, StackView};
+use uscope::profiler::{Preset, Profile, RecordOptions, SampleSource, StackCopy, StackView};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum PresetArg {
@@ -96,7 +96,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
         };
     }
     if let Some(bytes) = args.stack_bytes {
-        options.stack_bytes = bytes;
+        options.stack = StackCopy::Bytes(bytes);
     }
     let mut command = Command::new(&args.command[0]);
     command.args(&args.command[1..]);

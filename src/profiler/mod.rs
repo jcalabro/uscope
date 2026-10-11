@@ -2,6 +2,7 @@
 //! time, from outside the program, into a capture that can be saved,
 //! loaded, and queried.
 
+mod frame_pointers;
 mod record;
 
 pub use crate::analysis::{CallTree, Cost, Costs, Granularity, KeyKind, Keys, Query, Transform};
@@ -15,6 +16,7 @@ use std::time::Duration;
 use crate::backend::perf;
 use crate::capture::records::{FrameKind, NONE, Truncation};
 use crate::capture::{Capture, file};
+use record::Sites;
 
 /// How much a recording costs the program, and how much it sees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,14 +42,34 @@ impl Preset {
         }
     }
 
-    /// Bytes of stack each sample copies.
+    /// How much stack each sample copies.
     #[must_use]
-    pub const fn stack_bytes(self) -> u32 {
+    pub const fn stack_copy(self) -> StackCopy {
         match self {
-            Self::Production => 512,
-            Self::Development | Self::Maximum => 16 * 1024,
+            Self::Production => StackCopy::Auto,
+            Self::Development | Self::Maximum => StackCopy::Bytes(DEEP_STACK_COPY),
         }
     }
+}
+
+/// Bytes of stack a sample copies where the frame-pointer chain carries
+/// stacks: enough to unwind the innermost frames exactly.
+pub const SMALL_STACK_COPY: u32 = 512;
+
+/// Bytes of stack a sample copies where call-frame information alone
+/// unwinds: deep enough for most stacks.
+pub const DEEP_STACK_COPY: u32 = 16 * 1024;
+
+/// How much stack each sample copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackCopy {
+    /// The least that unwinds the program: [`SMALL_STACK_COPY`] when its
+    /// code keeps the frame-pointer chain where it calls, which a program
+    /// linked statically shows before it runs, and [`DEEP_STACK_COPY`]
+    /// otherwise. The profile says which, and why.
+    Auto,
+    /// This many bytes, rounded up to a multiple of eight.
+    Bytes(u32),
 }
 
 /// What makes a sample.
@@ -84,7 +106,7 @@ impl std::fmt::Display for SampleSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordOptions {
     pub source: SampleSource,
-    pub stack_bytes: u32,
+    pub stack: StackCopy,
     /// The most frames a stack keeps.
     pub max_frames: usize,
     /// Pages each CPU's ring holds: the most a burst of samples can write
@@ -101,7 +123,7 @@ impl RecordOptions {
             source: SampleSource::Clock {
                 rate: preset.rate(),
             },
-            stack_bytes: preset.stack_bytes(),
+            stack: preset.stack_copy(),
             max_frames: 512,
             ring_pages: 128,
             debug_directories: Vec::new(),
@@ -183,9 +205,15 @@ pub fn record_watched(
     let _span = crate::span!("record");
     let program = PathBuf::from(command.get_program());
     let (source, breakpoint) = perf_source(&program, &options.source)?;
+    let search = crate::debug_info::DebugFileSearch::new(&crate::DebugFileOptions {
+        directories: options.debug_directories.clone(),
+        ..crate::DebugFileOptions::default()
+    });
+    let mut processor = record::Processor::new(search, options.max_frames);
+    let (stack_bytes, stack_copy) = stack_copy(&mut processor, &program, options.stack);
     let events = perf::EventOptions {
         source,
-        stack_bytes: options.stack_bytes.next_multiple_of(8),
+        stack_bytes,
         ring_pages: options.ring_pages,
     };
     let launch = perf::LaunchOptions {
@@ -198,12 +226,7 @@ pub fn record_watched(
         killer,
         executed,
     } = perf::launch(command, &events, launch)?;
-    let search = crate::debug_info::DebugFileSearch::new(&crate::DebugFileOptions {
-        directories: options.debug_directories.clone(),
-        ..crate::DebugFileOptions::default()
-    });
     let ring_pages = events.pages();
-    let mut processor = record::Processor::new(search, options.max_frames);
     let builder = processor.builder();
     for (key, value) in [
         ("program", program.to_string_lossy().into_owned()),
@@ -211,7 +234,8 @@ pub fn record_watched(
         ("ring pages", ring_pages.to_string()),
         ("source", options.source.to_string()),
         ("weight", options.source.unit().to_owned()),
-        ("stack bytes", options.stack_bytes.to_string()),
+        ("stack bytes", stack_bytes.to_string()),
+        ("stack copy", stack_copy),
     ] {
         builder.setting(key, &value);
     }
@@ -300,6 +324,39 @@ fn perf_source(
     })
 }
 
+/// The bytes of stack each sample of `program` copies, and why.
+fn stack_copy(
+    processor: &mut record::Processor,
+    program: &Path,
+    stack: StackCopy,
+) -> (u32, String) {
+    let bytes = match stack {
+        StackCopy::Bytes(bytes) => return (bytes.next_multiple_of(8), "as asked".into()),
+        StackCopy::Auto => DEEP_STACK_COPY,
+    };
+    let Some(path) = which(program).and_then(|path| std::fs::canonicalize(path).ok()) else {
+        return (bytes, "auto: the program was not found".into());
+    };
+    match processor.call_sites(&path) {
+        None => (bytes, "auto: the program's code could not be read".into()),
+        Some(Sites::Dynamic) => (
+            bytes,
+            "auto: the program loads libraries, which are known only once it runs".into(),
+        ),
+        Some(Sites::Static(sites, _)) if sites.keep_the_chain() => (
+            SMALL_STACK_COPY,
+            "auto: the program keeps the frame-pointer chain where it calls".into(),
+        ),
+        Some(Sites::Static(_, function)) => (
+            bytes,
+            format!(
+                "auto: {} calls without keeping the frame-pointer chain",
+                function.as_deref().unwrap_or("a function")
+            ),
+        ),
+    }
+}
+
 /// How far behind a drain records are processed.
 const WATERMARK_DELAY: u64 = 20_000_000;
 
@@ -367,7 +424,7 @@ fn which(program: &Path) -> Option<PathBuf> {
 }
 
 /// How a stack ends.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StackEnding {
     Complete,
     /// Short of its outermost frame, for this reason.
