@@ -2839,3 +2839,132 @@ kbd {
   background: var(--surface-2);
   font-size: 12px;
 }
+
+/* ---------- zones ---------- */
+
+.profile-zones {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  min-height: 0;
+}
+
+.zones-tracks {
+  min-height: 0;
+  border-right: 1px solid var(--line);
+}
+
+.zones-body {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  overflow: auto;
+}
+
+.zones-body canvas {
+  display: block;
+  flex: none;
+  cursor: pointer;
+}
+
+.zone-names {
+  position: relative;
+  flex: none;
+  border-right: 1px solid var(--line);
+}
+
+.zone-name {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 16px;
+  padding: 0 8px;
+  overflow: hidden;
+  color: var(--ink-2);
+  font: 11px / 16px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.find-zone .pane-body {
+  padding: 6px 10px;
+  overflow: auto;
+}
+
+.zone-sites {
+  width: 100%;
+  border-collapse: collapse;
+  font: 11px var(--mono);
+}
+
+.zone-sites th,
+.zone-sites td {
+  padding: 2px 4px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.zone-sites th:first-child,
+.zone-sites td:first-child {
+  max-width: 150px;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+}
+
+.zone-sites tr.selected {
+  background: var(--accent-soft);
+}
+
+.zone-sites .warn,
+.find-zone .warn {
+  color: var(--changed);
+}
+
+.zone-stats dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px 8px;
+  margin: 10px 0;
+  font: 11px var(--mono);
+}
+
+.zone-stats dt {
+  color: var(--ink-3);
+}
+
+.zone-stats dd {
+  margin: 0;
+}
+
+.zone-histogram {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 60px;
+  border-bottom: 1px solid var(--line);
+}
+
+.zone-histogram .bar {
+  flex: 1;
+  min-height: 1px;
+  background: var(--accent);
+}
+
+.zone-axis {
+  display: flex;
+  justify-content: space-between;
+  font: 10px var(--mono);
+}
+
+.zone-longest,
+.zone-values {
+  margin: 4px 0 10px;
+  padding: 0;
+  list-style: none;
+  font: 11px var(--mono);
+}
+
+.zone-longest li,
+.zone-values li {
+  padding: 1px 0;
+}

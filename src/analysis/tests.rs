@@ -578,3 +578,137 @@ fn a_logical_stack_is_a_tasks_own_under_its_dispatch() {
         1
     );
 }
+
+/// A sample: its thread, time, weight, and task choice.
+type Sample = (u32, i64, u64, u32);
+
+/// A capture of label spans `route=vN` (thread, start, length, N), and of
+/// samples of one stack, goroutine 2 labeled `phase=spin`.
+fn labeled(spans: &[(u32, i64, i64, u32)], samples: &[Sample]) -> Capture {
+    let mut builder = CaptureBuilder::new();
+    let module = builder.module("/bin/app", None, [0; 16], 0);
+    let frame = builder.frame(FrameKind::Native, module, 0x10, 0);
+    builder.symbolize(frame, module, &[line("a")]);
+    let stack = builder.stack(&[frame]);
+    let threads = [builder.thread(1, 1, 0), builder.thread(1, 2, 0)];
+    let tasks: Vec<u32> = (1..=3)
+        .map(|number| builder.task("goroutine", number, 0))
+        .collect();
+    builder.describe_task(tasks[1], NONE, Some("phase=spin"));
+    let site = builder.site("route", "app.rs", 1, module, uscope_probes::abi::SITE_LABEL);
+    for &(thread, start, length, value) in spans {
+        let value = builder.string(&format!("v{value}"));
+        builder.zone(
+            threads[thread as usize],
+            crate::capture::records::Zone {
+                start: start.into(),
+                end: (start + length).into(),
+                site: site.into(),
+                flags: 0.into(),
+                value: value.into(),
+                reserved: 0.into(),
+            },
+        );
+    }
+    for &(thread, time, weight, task) in samples {
+        builder.sample(
+            threads[thread as usize],
+            time,
+            weight,
+            stack,
+            task_row(task),
+        );
+    }
+    builder.finish()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// A sample carries the labels of the spans open on its thread at its
+    /// time, and its task's: a query of a label keeps exactly the samples
+    /// that carry it, and one by a key roots each at its innermost value.
+    #[test]
+    fn samples_carry_the_labels_open_on_their_thread_and_their_tasks(
+        spans in proptest::collection::vec((0..2_u32, 0..100_i64, 0..50_i64, 0..3_u32), 0..12),
+        samples in proptest::collection::vec((0..2_u32, 0..160_i64, 1..5_u64, 0..4_u32), 0..40),
+        wanted in 0..3_u32,
+    ) {
+        let capture = labeled(&spans, &samples);
+        let keys = Keys::new(&capture, Granularity::Function);
+        // The innermost route a sample carries: the latest-starting span
+        // that covers it, of two that start together the shorter.
+        let route = |&(thread, time, _, _): &Sample| {
+            spans
+                .iter()
+                .filter(|(on, start, length, _)| *on == thread && *start <= time && time < start + length)
+                .max_by_key(|(_, start, length, value)| (*start, std::cmp::Reverse(*length), *value))
+                .map(|(_, _, _, value)| *value)
+        };
+        let carries = |sample: &Sample, value: u32| {
+            spans.iter().any(|(on, start, length, carried)| {
+                *on == sample.0 && *start <= sample.1 && sample.1 < start + length && *carried == value
+            })
+        };
+        let weight = |keep: &dyn Fn(&Sample) -> bool| -> u64 {
+            samples.iter().filter(|sample| keep(sample)).map(|sample| sample.2).sum()
+        };
+        let query = |labels: Vec<(&str, String)>, by: Option<&str>| Query {
+            labels: labels.into_iter().map(|(key, value)| (key.to_owned(), value)).collect(),
+            by_label: by.map(str::to_owned),
+            ..Query::default()
+        };
+        let routed = keys.aggregate(&query(vec![("route", format!("v{wanted}"))], None));
+        prop_assert_eq!(routed.weight, weight(&|sample| carries(sample, wanted)));
+        let spun = keys.aggregate(&query(vec![("phase", "spin".to_owned())], None));
+        prop_assert_eq!(spun.weight, weight(&|sample| sample.3 == 1));
+        let by = keys.aggregate(&query(Vec::new(), Some("route")));
+        let mut roots = BTreeMap::new();
+        for node in (0..by.len()).filter(|&node| by.depth[node] == 0) {
+            roots.insert(keys.name(by.key[node]), by.total[node]);
+        }
+        let mut expected = BTreeMap::new();
+        for sample in &samples {
+            let name = route(sample).map_or_else(|| "[no route]".to_owned(), |value| format!("route=v{value}"));
+            *expected.entry(name).or_insert(0) += sample.2;
+        }
+        if spans.is_empty() {
+            // A key no label has roots every sample at its absence.
+            expected = expected.into_values().map(|weight| ("[no such label]".to_owned(), weight)).collect();
+        }
+        prop_assert_eq!(roots, expected);
+    }
+
+    /// A track's blocks draw every zone in the range once, never overlap,
+    /// and fold only zones narrower than the fold.
+    #[test]
+    fn zone_blocks_draw_each_zone_once_and_fold_only_narrow_ones(
+        spans in proptest::collection::vec((0..2_u32, 0..400_i64, 0..60_i64, 0..3_u32), 0..40),
+        range in (0..300_i64, 1..300_i64),
+        fold in 1..40_i64,
+    ) {
+        let capture = labeled(&spans, &[]);
+        let range = (range.0, range.0 + range.1);
+        let blocks = zone_blocks(&capture, range, None, fold);
+        let mut drawn: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+        for pair in blocks.windows(2) {
+            if (pair[0].thread, pair[0].depth) == (pair[1].thread, pair[1].depth) {
+                prop_assert!(pair[0].end <= pair[1].start, "{:?}", pair);
+            }
+        }
+        for block in &blocks {
+            *drawn.entry((block.thread, block.depth)).or_default() += block.count;
+            prop_assert!(block.count == 1 || block.end - block.start < fold * i64::from(2 * block.count));
+        }
+        let mut expected: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+        for zones in &capture.zone_ranges {
+            let start = zones.start.get() as usize;
+            for zone in &capture.zones[start..start + zones.count.get() as usize] {
+                if zone.end.get() > range.0 && zone.start.get() < range.1 {
+                    *expected.entry((zones.thread.get(), zones.depth.get())).or_default() += 1;
+                }
+            }
+        }
+        prop_assert_eq!(drawn, expected);
+    }
+}

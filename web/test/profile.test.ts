@@ -11,6 +11,7 @@ import {
   validateProfileLook,
 } from "../src/profile/look";
 import { type CallTree, decodeTree, findPath, hit, layout, pathOf } from "../src/profile/tree";
+import { blockAt, decodeZones, tracks } from "../src/profile/zones";
 import type { ProfileKey, ProfileTree, ServerMessage } from "../src/protocol";
 import { binaries, transcript } from "./transcripts";
 
@@ -26,6 +27,9 @@ describe("a profile's address", () => {
       src: "waits",
       tk: ["3", "none"],
       bt: "1",
+      lb: ["route=/users?id=7", "round=2"],
+      bl: "route",
+      zs: "db::query",
       lanes: "tasks",
       tf: ["focus:<Pin<Box<F>> as Future>::poll", "drop:std::sys::backtrace::__rust_begin"],
       invert: "1",
@@ -42,6 +46,8 @@ describe("a profile's address", () => {
       source: "waits",
       tasks: [3, null],
       byTask: true,
+      labels: ["route=/users?id=7", "round=2"],
+      byLabel: "route",
       transforms: [
         { op: "focus", name: "<Pin<Box<F>> as Future>::poll" },
         { op: "drop", name: "std::sys::backtrace::__rust_begin" },
@@ -61,6 +67,7 @@ describe("a profile's address", () => {
         src: "cpu",
         tk: ["x", "-1"],
         bt: "yes",
+        lb: ["=x", "nokey"],
         lanes: "threads",
         tf: ["spin:main", ":main", "merge:"],
         invert: "yes",
@@ -71,6 +78,7 @@ describe("a profile's address", () => {
       profile: "p",
       source: "samples",
       byTask: false,
+      labels: [],
       transforms: [],
       invert: false,
       native: false,
@@ -200,5 +208,45 @@ describe("a real server's call trees", () => {
         }
       }
     }
+  });
+});
+
+describe("a zones answer", () => {
+  it("decodes its columns into a track per thread, a row per depth", () => {
+    // [start, end, thread, depth, name, count, flags]
+    const blocks: number[][] = [
+      [0, 100, 4, 0, 0, 1, 0],
+      [10, 40, 4, 1, 1, 1, 2],
+      [50, 52, 4, 1, 2, 7, 0],
+      [5, 30, 9, 0, 0, 1, 0],
+    ];
+    const count = blocks.length;
+    const bytes = new Uint8Array(count * 36);
+    const view = new DataView(bytes.buffer);
+    for (const [at, block] of blocks.entries()) {
+      for (const [column, value] of block.entries()) {
+        if (column < 2) {
+          view.setFloat64((column * count + at) * 8, value, true);
+        } else {
+          view.setUint32(count * 16 + ((column - 2) * count + at) * 4, value, true);
+        }
+      }
+    }
+    const zones = decodeZones(
+      { range: [0, 100], blocks: count, names: ["outer", "inner", "zones"], marks: [] },
+      bytes,
+    );
+    expect([...zones.zones]).toEqual([1, 1, 7, 1]);
+    expect([...zones.flags]).toEqual([0, 2, 0, 0]);
+    // The heavier thread first, then any other with zones.
+    const laid = tracks(zones, [9, 4]);
+    expect(laid).toEqual([
+      { thread: 9, row: 0, depths: 1 },
+      { thread: 4, row: 1, depths: 2 },
+    ]);
+    const track = laid[1] ?? laid[0];
+    expect(track && blockAt(zones, track, 1, 20, 0)).toBe(1);
+    expect(track && blockAt(zones, track, 1, 45, 0)).toBeNull();
+    expect(() => decodeZones({ range: [0, 1], blocks: 2, names: [], marks: [] }, bytes)).toThrow();
   });
 });

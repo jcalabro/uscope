@@ -2,12 +2,15 @@
 //! and densities over time.
 //!
 //! A query selects samples, or the waits task snapshots found, by time,
-//! thread, and task, turns each one's stack into a path of keys, outermost
-//! first or, inverted, innermost first, and reshapes the path by its
-//! transforms in order. A logical query first shows each async task's
-//! frames as a stack of their own, and a query by task roots each path at
-//! its task. Samples are counted per distinct stack first, and task, so
-//! the work is linear in the samples selected and the stacks they use.
+//! thread, task, and label, turns each one's stack into a path of keys,
+//! outermost first or, inverted, innermost first, and reshapes the path by
+//! its transforms in order. A logical query first shows each async task's
+//! frames as a stack of their own, and a query by task or label roots each
+//! path at its task or its label's value. A sample's labels are those
+//! open on its thread at its time, joined in one pass over each thread's
+//! samples and label spans, and its task's. Samples are counted per
+//! distinct stack first, and group, so the work is linear in the samples
+//! selected and the stacks they use.
 
 use foldhash::HashMap;
 
@@ -39,6 +42,9 @@ pub struct Query {
     /// Samples or waits of these tasks, by their rows, or of any: [`NONE`]
     /// is a sample no task snapshot named.
     pub tasks: Option<Vec<u32>>,
+    /// Samples or waits that carry every one of these labels, each a key
+    /// and value.
+    pub labels: Vec<(String, String)>,
     pub transforms: Vec<Transform>,
     /// Paths from the innermost frame out, so that the tree is of callers.
     pub invert: bool,
@@ -48,6 +54,9 @@ pub struct Query {
     /// Roots each path, after its transforms, at the task it ran or waited
     /// in.
     pub by_task: bool,
+    /// Roots each path, after its transforms and outside any task, at its
+    /// label of this key, or at the key's absence.
+    pub by_label: Option<String>,
 }
 
 /// One step of reshaping each sample's path, applied in order.
@@ -113,13 +122,69 @@ struct Selected {
     /// Its thread's row, or [`NONE`] for a wait.
     thread: u32,
     task: u32,
+    /// The key of its label a query by label roots it at, or [`NONE`].
+    label: u32,
     stack: u32,
     weight: u64,
 }
 
+/// What a query asks of labels: the rows a sample must carry, and the key
+/// it is grouped by.
+struct LabelQuery<'a> {
+    required: Vec<u32>,
+    by: Option<&'a str>,
+    /// The labels a sample carries.
+    carried: Vec<u32>,
+}
+
+impl<'a> LabelQuery<'a> {
+    /// `None` when a required label is nowhere, so nothing is selected.
+    fn new(keys: &Keys<'_>, query: &'a Query) -> Option<Self> {
+        let required = query
+            .labels
+            .iter()
+            .map(|(key, value)| keys.label(key, Some(value)))
+            .collect::<Option<Vec<u32>>>()?;
+        Some(Self {
+            required,
+            by: query.by_label.as_deref(),
+            carried: Vec::new(),
+        })
+    }
+
+    const fn active(&self) -> bool {
+        !self.required.is_empty() || self.by.is_some()
+    }
+
+    /// Whether a sample that carries `self.carried`, its task's labels
+    /// and then its thread's spans by start, is kept, and the key of the
+    /// label it is grouped by: of several of one key, the innermost span's.
+    fn judge(&self, keys: &Keys<'_>) -> Option<u32> {
+        if !self
+            .required
+            .iter()
+            .all(|label| self.carried.contains(label))
+        {
+            return None;
+        }
+        Some(self.by.map_or(NONE, |by| {
+            let label = self
+                .carried
+                .iter()
+                .copied()
+                .rfind(|&label| keys.labels()[label as usize].0 == by)
+                .or_else(|| keys.label(by, None));
+            keys.label_key(label.unwrap_or(NONE))
+        }))
+    }
+}
+
 /// Each sample or wait `query` selects, in time order per thread, but for
 /// its transforms.
-fn each(capture: &Capture, query: &Query, mut take: impl FnMut(Selected)) {
+fn each(capture: &Capture, keys: &Keys<'_>, query: &Query, mut take: impl FnMut(Selected)) {
+    let Some(mut labels) = LabelQuery::new(keys, query) else {
+        return;
+    };
     let task_kept = |task: u32| {
         query
             .tasks
@@ -137,18 +202,43 @@ fn each(capture: &Capture, query: &Query, mut take: impl FnMut(Selected)) {
                 {
                     continue;
                 }
+                // The thread's label spans that began by a sample's time
+                // and have not ended.
+                let spans = keys.spans(thread);
+                let (mut next, mut open) = (0, Vec::new());
                 let samples = capture.thread_samples(range);
                 for sample in &samples[in_range(samples, |sample| sample.time.get(), query.range)] {
-                    let (stack, task) = (sample.stack.get(), sample.task.get());
-                    if stack != NONE && task_kept(task) {
-                        take(Selected {
-                            time: sample.time.get(),
-                            thread,
-                            task,
-                            stack,
-                            weight: sample.weight.get(),
-                        });
+                    let (stack, task, time) =
+                        (sample.stack.get(), sample.task.get(), sample.time.get());
+                    if stack == NONE || !task_kept(task) {
+                        continue;
                     }
+                    let label = if labels.active() {
+                        while let Some(&(start, end, label)) = spans.get(next)
+                            && start <= time
+                        {
+                            open.push((end, label));
+                            next += 1;
+                        }
+                        open.retain(|(end, _)| *end > time);
+                        labels.carried.clear();
+                        labels.carried.extend_from_slice(keys.task_labels(task));
+                        labels.carried.extend(open.iter().map(|(_, label)| *label));
+                        let Some(judged) = labels.judge(keys) else {
+                            continue;
+                        };
+                        judged
+                    } else {
+                        NONE
+                    };
+                    take(Selected {
+                        time,
+                        thread,
+                        task,
+                        label,
+                        stack,
+                        weight: sample.weight.get(),
+                    });
                 }
             }
         }
@@ -156,41 +246,72 @@ fn each(capture: &Capture, query: &Query, mut take: impl FnMut(Selected)) {
             let waits = &capture.task_waits;
             for wait in &waits[in_range(waits, |wait| wait.time.get(), query.range)] {
                 let (stack, task) = (wait.stack.get(), wait.task.get());
-                if stack != NONE && task_kept(task) {
-                    take(Selected {
-                        time: wait.time.get(),
-                        thread: NONE,
-                        task,
-                        stack,
-                        weight: wait.weight.get(),
-                    });
+                if stack == NONE || !task_kept(task) {
+                    continue;
                 }
+                let label = if labels.active() {
+                    labels.carried.clear();
+                    labels.carried.extend_from_slice(keys.task_labels(task));
+                    let Some(judged) = labels.judge(keys) else {
+                        continue;
+                    };
+                    judged
+                } else {
+                    NONE
+                };
+                take(Selected {
+                    time: wait.time.get(),
+                    thread: NONE,
+                    task,
+                    label,
+                    stack,
+                    weight: wait.weight.get(),
+                });
             }
         }
     }
 }
 
+/// One stack's selection: its stack, and the task and label key a query
+/// by task or label roots it at, or [`NONE`], with its weight and count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Group {
+    stack: u32,
+    task: u32,
+    label: u32,
+    weight: u64,
+    count: u32,
+}
+
 /// The weight and count of what `query` selects on each stack and, by
-/// task, of each task on it: (stack, task, weight, count), the task
-/// [`NONE`] unless the query is by task.
-fn select(capture: &Capture, query: &Query) -> Vec<(u32, u32, u64, u32)> {
-    if query.by_task {
-        let mut by: HashMap<(u32, u32), (u64, u32)> = HashMap::default();
-        each(capture, query, |selected| {
-            let entry = by.entry((selected.stack, selected.task)).or_default();
+/// task or label, of each task and label on it.
+fn select(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Vec<Group> {
+    if query.by_task || query.by_label.is_some() {
+        let mut by: HashMap<(u32, u32, u32), (u64, u32)> = HashMap::default();
+        each(capture, keys, query, |selected| {
+            let task = if query.by_task { selected.task } else { NONE };
+            let entry = by
+                .entry((selected.stack, task, selected.label))
+                .or_default();
             entry.0 += selected.weight;
             entry.1 += 1;
         });
-        let mut selected: Vec<(u32, u32, u64, u32)> = by
+        let mut selected: Vec<Group> = by
             .into_iter()
-            .map(|((stack, task), (weight, count))| (stack, task, weight, count))
+            .map(|((stack, task, label), (weight, count))| Group {
+                stack,
+                task,
+                label,
+                weight,
+                count,
+            })
             .collect();
         selected.sort_unstable();
         return selected;
     }
     let mut weights = vec![0_u64; capture.stacks.len()];
     let mut counts = vec![0_u32; capture.stacks.len()];
-    each(capture, query, |selected| {
+    each(capture, keys, query, |selected| {
         weights[selected.stack as usize] += selected.weight;
         counts[selected.stack as usize] += 1;
     });
@@ -199,7 +320,13 @@ fn select(capture: &Capture, query: &Query) -> Vec<(u32, u32, u64, u32)> {
         .zip(counts)
         .enumerate()
         .filter(|(_, (weight, _))| *weight > 0)
-        .map(|(stack, (weight, count))| (index(stack), NONE, weight, count))
+        .map(|(stack, (weight, count))| Group {
+            stack: index(stack),
+            task: NONE,
+            label: NONE,
+            weight,
+            count,
+        })
         .collect()
 }
 
@@ -235,9 +362,9 @@ impl<'a> Paths<'a> {
         }
     }
 
-    /// The path of `stack`, run or waited on in `task`, under the query, or
-    /// `None` when a transform removes it.
-    fn of(&mut self, stack: u32, task: u32) -> Option<&[u32]> {
+    /// The path of `stack`, run or waited on in `task` under the label key
+    /// `label`, under the query, or `None` when a transform removes it.
+    fn of(&mut self, stack: u32, task: u32, label: u32) -> Option<&[u32]> {
         let path = &mut self.path;
         path.clear();
         for frame in self.capture.stack_frames(stack) {
@@ -273,8 +400,12 @@ impl<'a> Paths<'a> {
                 }
             }
         }
-        if self.query.by_task {
-            let group = self.keys.group(task);
+        let groups = [
+            self.query.by_task.then(|| self.keys.group(task)),
+            (label != NONE).then_some(label),
+        ];
+        // The label outermost, then the task.
+        for group in groups.into_iter().flatten() {
             if self.query.invert {
                 path.push(group);
             } else {
@@ -316,7 +447,7 @@ fn logical(keys: &Keys<'_>, path: &mut Vec<u32>) {
 
 /// The call tree of the samples `query` selects.
 pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree {
-    let selected = select(capture, query);
+    let selected = select(capture, keys, query);
     let mut paths = Paths::new(capture, keys, query);
     // The tree in the order nodes are first reached.
     let mut key = Vec::new();
@@ -324,10 +455,11 @@ pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree 
     let mut own = Vec::new();
     let mut children: HashMap<(u32, u32), u32> = HashMap::default();
     let mut tree = CallTree::default();
-    for &(stack, task, weight, count) in &selected {
-        let Some(path) = paths.of(stack, task) else {
+    for group in &selected {
+        let Some(path) = paths.of(group.stack, group.task, group.label) else {
             continue;
         };
+        let (weight, count) = (group.weight, group.count);
         tree.weight += weight;
         tree.samples += u64::from(count);
         let mut node = NONE;
@@ -413,17 +545,18 @@ pub struct Costs {
 
 /// What each key costs under `query`.
 pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Costs {
-    let selected = select(capture, query);
+    let selected = select(capture, keys, query);
     let mut paths = Paths::new(capture, keys, query);
     let mut own = vec![0_u64; keys.count()];
     let mut total = vec![0_u64; keys.count()];
     // The entry that last counted a key, so recursion counts once.
     let mut counted = vec![u32::MAX; keys.count()];
     let mut kept = 0;
-    for (entry, &(stack, task, weight, _)) in selected.iter().enumerate() {
-        let Some(path) = paths.of(stack, task) else {
+    for (entry, group) in selected.iter().enumerate() {
+        let Some(path) = paths.of(group.stack, group.task, group.label) else {
             continue;
         };
+        let weight = group.weight;
         kept += weight;
         let innermost = if query.invert {
             path.first()
@@ -557,18 +690,18 @@ pub fn density(
     let mut paths = Paths::new(capture, keys, query);
     // Whether each stack's samples are kept, decided once per stack and
     // task, and each lane, the last for no task.
-    let mut kept: HashMap<(u32, u32), bool> = HashMap::default();
+    let mut kept: HashMap<(u32, u32, u32), bool> = HashMap::default();
     let count = if by_task {
         capture.tasks.len() + 1
     } else {
         capture.threads.len()
     };
     let mut slices: Vec<Option<Vec<u64>>> = vec![None; count];
-    each(capture, query, |selected| {
+    each(capture, keys, query, |selected| {
         let task = if query.by_task { selected.task } else { NONE };
         let keep = *kept
-            .entry((selected.stack, task))
-            .or_insert_with(|| paths.of(selected.stack, task).is_some());
+            .entry((selected.stack, task, selected.label))
+            .or_insert_with(|| paths.of(selected.stack, task, selected.label).is_some());
         if !keep {
             return;
         }

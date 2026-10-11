@@ -371,6 +371,20 @@ choosing a task's name selects only its samples or waits. The footer says
 how many snapshots there were and what share of the recording they held
 the program stopped.
 
+A profile with instrumentation has a **Zones** view: a track per thread
+of its zones and labels, nested as they ran, with ticks where the program
+marked a frame, a message, or a trigger. Zones too narrow to tell apart
+are drawn as one block that says how many it holds; clicking a zone or a
+block selects its span. **Find zone** lists every zone site and label key
+with its total time. Choosing one shows the spread of its lengths in the
+selected range, its longest zones, each a button that selects it, and for
+a label, the time under each value. A value is a filter of every view:
+the flame graph, the call tree, and the timeline then keep only samples
+taken while it was open on their thread, or carried by their task, so
+`round=1` and a Go program's `phase=spin` filter alike. **Root by label**
+roots each path at its value of a label key, and samples without one at
+`[no round]`. A zone flagged as cut short says what of it was not seen.
+
 Everything the page shows is in its address, so a reload or a shared link
 opens the same view of the same profile.
 

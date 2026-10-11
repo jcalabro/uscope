@@ -145,6 +145,11 @@ pub enum Request {
     ProfileFunctions(ProfileQuery),
     /// How a query's samples fall over time, per thread.
     ProfileTimeline(ProfileTimelineQuery),
+    /// Each thread's zones in a range, folded to a width; their columns
+    /// go in the binary frame before the answer.
+    ProfileZones(ProfileZonesQuery),
+    /// The spread of one site's zone lengths.
+    ProfileZoneStats(ProfileZoneStatsQuery),
     /// Records a program, publishing its profile as it goes.
     RecordProfile(RecordProfile),
     /// Ends a recording, killing its program.
@@ -759,6 +764,13 @@ pub struct ProfileQuery {
     /// Roots each path at its task.
     #[serde(default)]
     pub by_task: bool,
+    /// Samples or waits that carry each of these labels, `key=value`.
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Roots each path, outside any task, at its label of this key.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub by_label: Option<String>,
     /// Applied in order, to keys by the names views show.
     #[serde(default)]
     pub transforms: Vec<ProfileTransform>,
@@ -874,6 +886,155 @@ pub struct ProfileSummary {
     pub snapshot_problems: Vec<ProfileMarker>,
     /// The weight of every wait the snapshots found.
     pub waited: u64,
+    /// What the recording read of the program's instrumentation, and lost.
+    pub probes: ProfileProbes,
+    /// Each zone site name's and label key's zones, most time first.
+    pub zone_sites: Vec<ProfileZoneSite>,
+    /// Every key a sample's or task's label may have.
+    pub label_keys: Vec<String>,
+    /// Why modules' instrumentation could not be read.
+    pub probe_problems: Vec<ProfileMarker>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileProbes {
+    pub events: u64,
+    /// Records threads overwrote before uscope read them.
+    pub overwritten: u64,
+    /// Events no ring could take.
+    pub no_ring: u64,
+    /// Events a signal handler dropped mid-write.
+    pub interrupted: u64,
+    /// Records that broke the probes ABI.
+    pub malformed: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileZoneSite {
+    pub name: String,
+    /// Whether its zones are a label's spans.
+    pub label: bool,
+    pub count: u64,
+    /// Nanoseconds, all of them and the longest.
+    pub total: u64,
+    pub longest: u64,
+    /// Zones of it whose begin or end was not seen, or did not nest.
+    pub flagged: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileZonesQuery {
+    pub profile: String,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    #[expect(dead_code, reason = "only the tab's cache reads it")]
+    pub revision: u32,
+    /// Nanoseconds from the profile's start, or all of it.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub range: Option<[i64; 2]>,
+    /// Of these threads, by row, or of all.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub threads: Option<Vec<u32>>,
+    /// The pixels the range is drawn across: zones under three pixels wide
+    /// fold together.
+    pub width: u32,
+}
+
+/// Zones as a view draws them: the binary frame before it holds, for each
+/// block, its start and end as `f64` nanoseconds from the profile's start,
+/// then its thread, depth, name (an index into `names`), zone count, and
+/// flags as `u32`s, column by column.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileZones {
+    pub range: [i64; 2],
+    pub blocks: u32,
+    pub names: Vec<String>,
+    /// The program's messages, frames, and triggers in the range.
+    pub marks: Vec<ProfileMark>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileMark {
+    pub thread: u32,
+    /// Nanoseconds from the start.
+    pub time: i64,
+    pub kind: ProfileMarkKind,
+    /// Its site's name.
+    pub name: String,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum ProfileMarkKind {
+    Message,
+    Frame,
+    Trigger,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileZoneStatsQuery {
+    pub profile: String,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    #[expect(dead_code, reason = "only the tab's cache reads it")]
+    pub revision: u32,
+    /// A zone site's name, or a label's key.
+    pub name: String,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub range: Option<[i64; 2]>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub threads: Option<Vec<u32>>,
+}
+
+/// The spread of one site's zone lengths, in nanoseconds.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileZoneStats {
+    pub count: u64,
+    pub total: u64,
+    pub flagged: u64,
+    pub min: u64,
+    pub median: u64,
+    pub p90: u64,
+    pub p99: u64,
+    pub max: u64,
+    /// Buckets of equal ratio: each its lowest length and how many.
+    pub histogram: Vec<[u64; 2]>,
+    /// The longest, longest first.
+    pub longest: Vec<ProfileZoneAt>,
+    /// For a label: each value's time and count, most time first.
+    pub values: Vec<ProfileLabelValue>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileZoneAt {
+    pub thread: u32,
+    /// Nanoseconds from the start.
+    pub start: i64,
+    pub end: i64,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileLabelValue {
+    pub value: String,
+    pub total: u64,
+    pub count: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -965,6 +1126,8 @@ pub enum ProfileKeyKind {
     Task,
     /// A task a query by task roots paths at.
     Group,
+    /// A label value a query by label roots paths at.
+    Label,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1977,6 +2140,16 @@ mod tests {
         ProfileTimeline::decl,
         ProfileLane::decl,
         ProfileMarker::decl,
+        ProfileProbes::decl,
+        ProfileZoneSite::decl,
+        ProfileZonesQuery::decl,
+        ProfileZones::decl,
+        ProfileMark::decl,
+        ProfileMarkKind::decl,
+        ProfileZoneStatsQuery::decl,
+        ProfileZoneStats::decl,
+        ProfileZoneAt::decl,
+        ProfileLabelValue::decl,
         RecordProfile::decl,
         RecordPreset::decl,
         RecordStarted::decl,

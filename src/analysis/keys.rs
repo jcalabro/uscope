@@ -39,7 +39,13 @@ pub enum KeyKind {
     /// A task of a language runtime, by its row, under which a query by
     /// task roots each path: [`NONE`] for what no task snapshot named.
     Group { task: u32 },
+    /// A label, by its row in [`Keys::labels`], under which a query by
+    /// label roots each path: [`NONE`] for a key no label has.
+    Label { label: u32 },
 }
+
+/// A label: a key, and its value, or `None` for its absence.
+pub type Label<'a> = (&'a str, Option<&'a str>);
 
 /// Each frame's keys, innermost first, and what each key is.
 pub struct Keys<'a> {
@@ -53,6 +59,30 @@ pub struct Keys<'a> {
     tasks: Vec<u32>,
     /// The group key of each task, by its row, and last, of none.
     groups: Vec<u32>,
+    labels: Vec<Label<'a>>,
+    label_rows: HashMap<Label<'a>, u32>,
+    /// The key of each label, by its row, and last, of a key no label has.
+    label_roots: Vec<u32>,
+    /// Each thread's label spans, by its row: start, end, and label, by
+    /// start.
+    spans: Vec<Vec<(i64, i64, u32)>>,
+    /// Each task's labels, by its row.
+    task_labels: Vec<Vec<u32>>,
+}
+
+/// The role of a key's code; keys of no code are ordinary.
+fn code_role(capture: &Capture, kind: KeyKind) -> CodeRole {
+    let number = match kind {
+        KeyKind::Function { function } | KeyKind::Line { function, .. } => {
+            capture.functions[function as usize].role
+        }
+        KeyKind::Address { frame } => capture.frames[frame as usize].role,
+        KeyKind::Truncation { .. }
+        | KeyKind::Task { .. }
+        | KeyKind::Group { .. }
+        | KeyKind::Label { .. } => 0,
+    };
+    role_of(number).unwrap_or_default()
 }
 
 impl<'a> Keys<'a> {
@@ -103,19 +133,7 @@ impl<'a> Keys<'a> {
             }
         }
         starts.push(index(flat.len()));
-        let mut roles: Vec<CodeRole> = kinds
-            .iter()
-            .map(|kind| {
-                let number = match *kind {
-                    KeyKind::Function { function } | KeyKind::Line { function, .. } => {
-                        capture.functions[function as usize].role
-                    }
-                    KeyKind::Address { frame } => capture.frames[frame as usize].role,
-                    KeyKind::Truncation { .. } | KeyKind::Task { .. } | KeyKind::Group { .. } => 0,
-                };
-                role_of(number).unwrap_or_default()
-            })
-            .collect();
+        let mut roles: Vec<CodeRole> = kinds.iter().map(|kind| code_role(capture, *kind)).collect();
         // A task is rooted by function, whatever the granularity.
         let mut tasks = vec![NONE; kinds.len()];
         for (code, kind) in kinds.clone().into_iter().enumerate() {
@@ -128,7 +146,10 @@ impl<'a> Keys<'a> {
                     function: NONE,
                     frame,
                 },
-                KeyKind::Truncation { .. } | KeyKind::Task { .. } | KeyKind::Group { .. } => {
+                KeyKind::Truncation { .. }
+                | KeyKind::Task { .. }
+                | KeyKind::Group { .. }
+                | KeyKind::Label { .. } => {
                     continue;
                 }
             };
@@ -138,13 +159,19 @@ impl<'a> Keys<'a> {
                 index(kinds.len() - 1)
             });
         }
+        let mut add = |kind: KeyKind| {
+            kinds.push(kind);
+            roles.push(CodeRole::Ordinary);
+            index(kinds.len() - 1)
+        };
         let groups = (0..index(capture.tasks.len()))
             .chain([NONE])
-            .map(|task| {
-                kinds.push(KeyKind::Group { task });
-                roles.push(CodeRole::Ordinary);
-                index(kinds.len() - 1)
-            })
+            .map(|task| add(KeyKind::Group { task }))
+            .collect();
+        let found = labels(capture);
+        let label_roots = (0..index(found.labels.len()))
+            .chain([NONE])
+            .map(|label| add(KeyKind::Label { label }))
             .collect();
         tasks.resize(kinds.len(), NONE);
         Self {
@@ -156,7 +183,47 @@ impl<'a> Keys<'a> {
             roles,
             tasks,
             groups,
+            labels: found.labels,
+            label_rows: found.rows,
+            label_roots,
+            spans: found.spans,
+            task_labels: found.tasks,
         }
+    }
+
+    /// Every label, by row.
+    #[must_use]
+    pub fn labels(&self) -> &[Label<'a>] {
+        &self.labels
+    }
+
+    /// The row of a label, if any span or task has it, or for `None`, if
+    /// any has its key.
+    #[must_use]
+    pub fn label(&self, key: &str, value: Option<&str>) -> Option<u32> {
+        self.label_rows.get(&(key, value)).copied()
+    }
+
+    /// The key a query by label roots a label's paths at, by its row, or
+    /// [`NONE`] for a key no label has.
+    #[must_use]
+    pub fn label_key(&self, label: u32) -> u32 {
+        self.label_roots
+            .get(label as usize)
+            .copied()
+            .unwrap_or(self.label_roots[self.label_roots.len() - 1])
+    }
+
+    /// A thread's label spans, by start: start, end, and label.
+    pub(crate) fn spans(&self, thread: u32) -> &[(i64, i64, u32)] {
+        self.spans.get(thread as usize).map_or(&[], Vec::as_slice)
+    }
+
+    /// A task's labels, by its row.
+    pub(crate) fn task_labels(&self, task: u32) -> &[u32] {
+        self.task_labels
+            .get(task as usize)
+            .map_or(&[], Vec::as_slice)
     }
 
     #[must_use]
@@ -293,6 +360,11 @@ impl<'a> Keys<'a> {
                     }
                 }
             }
+            KeyKind::Label { label: NONE } => "[no such label]".to_owned(),
+            KeyKind::Label { label } => match self.labels[label as usize] {
+                (key, Some(value)) => format!("{key}={value}"),
+                (key, None) => format!("[no {key}]"),
+            },
             KeyKind::Truncation { reason, module } => {
                 let reason = Truncation::from_number(u64::from(reason))
                     .map_or("unknown", Truncation::describe);
@@ -322,7 +394,8 @@ impl<'a> Keys<'a> {
             KeyKind::Address { .. }
             | KeyKind::Truncation { .. }
             | KeyKind::Task { .. }
-            | KeyKind::Group { .. } => {
+            | KeyKind::Group { .. }
+            | KeyKind::Label { .. } => {
                 return None;
             }
         };
@@ -344,7 +417,7 @@ impl<'a> Keys<'a> {
                 capture.frames[frame as usize].module.get()
             }
             KeyKind::Truncation { module, .. } => module,
-            KeyKind::Group { .. } => NONE,
+            KeyKind::Group { .. } | KeyKind::Label { .. } => NONE,
         };
         self.module_name(module)
     }
@@ -365,4 +438,69 @@ impl<'a> Keys<'a> {
             path.rsplit('/').next().unwrap_or(path)
         })
     }
+}
+
+/// A capture's labels, which spans of a thread's time and tasks carry.
+struct Found<'a> {
+    labels: Vec<Label<'a>>,
+    rows: HashMap<Label<'a>, u32>,
+    spans: Vec<Vec<(i64, i64, u32)>>,
+    tasks: Vec<Vec<u32>>,
+}
+
+/// The row of the label `key=value`, and of its key's absence.
+fn row<'a>(found: &mut Found<'a>, key: &'a str, value: &'a str) -> u32 {
+    let mut row = |label| {
+        *found.rows.entry(label).or_insert_with(|| {
+            found.labels.push(label);
+            index(found.labels.len() - 1)
+        })
+    };
+    row((key, None));
+    row((key, Some(value)))
+}
+
+/// Every label: each a key and a value, and each key's absence.
+fn labels(capture: &Capture) -> Found<'_> {
+    let mut found = Found {
+        labels: Vec::new(),
+        rows: HashMap::default(),
+        spans: vec![Vec::new(); capture.threads.len()],
+        tasks: vec![Vec::new(); capture.tasks.len()],
+    };
+    for range in &capture.zone_ranges {
+        let start = range.start.get() as usize;
+        for zone in &capture.zones[start..start + range.count.get() as usize] {
+            let site = &capture.sites[zone.site.get() as usize];
+            if site.kind != uscope_probes::abi::SITE_LABEL {
+                continue;
+            }
+            let (key, value) = (
+                capture.string(site.name.get()),
+                capture.string(zone.value.get()),
+            );
+            let label = row(&mut found, key, value);
+            found.spans[range.thread.get() as usize].push((
+                zone.start.get(),
+                zone.end.get(),
+                label,
+            ));
+        }
+    }
+    // Of spans that begin together, the inner, shorter one comes after.
+    for spans in &mut found.spans {
+        spans.sort_unstable_by_key(|&(start, end, label)| (start, std::cmp::Reverse(end), label));
+    }
+    for (task, record) in capture.tasks.iter().enumerate() {
+        if record.labels.get() == NONE {
+            continue;
+        }
+        for line in capture.string(record.labels.get()).lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                let label = row(&mut found, key, value);
+                found.tasks[task].push(label);
+            }
+        }
+    }
+    found
 }

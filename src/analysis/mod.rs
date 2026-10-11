@@ -13,12 +13,14 @@ pub mod keys;
 pub mod query;
 #[cfg(test)]
 mod tests;
+pub mod zones;
 
 pub use keys::{Granularity, KeyKind, Keys};
 pub use query::{
     CallTree, Cost, Costs, Lanes, OffCpuLane, Query, Source, Transform, aggregate, density,
     functions, off_cpu,
 };
+pub use zones::{ZoneAt, ZoneBlock, ZoneStats, sites_named, zone_blocks, zone_stats};
 
 /// A position in a capture's tables, which validation keeps within `u32`.
 fn index(position: usize) -> u32 {

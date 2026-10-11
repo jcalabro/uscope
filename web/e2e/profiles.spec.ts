@@ -187,3 +187,43 @@ test("a profile shows where tasks waited, by task, and a lane per task", async (
   ).toBeVisible();
   await expect(tree.filter({ hasText: "main.spin" }).first()).toBeVisible();
 });
+
+test("a program's zones show in tracks, and Find Zone measures one and filters by a label", async ({
+  page,
+  uscope,
+}, info) => {
+  const file = info.outputPath("zones.usprof");
+  execFileSync(
+    path.join(root, "target", "debug", "uscope"),
+    ["record", "-o", file, "--", fixture("probes"), "zones"],
+    { stdio: "ignore" },
+  );
+  const served = await uscope.start([file]);
+  await join(page, served.link);
+  await expect(page.getByTestId("accounting")).toContainText("probe events, lost 0");
+  await page.getByRole("button", { name: "Zones", exact: true }).click();
+  await expect(page).toHaveURL(/view=zones/);
+  await expect(page.getByRole("img", { name: /^Zones over/ })).toBeVisible();
+
+  // A site's zones, measured; its longest selects its span.
+  const find = page.getByTestId("find-zone");
+  await find.getByRole("button", { name: "outer", exact: true }).click();
+  await expect(page).toHaveURL(/zs=outer/);
+  const stats = page.getByTestId("zone-stats");
+  await expect(stats.locator("dd").first()).toHaveText("3");
+  await stats.getByRole("listitem").first().getByRole("button").click();
+  await expect(page).toHaveURL(/range=\d+-\d+/);
+
+  // A label's values are filters of every view: in that span, the round
+  // around it.
+  await find.getByRole("button", { name: "round", exact: true }).click();
+  const value = stats.getByRole("button", { name: /^round=\d$/ });
+  await expect(value).toHaveCount(1);
+  const round = (await value.textContent()) ?? "";
+  await value.click();
+  await expect(page).toHaveURL(new RegExp(`lb=${encodeURIComponent(round)}`));
+  await expect(page.getByRole("button", { name: `Remove ${round}` })).toBeVisible();
+  await stats.getByRole("button", { name: "By round" }).click();
+  await expect(page).toHaveURL(/bl=round/);
+  await expect(page.getByRole("combobox", { name: "Root by label" })).toHaveValue("round");
+});

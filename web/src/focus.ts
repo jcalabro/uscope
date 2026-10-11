@@ -31,7 +31,7 @@ const VIEWS: readonly View[] = ["source", "disassembly", "memory", "drawings"];
 /** The keys every route's query may carry, and whether each repeats: a
  * stop's watches, expanded rows, and drawings, and a profile's threads,
  * transforms, and zoomed path. */
-const LISTS = new Set(["w", "x", "d", "th", "tk", "tf", "z"]);
+const LISTS = new Set(["w", "x", "d", "th", "tk", "tf", "z", "lb"]);
 
 /**
  * Parses a query, keeping a repeated key's values in order. Lists repeat

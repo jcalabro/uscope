@@ -22,11 +22,12 @@ pub use collector::ProbeSelection;
 pub use session::{Attachment, Recording, Save, Watch, record, record_attached, record_watched};
 pub use zones::{
     PlotValue, ProbeCounts, ProfileZone, ProgramMarker, ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN,
-    ZONE_MISMATCHED,
+    ZONE_MISMATCHED, ZoneSite,
 };
 
 pub use crate::analysis::{
     CallTree, Cost, Costs, Granularity, KeyKind, Keys, Lanes, OffCpuLane, Query, Source, Transform,
+    ZoneAt, ZoneBlock, ZoneStats,
 };
 
 use std::path::{Path, PathBuf};
@@ -453,7 +454,7 @@ impl Profile {
         Keys::new(&self.capture, granularity)
     }
 
-    /// Each thread that was sampled or left its CPU, by its row, which
+    /// Each thread that was sampled, left its CPU, or recorded zones, by its row, which
     /// queries name.
     #[must_use]
     pub fn threads(&self) -> Vec<ProfileThread> {
@@ -480,6 +481,10 @@ impl Profile {
             let thread = threads.entry(row).or_insert_with(|| new(row));
             thread.samples = samples.len() as u64;
             thread.weight = samples.iter().map(|sample| sample.weight.get()).sum();
+        }
+        for range in &capture.zone_ranges {
+            let row = range.thread.get();
+            threads.entry(row).or_insert_with(|| new(row));
         }
         for range in &capture.off_cpu_ranges {
             let row = range.thread.get();

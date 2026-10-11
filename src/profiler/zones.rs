@@ -1,7 +1,7 @@
 //! What a profile's instrumentation recorded: zones and labels, plotted
 //! values, the program's markers, and what was lost.
 
-use super::Profile;
+use super::{Profile, ZoneBlock, ZoneStats};
 use crate::capture::records::{AccountKind, MarkerKind, NONE};
 
 pub use crate::capture::records::{ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, ZONE_MISMATCHED};
@@ -57,6 +57,19 @@ pub struct ProbeCounts {
     pub interrupted: u64,
     /// Records, and rings, that broke the ABI.
     pub malformed: u64,
+}
+
+/// Every zone of one site name, or one label key, over a whole profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZoneSite {
+    pub name: String,
+    /// Whether its sites are labels.
+    pub label: bool,
+    pub count: u64,
+    /// Nanoseconds, all of them and the longest.
+    pub total: u64,
+    pub longest: u64,
+    pub flagged: u64,
 }
 
 impl ProbeCounts {
@@ -152,6 +165,96 @@ impl Profile {
             interrupted: account(AccountKind::ProbeInterrupted),
             malformed: account(AccountKind::ProbeMalformed),
         }
+    }
+
+    /// The span the program's instrumentation covers: from the first
+    /// zone's start or mark to the last zone's end or mark, if any.
+    #[must_use]
+    pub fn zone_extent(&self) -> Option<(i64, i64)> {
+        let capture = &self.capture;
+        let marks = capture
+            .markers
+            .iter()
+            .filter(|marker| marker.site.get() != NONE)
+            .map(|marker| (marker.time.get(), marker.time.get()));
+        capture
+            .zones
+            .iter()
+            .map(|zone| (zone.start.get(), zone.end.get()))
+            .chain(marks)
+            .reduce(|(start, end), (from, to)| (start.min(from), end.max(to)))
+    }
+
+    /// What each site name's zones, or label key's spans, add up to, most
+    /// time first.
+    #[must_use]
+    pub fn zone_sites(&self) -> Vec<ZoneSite> {
+        let capture = &self.capture;
+        let mut sites: Vec<ZoneSite> = Vec::new();
+        for zone in &capture.zones {
+            let site = &capture.sites[zone.site.get() as usize];
+            let name = capture.string(site.name.get());
+            let label = site.kind == uscope_probes::abi::SITE_LABEL;
+            let position = sites
+                .iter()
+                .position(|known| known.name == name && known.label == label)
+                .unwrap_or_else(|| {
+                    sites.push(ZoneSite {
+                        name: name.to_owned(),
+                        label,
+                        count: 0,
+                        total: 0,
+                        longest: 0,
+                        flagged: 0,
+                    });
+                    sites.len() - 1
+                });
+            let length = u64::try_from(zone.end.get() - zone.start.get()).unwrap_or(0);
+            let entry = &mut sites[position];
+            entry.count += 1;
+            entry.total += length;
+            entry.longest = entry.longest.max(length);
+            entry.flagged += u64::from(zone.flags.get() != 0);
+        }
+        sites.sort_by(|a, b| (b.total, &a.name).cmp(&(a.total, &b.name)));
+        sites
+    }
+
+    /// The zones in `range` of the threads `threads` names by row, each
+    /// run narrower than `fold` nanoseconds drawn as one.
+    #[must_use]
+    pub fn zone_blocks(
+        &self,
+        range: (i64, i64),
+        threads: Option<&[u32]>,
+        fold: i64,
+    ) -> Vec<ZoneBlock> {
+        crate::analysis::zone_blocks(&self.capture, range, threads, fold)
+    }
+
+    /// The spread of the lengths of the zones a site name, or label key,
+    /// names that overlap `range`.
+    #[must_use]
+    pub fn zone_stats(&self, name: &str, range: (i64, i64), threads: Option<&[u32]>) -> ZoneStats {
+        let sites = crate::analysis::sites_named(&self.capture, name);
+        crate::analysis::zone_stats(&self.capture, &sites, range, threads)
+    }
+
+    /// How views name a zone of `site` with the label value `value`: its
+    /// name, or `key=value`; a run of several sites is `zones`.
+    #[must_use]
+    pub fn zone_name(&self, site: u32, value: u32) -> String {
+        match (site, value) {
+            (NONE, _) => "zones".to_owned(),
+            (site, NONE) => self.site_name(site),
+            (site, value) => format!("{}={}", self.site_name(site), self.capture.string(value)),
+        }
+    }
+
+    /// A label value's text, if the zone has one.
+    #[must_use]
+    pub fn label_value(&self, value: u32) -> Option<&str> {
+        (value != NONE).then(|| self.capture.string(value))
     }
 
     fn site_name(&self, site: u32) -> String {

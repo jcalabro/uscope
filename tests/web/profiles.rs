@@ -444,3 +444,132 @@ async fn a_program_that_cannot_start_fails_its_recording() {
     assert_eq!(kind, "failed");
     assert!(message.contains("starting the program failed"), "{message}");
 }
+
+/// A profile of the probes fixture's nested zones and labels.
+fn record_zones(scratch: &ScratchDir) -> std::path::PathBuf {
+    let mut command = Command::new(Scenario::fixture("probes"));
+    command.arg("zones").stdout(Stdio::null());
+    let recording = record(command, &RecordOptions::default()).expect("record");
+    assert!(recording.status.success());
+    let path = scratch.path().join("zones.usprof");
+    recording.profile.write(&path).expect("write the profile");
+    path
+}
+
+/// A zones answer's blocks: thread, depth, name, and zone count.
+fn blocks(answer: &Value, bytes: &[u8]) -> Vec<(u64, u32, String, u32)> {
+    let count = usize::try_from(answer["blocks"].as_u64().expect("a count")).expect("small");
+    assert_eq!(bytes.len(), count * 36);
+    let word = |column: usize, at: usize| {
+        let offset = count * 16 + (column * count + at) * 4;
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
+    };
+    let names = answer["names"].as_array().expect("names");
+    (0..count)
+        .map(|at| {
+            let name = names[word(2, at) as usize].as_str().expect("a name");
+            (
+                u64::from(word(0, at)),
+                word(1, at),
+                name.to_owned(),
+                word(3, at),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_profile_serves_its_zones_folded_to_a_width_and_measured() {
+    let scratch = ScratchDir::new("web-zones");
+    let path = record_zones(&scratch);
+    let web = Web::start("profile", &[path.to_str().expect("a path")]);
+    let mut tab = web.control("tab").await;
+    let listed = tab
+        .expect("the profiles", |message| message["type"] == "profiles")
+        .await;
+    let id = listed["profiles"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+
+    let summary = tab.ok("profile", json!({"profile": id})).await;
+    assert_eq!(summary["probes"]["overwritten"], 0, "{summary}");
+    assert_eq!(summary["labelKeys"], json!(["round"]));
+    let sites: Vec<(&str, bool, u64)> = summary["zoneSites"]
+        .as_array()
+        .expect("sites")
+        .iter()
+        .map(|site| {
+            (
+                site["name"].as_str().expect("a name"),
+                site["label"].as_bool().expect("a kind"),
+                site["count"].as_u64().expect("a count"),
+            )
+        })
+        .collect();
+    for expected in [
+        ("round", true, 3),
+        ("outer", false, 3),
+        ("leaf", false, 3),
+        ("step", false, 2),
+    ] {
+        assert!(sites.contains(&expected), "{expected:?} in {sites:?}");
+    }
+
+    // Wide enough, every zone is a block of its own, at its depth.
+    let (answer, bytes) = tab
+        .with_bytes(
+            "profileZones",
+            json!({"profile": id, "width": 1_000_000_000}),
+        )
+        .await
+        .expect("zones");
+    let drawn = blocks(&answer, &bytes);
+    assert_eq!(drawn.len(), 18, "{drawn:?}");
+    assert!(drawn.iter().all(|(_, _, _, count)| *count == 1));
+    let depth_of = |name: &str| {
+        drawn
+            .iter()
+            .filter(|(_, _, drawn, _)| drawn == name)
+            .map(|(_, depth, _, _)| *depth)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(depth_of("round=1"), [0]);
+    assert_eq!(depth_of("leaf"), [3, 3, 3]);
+    assert_eq!(answer["marks"].as_array().map(Vec::len), Some(7));
+    // Ten pixels wide, each thread's track folds into a block per depth.
+    let (answer, bytes) = tab
+        .with_bytes("profileZones", json!({"profile": id, "width": 10}))
+        .await
+        .expect("zones");
+    let folded = blocks(&answer, &bytes);
+    assert_eq!(
+        folded.iter().map(|block| block.3).sum::<u32>(),
+        18,
+        "{folded:?}"
+    );
+    assert!(folded.len() < drawn.len());
+
+    let stats = tab
+        .ok("profileZoneStats", json!({"profile": id, "name": "round"}))
+        .await;
+    assert_eq!(stats["count"], 3, "{stats}");
+    assert!(stats["median"].as_u64() <= stats["max"].as_u64());
+    let values: Vec<&str> = stats["values"]
+        .as_array()
+        .expect("values")
+        .iter()
+        .map(|value| value["value"].as_str().expect("a value"))
+        .collect();
+    assert_eq!(values.len(), 3);
+    for value in ["0", "1", "2"] {
+        assert!(values.contains(&value), "{values:?}");
+    }
+    // A label is a query's filter too: one no sample carries keeps none.
+    let filtered = tree(&mut tab, json!({"profile": id, "labels": ["round=9"]})).await;
+    assert!(filtered.is_empty());
+    let failed = tab
+        .with_bytes("profileTree", json!({"profile": id, "labels": ["round"]}))
+        .await;
+    assert!(failed.is_err());
+}

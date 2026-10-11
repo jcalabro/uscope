@@ -8,9 +8,9 @@ export type Envelope = {
 /**
  * Chosen by the tab; the answer carries it back.
  */
-id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" } | { "method": "profile", "params": ProfileRef } | { "method": "profileTree", "params": ProfileQuery } | { "method": "profileFunctions", "params": ProfileQuery } | { "method": "profileTimeline", "params": ProfileTimelineQuery } | { "method": "recordProfile", "params": RecordProfile } | { "method": "stopRecording", "params": ProfileRef });
+id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" } | { "method": "profile", "params": ProfileRef } | { "method": "profileTree", "params": ProfileQuery } | { "method": "profileFunctions", "params": ProfileQuery } | { "method": "profileTimeline", "params": ProfileTimelineQuery } | { "method": "profileZones", "params": ProfileZonesQuery } | { "method": "profileZoneStats", "params": ProfileZoneStatsQuery } | { "method": "recordProfile", "params": RecordProfile } | { "method": "stopRecording", "params": ProfileRef });
 
-export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" } | { "method": "profile", "params": ProfileRef } | { "method": "profileTree", "params": ProfileQuery } | { "method": "profileFunctions", "params": ProfileQuery } | { "method": "profileTimeline", "params": ProfileTimelineQuery } | { "method": "recordProfile", "params": RecordProfile } | { "method": "stopRecording", "params": ProfileRef };
+export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" } | { "method": "profile", "params": ProfileRef } | { "method": "profileTree", "params": ProfileQuery } | { "method": "profileFunctions", "params": ProfileQuery } | { "method": "profileTimeline", "params": ProfileTimelineQuery } | { "method": "profileZones", "params": ProfileZonesQuery } | { "method": "profileZoneStats", "params": ProfileZoneStatsQuery } | { "method": "recordProfile", "params": RecordProfile } | { "method": "stopRecording", "params": ProfileRef };
 
 export type SetName = { name: string, };
 
@@ -849,6 +849,14 @@ tasks?: Array<number | null> | null,
  */
 byTask: boolean, 
 /**
+ * Samples or waits that carry each of these labels, `key=value`.
+ */
+labels: Array<string>, 
+/**
+ * Roots each path, outside any task, at its label of this key.
+ */
+byLabel?: string | null, 
+/**
  * Applied in order, to keys by the names views show.
  */
 transforms: Array<ProfileTransform>, 
@@ -903,6 +911,14 @@ tasks?: Array<number | null> | null,
  * Roots each path at its task.
  */
 byTask: boolean, 
+/**
+ * Samples or waits that carry each of these labels, `key=value`.
+ */
+labels: Array<string>, 
+/**
+ * Roots each path, outside any task, at its label of this key.
+ */
+byLabel?: string | null, 
 /**
  * Applied in order, to keys by the names views show.
  */
@@ -974,7 +990,23 @@ snapshotProblems: Array<ProfileMarker>,
 /**
  * The weight of every wait the snapshots found.
  */
-waited: number, };
+waited: number, 
+/**
+ * What the recording read of the program's instrumentation, and lost.
+ */
+probes: ProfileProbes, 
+/**
+ * Each zone site name's and label key's zones, most time first.
+ */
+zoneSites: Array<ProfileZoneSite>, 
+/**
+ * Every key a sample's or task's label may have.
+ */
+labelKeys: Array<string>, 
+/**
+ * Why modules' instrumentation could not be read.
+ */
+probeProblems: Array<ProfileMarker>, };
 
 export type ProfileThread = { row: number, pid: number, tid: number, name: string | null, samples: number, weight: number, 
 /**
@@ -1006,7 +1038,7 @@ module: string | null,
  */
 file: string | null, line: number | null, };
 
-export type ProfileKeyKind = "function" | "line" | "address" | "truncation" | "task" | "group";
+export type ProfileKeyKind = "function" | "line" | "address" | "truncation" | "task" | "group" | "label";
 
 export type ProfileTask = { row: number, 
 /**
@@ -1046,6 +1078,99 @@ export type ProfileMarker = {
  * Nanoseconds from the start.
  */
 time: number, text: string, };
+
+export type ProfileProbes = { events: number, 
+/**
+ * Records threads overwrote before uscope read them.
+ */
+overwritten: number, 
+/**
+ * Events no ring could take.
+ */
+noRing: number, 
+/**
+ * Events a signal handler dropped mid-write.
+ */
+interrupted: number, 
+/**
+ * Records that broke the probes ABI.
+ */
+malformed: number, };
+
+export type ProfileZoneSite = { name: string, 
+/**
+ * Whether its zones are a label's spans.
+ */
+label: boolean, count: number, 
+/**
+ * Nanoseconds, all of them and the longest.
+ */
+total: number, longest: number, 
+/**
+ * Zones of it whose begin or end was not seen, or did not nest.
+ */
+flagged: number, };
+
+export type ProfileZonesQuery = { profile: string, revision?: number, 
+/**
+ * Nanoseconds from the profile's start, or all of it.
+ */
+range?: [number, number] | null, 
+/**
+ * Of these threads, by row, or of all.
+ */
+threads?: Array<number> | null, 
+/**
+ * The pixels the range is drawn across: zones under three pixels wide
+ * fold together.
+ */
+width: number, };
+
+export type ProfileZones = { range: [number, number], blocks: number, names: Array<string>, 
+/**
+ * The program's messages, frames, and triggers in the range.
+ */
+marks: Array<ProfileMark>, };
+
+export type ProfileMark = { thread: number, 
+/**
+ * Nanoseconds from the start.
+ */
+time: number, kind: ProfileMarkKind, 
+/**
+ * Its site's name.
+ */
+name: string, text: string | null, };
+
+export type ProfileMarkKind = "message" | "frame" | "trigger";
+
+export type ProfileZoneStatsQuery = { profile: string, revision?: number, 
+/**
+ * A zone site's name, or a label's key.
+ */
+name: string, range?: [number, number] | null, threads?: Array<number> | null, };
+
+export type ProfileZoneStats = { count: number, total: number, flagged: number, min: number, median: number, p90: number, p99: number, max: number, 
+/**
+ * Buckets of equal ratio: each its lowest length and how many.
+ */
+histogram: Array<[number, number]>, 
+/**
+ * The longest, longest first.
+ */
+longest: Array<ProfileZoneAt>, 
+/**
+ * For a label: each value's time and count, most time first.
+ */
+values: Array<ProfileLabelValue>, };
+
+export type ProfileZoneAt = { thread: number, 
+/**
+ * Nanoseconds from the start.
+ */
+start: number, end: number, value: string | null, };
+
+export type ProfileLabelValue = { value: string, total: number, count: number, };
 
 export type RecordProfile = { program: string, arguments: Array<string>, 
 /**

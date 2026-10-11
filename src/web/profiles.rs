@@ -13,8 +13,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{oneshot, watch};
 use uscope::profiler::{
-    GapReason, Granularity, KeyKind, Keys, Lanes, NO_TASK, Preset, Profile, Query, RecordOptions,
-    SampleSource, Source, Transform, Watch, record_watched,
+    GapReason, Granularity, KeyKind, Keys, Lanes, MarkerKind, NO_TASK, Preset, Profile, Query,
+    RecordOptions, SampleSource, Source, Transform, Watch, record_watched,
 };
 
 use super::protocol::{
@@ -364,47 +364,15 @@ impl Profiles {
             }
             Request::ProfileTimeline(timeline) => {
                 let entry = self.entry(&timeline.query.profile)?;
-                let keys = entry.profile.keys(granularity(timeline.query.granularity));
-                let mut resolved = resolve(&entry.profile, &keys, &timeline.query)?;
-                let (start, end) = entry.profile.span();
-                let range = resolved
-                    .range
-                    .unwrap_or_else(|| (start, end.saturating_add(1)));
-                resolved.range = Some(range);
-                let buckets = timeline.buckets.clamp(1, MOST_BUCKETS) as usize;
-                let by_task = timeline.task_lanes || timeline.query.source == ProfileSource::Waits;
-                let of = if by_task {
-                    Lanes::Tasks
-                } else {
-                    Lanes::Threads
-                };
-                let lane = |id: u32, weights| ProfileLane {
-                    thread: (!by_task).then_some(id),
-                    task: (by_task && id != NO_TASK).then_some(id),
-                    weights,
-                    blocked: Vec::new(),
-                    preempted: Vec::new(),
-                };
-                let mut lanes: std::collections::BTreeMap<u32, ProfileLane> = keys
-                    .density(&resolved, buckets, of)
-                    .into_iter()
-                    .map(|(id, weights)| (id, lane(id, weights)))
-                    .collect();
-                // Time off a CPU is a thread's.
-                if !by_task {
-                    for off in entry.profile.off_cpu_lanes(&resolved, buckets) {
-                        let lane = lanes
-                            .entry(off.thread)
-                            .or_insert_with(|| lane(off.thread, Vec::new()));
-                        lane.blocked = off.blocked;
-                        lane.preempted = off.preempted;
-                    }
-                }
-                let lanes = lanes.into_values().collect();
-                Ok(json(&ProfileTimeline {
-                    range: [range.0 - start, range.1 - start],
-                    lanes,
-                }))
+                Ok(json(&timeline_of(&entry.profile, &timeline)?))
+            }
+            Request::ProfileZones(query) => {
+                let entry = self.entry(&query.profile)?;
+                Ok(zones(&entry.profile, &query))
+            }
+            Request::ProfileZoneStats(query) => {
+                let entry = self.entry(&query.profile)?;
+                Ok(json(&zone_stats(&entry.profile, &query)))
             }
             _ => unreachable!("only profile requests come here"),
         }
@@ -419,6 +387,8 @@ pub const fn is_profile_request(request: &Request) -> bool {
             | Request::ProfileTree(_)
             | Request::ProfileFunctions(_)
             | Request::ProfileTimeline(_)
+            | Request::ProfileZones(_)
+            | Request::ProfileZoneStats(_)
             | Request::RecordProfile(_)
             | Request::StopRecording(_)
     )
@@ -480,6 +450,40 @@ fn summary(entry: &Entry) -> ProfileSummary {
         task_samples: profile.task_samples(),
         snapshot_problems: markers(profile.task_snapshot_problems(), start),
         waited: profile.task_waits().iter().map(|wait| wait.weight).sum(),
+        probes: {
+            let counts = profile.probe_counts();
+            protocol::ProfileProbes {
+                events: counts.events,
+                overwritten: counts.overwritten,
+                no_ring: counts.no_ring,
+                interrupted: counts.interrupted,
+                malformed: counts.malformed,
+            }
+        },
+        zone_sites: profile
+            .zone_sites()
+            .into_iter()
+            .map(|site| protocol::ProfileZoneSite {
+                name: site.name,
+                label: site.label,
+                count: site.count,
+                total: site.total,
+                longest: site.longest,
+                flagged: site.flagged,
+            })
+            .collect(),
+        label_keys: {
+            let keys = profile.keys(Granularity::Function);
+            let mut names: Vec<String> = keys
+                .labels()
+                .iter()
+                .filter(|(_, value)| value.is_none())
+                .map(|(key, _)| (*key).to_owned())
+                .collect();
+            names.sort();
+            names
+        },
+        probe_problems: markers(profile.probe_problems(), start),
         truncations: profile
             .truncations()
             .into_iter()
@@ -574,11 +578,216 @@ fn resolve(profile: &Profile, keys: &Keys<'_>, query: &ProfileQuery) -> Result<Q
             .tasks
             .as_ref()
             .map(|tasks| tasks.iter().map(|task| task.unwrap_or(NO_TASK)).collect()),
+        labels: query
+            .labels
+            .iter()
+            .map(|label| {
+                label
+                    .split_once('=')
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .ok_or_else(|| {
+                        Failure::new(ErrorKind::Invalid, format!("{label} is not key=value"))
+                    })
+            })
+            .collect::<Result<_, _>>()?,
+        by_label: query.by_label.clone(),
         transforms,
         invert: query.invert,
         logical: !query.native,
         by_task: query.by_task,
     })
+}
+
+/// Each thread's, or task's, weight over time, and its time off a CPU.
+fn timeline_of(
+    profile: &Profile,
+    timeline: &protocol::ProfileTimelineQuery,
+) -> Result<ProfileTimeline, Failure> {
+    let keys = profile.keys(granularity(timeline.query.granularity));
+    let mut resolved = resolve(profile, &keys, &timeline.query)?;
+    let (start, end) = profile.span();
+    let range = resolved
+        .range
+        .unwrap_or_else(|| (start, end.saturating_add(1)));
+    resolved.range = Some(range);
+    let buckets = timeline.buckets.clamp(1, MOST_BUCKETS) as usize;
+    let by_task = timeline.task_lanes || timeline.query.source == ProfileSource::Waits;
+    let of = if by_task {
+        Lanes::Tasks
+    } else {
+        Lanes::Threads
+    };
+    let lane = |id: u32, weights| ProfileLane {
+        thread: (!by_task).then_some(id),
+        task: (by_task && id != NO_TASK).then_some(id),
+        weights,
+        blocked: Vec::new(),
+        preempted: Vec::new(),
+    };
+    let mut lanes: std::collections::BTreeMap<u32, ProfileLane> = keys
+        .density(&resolved, buckets, of)
+        .into_iter()
+        .map(|(id, weights)| (id, lane(id, weights)))
+        .collect();
+    // Time off a CPU is a thread's.
+    if !by_task {
+        for off in profile.off_cpu_lanes(&resolved, buckets) {
+            let lane = lanes
+                .entry(off.thread)
+                .or_insert_with(|| lane(off.thread, Vec::new()));
+            lane.blocked = off.blocked;
+            lane.preempted = off.preempted;
+        }
+    }
+    let lanes = lanes.into_values().collect();
+    Ok(ProfileTimeline {
+        range: [range.0 - start, range.1 - start],
+        lanes,
+    })
+}
+
+/// The most marks a zones answer holds.
+const MOST_MARKS: usize = 4096;
+
+/// A range from the profile's start, as the profile's clock has it, or the
+/// whole profile.
+fn absolute(profile: &Profile, range: Option<[i64; 2]>) -> (i64, i64) {
+    let (start, end) = profile.span();
+    range.map_or_else(
+        || (start, end.saturating_add(1)),
+        |[from, to]| (start.saturating_add(from), start.saturating_add(to)),
+    )
+}
+
+/// Zones folded to a width, and the program's marks, in a range.
+fn zones(profile: &Profile, query: &protocol::ProfileZonesQuery) -> (Value, Vec<u8>) {
+    let (start, _) = profile.span();
+    // Without a range, the zones' own, with a margin.
+    let range = match (query.range, profile.zone_extent()) {
+        (None, Some((first, last))) => {
+            let margin = ((last - first) / 50).max(1);
+            (first - margin, last + margin)
+        }
+        (range, _) => absolute(profile, range),
+    };
+    // Zones under three pixels wide fold together.
+    let fold = (range.1 - range.0) * 3 / i64::from(query.width.max(1));
+    let blocks = profile.zone_blocks(range, query.threads.as_deref(), fold.max(1));
+    let mut names: Vec<String> = Vec::new();
+    let mut indices: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    let mut name = |site: u32, value: u32| {
+        *indices.entry((site, value)).or_insert_with(|| {
+            names.push(profile.zone_name(site, value));
+            u32::try_from(names.len() - 1).unwrap_or(u32::MAX)
+        })
+    };
+    let mut bytes = Vec::with_capacity(blocks.len() * 36);
+    for block in &blocks {
+        bytes.extend_from_slice(&exact_time(block.start - start).to_le_bytes());
+    }
+    for block in &blocks {
+        bytes.extend_from_slice(&exact_time(block.end - start).to_le_bytes());
+    }
+    let columns: [&dyn Fn(&uscope::profiler::ZoneBlock) -> u32; 2] =
+        [&|block| block.thread, &|block| block.depth];
+    for column in columns {
+        for block in &blocks {
+            bytes.extend_from_slice(&column(block).to_le_bytes());
+        }
+    }
+    for block in &blocks {
+        bytes.extend_from_slice(&name(block.site, block.value).to_le_bytes());
+    }
+    for block in &blocks {
+        bytes.extend_from_slice(&block.count.to_le_bytes());
+    }
+    for block in &blocks {
+        bytes.extend_from_slice(&block.flags.to_le_bytes());
+    }
+    let rows: BTreeMap<u32, u32> = profile
+        .threads()
+        .into_iter()
+        .map(|thread| (thread.tid, thread.row))
+        .collect();
+    let marks = profile
+        .program_markers()
+        .into_iter()
+        .filter(|marker| range.0 <= marker.time && marker.time < range.1)
+        .filter_map(|marker| {
+            Some(protocol::ProfileMark {
+                thread: *rows.get(&marker.tid)?,
+                time: marker.time - start,
+                kind: match marker.kind {
+                    MarkerKind::Frame => protocol::ProfileMarkKind::Frame,
+                    MarkerKind::Trigger => protocol::ProfileMarkKind::Trigger,
+                    _ => protocol::ProfileMarkKind::Message,
+                },
+                name: marker.name,
+                text: marker.text,
+            })
+        })
+        .take(MOST_MARKS)
+        .collect();
+    let answer = protocol::ProfileZones {
+        range: [range.0 - start, range.1 - start],
+        blocks: u32::try_from(blocks.len()).unwrap_or(u32::MAX),
+        names,
+        marks,
+    };
+    (to_value(&answer), bytes)
+}
+
+fn zone_stats(
+    profile: &Profile,
+    query: &protocol::ProfileZoneStatsQuery,
+) -> protocol::ProfileZoneStats {
+    let (start, _) = profile.span();
+    let range = absolute(profile, query.range);
+    let stats = profile.zone_stats(&query.name, range, query.threads.as_deref());
+    let value = |value: u32| profile.label_value(value).map(str::to_owned);
+    protocol::ProfileZoneStats {
+        count: stats.count,
+        total: stats.total,
+        flagged: stats.flagged,
+        min: stats.min,
+        median: stats.median,
+        p90: stats.p90,
+        p99: stats.p99,
+        max: stats.max,
+        histogram: stats
+            .histogram
+            .iter()
+            .map(|&bucket| bucket.into())
+            .collect(),
+        longest: stats
+            .longest
+            .iter()
+            .map(|zone| protocol::ProfileZoneAt {
+                thread: zone.thread,
+                start: zone.start - start,
+                end: zone.end - start,
+                value: value(zone.value),
+            })
+            .collect(),
+        values: stats
+            .values
+            .iter()
+            .map(|&(text, total, count)| protocol::ProfileLabelValue {
+                value: value(text).unwrap_or_default(),
+                total,
+                count,
+            })
+            .collect(),
+    }
+}
+
+/// A time as a page's numbers hold it, exactly to 2^53 nanoseconds.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "no view can show a part in 2^53"
+)]
+const fn exact_time(time: i64) -> f64 {
+    time as f64
 }
 
 /// The keys an answer names, each once, in the order first named.
@@ -613,6 +822,7 @@ impl<'a, 'k> Named<'a, 'k> {
                 KeyKind::Truncation { .. } => ProfileKeyKind::Truncation,
                 KeyKind::Task { .. } => ProfileKeyKind::Task,
                 KeyKind::Group { .. } => ProfileKeyKind::Group,
+                KeyKind::Label { .. } => ProfileKeyKind::Label,
             },
             module: keys.module(key).map(str::to_owned),
             file: location.map(|(file, _)| file.to_owned()),

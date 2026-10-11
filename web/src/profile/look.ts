@@ -6,7 +6,7 @@
 
 import type { ProfileGranularity, ProfileQuery, ProfileTransform, TransformOp } from "../protocol";
 
-export type ProfileView = "flame" | "tree" | "functions";
+export type ProfileView = "flame" | "tree" | "functions" | "zones";
 
 export interface ProfileLook {
   /** The view shown; the flame graph when absent. */
@@ -22,6 +22,12 @@ export interface ProfileLook {
   tk?: string[];
   /** Each path rooted at its task. */
   bt?: "1";
+  /** Labels a sample must carry, each `KEY=VALUE`. */
+  lb?: string[];
+  /** Each path rooted at its label of this key. */
+  bl?: string;
+  /** The zone site, or label key, the zones view finds. */
+  zs?: string;
   /** Timeline lanes of tasks rather than threads. */
   lanes?: "tasks";
   /** Transforms in order, each `OP:NAME`. */
@@ -37,7 +43,7 @@ export interface ProfileLook {
   z?: string[];
 }
 
-const VIEWS: readonly ProfileView[] = ["flame", "tree", "functions"];
+const VIEWS: readonly ProfileView[] = ["flame", "tree", "functions", "zones"];
 const GRANULARITIES: readonly string[] = ["physical", "line", "address"];
 const OPS: readonly TransformOp[] = ["focus", "merge", "drop", "collapse"];
 
@@ -75,6 +81,16 @@ export function validateProfileLook(search: Record<string, unknown>): ProfileLoo
   }
   if (text("bt") === "1") {
     look.bt = "1";
+  }
+  const lb = list("lb")?.filter((label) => label.indexOf("=") > 0);
+  if (lb && lb.length > 0) {
+    look.lb = lb;
+  }
+  for (const key of ["bl", "zs"] as const) {
+    const value = text(key);
+    if (value) {
+      look[key] = value;
+    }
   }
   if (text("lanes") === "tasks") {
     look.lanes = "tasks";
@@ -143,6 +159,8 @@ export function queryOf(profile: string, look: ProfileLook): ProfileQuery {
     source: look.src === "waits" ? "waits" : "samples",
     ...(look.tk ? { tasks: look.tk.map((row) => (row === "none" ? null : Number(row))) } : {}),
     byTask: look.bt === "1",
+    labels: look.lb ?? [],
+    ...(look.bl ? { byLabel: look.bl } : {}),
     transforms: (look.tf ?? []).flatMap((entry) => {
       const transform = parseTransform(entry);
       return transform ? [transform] : [];

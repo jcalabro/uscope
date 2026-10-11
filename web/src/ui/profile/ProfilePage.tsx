@@ -18,6 +18,7 @@ import { FlameView } from "./FlameView";
 import { FunctionsView } from "./FunctionsView";
 import { Timeline } from "./Timeline";
 import { TreeView } from "./TreeView";
+import { ZonesView } from "./ZonesView";
 
 /** `/profile/$profile`: one profile, explored. */
 export function ProfilePage() {
@@ -82,7 +83,9 @@ export function ProfilePage() {
         <ProfileHead />
         <Timeline />
         <div className="profile-view">
-          {view === "functions" ? (
+          {view === "zones" ? (
+            <ZonesView />
+          ) : view === "functions" ? (
             <FunctionsView />
           ) : view === "tree" ? (
             <TreeView />
@@ -100,6 +103,7 @@ const VIEWS: { view: ProfileView; label: string }[] = [
   { view: "flame", label: "Flame graph" },
   { view: "tree", label: "Call tree" },
   { view: "functions", label: "Functions" },
+  { view: "zones", label: "Zones" },
 ];
 
 const GRANULARITIES: { by: ProfileGranularity; label: string }[] = [
@@ -132,18 +136,20 @@ function ProfileHead() {
         </span>
       </div>
       <div className="segmented">
-        {VIEWS.map(({ view, label }) => (
-          <button
-            key={view}
-            type="button"
-            aria-pressed={(look.view ?? "flame") === view}
-            onClick={() =>
-              setLook((look) => withLook(look, "view", view === "flame" ? undefined : view), true)
-            }
-          >
-            {label}
-          </button>
-        ))}
+        {VIEWS.filter(({ view }) => view !== "zones" || summary.zoneSites.length > 0).map(
+          ({ view, label }) => (
+            <button
+              key={view}
+              type="button"
+              aria-pressed={(look.view ?? "flame") === view}
+              onClick={() =>
+                setLook((look) => withLook(look, "view", view === "flame" ? undefined : view), true)
+              }
+            >
+              {label}
+            </button>
+          ),
+        )}
       </div>
       {snapshots ? (
         <div className="segmented">
@@ -187,6 +193,19 @@ function ProfileHead() {
             remove={() => setLook((look) => withLook(look, "tk", undefined))}
           />
         ) : null}
+        {(look.lb ?? []).map((label) => (
+          <Chip
+            key={label}
+            label={label}
+            title="Samples that carry this label"
+            remove={() =>
+              setLook((look) => {
+                const kept = (look.lb ?? []).filter((each) => each !== label);
+                return withLook(look, "lb", kept.length > 0 ? kept : undefined);
+              })
+            }
+          />
+        ))}
         {(look.tf ?? []).map((entry, index) => {
           const transform = parseTransform(entry);
           return transform ? (
@@ -245,6 +264,23 @@ function ProfileHead() {
               </label>
             )}
           </>
+        ) : null}
+        {summary.labelKeys.length > 0 ? (
+          <select
+            className="input profile-by"
+            aria-label="Root by label"
+            value={look.bl ?? ""}
+            onChange={(event) =>
+              setLook((look) => withLook(look, "bl", event.target.value || undefined))
+            }
+          >
+            <option value="">no label roots</option>
+            {summary.labelKeys.map((key) => (
+              <option key={key} value={key}>
+                rooted by {key}
+              </option>
+            ))}
+          </select>
         ) : null}
         <select
           className="input profile-by"
@@ -340,6 +376,11 @@ function ProfileFoot({ summary }: { summary: ProfileSummary }) {
   const stack = setting("stack bytes");
   const paused = summary.gaps.reduce((sum, [from, to]) => sum + (to - from), 0);
   const span = Math.max(summary.duration, 1);
+  const probesLost =
+    summary.probes.overwritten +
+    summary.probes.noRing +
+    summary.probes.interrupted +
+    summary.probes.malformed;
   return (
     <div className="profile-foot" data-testid="accounting">
       <span>{formatWeight(summary.weight, summary.unit)} sampled</span>
@@ -370,6 +411,20 @@ function ProfileFoot({ summary }: { summary: ProfileSummary }) {
             .join("\n")}
         >
           paused {formatPercent(paused, span)} for the budget
+        </span>
+      ) : null}
+      {summary.probes.events > 0 || probesLost > 0 ? (
+        <span
+          className={probesLost > 0 || summary.probeProblems.length > 0 ? "warn" : undefined}
+          title={[
+            `${summary.probes.overwritten} records overwritten before uscope read them`,
+            `${summary.probes.noRing} events found no ring`,
+            `${summary.probes.interrupted} events dropped by a signal handler`,
+            `${summary.probes.malformed} records broke the probes ABI`,
+            ...summary.probeProblems.map((problem) => problem.text),
+          ].join("\n")}
+        >
+          {summary.probes.events.toLocaleString("en-US")} probe events, lost {probesLost}
         </span>
       ) : null}
       {summary.snapshots > 0 ? (
