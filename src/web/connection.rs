@@ -124,7 +124,9 @@ fn dispatch(
         let id = envelope.id;
         let answered = match envelope.request {
             protocol::Request::Draw(draw) => session.draw(&draw).await,
-            request if profiles::is_profile_request(&request) => profiles.handle(request).await,
+            request if profiles::is_profile_request(&request) => {
+                profiles.handle(role, request).await
+            }
             request => session
                 .handle(connection, role, request)
                 .await

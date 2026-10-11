@@ -1,5 +1,6 @@
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { base } from "../../base";
 import {
   type ProfileLook,
   type ProfileView,
@@ -10,7 +11,8 @@ import {
   withLook,
 } from "../../profile/look";
 import { formatDuration, formatPercent, formatWeight } from "../../profile/paint";
-import type { ProfileGranularity, ProfileSummary } from "../../protocol";
+import type { ProfileGranularity, ProfileInfo, ProfileSummary } from "../../protocol";
+import { useConnection, useModel } from "../../store";
 import { ProfileContext, type ProfileFocus, useAnswer, useProfile } from "./context";
 import { FlameView } from "./FlameView";
 import { FunctionsView } from "./FunctionsView";
@@ -22,7 +24,11 @@ export function ProfilePage() {
   const { profile } = useParams({ from: "/profile/$profile" });
   const look = useSearch({ from: "/profile/$profile" });
   const navigate = useNavigate();
-  const summary = useAnswer("profile", { profile });
+  const info = useModel((model) => model.profiles.find((each) => each.id === profile));
+  // Each revision of a growing profile is asked for anew; the last one's
+  // answers stay on screen until the new ones come.
+  const revision = info?.revision ?? 0;
+  const summary = useAnswer("profile", { profile, revision });
   const setLook = useCallback(
     (change: (look: ProfileLook) => ProfileLook, push = false) =>
       void navigate({
@@ -36,9 +42,15 @@ export function ProfilePage() {
   const focus = useMemo<ProfileFocus | null>(
     () =>
       summary.data
-        ? { profile, summary: summary.data, look, query: queryOf(profile, look), setLook }
+        ? {
+            profile,
+            summary: summary.data,
+            look,
+            query: { ...queryOf(profile, look), revision },
+            setLook,
+          }
         : null,
-    [profile, summary.data, look, setLook],
+    [profile, summary.data, look, setLook, revision],
   );
 
   if (summary.error) {
@@ -65,6 +77,7 @@ export function ProfilePage() {
   return (
     <ProfileContext.Provider value={focus}>
       <div className="profile" data-testid="profile">
+        {info ? <Recording info={info} /> : null}
         <ProfileHead />
         <Timeline />
         <div className="profile-view">
@@ -200,6 +213,61 @@ function Chip({ label, title, remove }: { label: string; title: string; remove: 
         ×
       </button>
     </span>
+  );
+}
+
+/** A recording's progress, and saving the profile as a file. */
+function Recording({ info }: { info: ProfileInfo }) {
+  const connection = useConnection();
+  const control = useModel((model) => model.hello?.role === "control");
+  const [failure, setFailure] = useState<string | null>(null);
+  const save = async () => {
+    setFailure(null);
+    try {
+      const response = await fetch(`${base}api/profile/${info.id}`, {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!response.ok) {
+        throw new Error(`the server answered ${response.status}`);
+      }
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(await response.blob());
+      link.download = info.name.endsWith(".usprof") ? info.name : `${info.name}.usprof`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : String(error));
+    }
+  };
+  return (
+    <div className="profile-recording" data-testid="recording">
+      {info.recording ? (
+        <span className="pill running">Recording {info.name}</span>
+      ) : info.ended ? (
+        <span className="muted">
+          {info.name} ended: {info.ended}
+        </span>
+      ) : null}
+      {info.recording && control ? (
+        <button
+          type="button"
+          className="tb ghost"
+          onClick={() =>
+            void connection
+              .request("stopRecording", { profile: info.id })
+              .catch((error: Error) => setFailure(error.message))
+          }
+        >
+          Stop
+        </button>
+      ) : null}
+      <span className="spacer" />
+      {failure ? <span className="error">{failure}</span> : null}
+      <button type="button" className="tb ghost" onClick={() => void save()}>
+        Save
+      </button>
+    </div>
   );
 }
 

@@ -87,3 +87,28 @@ test("a profile is explored, and its address opens the same view", async ({
   await expect(page).toHaveURL(/range=\d+-\d+/);
   await expect(page.getByRole("button", { name: /^Remove .* – / })).toBeVisible();
 });
+
+test("a program recorded from the page grows live, stops, and saves", async ({ page, uscope }) => {
+  await join(page, uscope.link);
+  await page.goto(new URL("/pick?tab=profile", uscope.origin).href);
+  await page.getByLabel("Program").fill(fixture("spin"));
+  await page.getByRole("button", { name: "Record" }).click();
+  await expect(page).toHaveURL(/\/profile\/[0-9a-f]{16}/);
+  await expect(page.getByTestId("recording")).toContainText("Recording spin");
+
+  // Its samples arrive while it runs.
+  await page.getByRole("button", { name: "Functions" }).click();
+  const functions = page.getByRole("listbox", { name: "Functions" });
+  const main = functions
+    .getByRole("option")
+    .filter({ has: page.getByText("main", { exact: true }) });
+  await expect(main).toBeVisible({ timeout: 10_000 });
+
+  await page.getByRole("button", { name: "Stop" }).click();
+  await expect(page.getByTestId("recording")).toContainText("spin ended: signal: 9");
+  await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0);
+
+  const saving = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save" }).click();
+  expect((await saving).suggestedFilename()).toBe("spin.usprof");
+});

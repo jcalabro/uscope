@@ -145,6 +145,10 @@ pub enum Request {
     ProfileFunctions(ProfileQuery),
     /// How a query's samples fall over time, per thread.
     ProfileTimeline(ProfileTimelineQuery),
+    /// Records a program, publishing its profile as it goes.
+    RecordProfile(RecordProfile),
+    /// Ends a recording, killing its program.
+    StopRecording(ProfileRef),
 }
 
 /// A stop, which must be current.
@@ -650,16 +654,71 @@ pub struct ProfileList {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileInfo {
-    /// Derived from the profile's bytes, so a link names the same profile
-    /// whenever a server serves it.
+    /// Derived from a file's bytes, so a link names the same profile
+    /// whenever a server serves it; a recording's is its own.
     pub id: String,
-    /// The file it was read from.
+    /// The file it was read from, or the program recorded.
     pub name: String,
+    /// Whether it is being recorded, and grows.
+    pub recording: bool,
+    /// Counts the profiles published under this id: each answer about it
+    /// is of the newest.
+    pub revision: u32,
+    /// How a recorded program ended, once it has.
+    pub ended: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileRef {
+    pub profile: String,
+    /// The revision the tab has seen, which keeps its cached answers
+    /// apart; the server answers from the newest.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    #[expect(dead_code, reason = "only the tab's cache reads it")]
+    pub revision: u32,
+}
+
+/// A program to record.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RecordProfile {
+    pub program: String,
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    /// Where it runs: the server's directory when absent.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub cwd: Option<String>,
+    /// Variables added to its environment, as `[name, value]` pairs.
+    #[serde(default)]
+    pub environment: Vec<(String, String)>,
+    #[serde(default)]
+    pub preset: RecordPreset,
+    /// Samples each call of the function this names instead of CPU time.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub function: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum RecordPreset {
+    /// 49 samples a second: safe in production.
+    Production,
+    /// 999 samples a second, with a deep stack copy.
+    #[default]
+    Development,
+    /// 9999 samples a second.
+    Maximum,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RecordStarted {
+    /// The profile's id, which stays its own once the recording ends.
     pub profile: String,
 }
 
@@ -668,6 +727,12 @@ pub struct ProfileRef {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileQuery {
     pub profile: String,
+    /// The revision the tab has seen, which keeps its cached answers
+    /// apart; the server answers from the newest.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    #[expect(dead_code, reason = "only the tab's cache reads it")]
+    pub revision: u32,
     /// Samples taken in `[start, end)`, in nanoseconds from the profile's
     /// start, or all.
     #[serde(default)]
@@ -1827,6 +1892,9 @@ mod tests {
         ProfileCost::decl,
         ProfileTimeline::decl,
         ProfileLane::decl,
+        RecordProfile::decl,
+        RecordPreset::decl,
+        RecordStarted::decl,
     ];
 
     /// Writes every message type as TypeScript.

@@ -4,50 +4,68 @@
 //! [`uscope::profiler`], which the CLI's reports read too.
 
 use std::collections::BTreeMap;
-use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use serde_json::Value;
-use tokio::sync::watch;
-use uscope::profiler::{Granularity, KeyKind, Keys, Profile, Query, Transform};
+use tokio::sync::{oneshot, watch};
+use uscope::profiler::{
+    Granularity, KeyKind, Keys, Preset, Profile, Query, RecordOptions, SampleSource, Transform,
+    Watch, record_watched,
+};
 
 use super::protocol::{
     self, ErrorKind, ProfileCost, ProfileFunctions, ProfileGranularity, ProfileInfo, ProfileKey,
     ProfileKeyKind, ProfileLane, ProfileList, ProfileQuery, ProfileSetting, ProfileSummary,
-    ProfileTimeline, ProfileTree, Request, TransformOp,
+    ProfileTimeline, ProfileTree, RecordPreset, RecordProfile, RecordStarted, Request, Role,
+    TransformOp,
 };
 use super::session::Failure;
 
 /// The most slices a timeline is cut into.
 const MOST_BUCKETS: u32 = 4096;
 
+/// How often a recording publishes its profile so far.
+const LIVE_EVERY: Duration = Duration::from_secs(2);
+
 /// The profiles one server serves.
 pub struct Profiles {
+    cwd: PathBuf,
     entries: RwLock<BTreeMap<String, Arc<Entry>>>,
     list: watch::Sender<Arc<ProfileList>>,
+    recordings: Mutex<BTreeMap<String, Recorder>>,
+    /// Counts recordings, so each gets an id of its own.
+    recorded: AtomicU64,
 }
 
 struct Entry {
     info: ProfileInfo,
-    profile: Profile,
+    profile: Arc<Profile>,
+}
+
+struct Recorder {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
 }
 
 impl Profiles {
-    pub fn new() -> Arc<Self> {
+    pub fn new(cwd: PathBuf) -> Arc<Self> {
         let (list, _) = watch::channel(Arc::new(ProfileList {
             profiles: Vec::new(),
         }));
         Arc::new(Self {
+            cwd,
             entries: RwLock::new(BTreeMap::new()),
             list,
+            recordings: Mutex::new(BTreeMap::new()),
+            recorded: AtomicU64::new(0),
         })
     }
 
     /// Serves the profile in `bytes`, read from `path`, returning its id.
-    #[expect(
-        clippy::significant_drop_tightening,
-        reason = "the list is sent under the lock, so additions publish in order"
-    )]
     pub fn add(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<String> {
         let read = Profile::from_bytes(bytes)?;
         if read.truncated {
@@ -61,18 +79,36 @@ impl Profiles {
             || path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let entry = Arc::new(Entry {
-            info: ProfileInfo {
+        self.publish(
+            ProfileInfo {
                 id: id.clone(),
                 name,
+                recording: false,
+                revision: 0,
+                ended: None,
             },
-            profile: read.profile,
-        });
+            read.profile,
+        );
+        Ok(id)
+    }
+
+    /// Serves `profile` as `info` says, replacing what its id served.
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the list is sent under the lock, so changes publish in order"
+    )]
+    fn publish(&self, info: ProfileInfo, profile: Profile) {
         let mut entries = self.entries.write().expect("profiles lock");
-        entries.insert(id.clone(), entry);
+        let id = info.id.clone();
+        entries.insert(
+            id,
+            Arc::new(Entry {
+                info,
+                profile: Arc::new(profile),
+            }),
+        );
         let profiles = entries.values().map(|entry| entry.info.clone()).collect();
         self.list.send_replace(Arc::new(ProfileList { profiles }));
-        Ok(id)
     }
 
     /// The profiles, now and as they change.
@@ -80,14 +116,178 @@ impl Profiles {
         self.list.subscribe()
     }
 
+    /// A profile's file, by its id, and the name to save it under.
+    pub fn file(&self, id: &str) -> Option<(String, Vec<u8>)> {
+        let entry = self.entry(id).ok()?;
+        let name = if std::path::Path::new(&entry.info.name)
+            .extension()
+            .is_some_and(|extension| extension == "usprof")
+        {
+            entry.info.name.clone()
+        } else {
+            format!("{}.usprof", entry.info.name)
+        };
+        Some((name, entry.profile.to_bytes()))
+    }
+
+    /// Ends every recording, killing its program, and waits for each.
+    pub fn shutdown(&self) {
+        let recordings = std::mem::take(&mut *self.recordings.lock().expect("recordings lock"));
+        for recorder in recordings.values() {
+            recorder.stop.store(true, Ordering::Relaxed);
+        }
+        for (_, recorder) in recordings {
+            let _ = recorder.thread.join();
+        }
+    }
+
     /// Answers a request about a profile, with the bytes that go before the
     /// answer. Aggregation reads every sample a query selects, so it runs
     /// off the server's threads.
-    pub async fn handle(self: &Arc<Self>, request: Request) -> Result<(Value, Vec<u8>), Failure> {
+    pub async fn handle(
+        self: &Arc<Self>,
+        role: Role,
+        request: Request,
+    ) -> Result<(Value, Vec<u8>), Failure> {
+        match request {
+            Request::RecordProfile(spec) => {
+                let profile = self.record(role, spec).await?;
+                Ok(json(&RecordStarted { profile }))
+            }
+            Request::StopRecording(protocol::ProfileRef { profile, .. }) => {
+                controls(role)?;
+                let recordings = self.recordings.lock().expect("recordings lock");
+                let recorder = recordings.get(&profile).ok_or_else(|| {
+                    Failure::new(ErrorKind::Invalid, format!("{profile} is not recording"))
+                })?;
+                recorder.stop.store(true, Ordering::Relaxed);
+                drop(recordings);
+                Ok(json(&Value::Null))
+            }
+            request => {
+                let profiles = Arc::clone(self);
+                tokio::task::spawn_blocking(move || profiles.answer(request))
+                    .await
+                    .map_err(|_| Failure::new(ErrorKind::Failed, "the query failed"))?
+            }
+        }
+    }
+
+    /// Starts recording `spec`, answering once its program has started.
+    async fn record(self: &Arc<Self>, role: Role, spec: RecordProfile) -> Result<String, Failure> {
+        controls(role)?;
+        let program = PathBuf::from(&spec.program);
+        let mut command = Command::new(&program);
+        command
+            .args(&spec.arguments)
+            .envs(spec.environment.iter().map(|(name, value)| (name, value)))
+            .current_dir(
+                spec.cwd
+                    .as_ref()
+                    .map_or_else(|| self.cwd.clone(), |cwd| self.cwd.join(cwd)),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut options = RecordOptions::preset(match spec.preset {
+            RecordPreset::Production => Preset::Production,
+            RecordPreset::Development => Preset::Development,
+            RecordPreset::Maximum => Preset::Maximum,
+        });
+        if let Some(symbol) = spec.function.filter(|symbol| !symbol.trim().is_empty()) {
+            options.source = SampleSource::Function { symbol };
+        }
+        let count = self.recorded.fetch_add(1, Ordering::Relaxed);
+        let id = format!(
+            "{:016x}",
+            twox_hash::XxHash3_64::oneshot(
+                format!(
+                    "{} {count} {:?}",
+                    spec.program,
+                    std::time::SystemTime::now()
+                )
+                .as_bytes()
+            )
+        );
+        let name = program.file_name().map_or_else(
+            || spec.program.clone(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let (started, starting) = oneshot::channel::<Result<(), String>>();
         let profiles = Arc::clone(self);
-        tokio::task::spawn_blocking(move || profiles.answer(request))
-            .await
-            .map_err(|_| Failure::new(ErrorKind::Failed, "the query failed"))?
+        let thread = std::thread::Builder::new()
+            .name("uscope-web-record".into())
+            .spawn({
+                let (id, stop) = (id.clone(), Arc::clone(&stop));
+                move || profiles.run_recording(&id, &name, command, &options, &stop, started)
+            })
+            .map_err(|error| Failure::new(ErrorKind::Failed, error.to_string()))?;
+        self.recordings
+            .lock()
+            .expect("recordings lock")
+            .insert(id.clone(), Recorder { stop, thread });
+        match starting.await {
+            Ok(Ok(())) => Ok(id),
+            Ok(Err(message)) => Err(Failure::new(ErrorKind::Failed, message)),
+            Err(_) => Err(Failure::new(
+                ErrorKind::Failed,
+                "the recording ended before it began",
+            )),
+        }
+    }
+
+    /// Records on this thread, publishing each profile under `id`.
+    fn run_recording(
+        &self,
+        id: &str,
+        name: &str,
+        command: Command,
+        options: &RecordOptions,
+        stop: &AtomicBool,
+        started: oneshot::Sender<Result<(), String>>,
+    ) {
+        let mut started = Some(started);
+        let mut revision = 0;
+        let info = |revision, ended: Option<String>| ProfileInfo {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            recording: ended.is_none(),
+            revision,
+            ended,
+        };
+        let recorded = record_watched(
+            command,
+            options,
+            &mut Watch {
+                every: LIVE_EVERY,
+                publish: &mut |profile| {
+                    self.publish(info(revision, None), profile);
+                    revision += 1;
+                    if let Some(started) = started.take() {
+                        let _ = started.send(Ok(()));
+                    }
+                },
+                stop,
+            },
+        );
+        match recorded {
+            Ok(recording) => {
+                self.publish(
+                    info(revision, Some(recording.status.to_string())),
+                    recording.profile,
+                );
+            }
+            Err(error) => {
+                if let Some(started) = started.take() {
+                    let _ = started.send(Err(error.to_string()));
+                } else if let Ok(entry) = self.entry(id) {
+                    let profile = Profile::clone(&entry.profile);
+                    self.publish(info(revision, Some(format!("failed: {error}"))), profile);
+                }
+            }
+        }
+        self.recordings.lock().expect("recordings lock").remove(id);
     }
 
     fn entry(&self, id: &str) -> Result<Arc<Entry>, Failure> {
@@ -101,7 +301,7 @@ impl Profiles {
 
     fn answer(&self, request: Request) -> Result<(Value, Vec<u8>), Failure> {
         match request {
-            Request::Profile(protocol::ProfileRef { profile }) => {
+            Request::Profile(protocol::ProfileRef { profile, .. }) => {
                 Ok(json(&summary(&*self.entry(&profile)?)))
             }
             Request::ProfileTree(query) => {
@@ -183,7 +383,21 @@ pub const fn is_profile_request(request: &Request) -> bool {
             | Request::ProfileTree(_)
             | Request::ProfileFunctions(_)
             | Request::ProfileTimeline(_)
+            | Request::RecordProfile(_)
+            | Request::StopRecording(_)
     )
+}
+
+/// Fails unless `role` may run programs.
+fn controls(role: Role) -> Result<(), Failure> {
+    if role == Role::Control {
+        Ok(())
+    } else {
+        Err(Failure::new(
+            ErrorKind::Forbidden,
+            "this link can only view; ask for a control link to record",
+        ))
+    }
 }
 
 fn summary(entry: &Entry) -> ProfileSummary {

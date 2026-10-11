@@ -182,6 +182,24 @@ impl Web {
         (status, cookie)
     }
 
+    /// Sends raw HTTP and returns the response's head and body, which may
+    /// be any bytes.
+    pub fn http_bytes(&self, request: &str) -> (String, Vec<u8>) {
+        let mut stream = TcpStream::connect(self.address).expect("connect");
+        stream
+            .set_read_timeout(Some(DEADLINE))
+            .expect("read timeout");
+        stream.write_all(request.as_bytes()).expect("send");
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        let end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("a response head");
+        let body = response.split_off(end + 4);
+        (String::from_utf8_lossy(&response).into_owned(), body)
+    }
+
     /// Sends raw HTTP and returns the whole response.
     pub fn http(&self, request: &str) -> String {
         let mut stream = TcpStream::connect(self.address).expect("connect");

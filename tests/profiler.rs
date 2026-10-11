@@ -4,7 +4,8 @@ use std::process::{Command, Stdio};
 
 use support::Scenario;
 use uscope::profiler::{
-    CallNode, Preset, RecordOptions, SampleSource, SampledStack, StackEnding, StackView, record,
+    CallNode, Preset, RecordOptions, SampleSource, SampledStack, StackEnding, StackView, Watch,
+    record, record_watched,
 };
 
 /// The profile-stacks fixture across languages, compilers, optimization,
@@ -263,6 +264,55 @@ fn an_async_tasks_samples_show_its_own_stack_of_awaits() {
             "{variant}: {native:?}"
         );
     }
+}
+
+#[test]
+fn a_watched_recording_publishes_as_it_goes_and_stops_when_asked() {
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let (published, snapshots) = std::sync::mpsc::channel();
+    let recording = std::thread::spawn({
+        let stop = Arc::clone(&stop);
+        move || {
+            let mut command = Command::new(Scenario::fixture("spin"));
+            command.stdout(Stdio::null());
+            record_watched(
+                command,
+                &RecordOptions::default(),
+                &mut Watch {
+                    every: std::time::Duration::ZERO,
+                    publish: &mut |profile| {
+                        let pid = profile.setting("pid").map(str::to_owned);
+                        let _ = published.send((profile.samples(), pid));
+                    },
+                    stop: &stop,
+                },
+            )
+        }
+    });
+    // The first profile is published as the program starts, empty.
+    let deadline = std::time::Duration::from_secs(10);
+    let (first, pid) = snapshots.recv_timeout(deadline).expect("the first profile");
+    assert_eq!(first, 0);
+    let pid = pid.expect("the program's pid");
+    let mut seen = 0;
+    while seen == 0 {
+        seen = snapshots
+            .recv_timeout(deadline)
+            .expect("a profile with samples")
+            .0;
+    }
+    stop.store(true, Ordering::Relaxed);
+    let recording = recording.join().expect("the recording").expect("record");
+    assert_eq!(recording.status.signal(), Some(9), "{:?}", recording.status);
+    assert!(recording.profile.samples() >= seen);
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "the program is gone"
+    );
 }
 
 #[test]

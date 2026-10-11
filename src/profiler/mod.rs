@@ -9,6 +9,7 @@ pub use crate::analysis::{CallTree, Cost, Costs, Granularity, KeyKind, Keys, Que
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::backend::perf;
@@ -57,6 +58,17 @@ pub enum SampleSource {
     /// Each execution of the first instruction of the function a symbol of
     /// the program names. The program runs without address randomization.
     Function { symbol: String },
+}
+
+impl SampleSource {
+    /// What a sample weighs: nanoseconds of CPU time, or one execution.
+    #[must_use]
+    pub const fn unit(&self) -> &'static str {
+        match self {
+            Self::Clock { .. } => "nanoseconds",
+            Self::Function { .. } => "executions",
+        }
+    }
 }
 
 impl std::fmt::Display for SampleSource {
@@ -133,25 +145,40 @@ pub struct Recording {
 
 /// Runs `command` to its exit, recording it.
 pub fn record(command: Command, options: &RecordOptions) -> Result<Recording, RecordError> {
+    let stop = AtomicBool::new(false);
+    record_watched(
+        command,
+        options,
+        &mut Watch {
+            every: Duration::MAX,
+            publish: &mut |_| {},
+            stop: &stop,
+        },
+    )
+}
+
+/// What a recording does while it runs, for a live view of it.
+pub struct Watch<'a> {
+    /// How often the profile so far is published, at most: the first
+    /// comes within a quarter second, and each wait doubles up to this.
+    pub every: Duration,
+    /// Takes the profile so far: once when the program has started, when
+    /// it holds nothing yet, and every `every` after.
+    pub publish: &'a mut dyn FnMut(Profile),
+    /// Ends the recording once set, by killing the program.
+    pub stop: &'a AtomicBool,
+}
+
+/// Records `command` as [`record`] does, publishing the profile so far as
+/// `watch` asks.
+pub fn record_watched(
+    command: Command,
+    options: &RecordOptions,
+    watch: &mut Watch<'_>,
+) -> Result<Recording, RecordError> {
     let _span = crate::span!("record");
     let program = PathBuf::from(command.get_program());
-    let (source, breakpoint) = match &options.source {
-        SampleSource::Clock { rate } => (
-            perf::Source::Clock {
-                period: Duration::from_nanos(1_000_000_000 / u64::from((*rate).max(1))),
-            },
-            None,
-        ),
-        SampleSource::Function { symbol } => {
-            let (address, bias) = function_address(&program, symbol)?;
-            (
-                perf::Source::Breakpoint {
-                    address: address + bias,
-                },
-                Some(bias),
-            )
-        }
-    };
+    let (source, breakpoint) = perf_source(&program, &options.source)?;
     let events = perf::EventOptions {
         source,
         stack_bytes: options.stack_bytes.next_multiple_of(8),
@@ -160,16 +187,49 @@ pub fn record(command: Command, options: &RecordOptions) -> Result<Recording, Re
     let launch = perf::LaunchOptions {
         no_address_randomization: breakpoint.is_some(),
     };
-    let perf::Launched { pid, events, exit } = perf::launch(command, &events, launch)?;
+    let perf::Launched {
+        pid,
+        events,
+        exit,
+        killer,
+        executed,
+    } = perf::launch(command, &events, launch)?;
     let search = crate::debug_info::DebugFileSearch::new(&crate::DebugFileOptions {
         directories: options.debug_directories.clone(),
         ..crate::DebugFileOptions::default()
     });
     let ring_pages = events.pages();
     let mut processor = record::Processor::new(search, options.max_frames);
+    let builder = processor.builder();
+    for (key, value) in [
+        ("program", program.to_string_lossy().into_owned()),
+        ("pid", pid.to_string()),
+        ("ring pages", ring_pages.to_string()),
+        ("source", options.source.to_string()),
+        ("weight", options.source.unit().to_owned()),
+        ("stack bytes", options.stack_bytes.to_string()),
+    ] {
+        builder.setting(key, &value);
+    }
+    // A program that failed to execute ends the recording with why, below,
+    // without having been published as started.
+    let started = executed.recv().is_ok();
+    if started {
+        (watch.publish)(Profile {
+            capture: processor.snapshot(),
+        });
+    }
+    let mut published = std::time::Instant::now();
+    let mut wait = watch.every.min(Duration::from_millis(250));
+    let mut killed = false;
     let mut events = events;
     let mut buffer = Vec::new();
     loop {
+        if !killed && watch.stop.load(Ordering::Relaxed) {
+            record!("record: stopping, killing {pid}");
+            killer.kill();
+            killed = true;
+        }
         let finished = exit.is_finished();
         // Every record stamped before this has been written by the time
         // the next drain begins, but for a stalled CPU.
@@ -187,6 +247,13 @@ pub fn record(command: Command, options: &RecordOptions) -> Result<Recording, Re
         if finished {
             break;
         }
+        if started && published.elapsed() >= wait {
+            (watch.publish)(Profile {
+                capture: processor.snapshot(),
+            });
+            published = std::time::Instant::now();
+            wait = (wait * 2).min(watch.every);
+        }
     }
     events.disable();
     let status = exit
@@ -194,23 +261,37 @@ pub fn record(command: Command, options: &RecordOptions) -> Result<Recording, Re
         .unwrap_or_else(|_| Err(std::io::Error::other("the program's waiter panicked")))
         .map_err(RecordError::Start)?;
     record!("record: the program ended: {status}");
-    let builder = processor.builder();
-    builder.setting("program", &program.to_string_lossy());
-    builder.setting("pid", &pid.to_string());
-    builder.setting("ring pages", &ring_pages.to_string());
-    builder.setting("source", &options.source.to_string());
-    let weight = match options.source {
-        SampleSource::Clock { .. } => "nanoseconds",
-        SampleSource::Function { .. } => "executions",
-    };
-    builder.setting("weight", weight);
-    builder.setting("stack bytes", &options.stack_bytes.to_string());
     let capture = processor.finish();
     let profile = Profile { capture };
     if let Some(expected) = breakpoint {
         profile.check_bias(&program, expected)?;
     }
     Ok(Recording { profile, status })
+}
+
+/// The event that takes `source`'s samples in `program`, and for a
+/// breakpoint, the bias the program must load at for it to be right.
+fn perf_source(
+    program: &Path,
+    source: &SampleSource,
+) -> Result<(perf::Source, Option<u64>), RecordError> {
+    Ok(match source {
+        SampleSource::Clock { rate } => (
+            perf::Source::Clock {
+                period: Duration::from_nanos(1_000_000_000 / u64::from((*rate).max(1))),
+            },
+            None,
+        ),
+        SampleSource::Function { symbol } => {
+            let (address, bias) = function_address(program, symbol)?;
+            (
+                perf::Source::Breakpoint {
+                    address: address + bias,
+                },
+                Some(bias),
+            )
+        }
+    })
 }
 
 /// How far behind a drain records are processed.
@@ -377,6 +458,14 @@ impl Profile {
             truncated: read.truncated,
             chunks: read.chunks,
         })
+    }
+
+    /// The profile as a file holds it.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        file::write(&self.capture, &mut bytes).expect("writing to memory cannot fail");
+        bytes
     }
 
     /// Writes the profile to a file.

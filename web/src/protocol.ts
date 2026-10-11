@@ -65,6 +65,8 @@ export interface Results {
   profileTree: P.ProfileTree & { payload?: Uint8Array };
   profileFunctions: P.ProfileFunctions;
   profileTimeline: P.ProfileTimeline;
+  recordProfile: P.RecordStarted;
+  stopRecording: null;
 }
 
 // Fails to compile when a method has no entry in Results, or Results names

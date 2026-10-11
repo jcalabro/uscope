@@ -192,6 +192,24 @@ pub struct Launched {
     pub events: Events,
     /// Ends with the program's exit status, once it exits.
     pub exit: JoinHandle<std::io::Result<ExitStatus>>,
+    /// Kills the program it was opened for and no later process given its
+    /// identifier.
+    pub killer: Killer,
+    /// Says the program executed; it closes without a word when it failed
+    /// to, and `exit` holds why.
+    pub executed: std::sync::mpsc::Receiver<()>,
+}
+
+/// Kills one launched program.
+#[derive(Debug)]
+pub struct Killer(OwnedFd);
+
+impl Killer {
+    /// Kills the program, unless it has ended already.
+    pub fn kill(&self) {
+        // A program that has ended already is no failure.
+        let _ = super::native::pidfd_send_signal(&self.0, super::signals::Signal::SIGKILL);
+    }
 }
 
 /// How to start the program.
@@ -216,13 +234,17 @@ pub fn launch(
     let (pid_read, pid_write) = pipe()?;
     let (go_read, go_write) = pipe()?;
     gate(&mut command, [&pid_write, &go_read, &go_write], launch);
+    let (executing, executed) = std::sync::mpsc::channel();
     let spawner = std::thread::Builder::new()
         .name("uscope-record-child".into())
         .spawn(move || {
+            // Spawning returns once the program executes, or has failed to.
             let spawned = command.spawn();
             // The child holds its own copies until it executes.
             drop((pid_write, go_read));
-            spawned?.wait()
+            let mut child = spawned?;
+            let _ = executing.send(());
+            child.wait()
         })
         .map_err(LaunchError::Spawn)?;
     let mut pid = [0_u8; 4];
@@ -236,6 +258,18 @@ pub fn launch(
     }
     let pid = u32::from_le_bytes(pid);
     record!("perf launch: {pid} waits at its gate");
+    // Until the gate opens the child can neither execute nor exit, so the
+    // descriptor names it and no other process.
+    let killer = match super::native::pidfd_open(nix::unistd::Pid::from_raw(
+        i32::try_from(pid).unwrap_or(i32::MAX),
+    )) {
+        Ok(descriptor) => Killer(descriptor),
+        Err(error) => {
+            drop(go_write);
+            let _ = spawner.join();
+            return Err(LaunchError::Spawn(error.into()));
+        }
+    };
     let events = match Events::open(pid, options) {
         Ok(events) => events,
         Err(error) => {
@@ -252,6 +286,8 @@ pub fn launch(
         pid,
         events,
         exit: spawner,
+        killer,
+        executed,
     })
 }
 

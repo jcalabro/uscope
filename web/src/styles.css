@@ -2602,8 +2602,8 @@ kbd {
 /* ---------- profiles ---------- */
 
 .profile {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   background: var(--surface);
 }
@@ -2717,6 +2717,7 @@ kbd {
 
 .profile-view {
   display: grid;
+  flex: 1;
   min-height: 0;
 }
 
@@ -2826,4 +2827,15 @@ kbd {
 
 .profile-foot .warn {
   color: var(--changed);
+}
+
+.profile-recording {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 3px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 12px;
 }

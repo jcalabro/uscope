@@ -14,7 +14,7 @@ use std::path::Path;
 pub struct StrId(pub u32);
 
 /// Display strings being pooled, each once, where it is first pushed.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct StringsBuilder {
     bytes: Vec<u8>,
     pooled: Pooled,

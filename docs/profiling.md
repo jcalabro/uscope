@@ -119,6 +119,12 @@ shows samples lost, throttled, and truncated.
 Everything the page shows is in its address, so a reload or a shared link
 opens the same view of the same profile.
 
+The picker's **Profile** tab records a program from the page. Its profile
+opens at once and fills in while the program runs: first within a quarter
+second, then at most every two seconds. **Stop** ends the recording and
+kills the program, as does stopping the server. **Save** downloads any
+profile as a file that `uscope report` and `uscope web` read.
+
 ## Profile files
 
 A profile is a file of sealed parts followed by an index of them. A file

@@ -327,10 +327,24 @@ impl Processor {
             .sample(thread, time, sample.period, stack, NONE);
     }
 
+    /// The capture so far, every frame symbolized, which goes on growing:
+    /// what a live view shows. Records held back stay held back.
+    pub fn snapshot(&mut self) -> Capture {
+        self.symbolize_new();
+        self.builder.clone().finish()
+    }
+
     /// The finished capture, every frame symbolized.
     pub fn finish(mut self) -> Capture {
         // Everything held back is processed now.
         self.ingest(&[], None);
+        self.symbolize_new();
+        self.builder.finish()
+    }
+
+    /// Gives each frame not yet symbolized its lines, and the capture its
+    /// span so far.
+    fn symbolize_new(&mut self) {
         let start = self.first.unwrap_or(0);
         self.builder.setting("start", &start.to_string());
         self.builder.setting("end", &self.latest.to_string());
@@ -345,8 +359,12 @@ impl Processor {
             .frames()
             .iter()
             .enumerate()
-            .filter(|(_, frame)| {
-                frame.kind == FrameKind::Native as u8 && frame.module.get() != NONE
+            .filter(|(index, frame)| {
+                frame.kind == FrameKind::Native as u8
+                    && frame.module.get() != NONE
+                    && !self
+                        .builder
+                        .symbolized(u32::try_from(*index).unwrap_or(u32::MAX))
             })
             .map(|(index, frame)| {
                 (
@@ -367,7 +385,6 @@ impl Processor {
             let inputs: Vec<LineInput<'_>> = lines.iter().map(OwnedLine::input).collect();
             self.builder.symbolize(frame, module, &inputs);
         }
-        self.builder.finish()
     }
 }
 

@@ -25,7 +25,7 @@ pub struct LineInput<'a> {
 }
 
 /// Builds a capture as a recording proceeds.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CaptureBuilder {
     strings: StringsBuilder,
     settings: BTreeMap<String, String>,

@@ -1,18 +1,18 @@
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { type FormEvent, type ReactNode, useEffect, useId, useMemo, useState } from "react";
 import { targetName } from "../model";
-import type { PathEntry, Process } from "../protocol";
+import type { PathEntry, Process, RecordPreset } from "../protocol";
 import { RequestError } from "../protocol";
 import { isRecentLaunches, type RecentLaunch, read, rememberLaunch } from "../storage";
 import { useConnection, useModel } from "../store";
 import { parseEnvironment, splitWords } from "../words";
 
-export type PickerTab = "launch" | "attach" | "core";
+export type PickerTab = "launch" | "attach" | "core" | "profile";
 
 /** Validates the `?tab=` search parameter. */
 export function pickerSearch(search: Record<string, unknown>): { tab?: PickerTab } {
   const tab = search.tab;
-  return tab === "attach" || tab === "core" || tab === "launch" ? { tab } : {};
+  return tab === "attach" || tab === "core" || tab === "launch" || tab === "profile" ? { tab } : {};
 }
 
 /** A request to start something, and how to retry it replacing the session. */
@@ -67,14 +67,18 @@ export function Picker() {
         <div className="card-head">
           <h1>Debug something</h1>
           <div className="segmented">
-            {(["launch", "attach", "core"] as const).map((name) => (
+            {(["launch", "attach", "core", "profile"] as const).map((name) => (
               <button
                 key={name}
                 type="button"
                 aria-pressed={tab === name}
                 onClick={() => void navigate({ to: "/pick", search: { tab: name }, replace: true })}
               >
-                {{ launch: "Launch", attach: "Attach", core: "Core dump" }[name]}
+                {
+                  { launch: "Launch", attach: "Attach", core: "Core dump", profile: "Profile" }[
+                    name
+                  ]
+                }
               </button>
             ))}
           </div>
@@ -121,6 +125,7 @@ export function Picker() {
           {tab === "core" && (
             <CoreForm working={working} submit={(pending) => void submit(pending)} />
           )}
+          {tab === "profile" && <RecordForm />}
         </div>
       </div>
     </div>
@@ -264,6 +269,153 @@ function LaunchForm({ working, submit }: FormProps) {
           </div>
         </div>
       )}
+    </form>
+  );
+}
+
+const PRESETS: { preset: RecordPreset; label: string }[] = [
+  { preset: "development", label: "Development: 999 Hz, deep stacks" },
+  { preset: "production", label: "Production: 49 Hz, a fraction of a percent of a CPU" },
+  { preset: "maximum", label: "Maximum: 9999 Hz" },
+];
+
+/** Records a program, opening its profile as it grows. */
+function RecordForm() {
+  const connection = useConnection();
+  const navigate = useNavigate();
+  const [form, setForm] = useState<RecentLaunch>({
+    program: "",
+    arguments: "",
+    cwd: "",
+    environment: "",
+  });
+  const [preset, setPreset] = useState<RecordPreset>("development");
+  const [function_, setFunction] = useState("");
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const words = splitWords(form.arguments);
+  const environment = parseEnvironment(form.environment);
+  const valid = form.program.trim() !== "" && words.ok && environment.ok;
+
+  const record = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!valid || !words.ok || !environment.ok) {
+      return;
+    }
+    setError(null);
+    setWorking(true);
+    try {
+      const started = await connection.request("recordProfile", {
+        program: form.program.trim(),
+        arguments: words.words,
+        cwd: form.cwd.trim() || null,
+        environment: environment.pairs,
+        preset,
+        function: function_.trim() || null,
+      });
+      void navigate({ to: "/profile/$profile", params: { profile: started.profile } });
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  return (
+    <form className="card-body" style={{ padding: 0 }} onSubmit={(event) => void record(event)}>
+      {error && (
+        <div className="banner error" role="alert">
+          {error}
+        </div>
+      )}
+      <Field label="Program" note="Sampled from outside, so it runs at full speed.">
+        {(id) => (
+          <PathInput
+            id={id}
+            value={form.program}
+            onChange={(program) => setForm({ ...form, program })}
+            autoFocus
+            placeholder="./build/app"
+            onlyExecutables
+          />
+        )}
+      </Field>
+      <Field label="Arguments" note={words.ok ? undefined : words.error}>
+        {(id) => (
+          <input
+            id={id}
+            className="input"
+            value={form.arguments}
+            aria-invalid={!words.ok}
+            onChange={(event) => setForm({ ...form, arguments: event.target.value })}
+            spellCheck={false}
+          />
+        )}
+      </Field>
+      <div className="two">
+        <Field label="Working directory" note="Empty runs it where uscope runs.">
+          {(id) => (
+            <PathInput
+              id={id}
+              value={form.cwd}
+              onChange={(cwd) => setForm({ ...form, cwd })}
+              placeholder="."
+              onlyDirectories
+            />
+          )}
+        </Field>
+        <Field
+          label="Environment"
+          note={environment.ok ? "NAME=VALUE, one per line" : environment.error}
+        >
+          {(id) => (
+            <textarea
+              id={id}
+              className="input"
+              value={form.environment}
+              aria-invalid={!environment.ok}
+              onChange={(event) => setForm({ ...form, environment: event.target.value })}
+              spellCheck={false}
+            />
+          )}
+        </Field>
+      </div>
+      <div className="two">
+        <Field label="Preset">
+          {(id) => (
+            <select
+              id={id}
+              className="input"
+              value={preset}
+              onChange={(event) => setPreset(event.target.value as RecordPreset)}
+            >
+              {PRESETS.map(({ preset, label }) => (
+                <option key={preset} value={preset}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+        <Field label="Calls of" note="A function to sample each call of, instead of CPU time.">
+          {(id) => (
+            <input
+              id={id}
+              className="input"
+              value={function_}
+              onChange={(event) => setFunction(event.target.value)}
+              placeholder="app::handle"
+              spellCheck={false}
+            />
+          )}
+        </Field>
+      </div>
+      <div className="actions">
+        <button type="submit" className="button primary" disabled={!valid || working}>
+          Record
+        </button>
+        <span className="muted">The profile opens as it is recorded.</span>
+      </div>
     </form>
   );
 }

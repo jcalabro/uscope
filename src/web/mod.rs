@@ -198,7 +198,8 @@ pub async fn run(args: &WebArgs) -> Result<()> {
     // Ctrl+C is caught from here on. One that comes while the program starts
     // ends the server once it has, so nothing is left half launched.
     let terminated = crate::dap::termination();
-    let profiles = profiles::Profiles::new();
+    let cwd = std::env::current_dir().context("the working directory")?;
+    let profiles = profiles::Profiles::new(cwd.clone());
     let (start, profile) = what_to_serve(args, &profiles)?;
     let listener = bind(args).await?;
     let address = listener.local_addr().context("the listening address")?;
@@ -207,7 +208,6 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         || format!("http://{}/", origins.primary()),
         auth::PublicUrl::url,
     );
-    let cwd = std::env::current_dir().context("the working directory")?;
     let tokens = Tokens::mint().context("failed to mint access tokens")?;
     let debug_files = uscope::DebugFileOptions {
         directories: args.debug_directories.clone(),
@@ -271,26 +271,8 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         })
     });
 
-    let base = app.base().trim_end_matches('/').to_owned();
-    let root_app = Arc::clone(&app);
-    let api = Router::new()
-        .route("/api/ws", get(socket))
-        .route("/api/login", post(login))
-        .route("/api/check", post(check))
-        .route("/visualizer-frame", get(frame::frame))
-        .fallback(get(page))
-        .with_state(app);
-    // Behind a proxy, nothing outside the public URL's path is served.
-    let router = if base.is_empty() {
-        api
-    } else {
-        // nest serves the path without its slash but not with it, which is
-        // the URL itself: its page is the root's.
-        let root = move |headers: HeaderMap| page(State(root_app), headers, Uri::from_static("/"));
-        Router::new()
-            .nest(&base, api)
-            .route(&format!("{base}/"), get(root))
-    };
+    let app_profiles = Arc::clone(&app.profiles);
+    let router = router(app);
     let served = tokio::select! {
         served = axum::serve(listener, router) => served.context("the server failed"),
         () = terminated => Ok(()),
@@ -304,8 +286,36 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         let _ = starting.await;
     }
     session.shutdown().await;
+    // Recordings end with the server, and so do the programs they run.
+    let profiles = Arc::clone(&app_profiles);
+    let _ = tokio::task::spawn_blocking(move || profiles.shutdown()).await;
     drop(keys);
     served
+}
+
+/// Every route, under the public URL's path when there is one.
+fn router(app: Arc<App>) -> Router {
+    let base = app.base().trim_end_matches('/').to_owned();
+    let root_app = Arc::clone(&app);
+    let api = Router::new()
+        .route("/api/ws", get(socket))
+        .route("/api/login", post(login))
+        .route("/api/check", post(check))
+        .route("/api/profile/{id}", post(download))
+        .route("/visualizer-frame", get(frame::frame))
+        .fallback(get(page))
+        .with_state(app);
+    // Behind a proxy, nothing outside the public URL's path is served.
+    if base.is_empty() {
+        api
+    } else {
+        // nest serves the path without its slash but not with it, which is
+        // the URL itself: its page is the root's.
+        let root = move |headers: HeaderMap| page(State(root_app), headers, Uri::from_static("/"));
+        Router::new()
+            .nest(&base, api)
+            .route(&format!("{base}/"), get(root))
+    }
 }
 
 /// What to debug, or the profile to serve, by its id: the executable
@@ -418,6 +428,43 @@ async fn login(State(app): State<Arc<App>>, headers: HeaderMap, body: String) ->
         |_| StatusCode::BAD_REQUEST.into_response(),
         |cookie| (StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response(),
     )
+}
+
+/// A profile's file, for saving. It is a POST, which carries the `Origin`
+/// that shows the request came from this server's own page.
+async fn download(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if app.authorize(&headers).is_none() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some((name, bytes)) = app.profiles.file(&id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // Only characters a file name and a header both take.
+    let name: String = name
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() || "._-".contains(char) {
+                char
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    (
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 /// Says whether this browser's cookie grants access, which a refused

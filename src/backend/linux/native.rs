@@ -873,7 +873,7 @@ pub(super) fn held_in_status(status: &str, stat: &str) -> bool {
     unsafe_code,
     reason = "Linux exposes process file descriptors only through system calls"
 )]
-fn pidfd_open(process: Pid) -> std::result::Result<std::os::fd::OwnedFd, Errno> {
+pub(super) fn pidfd_open(process: Pid) -> std::result::Result<std::os::fd::OwnedFd, Errno> {
     use std::os::fd::FromRawFd as _;
     // SAFETY: pidfd_open takes a process ID and flags, and reads no memory.
     let result = unsafe { libc::syscall(libc::SYS_pidfd_open, process.as_raw(), 0) };
@@ -887,7 +887,7 @@ fn pidfd_open(process: Pid) -> std::result::Result<std::os::fd::OwnedFd, Errno> 
     unsafe_code,
     reason = "Linux exposes process file descriptors only through system calls"
 )]
-fn pidfd_send_signal(
+pub(super) fn pidfd_send_signal(
     handle: &std::os::fd::OwnedFd,
     signal: Signal,
 ) -> std::result::Result<(), Errno> {

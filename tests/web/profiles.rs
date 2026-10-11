@@ -186,3 +186,129 @@ async fn a_profile_is_served_as_trees_functions_and_a_timeline() {
     assert!(message.contains("nothing"), "{message}");
     tab.save_traffic("profile");
 }
+
+/// Waits for the profiles list to show `id` as `matches` accepts.
+async fn listed(tab: &mut Client, id: &str, what: &str, matches: impl Fn(&Value) -> bool) -> Value {
+    loop {
+        let message = tab
+            .expect(what, |message| message["type"] == "profiles")
+            .await;
+        if let Some(info) = message["profiles"]
+            .as_array()
+            .and_then(|profiles| profiles.iter().find(|info| info["id"] == id))
+            && matches(info)
+        {
+            return info.clone();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_recording_grows_live_stops_when_asked_and_downloads_whole() {
+    let web = Web::start("record", &[]);
+    let mut tab = web.control("tab").await;
+    let started = tab
+        .ok(
+            "recordProfile",
+            json!({"program": Scenario::fixture("spin"), "preset": "development"}),
+        )
+        .await;
+    let id = started["profile"].as_str().expect("an id").to_owned();
+
+    // The profile is published as it grows, each time a new revision.
+    let mut samples = 0;
+    let mut revision = 0;
+    while samples == 0 {
+        let info = listed(&mut tab, &id, "a newer revision", |info| {
+            info["revision"].as_u64() > Some(revision)
+        })
+        .await;
+        assert_eq!(info["recording"], true);
+        revision = info["revision"].as_u64().expect("a revision");
+        let summary = tab
+            .ok("profile", json!({"profile": id, "revision": revision}))
+            .await;
+        samples = summary["samples"].as_u64().expect("samples");
+    }
+    let summary = tab.ok("profile", json!({"profile": id})).await;
+    let pid: u64 = summary["settings"]
+        .as_array()
+        .and_then(|settings| settings.iter().find(|setting| setting["name"] == "pid"))
+        .and_then(|setting| setting["value"].as_str()?.parse().ok())
+        .expect("the program's pid");
+
+    // A viewer may look but not stop it.
+    let link = tab.ok("share", json!({"role": "view", "to": "/"})).await;
+    let mut viewer = web
+        .joining("viewer", link["url"].as_str().expect("a link"))
+        .await;
+    let (kind, _) = viewer
+        .request("stopRecording", json!({"profile": id}))
+        .await
+        .expect_err("a viewer's stop");
+    assert_eq!(kind, "forbidden");
+
+    tab.ok("stopRecording", json!({"profile": id})).await;
+    let ended = listed(&mut tab, &id, "the recording's end", |info| {
+        info["recording"] == false
+    })
+    .await;
+    assert!(
+        ended["ended"]
+            .as_str()
+            .is_some_and(|ended| ended.contains("SIGKILL")),
+        "{ended}"
+    );
+    crate::web::wait_gone(pid);
+
+    // The file the page saves is the whole profile.
+    let summary = tab.ok("profile", json!({"profile": id})).await;
+    let cookie = web.cookie(&web.control_token.clone());
+    let (head, body) = web.http_bytes(&format!(
+        "POST /api/profile/{id} HTTP/1.1\r\nHost: {}\r\nOrigin: {}\r\nCookie: {cookie}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        web.host(),
+        web.origin()
+    ));
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(head.contains("filename=\"spin.usprof\""), "{head}");
+    let saved = uscope::profiler::Profile::from_bytes(&body).expect("a profile");
+    assert_eq!(
+        Some(saved.profile.samples() as u64),
+        summary["samples"].as_u64()
+    );
+}
+
+#[tokio::test]
+async fn a_server_that_ends_ends_its_recordings_programs() {
+    let mut web = Web::start("record-shutdown", &[]);
+    let mut tab = web.control("tab").await;
+    let started = tab
+        .ok(
+            "recordProfile",
+            json!({"program": Scenario::fixture("spin")}),
+        )
+        .await;
+    let id = started["profile"].as_str().expect("an id");
+    let summary = tab.ok("profile", json!({"profile": id})).await;
+    let pid: u64 = summary["settings"]
+        .as_array()
+        .and_then(|settings| settings.iter().find(|setting| setting["name"] == "pid"))
+        .and_then(|setting| setting["value"].as_str()?.parse().ok())
+        .expect("the program's pid");
+    assert!(crate::web::exists(pid));
+    let status = web.interrupt();
+    assert!(status.success(), "{status}");
+    crate::web::wait_gone(pid);
+}
+
+#[tokio::test]
+async fn a_program_that_cannot_start_fails_its_recording() {
+    let web = Web::start("record-missing", &[]);
+    let mut tab = web.control("tab").await;
+    let (kind, message) = tab
+        .request("recordProfile", json!({"program": "/nonexistent/program"}))
+        .await
+        .expect_err("a missing program");
+    assert_eq!(kind, "failed");
+    assert!(message.contains("starting the program failed"), "{message}");
+}
