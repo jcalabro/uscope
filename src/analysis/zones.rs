@@ -216,6 +216,90 @@ fn histogram(lengths: &[u64], min: u64, max: u64) -> Vec<(u64, u64)> {
     buckets
 }
 
+/// One plotted series in a range: every plot site of one name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlotSeries {
+    /// Its name's string.
+    pub name: u32,
+    /// How many values it drew, and how many were not finite.
+    pub values: u64,
+    pub unshown: u64,
+    /// By time, each a bin's values.
+    pub bins: Vec<PlotBin>,
+}
+
+/// The values a series plotted in one bin of time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlotBin {
+    /// Its first value's time.
+    pub time: i64,
+    pub first: f64,
+    pub last: f64,
+    pub low: f64,
+    pub high: f64,
+}
+
+/// Each series' values in `range`, of the threads `threads` selects, by
+/// name, in `bins` bins of equal time.
+pub fn plot_series(
+    capture: &Capture,
+    range: (i64, i64),
+    threads: Option<&[u32]>,
+    bins: usize,
+) -> Vec<PlotSeries> {
+    let mut values: Vec<(&str, u32, i64, f64)> = capture
+        .plots
+        .iter()
+        .filter(|plot| (range.0..range.1).contains(&plot.time.get()))
+        .filter(|plot| threads.is_none_or(|threads| threads.contains(&plot.thread.get())))
+        .map(|plot| {
+            let name = capture.sites[plot.site.get() as usize].name.get();
+            let value = f64::from_bits(plot.value.get());
+            (capture.string(name), name, plot.time.get(), value)
+        })
+        .collect();
+    values.sort_by(|a, b| (a.0, a.2).cmp(&(b.0, b.2)));
+    let width = i128::from((range.1 - range.0).max(1));
+    let bin_of = |time: i64| i128::from(time - range.0) * bins.max(1) as i128 / width;
+    let mut series: Vec<PlotSeries> = Vec::new();
+    let mut last_bin = 0;
+    for (_, name, time, value) in values {
+        if series.last().is_none_or(|series| series.name != name) {
+            series.push(PlotSeries {
+                name,
+                values: 0,
+                unshown: 0,
+                bins: Vec::new(),
+            });
+        }
+        let Some(series) = series.last_mut() else {
+            continue;
+        };
+        if !value.is_finite() {
+            series.unshown += 1;
+            continue;
+        }
+        series.values += 1;
+        let bin = bin_of(time);
+        match series.bins.last_mut() {
+            Some(open) if bin == last_bin => {
+                open.last = value;
+                open.low = open.low.min(value);
+                open.high = open.high.max(value);
+            }
+            _ => series.bins.push(PlotBin {
+                time,
+                first: value,
+                last: value,
+                low: value,
+                high: value,
+            }),
+        }
+        last_bin = bin;
+    }
+    series
+}
+
 /// The sites `name` names, of zones or labels.
 pub fn sites_named(capture: &Capture, name: &str) -> Vec<u32> {
     (0..capture.sites.len())

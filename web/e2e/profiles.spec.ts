@@ -204,6 +204,7 @@ test("a program's zones show in tracks, and Find Zone measures one and filters b
   await page.getByRole("button", { name: "Zones", exact: true }).click();
   await expect(page).toHaveURL(/view=zones/);
   await expect(page.getByRole("img", { name: /^Zones over/ })).toBeVisible();
+  await expect(page.getByRole("img", { name: "Plot round, 3 values from 0 – 2" })).toBeVisible();
 
   // A site's zones, measured; its longest selects its span.
   const find = page.getByTestId("find-zone");

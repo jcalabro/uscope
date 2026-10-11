@@ -375,7 +375,9 @@ A profile with instrumentation has a **Zones** view: a track per thread
 of its zones and labels, nested as they ran, with ticks where the program
 marked a frame, a message, or a trigger. Zones too narrow to tell apart
 are drawn as one block that says how many it holds; clicking a zone or a
-block selects its span. **Find zone** lists every zone site and label key
+block selects its span. Under the tracks, each plotted series is a line
+through its lowest and highest values at every pixel, so a spike between
+two others still shows. **Find zone** lists every zone site and label key
 with its total time. Choosing one shows the spread of its lengths in the
 selected range, its longest zones, each a button that selects it, and for
 a label, the time under each value. A value is a filter of every view:

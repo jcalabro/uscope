@@ -136,20 +136,21 @@ function ProfileHead() {
         </span>
       </div>
       <div className="segmented">
-        {VIEWS.filter(({ view }) => view !== "zones" || summary.zoneSites.length > 0).map(
-          ({ view, label }) => (
-            <button
-              key={view}
-              type="button"
-              aria-pressed={(look.view ?? "flame") === view}
-              onClick={() =>
-                setLook((look) => withLook(look, "view", view === "flame" ? undefined : view), true)
-              }
-            >
-              {label}
-            </button>
-          ),
-        )}
+        {VIEWS.filter(
+          ({ view }) =>
+            view !== "zones" || summary.zoneSites.length > 0 || summary.probes.plotted > 0,
+        ).map(({ view, label }) => (
+          <button
+            key={view}
+            type="button"
+            aria-pressed={(look.view ?? "flame") === view}
+            onClick={() =>
+              setLook((look) => withLook(look, "view", view === "flame" ? undefined : view), true)
+            }
+          >
+            {label}
+          </button>
+        ))}
       </div>
       {snapshots ? (
         <div className="segmented">

@@ -115,3 +115,32 @@ export function describeFlags(flags: number): string[] {
   }
   return said;
 }
+
+/** An SVG path of a plot's bins, `width` by `height`, from `origin` over
+ * `span` nanoseconds and from `low` to `high`: each bin a stroke from its
+ * first value through its lowest and highest to its last, joined to the
+ * next. */
+export function plotPath(
+  bins: number[][],
+  origin: number,
+  span: number,
+  width: number,
+  height: number,
+  low: number,
+  high: number,
+): string {
+  const x = (time: number) => (((time - origin) * width) / Math.max(span, 1)).toFixed(1);
+  const y = (value: number) =>
+    (high === low
+      ? height / 2
+      : height - 2 - ((value - low) * (height - 4)) / (high - low)
+    ).toFixed(1);
+  const points: string[] = [];
+  for (const [time = 0, first = 0, last = 0, least = 0, most = 0] of bins) {
+    const at = x(time);
+    for (const value of [first, least, most, last]) {
+      points.push(`${at} ${y(value)}`);
+    }
+  }
+  return points.length > 0 ? `M${points.join("L")}` : "";
+}

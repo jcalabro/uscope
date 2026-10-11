@@ -909,6 +909,8 @@ pub struct ProfileProbes {
     pub interrupted: u64,
     /// Records that broke the probes ABI.
     pub malformed: u64,
+    /// Values plotted.
+    pub plotted: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -958,6 +960,20 @@ pub struct ProfileZones {
     pub names: Vec<String>,
     /// The program's messages, frames, and triggers in the range.
     pub marks: Vec<ProfileMark>,
+    /// Each plotted series in the range, by name.
+    pub plots: Vec<ProfilePlot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfilePlot {
+    pub name: String,
+    /// How many values it drew, and how many were not finite.
+    pub values: u64,
+    pub unshown: u64,
+    /// A bin a pixel wide each: the time from the start of its first
+    /// value, its first, last, lowest, and highest values.
+    pub bins: Vec<[f64; 5]>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2145,6 +2161,7 @@ mod tests {
         ProfileZonesQuery::decl,
         ProfileZones::decl,
         ProfileMark::decl,
+        ProfilePlot::decl,
         ProfileMarkKind::decl,
         ProfileZoneStatsQuery::decl,
         ProfileZoneStats::decl,

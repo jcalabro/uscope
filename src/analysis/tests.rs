@@ -712,3 +712,47 @@ proptest! {
         prop_assert_eq!(drawn, expected);
     }
 }
+
+/// A series is every site of one name, binned by time: each bin keeps its
+/// first, last, lowest, and highest value, and values no axis can show
+/// are counted, not drawn.
+#[test]
+fn a_plot_keeps_each_bins_extremes_and_counts_what_it_cannot_draw() {
+    let mut builder = CaptureBuilder::new();
+    let module = builder.module("/bin/app", None, [0; 16], 0);
+    let (one, two) = (builder.thread(1, 1, 0), builder.thread(1, 2, 0));
+    let kind = uscope_probes::abi::SITE_PLOT;
+    let sites = [
+        builder.site("depth", "a.rs", 1, module, kind),
+        builder.site("depth", "b.rs", 2, module, kind),
+        builder.site("rate", "a.rs", 3, module, kind),
+    ];
+    for (thread, site, time, value) in [
+        (one, 0, 5, 3.0),
+        (two, 1, 1, 7.0),
+        (one, 0, 9, -2.0),
+        (two, 1, 12, f64::NAN),
+        (one, 0, 15, 4.0),
+        (one, 2, 30, 1.0),
+        (one, 0, 40, 9.0),
+    ] {
+        builder.plot(thread, sites[site], time, value);
+    }
+    let capture = builder.finish();
+    let series = plot_series(&capture, (0, 20), None, 2);
+    let named: Vec<&str> = series
+        .iter()
+        .map(|series| capture.string(series.name))
+        .collect();
+    assert_eq!(named, ["depth"]);
+    let depth = &series[0];
+    assert_eq!((depth.values, depth.unshown), (4, 1));
+    let bins: Vec<(i64, f64, f64, f64, f64)> = depth
+        .bins
+        .iter()
+        .map(|bin| (bin.time, bin.first, bin.last, bin.low, bin.high))
+        .collect();
+    assert_eq!(bins, [(1, 7.0, -2.0, -2.0, 7.0), (15, 4.0, 4.0, 4.0, 4.0)]);
+    let only = plot_series(&capture, (0, 50), Some(&[two]), 1);
+    assert_eq!((only.len(), only[0].values, only[0].unshown), (1, 1, 1));
+}

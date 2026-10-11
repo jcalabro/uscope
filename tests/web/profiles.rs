@@ -537,6 +537,20 @@ async fn a_profile_serves_its_zones_folded_to_a_width_and_measured() {
     assert_eq!(depth_of("round=1"), [0]);
     assert_eq!(depth_of("leaf"), [3, 3, 3]);
     assert_eq!(answer["marks"].as_array().map(Vec::len), Some(7));
+    // Each round's plotted value, in a bin of its own.
+    let plots = answer["plots"].as_array().expect("plots");
+    assert_eq!(plots.len(), 1, "{plots:?}");
+    assert_eq!(
+        (&plots[0]["name"], &plots[0]["values"]),
+        (&json!("round"), &json!(3))
+    );
+    let lows: Vec<f64> = plots[0]["bins"]
+        .as_array()
+        .expect("bins")
+        .iter()
+        .map(|bin| bin[3].as_f64().expect("a value"))
+        .collect();
+    assert_eq!(lows, [0.0, 1.0, 2.0]);
     // Ten pixels wide, each thread's track folds into a block per depth.
     let (answer, bytes) = tab
         .with_bytes("profileZones", json!({"profile": id, "width": 10}))

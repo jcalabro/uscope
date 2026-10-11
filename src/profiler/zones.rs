@@ -1,7 +1,7 @@
 //! What a profile's instrumentation recorded: zones and labels, plotted
 //! values, the program's markers, and what was lost.
 
-use super::{Profile, ZoneBlock, ZoneStats};
+use super::{PlotSeries, Profile, ZoneBlock, ZoneStats};
 use crate::capture::records::{AccountKind, MarkerKind, NONE};
 
 pub use crate::capture::records::{ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, ZONE_MISMATCHED};
@@ -57,6 +57,8 @@ pub struct ProbeCounts {
     pub interrupted: u64,
     /// Records, and rings, that broke the ABI.
     pub malformed: u64,
+    /// Values plotted.
+    pub plotted: u64,
 }
 
 /// Every zone of one site name, or one label key, over a whole profile.
@@ -164,6 +166,7 @@ impl Profile {
             no_ring: account(AccountKind::ProbeNoRing),
             interrupted: account(AccountKind::ProbeInterrupted),
             malformed: account(AccountKind::ProbeMalformed),
+            plotted: self.capture.plots.len() as u64,
         }
     }
 
@@ -238,6 +241,24 @@ impl Profile {
     pub fn zone_stats(&self, name: &str, range: (i64, i64), threads: Option<&[u32]>) -> ZoneStats {
         let sites = crate::analysis::sites_named(&self.capture, name);
         crate::analysis::zone_stats(&self.capture, &sites, range, threads)
+    }
+
+    /// Each plotted series' values in `range`, of the threads `threads`
+    /// names by row, in `bins` bins of equal time.
+    #[must_use]
+    pub fn plot_series(
+        &self,
+        range: (i64, i64),
+        threads: Option<&[u32]>,
+        bins: usize,
+    ) -> Vec<PlotSeries> {
+        crate::analysis::plot_series(&self.capture, range, threads, bins)
+    }
+
+    /// A string of the profile's, by index.
+    #[must_use]
+    pub fn string(&self, string: u32) -> &str {
+        self.capture.string(string)
     }
 
     /// How views name a zone of `site` with the label value `value`: its

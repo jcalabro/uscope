@@ -458,6 +458,7 @@ fn summary(entry: &Entry) -> ProfileSummary {
                 no_ring: counts.no_ring,
                 interrupted: counts.interrupted,
                 malformed: counts.malformed,
+                plotted: counts.plotted,
             }
         },
         zone_sites: profile
@@ -728,11 +729,29 @@ fn zones(profile: &Profile, query: &protocol::ProfileZonesQuery) -> (Value, Vec<
         })
         .take(MOST_MARKS)
         .collect();
+    let plots = profile
+        .plot_series(range, query.threads.as_deref(), query.width.max(1) as usize)
+        .into_iter()
+        .map(|series| protocol::ProfilePlot {
+            name: profile.string(series.name).to_owned(),
+            values: series.values,
+            unshown: series.unshown,
+            bins: series
+                .bins
+                .iter()
+                .map(|bin| {
+                    let time = exact_time(bin.time - start);
+                    [time, bin.first, bin.last, bin.low, bin.high]
+                })
+                .collect(),
+        })
+        .collect();
     let answer = protocol::ProfileZones {
         range: [range.0 - start, range.1 - start],
         blocks: u32::try_from(blocks.len()).unwrap_or(u32::MAX),
         names,
         marks,
+        plots,
     };
     (to_value(&answer), bytes)
 }

@@ -11,7 +11,7 @@ import {
   validateProfileLook,
 } from "../src/profile/look";
 import { type CallTree, decodeTree, findPath, hit, layout, pathOf } from "../src/profile/tree";
-import { blockAt, decodeZones, tracks } from "../src/profile/zones";
+import { blockAt, decodeZones, plotPath, tracks } from "../src/profile/zones";
 import type { ProfileKey, ProfileTree, ServerMessage } from "../src/protocol";
 import { binaries, transcript } from "./transcripts";
 
@@ -233,7 +233,7 @@ describe("a zones answer", () => {
       }
     }
     const zones = decodeZones(
-      { range: [0, 100], blocks: count, names: ["outer", "inner", "zones"], marks: [] },
+      { range: [0, 100], blocks: count, names: ["outer", "inner", "zones"], marks: [], plots: [] },
       bytes,
     );
     expect([...zones.zones]).toEqual([1, 1, 7, 1]);
@@ -247,6 +247,30 @@ describe("a zones answer", () => {
     const track = laid[1] ?? laid[0];
     expect(track && blockAt(zones, track, 1, 20, 0)).toBe(1);
     expect(track && blockAt(zones, track, 1, 45, 0)).toBeNull();
-    expect(() => decodeZones({ range: [0, 1], blocks: 2, names: [], marks: [] }, bytes)).toThrow();
+    expect(() =>
+      decodeZones({ range: [0, 1], blocks: 2, names: [], marks: [], plots: [] }, bytes),
+    ).toThrow();
+  });
+
+  it("a plot's bin strokes from its first value through its extremes to its last", () => {
+    // Two bins over 100 ns, 100 px wide and 24 tall, of values 0 to 10.
+    const path = plotPath(
+      [
+        [10, 5, 0, 0, 10],
+        [60, 10, 10, 10, 10],
+      ],
+      0,
+      100,
+      100,
+      24,
+      0,
+      10,
+    );
+    expect(path).toBe(
+      "M10.0 12.0L10.0 22.0L10.0 2.0L10.0 22.0L60.0 2.0L60.0 2.0L60.0 2.0L60.0 2.0",
+    );
+    expect(plotPath([[0, 3, 3, 3, 3]], 0, 1, 10, 20, 3, 3)).toBe(
+      "M0.0 10.0L0.0 10.0L0.0 10.0L0.0 10.0",
+    );
   });
 });

@@ -26,8 +26,8 @@ pub use zones::{
 };
 
 pub use crate::analysis::{
-    CallTree, Cost, Costs, Granularity, KeyKind, Keys, Lanes, OffCpuLane, Query, Source, Transform,
-    ZoneAt, ZoneBlock, ZoneStats,
+    CallTree, Cost, Costs, Granularity, KeyKind, Keys, Lanes, OffCpuLane, PlotBin, PlotSeries,
+    Query, Source, Transform, ZoneAt, ZoneBlock, ZoneStats,
 };
 
 use std::path::{Path, PathBuf};

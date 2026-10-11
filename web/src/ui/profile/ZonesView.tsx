@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatRange, parseRange, withLook } from "../../profile/look";
 import { formatDuration, hue } from "../../profile/paint";
-import { blockAt, decodeZones, describeFlags, type Track, tracks } from "../../profile/zones";
-import type { ProfileMark, ProfileZoneSite } from "../../protocol";
+import {
+  blockAt,
+  decodeZones,
+  describeFlags,
+  plotPath,
+  type Track,
+  tracks,
+} from "../../profile/zones";
+import type { ProfileMark, ProfilePlot, ProfileZoneSite } from "../../protocol";
 import { isDark, token, useAnswer, useProfile } from "./context";
 
 /** A depth's row, the gap between tracks, and the names column, in CSS
@@ -10,6 +17,7 @@ import { isDark, token, useAnswer, useProfile } from "./context";
 const ROW = 16;
 const GAP = 6;
 const NAMES = 180;
+const PLOT = 40;
 
 /** What the pointer is over. */
 interface Tip {
@@ -203,47 +211,52 @@ function ZoneTracks() {
         <div className="empty">{answer.error.message}</div>
       ) : (
         <div className={`pane-body zones-body ${answer.current ? "" : "stale"}`} ref={box}>
-          <div className="zone-names" style={{ width: NAMES, height }}>
-            {laid.map((track, index) => (
-              <div
-                key={track.thread}
-                className="zone-name"
-                style={{ top: trackTop(track, index) - ROW }}
-              >
-                {name(track.thread)}
-              </div>
-            ))}
-          </div>
-          <canvas
-            ref={canvas}
-            style={{ width: plot, height }}
-            role="img"
-            aria-label={`Zones over ${formatDuration(span)}`}
-            onPointerMove={(event) => {
-              const at = point(event);
-              const lines =
-                at.block !== null && blocks
-                  ? blockLines(blocks, at.block, name)
-                  : at.mark
-                    ? [
-                        `${at.mark.kind} ${at.mark.name} at ${formatDuration(at.mark.time)}`,
-                        ...(at.mark.text ? [at.mark.text] : []),
-                      ]
-                    : null;
-              setTip(lines ? { x: at.px + NAMES + 12, y: at.py + 30, lines } : null);
-            }}
-            onPointerLeave={() => setTip(null)}
-            onClick={(event) => {
-              const at = point(event);
-              if (at.block !== null && blocks) {
-                const start = blocks.start[at.block] ?? 0;
-                const end = blocks.end[at.block] ?? 0;
-                if (end > start) {
-                  setLook((look) => withLook(look, "range", formatRange([start, end])), true);
+          <div className="zone-lane">
+            <div className="zone-names" style={{ width: NAMES, height }}>
+              {laid.map((track, index) => (
+                <div
+                  key={track.thread}
+                  className="zone-name"
+                  style={{ top: trackTop(track, index) - ROW }}
+                >
+                  {name(track.thread)}
+                </div>
+              ))}
+            </div>
+            <canvas
+              ref={canvas}
+              style={{ width: plot, height }}
+              role="img"
+              aria-label={`Zones over ${formatDuration(span)}`}
+              onPointerMove={(event) => {
+                const at = point(event);
+                const lines =
+                  at.block !== null && blocks
+                    ? blockLines(blocks, at.block, name)
+                    : at.mark
+                      ? [
+                          `${at.mark.kind} ${at.mark.name} at ${formatDuration(at.mark.time)}`,
+                          ...(at.mark.text ? [at.mark.text] : []),
+                        ]
+                      : null;
+                setTip(lines ? { x: at.px + NAMES + 12, y: at.py + 30, lines } : null);
+              }}
+              onPointerLeave={() => setTip(null)}
+              onClick={(event) => {
+                const at = point(event);
+                if (at.block !== null && blocks) {
+                  const start = blocks.start[at.block] ?? 0;
+                  const end = blocks.end[at.block] ?? 0;
+                  if (end > start) {
+                    setLook((look) => withLook(look, "range", formatRange([start, end])), true);
+                  }
                 }
-              }
-            }}
-          />
+              }}
+            />
+          </div>
+          {(answer.data?.plots ?? []).map((series) => (
+            <PlotLane key={series.name} series={series} origin={origin} span={span} width={plot} />
+          ))}
           {tip ? (
             <div className="flame-tip" style={{ left: tip.x, top: tip.y }} data-testid="zone-tip">
               {tip.lines.map((line) => (
@@ -251,13 +264,57 @@ function ZoneTracks() {
               ))}
             </div>
           ) : null}
-          {blocks && blocks.count === 0 ? (
+          {blocks && blocks.count === 0 && (answer.data?.plots.length ?? 0) === 0 ? (
             <div className="empty">No zones in this range.</div>
           ) : null}
         </div>
       )}
     </div>
   );
+}
+
+/** One plotted series as a line from its lowest value to its highest. */
+function PlotLane({
+  series,
+  origin,
+  span,
+  width,
+}: {
+  series: ProfilePlot;
+  origin: number;
+  span: number;
+  width: number;
+}) {
+  let [low, high] = [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+  for (const bin of series.bins) {
+    low = Math.min(low, bin[3] ?? low);
+    high = Math.max(high, bin[4] ?? high);
+  }
+  const extent = series.bins.length > 0 ? `${formatValue(low)} – ${formatValue(high)}` : "";
+  return (
+    <div className="zone-lane zone-plot">
+      <div className="zone-names" style={{ width: NAMES, height: PLOT }}>
+        <div className="zone-name">{series.name}</div>
+        <div className="zone-name dim" style={{ top: 16 }}>
+          {extent}
+          {series.unshown > 0 ? ` · ${series.unshown} not finite` : ""}
+        </div>
+      </div>
+      <svg
+        width={width}
+        height={PLOT}
+        role="img"
+        aria-label={`Plot ${series.name}, ${series.values} values${extent ? ` from ${extent}` : ""}`}
+      >
+        <path d={plotPath(series.bins, origin, span, width, PLOT, low, high)} />
+      </svg>
+    </div>
+  );
+}
+
+/** A plotted value, short. */
+function formatValue(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toPrecision(4);
 }
 
 /** Where a track's first row begins: its marks take the row above. */

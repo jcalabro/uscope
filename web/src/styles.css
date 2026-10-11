@@ -2855,9 +2855,27 @@ kbd {
 
 .zones-body {
   position: relative;
+  overflow: auto;
+}
+
+.zone-lane {
   display: flex;
   align-items: flex-start;
-  overflow: auto;
+}
+
+.zone-plot {
+  border-top: 1px solid var(--line);
+}
+
+.zone-plot svg {
+  display: block;
+  flex: none;
+}
+
+.zone-plot path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.25;
 }
 
 .zones-body canvas {

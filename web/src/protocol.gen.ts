@@ -1095,7 +1095,11 @@ interrupted: number,
 /**
  * Records that broke the probes ABI.
  */
-malformed: number, };
+malformed: number, 
+/**
+ * Values plotted.
+ */
+plotted: number, };
 
 export type ProfileZoneSite = { name: string, 
 /**
@@ -1130,7 +1134,11 @@ export type ProfileZones = { range: [number, number], blocks: number, names: Arr
 /**
  * The program's messages, frames, and triggers in the range.
  */
-marks: Array<ProfileMark>, };
+marks: Array<ProfileMark>, 
+/**
+ * Each plotted series in the range, by name.
+ */
+plots: Array<ProfilePlot>, };
 
 export type ProfileMark = { thread: number, 
 /**
@@ -1141,6 +1149,17 @@ time: number, kind: ProfileMarkKind,
  * Its site's name.
  */
 name: string, text: string | null, };
+
+export type ProfilePlot = { name: string, 
+/**
+ * How many values it drew, and how many were not finite.
+ */
+values: number, unshown: number, 
+/**
+ * A bin a pixel wide each: the time from the start of its first
+ * value, its first, last, lowest, and highest values.
+ */
+bins: Array<[number, number, number, number, number]>, };
 
 export type ProfileMarkKind = "message" | "frame" | "trigger";
 
