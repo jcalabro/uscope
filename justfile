@@ -71,10 +71,11 @@ lint:
 # randomization off, which setarch turns back on, so tests see what they would
 # in any shell. A user's own view files are not the tests', so the user
 # configuration is an empty directory. Tests read images the cache-warm recipe
-# wrote; `just stress` loads them afresh.
+# wrote; `just stress` loads them afresh. Programs the tests kill dump no core,
+# which took the machine's core handler most of a second each.
 [doc("Builds the native test fixtures and runs the Rust test suite.")]
 test *ARGS: cache-warm
-    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; USCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" "$@"
+    ulimit -c 0; test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; USCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
 
 # Fills the image cache tests read with every fixture's image, built by this
@@ -89,7 +90,7 @@ cache-warm: build-test-programs
 # e.g. `just tokio workers::`.
 tokio *ARGS:
     ./scripts/build-test-programs.sh tokio
-    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; USCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" --test tokio "$@"
+    ulimit -c 0; test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; USCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" --test tokio "$@"
 
 # Races in process control fail far more often when the debugger competes for
 # the CPUs, so this oversubscribes the test threads and keeps busy loops
@@ -107,6 +108,7 @@ stress COUNT="10" *ARGS: build-test-programs
     burners=()
     trap 'kill "${burners[@]}" 2>/dev/null || true' EXIT
     for (( i = 0; i < cpus / 2; i++ )); do (while :; do :; done) & burners+=($!); done
+    ulimit -c 0
     XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
 
 # Attaches uscope to a tokio server under load for MINUTES, inspecting and
@@ -114,6 +116,7 @@ stress COUNT="10" *ARGS: build-test-programs
 [script]
 soak MINUTES="10": build-test-programs
     cargo nextest run --features tools --no-run
+    ulimit -c 0
     USCOPE_SOAK_SECONDS="$(( $1 * 60 ))" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --profile soak --no-capture --run-ignored only --test tokio -E 'test(=soak::soak)'
 
 # Installs the web page's locked dependencies.
