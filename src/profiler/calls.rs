@@ -58,18 +58,21 @@ impl Branch {
 const UNRANDOMIZED_PIE_BASE: u64 = 0x5555_5555_4aaa;
 
 /// Where to count the calls of the function `symbol` names in `program`.
-pub fn plan(program: &Path, symbol: &str) -> Result<Calls, RecordError> {
+/// The program loads at `bias`, or where it does without address
+/// randomization.
+pub fn plan(program: &Path, symbol: &str, bias: Option<u64>) -> Result<Calls, RecordError> {
     let unreadable = |error: &dyn std::fmt::Display| RecordError::Program(error.to_string());
-    let program = super::which(program).ok_or_else(|| RecordError::Program("not found".into()))?;
+    let program =
+        super::session::which(program).ok_or_else(|| RecordError::Program("not found".into()))?;
     let data = std::fs::read(&program).map_err(|error| unreadable(&error))?;
     let file = object::File::parse(data.as_slice()).map_err(|error| unreadable(&error))?;
-    let bias = match file.kind() {
+    let bias = bias.unwrap_or_else(|| match file.kind() {
         object::ObjectKind::Dynamic => {
             let first = file.segments().map(|segment| segment.address()).min();
             UNRANDOMIZED_PIE_BASE.wrapping_sub(first.unwrap_or(0)) & !0xfff
         }
         _ => 0,
-    };
+    });
     // A symbol, or the name a profile shows for one.
     let addresses: BTreeSet<u64> = file
         .symbols()

@@ -77,14 +77,15 @@ pub mod sample {
 const FLAG_FD_CLOEXEC: libc::c_ulong = 1 << 3;
 const IOC_ENABLE: libc::c_ulong = 0x2400;
 const IOC_DISABLE: libc::c_ulong = 0x2401;
+const IOC_SET_OUTPUT: libc::c_ulong = 0x2405;
 
 /// `read_format`: each read also gives how many samples the event lost.
 pub const FORMAT_LOST: u64 = 1 << 4;
 
-/// What an event with [`FORMAT_LOST`] has lost: every sample its own
-/// events and those it is inherited by found no room for, whether or not
-/// a loss record has said so yet.
-pub fn lost(fd: &OwnedFd) -> std::io::Result<u64> {
+/// An event's count, with those of the events inherited from it, and what
+/// it has lost: every sample it and they found no room for, whether or not
+/// a loss record has said so yet. The event reads [`FORMAT_LOST`].
+pub fn counts(fd: &OwnedFd) -> std::io::Result<(u64, u64)> {
     let mut values = [0_u64; 2];
     // SAFETY: the buffer holds the two words this read format reads, and
     // outlives the call.
@@ -92,7 +93,7 @@ pub fn lost(fd: &OwnedFd) -> std::io::Result<u64> {
     if read != 16 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(values[1])
+    Ok(values.into())
 }
 
 /// Opens an event for `pid` on `cpu`.
@@ -125,6 +126,18 @@ pub fn enable(fd: &OwnedFd, enabled: bool) -> std::io::Result<()> {
     // SAFETY: the request takes an integer argument, and the descriptor is
     // a perf event this process owns.
     let result = unsafe { libc::ioctl(fd.as_raw_fd(), request, 0) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Sends an event's records to the ring of `ring`'s event, which must be
+/// on the same CPU.
+pub fn set_output(fd: &OwnedFd, ring: &OwnedFd) -> std::io::Result<()> {
+    // SAFETY: the request takes the descriptor of another perf event, and
+    // both descriptors are perf events this process owns.
+    let result = unsafe { libc::ioctl(fd.as_raw_fd(), IOC_SET_OUTPUT, ring.as_raw_fd()) };
     if result < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -240,6 +253,19 @@ pub fn page_size() -> usize {
     // SAFETY: sysconf reads a constant.
     let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     usize::try_from(size).unwrap_or(4096)
+}
+
+/// Whether `fd` is readable now, as a process descriptor is once its
+/// process has exited.
+pub fn readable(fd: &OwnedFd) -> bool {
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one initialized entry, for a call that does not wait.
+    let result = unsafe { libc::poll(&raw mut poll, 1, 0) };
+    result > 0 && poll.revents & libc::POLLIN != 0
 }
 
 /// Waits until one of `rings` has data past its watermark, or `timeout`.

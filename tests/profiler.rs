@@ -4,8 +4,9 @@ use std::process::{Command, Stdio};
 
 use support::Scenario;
 use uscope::profiler::{
-    CallNode, DEEP_STACK_COPY, Preset, RecordOptions, SMALL_STACK_COPY, SampleSource, SampledStack,
-    StackCopy, StackEnding, StackView, Watch, record, record_watched,
+    Attachment, CallNode, DEEP_STACK_COPY, Preset, RecordError, RecordOptions, SMALL_STACK_COPY,
+    SampleSource, SampledStack, StackCopy, StackEnding, StackView, Watch, record, record_attached,
+    record_watched,
 };
 
 /// The profile-stacks fixture across languages, compilers, optimization,
@@ -386,9 +387,12 @@ fn a_goroutines_calls_name_its_exact_stack_in_every_build() {
     for variant in ["o0", "o2"] {
         let recording = record(go_command(variant, 5), &calls_of("main.work")).expect("record");
         assert!(recording.status.success());
-        let stacks = recording.profile.stacks();
+        let profile = &recording.profile;
+        let stacks = profile.stacks();
         // Four workers call work five times each.
         assert_eq!(stacks.len(), 20, "{variant}");
+        // Every execution of the instruction is a sample or a repeat.
+        assert_eq!(profile.counted(), 20 + profile.repeats(), "{variant}");
         for stack in &stacks {
             assert_eq!(
                 stack.functions,
@@ -458,6 +462,22 @@ fn a_stack_on_the_system_stack_goes_on_into_the_goroutine_that_switched() {
         // The workers collect at least once.
         assert!(ours > 0, "{variant}");
     }
+}
+
+#[test]
+fn a_profile_says_how_much_cpu_time_its_samples_cover() {
+    // At 49 samples a second, a thread's time on each CPU is sampled
+    // only once a whole period of it has passed there.
+    let options = RecordOptions::preset(Preset::Production);
+    let recording = record(go_command("o2", 40), &options).expect("record");
+    assert!(recording.status.success());
+    let profile = &recording.profile;
+    assert!(profile.counted() > 0);
+    assert!(
+        profile.total_weight() <= profile.counted(),
+        "{:?}",
+        profile.settings()
+    );
 }
 
 #[test]
@@ -547,6 +567,125 @@ fn a_stack_through_the_vdso_goes_on_to_its_callers() {
         stacks.len(),
         recording.profile.lost_samples()
     );
+}
+
+/// Attaches to `process`, then, once the events are open, releases it, or
+/// when `stopping`, stops the recording, which records until it ends.
+fn attach_and_release(
+    process: &mut support::ExternalProcess,
+    options: &RecordOptions,
+    stopping: bool,
+) -> Result<Attachment, RecordError> {
+    let pid = u32::try_from(process.process_id().get()).expect("a pid");
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (attached, opened) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let recording = scope.spawn(|| {
+            // Owned here, so that a failed attach closes the channel.
+            let attached = attached;
+            let mut publish = |_| {
+                let _ = attached.send(());
+            };
+            let mut watch = Watch {
+                every: std::time::Duration::MAX,
+                publish: &mut publish,
+                stop: &stop,
+            };
+            record_attached(pid, options, &mut watch)
+        });
+        // The first profile is published once the events are open.
+        if opened.recv().is_ok() {
+            if stopping {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                process.release();
+            }
+        }
+        recording.join().expect("the recording")
+    })
+}
+
+#[test]
+fn an_attach_follows_threads_that_began_before_it_and_after() {
+    let scratch = support::ScratchDir::new("profiler-attach");
+    for (variant, deleted) in [("gcc-o0", false), ("clang-o2-nofp", true)] {
+        let mut program = Scenario::fixture(&format!("profile-attach-{variant}"));
+        if deleted {
+            // A program deleted since it started is read through it.
+            let copy = scratch.path().join(variant);
+            std::fs::copy(&program, &copy).expect("copy the program");
+            program = copy;
+        }
+        let mut process = support::ExternalProcess::spawn(&program);
+        if deleted {
+            std::fs::remove_file(&program).expect("delete the program");
+        }
+        let attachment =
+            attach_and_release(&mut process, &calls_of("leaf"), false).expect("attach");
+        assert!(attachment.exited, "{variant}");
+        assert!(process.wait().success(), "{variant}");
+        let mut stacks: Vec<Vec<String>> = attachment
+            .profile
+            .stacks()
+            .into_iter()
+            .map(|stack| {
+                assert_eq!(stack.ending, StackEnding::Complete, "{variant}: {stack:?}");
+                stack.functions
+            })
+            .collect();
+        stacks.sort();
+        let main = [
+            "leaf",
+            "middle",
+            "outer",
+            "main",
+            "__libc_start_call_main",
+            "__libc_start_main",
+            "_start",
+        ];
+        let worker = [
+            "leaf",
+            "middle",
+            "outer",
+            "worker",
+            "start_thread",
+            "__GI___clone3",
+        ];
+        // Three calls on main and on each worker, the one there before the
+        // attach and the one started after.
+        let mut expected: Vec<Vec<String>> = std::iter::repeat_n(&main[..], 3)
+            .chain(std::iter::repeat_n(&worker[..], 6))
+            .map(|stack| stack.iter().map(|name| (*name).to_owned()).collect())
+            .collect();
+        expected.sort();
+        assert_eq!(stacks, expected, "{variant}");
+    }
+}
+
+#[test]
+fn an_attach_past_its_event_budget_is_refused_with_the_count() {
+    let mut process = support::ExternalProcess::spawn(&Scenario::fixture("profile-attach-gcc-o0"));
+    let options = RecordOptions {
+        max_events: 1,
+        ..RecordOptions::default()
+    };
+    let error = attach_and_release(&mut process, &options, false).expect_err("over budget");
+    let message = error.to_string();
+    assert!(message.contains("more than the budget of 1"), "{message}");
+    // The program goes on as if nothing had looked at it.
+    process.release();
+    assert!(process.wait().success());
+}
+
+#[test]
+fn a_stopped_attach_leaves_its_program_running() {
+    let mut process = support::ExternalProcess::spawn(&Scenario::fixture("profile-attach-gcc-o0"));
+    let attachment = attach_and_release(&mut process, &calls_of("leaf"), true).expect("attach");
+    assert!(!attachment.exited);
+    // Nothing was sampled before the program was released.
+    assert_eq!(attachment.profile.samples(), 0);
+    process.release();
+    assert!(process.wait().success());
 }
 
 #[test]

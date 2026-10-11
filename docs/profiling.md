@@ -51,6 +51,40 @@ records the size it got. A sample that finds its ring full is lost, and
 the profile counts every one: the count comes from the kernel's events,
 which count losses a ring never reports.
 
+## Recording a running program
+
+```sh
+uscope record -o app.usprof --pid 1234 --duration 30
+```
+
+`--pid` records a process that is already running, without stopping it or
+changing what it sees: no ptrace, no breakpoints, only perf events. The
+recording follows every thread the process has and every thread it starts,
+and it ends when the process exits, after `--duration` seconds, or at
+Ctrl-C, when the process goes on as it was. The program is read through
+`/proc/PID/root`, so a process in a container works, and so does one whose
+executable was deleted or replaced after it started, which is read from
+its mapping.
+
+An attach takes one event for each thread on each CPU, which a process
+with many threads on a machine with many CPUs multiplies quickly. uscope
+refuses an attach that needs more than 16384 events, and says how many it
+needed.
+
+A report says how much of the program's CPU time its samples cover:
+
+```
+The samples cover 81% of the 4.170 s of CPU time the program ran.
+```
+
+This holds for a program uscope starts too. The kernel counts the time
+exactly, but each thread's event on each CPU
+only takes a sample once a whole period has run there, so time a thread
+spends on a CPU in pieces shorter than a period may go unsampled. At low
+rates, on a program whose threads move between many CPUs, the samples can
+cover much less than the program ran, and they favor threads that stay on
+one CPU longer. A higher rate covers more.
+
 ## What a stack means
 
 Every stack in a profile is exact as far as it goes, and says why when it

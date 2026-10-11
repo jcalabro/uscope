@@ -395,6 +395,10 @@ pub enum AccountKind {
     /// Breakpoint samples of an instruction that ran again within one
     /// call, as a Go stack check does when it grows the stack.
     Repeats = 12,
+    /// What the events counted, in the weight's unit: the CPU time the
+    /// program's threads ran, sampled or not, or every execution of a
+    /// breakpoint's instruction.
+    Counted = 13,
 }
 
 /// A count of something the views must show.

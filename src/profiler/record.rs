@@ -122,7 +122,7 @@ impl Processor {
             return Some(Sites::Dynamic);
         }
         let inode = std::fs::metadata(path).ok()?.ino();
-        let image = self.image(path.to_owned(), Some(inode));
+        let image = self.image(path.to_owned(), path, Some(inode));
         let info = self.images[image].info.as_ref()?;
         let sites = call_sites(&data, &info.image, info.unwind.as_ref());
         let function = sites.first_not_kept.and_then(|address| {
@@ -144,13 +144,58 @@ impl Processor {
         self.repeats = Some((address, branch));
     }
 
-    /// Takes the events' count of samples lost so far.
-    pub fn lost(&mut self, total: u64) {
-        let counted = self.builder.account(AccountKind::LostSamples as u32);
-        self.builder.count(
-            AccountKind::LostSamples as u32,
-            total.saturating_sub(counted),
-        );
+    /// Records what a process already had when an attach began, as its
+    /// records describe only what comes after: its name, its threads and
+    /// theirs, and its executable mappings.
+    pub fn attached(&mut self, pid: u32, time: u64) {
+        let at = time.cast_signed();
+        self.first.get_or_insert(time);
+        self.latest = self.latest.max(time);
+        let name = |path: String| {
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|name| name.trim_end().to_owned())
+        };
+        let process = self.builder.process(pid, at);
+        if let Some(name) = name(format!("/proc/{pid}/comm")) {
+            self.builder.process_name(process, &name);
+        }
+        if let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) {
+            let mut tids: Vec<u32> = tasks
+                .filter_map(|task| task.ok()?.file_name().to_str()?.parse().ok())
+                .collect();
+            tids.sort_unstable();
+            for tid in tids {
+                let thread = self.thread(pid, tid, at);
+                if let Some(name) = name(format!("/proc/{pid}/task/{tid}/comm")) {
+                    self.builder.thread_name(thread, &name);
+                }
+            }
+        }
+        for mapped in perf::mappings(pid).unwrap_or_default() {
+            self.mmap(&decode::Mmap {
+                pid,
+                start: mapped.start,
+                length: mapped.end - mapped.start,
+                file_offset: mapped.file_offset,
+                inode: Some(mapped.inode),
+                executable: mapped.executable,
+                path: &mapped.path,
+                time,
+            });
+        }
+    }
+
+    /// Takes the events' counts so far: what they counted, and how many
+    /// samples they lost.
+    pub fn counts(&mut self, (counted, lost): (u64, u64)) {
+        for (kind, total) in [
+            (AccountKind::Counted, counted),
+            (AccountKind::LostSamples, lost),
+        ] {
+            let had = self.builder.account(kind as u32);
+            self.builder.count(kind as u32, total.saturating_sub(had));
+        }
     }
 
     /// Processes the records in `batch` and those held back before, in
@@ -261,7 +306,10 @@ impl Processor {
             self.vdso()
                 .map(|(image, link)| (image, mmap.start.wrapping_sub(link)))
         } else {
-            perf::identify(mmap).map(|(path, bias)| (self.image(path, mmap.inode), bias))
+            perf::identify(mmap).map(|(file, bias)| {
+                let path = PathBuf::from(String::from_utf8_lossy(mmap.path).into_owned());
+                (self.image(path, &file, mmap.inode), bias)
+            })
         };
         let state = self.processes.entry(mmap.pid).or_default();
         // A mapping replaces whatever it overlaps.
@@ -311,12 +359,12 @@ impl Processor {
     }
 
     /// The image of the file at `path`, loading it the first time.
-    fn image(&mut self, path: PathBuf, inode: Option<u64>) -> usize {
+    fn image(&mut self, path: PathBuf, file: &std::path::Path, inode: Option<u64>) -> usize {
         let key = (path, inode.unwrap_or(0));
         if let Some(&image) = self.image_index.get(&key) {
             return image;
         }
-        let data = crate::image::backing::read_input(&key.0)
+        let data = crate::image::backing::read_input(file)
             .ok()
             .map(|(data, _)| data);
         let image = self.add_image(&key.0, data);

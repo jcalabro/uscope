@@ -55,6 +55,17 @@ pub enum OpenError {
     RingBudget { pages: usize },
     #[error("reading the online CPUs failed: {0}")]
     Cpus(std::io::Error),
+    #[error("the process cannot be read: {0}")]
+    NoProcess(std::io::Error),
+    #[error(
+        "sampling {threads} threads on {cpus} CPUs takes {} events, more than the budget of {budget}",
+        threads * cpus
+    )]
+    TooManyEvents {
+        threads: usize,
+        cpus: usize,
+        budget: usize,
+    },
 }
 
 /// One event per online CPU, each with its ring.
@@ -62,6 +73,8 @@ pub enum OpenError {
 pub struct Events {
     rings: Vec<sys::Ring>,
     pages: usize,
+    /// Events that write to the rings of others on their CPUs.
+    followers: Vec<OwnedFd>,
 }
 
 /// The most bytes a sample of `stack_bytes` can take: its fixed fields,
@@ -87,76 +100,97 @@ impl Events {
     /// Opens disabled events for `pid`, its threads, and its children,
     /// which enable themselves when it next executes a program.
     pub fn open(pid: u32, options: &EventOptions) -> Result<Self, OpenError> {
-        use sys::flag;
-        let mut attr = sys::Attr {
-            size: u32::try_from(std::mem::size_of::<sys::Attr>()).expect("small"),
-            sample_type: decode::SAMPLE_TYPE,
-            flags: flag::DISABLED
-                | flag::INHERIT
-                | flag::EXCLUDE_KERNEL
-                | flag::EXCLUDE_HV
-                | flag::MMAP
-                | flag::MMAP2
-                | flag::COMM
-                | flag::COMM_EXEC
-                | flag::TASK
-                | flag::ENABLE_ON_EXEC
-                | flag::SAMPLE_ID_ALL
-                | flag::EXCLUDE_CALLCHAIN_KERNEL
-                | flag::USE_CLOCKID
-                | flag::WATERMARK,
-            read_format: sys::FORMAT_LOST,
-            sample_regs_user: decode::REGISTERS,
-            sample_stack_user: options.stack_bytes,
-            clockid: libc::CLOCK_MONOTONIC,
-            sample_max_stack: 127,
-            ..sys::Attr::default()
-        };
-        match options.source {
-            Source::Clock { period } => {
-                attr.kind = sys::TYPE_SOFTWARE;
-                attr.config = sys::COUNT_SW_CPU_CLOCK;
-                attr.sample_period = u64::try_from(period.as_nanos()).unwrap_or(u64::MAX).max(1);
-            }
-            Source::Breakpoint { address } => {
-                attr.kind = sys::TYPE_BREAKPOINT;
-                attr.bp_type = sys::BREAKPOINT_EXECUTE;
-                attr.bp_addr = address;
-                attr.bp_len = 8;
-                attr.sample_period = 1;
-            }
-        }
+        let attr = attr(options, sys::flag::DISABLED | sys::flag::ENABLE_ON_EXEC);
         let pid = i32::try_from(pid).map_err(|_| OpenError::Cpus(std::io::Error::other("pid")))?;
         let cpus = online_cpus().map_err(OpenError::Cpus)?;
-        // The kernel lets a user lock only so much memory for rings, which
-        // other recordings may be using: rings that do not fit are halved,
-        // down to the fewest that hold two samples. Each size opens its
-        // events afresh, as they wake their reader a quarter of the way in.
-        let fewest = min_pages(options.stack_bytes);
-        let mut pages = options.ring_pages.next_power_of_two().max(fewest);
+        let (rings, pages, _) = rings(attr, pid, &cpus, options)?;
+        record!(
+            "perf events for {pid}: {} CPUs, {pages} pages each",
+            rings.len()
+        );
+        Ok(Self {
+            rings,
+            pages,
+            followers: Vec::new(),
+        })
+    }
+
+    /// Opens events for every thread of the running process `pid`, which
+    /// follow every thread and child each starts after, into one ring per
+    /// CPU. A thread needs an event on each CPU, so the events number its
+    /// threads times its CPUs; past `budget` the attach is refused, rather
+    /// than leaving threads unsampled.
+    pub fn attach(pid: u32, options: &EventOptions, budget: usize) -> Result<Self, OpenError> {
+        let cpus = online_cpus().map_err(OpenError::Cpus)?;
+        raise_descriptor_limit();
+        let mut attr = attr(options, 0);
+        let mut opened = std::collections::BTreeSet::new();
+        let mut owner = None;
+        // A thread may start another before its own events open, so the
+        // threads are listed again until no new one appears.
         loop {
-            attr.wakeup_watermark = u32::try_from(pages * sys::page_size() / 4).unwrap_or(u32::MAX);
-            let rings: std::io::Result<Vec<sys::Ring>> = open_each(&attr, pid, &cpus)?
+            let threads = threads(pid).map_err(OpenError::NoProcess)?;
+            let new: Vec<u32> = threads
                 .into_iter()
-                .map(|fd| sys::Ring::map(fd, pages))
+                .filter(|tid| !opened.contains(tid))
                 .collect();
-            match rings {
-                Ok(rings) => {
-                    record!(
-                        "perf events for {pid}: {} CPUs, {pages} pages each",
-                        rings.len()
-                    );
-                    return Ok(Self { rings, pages });
-                }
-                Err(error) if error.raw_os_error() == Some(libc::EPERM) => {
-                    if pages == fewest {
-                        return Err(OpenError::RingBudget { pages });
+            if new.is_empty() {
+                break;
+            }
+            if (opened.len() + new.len()) * cpus.len() > budget {
+                return Err(OpenError::TooManyEvents {
+                    threads: opened.len() + new.len(),
+                    cpus: cpus.len(),
+                    budget,
+                });
+            }
+            for tid in new {
+                opened.insert(tid);
+                let thread = i32::try_from(tid).unwrap_or(i32::MAX);
+                let Some(events) = owner.as_mut() else {
+                    // The first thread's events own the rings.
+                    match rings(attr, thread, &cpus, options) {
+                        Ok((rings, pages, watermark)) => {
+                            attr.wakeup_watermark = watermark;
+                            owner = Some(Self {
+                                rings,
+                                pages,
+                                followers: Vec::new(),
+                            });
+                        }
+                        Err(OpenError::Event { source, .. })
+                            if source.raw_os_error() == Some(libc::ESRCH) => {}
+                        Err(error) => return Err(error),
                     }
-                    pages /= 2;
-                }
-                Err(error) => return Err(OpenError::Ring(error)),
+                    continue;
+                };
+                events.follow(&attr, thread, &cpus)?;
             }
         }
+        let events = owner
+            .ok_or_else(|| OpenError::NoProcess(std::io::Error::from_raw_os_error(libc::ESRCH)))?;
+        record!(
+            "perf attach to {pid}: {} threads, {} CPUs, {} pages each",
+            opened.len(),
+            cpus.len(),
+            events.pages
+        );
+        Ok(events)
+    }
+
+    /// Opens `thread`'s events on each of `cpus`, into the rings already
+    /// open there. A thread that has exited has none.
+    fn follow(&mut self, attr: &sys::Attr, thread: i32, cpus: &[u32]) -> Result<(), OpenError> {
+        for (ring, &cpu) in self.rings.iter().zip(cpus) {
+            let fd = match sys::open(attr, thread, i32::try_from(cpu).unwrap_or(i32::MAX)) {
+                Ok(fd) => fd,
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
+                Err(source) => return Err(OpenError::Event { cpu, source }),
+            };
+            sys::set_output(&fd, ring.fd()).map_err(|source| OpenError::Event { cpu, source })?;
+            self.followers.push(fd);
+        }
+        Ok(())
     }
 
     /// Data pages each ring has.
@@ -175,19 +209,127 @@ impl Events {
         sys::poll(&self.rings, timeout);
     }
 
-    /// How many samples the events have lost so far, exactly.
-    pub fn lost(&self) -> u64 {
+    /// What the events have counted so far, in their source's units, and
+    /// how many samples they have lost, exactly.
+    pub fn counts(&self) -> (u64, u64) {
         self.rings
             .iter()
-            .filter_map(|ring| sys::lost(ring.fd()).ok())
-            .sum()
+            .map(sys::Ring::fd)
+            .chain(&self.followers)
+            .filter_map(|fd| sys::counts(fd).ok())
+            .fold((0, 0), |(count, lost), (more, also)| {
+                (count + more, lost + also)
+            })
     }
 
     /// Stops every event sampling.
     pub fn disable(&self) {
-        for ring in &self.rings {
-            let _ = sys::enable(ring.fd(), false);
+        for fd in self.rings.iter().map(sys::Ring::fd).chain(&self.followers) {
+            let _ = sys::enable(fd, false);
         }
+    }
+}
+
+/// The attributes of every event: `options`' samples, with every record
+/// of mappings and threads beside them, and `start`'s flags.
+fn attr(options: &EventOptions, start: u64) -> sys::Attr {
+    use sys::flag;
+    let mut attr = sys::Attr {
+        size: u32::try_from(std::mem::size_of::<sys::Attr>()).expect("small"),
+        sample_type: decode::SAMPLE_TYPE,
+        flags: start
+            | flag::INHERIT
+            | flag::EXCLUDE_KERNEL
+            | flag::EXCLUDE_HV
+            | flag::MMAP
+            | flag::MMAP2
+            | flag::COMM
+            | flag::COMM_EXEC
+            | flag::TASK
+            | flag::SAMPLE_ID_ALL
+            | flag::EXCLUDE_CALLCHAIN_KERNEL
+            | flag::USE_CLOCKID
+            | flag::WATERMARK,
+        read_format: sys::FORMAT_LOST,
+        sample_regs_user: decode::REGISTERS,
+        sample_stack_user: options.stack_bytes,
+        clockid: libc::CLOCK_MONOTONIC,
+        sample_max_stack: 127,
+        ..sys::Attr::default()
+    };
+    match options.source {
+        Source::Clock { period } => {
+            attr.kind = sys::TYPE_SOFTWARE;
+            attr.config = sys::COUNT_SW_CPU_CLOCK;
+            attr.sample_period = u64::try_from(period.as_nanos()).unwrap_or(u64::MAX).max(1);
+        }
+        Source::Breakpoint { address } => {
+            attr.kind = sys::TYPE_BREAKPOINT;
+            attr.bp_type = sys::BREAKPOINT_EXECUTE;
+            attr.bp_addr = address;
+            attr.bp_len = 8;
+            attr.sample_period = 1;
+        }
+    }
+    attr
+}
+
+/// One event of `attr` for `pid` on each of `cpus` with its ring, the rings'
+/// data pages, and the watermark the events wake their reader at.
+///
+/// The kernel lets a user lock only so much memory for rings, which other
+/// recordings may be using: rings that do not fit are halved, down to the
+/// fewest that hold two samples. Each size opens its events afresh, as they
+/// wake their reader a quarter of the way in.
+fn rings(
+    mut attr: sys::Attr,
+    pid: i32,
+    cpus: &[u32],
+    options: &EventOptions,
+) -> Result<(Vec<sys::Ring>, usize, u32), OpenError> {
+    let fewest = min_pages(options.stack_bytes);
+    let mut pages = options.ring_pages.next_power_of_two().max(fewest);
+    loop {
+        attr.wakeup_watermark = u32::try_from(pages * sys::page_size() / 4).unwrap_or(u32::MAX);
+        let rings: std::io::Result<Vec<sys::Ring>> = open_each(&attr, pid, cpus)?
+            .into_iter()
+            .map(|fd| sys::Ring::map(fd, pages))
+            .collect();
+        match rings {
+            Ok(rings) => return Ok((rings, pages, attr.wakeup_watermark)),
+            Err(error) if error.raw_os_error() == Some(libc::EPERM) => {
+                if pages == fewest {
+                    return Err(OpenError::RingBudget { pages });
+                }
+                pages /= 2;
+            }
+            Err(error) => return Err(OpenError::Ring(error)),
+        }
+    }
+}
+
+/// The threads of process `pid`.
+fn threads(pid: u32) -> std::io::Result<Vec<u32>> {
+    let mut threads = Vec::new();
+    for entry in std::fs::read_dir(format!("/proc/{pid}/task"))? {
+        if let Some(tid) = entry?
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+        {
+            threads.push(tid);
+        }
+    }
+    threads.sort_unstable();
+    Ok(threads)
+}
+
+/// Raises this process's limit on open descriptors as far as it may go,
+/// as an attach holds one per thread per CPU.
+fn raise_descriptor_limit() {
+    use nix::sys::resource::{Resource, getrlimit, setrlimit};
+    if let Ok((_, hard)) = getrlimit(Resource::RLIMIT_NOFILE) {
+        let _ = setrlimit(Resource::RLIMIT_NOFILE, hard, hard);
     }
 }
 
@@ -222,6 +364,61 @@ fn online_cpus() -> std::io::Result<Vec<u32>> {
         cpus.extend(parse(first)?..=parse(last)?);
     }
     Ok(cpus)
+}
+
+/// A running process sampled from outside, without stopping it.
+#[derive(Debug)]
+pub struct Attached {
+    pub events: Events,
+    pub process: ProcessWatch,
+}
+
+/// Says when one process exits: its identifier may name another after.
+#[derive(Debug)]
+pub struct ProcessWatch(OwnedFd);
+
+impl ProcessWatch {
+    /// Whether the process has exited.
+    pub fn exited(&self) -> bool {
+        sys::readable(&self.0)
+    }
+}
+
+/// Samples the running process `pid` and everything it starts, within the
+/// `budget` of events [`Events::attach`] takes.
+pub fn attach(pid: u32, options: &EventOptions, budget: usize) -> Result<Attached, OpenError> {
+    // Held first, so that the process the events name is the one watched.
+    let process = super::native::pidfd_open(nix::unistd::Pid::from_raw(
+        i32::try_from(pid).unwrap_or(i32::MAX),
+    ))
+    .map_err(|error| OpenError::NoProcess(error.into()))?;
+    let events = Events::attach(pid, options, budget)?;
+    Ok(Attached {
+        events,
+        process: ProcessWatch(process),
+    })
+}
+
+/// The load bias of the program process `pid` runs, from its mapping of
+/// the start of its file.
+pub fn program_bias(pid: u32) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let inode = std::fs::metadata(format!("/proc/{pid}/exe")).ok()?.ino();
+    let mapped = mappings(pid)
+        .ok()?
+        .into_iter()
+        .find(|mapped| mapped.inode == inode)?;
+    identify(&decode::Mmap {
+        pid,
+        start: mapped.start,
+        length: mapped.end - mapped.start,
+        file_offset: mapped.file_offset,
+        inode: Some(mapped.inode),
+        executable: true,
+        path: &mapped.path,
+        time: 0,
+    })
+    .map(|(_, bias)| bias)
 }
 
 /// A program started for sampling.
@@ -417,21 +614,97 @@ pub fn is_vdso(mmap: &decode::Mmap<'_>) -> bool {
     mmap.executable && mmap.path == super::vdso::VDSO_NAME.as_bytes()
 }
 
-/// The file an executable mapping maps and its image's load bias, if the
-/// file at its path is still the one mapped.
+/// A file to read an executable mapping's image from, and the image's load
+/// bias, if one is still the file mapped.
+///
+/// The file is the mapped path, or the same path in the process's own root
+/// where the process sees other mounts, as in a container. A file deleted
+/// since is still the process's: its mapping's link in `map_files`, which
+/// needs privileges, or for the program itself, its `exe`.
 pub fn identify(mmap: &decode::Mmap<'_>) -> Option<(PathBuf, u64)> {
     use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::OsStr::from_bytes(mmap.path);
     if !mmap.executable || !mmap.path.starts_with(b"/") {
         return None;
     }
-    let deleted = mmap.path.ends_with(b" (deleted)");
-    identify_mapped_module(&ModuleMapping {
-        path: PathBuf::from(path),
-        inode: mmap.inode?,
-        start: mmap.start,
-        file_offset: mmap.file_offset,
-        deleted,
-        executable: true,
+    let deleted = mmap.path.strip_suffix(b" (deleted)");
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(deleted.unwrap_or(mmap.path)));
+    let pid = mmap.pid;
+    let mut candidates = Vec::with_capacity(4);
+    if deleted.is_none() {
+        candidates.push(path.to_owned());
+        let relative = path.strip_prefix("/").unwrap_or(path);
+        candidates.push(PathBuf::from(format!("/proc/{pid}/root")).join(relative));
+    }
+    let end = mmap.start.saturating_add(mmap.length);
+    candidates.push(PathBuf::from(format!(
+        "/proc/{pid}/map_files/{:x}-{end:x}",
+        mmap.start
+    )));
+    candidates.push(PathBuf::from(format!("/proc/{pid}/exe")));
+    let inode = mmap.inode?;
+    candidates.into_iter().find_map(|candidate| {
+        identify_mapped_module(&ModuleMapping {
+            path: candidate,
+            inode,
+            start: mmap.start,
+            file_offset: mmap.file_offset,
+            deleted: false,
+            executable: true,
+        })
     })
+}
+
+/// One line of a process's memory map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mapped {
+    pub start: u64,
+    pub end: u64,
+    pub file_offset: u64,
+    pub inode: u64,
+    pub executable: bool,
+    pub path: Vec<u8>,
+}
+
+/// The executable mappings of process `pid` now, which the records of an
+/// attach began after.
+pub fn mappings(pid: u32) -> std::io::Result<Vec<Mapped>> {
+    let maps = std::fs::read(format!("/proc/{pid}/maps"))?;
+    let mut mappings = Vec::new();
+    for line in maps.split(|byte| *byte == b'\n') {
+        let mut fields = line.splitn(6, |byte| *byte == b' ');
+        let (Some(range), Some(permissions), Some(offset), Some(_device), Some(inode)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            continue;
+        };
+        let path = fields.next().unwrap_or_default().trim_ascii_start();
+        let hex = |text: &[u8]| u64::from_str_radix(std::str::from_utf8(text).ok()?, 16).ok();
+        let mut bounds = range.splitn(2, |byte| *byte == b'-');
+        let (Some(start), Some(end), Some(file_offset)) = (
+            bounds.next().and_then(hex),
+            bounds.next().and_then(hex),
+            hex(offset),
+        ) else {
+            continue;
+        };
+        let executable = permissions.get(2) == Some(&b'x');
+        let inode = std::str::from_utf8(inode)
+            .ok()
+            .and_then(|inode| inode.parse().ok());
+        if executable && !path.is_empty() {
+            mappings.push(Mapped {
+                start,
+                end,
+                file_offset,
+                inode: inode.unwrap_or(0),
+                executable,
+                path: path.to_vec(),
+            });
+        }
+    }
+    Ok(mappings)
 }

@@ -4,13 +4,17 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use uscope::profiler::{Preset, Profile, RecordOptions, SampleSource, StackCopy, StackView};
+use uscope::profiler::{Preset, Profile, RecordOptions, SampleSource, StackCopy, StackView, Watch};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum PresetArg {
-    /// 49 samples a second with a small stack copy: safe in production.
+    /// 49 samples a second, copying as little stack as unwinds the program:
+    /// safe in production.
     Prod,
     /// 999 samples a second with a deep stack copy.
     Dev,
@@ -35,8 +39,15 @@ pub struct RecordArgs {
     /// Sample each call of the function SYMBOL names, instead of CPU time.
     #[arg(long, value_name = "SYMBOL", conflicts_with = "rate")]
     function: Option<String>,
+    /// Record the running process PID, without stopping it, until it exits
+    /// or Ctrl-C.
+    #[arg(long, value_name = "PID", conflicts_with = "command")]
+    pid: Option<u32>,
+    /// Stop recording after SECONDS; a started program is then killed.
+    #[arg(long, value_name = "SECONDS")]
+    duration: Option<f64>,
     /// The program to record and its arguments.
-    #[arg(last = true, required = true, value_name = "PROGRAM")]
+    #[arg(last = true, required_unless_present = "pid", value_name = "PROGRAM")]
     command: Vec<OsString>,
 }
 
@@ -98,23 +109,81 @@ fn record(args: &RecordArgs) -> Result<i32> {
     if let Some(bytes) = args.stack_bytes {
         options.stack = StackCopy::Bytes(bytes);
     }
-    let mut command = Command::new(&args.command[0]);
-    command.args(&args.command[1..]);
-    let recording = uscope::profiler::record(command, &options)?;
-    recording
-        .profile
+    let stop = Arc::new(AtomicBool::new(false));
+    // Ctrl-C reaches a started program too, which ends as it chooses; an
+    // attached one goes on, and the recording stops.
+    stop_on_interrupt(args.pid.is_some().then(|| Arc::clone(&stop)))?;
+    if let Some(seconds) = args.duration {
+        let duration = Duration::try_from_secs_f64(seconds).context("--duration")?;
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            std::thread::sleep(duration);
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+    let mut watch = Watch {
+        every: Duration::MAX,
+        publish: &mut |_| {},
+        stop: &stop,
+    };
+    let (profile, code) = if let Some(pid) = args.pid {
+        let attachment = uscope::profiler::record_attached(pid, &options, &mut watch)?;
+        (attachment.profile, 0)
+    } else {
+        let mut command = Command::new(&args.command[0]);
+        command.args(&args.command[1..]);
+        let recording = uscope::profiler::record_watched(command, &options, &mut watch)?;
+        (recording.profile, recording.status.code().unwrap_or(1))
+    };
+    profile
         .write(&args.output)
         .with_context(|| format!("writing {}", args.output.display()))?;
     eprintln!(
         "uscope: recorded {} samples to {}",
-        recording.profile.samples(),
+        profile.samples(),
         args.output.display()
     );
-    let lost = recording.profile.lost_samples();
+    let lost = profile.lost_samples();
     if lost > 0 {
         eprintln!("uscope: the kernel dropped {lost} samples");
     }
-    Ok(recording.status.code().unwrap_or(1))
+    Ok(code)
+}
+
+/// Keeps Ctrl-C from ending uscope, setting `stop` if there is one.
+fn stop_on_interrupt(stop: Option<Arc<AtomicBool>>) -> Result<()> {
+    let (installed, ready) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let handled = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .and_then(|runtime| {
+                let interrupts = runtime.block_on(async {
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                })?;
+                Ok((runtime, interrupts))
+            });
+        let (runtime, mut interrupts) = match handled {
+            Ok(handled) => handled,
+            Err(error) => {
+                let _ = installed.send(Err(error));
+                return;
+            }
+        };
+        let _ = installed.send(Ok(()));
+        runtime.block_on(async {
+            while interrupts.recv().await.is_some() {
+                if let Some(stop) = &stop {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+    });
+    // The handler is installed before the recording begins.
+    ready
+        .recv()
+        .context("starting a signal handler")?
+        .context("handling Ctrl-C")
 }
 
 #[expect(
@@ -136,23 +205,8 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
             "The file was cut short; this is the part that was complete."
         )?;
     }
+    summary(&profile, out)?;
     let total = profile.total_weight();
-    let program = profile.setting("program").unwrap_or("the program");
-    let unit = profile.setting("weight").unwrap_or("nanoseconds");
-    let weight = |value: u64| match unit {
-        "nanoseconds" => format!("{:.3} s", value as f64 / 1e9),
-        _ => format!("{value} executions"),
-    };
-    writeln!(
-        out,
-        "{program}: {} samples, {}",
-        profile.samples(),
-        weight(total)
-    )?;
-    let lost = profile.lost_samples();
-    if lost > 0 {
-        writeln!(out, "The kernel dropped {lost} samples.")?;
-    }
     let percent = |value: u64| {
         if total == 0 {
             0.0
@@ -218,6 +272,41 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
         for (reason, count) in truncations {
             writeln!(out, "  {count:>8}  {reason}")?;
         }
+    }
+    Ok(())
+}
+
+/// What a report's profile holds, and how much of the program it covers.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "seconds and percentages need no more precision than f64's"
+)]
+fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
+    let total = profile.total_weight();
+    let program = profile.setting("program").unwrap_or("the program");
+    let unit = profile.setting("weight").unwrap_or("nanoseconds");
+    let weight = |value: u64| match unit {
+        "nanoseconds" => format!("{:.3} s", value as f64 / 1e9),
+        _ => format!("{value} executions"),
+    };
+    writeln!(
+        out,
+        "{program}: {} samples, {}",
+        profile.samples(),
+        weight(total)
+    )?;
+    let lost = profile.lost_samples();
+    if lost > 0 {
+        writeln!(out, "The kernel dropped {lost} samples.")?;
+    }
+    let counted = profile.counted();
+    if unit == "nanoseconds" && counted > total {
+        writeln!(
+            out,
+            "The samples cover {:.0}% of the {} of CPU time the program ran.",
+            total as f64 * 100.0 / counted as f64,
+            weight(counted)
+        )?;
     }
     Ok(())
 }

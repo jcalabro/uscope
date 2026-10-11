@@ -2051,6 +2051,11 @@ for variant in \
     build_fixture "$compiler" "$c_fixtures_dir/profile-stacks.c" "$output_dir/profile-stacks-$name" \
         "$level" -g3 "$frames" "$code" "$link" -pthread
 done
+# A program attached to, with threads started before and after.
+build_fixture gcc "$c_fixtures_dir/profile-attach.c" "$output_dir/profile-attach-gcc-o0" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie -pthread
+build_fixture clang "$c_fixtures_dir/profile-attach.c" "$output_dir/profile-attach-clang-o2-nofp" \
+    -O2 -g3 -fomit-frame-pointer -fPIE -pie -pthread
 # Signal handlers and the vDSO, which samples unwind through.
 build_fixture gcc "$c_fixtures_dir/profile-signals.c" "$output_dir/profile-signals-gcc-o0" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie

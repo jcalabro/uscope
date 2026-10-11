@@ -5,18 +5,17 @@
 mod calls;
 mod frame_pointers;
 mod record;
+mod session;
+
+pub use session::{Attachment, Recording, Watch, record, record_attached, record_watched};
 
 pub use crate::analysis::{CallTree, Cost, Costs, Granularity, KeyKind, Keys, Query, Transform};
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use crate::backend::perf;
 use crate::capture::records::{FrameKind, NONE, Truncation};
 use crate::capture::{Capture, file};
-use record::Sites;
 
 /// How much a recording costs the program, and how much it sees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -112,6 +111,8 @@ pub struct RecordOptions {
     /// Pages each CPU's ring holds: the most a burst of samples can write
     /// before they are drained. Fewer lose more samples, every one counted.
     pub ring_pages: usize,
+    /// The most events an attach may open: one per thread per CPU.
+    pub max_events: usize,
     /// Directories searched for separate debug files.
     pub debug_directories: Vec<PathBuf>,
 }
@@ -126,6 +127,7 @@ impl RecordOptions {
             stack: preset.stack_copy(),
             max_frames: 512,
             ring_pages: 128,
+            max_events: 16_384,
             debug_directories: Vec::new(),
         }
     }
@@ -142,6 +144,8 @@ impl Default for RecordOptions {
 pub enum RecordError {
     #[error(transparent)]
     Launch(#[from] perf::LaunchError),
+    #[error(transparent)]
+    Attach(#[from] perf::OpenError),
     #[error("starting the program failed: {0}")]
     Start(std::io::Error),
     #[error("the program has no function named '{0}'")]
@@ -164,234 +168,12 @@ pub struct Profile {
     capture: Capture,
 }
 
-/// A recording and how its program ended.
-#[derive(Debug)]
-pub struct Recording {
-    pub profile: Profile,
-    pub status: ExitStatus,
-}
-
-/// Runs `command` to its exit, recording it.
-pub fn record(command: Command, options: &RecordOptions) -> Result<Recording, RecordError> {
-    let stop = AtomicBool::new(false);
-    record_watched(
-        command,
-        options,
-        &mut Watch {
-            every: Duration::MAX,
-            publish: &mut |_| {},
-            stop: &stop,
-        },
-    )
-}
-
-/// What a recording does while it runs, for a live view of it.
-pub struct Watch<'a> {
-    /// How often the profile so far is published, at most: the first
-    /// comes within a quarter second, and each wait doubles up to this.
-    pub every: Duration,
-    /// Takes the profile so far: once when the program has started, when
-    /// it holds nothing yet, and every `every` after.
-    pub publish: &'a mut dyn FnMut(Profile),
-    /// Ends the recording once set, by killing the program.
-    pub stop: &'a AtomicBool,
-}
-
-/// Records `command` as [`record`] does, publishing the profile so far as
-/// `watch` asks.
-pub fn record_watched(
-    command: Command,
-    options: &RecordOptions,
-    watch: &mut Watch<'_>,
-) -> Result<Recording, RecordError> {
-    let _span = crate::span!("record");
-    let program = PathBuf::from(command.get_program());
-    let (source, breakpoint) = perf_source(&program, &options.source)?;
-    let search = crate::debug_info::DebugFileSearch::new(&crate::DebugFileOptions {
-        directories: options.debug_directories.clone(),
-        ..crate::DebugFileOptions::default()
-    });
-    let mut processor = record::Processor::new(search, options.max_frames);
-    if let Some(calls) = breakpoint
-        && let Some(branch) = calls.repeats_when
-    {
-        processor.repeats_when(calls.address + calls.bias, branch);
-    }
-    let (stack_bytes, stack_copy) = stack_copy(&mut processor, &program, options.stack);
-    let events = perf::EventOptions {
-        source,
-        stack_bytes,
-        ring_pages: options.ring_pages,
-    };
-    let launch = perf::LaunchOptions {
-        no_address_randomization: breakpoint.is_some(),
-    };
-    let perf::Launched {
-        pid,
-        events,
-        exit,
-        killer,
-        executed,
-    } = perf::launch(command, &events, launch)?;
-    let ring_pages = events.pages();
-    let builder = processor.builder();
-    for (key, value) in [
-        ("program", program.to_string_lossy().into_owned()),
-        ("pid", pid.to_string()),
-        ("ring pages", ring_pages.to_string()),
-        ("source", options.source.to_string()),
-        ("weight", options.source.unit().to_owned()),
-        ("stack bytes", stack_bytes.to_string()),
-        ("stack copy", stack_copy),
-    ] {
-        builder.setting(key, &value);
-    }
-    // A program that failed to execute ends the recording with why, below,
-    // without having been published as started.
-    let started = executed.recv().is_ok();
-    if started {
-        (watch.publish)(Profile {
-            capture: processor.snapshot(),
-        });
-    }
-    let mut published = std::time::Instant::now();
-    let mut wait = watch.every.min(Duration::from_millis(250));
-    let mut killed = false;
-    let mut events = events;
-    let mut buffer = Vec::new();
-    loop {
-        if !killed && watch.stop.load(Ordering::Relaxed) {
-            record!("record: stopping, killing {pid}");
-            killer.kill();
-            killed = true;
-        }
-        let finished = exit.is_finished();
-        // Every record stamped before this has been written by the time
-        // the next drain begins, but for a stalled CPU.
-        let watermark = monotonic().saturating_sub(WATERMARK_DELAY);
-        if !finished {
-            events.wait(Duration::from_millis(10));
-        }
-        buffer.clear();
-        events.drain(&mut buffer);
-        record!(
-            "record: drained {} bytes, finished {finished}",
-            buffer.len()
-        );
-        processor.ingest(&buffer, (!finished).then_some(watermark));
-        if finished {
-            break;
-        }
-        if started && published.elapsed() >= wait {
-            processor.lost(events.lost());
-            (watch.publish)(Profile {
-                capture: processor.snapshot(),
-            });
-            published = std::time::Instant::now();
-            wait = (wait * 2).min(watch.every);
-        }
-    }
-    events.disable();
-    processor.lost(events.lost());
-    let status = exit
-        .join()
-        .unwrap_or_else(|_| Err(std::io::Error::other("the program's waiter panicked")))
-        .map_err(RecordError::Start)?;
-    record!("record: the program ended: {status}");
-    let capture = processor.finish();
-    let profile = Profile { capture };
-    if let Some(calls) = breakpoint {
-        profile.check_bias(&program, calls.bias)?;
-    }
-    Ok(Recording { profile, status })
-}
-
-/// The event that takes `source`'s samples in `program`, and for a
-/// breakpoint, the bias the program must load at for it to be right.
-fn perf_source(
-    program: &Path,
-    source: &SampleSource,
-) -> Result<(perf::Source, Option<calls::Calls>), RecordError> {
-    Ok(match source {
-        SampleSource::Clock { rate } => (
-            perf::Source::Clock {
-                period: Duration::from_nanos(1_000_000_000 / u64::from((*rate).max(1))),
-            },
-            None,
-        ),
-        SampleSource::Function { symbol } => {
-            let calls = calls::plan(program, symbol)?;
-            (
-                perf::Source::Breakpoint {
-                    address: calls.address + calls.bias,
-                },
-                Some(calls),
-            )
-        }
-    })
-}
-
-/// The bytes of stack each sample of `program` copies, and why.
-fn stack_copy(
-    processor: &mut record::Processor,
-    program: &Path,
-    stack: StackCopy,
-) -> (u32, String) {
-    let bytes = match stack {
-        StackCopy::Bytes(bytes) => return (bytes.next_multiple_of(8), "as asked".into()),
-        StackCopy::Auto => DEEP_STACK_COPY,
-    };
-    let Some(path) = which(program).and_then(|path| std::fs::canonicalize(path).ok()) else {
-        return (bytes, "auto: the program was not found".into());
-    };
-    match processor.call_sites(&path) {
-        None => (bytes, "auto: the program's code could not be read".into()),
-        Some(Sites::Dynamic) => (
-            bytes,
-            "auto: the program loads libraries, which are known only once it runs".into(),
-        ),
-        Some(Sites::Static(sites, _)) if sites.keep_the_chain() => (
-            SMALL_STACK_COPY,
-            "auto: the program keeps the frame-pointer chain where it calls".into(),
-        ),
-        Some(Sites::Static(_, function)) => (
-            bytes,
-            format!(
-                "auto: {} calls without keeping the frame-pointer chain",
-                function.as_deref().unwrap_or("a function")
-            ),
-        ),
-    }
-}
-
-/// How far behind a drain records are processed.
-const WATERMARK_DELAY: u64 = 20_000_000;
-
-fn monotonic() -> u64 {
-    nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC).map_or(0, |time| {
-        u64::try_from(time.tv_sec()).unwrap_or(0) * 1_000_000_000
-            + u64::try_from(time.tv_nsec()).unwrap_or(0)
-    })
-}
-
 /// The query of every sample, seen as `view` shows stacks.
 fn query(view: StackView) -> Query {
     Query {
         logical: view == StackView::Logical,
         ..Query::default()
     }
-}
-
-/// The file a command names, as `execvp` would find it.
-pub(super) fn which(program: &Path) -> Option<PathBuf> {
-    if program.components().count() > 1 {
-        return Some(program.to_owned());
-    }
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|directory| directory.join(program))
-            .find(|candidate| candidate.is_file())
-    })
 }
 
 /// How a stack ends.
@@ -630,6 +412,24 @@ impl Profile {
             .account(crate::capture::records::AccountKind::LostSamples as u32)
     }
 
+    /// What the events counted, in the weight's unit, sampled or not: the
+    /// CPU time the program ran, or each execution of a breakpoint's
+    /// instruction. A thread's time on each CPU is sampled only once a whole
+    /// period of it has passed there, so a short recording at a low rate
+    /// samples less of it.
+    #[must_use]
+    pub fn counted(&self) -> u64 {
+        self.capture
+            .account(crate::capture::records::AccountKind::Counted as u32)
+    }
+
+    /// Breakpoint samples set aside as repeats within one call.
+    #[must_use]
+    pub fn repeats(&self) -> u64 {
+        self.capture
+            .account(crate::capture::records::AccountKind::Repeats as u32)
+    }
+
     /// How many stacks ended short of their outermost frame, by reason.
     #[must_use]
     pub fn truncations(&self) -> Vec<(String, u64)> {
@@ -699,7 +499,8 @@ impl Profile {
     /// Whether every mapping of `program` has the bias a breakpoint
     /// source assumed.
     fn check_bias(&self, program: &Path, expected: u64) -> Result<(), RecordError> {
-        let program = which(program).and_then(|program| std::fs::canonicalize(program).ok());
+        let program =
+            session::which(program).and_then(|program| std::fs::canonicalize(program).ok());
         let capture = &self.capture;
         for mapping in &capture.mappings {
             let path = capture.string(capture.modules[mapping.module.get() as usize].path.get());
