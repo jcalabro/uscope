@@ -101,9 +101,11 @@ fn a_cached_load_answers_as_an_uncached_one() {
     let split = fixture("split/basic-build-id");
     let root = fixture("split/debug-root");
     let altlink = fixture("split/altlink-root");
+    // Binding is the same for every program, so small ones suffice: a
+    // dump's cost grows with the program.
     let cases = [
-        (fixture("containers-cpp-clang-o2"), search(&[])),
-        (fixture("containers-rust-o2"), search(&[])),
+        (fixture("variables-cpp-clang-o2"), search(&[])),
+        (fixture("variables-rust-o2"), search(&[])),
         (fixture("callers-go-stripped"), search(&[])),
         (split.clone(), search(&[&root])),
         (split, search(&[&altlink])),

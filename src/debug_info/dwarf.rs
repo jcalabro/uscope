@@ -4038,13 +4038,43 @@ mod tests {
             let (start, end) = (fde.start.get(), fde.end.get());
             probes.extend([start.wrapping_sub(1), start, start + 1, end - 1, end]);
         }
+        // The walk `fde_for_address` makes for each address, made once:
+        // the first entry in section order that contains an address
+        // answers it, and an entry that does not parse answers every
+        // address no entry before it contains.
+        let mut open = probes
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut found = std::collections::BTreeMap::new();
+        let mut entries = section.entries(bases);
+        let failure = loop {
+            let partial = match entries.next() {
+                Ok(Some(gimli::CieOrFde::Fde(partial))) => partial,
+                Ok(Some(gimli::CieOrFde::Cie(_))) => continue,
+                Ok(None) => break None,
+                Err(error) => break Some(error),
+            };
+            let fde = match partial.parse(S::cie_from_offset) {
+                Ok(fde) => fde,
+                Err(error) => break Some(error),
+            };
+            let contained = open
+                .range(fde.initial_address()..)
+                .take_while(|&&address| fde.contains(address))
+                .copied()
+                .collect::<Vec<_>>();
+            for address in contained {
+                open.remove(&address);
+                found.insert(address, fde.offset());
+            }
+        };
         for address in probes {
-            let walk = section
-                .fde_for_address(bases, address, S::cie_from_offset)
-                .map(|fde| fde.offset())
-                .map_err(|error| {
-                    (error != gimli::Error::NoUnwindInfoForAddress).then(|| error.to_string())
-                });
+            let walk = found.get(&address).copied().ok_or_else(|| {
+                failure
+                    .filter(|&error| error != gimli::Error::NoUnwindInfoForAddress)
+                    .map(|error| error.to_string())
+            });
             let indexed = index.lookup(address).map_err(|miss| match miss {
                 FdeMiss::NoEntry => None,
                 FdeMiss::Malformed(error) => Some(error.to_owned()),
@@ -4173,10 +4203,12 @@ mod tests {
             crate::DebugInformation::Loaded
         );
         // A budget too small for the locals but large enough for the rest.
-        let (mut small, mut large) = (0, 1 << 32);
+        // Those budgets differ by a factor rather than a margin, which
+        // halving the factor between the bounds finds in a few loads.
+        let (mut small, mut large) = (1_u64, 1 << 32);
         let partial = loop {
             assert!(small + 1 < large, "no budget leaves out only the locals");
-            let floor = small + (large - small) / 2;
+            let floor = (small.isqrt() * large.isqrt()).clamp(small + 1, large - 1);
             let info = load(floor);
             match info.image.debug_information() {
                 crate::DebugInformation::Loaded => large = floor,
