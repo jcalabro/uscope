@@ -196,7 +196,7 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
         tables.statements(image.table())?;
         tables.boundaries(image.table())
     };
-    let families: [(&str, Validation); 12] = [
+    let families: [(&'static str, Validation); 12] = [
         ("validate.symbols", super::symbols::validate),
         ("validate.functions", super::functions::validate),
         ("validate.unwind", super::unwind::validate),
@@ -210,21 +210,27 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
         ("validate.resumes", super::resumes::validate),
         ("validate.declarations", super::declarations::validate),
     ];
-    // Each family reads only the image, so they are checked in parallel;
-    // the first to fail in this order is the error, as when they were
-    // checked in turn.
+    let family = |&(name, validate): &(&'static str, Validation)| {
+        let _phase = crate::profile::span(name, None, None);
+        validate(image).map_err(malformed)
+    };
+    // Each family reads only the image, so a large image's are checked in
+    // parallel; a small one's are checked in turn, which takes less than
+    // waking the pool's threads. Either way the first to fail in this
+    // order is the error.
+    if image.as_bytes().len() < PARALLEL_VALIDATION {
+        lines()?;
+        return families.iter().try_for_each(family);
+    }
     let (lines, families) = rayon::join(lines, || {
-        families
-            .par_iter()
-            .map(|(name, validate)| {
-                let _phase = crate::profile::span(name, None, None);
-                validate(image).map_err(malformed)
-            })
-            .collect::<Vec<_>>()
+        families.par_iter().map(family).collect::<Vec<_>>()
     });
     lines?;
     families.into_iter().collect()
 }
+
+/// The size from which an image's tables are validated in parallel.
+const PARALLEL_VALIDATION: usize = 1 << 20;
 
 /// The line tables, checked against each other and their indexes. Each
 /// index is strictly ordered, refers to records it agrees with, and has as
