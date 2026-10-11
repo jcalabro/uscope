@@ -10,8 +10,8 @@
     "callgrind_instructions": null
   },
   "containers-zig-self-hosted": {
-    "digest": "49add622d8ff3f1803f78e140b9a2bf5",
-    "allocations": 323980,
+    "digest": "bbc201c39a2084751a8c976b86c3f4b7",
+    "allocations": 323982,
     "callgrind_instructions": null
   },
   "golden/containers-clang-O0": {

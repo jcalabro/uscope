@@ -1,4 +1,4 @@
-// The code at the focus, in one of three views of the place. Source shows
+// The code at the focus, in one of four views of the place. Source shows
 // the file and lines the link names, or else the frame's own line, or,
 // before the program runs, its main function (D2). A frame with no source
 // shows its instructions instead.
@@ -11,6 +11,7 @@ import type { Breakpoint, Row } from "../protocol";
 import { useConnection, useModel } from "../store";
 import { closeFile, openFile, shownAt, tab, useTab } from "../tab";
 import { Disassembly } from "./Disassembly";
+import { Drawings, useCards } from "./Drawings";
 import { Memory } from "./Memory";
 import { useLinkPaths, useLook } from "./navigation";
 import { fileName } from "./paths";
@@ -60,6 +61,7 @@ const VIEWS: readonly { view: View; label: string; key: string }[] = [
   { view: "source", label: "Source", key: "Alt+S" },
   { view: "disassembly", label: "Disassembly", key: "Alt+D" },
   { view: "memory", label: "Memory", key: "Alt+M" },
+  { view: "drawings", label: "Drawings", key: "Alt+V" },
 ];
 
 export function CodeArea() {
@@ -69,6 +71,7 @@ export function CodeArea() {
   const files = useTab((current) => current.files);
   const look = useLook();
   const paths = useLinkPaths();
+  const drawings = useCards().length;
 
   const path = shown?.path;
   const line = shown?.line ?? null;
@@ -175,6 +178,9 @@ export function CodeArea() {
                 onClick={() => look((look) => inView(look, choice.view), { replace: false })}
               >
                 {choice.label}
+                {choice.view === "drawings" && drawings > 0 && (
+                  <span className="badge">{drawings}</span>
+                )}
               </button>
             ))}
           </fieldset>
@@ -191,6 +197,8 @@ export function CodeArea() {
         </>
       ) : view === "memory" ? (
         <Memory />
+      ) : view === "drawings" ? (
+        <Drawings />
       ) : shown && open ? (
         <SourceFile shown={shown} />
       ) : (

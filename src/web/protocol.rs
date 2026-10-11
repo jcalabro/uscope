@@ -127,6 +127,15 @@ pub enum Request {
     Functions(FunctionQuery),
     /// The tasks of the program's runtimes at a stop.
     Tasks(StopAt),
+    /// The inputs of a drawing of a value, which the page's renderer draws.
+    Draw(Draw),
+    /// A renderer's JavaScript, by its digest.
+    Renderer(RendererRef),
+    /// Every renderer a drawing may name, for drawing a value with any.
+    Renderers,
+    /// Reads the session's view files, and the renderers beside them,
+    /// again.
+    ReloadViews,
 }
 
 /// A stop, which must be current.
@@ -1050,6 +1059,8 @@ pub struct Row {
     pub memory_bytes: Option<u64>,
     /// A row that only says where reading stopped short.
     pub truncated: bool,
+    /// The renderers of the drawings the value's view offers, each once.
+    pub drawings: Vec<String>,
 }
 
 /// What a row expands to.
@@ -1162,6 +1173,157 @@ pub struct Token {
 pub struct BranchTarget {
     pub address: String,
     pub name: Option<String>,
+}
+
+/// A drawing of a value at a frame.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Draw {
+    #[serde(flatten)]
+    pub at: FrameAt,
+    /// The value's `path`, which evaluates it.
+    pub path: String,
+    /// The renderer: one whose drawing the value's view offers, or else any
+    /// renderer, which then draws the value itself as its `values`.
+    pub renderer: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RendererRef {
+    pub digest: String,
+}
+
+/// A renderer, by name, where it was loaded from, and the digest of its
+/// JavaScript.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RendererInfo {
+    pub name: String,
+    /// The file or module record it was loaded from, or `built-in`.
+    pub origin: String,
+    pub digest: String,
+}
+
+/// The answer to `renderer`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RendererSource {
+    #[serde(flatten)]
+    pub info: RendererInfo,
+    pub source: String,
+}
+
+/// The answer to `renderers`: each name once, the one a drawing would use.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RendererList {
+    pub renderers: Vec<RendererInfo>,
+}
+
+/// The answer to `draw`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Drawing {
+    pub renderer: RendererInfo,
+    /// Whether the value's view offers the drawing; otherwise the renderer
+    /// draws the value itself as its `values`.
+    pub offered: bool,
+    /// Each input, by name, in order; none when a problem kept any part of
+    /// them from being read.
+    pub inputs: Option<Vec<DrawInput>>,
+    /// Why the inputs could not be read whole: the first part that could
+    /// not, and why.
+    pub problem: Option<String>,
+    /// How many bytes the binary frame sent just before this answer holds:
+    /// the bytes and numbers the inputs' `bytes` and `numbers` lie in.
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DrawInput {
+    pub name: String,
+    pub value: Datum,
+    /// The part of the drawn value the input is, when it is one.
+    pub path: Option<String>,
+}
+
+/// A value as a renderer receives it, decided by its type alone.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "t", rename_all = "camelCase")]
+pub enum Datum {
+    Bool {
+        b: bool,
+    },
+    /// An integer of at most 32 bits, or one the view writes, such as
+    /// `64`, that a double holds exactly.
+    Int {
+        i: i64,
+    },
+    /// An integer of 64 or 128 bits, a pointer, or an address, in decimal.
+    Big {
+        big: String,
+    },
+    /// A float, as the shortest text that reads back as its nearest
+    /// double: `NaN`, `Infinity`, and `-Infinity` included.
+    Float {
+        f: String,
+    },
+    Text {
+        s: String,
+    },
+    /// An enumeration's value and the enumerator it equals.
+    Enum {
+        name: Option<String>,
+        value: Box<Self>,
+    },
+    /// The variant a sum type holds, and its payload.
+    Sum {
+        variant: String,
+        value: Option<Box<Self>>,
+    },
+    Record {
+        members: Vec<(String, Self)>,
+    },
+    List {
+        items: Vec<Self>,
+    },
+    /// Numbers of one kind, `count` of them at `offset` in the drawing's
+    /// bytes, little-endian.
+    Numbers {
+        kind: NumberKind,
+        offset: u64,
+        count: u64,
+    },
+    /// `length` bytes at `offset` in the drawing's bytes.
+    Bytes {
+        offset: u64,
+        length: u64,
+    },
+    /// A map's entries, each a key and a value, in its view's order.
+    Entries {
+        entries: Vec<(Self, Self)>,
+    },
+    Null,
+}
+
+/// The kind of number each of a sequence's elements is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum NumberKind {
+    I8,
+    U8,
+    I16,
+    U16,
+    I32,
+    U32,
+    I64,
+    U64,
+    F32,
+    F64,
 }
 
 /// The answer to `readMemory`.
@@ -1406,6 +1568,15 @@ mod tests {
         TaskList::decl,
         Task::decl,
         TaskState::decl,
+        Draw::decl,
+        RendererRef::decl,
+        RendererInfo::decl,
+        RendererSource::decl,
+        RendererList::decl,
+        Drawing::decl,
+        DrawInput::decl,
+        Datum::decl,
+        NumberKind::decl,
     ];
 
     /// Writes every message type as TypeScript.

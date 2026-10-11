@@ -172,6 +172,8 @@ impl ControllerMessage {
                     | Request::RecordKernels { .. }
                     | Request::Dereference { .. }
                     | Request::ValueChildren { .. }
+                    | Request::VisualizerInputs { .. }
+                    | Request::Numbers { .. }
                     | Request::Backtrace { .. }
                     | Request::Registers { .. }
                     | Request::ReadMemory { .. }

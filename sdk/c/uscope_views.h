@@ -6,6 +6,9 @@
  * USCOPE_KERNEL("tree", "kernels/tree.c", "build/tree.wasm"); embeds a
  * kernel those views may call by its name, with its source, so that it is
  * reviewed as that; uscope_kernel.h says how to write one.
+ * USCOPE_VISUALIZER("chess-board", "views/chess-board.js"); embeds a
+ * renderer those views' drawings may call by its name, which uscope's web
+ * page runs in its sandbox; docs/visualizers.md says how to write one.
  *
  * The section is not loaded when the program runs, and strip --strip-debug
  * removes it with the rest of the debug information. The paths are the
@@ -46,6 +49,21 @@
             ".incbin \"" source "\"\n"                                 \
             "6:\n"                                                     \
             ".incbin \"" module "\"\n"                                 \
+            "8:\n"                                                     \
+            ".popsection\n")
+
+/* A record: kind 3 (renderer), format 1, its length, then the name's
+ * length and the name, and the renderer's JavaScript. */
+#define USCOPE_VISUALIZER(name, path)                                  \
+    __asm__(".pushsection .debug_uscope_views,\"\",@progbits\n"       \
+            ".byte 3, 1\n"                                             \
+            ".long 8f - 7f\n"                                          \
+            "7:\n"                                                     \
+            ".short 4f - 3f\n"                                         \
+            "3:\n"                                                     \
+            ".ascii \"" name "\"\n"                                    \
+            "4:\n"                                                     \
+            ".incbin \"" path "\"\n"                                   \
             "8:\n"                                                     \
             ".popsection\n")
 

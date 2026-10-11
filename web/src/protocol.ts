@@ -55,6 +55,11 @@ export interface Results {
   modules: P.Modules;
   functions: P.Functions;
   tasks: P.TaskList;
+  /** With the bytes its inputs' numbers and bytes lie in, when any. */
+  draw: P.Drawing & { payload?: Uint8Array };
+  renderer: P.RendererSource;
+  renderers: P.RendererList;
+  reloadViews: null;
 }
 
 // Fails to compile when a method has no entry in Results, or Results names

@@ -20,14 +20,16 @@ export interface Look {
   w?: string[];
   /** Expanded paths in the variable tree, such as `args/req`. */
   x?: string[];
+  /** Values pinned to the drawings, each `PATH` or `PATH~RENDERER`. */
+  d?: string[];
 }
 
-export type View = "source" | "disassembly" | "memory";
+export type View = "source" | "disassembly" | "memory" | "drawings";
 
-const VIEWS: readonly View[] = ["source", "disassembly", "memory"];
+const VIEWS: readonly View[] = ["source", "disassembly", "memory", "drawings"];
 
 /** The keys every route's query may carry, and whether each repeats. */
-const LISTS = new Set(["w", "x"]);
+const LISTS = new Set(["w", "x", "d"]);
 
 /**
  * Parses a query, keeping a repeated key's values in order. Lists repeat
@@ -58,8 +60,10 @@ export function stringifySearch(search: Record<string, unknown>): string {
     }
   }
   const text = params.toString();
-  // `/` and `:` read better than their escapes, and are safe in a query.
-  return text ? `?${text.replaceAll("%2F", "/").replaceAll("%3A", ":")}` : "";
+  // `/`, `:`, and `~` read better than their escapes, and are safe in a query.
+  return text
+    ? `?${text.replaceAll("%2F", "/").replaceAll("%3A", ":").replaceAll("%7E", "~")}`
+    : "";
 }
 
 /** The typed query, dropping anything malformed. */
@@ -98,6 +102,10 @@ export function validateLook(search: Record<string, unknown>): Look {
   const x = list("x");
   if (x) {
     look.x = x;
+  }
+  const d = list("d");
+  if (d) {
+    look.d = d;
   }
   return look;
 }
@@ -246,6 +254,36 @@ export function followedLook(look: Look): Look {
 export function showingSource(look: Look, src: string): Look {
   const { view: _view, ...rest } = look;
   return { ...rest, src };
+}
+
+/** A value pinned to the drawings, and the renderer it names, if any. */
+export interface Pinned {
+  path: string;
+  renderer: string | null;
+}
+
+const RENDERER = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Parses a `d` entry, `PATH` or `PATH~RENDERER`. A path may hold `~`,
+ * C's complement, so only what follows the last one, when it is a
+ * renderer's name, names a renderer. */
+export function parsePinned(entry: string): Pinned {
+  const at = entry.lastIndexOf("~");
+  const renderer = at > 0 ? entry.slice(at + 1) : "";
+  return RENDERER.test(renderer)
+    ? { path: entry.slice(0, at), renderer }
+    : { path: entry, renderer: null };
+}
+
+export function formatPinned(pinned: Pinned): string {
+  return pinned.renderer === null ? pinned.path : `${pinned.path}~${pinned.renderer}`;
+}
+
+/** The same look with `pinned` drawn, once, and the drawings shown. */
+export function drawing(look: Look, pinned: Pinned): Look {
+  const entry = formatPinned(pinned);
+  const d = (look.d ?? []).filter((each) => each !== entry);
+  return { ...look, d: [...d, entry], view: "drawings" };
 }
 
 /** The same look, in `view`: source is the view a look names by none. */

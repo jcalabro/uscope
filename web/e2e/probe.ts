@@ -1,18 +1,28 @@
 // Drives a real `uscope web` through a few steps and saves a screenshot after
 // each, printing the page's errors: the quickest look at one interaction.
 // `node e2e/probe.ts PROGRAM STEP...`, where a step is `key:F5`,
-// `click:TEXT`, `type:TEXT`, `wait:TEXT`, `goto:PATH`, `eval:JS`, or `sleep:MS`.
+// `click:TEXT`, `type:TEXT`, `wait:TEXT`, `goto:PATH`, `eval:JS`, or `sleep:MS`;
+// `views:PATH` and `arg:TEXT`, wherever they are, start uscope with that
+// views file or hand the program that argument.
 
 import * as path from "node:path";
 import { chromium } from "@playwright/test";
 import { root, startUscope } from "./server.ts";
 
-const [program, ...steps] = process.argv.slice(2);
+const [program, ...given] = process.argv.slice(2);
 if (!program) {
   throw new Error("usage: probe.ts PROGRAM STEP...");
 }
+const starting = given.filter((step) => step.startsWith("views:") || step.startsWith("arg:"));
+const steps = given.filter((step) => !starting.includes(step));
+const views = starting.flatMap((step) =>
+  step.startsWith("views:") ? ["--views", path.resolve(root, step.slice("views:".length))] : [],
+);
+const args = starting.flatMap((step) =>
+  step.startsWith("arg:") ? [step.slice("arg:".length)] : [],
+);
 const out = path.join(root, "target", "web-shots");
-const server = await startUscope([program], "");
+const server = await startUscope([...views, program, ...args], "");
 const browser = await chromium.launch();
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 800 } });

@@ -4,9 +4,14 @@
 //! everything as it happens. Each request runs in a task of its own, so a
 //! slow one, such as loading a large program, never holds up the state,
 //! output, or other answers the tab is waiting for.
+//!
+//! Every message is JSON text but one: a drawing's numbers and bytes go in
+//! a binary frame just before its answer, the request's id as 8 bytes,
+//! little-endian, then the bytes.
 
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
 use tokio::sync::{broadcast, mpsc};
 
@@ -37,7 +42,7 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
         }
     }
 
-    let (answers, mut pending) = mpsc::channel::<Utf8Bytes>(PENDING_ANSWERS);
+    let (answers, mut pending) = mpsc::channel::<Message>(PENDING_ANSWERS);
     loop {
         // Biased, in this order: requests are read even during a flood of
         // output, and a request's state change goes out before its answer.
@@ -48,7 +53,7 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
                     dispatch(&session, connection, role, text.as_str(), answers.clone());
                     continue;
                 }
-                Some(Ok(Message::Binary(_))) => encode(&error(0, ErrorKind::Invalid, "messages are JSON text")),
+                Some(Ok(Message::Binary(_))) => Message::Text(encode(&error(0, ErrorKind::Invalid, "messages are JSON text"))),
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                 Some(Ok(Message::Close(_)) | Err(_)) | None => break,
             },
@@ -57,17 +62,17 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
                     break;
                 }
                 let state = Arc::clone(&joined.state.borrow_and_update());
-                encode(&ServerMessage::State(state))
+                Message::Text(encode(&ServerMessage::State(state)))
             }
             Some(answer) = pending.recv() => answer,
             message = joined.messages.recv() => match message {
-                Ok(text) => Utf8Bytes::from(&*text),
+                Ok(text) => Message::Text(Utf8Bytes::from(&*text)),
                 // Output was dropped; the state, which matters, is sent whole.
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
             },
         };
-        if socket.send(Message::Text(outgoing)).await.is_err() {
+        if socket.send(outgoing).await.is_err() {
             break;
         }
     }
@@ -79,7 +84,7 @@ fn dispatch(
     connection: u32,
     role: Role,
     text: &str,
-    answers: mpsc::Sender<Utf8Bytes>,
+    answers: mpsc::Sender<Message>,
 ) {
     let envelope = match serde_json::from_str::<Envelope>(text) {
         Ok(envelope) => envelope,
@@ -89,7 +94,8 @@ fn dispatch(
                 .ok()
                 .and_then(|value| value.get("id")?.as_u64())
                 .unwrap_or(0);
-            let answer = encode(&error(id, ErrorKind::Invalid, &problem.to_string()));
+            let answer =
+                Message::Text(encode(&error(id, ErrorKind::Invalid, &problem.to_string())));
             tokio::spawn(async move { answers.send(answer).await });
             return;
         }
@@ -97,14 +103,35 @@ fn dispatch(
     let session = Arc::clone(session);
     tokio::spawn(async move {
         let id = envelope.id;
-        let answer = match session.handle(connection, role, envelope.request).await {
-            Ok(result) => ServerMessage::Result { id, result },
+        let answered = match envelope.request {
+            protocol::Request::Draw(draw) => session.draw(&draw).await,
+            request => session
+                .handle(connection, role, request)
+                .await
+                .map(|result| (result, Vec::new())),
+        };
+        let answer = match answered {
+            Ok((result, bytes)) => {
+                if !bytes.is_empty() {
+                    let mut frame = Vec::with_capacity(8 + bytes.len());
+                    frame.extend_from_slice(&id.to_le_bytes());
+                    frame.extend_from_slice(&bytes);
+                    if answers
+                        .send(Message::Binary(Bytes::from(frame)))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                ServerMessage::Result { id, result }
+            }
             Err(failure) => ServerMessage::Error {
                 id,
                 error: failure.body(),
             },
         };
-        let _ = answers.send(encode(&answer)).await;
+        let _ = answers.send(Message::Text(encode(&answer))).await;
     });
 }
 

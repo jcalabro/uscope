@@ -45,6 +45,95 @@ impl<O, S> Program<O, S> {
     }
 }
 
+impl<O: Clone, S: Clone> Program<O, S> {
+    /// When the program is `p[i]`, a pointer `p` moved by a value `index`
+    /// accepts and nothing else, as a view's elements often are: `p`, the
+    /// size of each element, and the type it points to.
+    pub fn indexed_pointer(
+        &self,
+        index: impl Fn(&O) -> bool,
+    ) -> Option<(Self, u64, TypeReference)> {
+        let Op::At { address, pointee } = &self.root.op else {
+            return None;
+        };
+        let Op::Offset {
+            pointer,
+            count,
+            scale,
+            backward: false,
+        } = &address.op
+        else {
+            return None;
+        };
+        let indexes = match &count.op {
+            Op::Bound(object) | Op::Object(object) => index(object),
+            Op::Load(place) => matches!(&place.op, Op::Object(object) if index(object)),
+            _ => false,
+        };
+        indexes.then(|| {
+            (
+                Self {
+                    root: (**pointer).clone(),
+                },
+                *scale,
+                *pointee,
+            )
+        })
+    }
+}
+
+impl<O, S> Program<O, S> {
+    /// Whether any part of the program names an object `test` accepts.
+    pub fn mentions(&self, test: &impl Fn(&O) -> bool) -> bool {
+        self.root.mentions(test)
+    }
+}
+
+impl<O, S> Node<O, S> {
+    fn mentions(&self, test: &impl Fn(&O) -> bool) -> bool {
+        let any = |nodes: &[&Self]| nodes.iter().any(|node| node.mentions(test));
+        match &self.op {
+            Op::Object(object) | Op::Bound(object) => test(object),
+            Op::Task | Op::Register(_) | Op::Constant(_) => false,
+            Op::Entry { base, key, .. } => any(&[base, key]),
+            Op::Step { base, indices, .. } => {
+                base.mentions(test) || indices.iter().any(|index| index.mentions(test))
+            }
+            Op::Holds { base, .. } => base.mentions(test),
+            Op::At { address, .. } | Op::Raw { address } => address.mentions(test),
+            Op::Load(operand)
+            | Op::AddressOf(operand)
+            | Op::Decay(operand)
+            | Op::Negate(operand)
+            | Op::FloatNegate(operand)
+            | Op::Not(operand)
+            | Op::BitNot(operand)
+            | Op::Fit(operand)
+            | Op::Convert { operand, .. }
+            | Op::Length { operand, .. }
+            | Op::Capacity { operand, .. } => operand.mentions(test),
+            Op::Arithmetic { left, right, .. }
+            | Op::FloatArithmetic { left, right, .. }
+            | Op::Bitwise { left, right, .. }
+            | Op::Compare { left, right, .. }
+            | Op::Logical { left, right, .. }
+            | Op::Difference { left, right, .. } => any(&[left, right]),
+            Op::Shift { value, amount, .. } => any(&[value, amount]),
+            Op::Choose {
+                condition,
+                then,
+                otherwise,
+                ..
+            } => any(&[condition, then, otherwise]),
+            Op::Offset { pointer, count, .. } => any(&[pointer, count]),
+            Op::Assign { target, value } => any(&[target, value]),
+            Op::Range { base, start, end } | Op::TextSlice { base, start, end } => {
+                base.mentions(test) || start.iter().chain(end).any(|bound| bound.mentions(test))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Node<O, S> {
     pub op: Op<O, S>,

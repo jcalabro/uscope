@@ -73,6 +73,7 @@ pub use eval::Evaluation;
 pub use eval::bind::Mode as EvaluationMode;
 pub use eval::error::{ErrorKind as ExpressionErrorKind, ExpressionError};
 pub use eval::syntax::{Expression, Span};
+pub use inspection::MAX_INSPECTION_LIMITS;
 pub use model::{
     Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArgumentOrigin,
     ArrayBound, ArrayDimension, ArrayExtent, ArrayOrdering, Backtrace, BaseClass,
@@ -106,7 +107,8 @@ pub use model::{
     ValueChildrenReference, Variable, VariableInvalidReason, VariableKind, VariableMalformedKind,
     VariableMalformedReason, VariableSnapshot, VariableState, VariableUnavailableReason,
     VariableValue, VariableValueSource, Variant, VariantDiscriminant, VariantSelection,
-    VariantSelector, VariantStorageKind, ViewName, ViewProblem, VirtualAddress,
+    VariantSelector, VariantStorageKind, ViewName, ViewProblem, VirtualAddress, Visualizer,
+    VisualizerReference,
 };
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, ConditionOwner,
@@ -114,12 +116,13 @@ pub use protocol::{
     ExceptionDisposition, ExceptionFilter, ExceptionInfo, ExceptionStops, ExecutionId, ExitStatus,
     FramePresentation, GlobalVariableQuery, HeldChild, HeldProcess, HitComparison, HitCondition,
     InferiorState, InvalidatedWatchpoint, KernelSource, LanguageException, LanguageExceptionKind,
-    LaunchOptions, LogPart, ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation,
-    ResumeScope, SignalPolicy, StateSnapshot, StepKind, StepTarget, StopId, StopReason, TaskEnding,
-    ThreadSnapshot, ThreadState, TypeViews, ValueChildQuery, VariableQuery, ViewCandidate,
-    ViewCheck, ViewExplanation, WatchAccess, WatchScope, WatchTarget, Watchpoint,
-    WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions,
-    WatchpointSpec,
+    LaunchOptions, LogPart, MAX_DRAWING_BYTES, ModuleIdentity, NumberKind, Numbers, PresentedFrame,
+    ProcessId, Renderer, ResolvedBreakpointLocation, ResumeScope, SignalPolicy, StateSnapshot,
+    StepKind, StepTarget, StopId, StopReason, TaskEnding, ThreadSnapshot, ThreadState, TypeViews,
+    ValueChildQuery, VariableQuery, ViewCandidate, ViewCheck, ViewExplanation, VisualizerBinding,
+    VisualizerInput, VisualizerInputs, VisualizerValue, WatchAccess, WatchScope, WatchTarget,
+    Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation,
+    WatchpointOptions, WatchpointSpec,
 };
 pub use runtime_model::TASK_NOUNS;
 pub use source_map::SourcePathMap;
@@ -1638,15 +1641,23 @@ impl DebuggerHandle {
 
     /// Presents values with these view files ahead of the views modules
     /// embed and the built-in views, replacing any loaded before, with the
-    /// kernels beside them, and returns what kept parts of them out. Files
-    /// are parsed, and kernels loaded, here, before the debugger sees
-    /// them; a kernel whose name an earlier one has is left out.
+    /// kernels and renderers beside them, and returns what kept parts of
+    /// them out. Files are parsed, and kernels loaded, here, before the
+    /// debugger sees them; a kernel or renderer whose name an earlier one
+    /// has is left out.
     pub async fn load_views(
         &self,
         files: &[(&str, &str)],
         kernels: &[view_files::KernelFile],
+        renderers: &[view_files::RendererFile],
     ) -> Result<Arc<[ViewFileError]>> {
         let mut views = view::ViewSet::new(files.iter().copied());
+        for renderer in renderers {
+            views.add_renderers(
+                &renderer.path,
+                [(renderer.name.as_str(), renderer.source.as_str())],
+            );
+        }
         for kernel in kernels {
             views.add_kernels(
                 &kernel.path,
@@ -1784,6 +1795,45 @@ impl DebuggerHandle {
             reply,
         })
         .await
+    }
+
+    /// Reads the inputs of one drawing a value's view offers, at the stop
+    /// its reference names, under explicit bounded resource limits. Only
+    /// the web page draws.
+    pub async fn visualizer_inputs(
+        &self,
+        reference: Arc<VisualizerReference>,
+        limits: InspectionLimits,
+    ) -> Result<VisualizerInputs> {
+        self.request(|reply| Request::VisualizerInputs {
+            reference,
+            limits,
+            reply,
+        })
+        .await
+    }
+
+    /// Reads the elements of a sequence of numbers at once, when they lie
+    /// next to each other in memory and take at most `most_bytes`, as an
+    /// array's, a slice's, and a view's of the form `range(n) => p[i]` do.
+    /// `None` means they do not, and are read as children.
+    pub async fn numbers(
+        &self,
+        reference: Arc<ValueChildrenReference>,
+        most_bytes: u64,
+    ) -> Result<Option<Numbers>> {
+        self.request(|reply| Request::Numbers {
+            reference,
+            most_bytes,
+            reply,
+        })
+        .await
+    }
+
+    /// Every renderer drawings may name, in the order a name is looked up:
+    /// the session's, each module's own, then the built-in ones.
+    pub async fn renderers(&self) -> Result<Arc<[Arc<Renderer>]>> {
+        self.request(|reply| Request::Renderers { reply }).await
     }
 
     /// Lists one filtered, bounded page of immutable global metadata.
