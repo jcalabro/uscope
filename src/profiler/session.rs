@@ -11,7 +11,7 @@ use super::budget::{Budget, Controller, Observation, STEPS};
 use super::calls::{self, Calls};
 use super::collector::{Collector, ProbeSelection};
 use super::record::{self, Sites};
-use super::tasks::{Snapshot, Snapshotter};
+use super::tasks::{self, Live, Snapshot, Snapshotter};
 use super::{
     DEEP_STACK_COPY, Profile, RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource, StackCopy,
 };
@@ -470,13 +470,21 @@ impl Snapshots {
             // The program runs on, and the samples it writes meanwhile
             // arrive as any do.
             let start = monotonic();
-            if let Some(snapshot) = snapshotter.take_live() {
-                let end = monotonic();
-                self.next = std::time::Instant::now() + self.every;
-                let weight = start.saturating_sub(self.previous);
-                processor.live_task_snapshot(self.pid, (start, end), weight, &snapshot);
-                self.previous = start;
-                return;
+            match snapshotter.take_live() {
+                Live::Taken(snapshot) => {
+                    let end = monotonic();
+                    self.next = std::time::Instant::now() + self.every;
+                    let weight = start.saturating_sub(self.previous);
+                    processor.live_task_snapshot(self.pid, (start, end), weight, &snapshot);
+                    self.previous = start;
+                    return;
+                }
+                // The recording ends with the program, which has no tasks.
+                Live::Exited => {
+                    self.next = std::time::Instant::now() + self.every;
+                    return;
+                }
+                Live::Unlearned => {}
             }
         }
         if sampling {
@@ -500,6 +508,8 @@ impl Snapshots {
                 processor.task_snapshot(self.pid, (start, end), weight, &snapshot);
                 self.previous = start;
             }
+            // A program that exited is not attached to, and has no tasks.
+            Err(_) if tasks::exited(self.pid) => {}
             Err(error) => {
                 processor.task_snapshot(self.pid, (start, end), 0, &Snapshot::default());
                 processor.snapshot_failed(start, &format!("a task snapshot failed: {error}"));

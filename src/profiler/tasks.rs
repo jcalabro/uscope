@@ -410,20 +410,34 @@ const LIVE_STACK_BYTES: u64 = 1 << 20;
 /// The deepest stack a live snapshot unwinds.
 const LIVE_FRAMES: usize = 512;
 
+/// What a live snapshot found.
+#[derive(Debug)]
+pub enum Live {
+    Taken(Snapshot),
+    /// A runtime needs a thread's thread pointer that no stopped snapshot
+    /// has learned.
+    Unlearned,
+    /// The process exited, before or while it was read, so it has no
+    /// tasks, and what was read of it may show it partly gone.
+    Exited,
+}
+
 impl Snapshotter {
     /// Reads where the process's tasks wait while it runs (see the module
-    /// documentation), or `None` when a runtime needs a thread's thread
-    /// pointer that no stopped snapshot has learned.
-    pub fn take_live(&self) -> Option<Snapshot> {
+    /// documentation).
+    pub fn take_live(&self) -> Live {
         let _span = crate::span!("live task snapshot");
         let mut snapshot = Snapshot::default();
         let info = &self.program.debug_info;
         let image = Arc::clone(&info.image);
         let Some(bias) = super::perf::program_bias(self.pid) else {
+            if exited(self.pid) {
+                return Live::Exited;
+            }
             snapshot
                 .problems
                 .push("the program's mapping cannot be read".to_owned());
-            return Some(snapshot);
+            return Live::Taken(snapshot);
         };
         let threads = threads(self.pid);
         let pointers = threads
@@ -455,7 +469,7 @@ impl Snapshotter {
         for model in runtime_model::detect(&runtime_image) {
             match model {
                 Ok(model) => {
-                    let live = Live {
+                    let live = LiveRuntime {
                         image: &image,
                         stop: &stop,
                         modules: &modules,
@@ -466,8 +480,23 @@ impl Snapshotter {
                 Err(unbound) => snapshot.problems.push(unbound.reason.to_string()),
             }
         }
-        (!stop.unlearned.load(Ordering::Relaxed)).then_some(snapshot)
+        if exited(self.pid) {
+            Live::Exited
+        } else if stop.unlearned.load(Ordering::Relaxed) {
+            Live::Unlearned
+        } else {
+            Live::Taken(snapshot)
+        }
     }
+}
+
+/// Whether process `pid` has exited: it is gone, or waits to be reaped.
+pub fn exited(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+        stat.rfind(')')
+            .and_then(|end| stat.get(end + 2..))
+            .is_some_and(|state| state.starts_with(['Z', 'X']))
+    })
 }
 
 /// The threads of process `pid`, in the order of their ids.
@@ -577,14 +606,14 @@ impl crate::unwind::MemoryReader for LivePages<'_> {
 }
 
 /// One runtime of the running process, as a live snapshot reads it.
-struct Live<'a> {
+struct LiveRuntime<'a> {
     image: &'a Arc<ModuleImage>,
     stop: &'a LiveStop,
     modules: &'a [crate::unwind::UnwindModule<'a>],
     model: &'a dyn runtime_model::RuntimeModel,
 }
 
-impl Live<'_> {
+impl LiveRuntime<'_> {
     /// Adds the runtime's tasks, and where those that wait wait, to
     /// `snapshot`.
     fn read(&self, snapshot: &mut Snapshot) {
@@ -783,4 +812,42 @@ const fn live_waits(task: &runtime_model::RuntimeTask) -> bool {
             task.state,
             TaskState::Runnable | TaskState::Blocked | TaskState::Unknown(_)
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{Live, Snapshotter};
+
+    /// Whether process `pid` has exited and waits to be reaped.
+    fn zombie(pid: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| Some(stat[stat.rfind(')')? + 2..].starts_with('Z')))
+            .unwrap_or(false)
+    }
+
+    /// A process that has exited, before it is reaped, keeps no mappings
+    /// and runs no tasks: a live snapshot of it says it exited, rather
+    /// than that it could not read the program.
+    #[test]
+    fn a_live_snapshot_of_an_exited_process_says_it_exited() {
+        let program =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("build/test-programs/basic");
+        let mut child = std::process::Command::new(&program)
+            .spawn()
+            .expect("start the program");
+        let pid = child.id();
+        let snapshotter = Snapshotter::new(pid, &program, &crate::DebugFileOptions::default())
+            .expect("read the program");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !zombie(pid) {
+            assert!(Instant::now() < deadline, "the program never exited");
+            std::thread::yield_now();
+        }
+        let live = snapshotter.take_live();
+        child.wait().expect("reap the program");
+        assert!(matches!(live, Live::Exited), "{live:?}");
+    }
 }
