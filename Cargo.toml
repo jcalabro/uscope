@@ -81,6 +81,7 @@ twox-hash = { version = "2.1", default-features = false, features = ["std", "xxh
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cpp_demangle = "0.5"
+crc32fast = "1.5"
 gimli = "0.34"
 iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "gas", "instr_info", "intel", "std"] }
 lzma-rs = "0.3"

@@ -17,6 +17,10 @@ pub struct LoadLimits {
     pub per_input_byte: u64,
     /// What any module may build, however little debug information it has.
     pub floor: u64,
+    /// How many units past those added to the image each worker may walk
+    /// to: what is walked waits in memory until the units before it are
+    /// added.
+    pub walk_ahead: usize,
 }
 
 impl Default for LoadLimits {
@@ -28,6 +32,10 @@ impl Default for LoadLimits {
         Self {
             per_input_byte: 32,
             floor: 32 << 20,
+            // Walking 64 units ahead of the adding takes ThinLTO-built vlpds
+            // 0.5 s longer than walking without bound, and its peak holds
+            // 0.8 GB less.
+            walk_ahead: 64,
         }
     }
 }
@@ -105,6 +113,16 @@ impl Meter {
         }
     }
 
+    /// What this meter spent since it had spent `mark`, as a meter of its
+    /// own that refused what this one has.
+    pub const fn since(&self, mark: u64) -> Self {
+        Self {
+            limit: self.limit,
+            spent: self.spent - mark,
+            exceeded: self.exceeded,
+        }
+    }
+
     /// Charges what `apart`, split from this meter, spent, when it refused
     /// nothing and what it spent is still left here; otherwise nothing.
     pub fn absorb(&mut self, apart: &Self) -> bool {
@@ -131,6 +149,7 @@ mod tests {
         let limits = LoadLimits {
             per_input_byte: 2,
             floor: 10,
+            ..LoadLimits::default()
         };
         assert_eq!(limits.budget(3).limit, 10, "the floor");
         let mut meter = limits.budget(8);
@@ -154,7 +173,8 @@ mod tests {
         assert_eq!(
             LoadLimits {
                 per_input_byte: u64::MAX,
-                floor: 0
+                floor: 0,
+                ..LoadLimits::default()
             }
             .budget(u64::MAX)
             .limit,

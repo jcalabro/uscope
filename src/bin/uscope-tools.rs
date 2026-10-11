@@ -131,6 +131,7 @@ enum Corpus {
 }
 
 fn main() -> ExitCode {
+    uscope::profile::alloc::return_freed_memory_promptly();
     match run(Args::parse()) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,

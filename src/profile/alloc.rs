@@ -260,6 +260,41 @@ pub type Selected = mimalloc::MiMalloc;
 #[cfg(feature = "system-alloc")]
 pub type Selected = std::alloc::System;
 
+/// Has the allocator return freed memory to the system within 10 ms.
+///
+/// mimalloc otherwise waits a second, and `MIMALLOC_PURGE_DELAY` still
+/// overrides it. Loading a large program frees gigabytes it built along the way, which
+/// otherwise stay resident through the rest of the load: some 2 GB of a
+/// 9 GB peak for the largest measured. A program calls it first, before
+/// it starts any thread.
+#[cfg_attr(
+    feature = "system-alloc",
+    expect(clippy::missing_const_for_fn, reason = "mimalloc's is not const")
+)]
+pub fn return_freed_memory_promptly() {
+    #[cfg(not(feature = "system-alloc"))]
+    {
+        // mimalloc's `mi_option_purge_delay`, in its second and third
+        // versions alike.
+        const PURGE_DELAY: std::ffi::c_int = 15;
+        #[allow(
+            unsafe_code,
+            reason = "mimalloc's options are set through its C interface"
+        )]
+        // SAFETY: the declaration matches mimalloc.h's `void
+        // mi_option_set_default(mi_option_t option, long value)`, whose
+        // enum is an int, and libmimalloc-sys links the library. It only
+        // stores the default, which is not thread-safe: the caller runs it
+        // before starting a thread.
+        unsafe {
+            unsafe extern "C" {
+                fn mi_option_set_default(option: std::ffi::c_int, value: std::ffi::c_long);
+            }
+            mi_option_set_default(PURGE_DELAY, 10);
+        }
+    }
+}
+
 /// The allocator a program installs, counted: `#[global_allocator] static
 /// ALLOCATOR: Counting<Selected> = alloc::selected();`.
 #[must_use]

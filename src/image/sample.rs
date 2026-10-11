@@ -841,10 +841,10 @@ pub(super) fn sample_variables() -> Variables {
         name: name.into(),
         declaration: Some(declared.clone()),
         ranges: std::sync::Arc::clone(&code),
-        go_declaration: Some(GoDeclaration {
+        go_declaration: Some(Box::new(GoDeclaration {
             location: declared.clone(),
             instance: Some(CodeInstanceId::new(1)),
-        }),
+        })),
         instance: Some(CodeInstanceId::new(1)),
         lexical_depth: 1,
         order: 0,
@@ -874,7 +874,9 @@ pub(super) fn sample_variables() -> Variables {
             malformed: Some("bad".into()),
             ..local(
                 "p",
-                Metadata::Value(ValueDescription::Constant(ConstantValue::Signed(-3))),
+                Metadata::Value(ValueDescription::Constant(Box::new(ConstantValue::Signed(
+                    -3,
+                )))),
             )
         },
         DataObject {
@@ -889,9 +891,9 @@ pub(super) fn sample_variables() -> Variables {
             frame_base: Metadata::Absent(MetadataAbsence::NotApplicable),
             ..local(
                 "g",
-                Metadata::Value(ValueDescription::Constant(ConstantValue::Bytes(
+                Metadata::Value(ValueDescription::Constant(Box::new(ConstantValue::Bytes(
                     [1, 2, 3].into(),
-                ))),
+                )))),
             )
         },
         DataObject {
@@ -902,8 +904,8 @@ pub(super) fn sample_variables() -> Variables {
             debug_info_offset: Some(0x60),
             ..local(
                 "u",
-                Metadata::Value(ValueDescription::Constant(ConstantValue::Unsigned(
-                    u128::MAX - 1,
+                Metadata::Value(ValueDescription::Constant(Box::new(
+                    ConstantValue::Unsigned(u128::MAX - 1),
                 ))),
             )
         },
@@ -913,7 +915,9 @@ pub(super) fn sample_variables() -> Variables {
             frame_base: Metadata::Malformed("no frame base".into()),
             ..local(
                 "f",
-                Metadata::Value(ValueDescription::Constant(ConstantValue::Fixed(0xff))),
+                Metadata::Value(ValueDescription::Constant(Box::new(ConstantValue::Fixed(
+                    0xff,
+                )))),
             )
         },
         DataObject {

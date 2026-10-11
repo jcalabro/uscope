@@ -1,15 +1,19 @@
-//! Walking every unit at once, and putting what each built in order.
+//! Walking units apart, and putting what each built in order.
 //!
-//! Each unit's walk reads what the arena held before any unit was walked
-//! and builds its own types, locations, and files beside them, numbered
-//! from where that base ends. Its records are then added in unit order,
+//! Units are walked in groups: the units whose DIEs refer to one
+//! another's, directly or through other units. Each group's walk reads
+//! what the arena held before any unit was walked, walks the group's units
+//! in order, and builds their types, locations, and files beside that
+//! base; each unit's types are those built between where its walk began
+//! and ended. Every unit's records are then added in unit order,
 //! renumbered after the units before it, which numbers everything as one
-//! walk of every unit in order does, so long as no unit reaches another's
-//! types: a walk in order would have built those once, where the first
-//! unit reached them. A unit that does, or a load that runs out of its
-//! budget or fails, is walked again in order instead.
+//! walk of every unit in order does, so long as no unit reaches another
+//! group's types: a walk in order would have built those once, where the
+//! first unit reached them. A unit that does, or a load that runs out of
+//! its budget or fails, is walked again in order instead.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 
 use foldhash::HashMap;
 
@@ -56,14 +60,15 @@ impl Pooled {
     }
 }
 
-/// Where the types one unit built apart are numbered.
-struct Renumbered {
-    /// Where the shared base ends, and the unit's own types begin.
+/// Where the types one group built apart are numbered, for the group's
+/// units added so far.
+struct Renumbered<'r> {
+    /// Where the shared base ends, and the group's own types begin.
     base: usize,
-    ids: Vec<TypeId>,
+    ids: &'r [TypeId],
 }
 
-impl Renumbered {
+impl Renumbered<'_> {
     fn id(&self, id: TypeId) -> TypeId {
         id.index()
             .checked_sub(self.base)
@@ -84,8 +89,10 @@ impl Renumbered {
     }
 }
 
-/// What one unit's walk built apart from the others'.
+/// What one unit's walk built apart from other groups'.
 struct UnitWalk {
+    /// The unit's group, which its types are numbered within.
+    group: usize,
     result: Result<(), DwarfError>,
     walked: Walked,
     types: UnitTypes,
@@ -93,13 +100,15 @@ struct UnitWalk {
     pool: LocationsBuilder,
 }
 
-/// The types one unit's walk built, past the shared base.
+/// The types one unit's walk built, numbered within its group's past the
+/// shared base.
 pub(super) struct UnitTypes {
+    /// Where its types begin among its group's.
+    start: usize,
     entries: Vec<TypeEntry>,
     by_die: DieMap<TypeId>,
     explicit_names: Bits,
-    /// Where its identity parts begin, and the parts.
-    identity_parts: (usize, Vec<Option<IdentityParts>>),
+    identity_parts: Vec<(usize, IdentityParts)>,
     go_identity_parts: HashMap<TypeId, super::identity::GoParts>,
     go_dict_indices: HashMap<TypeId, u64>,
     passed_by_value: HashMap<TypeId, bool>,
@@ -159,11 +168,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
 }
 
 impl<'data> Frozen<'_, 'data> {
-    /// An arena that builds `unit`'s types on this base, pooling locations
-    /// into `pool`.
+    /// An arena that builds the types of `home`, a group and each unit's
+    /// group, on this base, pooling locations into `pool`.
     fn split<'b>(
         &'b self,
-        unit: usize,
+        home: (usize, &'b [usize]),
         pool: &'b Mutex<LocationsBuilder>,
         die_buffers: &'b DieBuffers<'data>,
     ) -> TypeArenaBuilder<'b, 'data> {
@@ -192,81 +201,177 @@ impl<'data> Frozen<'_, 'data> {
             complex_parts: HashMap::default(),
             go_dict_indices: self.go_dict_indices.split(),
             passed_by_value: self.passed_by_value.split(),
-            home_unit: Some(unit),
+            home: Some(home),
             foreign: false,
+            aliases: Vec::new(),
         }
     }
 }
 
+/// Where one unit's walk ended in its group's arena.
+struct Cut {
+    /// How many types the arena held.
+    end: usize,
+    /// How many DIEs it had taken for another's type.
+    aliases: usize,
+    /// What the unit's walk spent.
+    budget: Meter,
+    foreign: bool,
+}
+
 impl TypeArenaBuilder<'_, '_> {
-    /// What this arena, split from another, built past their base.
-    fn into_unit_types(self) -> UnitTypes {
+    /// What this arena, split from another, built past their base for each
+    /// unit whose walk ended at `cuts`, in order.
+    #[expect(
+        clippy::iter_over_hash_type,
+        reason = "each entry of a map goes to its unit on its own, so their order cannot matter"
+    )]
+    fn into_unit_types(self, cuts: &[Cut]) -> Vec<UnitTypes> {
         debug_assert!(
             self.complex_parts.is_empty(),
             "complex parts are added once every unit is walked"
         );
-        let identity_start = self.identity_parts.base_len();
-        UnitTypes {
-            entries: self.entries.into_own(),
-            by_die: self.by_die.into_own(),
-            explicit_names: self.explicit_names.into_own(),
-            identity_parts: (identity_start, self.identity_parts.into_own()),
-            go_identity_parts: self.go_identity_parts.into_own(),
-            go_dict_indices: self.go_dict_indices.into_own(),
-            passed_by_value: self.passed_by_value.into_own(),
-            pending_arguments: self.pending_arguments,
-            record_member_declarations: self.record_member_declarations,
-            dynamic_record_layouts: self.dynamic_record_layouts,
-            void_type: self.void_type,
-            character_type: self.character_type,
-            limit_type: self.limit_type,
-            budget: self.budget,
-            foreign: self.foreign,
+        let base = self.entries.base_len();
+        // The unit whose walk built a type, by its number.
+        let unit_of = |id: usize| cuts.partition_point(|cut| cut.end <= id);
+        let made = |made: Option<TypeId>, start: usize, end: usize| {
+            made.filter(|id| (start..end).contains(&id.index()))
+        };
+        let mut units = cuts
+            .iter()
+            .enumerate()
+            .map(|(index, cut)| {
+                let start = index.checked_sub(1).map_or(base, |before| cuts[before].end);
+                UnitTypes {
+                    start: start - base,
+                    entries: Vec::new(),
+                    by_die: DieMap::default(),
+                    explicit_names: Bits::default(),
+                    identity_parts: Vec::new(),
+                    go_identity_parts: HashMap::default(),
+                    go_dict_indices: HashMap::default(),
+                    passed_by_value: HashMap::default(),
+                    pending_arguments: Vec::new(),
+                    record_member_declarations: Vec::new(),
+                    dynamic_record_layouts: HashMap::default(),
+                    void_type: made(self.void_type, start, cut.end),
+                    character_type: made(self.character_type, start, cut.end),
+                    limit_type: made(self.limit_type, start, cut.end),
+                    budget: cut.budget.clone(),
+                    foreign: cut.foreign,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut entries = self.entries.into_own();
+        debug_assert_eq!(
+            base + entries.len(),
+            cuts.last().map_or(base, |cut| cut.end)
+        );
+        for unit in units.iter_mut().rev() {
+            unit.entries = entries.split_off(unit.start);
         }
+        // A DIE taken for another's type goes to the unit that took it, and
+        // a type's own to the unit that built it.
+        let mut by_die = self.by_die.into_own();
+        for (position, key) in self.aliases.into_iter().enumerate() {
+            let id = by_die.remove(&key).expect("an alias names its type");
+            units[cuts.partition_point(|cut| cut.aliases <= position)]
+                .by_die
+                .insert(key, id);
+        }
+        for (key, id) in by_die.into_entries() {
+            units[unit_of(id.index())].by_die.insert(key, id);
+        }
+        for id in self.explicit_names.into_own().iter() {
+            units[unit_of(id)].explicit_names.insert(id);
+        }
+        let identity_start = self.identity_parts.base_len();
+        for (own, parts) in self.identity_parts.into_own().into_iter().enumerate() {
+            if let Some(parts) = parts {
+                let id = identity_start + own;
+                units[unit_of(id)].identity_parts.push((id, parts));
+            }
+        }
+        for (id, parts) in self.go_identity_parts.into_own() {
+            units[unit_of(id.index())]
+                .go_identity_parts
+                .insert(id, parts);
+        }
+        for (id, index) in self.go_dict_indices.into_own() {
+            units[unit_of(id.index())].go_dict_indices.insert(id, index);
+        }
+        for (id, by_value) in self.passed_by_value.into_own() {
+            units[unit_of(id.index())]
+                .passed_by_value
+                .insert(id, by_value);
+        }
+        for pending in self.pending_arguments {
+            units[unit_of(pending.entry)]
+                .pending_arguments
+                .push(pending);
+        }
+        for declaration in self.record_member_declarations {
+            units[unit_of(declaration.aggregate.index())]
+                .record_member_declarations
+                .push(declaration);
+        }
+        for (key, expression) in self.dynamic_record_layouts {
+            units[unit_of(key.aggregate.index())]
+                .dynamic_record_layouts
+                .insert(key, expression);
+        }
+        units
     }
 
     /// The types an arena makes once, `void` and the character of strings
     /// that name none, that `unit` made, each with the one a unit before it
-    /// made since, if any: the unit made one only when its base had none.
-    fn made_once(&self, unit: &UnitTypes, base: usize) -> [(Option<TypeId>, Option<TypeId>); 2] {
-        let own_void = unit.void_type.filter(|id| id.index() >= base);
-        let own_character = unit.character_type.filter(|id| id.index() >= base);
+    /// made since, if any: the unit made one only when its group had none.
+    fn made_once(&self, unit: &UnitTypes) -> [(Option<TypeId>, Option<TypeId>); 2] {
         [
-            (own_void, own_void.and(self.void_type)),
-            (own_character, own_character.and(self.character_type)),
+            (unit.void_type, unit.void_type.and(self.void_type)),
+            (
+                unit.character_type,
+                unit.character_type.and(self.character_type),
+            ),
         ]
     }
 
     /// Adds the types a unit built apart after these, as building them
-    /// here after the units before it would have numbered them.
+    /// here after the units before it would have numbered them, and
+    /// numbers them among `ids`, its group's.
     #[expect(
         clippy::iter_over_hash_type,
         reason = "each entry of a map is added on its own, so their order cannot matter"
     )]
-    fn absorb(&mut self, unit: UnitTypes, pooled: &Pooled) -> Renumbered {
+    fn absorb<'r>(
+        &mut self,
+        unit: UnitTypes,
+        pooled: &Pooled,
+        ids: &'r mut Vec<TypeId>,
+    ) -> Renumbered<'r> {
         let base = self.entries.base_len();
         debug_assert!(
-            unit.limit_type.is_none_or(|id| id.index() < base),
+            unit.limit_type.is_none(),
             "a unit that exceeds the budget is walked in order"
         );
-        let made = self.made_once(&unit, base);
+        debug_assert_eq!(ids.len(), unit.start, "a group's units are added in order");
+        let first = base + unit.start;
+        let made = self.made_once(&unit);
         let [(own_void, _), (own_character, _)] = made;
         let shared = |own: usize| {
             made.into_iter().find_map(|(made, before)| {
-                before.filter(|_| made.is_some_and(|id| id.index() == base + own))
+                before.filter(|_| made.is_some_and(|id| id.index() == first + own))
             })
         };
         let mut next = self.entries.len();
-        let ids = (0..unit.entries.len())
-            .map(|own| {
-                if let Some(before) = shared(own) {
-                    return before;
-                }
-                let id = TypeId::new(u32::try_from(next).expect("bounded type count fits u32"));
-                next += 1;
-                id
-            })
-            .collect::<Vec<_>>();
+        ids.extend((0..unit.entries.len()).map(|own| {
+            if let Some(before) = shared(own) {
+                return before;
+            }
+            let id = TypeId::new(u32::try_from(next).expect("bounded type count fits u32"));
+            next += 1;
+            id
+        }));
         let renumbered = Renumbered { base, ids };
         for (own, entry) in unit.entries.into_iter().enumerate() {
             if shared(own).is_some() {
@@ -293,17 +398,13 @@ impl TypeArenaBuilder<'_, '_> {
             let id = TypeId::new(u32::try_from(own).expect("bounded type count fits u32"));
             self.explicit_names.insert(renumbered.id(id).index());
         }
-        let (start, parts) = unit.identity_parts;
-        for (own, parts) in parts.into_iter().enumerate() {
-            let Some(mut parts) = parts else {
-                continue;
-            };
+        for (id, mut parts) in unit.identity_parts {
             for argument in &mut parts.template {
                 if let TypeArgument::Type(reference) = argument {
                     *reference = renumbered.reference(*reference);
                 }
             }
-            let id = TypeId::new(u32::try_from(start + own).expect("bounded type count fits u32"));
+            let id = TypeId::new(u32::try_from(id).expect("bounded type count fits u32"));
             let index = renumbered.id(id).index();
             self.identity_parts.resize_with(index + 1, || None);
             self.identity_parts[index] = Some(parts);
@@ -352,7 +453,7 @@ impl TypeArenaBuilder<'_, '_> {
 fn absorb_walked(
     into: &mut Walked,
     unit: &mut Walked,
-    types: &Renumbered,
+    types: &Renumbered<'_>,
     pooled: &Pooled,
     files: &[SourceFileId],
 ) {
@@ -525,6 +626,8 @@ struct Merge<'m, 'a, 'data> {
     types: &'m mut TypeArenaBuilder<'a, 'data>,
     files: &'m mut Files,
     pool: &'m mut LocationsBuilder,
+    /// Where each group's types added so far are numbered, by the group.
+    groups: HashMap<usize, Vec<TypeId>>,
     /// The next unit to add.
     next: usize,
     /// Whether every unit added so far kept to its own types, the budget,
@@ -565,8 +668,38 @@ impl Merge<'_, '_, '_> {
             .iter()
             .map(|path| self.files.intern(path.clone()))
             .collect::<Vec<_>>();
-        let renumbered = self.types.absorb(unit.types, &pooled);
+        let ids = self.groups.entry(unit.group).or_default();
+        let renumbered = self.types.absorb(unit.types, &pooled, ids);
         absorb_walked(self.walked, &mut unit.walked, &renumbered, &pooled, &files);
+    }
+}
+
+/// How far past the units added a group's walk may begin: what is walked
+/// waits in memory until the units before it are added.
+struct Window {
+    added: Mutex<usize>,
+    progress: Condvar,
+    ahead: usize,
+}
+
+impl Window {
+    /// Waits until `group`, its first unit, is within the window, or the
+    /// walk is abandoned.
+    fn enter(&self, group: usize, abandoned: &AtomicBool) {
+        let added = self.added.lock().expect("loading does not panic");
+        drop(
+            self.progress
+                .wait_while(added, |added| {
+                    group >= *added + self.ahead && !abandoned.load(Ordering::Relaxed)
+                })
+                .expect("loading does not panic"),
+        );
+    }
+
+    /// Records that the units before `next` are added.
+    fn advance(&self, next: usize) {
+        *self.added.lock().expect("loading does not panic") = next;
+        self.progress.notify_all();
     }
 }
 
@@ -575,17 +708,19 @@ struct Finished {
     units: std::collections::BTreeMap<usize, Option<UnitWalk>>,
 }
 
-/// Walks every unit at once and adds what each recorded to `walked`,
-/// `types`, `files`, and `pool` in unit order as soon as the units before
-/// it are added, as walking them in order would have. Returns `false`,
-/// having changed nothing, when walking them apart could differ from
-/// walking them in order.
+/// Walks every group of units at once and adds what each unit recorded to
+/// `walked`, `types`, `files`, and `pool` in unit order as soon as the
+/// units before it are added, as walking them in order would have. Each
+/// worker walks at most `walk_ahead` units past those added.
+/// Returns `false`, having changed nothing, when walking them apart could
+/// differ from walking them in order.
 pub(super) fn walk_units_apart<'data>(
     cx: &WalkContext<'_, 'data>,
     walked: &mut Walked,
     types: &mut TypeArenaBuilder<'_, 'data>,
     files: &mut Files,
     pool: &Mutex<LocationsBuilder>,
+    walk_ahead: usize,
 ) -> bool {
     let units = &cx.catalog.units;
     // One worker would only add copying each unit's records, and a type
@@ -598,6 +733,18 @@ pub(super) fn walk_units_apart<'data>(
         return false;
     }
     let _phase = crate::span!("variables.walk_apart");
+    // A unit whose references cannot be read fails the walk in order.
+    let Ok(groups) = units.groups() else {
+        return false;
+    };
+    let mut members = vec![Vec::new(); units.len()];
+    for (unit, group) in groups.iter().enumerate() {
+        members[*group].push(unit);
+    }
+    crate::count!(
+        "unit_groups",
+        members.iter().filter(|units| !units.is_empty()).count()
+    );
     let frozen = types.frozen();
     let pool = &mut *pool.lock().expect("loading does not panic");
     debug_assert!(walked.calls.is_empty(), "only the walk records calls");
@@ -607,53 +754,51 @@ pub(super) fn walk_units_apart<'data>(
         types,
         files,
         pool,
+        groups: HashMap::default(),
         next: 0,
         kept: true,
     });
     let finished = Mutex::new(Finished {
         units: std::collections::BTreeMap::new(),
     });
-    let abandoned = std::sync::atomic::AtomicBool::new(false);
-    rayon::in_place_scope_fifo(|scope| {
-        for unit_index in 0..units.len() {
-            let (frozen, merge, finished, abandoned) = (&frozen, &merge, &finished, &abandoned);
-            scope.spawn_fifo(move |_| {
-                let unit = (!abandoned.load(std::sync::atomic::Ordering::Relaxed))
-                    .then(|| walk_apart(cx, frozen, unit_index));
-                finished
-                    .lock()
-                    .expect("loading does not panic")
-                    .units
-                    .insert(unit_index, unit);
-                // Whichever walk finishes adds what is ready, in order. One
-                // that finds another adding leaves its unit to it, which
-                // looks again once it is done.
-                while let Ok(mut merge) = merge.try_lock() {
-                    loop {
-                        let next = merge.next;
-                        let Some(unit) = finished
-                            .lock()
-                            .expect("loading does not panic")
-                            .units
-                            .remove(&next)
-                        else {
-                            break;
-                        };
-                        merge.add(unit);
-                        if !merge.kept {
-                            abandoned.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                    let next = merge.next;
-                    drop(merge);
-                    if !finished
+    let abandoned = AtomicBool::new(false);
+    // Each worker claims the next group, in the order of their first
+    // units, which name them, and waits to walk one that begins too far
+    // past the units added: what is walked waits in memory until the units
+    // before it are added. The units the adding waits for are in groups
+    // claimed before, so they are walked meanwhile.
+    let order = members
+        .iter()
+        .enumerate()
+        .filter_map(|(group, units)| (!units.is_empty()).then_some(group))
+        .collect::<Vec<_>>();
+    let claimed = AtomicUsize::new(0);
+    let workers = rayon::current_num_threads();
+    let window = Window {
+        added: Mutex::new(0),
+        progress: Condvar::new(),
+        ahead: walk_ahead.saturating_mul(workers),
+    };
+    rayon::in_place_scope(|scope| {
+        for _ in 0..workers {
+            let (frozen, groups, members, order) = (&frozen, &groups, &members, &order);
+            let (merge, finished, abandoned) = (&merge, &finished, &abandoned);
+            let (claimed, window) = (&claimed, &window);
+            scope.spawn(move |_| {
+                while let Some(&group) = order.get(claimed.fetch_add(1, Ordering::Relaxed)) {
+                    window.enter(group, abandoned);
+                    let group_units = &members[group];
+                    let walks = if abandoned.load(Ordering::Relaxed) {
+                        group_units.iter().map(|unit| (*unit, None)).collect()
+                    } else {
+                        walk_group(cx, frozen, (group, groups), group_units)
+                    };
+                    finished
                         .lock()
                         .expect("loading does not panic")
                         .units
-                        .contains_key(&next)
-                    {
-                        break;
-                    }
+                        .extend(walks);
+                    add_ready(merge, finished, abandoned, window);
                 }
             });
         }
@@ -667,30 +812,110 @@ pub(super) fn walk_units_apart<'data>(
     false
 }
 
-/// Walks one unit on the frozen arena, apart from the others.
-fn walk_apart<'data>(
+/// Adds the finished units that are next, in order, unless another walk is
+/// adding them: that one looks again once it is done.
+fn add_ready(
+    merge: &Mutex<Merge<'_, '_, '_>>,
+    finished: &Mutex<Finished>,
+    abandoned: &AtomicBool,
+    window: &Window,
+) {
+    while let Ok(mut merge) = merge.try_lock() {
+        loop {
+            let next = merge.next;
+            let Some(unit) = finished
+                .lock()
+                .expect("loading does not panic")
+                .units
+                .remove(&next)
+            else {
+                break;
+            };
+            merge.add(unit);
+            if !merge.kept {
+                abandoned.store(true, Ordering::Relaxed);
+            }
+        }
+        let next = merge.next;
+        window.advance(next);
+        drop(merge);
+        if !finished
+            .lock()
+            .expect("loading does not panic")
+            .units
+            .contains_key(&next)
+        {
+            break;
+        }
+    }
+}
+
+/// Walks the units of one group in order on the frozen arena, apart from
+/// the other groups, and returns what each recorded, by unit. `home` is the
+/// group and each unit's group. Once a unit fails, reaches another group's
+/// types, or exceeds the budget, which leaves it to the walk in order, the
+/// units after it go unwalked.
+fn walk_group<'data>(
     cx: &WalkContext<'_, 'data>,
     frozen: &Frozen<'_, 'data>,
-    unit_index: usize,
-) -> UnitWalk {
-    let pool = Mutex::new(LocationsBuilder::default());
+    home: (usize, &[usize]),
+    units: &[usize],
+) -> Vec<(usize, Option<UnitWalk>)> {
+    // Each unit pools its locations apart, as they are pooled in unit order.
+    let pools = units
+        .iter()
+        .map(|_| Mutex::new(LocationsBuilder::default()))
+        .collect::<Vec<_>>();
     let die_buffers = DieBuffers::default();
-    let mut types = frozen.split(unit_index, &pool, &die_buffers);
-    let mut walked = Walked::default();
-    let mut files = Files::default();
-    let result = walk_unit(
-        cx,
-        unit_index,
-        &mut walked,
-        &mut types,
-        &mut files,
-        &mut die::DeclaredFiles::default(),
-    );
-    UnitWalk {
-        result,
-        walked,
-        types: types.into_unit_types(),
-        files,
-        pool: pool.into_inner().expect("loading does not panic"),
+    let mut types = frozen.split(home, &pools[0], &die_buffers);
+    let mut walks = Vec::with_capacity(units.len());
+    let mut cuts = Vec::with_capacity(units.len());
+    // The group's units share the names they hold.
+    let mut names = super::Names::default();
+    for (&unit_index, pool) in units.iter().zip(&pools) {
+        types.pool = pool;
+        let mark = types.budget.spent();
+        let mut walked = Walked {
+            names: std::mem::take(&mut names),
+            ..Walked::default()
+        };
+        let mut files = Files::default();
+        let result = walk_unit(
+            cx,
+            unit_index,
+            &mut walked,
+            &mut types,
+            &mut files,
+            &mut die::DeclaredFiles::default(),
+        );
+        names = std::mem::take(&mut walked.names);
+        let left = result.is_err() || types.foreign || types.budget.check().is_err();
+        cuts.push(Cut {
+            end: types.entries.len(),
+            aliases: types.aliases.len(),
+            budget: types.budget.since(mark),
+            foreign: types.foreign,
+        });
+        walks.push((result, walked, files));
+        if left {
+            break;
+        }
     }
+    let mut built = types.into_unit_types(&cuts).into_iter();
+    let mut walks = walks.into_iter();
+    units
+        .iter()
+        .zip(pools)
+        .map(|(&unit, pool)| {
+            let walk = walks.next().map(|(result, walked, files)| UnitWalk {
+                group: home.0,
+                result,
+                walked,
+                types: built.next().expect("each walked unit built types"),
+                files,
+                pool: pool.into_inner().expect("loading does not panic"),
+            });
+            (unit, walk)
+        })
+        .collect()
 }

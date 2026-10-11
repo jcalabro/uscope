@@ -1480,6 +1480,7 @@ dependencies = [
  "axum",
  "clap",
  "cpp_demangle",
+ "crc32fast",
  "foldhash 0.2.0",
  "gimli",
  "iced-x86",

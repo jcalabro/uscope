@@ -351,6 +351,7 @@ pub(super) fn load_variable_info<'data>(
     files: &mut Files,
     locals: Locals,
     budget: super::budget::Meter,
+    walk_ahead: usize,
 ) -> std::result::Result<LoadedVariables, DwarfError> {
     let units = &catalog.units;
     let instance_ids = code.instance_ids;
@@ -406,7 +407,7 @@ pub(super) fn load_variable_info<'data>(
         instance_ids,
         locals,
     };
-    if !merge::walk_units_apart(&cx, &mut walked, &mut types, files, &pool) {
+    if !merge::walk_units_apart(&cx, &mut walked, &mut types, files, &pool, walk_ahead) {
         crate::count!("units_walked_in_order", units.len());
         for (unit_index, unit) in units.iter().enumerate() {
             if is_type_unit(unit) {
@@ -434,6 +435,7 @@ pub(super) fn load_variable_info<'data>(
         mut abstract_bodies,
         mut function_generics,
         order: _,
+        names: _,
     } = walked;
     for function in &mut functions {
         function
@@ -607,6 +609,22 @@ struct Walked {
     abstract_bodies: Vec<(CodeInstanceId, TypeId)>,
     function_generics: BTreeMap<CodeInstanceId, crate::FunctionGenerics>,
     order: u64,
+    names: Names,
+}
+
+/// Data objects' names, each held once: a large program names a few
+/// hundred thousand variables millions of times.
+#[derive(Default)]
+struct Names(foldhash::HashSet<Arc<str>>);
+
+impl Names {
+    fn intern(&mut self, name: Arc<str>) -> Arc<str> {
+        if let Some(held) = self.0.get(&*name) {
+            return Arc::clone(held);
+        }
+        self.0.insert(Arc::clone(&name));
+        name
+    }
 }
 
 /// Records what one unit's DIEs describe: its functions, scopes, call
@@ -642,6 +660,7 @@ fn walk_unit<'data>(
         abstract_bodies,
         function_generics,
         order,
+        names,
     } = walked;
     let units = &catalog.units;
     let unit = &units[unit_index];
@@ -705,6 +724,7 @@ fn walk_unit<'data>(
                     objects,
                     functions,
                     order,
+                    names,
                     types,
                     files,
                     bodies: abstract_bodies,
@@ -1158,10 +1178,10 @@ fn walk_unit<'data>(
                 // A Go local exists from the line after its declaration.
                 let go_declaration = match (go, kind, &declaration) {
                     (true, VariableKind::Local, Ok(Some(declared))) => {
-                        Some(visibility::GoDeclaration {
+                        Some(Box::new(visibility::GoDeclaration {
                             location: declared.clone(),
                             instance: scope.code_instance,
-                        })
+                        }))
                     }
                     _ => None,
                 };
@@ -1256,7 +1276,7 @@ fn walk_unit<'data>(
                 objects.push(DataObject {
                     debug_info_offset: debug_info_offset(units, unit_index, entry),
                     kind,
-                    name,
+                    name: names.intern(name),
                     declaration: declaration.as_ref().ok().cloned().flatten(),
                     ranges,
                     go_declaration,
@@ -1297,6 +1317,7 @@ fn walk_unit<'data>(
                 objects,
                 functions,
                 order,
+                names,
                 types,
                 files,
                 bodies: abstract_bodies,
@@ -1344,6 +1365,7 @@ struct AbstractTargets<'a, 'data, 'units> {
     objects: &'a mut Vec<DataObject>,
     functions: &'a mut Vec<Function>,
     order: &'a mut u64,
+    names: &'a mut Names,
     types: &'a mut TypeArenaBuilder<'units, 'data>,
     files: &'a mut Files,
     /// The instances whose abstract function takes an unnamed parameter,
@@ -1430,7 +1452,7 @@ fn add_abstract_only_variables<'data>(
         targets.objects.push(DataObject {
             debug_info_offset: None,
             kind,
-            name,
+            name: targets.names.intern(name),
             declaration,
             ranges: Arc::clone(&routine.scope.ranges),
             go_declaration: None,
