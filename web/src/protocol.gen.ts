@@ -836,6 +836,19 @@ range?: [number, number] | null,
  */
 threads?: Array<number> | null, 
 /**
+ * What the query aggregates.
+ */
+source: ProfileSource, 
+/**
+ * Samples or waits of these tasks, by row, or of any; `null` in the
+ * list is what no snapshot named.
+ */
+tasks?: Array<number | null> | null, 
+/**
+ * Roots each path at its task.
+ */
+byTask: boolean, 
+/**
  * Applied in order, to keys by the names views show.
  */
 transforms: Array<ProfileTransform>, 
@@ -858,7 +871,11 @@ export type ProfileTimelineQuery = {
 /**
  * Slices of the query's range, or of the whole profile.
  */
-buckets: number, profile: string, 
+buckets: number, 
+/**
+ * Lanes of tasks rather than threads; waits are always of tasks.
+ */
+taskLanes: boolean, profile: string, 
 /**
  * The revision the tab has seen, which keeps its cached answers
  * apart; the server answers from the newest.
@@ -873,6 +890,19 @@ range?: [number, number] | null,
  * Samples of these threads, by row, or of all.
  */
 threads?: Array<number> | null, 
+/**
+ * What the query aggregates.
+ */
+source: ProfileSource, 
+/**
+ * Samples or waits of these tasks, by row, or of any; `null` in the
+ * list is what no snapshot named.
+ */
+tasks?: Array<number | null> | null, 
+/**
+ * Roots each path at its task.
+ */
+byTask: boolean, 
 /**
  * Applied in order, to keys by the names views show.
  */
@@ -927,7 +957,24 @@ gaps: Array<[number, number]>,
 /**
  * Each change the budget made, from the start.
  */
-budgetChanges: Array<ProfileMarker>, };
+budgetChanges: Array<ProfileMarker>, 
+/**
+ * The tasks task snapshots found, most weight first.
+ */
+tasks: Array<ProfileTask>, 
+/**
+ * Task snapshots taken, the nanoseconds they held the program
+ * stopped, and the samples they named the task of.
+ */
+snapshots: number, snapshotPause: number, taskSamples: number, 
+/**
+ * Each time a snapshot failed or missed tasks, from the start.
+ */
+snapshotProblems: Array<ProfileMarker>, 
+/**
+ * The weight of every wait the snapshots found.
+ */
+waited: number, };
 
 export type ProfileThread = { row: number, pid: number, tid: number, name: string | null, samples: number, weight: number, 
 /**
@@ -959,7 +1006,20 @@ module: string | null,
  */
 file: string | null, line: number | null, };
 
-export type ProfileKeyKind = "function" | "line" | "address" | "truncation" | "task";
+export type ProfileKeyKind = "function" | "line" | "address" | "truncation" | "task" | "group";
+
+export type ProfileTask = { row: number, 
+/**
+ * As views name it: its runtime's noun, number, and labels.
+ */
+name: string, 
+/**
+ * The weight of the samples that ran it, and the nanoseconds of
+ * waiting snapshots found it in.
+ */
+weight: number, waited: number, };
+
+export type ProfileSource = "samples" | "waits";
 
 export type ProfileFunctions = { weight: number, 
 /**
@@ -979,7 +1039,7 @@ export type ProfileTimeline = {
  */
 range: [number, number], lanes: Array<ProfileLane>, };
 
-export type ProfileLane = { thread: number, weights: Array<number>, blocked: Array<number>, preempted: Array<number>, };
+export type ProfileLane = { thread: number | null, task: number | null, weights: Array<number>, blocked: Array<number>, preempted: Array<number>, };
 
 export type ProfileMarker = { 
 /**

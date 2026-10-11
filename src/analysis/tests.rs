@@ -9,11 +9,32 @@ use crate::capture::records::{FrameKind, NONE, Truncation};
 
 const FUNCTIONS: [&str; 5] = ["a", "b", "c", "d", "e"];
 
+/// Goroutines 1 to 3 by choice, the second labeled, and this choice for
+/// none.
+const UNNAMED: u32 = 3;
+
+fn task_row(choice: u32) -> u32 {
+    if choice == UNNAMED { NONE } else { choice }
+}
+
+/// How a query by task names a task by its choice.
+fn group_name(choice: u32) -> String {
+    match choice {
+        UNNAMED => "[no task known]".to_owned(),
+        1 => "goroutine 2 {phase=spin}".to_owned(),
+        _ => format!("goroutine {}", choice + 1),
+    }
+}
+
 /// A capture of `stacks` (frame choices, innermost first, and whether a
-/// truncation ends them) and `samples` (thread, time, weight, stack).
-/// Frame 5 has no symbols, and frames 6 and 7 inline one function into
-/// another.
-fn capture(stacks: &[(Vec<usize>, bool)], samples: &[(u32, i64, u64, usize)]) -> Capture {
+/// truncation ends them), `samples` (thread, time, weight, stack, task
+/// choice), and `waits` (time, weight, stack, task choice). Frame 5 has no
+/// symbols, and frames 6 and 7 inline one function into another.
+fn capture(
+    stacks: &[(Vec<usize>, bool)],
+    samples: &[(u32, i64, u64, usize, u32)],
+    waits: &[(i64, u64, usize, u32)],
+) -> Capture {
     let mut builder = CaptureBuilder::new();
     let module = builder.module("/bin/app", None, [0; 16], 0);
     let mut frames = Vec::new();
@@ -44,8 +65,21 @@ fn capture(stacks: &[(Vec<usize>, bool)], samples: &[(u32, i64, u64, usize)]) ->
         builder.thread(1, 2, 0),
         builder.thread(1, 3, 0),
     ];
-    for &(thread, time, weight, stack) in samples {
-        builder.sample(threads[thread as usize], time, weight, stacks[stack], NONE);
+    let tasks: Vec<u32> = (1..=3)
+        .map(|number| builder.task("goroutine", number, 0))
+        .collect();
+    builder.describe_task(tasks[1], NONE, Some("phase=spin"));
+    for &(thread, time, weight, stack, task) in samples {
+        builder.sample(
+            threads[thread as usize],
+            time,
+            weight,
+            stacks[stack],
+            task_row(task),
+        );
+    }
+    for &(time, weight, stack, task) in waits {
+        builder.task_wait(task_row(task), time, weight, stacks[stack], "chan receive");
     }
     builder.finish()
 }
@@ -126,29 +160,75 @@ fn key_named(keys: &Keys<'_>, name: &str) -> Option<u32> {
     (0..index(keys.count())).find(|key| keys.name(*key) == name)
 }
 
-/// Stacks and samples as [`capture`] takes them.
+/// Stacks, samples, and waits as [`capture`] takes them.
 type Stacks = Vec<(Vec<usize>, bool)>;
-type Samples = Vec<(u32, i64, u64, usize)>;
-/// A range, threads, transforms by kind and function, and inversion.
-type Selection = (Option<(i64, i64)>, Option<Vec<u32>>, Vec<(u8, usize)>, bool);
+type Samples = Vec<(u32, i64, u64, usize, u32)>;
+type Waits = Vec<(i64, u64, usize, u32)>;
+/// A range, threads, transforms by kind and function, and inversion; and
+/// whether waits are queried, tasks by choice, and whether by task.
+type Selection = (
+    (Option<(i64, i64)>, Option<Vec<u32>>, Vec<(u8, usize)>, bool),
+    (bool, Option<Vec<u32>>, bool),
+);
 
-fn strategy() -> impl Strategy<Value = (Stacks, Samples, Selection)> {
+fn strategy() -> impl Strategy<Value = (Stacks, (Samples, Waits), Selection)> {
     let stacks = prop::collection::vec(
         (prop::collection::vec(0..8_usize, 1..7), any::<bool>()),
         1..6,
     );
     stacks.prop_flat_map(|stacks| {
         let count = stacks.len();
-        let samples = prop::collection::vec((0..3_u32, 0..100_i64, 1..5_u64, 0..count), 0..40);
+        let samples = prop::collection::vec(
+            (0..3_u32, 0..100_i64, 1..5_u64, 0..count, 0..=UNNAMED),
+            0..40,
+        );
+        let waits = prop::collection::vec((0..100_i64, 1..5_u64, 0..count, 0..UNNAMED), 0..10);
         let range = prop::option::of((0..100_i64, 0..100_i64));
         let threads = prop::option::of(prop::collection::vec(0..3_u32, 0..3));
         let transforms = prop::collection::vec((0..4_u8, 0..FUNCTIONS.len()), 0..3);
+        let tasks = prop::option::of(prop::collection::vec(0..=UNNAMED, 0..3));
         (
             Just(stacks),
-            samples,
-            (range, threads, transforms, any::<bool>()),
+            (samples, waits),
+            (
+                (range, threads, transforms, any::<bool>()),
+                (any::<bool>(), tasks, any::<bool>()),
+            ),
         )
     })
+}
+
+/// What the oracle follows: each selected sample's or wait's task, stack,
+/// and weight.
+fn selected(
+    capture: &Capture,
+    range: Option<(i64, i64)>,
+    threads: Option<&Vec<u32>>,
+    (waits, tasks): (bool, Option<&Vec<u32>>),
+) -> Vec<(u32, u32, u64)> {
+    let in_range = |time: i64| range.is_none_or(|(start, end)| start <= time && time < end);
+    let task_kept =
+        |task: u32| tasks.is_none_or(|tasks| tasks.iter().any(|choice| task_row(*choice) == task));
+    let mut chosen = Vec::new();
+    if waits {
+        for wait in &capture.task_waits {
+            if in_range(wait.time.get()) && task_kept(wait.task.get()) {
+                chosen.push((wait.task.get(), wait.stack.get(), wait.weight.get()));
+            }
+        }
+        return chosen;
+    }
+    for range_row in &capture.sample_ranges {
+        if threads.is_some_and(|threads| !threads.contains(&range_row.thread.get())) {
+            continue;
+        }
+        for sample in capture.thread_samples(range_row) {
+            if in_range(sample.time.get()) && task_kept(sample.task.get()) {
+                chosen.push((sample.task.get(), sample.stack.get(), sample.weight.get()));
+            }
+        }
+    }
+    chosen
 }
 
 proptest! {
@@ -157,9 +237,9 @@ proptest! {
     /// function, under any selection and transforms, inverted or not.
     #[test]
     fn aggregation_agrees_with_a_sample_by_sample_oracle(
-        (stacks, samples, (range, threads, transforms, invert)) in strategy()
+        (stacks, (samples, waits), ((range, threads, transforms, invert), (of_waits, tasks, by_task))) in strategy()
     ) {
-        let capture = capture(&stacks, &samples);
+        let capture = capture(&stacks, &samples, &waits);
         prop_assert_eq!(capture.validate(), Ok(()));
         let keys = Keys::new(&capture, Granularity::Function);
         let named: Vec<Named> = transforms
@@ -177,7 +257,15 @@ proptest! {
         // A transform of a function no frame has removes nothing, or, as a
         // focus, everything; the engine can only name functions it has.
         let known = |name: &str| key_named(&keys, name);
-        let mut query = Query { range, threads: threads.clone(), invert, ..Query::default() };
+        let mut query = Query {
+            source: if of_waits { Source::Waits } else { Source::Samples },
+            range,
+            threads: threads.clone(),
+            tasks: tasks.as_ref().map(|tasks| tasks.iter().map(|choice| task_row(*choice)).collect()),
+            invert,
+            by_task,
+            ..Query::default()
+        };
         let mut naive_transforms = Vec::new();
         for transform in &named {
             let (Named::Focus(name) | Named::Merge(name) | Named::Drop(name) | Named::Collapse(name)) = transform;
@@ -195,20 +283,19 @@ proptest! {
         let mut expected_totals: BTreeMap<Vec<String>, u64> = BTreeMap::new();
         let mut expected_functions: BTreeMap<String, (u64, u64)> = BTreeMap::new();
         let mut expected_weight = 0;
-        for range_row in &capture.sample_ranges {
-            let thread = range_row.thread.get();
-            if threads.as_ref().is_some_and(|threads| !threads.contains(&thread)) {
-                continue;
-            }
-            for sample in capture.thread_samples(range_row) {
-                let time = sample.time.get();
-                if range.is_some_and(|(start, end)| time < start || time >= end) {
-                    continue;
-                }
-                let Some(path) = naive_path(&capture, sample.stack.get(), invert, &naive_transforms) else {
+        for (task, stack, weight) in selected(&capture, range, threads.as_ref(), (of_waits, tasks.as_ref())) {
+            {
+                let Some(mut path) = naive_path(&capture, stack, invert, &naive_transforms) else {
                     continue;
                 };
-                let weight = sample.weight.get();
+                if by_task {
+                    let choice = if task == NONE { UNNAMED } else { task };
+                    if invert {
+                        path.push(group_name(choice));
+                    } else {
+                        path.insert(0, group_name(choice));
+                    }
+                }
                 expected_weight += weight;
                 for depth in 1..=path.len() {
                     *expected_totals.entry(path[..depth].to_vec()).or_default() += weight;
@@ -263,10 +350,16 @@ proptest! {
 }
 
 #[test]
-fn density_buckets_kept_samples_by_thread_and_time() {
+fn density_buckets_kept_samples_by_lane_and_time() {
     let capture = capture(
         &[(vec![0], false), (vec![1], false)],
-        &[(0, 0, 1, 0), (0, 9, 2, 0), (1, 5, 4, 1), (1, 10, 8, 1)],
+        &[
+            (0, 0, 1, 0, 0),
+            (0, 9, 2, 0, UNNAMED),
+            (1, 5, 4, 1, 0),
+            (1, 10, 8, 1, 0),
+        ],
+        &[(3, 7, 0, 1)],
     );
     let keys = Keys::new(&capture, Granularity::Function);
     let all = Query {
@@ -275,14 +368,29 @@ fn density_buckets_kept_samples_by_thread_and_time() {
     };
     // The sample at 10 lies outside [0, 10).
     assert_eq!(
-        density(&capture, &keys, &all, 2),
+        density(&capture, &keys, &all, 2, Lanes::Threads),
         [(0, vec![1, 2]), (1, vec![0, 4])]
+    );
+    assert_eq!(
+        density(&capture, &keys, &all, 2, Lanes::Tasks),
+        [(0, vec![1, 4]), (NONE, vec![0, 2])]
+    );
+    let waits = Query {
+        source: Source::Waits,
+        ..all.clone()
+    };
+    assert_eq!(
+        density(&capture, &keys, &waits, 2, Lanes::Threads),
+        [(1, vec![7, 0])]
     );
     let without_b = Query {
         transforms: vec![Transform::Drop(key_named(&keys, "b").expect("b"))],
         ..all
     };
-    assert_eq!(density(&capture, &keys, &without_b, 2), [(0, vec![1, 2])]);
+    assert_eq!(
+        density(&capture, &keys, &without_b, 2, Lanes::Threads),
+        [(0, vec![1, 2])]
+    );
 }
 
 #[test]

@@ -730,6 +730,7 @@ pub struct RecordStarted {
 /// Which of a profile's samples, seen how.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileQuery {
     pub profile: String,
     /// The revision the tab has seen, which keeps its cached answers
@@ -747,6 +748,17 @@ pub struct ProfileQuery {
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub threads: Option<Vec<u32>>,
+    /// What the query aggregates.
+    #[serde(default)]
+    pub source: ProfileSource,
+    /// Samples or waits of these tasks, by row, or of any; `null` in the
+    /// list is what no snapshot named.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub tasks: Option<Vec<Option<u32>>>,
+    /// Roots each path at its task.
+    #[serde(default)]
+    pub by_task: bool,
     /// Applied in order, to keys by the names views show.
     #[serde(default)]
     pub transforms: Vec<ProfileTransform>,
@@ -758,6 +770,17 @@ pub struct ProfileQuery {
     pub native: bool,
     #[serde(default)]
     pub granularity: ProfileGranularity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum ProfileSource {
+    /// The samples.
+    #[default]
+    Samples,
+    /// Where task snapshots found tasks waiting.
+    Waits,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -798,11 +821,15 @@ pub enum ProfileGranularity {
 
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileTimelineQuery {
     #[serde(flatten)]
     pub query: ProfileQuery,
     /// Slices of the query's range, or of the whole profile.
     pub buckets: u32,
+    /// Lanes of tasks rather than threads; waits are always of tasks.
+    #[serde(default)]
+    pub task_lanes: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -836,6 +863,29 @@ pub struct ProfileSummary {
     pub gaps: Vec<[i64; 2]>,
     /// Each change the budget made, from the start.
     pub budget_changes: Vec<ProfileMarker>,
+    /// The tasks task snapshots found, most weight first.
+    pub tasks: Vec<ProfileTask>,
+    /// Task snapshots taken, the nanoseconds they held the program
+    /// stopped, and the samples they named the task of.
+    pub snapshots: u64,
+    pub snapshot_pause: u64,
+    pub task_samples: u64,
+    /// Each time a snapshot failed or missed tasks, from the start.
+    pub snapshot_problems: Vec<ProfileMarker>,
+    /// The weight of every wait the snapshots found.
+    pub waited: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileTask {
+    pub row: u32,
+    /// As views name it: its runtime's noun, number, and labels.
+    pub name: String,
+    /// The weight of the samples that ran it, and the nanoseconds of
+    /// waiting snapshots found it in.
+    pub weight: u64,
+    pub waited: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -913,6 +963,8 @@ pub enum ProfileKeyKind {
     Truncation,
     /// An async task's root.
     Task,
+    /// A task a query by task roots paths at.
+    Group,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -941,12 +993,14 @@ pub struct ProfileTimeline {
     pub lanes: Vec<ProfileLane>,
 }
 
-/// One thread's weight in each slice, and the nanoseconds of each it
-/// spent off its CPU: each list empty when it has none.
+/// One thread's or task's weight in each slice, and the nanoseconds of
+/// each a thread spent off its CPU: each list empty when it has none. A
+/// lane of neither is what no task snapshot named.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileLane {
-    pub thread: u32,
+    pub thread: Option<u32>,
+    pub task: Option<u32>,
     pub weights: Vec<u64>,
     pub blocked: Vec<u64>,
     pub preempted: Vec<u64>,
@@ -1916,6 +1970,8 @@ mod tests {
         ProfileTree::decl,
         ProfileKey::decl,
         ProfileKeyKind::decl,
+        ProfileTask::decl,
+        ProfileSource::decl,
         ProfileFunctions::decl,
         ProfileCost::decl,
         ProfileTimeline::decl,

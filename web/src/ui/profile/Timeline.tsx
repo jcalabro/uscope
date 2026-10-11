@@ -1,20 +1,69 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatRange, parseRange, withLook } from "../../profile/look";
 import { formatDuration } from "../../profile/paint";
-import type { ProfileLane, ProfileThread } from "../../protocol";
-import { token, useAnswer, useProfile } from "./context";
+import type { ProfileLane, ProfileSummary, ProfileThread } from "../../protocol";
+import { type ProfileFocus, token, useAnswer, useProfile } from "./context";
 
-/** One thread's lane, in CSS pixels. */
+/** One lane, in CSS pixels. */
 const LANE = 18;
 /** The names column. */
 const NAMES = 180;
+/** The most task lanes drawn, the heaviest. */
+const MOST_TASK_LANES = 50;
+
+/** A lane: what the look selects it by, and the answer's lane id. */
+interface Row {
+  id: string;
+  lane: number;
+  label: string;
+  dim?: string;
+  title: string;
+}
+
+/** The lanes a look shows: threads, or tasks, which waits always are, and
+ * for samples, what no snapshot named. */
+function rows(summary: ProfileSummary, look: ProfileFocus["look"]): Row[] {
+  const waits = look.src === "waits";
+  if (!waits && look.lanes !== "tasks") {
+    return [...summary.threads]
+      .sort((a, b) => b.weight - a.weight)
+      .map((thread) => ({
+        id: String(thread.row),
+        lane: thread.row,
+        label: thread.name ?? "thread",
+        dim: String(thread.tid),
+        title: `pid ${thread.pid}, tid ${thread.tid}: ${thread.samples} samples${offCpu(thread)}`,
+      }));
+  }
+  const weight = (task: ProfileSummary["tasks"][number]) => (waits ? task.waited : task.weight);
+  const tasks: Row[] = summary.tasks
+    .filter((task) => weight(task) > 0)
+    .sort((a, b) => weight(b) - weight(a))
+    .slice(0, MOST_TASK_LANES)
+    .map((task) => ({
+      id: String(task.row),
+      lane: task.row,
+      label: task.name,
+      title: `${task.name}: ${formatDuration(task.weight)} sampled, ${formatDuration(task.waited)} waiting`,
+    }));
+  if (!waits) {
+    tasks.push({
+      id: "none",
+      lane: -1,
+      label: "no task known",
+      title: "Samples no task snapshot named the task of",
+    });
+  }
+  return tasks;
+}
 
 /**
  * A lane per thread of how its kept samples fall over the whole profile,
  * over bands of the time it spent off its CPU: grey where it blocked,
  * amber where it was preempted, as strong as the share of the slice it
- * was off. Dragging selects a time range, which every view then reads; a click
- * clears it. A thread's name selects or deselects it.
+ * was off; or a lane per task, of its samples or waits. Dragging selects a
+ * time range, which every view then reads; a click clears it. A lane's
+ * name selects or deselects its thread or task.
  */
 export function Timeline() {
   const { summary, query, look, setLook } = useProfile();
@@ -37,19 +86,18 @@ export function Timeline() {
   // Every thread, over the whole profile: the selection is drawn over it.
   const plot = Math.max(width - NAMES, 0);
   const buckets = Math.max(1, Math.min(2048, Math.floor(plot / 2)));
+  const byTask = look.src === "waits" || look.lanes === "tasks";
   const params = useMemo(() => {
-    const { range: _range, threads: _threads, ...rest } = query;
-    return plot > 0 ? { ...rest, buckets } : null;
-  }, [query, buckets, plot]);
+    const { range: _range, threads: _threads, tasks: _tasks, ...rest } = query;
+    return plot > 0 ? { ...rest, buckets, taskLanes: byTask } : null;
+  }, [query, buckets, plot, byTask]);
   const answer = useAnswer("profileTimeline", params);
-  const threads = useMemo(
-    () => [...summary.threads].sort((a, b) => b.weight - a.weight),
-    [summary.threads],
-  );
-  const selected = look.th ? new Set(look.th.map(Number)) : null;
+  const lanes = useMemo(() => rows(summary, look), [summary, look]);
+  const chosen = byTask ? look.tk : look.th;
+  const selected = chosen ? new Set(chosen) : null;
   const range = look.range ? parseRange(look.range) : null;
   const span = Math.max(summary.duration, 1);
-  const height = threads.length * LANE;
+  const height = lanes.length * LANE;
 
   useEffect(() => {
     const element = canvas.current;
@@ -62,8 +110,10 @@ export function Timeline() {
     element.height = Math.round(height * ratio);
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, plot, height);
-    const lanes = new Map((answer.data?.lanes ?? []).map((lane) => [lane.thread, lane]));
-    const most = Math.max(1, ...[...lanes.values()].flatMap((lane) => lane.weights));
+    const answered = new Map(
+      (answer.data?.lanes ?? []).map((lane) => [(byTask ? lane.task : lane.thread) ?? -1, lane]),
+    );
+    const most = Math.max(1, ...[...answered.values()].flatMap((lane) => lane.weights));
     const bar = token("--accent");
     const [start, end] = answer.data?.range ?? [0, span];
     const width = (plot * (end - start)) / span / Math.max(1, buckets);
@@ -72,9 +122,9 @@ export function Timeline() {
       ["blocked", token("--line-strong")],
       ["preempted", token("--warn-line")],
     ];
-    for (const [index, thread] of threads.entries()) {
-      const lane = lanes.get(thread.row);
-      const dim = selected && !selected.has(thread.row) ? 0.3 : 1;
+    for (const [index, row] of lanes.entries()) {
+      const lane = answered.get(row.lane);
+      const dim = selected && !selected.has(row.id) ? 0.3 : 1;
       for (const [kind, color] of bands) {
         context.fillStyle = color;
         for (const [bucket, off] of (lane?.[kind] ?? []).entries()) {
@@ -116,34 +166,47 @@ export function Timeline() {
       context.fillRect(to, 0, plot - to, height);
       context.globalAlpha = 1;
     }
-  }, [answer.data, threads, plot, height, span, buckets, selected, range, dragging, summary.gaps]);
+  }, [
+    answer.data,
+    lanes,
+    byTask,
+    plot,
+    height,
+    span,
+    buckets,
+    selected,
+    range,
+    dragging,
+    summary.gaps,
+  ]);
 
   const time = (event: React.PointerEvent) => {
     const bounds = event.currentTarget.getBoundingClientRect();
     const fraction = (event.clientX - bounds.left) / bounds.width;
     return Math.min(Math.max(fraction, 0), 1) * span;
   };
-  const toggle = (row: number) =>
+  const toggle = (id: string) =>
     setLook((look) => {
-      const rows = new Set(look.th ?? []);
-      if (!rows.delete(String(row))) {
-        rows.add(String(row));
+      const key = byTask ? "tk" : "th";
+      const ids = new Set(look[key] ?? []);
+      if (!ids.delete(id)) {
+        ids.add(id);
       }
-      return withLook(look, "th", rows.size > 0 ? [...rows].sort() : undefined);
+      return withLook(look, key, ids.size > 0 ? [...ids].sort() : undefined);
     });
   return (
     <div className="profile-timeline" ref={box} data-testid="timeline">
       <div className="lane-names" style={{ width: NAMES }}>
-        {threads.map((thread) => (
+        {lanes.map((row) => (
           <button
-            key={thread.row}
+            key={row.id}
             type="button"
-            className={`lane-name ${selected?.has(thread.row) ? "selected" : ""}`}
-            aria-pressed={selected?.has(thread.row) ?? false}
-            title={`pid ${thread.pid}, tid ${thread.tid}: ${thread.samples} samples${offCpu(thread)}`}
-            onClick={() => toggle(thread.row)}
+            className={`lane-name ${selected?.has(row.id) ? "selected" : ""}`}
+            aria-pressed={selected?.has(row.id) ?? false}
+            title={row.title}
+            onClick={() => toggle(row.id)}
           >
-            {thread.name ?? "thread"} <span className="dim">{thread.tid}</span>
+            {row.label} {row.dim ? <span className="dim">{row.dim}</span> : null}
           </button>
         ))}
       </div>

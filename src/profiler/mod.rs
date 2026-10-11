@@ -10,10 +10,14 @@ mod session;
 mod tasks;
 
 pub use crate::capture::records::GapReason;
+
+/// The task row of a sample no task snapshot named, as queries and lanes
+/// give it.
+pub const NO_TASK: u32 = NONE;
 pub use session::{Attachment, Recording, Save, Watch, record, record_attached, record_watched};
 
 pub use crate::analysis::{
-    CallTree, Cost, Costs, Granularity, KeyKind, Keys, OffCpuLane, Query, Transform,
+    CallTree, Cost, Costs, Granularity, KeyKind, Keys, Lanes, OffCpuLane, Query, Source, Transform,
 };
 
 use std::path::{Path, PathBuf};
@@ -241,11 +245,17 @@ pub struct SampledStack {
 /// A task of a language runtime that task snapshots found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileTask {
+    /// Its row, which queries select it by.
+    pub row: u32,
     /// What its runtime calls a task, and its number.
     pub noun: String,
     pub number: u64,
     /// The labels the program gave it, such as Go's profiler labels.
     pub labels: Vec<(String, String)>,
+    /// The weight of the samples that ran it, and the nanoseconds of
+    /// waiting the snapshots found it in.
+    pub weight: u64,
+    pub waited: u64,
 }
 
 /// Where a task waited at a task snapshot.
@@ -682,14 +692,27 @@ impl Profile {
             .collect()
     }
 
-    /// Every task task snapshots found, with its labels.
+    /// Every task task snapshots found, with its labels and weights.
     #[must_use]
     pub fn tasks(&self) -> Vec<ProfileTask> {
         let capture = &self.capture;
+        let mut weights = vec![(0_u64, 0_u64); capture.tasks.len()];
+        for sample in &capture.samples {
+            if let Some(weight) = weights.get_mut(sample.task.get() as usize) {
+                weight.0 += sample.weight.get();
+            }
+        }
+        for wait in &capture.task_waits {
+            if let Some(weight) = weights.get_mut(wait.task.get() as usize) {
+                weight.1 += wait.weight.get();
+            }
+        }
         capture
             .tasks
             .iter()
-            .map(|task| {
+            .zip(weights)
+            .zip(0_u32..)
+            .map(|((task, (weight, waited)), row)| {
                 let labels = match task.labels.get() {
                     NONE => Vec::new(),
                     labels => capture
@@ -700,9 +723,12 @@ impl Profile {
                         .collect(),
                 };
                 ProfileTask {
+                    row,
                     noun: capture.string(task.runtime.get()).to_owned(),
                     number: task.number.get(),
                     labels,
+                    weight,
+                    waited,
                 }
             })
             .collect()

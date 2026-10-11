@@ -2,7 +2,7 @@
 // transform, the flame graph's zoom, and the timeline's range, each held
 // in the address bar, so a reload or a link opens the same view.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as path from "node:path";
 import { expect, fixture, join, root, test } from "./server";
 
@@ -137,4 +137,53 @@ test("a program recorded from the page grows live, stops, and saves", async ({ p
   const saving = page.waitForEvent("download");
   await page.getByRole("button", { name: "Save" }).click();
   expect((await saving).suggestedFilename()).toBe("spin.usprof");
+});
+
+test("a profile shows where tasks waited, by task, and a lane per task", async ({
+  page,
+  uscope,
+}, info) => {
+  // The program waits on its standard input the whole time it is recorded.
+  const file = info.outputPath("waits.usprof");
+  const program = spawn(fixture("profile-go-waits"), [], { stdio: ["pipe", "ignore", "ignore"] });
+  const exited = new Promise((done) => program.once("exit", done));
+  try {
+    execFileSync(
+      path.join(root, "target", "debug", "uscope"),
+      ["record", "-o", file, "--pid", String(program.pid), "--task-snapshots", "0.05"].concat([
+        "--duration",
+        "2",
+      ]),
+      { stdio: "ignore" },
+    );
+  } finally {
+    program.stdin?.end("x");
+    await exited;
+  }
+  const served = await uscope.start([file]);
+  await join(page, served.link);
+  await expect(page.getByTestId("accounting")).toContainText("task snapshots");
+
+  // The waits' functions are the receivers', and by task each is its own.
+  await page.getByRole("button", { name: "Waits" }).click();
+  await expect(page).toHaveURL(/src=waits/);
+  await page.getByRole("button", { name: "Functions" }).click();
+  const functions = page.getByRole("listbox", { name: "Functions" });
+  await expect(functions.getByRole("option").filter({ hasText: "main.receive" })).toHaveCount(1);
+  await page.getByRole("checkbox", { name: "By task" }).check();
+  await page.getByRole("button", { name: "Call tree" }).click();
+  const tree = page.getByRole("tree", { name: "Call tree" }).getByRole("treeitem");
+  await expect(tree.first()).toContainText("goroutine");
+
+  // The CPU's lanes by task: the spinner's, which selects its samples.
+  await page.getByRole("button", { name: "CPU" }).click();
+  await page.getByRole("checkbox", { name: "By task" }).uncheck();
+  await page.getByRole("checkbox", { name: "Task lanes" }).check();
+  const spinner = page.getByTestId("timeline").getByRole("button", { name: /phase=spin/ });
+  await spinner.click();
+  await expect(page).toHaveURL(/tk=\d+/);
+  await expect(
+    page.getByRole("button", { name: /Remove goroutine \d+ \{phase=spin\}/ }),
+  ).toBeVisible();
+  await expect(tree.filter({ hasText: "main.spin" }).first()).toBeVisible();
 });

@@ -36,6 +36,9 @@ pub enum KeyKind {
     /// its own: a function, or a frame no symbols describe, the other
     /// [`NONE`].
     Task { function: u32, frame: u32 },
+    /// A task of a language runtime, by its row, under which a query by
+    /// task roots each path: [`NONE`] for what no task snapshot named.
+    Group { task: u32 },
 }
 
 /// Each frame's keys, innermost first, and what each key is.
@@ -48,6 +51,8 @@ pub struct Keys<'a> {
     roles: Vec<CodeRole>,
     /// Each key's task root, or [`NONE`] for a key that roots none.
     tasks: Vec<u32>,
+    /// The group key of each task, by its row, and last, of none.
+    groups: Vec<u32>,
 }
 
 impl<'a> Keys<'a> {
@@ -106,7 +111,7 @@ impl<'a> Keys<'a> {
                         capture.functions[function as usize].role
                     }
                     KeyKind::Address { frame } => capture.frames[frame as usize].role,
-                    KeyKind::Truncation { .. } | KeyKind::Task { .. } => 0,
+                    KeyKind::Truncation { .. } | KeyKind::Task { .. } | KeyKind::Group { .. } => 0,
                 };
                 role_of(number).unwrap_or_default()
             })
@@ -123,7 +128,9 @@ impl<'a> Keys<'a> {
                     function: NONE,
                     frame,
                 },
-                KeyKind::Truncation { .. } | KeyKind::Task { .. } => continue,
+                KeyKind::Truncation { .. } | KeyKind::Task { .. } | KeyKind::Group { .. } => {
+                    continue;
+                }
             };
             tasks[code] = *known.entry(task).or_insert_with(|| {
                 kinds.push(task);
@@ -131,6 +138,14 @@ impl<'a> Keys<'a> {
                 index(kinds.len() - 1)
             });
         }
+        let groups = (0..index(capture.tasks.len()))
+            .chain([NONE])
+            .map(|task| {
+                kinds.push(KeyKind::Group { task });
+                roles.push(CodeRole::Ordinary);
+                index(kinds.len() - 1)
+            })
+            .collect();
         tasks.resize(kinds.len(), NONE);
         Self {
             capture,
@@ -140,6 +155,7 @@ impl<'a> Keys<'a> {
             kinds,
             roles,
             tasks,
+            groups,
         }
     }
 
@@ -178,6 +194,16 @@ impl<'a> Keys<'a> {
         Some(self.tasks[key as usize]).filter(|task| *task != NONE)
     }
 
+    /// The key a query by task roots `task`'s paths at, by its row, or
+    /// [`NONE`] for what no task snapshot named.
+    #[must_use]
+    pub fn group(&self, task: u32) -> u32 {
+        self.groups
+            .get(task as usize)
+            .copied()
+            .unwrap_or(self.groups[self.groups.len() - 1])
+    }
+
     /// The key of `kind`, if any frame has it.
     pub fn find(&self, kind: KeyKind) -> Option<u32> {
         self.kinds
@@ -206,11 +232,16 @@ impl<'a> Keys<'a> {
         super::functions(self.capture, self, query)
     }
 
-    /// The weight of kept samples in each of `buckets` slices of the
-    /// query's range, per selected thread with any.
+    /// The weight of what `query` keeps in each of `buckets` slices of its
+    /// range, per lane with any.
     #[must_use]
-    pub fn density(&self, query: &Query, buckets: usize) -> Vec<(u32, Vec<u64>)> {
-        super::density(self.capture, self, query, buckets)
+    pub fn density(
+        &self,
+        query: &Query,
+        buckets: usize,
+        lanes: super::Lanes,
+    ) -> Vec<(u32, Vec<u64>)> {
+        super::density(self.capture, self, query, buckets, lanes)
     }
 
     /// How a view names a key: a function's name, an address by module and
@@ -246,6 +277,22 @@ impl<'a> Keys<'a> {
                 };
                 format!("[task] {root}")
             }
+            KeyKind::Group { task: NONE } => "[no task known]".to_owned(),
+            KeyKind::Group { task } => {
+                let task = &capture.tasks[task as usize];
+                let name = format!(
+                    "{} {}",
+                    capture.string(task.runtime.get()),
+                    task.number.get()
+                );
+                match task.labels.get() {
+                    NONE => name,
+                    labels => {
+                        let labels: Vec<&str> = capture.string(labels).lines().collect();
+                        format!("{name} {{{}}}", labels.join(", "))
+                    }
+                }
+            }
             KeyKind::Truncation { reason, module } => {
                 let reason = Truncation::from_number(u64::from(reason))
                     .map_or("unknown", Truncation::describe);
@@ -272,7 +319,10 @@ impl<'a> Keys<'a> {
                 let function = &capture.functions[function as usize];
                 (function.file.get(), function.line.get())
             }
-            KeyKind::Address { .. } | KeyKind::Truncation { .. } | KeyKind::Task { .. } => {
+            KeyKind::Address { .. }
+            | KeyKind::Truncation { .. }
+            | KeyKind::Task { .. }
+            | KeyKind::Group { .. } => {
                 return None;
             }
         };
@@ -294,6 +344,7 @@ impl<'a> Keys<'a> {
                 capture.frames[frame as usize].module.get()
             }
             KeyKind::Truncation { module, .. } => module,
+            KeyKind::Group { .. } => NONE,
         };
         self.module_name(module)
     }

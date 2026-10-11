@@ -47,6 +47,7 @@ export function ProfilePage() {
             summary: summary.data,
             look,
             query: { ...queryOf(profile, look), revision },
+            unit: look.src === "waits" ? "nanoseconds" : summary.data.unit,
             setLook,
           }
         : null,
@@ -113,6 +114,11 @@ const GRANULARITIES: { by: ProfileGranularity; label: string }[] = [
 function ProfileHead() {
   const { summary, look, setLook } = useProfile();
   const range = look.range ? parseRange(look.range) : null;
+  const snapshots = summary.snapshots > 0;
+  const taskName = (id: string) =>
+    id === "none"
+      ? "no task known"
+      : (summary.tasks.find((task) => String(task.row) === id)?.name ?? `task ${id}`);
   const program = summary.program?.slice(summary.program.lastIndexOf("/") + 1);
   return (
     <div className="profile-head">
@@ -139,6 +145,26 @@ function ProfileHead() {
           </button>
         ))}
       </div>
+      {snapshots ? (
+        <div className="segmented">
+          {(
+            [
+              [undefined, "CPU", "Where the program ran"],
+              ["waits", "Waits", "Where task snapshots found tasks waiting"],
+            ] as const
+          ).map(([src, label, title]) => (
+            <button
+              key={label}
+              type="button"
+              title={title}
+              aria-pressed={look.src === src}
+              onClick={() => setLook((look) => withLook(look, "src", src), true)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className="profile-query">
         {range ? (
           <Chip
@@ -152,6 +178,13 @@ function ProfileHead() {
             label={`${look.th.length} ${look.th.length === 1 ? "thread" : "threads"}`}
             title="Samples of these threads"
             remove={() => setLook((look) => withLook(look, "th", undefined))}
+          />
+        ) : null}
+        {look.tk ? (
+          <Chip
+            label={look.tk.length === 1 ? taskName(look.tk[0] ?? "") : `${look.tk.length} tasks`}
+            title={look.tk.map(taskName).join("\n")}
+            remove={() => setLook((look) => withLook(look, "tk", undefined))}
           />
         ) : null}
         {(look.tf ?? []).map((entry, index) => {
@@ -185,6 +218,34 @@ function ProfileHead() {
           />
           Async stacks
         </label>
+        {snapshots ? (
+          <>
+            <label className="check" title="Root each path at the task it ran or waited in">
+              <input
+                type="checkbox"
+                checked={look.bt === "1"}
+                onChange={(event) =>
+                  setLook((look) => withLook(look, "bt", event.target.checked ? "1" : undefined))
+                }
+              />
+              By task
+            </label>
+            {look.src === "waits" ? null : (
+              <label className="check" title="A timeline lane per task, not per thread">
+                <input
+                  type="checkbox"
+                  checked={look.lanes === "tasks"}
+                  onChange={(event) =>
+                    setLook((look) =>
+                      withLook(look, "lanes", event.target.checked ? "tasks" : undefined),
+                    )
+                  }
+                />
+                Task lanes
+              </label>
+            )}
+          </>
+        ) : null}
         <select
           className="input profile-by"
           aria-label="Frames by"
@@ -309,6 +370,19 @@ function ProfileFoot({ summary }: { summary: ProfileSummary }) {
             .join("\n")}
         >
           paused {formatPercent(paused, span)} for the budget
+        </span>
+      ) : null}
+      {summary.snapshots > 0 ? (
+        <span
+          className={summary.snapshotProblems.length > 0 ? "warn" : undefined}
+          title={[
+            `${formatPercent(summary.taskSamples, summary.samples)} of samples know their task`,
+            ...summary.snapshotProblems.map(
+              (problem) => `${formatDuration(problem.time)}: ${problem.text}`,
+            ),
+          ].join("\n")}
+        >
+          {summary.snapshots} task snapshots, stopped {formatPercent(summary.snapshotPause, span)}
         </span>
       ) : null}
     </div>

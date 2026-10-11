@@ -310,6 +310,15 @@ can be inverted to show callers, switched from async stacks to native
 ones, and grouped by function, line, or instruction. The footer always
 shows samples lost, throttled, and truncated.
 
+A profile with task snapshots has more. **Waits** turns every view to
+where its tasks waited instead of where it ran, each wait as wide as the
+time it stands for. **By task** roots each path at its task, such as
+`goroutine 22 {phase=spin}`, and **Task lanes** gives the timeline a lane
+per task instead of per thread, with one for samples no snapshot named;
+choosing a task's name selects only its samples or waits. The footer says
+how many snapshots there were and what share of the recording they held
+the program stopped.
+
 Everything the page shows is in its address, so a reload or a shared link
 opens the same view of the same profile.
 

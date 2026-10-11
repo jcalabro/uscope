@@ -14,6 +14,8 @@ export interface ProfileFocus {
   look: ProfileLook;
   /** The query the look asks. */
   query: ProfileQuery;
+  /** What the query's weights are: waits are nanoseconds. */
+  unit: string;
   /** Changes the look, replacing the address unless `push` is set. */
   setLook(change: (look: ProfileLook) => ProfileLook, push?: boolean): void;
 }

@@ -118,7 +118,7 @@ function FlameGraph({
   matched: Set<number> | null;
   onZoom: (node: number) => void;
 }) {
-  const { summary } = useProfile();
+  const { unit } = useProfile();
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [width, setWidth] = useState(0);
@@ -209,7 +209,7 @@ function FlameGraph({
         >
           <div className="mono">{nameOf(tree, shown)}</div>
           <div className="muted">
-            {formatWeight(tree.total[shown] ?? 0, summary.unit)} ·{" "}
+            {formatWeight(tree.total[shown] ?? 0, unit)} ·{" "}
             {formatPercent(tree.total[shown] ?? 0, tree.weight)} total,{" "}
             {formatPercent(tree.own[shown] ?? 0, tree.weight)} own
           </div>
@@ -247,7 +247,7 @@ const ACTIONS: { op: TransformOp; label: string; title: string }[] = [
 /** The selected function: what it costs under the query, and what can be
  * done with it. */
 export function Details({ tree, name }: { tree: CallTree; name: string }) {
-  const { summary, setLook } = useProfile();
+  const { unit, setLook } = useProfile();
   // A function's cost in a tree counts it once per sample.
   let total = 0;
   let own = 0;
@@ -274,7 +274,7 @@ export function Details({ tree, name }: { tree: CallTree; name: string }) {
         </span>
       ) : null}
       <span className="muted">
-        {formatWeight(total, summary.unit)} · {formatPercent(total, tree.weight)} total,{" "}
+        {formatWeight(total, unit)} · {formatPercent(total, tree.weight)} total,{" "}
         {formatPercent(own, tree.weight)} own
       </span>
       <span className="spacer" />

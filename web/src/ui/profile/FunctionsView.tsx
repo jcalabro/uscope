@@ -12,7 +12,7 @@ type Order = "own" | "total";
 /** Every function's cost, and for the selected one a sandwich: its
  * callers above and its callees below, merged from every call. */
 export function FunctionsView() {
-  const { query, look, summary, setLook } = useProfile();
+  const { query, look, unit, setLook } = useProfile();
   const answer = useAnswer("profileFunctions", query);
   const [order, setOrder] = useState<Order>("own");
   const body = useRef<HTMLDivElement>(null);
@@ -72,7 +72,7 @@ export function FunctionsView() {
                     aria-selected={selected}
                     className={`row tree-row ${selected ? "selected" : ""}`}
                     style={{ transform: `translateY(${item.start}px)` }}
-                    title={formatWeight(row.total, summary.unit)}
+                    title={formatWeight(row.total, unit)}
                     onClick={() => setLook((look) => ({ ...look, fn: key.name }))}
                     onKeyDown={(event) => {
                       if (event.key === "Enter") {

@@ -13,15 +13,15 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{oneshot, watch};
 use uscope::profiler::{
-    GapReason, Granularity, KeyKind, Keys, Preset, Profile, Query, RecordOptions, SampleSource,
-    Transform, Watch, record_watched,
+    GapReason, Granularity, KeyKind, Keys, Lanes, NO_TASK, Preset, Profile, Query, RecordOptions,
+    SampleSource, Source, Transform, Watch, record_watched,
 };
 
 use super::protocol::{
     self, ErrorKind, ProfileCost, ProfileFunctions, ProfileGranularity, ProfileInfo, ProfileKey,
-    ProfileKeyKind, ProfileLane, ProfileList, ProfileQuery, ProfileSetting, ProfileSummary,
-    ProfileTimeline, ProfileTree, RecordPreset, RecordProfile, RecordStarted, Request, Role,
-    TransformOp,
+    ProfileKeyKind, ProfileLane, ProfileList, ProfileQuery, ProfileSetting, ProfileSource,
+    ProfileSummary, ProfileTimeline, ProfileTree, RecordPreset, RecordProfile, RecordStarted,
+    Request, Role, TransformOp,
 };
 use super::session::Failure;
 
@@ -372,28 +372,33 @@ impl Profiles {
                     .unwrap_or_else(|| (start, end.saturating_add(1)));
                 resolved.range = Some(range);
                 let buckets = timeline.buckets.clamp(1, MOST_BUCKETS) as usize;
+                let by_task = timeline.task_lanes || timeline.query.source == ProfileSource::Waits;
+                let of = if by_task {
+                    Lanes::Tasks
+                } else {
+                    Lanes::Threads
+                };
+                let lane = |id: u32, weights| ProfileLane {
+                    thread: (!by_task).then_some(id),
+                    task: (by_task && id != NO_TASK).then_some(id),
+                    weights,
+                    blocked: Vec::new(),
+                    preempted: Vec::new(),
+                };
                 let mut lanes: std::collections::BTreeMap<u32, ProfileLane> = keys
-                    .density(&resolved, buckets)
+                    .density(&resolved, buckets, of)
                     .into_iter()
-                    .map(|(thread, weights)| {
-                        let lane = ProfileLane {
-                            thread,
-                            weights,
-                            blocked: Vec::new(),
-                            preempted: Vec::new(),
-                        };
-                        (thread, lane)
-                    })
+                    .map(|(id, weights)| (id, lane(id, weights)))
                     .collect();
-                for off in entry.profile.off_cpu_lanes(&resolved, buckets) {
-                    let lane = lanes.entry(off.thread).or_insert_with(|| ProfileLane {
-                        thread: off.thread,
-                        weights: Vec::new(),
-                        blocked: Vec::new(),
-                        preempted: Vec::new(),
-                    });
-                    lane.blocked = off.blocked;
-                    lane.preempted = off.preempted;
+                // Time off a CPU is a thread's.
+                if !by_task {
+                    for off in entry.profile.off_cpu_lanes(&resolved, buckets) {
+                        let lane = lanes
+                            .entry(off.thread)
+                            .or_insert_with(|| lane(off.thread, Vec::new()));
+                        lane.blocked = off.blocked;
+                        lane.preempted = off.preempted;
+                    }
                 }
                 let lanes = lanes.into_values().collect();
                 Ok(json(&ProfileTimeline {
@@ -468,14 +473,13 @@ fn summary(entry: &Entry) -> ProfileSummary {
             .into_iter()
             .map(|(from, to)| [from - start, to - start])
             .collect(),
-        budget_changes: profile
-            .budget_changes()
-            .into_iter()
-            .map(|(time, text)| protocol::ProfileMarker {
-                time: time - start,
-                text,
-            })
-            .collect(),
+        budget_changes: markers(profile.budget_changes(), start),
+        tasks: tasks(profile),
+        snapshots: profile.task_snapshots().0,
+        snapshot_pause: profile.task_snapshots().1,
+        task_samples: profile.task_samples(),
+        snapshot_problems: markers(profile.task_snapshot_problems(), start),
+        waited: profile.task_waits().iter().map(|wait| wait.weight).sum(),
         truncations: profile
             .truncations()
             .into_iter()
@@ -490,6 +494,35 @@ fn summary(entry: &Entry) -> ProfileSummary {
             })
             .collect(),
     }
+}
+
+/// Markers as a page shows them, from the profile's `start`.
+fn markers(markers: Vec<(i64, String)>, start: i64) -> Vec<protocol::ProfileMarker> {
+    markers
+        .into_iter()
+        .map(|(time, text)| protocol::ProfileMarker {
+            time: time - start,
+            text,
+        })
+        .collect()
+}
+
+/// A profile's tasks, named as views name their groups, most weight
+/// first.
+fn tasks(profile: &Profile) -> Vec<protocol::ProfileTask> {
+    let keys = profile.keys(Granularity::Function);
+    let mut tasks: Vec<protocol::ProfileTask> = profile
+        .tasks()
+        .into_iter()
+        .map(|task| protocol::ProfileTask {
+            row: task.row,
+            name: keys.name(keys.group(task.row)),
+            weight: task.weight,
+            waited: task.waited,
+        })
+        .collect();
+    tasks.sort_by(|a, b| (b.weight, b.waited, a.row).cmp(&(a.weight, a.waited, b.row)));
+    tasks
 }
 
 const fn granularity(granularity: ProfileGranularity) -> Granularity {
@@ -529,13 +562,22 @@ fn resolve(profile: &Profile, keys: &Keys<'_>, query: &ProfileQuery) -> Result<Q
         }));
     }
     Ok(Query {
+        source: match query.source {
+            ProfileSource::Samples => Source::Samples,
+            ProfileSource::Waits => Source::Waits,
+        },
         range: query
             .range
             .map(|[from, to]| (start.saturating_add(from), start.saturating_add(to))),
         threads: query.threads.clone(),
+        tasks: query
+            .tasks
+            .as_ref()
+            .map(|tasks| tasks.iter().map(|task| task.unwrap_or(NO_TASK)).collect()),
         transforms,
         invert: query.invert,
         logical: !query.native,
+        by_task: query.by_task,
     })
 }
 
@@ -570,6 +612,7 @@ impl<'a, 'k> Named<'a, 'k> {
                 KeyKind::Address { .. } => ProfileKeyKind::Address,
                 KeyKind::Truncation { .. } => ProfileKeyKind::Truncation,
                 KeyKind::Task { .. } => ProfileKeyKind::Task,
+                KeyKind::Group { .. } => ProfileKeyKind::Group,
             },
             module: keys.module(key).map(str::to_owned),
             file: location.map(|(file, _)| file.to_owned()),

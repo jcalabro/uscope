@@ -1,10 +1,13 @@
 //! Profiles a server serves, whatever it debugs: what one holds, its call
 //! tree's columns, its functions, and its timeline, as the page reads them.
 
+use std::io::Write as _;
 use std::process::{Command, Stdio};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use serde_json::{Value, json};
-use uscope::profiler::{RecordOptions, SampleSource, record};
+use uscope::profiler::{RecordOptions, SampleSource, Watch, record, record_watched};
 
 use crate::support::{Scenario, ScratchDir};
 use crate::web::{Client, Web};
@@ -185,6 +188,120 @@ async fn a_profile_is_served_as_trees_functions_and_a_timeline() {
     assert_eq!(kind, "invalid");
     assert!(message.contains("nothing"), "{message}");
     tab.save_traffic("profile");
+}
+
+/// A profile of the waits fixture with task snapshots, once two of them
+/// have found its three receivers waiting.
+fn record_waits(scratch: &ScratchDir) -> std::path::PathBuf {
+    let (reader, mut writer) = std::io::pipe().expect("pipe");
+    let mut command = Command::new(Scenario::fixture("profile-go-waits"));
+    command.stdin(reader).stdout(Stdio::null());
+    let options = RecordOptions {
+        task_snapshots: Some(Duration::from_millis(50)),
+        ..RecordOptions::default()
+    };
+    let (stop, mut released) = (AtomicBool::new(false), false);
+    let recording = record_watched(
+        command,
+        &options,
+        &mut Watch {
+            every: Duration::from_millis(20),
+            publish: &mut |profile| {
+                let found = profile
+                    .task_waits()
+                    .iter()
+                    .filter(|wait| wait.state == "chan receive")
+                    .count();
+                if !released && found >= 6 {
+                    writer.write_all(b"x").expect("release the program");
+                    released = true;
+                }
+            },
+            stop: &stop,
+            save: None,
+        },
+    )
+    .expect("record");
+    assert!(recording.status.success());
+    let path = scratch.path().join("waits.usprof");
+    recording.profile.write(&path).expect("write the profile");
+    path
+}
+
+#[tokio::test]
+async fn a_profile_shows_where_tasks_waited_and_what_each_ran() {
+    let scratch = ScratchDir::new("web-waits");
+    let path = record_waits(&scratch);
+    let web = Web::start("profile", &[path.to_str().expect("a path")]);
+    let mut tab = web.control("tab").await;
+    let listed = tab
+        .expect("the profiles", |message| message["type"] == "profiles")
+        .await;
+    let id = listed["profiles"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+
+    let summary = tab.ok("profile", json!({"profile": id})).await;
+    assert!(summary["snapshots"].as_u64() >= Some(2), "{summary}");
+    let tasks = summary["tasks"].as_array().expect("tasks");
+    let spinner = tasks
+        .iter()
+        .find(|task| {
+            task["name"]
+                .as_str()
+                .is_some_and(|name| name.ends_with("{phase=spin}"))
+        })
+        .unwrap_or_else(|| panic!("the spinner: {tasks:?}"));
+    assert!(spinner["weight"].as_u64() > Some(0), "{spinner}");
+    assert!(summary["taskSamples"].as_u64() > Some(0));
+
+    // The waits weigh what every task waited, and each receiver's root
+    // is its own task by task.
+    let waits = tree(&mut tab, json!({"profile": id, "source": "waits"})).await;
+    let roots: u64 = waits
+        .iter()
+        .filter(|(path, _, _)| path.len() == 1)
+        .map(|(_, _, total)| total)
+        .sum();
+    assert_eq!(Some(roots), summary["waited"].as_u64());
+    assert!(
+        waits
+            .iter()
+            .any(|(path, _, _)| path.iter().any(|name| name == "main.receive"))
+    );
+    let by_task = tree(
+        &mut tab,
+        json!({"profile": id, "source": "waits", "byTask": true}),
+    )
+    .await;
+    let receivers = by_task
+        .iter()
+        .filter(|(path, _, _)| path.len() >= 2 && path.iter().any(|name| name == "main.receive"))
+        .map(|(path, _, _)| path[0].clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(receivers.len(), 3, "{receivers:?}");
+    assert!(receivers.iter().all(|name| name.starts_with("goroutine ")));
+
+    // The spinner's samples alone, in a lane of their own.
+    let row = spinner["row"].clone();
+    let spun = tree(&mut tab, json!({"profile": id, "tasks": [row]})).await;
+    assert!(!spun.is_empty());
+    assert!(spun.iter().all(|(path, _, _)| {
+        path.iter().any(|name| name == "main.spin")
+            || path
+                .iter()
+                .all(|name| name == "runtime.goexit" || name == "main.main.gowrap2")
+    }));
+    let timeline = tab
+        .ok(
+            "profileTimeline",
+            json!({"profile": id, "buckets": 10, "taskLanes": true}),
+        )
+        .await;
+    let lanes = timeline["lanes"].as_array().expect("lanes");
+    assert!(lanes.iter().any(|lane| lane["task"] == row), "{timeline}");
+    assert!(lanes.iter().all(|lane| lane["thread"].is_null()));
 }
 
 /// Waits for the profiles list to show `id` as `matches` accepts.

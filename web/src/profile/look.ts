@@ -1,7 +1,8 @@
 // How a tab looks at a profile, all of it in the address bar: the view,
-// the time range and threads selected, the transforms in order, and what
-// is selected and zoomed, by function names rather than node numbers, so
-// a link opens the same view of the same profile anywhere.
+// what it aggregates, the time range, threads, and tasks selected, the
+// transforms in order, and what is selected and zoomed, by function names
+// rather than node numbers, so a link opens the same view of the same
+// profile anywhere.
 
 import type { ProfileGranularity, ProfileQuery, ProfileTransform, TransformOp } from "../protocol";
 
@@ -14,6 +15,15 @@ export interface ProfileLook {
   range?: string;
   /** Thread rows selected; every thread when absent. */
   th?: string[];
+  /** Where task snapshots found tasks waiting, not the CPU samples. */
+  src?: "waits";
+  /** Task rows selected, `none` for what no snapshot named; every task
+   * when absent. */
+  tk?: string[];
+  /** Each path rooted at its task. */
+  bt?: "1";
+  /** Timeline lanes of tasks rather than threads. */
+  lanes?: "tasks";
   /** Transforms in order, each `OP:NAME`. */
   tf?: string[];
   invert?: "1";
@@ -55,6 +65,19 @@ export function validateProfileLook(search: Record<string, unknown>): ProfileLoo
   const th = list("th")?.filter((row) => /^\d+$/.test(row));
   if (th && th.length > 0) {
     look.th = th;
+  }
+  if (text("src") === "waits") {
+    look.src = "waits";
+  }
+  const tk = list("tk")?.filter((row) => row === "none" || /^\d+$/.test(row));
+  if (tk && tk.length > 0) {
+    look.tk = tk;
+  }
+  if (text("bt") === "1") {
+    look.bt = "1";
+  }
+  if (text("lanes") === "tasks") {
+    look.lanes = "tasks";
   }
   const tf = list("tf")?.filter((entry) => parseTransform(entry) !== null);
   if (tf && tf.length > 0) {
@@ -117,6 +140,9 @@ export function queryOf(profile: string, look: ProfileLook): ProfileQuery {
     profile,
     ...(range ? { range } : {}),
     ...(look.th ? { threads: look.th.map(Number) } : {}),
+    source: look.src === "waits" ? "waits" : "samples",
+    ...(look.tk ? { tasks: look.tk.map((row) => (row === "none" ? null : Number(row))) } : {}),
+    byTask: look.bt === "1",
     transforms: (look.tf ?? []).flatMap((entry) => {
       const transform = parseTransform(entry);
       return transform ? [transform] : [];

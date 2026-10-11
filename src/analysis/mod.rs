@@ -16,7 +16,8 @@ mod tests;
 
 pub use keys::{Granularity, KeyKind, Keys};
 pub use query::{
-    CallTree, Cost, Costs, OffCpuLane, Query, Transform, aggregate, density, functions, off_cpu,
+    CallTree, Cost, Costs, Lanes, OffCpuLane, Query, Source, Transform, aggregate, density,
+    functions, off_cpu,
 };
 
 /// A position in a capture's tables, which validation keeps within `u32`.
