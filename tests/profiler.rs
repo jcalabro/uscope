@@ -553,6 +553,12 @@ fn a_threads_time_off_its_cpu_is_each_sleep_and_each_preemption() {
 /// reaches past the start of one, and each change of the share is marked.
 #[test]
 fn a_recording_over_its_budget_pauses_between_samples_and_says_so() {
+    let (reader, mut writer) = std::io::pipe().expect("pipe");
+    let mut command = Command::new(Scenario::fixture("profile-phases"));
+    command
+        .stdin(reader)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let options = RecordOptions {
         budget: Some(Budget {
             cpu: 0.001,
@@ -560,8 +566,26 @@ fn a_recording_over_its_budget_pauses_between_samples_and_says_so() {
         }),
         ..RecordOptions::preset(Preset::Maximum)
     };
-    let recording = record(command("gcc-o0", 100_000_000), &options).expect("record");
-    assert!(recording.status.success());
+    let stop = AtomicBool::new(false);
+    let mut released = false;
+    // The program spins until the budget has changed what is sampled.
+    let recording = record_watched(
+        command,
+        &options,
+        &mut Watch {
+            every: Duration::from_millis(20),
+            publish: &mut |profile| {
+                if !released && !profile.budget_changes().is_empty() && !profile.gaps().is_empty() {
+                    writer.write_all(b"x").expect("release the program");
+                    released = true;
+                }
+            },
+            stop: &stop,
+            save: None,
+        },
+    )
+    .expect("record");
+    assert!(recording.status.success(), "{}", recording.status);
     let profile = &recording.profile;
     let (gaps, changes) = (profile.gaps(), profile.budget_changes());
     assert!(!gaps.is_empty() && !changes.is_empty(), "{changes:?}");
