@@ -196,6 +196,22 @@ source_changed_since_output() {
     [[ -n "$changed" ]]
 }
 
+# Whether a file the command names among the built outputs, such as a
+# library it links, changed after the output.
+built_input_changed_since_output() {
+    local output="$1"
+    shift
+    local word path
+    for word in "$@"; do
+        path="${word#*=}"
+        if [[ "$path" == "$output_dir"/* && "$path" != "$output" && -f "$path" \
+            && "$path" -nt "$output" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 run_cached_build() {
     local source="$1"
     local output="$2"
@@ -215,6 +231,7 @@ run_cached_build() {
 
     if [[ -x "$output" ]] \
         && ! source_changed_since_output "$source" "$output" \
+        && ! built_input_changed_since_output "$output" "${command[@]}" \
         && [[ "$previous" == "$signature" ]]; then
         rebuilt_outputs["$output"]=false
         printf '[cached] %s\n' "$output"
