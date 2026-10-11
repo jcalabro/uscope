@@ -7,6 +7,8 @@
 use zerocopy::little_endian::{I64, U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
+use crate::CodeRole;
+
 pub use crate::image::NONE;
 
 /// What a table holds. The numbers are part of the format: a reader that
@@ -331,6 +333,40 @@ pub struct Function {
     /// The file it is declared in, or [`NONE`].
     pub file: U32,
     pub line: U32,
+    /// Its `CodeRole`, by [`role_number`].
+    pub role: u8,
+    pub reserved: [u8; 3],
+}
+
+/// A role's number in a capture.
+pub const fn role_number(role: CodeRole) -> u8 {
+    match role {
+        CodeRole::Ordinary => 0,
+        CodeRole::Wrapper => 1,
+        CodeRole::RuntimeInternal => 2,
+        CodeRole::Panic => 3,
+        CodeRole::StackSwitch => 4,
+        CodeRole::Outermost => 5,
+        CodeRole::TrapEntry => 6,
+        CodeRole::SignalTrampoline => 7,
+        CodeRole::Dispatch => 8,
+    }
+}
+
+/// The role a capture's number stands for.
+pub const fn role_of(number: u8) -> Option<CodeRole> {
+    Some(match number {
+        0 => CodeRole::Ordinary,
+        1 => CodeRole::Wrapper,
+        2 => CodeRole::RuntimeInternal,
+        3 => CodeRole::Panic,
+        4 => CodeRole::StackSwitch,
+        5 => CodeRole::Outermost,
+        6 => CodeRole::TrapEntry,
+        7 => CodeRole::SignalTrampoline,
+        8 => CodeRole::Dispatch,
+        _ => return None,
+    })
 }
 
 /// What a count in [`Account`] counts.

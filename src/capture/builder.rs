@@ -20,6 +20,8 @@ pub struct LineInput<'a> {
     pub column: u32,
     /// Where the function is declared.
     pub declared: Option<(&'a str, u32)>,
+    /// The function's role, by [`role_number`](super::records::role_number).
+    pub role: u8,
 }
 
 /// Builds a capture as a recording proceeds.
@@ -273,7 +275,7 @@ impl CaptureBuilder {
             let (declared, declared_line) = line
                 .declared
                 .map_or((NONE, 0), |(file, line)| (self.string(file), line));
-            let function = self.function(name, module, declared, declared_line);
+            let function = self.function(name, module, (declared, declared_line), line.role);
             let file = self.optional(line.file);
             self.lines.push(Line {
                 function: function.into(),
@@ -286,7 +288,7 @@ impl CaptureBuilder {
     }
 
     /// The function named `name` of `module`, declared at `file`:`line`.
-    fn function(&mut self, name: u32, module: u32, file: u32, line: u32) -> u32 {
+    fn function(&mut self, name: u32, module: u32, (file, line): (u32, u32), role: u8) -> u32 {
         let key = (name, module, file, line);
         if let Some(&function) = self.function_index.get(&key) {
             return function;
@@ -297,6 +299,8 @@ impl CaptureBuilder {
             module: module.into(),
             file: file.into(),
             line: line.into(),
+            role,
+            reserved: [0; 3],
         });
         self.function_index.insert(key, function);
         function
@@ -498,7 +502,8 @@ impl CaptureBuilder {
                 let function = &capture.functions[line.function.get() as usize];
                 let name = self.copy_string(capture, function.name.get());
                 let declared = self.copy_string(capture, function.file.get());
-                let function = self.function(name, module, declared, function.line.get());
+                let function =
+                    self.function(name, module, (declared, function.line.get()), function.role);
                 let file = self.copy_string(capture, line.file.get());
                 self.lines.push(Line {
                     function: function.into(),

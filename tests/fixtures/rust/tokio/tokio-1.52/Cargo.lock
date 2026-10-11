@@ -171,6 +171,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "profile"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"

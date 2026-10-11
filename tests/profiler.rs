@@ -3,7 +3,9 @@ mod support;
 use std::process::{Command, Stdio};
 
 use support::Scenario;
-use uscope::profiler::{Preset, RecordOptions, SampleSource, SampledStack, StackEnding, record};
+use uscope::profiler::{
+    CallNode, Preset, RecordOptions, SampleSource, SampledStack, StackEnding, StackView, record,
+};
 
 /// The profile-stacks fixture across languages, compilers, optimization,
 /// frame pointers, PIE, and linkers, and whether the build keeps frame
@@ -186,6 +188,79 @@ fn function_breakpoints_name_every_language_and_layout_exactly() {
         assert_eq!(
             main_thread, 3,
             "{variant}: the main thread's calls name {main}"
+        );
+    }
+}
+
+/// Each path of a call tree that samples end at, outermost first, with
+/// the weight that ends there.
+fn ending_paths(tree: &[CallNode]) -> Vec<(Vec<&str>, u64)> {
+    (0..tree.len())
+        .filter(|node| tree[*node].own > 0)
+        .map(|node| {
+            let mut path = Vec::new();
+            let mut at = Some(node);
+            while let Some(node) = at {
+                path.push(tree[node].name.as_str());
+                at = tree[node].parent;
+            }
+            path.reverse();
+            (path, tree[node].own)
+        })
+        .collect()
+}
+
+#[test]
+fn an_async_tasks_samples_show_its_own_stack_of_awaits() {
+    for variant in ["o0", "o3"] {
+        let mut command = Command::new(Scenario::fixture(&format!("tokio-profile-{variant}")));
+        command.stdout(Stdio::null());
+        let recording = record(command, &calls_of("profile::work")).expect("record");
+        assert!(recording.status.success());
+        let profile = &recording.profile;
+        // Four tasks call work five times each. A full ring drops calls,
+        // and counts each one dropped.
+        let recorded = profile.total_weight();
+        assert!(recorded > 0, "{variant}");
+        assert_eq!(recorded + profile.lost_samples(), 20, "{variant}");
+
+        let logical_tree = profile.call_tree(StackView::Logical);
+        let logical = ending_paths(&logical_tree);
+        assert_eq!(logical.len(), 1, "{variant}: {logical:?}");
+        let (path, weight) = &logical[0];
+        assert_eq!(*weight, recorded);
+        let context = format!("{variant}: {path:?}");
+        assert!(
+            path[0]
+                .starts_with("<tokio::runtime::task::harness::Harness<profile::task::{closure#0}"),
+            "{context}"
+        );
+        let work = path[1..].iter().position(|name| *name == "profile::work");
+        let (own, inlined) = path[1..].split_at(work.expect(&context));
+        assert_eq!(
+            own,
+            [
+                "[task] profile::task::{closure#0}",
+                "profile::task::{closure#0}",
+                "profile::outer::{closure#0}",
+                "profile::inner::{closure#0}",
+            ],
+            "{context}"
+        );
+        // Code inlined into work's first instruction is shown inside it.
+        assert!(
+            inlined[1..]
+                .iter()
+                .all(|name| name.starts_with("core::hint::")),
+            "{context}"
+        );
+
+        // The threads' own frames are one switch away.
+        let native_tree = profile.call_tree(StackView::Native);
+        let native = ending_paths(&native_tree);
+        assert!(
+            native.iter().all(|(path, _)| path[0] == "__GI___clone3"),
+            "{variant}: {native:?}"
         );
     }
 }

@@ -33,7 +33,7 @@ pub struct CaptureFormat;
 
 /// What a capture's tables mean: bump it with any change to what is
 /// stored.
-pub const CAPTURE_REVISION: u32 = 1;
+pub const CAPTURE_REVISION: u32 = 2;
 
 impl Format for CaptureFormat {
     type Kind = CaptureTable;
@@ -300,6 +300,9 @@ impl Capture {
             if FrameKind::from_number(frame.kind).is_none() {
                 return Err(format!("a frame has unknown kind {}", frame.kind));
             }
+            if role_of(frame.role).is_none() {
+                return Err(format!("a frame has unknown role {}", frame.role));
+            }
         }
         for (position, stack) in self.stacks.iter().enumerate() {
             let parent = stack.parent.get();
@@ -359,6 +362,9 @@ impl Capture {
             string(line.file.get(), "a line's file")?;
         }
         for function in &self.functions {
+            if role_of(function.role).is_none() || function.reserved != [0; 3] {
+                return Err("a function has an unknown role".into());
+            }
             string(function.name.get(), "a function")?;
             string(function.file.get(), "a function's file")?;
             index(

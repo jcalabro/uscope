@@ -1238,11 +1238,12 @@ build_tokio_fixtures() {
     }
     # Every fixture, unoptimized and optimized. Unoptimized only: a hundred
     # thousand tasks, which bound what listing them costs, and a task list
-    # the program damages, whose reading the build changes nothing of.
+    # the program damages, whose reading the build changes nothing of. The
+    # profiler's tasks need neither tokio release in particular.
     local -a fixtures=(std-async panics workers server drivers steps cancel shapes values
         runtimes blocking migrate deadlock)
-    variant o0 dev "" "" "${fixtures[@]}" scale corrupt
-    variant o3 release "" "" "${fixtures[@]}"
+    variant o0 dev "" "" "${fixtures[@]}" scale corrupt profile
+    variant o3 release "" "" "${fixtures[@]}" profile
     # Every fixture again with the older tokio release, which tests read
     # as tokio-NAME-1.52-o0 and tokio-NAME-1.52-o3.
     variant "${tokio_older_release}-o0" dev "" "" "${fixtures[@]}"

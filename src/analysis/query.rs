@@ -3,13 +3,15 @@
 //!
 //! A query selects samples by time and thread, turns each sample's stack
 //! into a path of keys, outermost first or, inverted, innermost first,
-//! and reshapes the path by its transforms in order. Samples are counted
+//! and reshapes the path by its transforms in order. A logical query
+//! first shows each async task's frames as a stack of their own. Samples are counted
 //! per distinct stack first, so the work is linear in the samples selected
 //! and the stacks they use.
 
 use foldhash::HashMap;
 
 use super::{Keys, index};
+use crate::CodeRole;
 use crate::capture::Capture;
 use crate::capture::records::{NONE, Sample};
 
@@ -23,6 +25,9 @@ pub struct Query {
     pub transforms: Vec<Transform>,
     /// Paths from the innermost frame out, so that the tree is of callers.
     pub invert: bool,
+    /// Each async task's frames as a stack of their own (see [`logical`]),
+    /// before any transform.
+    pub logical: bool,
 }
 
 /// One step of reshaping each sample's path, applied in order.
@@ -139,6 +144,9 @@ impl<'a> Paths<'a> {
         for frame in self.capture.stack_frames(stack) {
             path.extend_from_slice(self.keys.frame(frame));
         }
+        if self.query.logical {
+            logical(self.keys, path);
+        }
         // Innermost first, as stacks are; a tree from the roots starts
         // with the outermost.
         if !self.query.invert {
@@ -168,6 +176,35 @@ impl<'a> Paths<'a> {
         }
         Some(path)
     }
+}
+
+/// Makes an innermost-first path logical. The runtime gives the thread to
+/// a task at the innermost `Dispatch` frame, so the frames inside it are
+/// the task's and the scheduler's outside it are dropped. The task's own
+/// code begins at its outermost frame that is neither runtime machinery
+/// nor a wrapper, which is rooted under a key for the task; the machinery
+/// between the dispatch and it goes. Wrappers only forward, so they fold
+/// away everywhere. A path with no dispatch, such as a goroutine's, which
+/// runs on a stack of its own, keeps its frames.
+fn logical(keys: &Keys<'_>, path: &mut Vec<u32>) {
+    if let Some(dispatch) = path
+        .iter()
+        .position(|key| keys.role(*key) == CodeRole::Dispatch)
+    {
+        path.truncate(dispatch + 1);
+        let machinery = |key: &u32| {
+            matches!(
+                keys.role(*key),
+                CodeRole::RuntimeInternal | CodeRole::Wrapper
+            )
+        };
+        if let Some(root) = path[..dispatch].iter().rposition(|key| !machinery(key))
+            && let Some(task) = keys.task(path[root])
+        {
+            path.splice(root + 1..dispatch, [task]);
+        }
+    }
+    path.retain(|key| keys.role(*key) != CodeRole::Wrapper);
 }
 
 /// The call tree of the samples `query` selects.

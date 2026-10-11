@@ -22,6 +22,7 @@ fn sample_capture(offset: i64) -> Capture {
             line: 3,
             column: 1,
             declared: Some(("app.c", 1)),
+            role: 0,
         }],
     );
     let deep = builder.stack(&[work, main]);

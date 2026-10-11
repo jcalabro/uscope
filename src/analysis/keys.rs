@@ -3,8 +3,9 @@
 use foldhash::HashMap;
 
 use super::index;
+use crate::CodeRole;
 use crate::capture::Capture;
-use crate::capture::records::{FrameKind, NONE, Truncation};
+use crate::capture::records::{FrameKind, NONE, Truncation, role_of};
 
 /// How finely frames are told apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -31,6 +32,10 @@ pub enum KeyKind {
     Address { frame: u32 },
     /// Where a stack ended early, and the module at fault, or [`NONE`].
     Truncation { reason: u8, module: u32 },
+    /// The root of an async task's logical stack, by the outermost code of
+    /// its own: a function, or a frame no symbols describe, the other
+    /// [`NONE`].
+    Task { function: u32, frame: u32 },
 }
 
 /// Each frame's keys, innermost first, and what each key is.
@@ -40,6 +45,9 @@ pub struct Keys<'a> {
     starts: Vec<u32>,
     flat: Vec<u32>,
     kinds: Vec<KeyKind>,
+    roles: Vec<CodeRole>,
+    /// Each key's task root, or [`NONE`] for a key that roots none.
+    tasks: Vec<u32>,
 }
 
 impl<'a> Keys<'a> {
@@ -90,12 +98,48 @@ impl<'a> Keys<'a> {
             }
         }
         starts.push(index(flat.len()));
+        let mut roles: Vec<CodeRole> = kinds
+            .iter()
+            .map(|kind| {
+                let number = match *kind {
+                    KeyKind::Function { function } | KeyKind::Line { function, .. } => {
+                        capture.functions[function as usize].role
+                    }
+                    KeyKind::Address { frame } => capture.frames[frame as usize].role,
+                    KeyKind::Truncation { .. } | KeyKind::Task { .. } => 0,
+                };
+                role_of(number).unwrap_or_default()
+            })
+            .collect();
+        // A task is rooted by function, whatever the granularity.
+        let mut tasks = vec![NONE; kinds.len()];
+        for (code, kind) in kinds.clone().into_iter().enumerate() {
+            let task = match kind {
+                KeyKind::Function { function } | KeyKind::Line { function, .. } => KeyKind::Task {
+                    function,
+                    frame: NONE,
+                },
+                KeyKind::Address { frame } => KeyKind::Task {
+                    function: NONE,
+                    frame,
+                },
+                KeyKind::Truncation { .. } | KeyKind::Task { .. } => continue,
+            };
+            tasks[code] = *known.entry(task).or_insert_with(|| {
+                kinds.push(task);
+                roles.push(CodeRole::Ordinary);
+                index(kinds.len() - 1)
+            });
+        }
+        tasks.resize(kinds.len(), NONE);
         Self {
             capture,
             granularity,
             starts,
             flat,
             kinds,
+            roles,
+            tasks,
         }
     }
 
@@ -118,6 +162,16 @@ impl<'a> Keys<'a> {
         self.kinds[key as usize]
     }
 
+    /// The role of a key's code.
+    pub fn role(&self, key: u32) -> CodeRole {
+        self.roles[key as usize]
+    }
+
+    /// The root of a task whose outermost code of its own is `key`'s.
+    pub fn task(&self, key: u32) -> Option<u32> {
+        Some(self.tasks[key as usize]).filter(|task| *task != NONE)
+    }
+
     /// The key of `kind`, if any frame has it.
     pub fn find(&self, kind: KeyKind) -> Option<u32> {
         self.kinds
@@ -134,13 +188,15 @@ impl<'a> Keys<'a> {
             KeyKind::Function { function } | KeyKind::Line { function, .. } => capture
                 .string(capture.functions[function as usize].name.get())
                 .to_owned(),
-            KeyKind::Address { frame } => {
-                let record = &capture.frames[frame as usize];
-                let address = record.address.get();
-                self.module_name(record.module.get()).map_or_else(
-                    || format!("{address:#x}"),
-                    |module| format!("{module}+{address:#x}"),
-                )
+            KeyKind::Address { frame } => self.address_name(frame),
+            KeyKind::Task { function, frame } => {
+                let root = match function {
+                    NONE => self.address_name(frame),
+                    function => capture
+                        .string(capture.functions[function as usize].name.get())
+                        .to_owned(),
+                };
+                format!("[task] {root}")
             }
             KeyKind::Truncation { reason, module } => {
                 let reason = Truncation::from_number(u64::from(reason))
@@ -163,7 +219,13 @@ impl<'a> Keys<'a> {
                 let function = &capture.functions[function as usize];
                 (function.file.get(), function.line.get())
             }
-            KeyKind::Address { .. } | KeyKind::Truncation { .. } => return None,
+            KeyKind::Task { function, .. } if function != NONE => {
+                let function = &capture.functions[function as usize];
+                (function.file.get(), function.line.get())
+            }
+            KeyKind::Address { .. } | KeyKind::Truncation { .. } | KeyKind::Task { .. } => {
+                return None;
+            }
         };
         (file != NONE).then(|| (capture.string(file), line))
     }
@@ -172,13 +234,27 @@ impl<'a> Keys<'a> {
     pub fn module(&self, key: u32) -> Option<&'a str> {
         let capture = self.capture;
         let module = match self.kind(key) {
-            KeyKind::Function { function } | KeyKind::Line { function, .. } => {
-                capture.functions[function as usize].module.get()
+            KeyKind::Function { function }
+            | KeyKind::Line { function, .. }
+            | KeyKind::Task {
+                function,
+                frame: NONE,
+            } => capture.functions[function as usize].module.get(),
+            KeyKind::Address { frame } | KeyKind::Task { frame, .. } => {
+                capture.frames[frame as usize].module.get()
             }
-            KeyKind::Address { frame } => capture.frames[frame as usize].module.get(),
             KeyKind::Truncation { module, .. } => module,
         };
         self.module_name(module)
+    }
+
+    fn address_name(&self, frame: u32) -> String {
+        let record = &self.capture.frames[frame as usize];
+        let address = record.address.get();
+        self.module_name(record.module.get()).map_or_else(
+            || format!("{address:#x}"),
+            |module| format!("{module}+{address:#x}"),
+        )
     }
 
     fn module_name(&self, module: u32) -> Option<&'a str> {

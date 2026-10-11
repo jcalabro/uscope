@@ -5,7 +5,7 @@
 # with each (scripts/build-test-programs.sh).
 [workspace]
 resolver = "3"
-members = ["truth", "std-async", "panics", "workers", "server", "drivers", "steps", "cancel", "shapes", "values", "runtimes", "scale", "blocking", "migrate", "deadlock", "corrupt"]
+members = ["truth", "std-async", "panics", "workers", "server", "drivers", "steps", "cancel", "shapes", "values", "runtimes", "scale", "blocking", "migrate", "deadlock", "corrupt", "profile"]
 
 [workspace.package]
 version = "0.0.0"

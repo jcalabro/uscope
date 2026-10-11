@@ -4,6 +4,7 @@
 
 mod record;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::time::Duration;
@@ -96,6 +97,8 @@ pub enum RecordError {
     Start(std::io::Error),
     #[error("the program has no function named '{0}'")]
     NoSuchFunction(String),
+    #[error("{count} functions are named '{name}'; name one by its symbol")]
+    AmbiguousFunction { name: String, count: usize },
     #[error("reading the program failed: {0}")]
     Program(String),
     #[error(
@@ -209,6 +212,14 @@ fn monotonic() -> u64 {
     })
 }
 
+/// The query of every sample, seen as `view` shows stacks.
+fn query(view: StackView) -> crate::analysis::Query {
+    crate::analysis::Query {
+        logical: view == StackView::Logical,
+        ..crate::analysis::Query::default()
+    }
+}
+
 /// The image address of the function `symbol` names in `program`, and the
 /// bias the program loads at without address randomization.
 fn function_address(program: &Path, symbol: &str) -> Result<(u64, u64), RecordError> {
@@ -223,14 +234,26 @@ fn function_address(program: &Path, symbol: &str) -> Result<(u64, u64), RecordEr
         object::ObjectKind::Dynamic => UNRANDOMIZED_PIE_BASE,
         _ => 0,
     };
-    let address = object::Object::symbols(&file)
-        .find(|candidate| {
-            object::ObjectSymbol::name(candidate) == Ok(symbol)
-                && object::ObjectSymbol::kind(candidate) == object::SymbolKind::Text
+    // A symbol, or the name a profile shows for one.
+    let addresses: BTreeSet<u64> = object::Object::symbols(&file)
+        .filter(|candidate| {
+            object::ObjectSymbol::kind(candidate) == object::SymbolKind::Text
+                && object::ObjectSymbol::name(candidate).is_ok_and(|name| {
+                    name == symbol
+                        || crate::demangle::qualified_name(name).is_some_and(|name| name == symbol)
+                })
         })
         .map(|found| object::ObjectSymbol::address(&found))
-        .ok_or_else(|| RecordError::NoSuchFunction(symbol.to_owned()))?;
-    Ok((address, bias))
+        .collect();
+    let mut addresses = addresses.into_iter();
+    match (addresses.next(), addresses.len()) {
+        (None, _) => Err(RecordError::NoSuchFunction(symbol.to_owned())),
+        (Some(address), 0) => Ok((address, bias)),
+        (Some(_), others) => Err(RecordError::AmbiguousFunction {
+            name: symbol.to_owned(),
+            count: others + 1,
+        }),
+    }
 }
 
 /// The file a command names, as `execvp` would find it.
@@ -274,6 +297,17 @@ pub struct FunctionCost {
     pub own: u64,
     /// The weight of samples it was anywhere on the stack of.
     pub total: u64,
+}
+
+/// How a profile's stacks are shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StackView {
+    /// Each async task's frames as a stack of their own, rooted under the
+    /// runtime's dispatch, with wrappers folded away.
+    #[default]
+    Logical,
+    /// The frames as the thread ran them.
+    Native,
 }
 
 /// A function called from its parent's node.
@@ -348,10 +382,10 @@ impl Profile {
 
     /// What each function costs, most expensive first.
     #[must_use]
-    pub fn top(&self) -> Vec<FunctionCost> {
+    pub fn top(&self, view: StackView) -> Vec<FunctionCost> {
         let keys =
             crate::analysis::Keys::new(&self.capture, crate::analysis::Granularity::Function);
-        crate::analysis::functions(&self.capture, &keys, &crate::analysis::Query::default())
+        crate::analysis::functions(&self.capture, &keys, &query(view))
             .into_iter()
             .map(|cost| FunctionCost {
                 name: keys.name(cost.key),
@@ -364,11 +398,10 @@ impl Profile {
     /// The call tree, from the outermost callers in; parents come before
     /// their children.
     #[must_use]
-    pub fn call_tree(&self) -> Vec<CallNode> {
+    pub fn call_tree(&self, view: StackView) -> Vec<CallNode> {
         let keys =
             crate::analysis::Keys::new(&self.capture, crate::analysis::Granularity::Function);
-        let tree =
-            crate::analysis::aggregate(&self.capture, &keys, &crate::analysis::Query::default());
+        let tree = crate::analysis::aggregate(&self.capture, &keys, &query(view));
         (0..tree.len())
             .map(|node| CallNode {
                 parent: (tree.parent[node] != NONE).then_some(tree.parent[node] as usize),

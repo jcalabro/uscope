@@ -57,6 +57,7 @@ fn line(function: &str) -> LineInput<'_> {
         line: 1,
         column: 0,
         declared: None,
+        role: 0,
     }
 }
 
@@ -176,7 +177,7 @@ proptest! {
         // A transform of a function no frame has removes nothing, or, as a
         // focus, everything; the engine can only name functions it has.
         let known = |name: &str| key_named(&keys, name);
-        let mut query = Query { range, threads: threads.clone(), transforms: Vec::new(), invert };
+        let mut query = Query { range, threads: threads.clone(), invert, ..Query::default() };
         let mut naive_transforms = Vec::new();
         for transform in &named {
             let (Named::Focus(name) | Named::Merge(name) | Named::Drop(name) | Named::Collapse(name)) = transform;
@@ -317,4 +318,112 @@ fn the_analysis_stays_pure() {
         checked += 1;
     }
     assert!(checked >= 3, "the analysis's sources were found");
+}
+
+/// Each path of the tree that samples end at, outermost first, with the
+/// weight that ends there.
+fn ending_paths(tree: &CallTree, keys: &Keys<'_>) -> BTreeMap<Vec<String>, u64> {
+    (0..tree.len())
+        .filter(|node| tree.own[*node] > 0)
+        .map(|node| {
+            let mut path = Vec::new();
+            let mut at = index(node);
+            while at != NONE {
+                path.push(keys.name(tree.key[at as usize]));
+                at = tree.parent[at as usize];
+            }
+            path.reverse();
+            (path, tree.own[node])
+        })
+        .collect()
+}
+
+#[test]
+fn a_logical_stack_is_a_tasks_own_under_its_dispatch() {
+    use crate::CodeRole::{Dispatch, Ordinary, Outermost, RuntimeInternal, Wrapper};
+    let mut builder = CaptureBuilder::new();
+    let module = builder.module("/bin/server", None, [0; 16], 0);
+    let mut frame = |name: &str, role: crate::CodeRole| {
+        let address = 0x100 * (builder.frames().len() as u64 + 1);
+        let frame = builder.frame(FrameKind::Native, module, address, 0);
+        builder.symbolize(
+            frame,
+            module,
+            &[LineInput {
+                role: crate::capture::records::role_number(role),
+                ..line(name)
+            }],
+        );
+        frame
+    };
+    let leaf = frame("decode", Ordinary);
+    let pinned = frame("<Pin<Box<F>> as Future>::poll", Wrapper);
+    let handler = frame("handler::{closure#0}", Ordinary);
+    let core = frame("Core::poll", RuntimeInternal);
+    let harness = frame("Harness::poll", Dispatch);
+    let run = frame("run_task", RuntimeInternal);
+    let start = frame("thread_start", Outermost);
+    let park = frame("park", RuntimeInternal);
+    let coop = frame("coop::budget", RuntimeInternal);
+    let stacks = [
+        builder.stack(&[leaf, pinned, handler, core, harness, run, start]),
+        builder.stack(&[park, run, start]),
+        builder.stack(&[coop, harness, run, start]),
+    ];
+    let thread = builder.thread(1, 1, 0);
+    for (time, stack) in stacks.into_iter().enumerate() {
+        builder.sample(
+            thread,
+            i64::try_from(time).expect("a time"),
+            1 << time,
+            stack,
+            NONE,
+        );
+    }
+    let capture = builder.finish();
+    let keys = Keys::new(&capture, Granularity::Function);
+    let names = |path: &[&str]| {
+        path.iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    let logical = aggregate(
+        &capture,
+        &keys,
+        &Query {
+            logical: true,
+            ..Query::default()
+        },
+    );
+    assert_eq!(
+        ending_paths(&logical, &keys),
+        BTreeMap::from([
+            (
+                names(&[
+                    "Harness::poll",
+                    "[task] handler::{closure#0}",
+                    "handler::{closure#0}",
+                    "decode"
+                ]),
+                1
+            ),
+            (names(&["thread_start", "run_task", "park"]), 2),
+            (names(&["Harness::poll", "coop::budget"]), 4),
+        ])
+    );
+    // The native stacks are one switch away.
+    let native = aggregate(&capture, &keys, &Query::default());
+    assert_eq!(
+        ending_paths(&native, &keys)[&names(&[
+            "thread_start",
+            "run_task",
+            "Harness::poll",
+            "Core::poll",
+            "handler::{closure#0}",
+            "<Pin<Box<F>> as Future>::poll",
+            "decode",
+        ])],
+        1
+    );
 }

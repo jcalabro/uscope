@@ -62,6 +62,34 @@ looks complete and skips callers. uscope never shows such a stack.
 Functions are named with their scopes (`app::server::handle`), and each
 function inlined into a frame is a frame of its own.
 
+## Async tasks
+
+A thread running an async runtime switches between tasks, so its native
+stacks bury each task under the runtime's scheduler. Reports show logical
+stacks instead: a task's frames begin under the frame where the runtime
+dispatches it, rooted by the task's outermost function of its own:
+
+```
+<tokio::runtime::task::harness::Harness<app::serve::{closure#0}, …>>::poll
+  [task] app::serve::{closure#0}
+    app::serve::{closure#0}
+      app::handle::{closure#0}
+        app::decode
+```
+
+The runtime's machinery between the dispatch and the task goes, and so do
+frames that only forward a call, such as `Pin<Box<F>>`'s `poll`. Samples
+of the scheduler itself keep their frames. A goroutine already runs on a
+stack of its own, which begins at `goexit`, so a Go stack only loses its
+wrappers. uscope knows a runtime's code by the roles the debugger gives it,
+so there are no name patterns to configure. `report --native` shows the
+frames as the threads ran them.
+
+A task's logical stack needs the frames from its dispatch inward. With
+`--preset prod`, the copy of 512 bytes rarely reaches them in code without
+frame pointers, so build async Rust with `-C force-frame-pointers=yes` to
+profile it in production.
+
 ## Profile files
 
 A profile is a file of sealed parts followed by an index of them. A file

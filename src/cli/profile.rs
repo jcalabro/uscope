@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use uscope::profiler::{Preset, Profile, RecordOptions, SampleSource};
+use uscope::profiler::{Preset, Profile, RecordOptions, SampleSource, StackView};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum PresetArg {
@@ -50,6 +50,9 @@ pub struct ReportArgs {
     /// Show this many functions.
     #[arg(long, default_value_t = 20)]
     limit: usize,
+    /// Show the frames threads ran, not each async task's own stack.
+    #[arg(long)]
+    native: bool,
     /// Hide call-tree nodes below this percentage of the total.
     #[arg(long, value_name = "PERCENT", default_value_t = 1.0)]
     min_percent: f64,
@@ -122,6 +125,11 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
     let read =
         Profile::read(&args.file).with_context(|| format!("reading {}", args.file.display()))?;
     let profile = read.profile;
+    let view = if args.native {
+        StackView::Native
+    } else {
+        StackView::Logical
+    };
     if read.truncated {
         writeln!(
             out,
@@ -154,7 +162,7 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
     };
     writeln!(out)?;
     if args.tree {
-        let tree = profile.call_tree();
+        let tree = profile.call_tree(view);
         let mut depth = vec![0_usize; tree.len()];
         // Each node with its children after it, depth first.
         let mut children: Vec<Vec<usize>> = vec![Vec::new(); tree.len()];
@@ -193,7 +201,7 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
         }
     } else {
         writeln!(out, "{:>7} {:>7}  function", "own", "total")?;
-        for cost in profile.top().iter().take(args.limit) {
+        for cost in profile.top(view).iter().take(args.limit) {
             writeln!(
                 out,
                 "{:6.2}% {:6.2}%  {}",

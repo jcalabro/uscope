@@ -10,7 +10,7 @@ use foldhash::HashMap;
 
 use crate::backend::perf::{self, decode};
 use crate::capture::builder::LineInput;
-use crate::capture::records::{AccountKind, FrameKind, Mapping, NONE, Truncation};
+use crate::capture::records::{AccountKind, FrameKind, Mapping, NONE, Truncation, role_number};
 use crate::capture::{Capture, CaptureBuilder};
 use crate::debug_info::{DebugFileSearch, DebugInfo};
 use crate::unwind::UnwindModule;
@@ -378,6 +378,7 @@ struct OwnedLine {
     line: u32,
     column: u32,
     declared: Option<(String, u32)>,
+    role: CodeRole,
 }
 
 impl OwnedLine {
@@ -391,6 +392,7 @@ impl OwnedLine {
                 .declared
                 .as_ref()
                 .map(|(file, line)| (file.as_str(), *line)),
+            role: role_number(self.role),
         }
     }
 }
@@ -405,9 +407,11 @@ fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
             .map(|file: &crate::SourceFile| file.path.display().to_string())
     };
     let line = |function: Arc<str>,
+                role: CodeRole,
                 declaration: Option<&crate::SourceLocation>,
                 source: Option<&crate::SourceLocation>| OwnedLine {
         function,
+        role,
         file: source.and_then(|source| path(source.file)),
         line: source.map_or(0, |source| {
             u32::try_from(source.line.get()).unwrap_or(u32::MAX)
@@ -433,6 +437,7 @@ fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
                 let function = function.info();
                 lines.push(line(
                     qualified(&function),
+                    function.role,
                     function.declaration.as_ref(),
                     source.as_ref(),
                 ));
@@ -451,15 +456,17 @@ fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
     if let Some(function) = physical {
         lines.push(line(
             qualified(&function),
+            function.role,
             function.declaration.as_ref(),
             source.as_ref(),
         ));
     } else if let Some(symbol) = &location.symbol {
-        let name = image
-            .symbol(symbol.symbol)
+        let found = image.symbol(symbol.symbol);
+        let name = found
             .and_then(crate::Symbol::demangled_name)
             .map_or_else(|| symbol.name.clone(), Arc::from);
-        lines.push(line(name, None, source.as_ref()));
+        let role = found.map_or(CodeRole::Ordinary, crate::Symbol::role);
+        lines.push(line(name, role, None, source.as_ref()));
     }
     lines
 }
@@ -480,21 +487,6 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(text, "{byte:02x}");
         text
     })
-}
-
-/// A role's number in a capture.
-pub const fn role_number(role: CodeRole) -> u8 {
-    match role {
-        CodeRole::Ordinary => 0,
-        CodeRole::Wrapper => 1,
-        CodeRole::RuntimeInternal => 2,
-        CodeRole::Panic => 3,
-        CodeRole::StackSwitch => 4,
-        CodeRole::Outermost => 5,
-        CodeRole::TrapEntry => 6,
-        CodeRole::SignalTrampoline => 7,
-        CodeRole::Dispatch => 8,
-    }
 }
 
 /// Truncations by number, for the accounts that count them.
