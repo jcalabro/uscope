@@ -1,8 +1,10 @@
 mod support;
 
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use support::Scenario;
+use uscope::profiler::budget::Budget;
 use uscope::profiler::{
     Attachment, CallNode, DEEP_STACK_COPY, Preset, RecordError, RecordOptions, SMALL_STACK_COPY,
     SampleSource, SampledStack, StackCopy, StackEnding, StackView, Watch, record, record_attached,
@@ -540,6 +542,47 @@ fn a_threads_time_off_its_cpu_is_each_sleep_and_each_preemption() {
             let end = pair[0].time + i64::try_from(pair[0].duration).expect("short");
             assert!(end <= pair[1].time, "{pair:?} overlap");
         }
+    }
+}
+
+/// A recording over its CPU budget samples less of each period and pauses
+/// every event between: no sample falls in a pause, no off-CPU interval
+/// reaches past the start of one, and each change of the share is marked.
+#[test]
+fn a_recording_over_its_budget_pauses_between_samples_and_says_so() {
+    let options = RecordOptions {
+        budget: Some(Budget {
+            cpu: 0.001,
+            period: Duration::from_millis(50),
+        }),
+        ..RecordOptions::preset(Preset::Maximum)
+    };
+    let recording = record(command("gcc-o0", 100_000_000), &options).expect("record");
+    assert!(recording.status.success());
+    let profile = &recording.profile;
+    let (gaps, changes) = (profile.gaps(), profile.budget_changes());
+    assert!(!gaps.is_empty() && !changes.is_empty(), "{changes:?}");
+    assert!(profile.recorder_cpu().0 > 0);
+    // A recording that ends paused ends where the pause does.
+    let (start, end) = profile.span();
+    assert!(
+        gaps.iter().all(|(from, to)| start <= *from && *to <= end),
+        "{gaps:?} beyond {start}..{end}"
+    );
+    let inside = |time: i64| gaps.iter().any(|(start, end)| *start < time && time < *end);
+    let sampled = profile.stacks();
+    assert!(!sampled.is_empty());
+    if let Some(stack) = sampled.iter().find(|stack| inside(stack.time)) {
+        panic!("{stack:?} was sampled in a gap: {gaps:?}");
+    }
+    for interval in profile.off_cpu() {
+        let back = interval.time + i64::try_from(interval.duration).expect("short");
+        assert!(
+            !gaps
+                .iter()
+                .any(|(start, _)| interval.time < *start && *start < back),
+            "{interval:?} reaches past the start of a gap: {gaps:?}"
+        );
     }
 }
 

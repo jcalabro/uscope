@@ -56,10 +56,12 @@ pub enum CaptureTable {
     Tasks = 22,
     /// Samples of where tasks waited, thread of none, by time.
     TaskWaits = 23,
+    /// Spans the recording did not sample, in time order.
+    Gaps = 24,
 }
 
 impl CaptureTable {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Strings,
         Self::Settings,
         Self::Modules,
@@ -83,6 +85,7 @@ impl CaptureTable {
         Self::Markers,
         Self::Tasks,
         Self::TaskWaits,
+        Self::Gaps,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -411,8 +414,12 @@ pub enum AccountKind {
     Repeats = 12,
     /// What the events counted, in the weight's unit: the CPU time the
     /// program's threads ran, sampled or not, or every execution of a
-    /// breakpoint's instruction.
+    /// breakpoint's instruction, while the events were on.
     Counted = 13,
+    /// Nanoseconds of CPU time uscope spent recording.
+    RecorderCpu = 14,
+    /// The part of it spent reading programs' debug information.
+    RecorderLoading = 15,
 }
 
 /// A count of something the views must show.
@@ -492,6 +499,56 @@ pub struct Marker {
     pub text: U32,
     pub kind: u8,
     pub reserved: [u8; 3],
+}
+
+/// What a [`Marker`] marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MarkerKind {
+    /// The budget changed how much of each period is sampled; the text
+    /// says to what, and why.
+    Budget = 1,
+}
+
+impl MarkerKind {
+    pub const fn from_number(number: u8) -> Option<Self> {
+        match number {
+            1 => Some(Self::Budget),
+            _ => None,
+        }
+    }
+}
+
+/// A span of time the recording did not sample: no event counted or
+/// sampled, and no record says what threads did.
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
+pub struct Gap {
+    /// From the moment every event had stopped to the moment before any
+    /// began again, on the capture's clock.
+    pub start: I64,
+    pub end: I64,
+    /// A [`GapReason`].
+    pub reason: u8,
+}
+
+/// Why a recording paused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GapReason {
+    /// To hold uscope's own CPU time to its budget.
+    Budget = 1,
+}
+
+impl GapReason {
+    pub const fn from_number(number: u8) -> Option<Self> {
+        match number {
+            1 => Some(Self::Budget),
+            _ => None,
+        }
+    }
 }
 
 /// A task of a language runtime.
@@ -574,6 +631,7 @@ records! {
     Marker => Markers,
     Task => Tasks,
     TaskWait => TaskWaits,
+    Gap => Gaps,
 }
 
 const _: () = assert!(size_of::<Frame>() == 16);

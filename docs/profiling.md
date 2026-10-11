@@ -19,11 +19,11 @@ uscope report --tree app.usprof   # the call tree
 It follows every thread and every child process the program starts. A
 preset chooses how much to record:
 
-| Preset | Samples a second | Stack copied | Off-CPU | For |
-| --- | --- | --- | --- | --- |
-| `--preset prod` | 49 | auto | off | production: a fraction of a percent of one CPU |
-| `--preset dev` (the default) | 999 | 16 KiB | on | development: unwinds code without frame pointers |
-| `--preset max` | 9999 | 16 KiB | on | short runs that need every detail |
+| Preset | Samples a second | Stack copied | Off-CPU | Budget | For |
+| --- | --- | --- | --- | --- | --- |
+| `--preset prod` | 49 | auto | off | 1% of a CPU | production: a fraction of a percent of one CPU |
+| `--preset dev` (the default) | 999 | 16 KiB | on | none | development: unwinds code without frame pointers |
+| `--preset max` | 9999 | 16 KiB | on | none | short runs that need every detail |
 
 In auto mode a sample copies 512 bytes of stack when the frame-pointer
 chain carries every stack through the program, and 16 KiB otherwise. Before
@@ -50,6 +50,34 @@ are made smaller, down to the size that holds two samples, and the profile
 records the size it got. A sample that finds its ring full is lost, and
 the profile counts every one: the count comes from the kernel's events,
 which count losses a ring never reports.
+
+## What recording costs
+
+A report says how much CPU time uscope spent recording, and how much of
+that was reading the program's debug information, which happens once per
+file:
+
+```
+Recording took 0.012 s of uscope's CPU time, 0.43% of one CPU, 0.001 s of it reading debug information.
+```
+
+A budget holds that cost down. Each second, uscope measures what the
+second's sampling cost it and chooses how much of the next second to
+sample: all of it while that fits, and otherwise one span, at a random
+offset so it cannot keep step with a program that works in periodic
+bursts. Between spans every event is off, so the program pays nothing for
+sampling either. The first second is never judged, as it builds what
+unwinding reuses. A pause is a gap in the profile: no sample, count, or
+off-CPU interval comes from one, the timeline shades it, and the report
+says how much was paused and how often the share changed:
+
+```
+Sampling paused for 1.389 s of the 3.453 s recorded, to hold uscope to 5% of a CPU; the share sampled changed once.
+```
+
+`--budget PERCENT` sets the budget as a share of one CPU, and `--budget 0`
+lifts it. A recording without one that uses more than 5% of a CPU says
+that `--preset prod` would hold it to 1%.
 
 ## Time off the CPU
 

@@ -802,6 +802,7 @@ pub struct ProfileTimelineQuery {
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileSummary {
     pub id: String,
     pub name: String,
@@ -822,6 +823,22 @@ pub struct ProfileSummary {
     pub truncations: Vec<ProfileCount>,
     /// How the profile was recorded, by setting.
     pub settings: Vec<ProfileSetting>,
+    /// Nanoseconds of CPU time uscope spent recording, and the part of it
+    /// spent reading debug information.
+    pub recorder_cpu: u64,
+    pub recorder_loading: u64,
+    /// Spans not sampled, in nanoseconds from the start.
+    pub gaps: Vec<[i64; 2]>,
+    /// Each change the budget made, from the start.
+    pub budget_changes: Vec<ProfileMarker>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileMarker {
+    /// Nanoseconds from the start.
+    pub time: i64,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1898,6 +1915,7 @@ mod tests {
         ProfileCost::decl,
         ProfileTimeline::decl,
         ProfileLane::decl,
+        ProfileMarker::decl,
         RecordProfile::decl,
         RecordPreset::decl,
         RecordStarted::decl,

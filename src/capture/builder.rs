@@ -6,9 +6,9 @@ use foldhash::HashMap;
 
 use super::Capture;
 use super::records::{
-    Account, Frame, FrameKind, Function, Line, Mapping, Marker, Module, NONE, OffCpu, Plot,
-    Process, Range, Sample, Setting, Site, Stack, Task, TaskWait, Thread, ThreadRange, Truncation,
-    Zone, ZoneRange,
+    Account, Frame, FrameKind, Function, Gap, GapReason, Line, Mapping, Marker, MarkerKind, Module,
+    NONE, OffCpu, Plot, Process, Range, Sample, Setting, Site, Stack, Task, TaskWait, Thread,
+    ThreadRange, Truncation, Zone, ZoneRange,
 };
 use crate::image::{StrId, StringsBuilder};
 
@@ -55,6 +55,7 @@ pub struct CaptureBuilder {
     tasks: Vec<Task>,
     task_index: HashMap<(u32, u64), u32>,
     task_waits: Vec<TaskWait>,
+    gaps: Vec<Gap>,
 }
 
 impl CaptureBuilder {
@@ -385,6 +386,28 @@ impl CaptureBuilder {
         }
     }
 
+    /// Marks an instant of the whole recording, saying what happened.
+    pub fn marker(&mut self, time: i64, kind: MarkerKind, text: &str) {
+        let text = self.string(text);
+        self.markers.push(Marker {
+            time: time.into(),
+            thread: NONE.into(),
+            site: NONE.into(),
+            text: text.into(),
+            kind: kind as u8,
+            reserved: [0; 3],
+        });
+    }
+
+    /// Records that nothing was sampled from `start` to `end`.
+    pub fn gap(&mut self, start: i64, end: i64, reason: GapReason) {
+        self.gaps.push(Gap {
+            start: start.into(),
+            end: end.into(),
+            reason: reason as u8,
+        });
+    }
+
     /// Records where a task waited.
     pub fn task_wait(&mut self, task: u32, time: i64, weight: u64, stack: u32, state: &str) {
         let state = self.string(state);
@@ -604,6 +627,7 @@ impl CaptureBuilder {
             let stack = Remap::get(&map.stacks, wait.stack.get());
             self.task_wait(task, wait.time.get(), wait.weight.get(), stack, state);
         }
+        self.gaps.extend_from_slice(&capture.gaps);
     }
 
     /// The finished capture: each thread's rows in time order, zones by
@@ -656,6 +680,8 @@ impl CaptureBuilder {
         plots.sort_by_key(|plot| (plot.site.get(), plot.time.get()));
         let mut markers = self.markers;
         markers.sort_by_key(|marker| (marker.time.get(), marker.thread.get()));
+        let mut gaps = self.gaps;
+        gaps.sort_by_key(|gap| gap.start.get());
         let mut task_waits = self.task_waits;
         task_waits.sort_by_key(|wait| (wait.time.get(), wait.task.get()));
         let mut strings = self.strings;
@@ -703,6 +729,7 @@ impl CaptureBuilder {
             markers,
             tasks: self.tasks,
             task_waits,
+            gaps,
         }
     }
 }

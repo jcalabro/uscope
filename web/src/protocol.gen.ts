@@ -914,7 +914,20 @@ truncations: Array<ProfileCount>,
 /**
  * How the profile was recorded, by setting.
  */
-settings: Array<ProfileSetting>, };
+settings: Array<ProfileSetting>, 
+/**
+ * Nanoseconds of CPU time uscope spent recording, and the part of it
+ * spent reading debug information.
+ */
+recorderCpu: number, recorderLoading: number, 
+/**
+ * Spans not sampled, in nanoseconds from the start.
+ */
+gaps: Array<[number, number]>, 
+/**
+ * Each change the budget made, from the start.
+ */
+budgetChanges: Array<ProfileMarker>, };
 
 export type ProfileThread = { row: number, pid: number, tid: number, name: string | null, samples: number, weight: number, 
 /**
@@ -967,6 +980,12 @@ export type ProfileTimeline = {
 range: [number, number], lanes: Array<ProfileLane>, };
 
 export type ProfileLane = { thread: number, weights: Array<number>, blocked: Array<number>, preempted: Array<number>, };
+
+export type ProfileMarker = { 
+/**
+ * Nanoseconds from the start.
+ */
+time: number, text: string, };
 
 export type RecordProfile = { program: string, arguments: Array<string>, 
 /**

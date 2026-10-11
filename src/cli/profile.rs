@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use uscope::profiler::budget::Budget;
 use uscope::profiler::{Preset, Profile, RecordOptions, SampleSource, StackCopy, StackView, Watch};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -46,6 +47,11 @@ pub struct RecordArgs {
     /// preempted, over the preset's choice: on except in production.
     #[arg(long, value_enum)]
     off_cpu: Option<OnOff>,
+    /// Hold uscope's own CPU time to PERCENT of one CPU by sampling less of
+    /// each second, over the preset's: 1 in production, and otherwise
+    /// none. 0 lifts it.
+    #[arg(long, value_name = "PERCENT")]
+    budget: Option<f64>,
     /// Sample each call of the function SYMBOL names, instead of CPU time.
     #[arg(long, value_name = "SYMBOL", conflicts_with = "rate")]
     function: Option<String>,
@@ -121,6 +127,16 @@ fn record(args: &RecordArgs) -> Result<i32> {
     }
     if let Some(off_cpu) = args.off_cpu {
         options.off_cpu = matches!(off_cpu, OnOff::On);
+    }
+    if let Some(percent) = args.budget {
+        anyhow::ensure!(
+            percent.is_finite() && percent >= 0.0,
+            "--budget is a percentage of one CPU"
+        );
+        options.budget = (percent > 0.0).then_some(Budget {
+            cpu: percent / 100.0,
+            ..Budget::PRODUCTION
+        });
     }
     let stop = Arc::new(AtomicBool::new(false));
     // Ctrl-C reaches a started program too, which ends as it chooses; an
@@ -289,6 +305,53 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
     Ok(())
 }
 
+/// What recording cost uscope, and how the budget held it.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "seconds and percentages need no more precision than f64's"
+)]
+fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
+    let seconds = |nanoseconds: u64| nanoseconds as f64 / 1e9;
+    let (start, end) = profile.span();
+    let span = u64::try_from(end - start).unwrap_or(0).max(1);
+    let (used, loading) = profile.recorder_cpu();
+    if used > 0 {
+        writeln!(
+            out,
+            "Recording took {:.3} s of uscope's CPU time, {:.2}% of one CPU, {:.3} s of it \
+             reading debug information.",
+            seconds(used),
+            used as f64 * 100.0 / span as f64,
+            seconds(loading)
+        )?;
+    }
+    let gaps = profile.gaps();
+    if !gaps.is_empty() {
+        let paused: u64 = gaps
+            .iter()
+            .map(|(start, end)| u64::try_from(end - start).unwrap_or(0))
+            .sum();
+        writeln!(
+            out,
+            "Sampling paused for {:.3} s of the {:.3} s recorded, to hold uscope to {}; \
+             the share sampled changed {}.",
+            seconds(paused),
+            seconds(span),
+            profile.setting("budget").unwrap_or("its budget"),
+            match profile.budget_changes().len() {
+                1 => "once".to_owned(),
+                changes => format!("{changes} times"),
+            }
+        )?;
+    } else if profile.setting("budget") == Some("none") && used * 20 > span {
+        writeln!(
+            out,
+            "That is more than --preset prod allows, which holds uscope to 1% of a CPU."
+        )?;
+    }
+    Ok(())
+}
+
 /// What a report's profile holds, and how much of the program it covers.
 #[expect(
     clippy::cast_precision_loss,
@@ -313,14 +376,17 @@ fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
         writeln!(out, "The kernel dropped {lost} samples.")?;
     }
     let counted = profile.counted();
+    let paused = !profile.gaps().is_empty();
     if unit == "nanoseconds" && counted > total {
         writeln!(
             out,
-            "The samples cover {:.0}% of the {} of CPU time the program ran.",
+            "The samples cover {:.0}% of the {} of CPU time the program ran{}.",
             total as f64 * 100.0 / counted as f64,
-            weight(counted)
+            weight(counted),
+            if paused { " while sampling was on" } else { "" }
         )?;
     }
+    cost(profile, out)?;
     if profile.setting("off-CPU") == Some("on") {
         let threads = profile.threads();
         let blocked = threads.iter().map(|thread| thread.blocked).sum::<u64>();

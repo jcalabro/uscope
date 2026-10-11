@@ -7,12 +7,14 @@ use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use super::budget::{Budget, Controller, Observation, STEPS};
 use super::calls::{self, Calls};
 use super::record::{self, Sites};
 use super::{
     DEEP_STACK_COPY, Profile, RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource, StackCopy,
 };
 use crate::backend::perf;
+use crate::capture::records::MarkerKind;
 
 /// A recording and how its program ended.
 #[derive(Debug)]
@@ -101,6 +103,7 @@ pub fn record_watched(
         &mut events,
         watch,
         started,
+        options.budget,
         || exit.is_finished(),
         || {
             record!("record: stopping, killing {pid}");
@@ -165,6 +168,7 @@ pub fn record_attached(
         &mut events,
         watch,
         true,
+        options.budget,
         || process.exited(),
         || {
             record!("record: stopping, detaching from {pid}");
@@ -216,22 +220,34 @@ fn settings(
         ("stack bytes", stack_bytes.to_string()),
         ("stack copy", stack_copy),
         ("off-CPU", if options.off_cpu { "on" } else { "off" }.into()),
+        (
+            "budget",
+            options.budget.map_or_else(
+                || "none".into(),
+                |budget| format!("{}% of a CPU", budget.cpu * 100.0),
+            ),
+        ),
     ] {
         builder.setting(key, &value);
     }
 }
 
 /// Drains `events` into `processor` until `ended`, publishing as `watch`
-/// asks once the program has `started`. When `watch` stops the recording,
-/// `stop` ends it at once when it says so, or else waits for `ended`.
+/// asks, and holding to `budget`, once the program has started. When
+/// `watch` stops the recording, `stop` ends it at once when it says so, or
+/// else waits for `ended`.
 fn drive(
     processor: &mut record::Processor,
     events: &mut perf::Events,
     watch: &mut Watch<'_>,
     started: bool,
+    budget: Option<Budget>,
     mut ended: impl FnMut() -> bool,
     mut stop: impl FnMut() -> bool,
 ) {
+    let mut pacer = budget
+        .filter(|_| started)
+        .map(|budget| Pacer::new(budget, monotonic(), processor));
     if started {
         (watch.publish)(Profile {
             capture: processor.snapshot(),
@@ -252,7 +268,11 @@ fn drive(
         // the next drain begins, but for a stalled CPU.
         let watermark = monotonic().saturating_sub(WATERMARK_DELAY);
         if !finished {
-            events.wait(Duration::from_millis(10));
+            let mut wait = Duration::from_millis(10);
+            if let Some(pacer) = &mut pacer {
+                wait = wait.min(pacer.pace(monotonic(), events, processor));
+            }
+            events.wait(wait);
         }
         buffer.clear();
         events.drain(&mut buffer);
@@ -273,8 +293,125 @@ fn drive(
             wait = (wait * 2).min(watch.every);
         }
     }
-    events.disable();
+    events.enable(false);
+    if let Some(pacer) = pacer {
+        pacer.finish(monotonic(), processor);
+    }
     processor.counts(events.counts());
+}
+
+/// Samples a share of each budget period, in one span at a random offset
+/// so that it cannot keep step with a periodic program, and asks the
+/// controller once a period how large the next share is.
+struct Pacer {
+    budget: Budget,
+    controller: Controller,
+    /// When the period began, and the span of it to sample.
+    period: u64,
+    window: (u64, u64),
+    /// Since when sampling has been on, or off.
+    on_since: Option<u64>,
+    paused_since: Option<u64>,
+    /// What the period has sampled and cost so far.
+    sampled: u64,
+    cpu: Duration,
+    loading: Duration,
+    random: u64,
+}
+
+impl Pacer {
+    fn new(budget: Budget, now: u64, processor: &record::Processor) -> Self {
+        Self {
+            budget,
+            controller: Controller::default(),
+            period: now,
+            window: (now, u64::MAX),
+            on_since: Some(now),
+            paused_since: None,
+            sampled: 0,
+            cpu: record::thread_cpu(),
+            loading: processor.loading(),
+            random: now | 1,
+        }
+    }
+
+    /// Turns sampling on or off as the schedule says at `now`, and says
+    /// how long until it next changes.
+    fn pace(
+        &mut self,
+        now: u64,
+        events: &perf::Events,
+        processor: &mut record::Processor,
+    ) -> Duration {
+        let length = u64::try_from(self.budget.period.as_nanos())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        if now >= self.period.saturating_add(length) {
+            self.next_period(now, length, processor);
+        }
+        let (from, until) = self.window;
+        let wanted = from <= now && now < until;
+        if wanted && let Some(paused) = self.paused_since.take() {
+            processor.gap(paused, monotonic());
+            events.enable(true);
+            self.on_since = Some(monotonic());
+        } else if !wanted && let Some(on) = self.on_since.take() {
+            events.enable(false);
+            let off = monotonic();
+            self.sampled += off.saturating_sub(on);
+            self.paused_since = Some(off);
+        }
+        let next = [from, until, self.period.saturating_add(length)]
+            .into_iter()
+            .find(|edge| *edge > now)
+            .unwrap_or(now);
+        Duration::from_nanos(next - now)
+    }
+
+    /// Ends the period at `now`, lets the controller choose the share of
+    /// the next one, and places its window.
+    fn next_period(&mut self, now: u64, length: u64, processor: &mut record::Processor) {
+        if let Some(on) = &mut self.on_since {
+            self.sampled += now.saturating_sub(*on);
+            *on = now;
+        }
+        let cpu = record::thread_cpu();
+        let loading = processor.loading();
+        let observed = Observation {
+            cpu: cpu
+                .saturating_sub(self.cpu)
+                .saturating_sub(loading.saturating_sub(self.loading)),
+            sampled: Duration::from_nanos(self.sampled),
+            period: Duration::from_nanos(now.saturating_sub(self.period)),
+        };
+        (self.cpu, self.loading, self.sampled, self.period) = (cpu, loading, 0, now);
+        if let Some(decision) = self.controller.step(self.budget, observed) {
+            let text = format!(
+                "sampling {:.1}% of each period: recording used {:.2}% of a CPU, against a budget of {:.2}%",
+                f64::from(decision.steps) * 100.0 / f64::from(STEPS),
+                decision.used * 100.0,
+                self.budget.cpu * 100.0
+            );
+            record!("record: budget: {text}");
+            processor
+                .builder()
+                .marker(now.cast_signed(), MarkerKind::Budget, &text);
+        }
+        let span = length / u64::from(STEPS) * u64::from(self.controller.steps());
+        // xorshift: a period's offset needs only to be unpredictable.
+        self.random ^= self.random << 13;
+        self.random ^= self.random >> 7;
+        self.random ^= self.random << 17;
+        let offset = self.random % (length - span + 1);
+        self.window = (now + offset, now + offset + span);
+    }
+
+    /// Ends the recording at `now`: a pause it ends in is a gap to the end.
+    fn finish(self, now: u64, processor: &mut record::Processor) {
+        if let Some(paused) = self.paused_since {
+            processor.gap(paused, now);
+        }
+    }
 }
 
 /// The event that takes `source`'s samples in `program`, and for a

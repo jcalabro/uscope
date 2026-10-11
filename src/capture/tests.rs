@@ -34,6 +34,12 @@ fn sample_capture(offset: i64) -> Capture {
     builder.off_cpu(worker, offset + 4, 2, false);
     builder.off_cpu(worker, offset + 1, 1, true);
     builder.count(AccountKind::LostSamples as u32, 2);
+    builder.gap(offset + 6, offset + 7, GapReason::Budget);
+    builder.marker(
+        offset + 6,
+        MarkerKind::Budget,
+        "sampling half of each second",
+    );
     let site = builder.site("handle", "app.rs", 9, module, 1);
     builder.zone(
         worker,
@@ -81,6 +87,10 @@ fn a_capture_seals_reads_back_and_files_merge_chunks_by_identity() {
             zone.start = (zone.start.get() + 50).into();
             zone.end = (zone.end.get() + 50).into();
         }
+        for gap in &mut capture.gaps {
+            gap.start = (gap.start.get() + 50).into();
+            gap.end = (gap.end.get() + 50).into();
+        }
         capture
     };
     writer.chunk(&later.seal().expect("seal")).expect("chunk");
@@ -94,6 +104,7 @@ fn a_capture_seals_reads_back_and_files_merge_chunks_by_identity() {
     assert_eq!(merged.threads.len(), 2);
     assert_eq!(merged.samples.len(), 6);
     assert_eq!(merged.zones.len(), 2);
+    assert_eq!(merged.gaps.len(), 2);
     assert_eq!(merged.account(AccountKind::LostSamples as u32), 4);
     assert_eq!(merged.frame_lines(0).len(), 1);
 
@@ -128,6 +139,9 @@ fn validation_rejects_every_out_of_bounds_reference() {
         broken.validate().is_err(),
         "an off-CPU interval of no cause"
     );
+    let mut broken = valid.clone();
+    broken.gaps[0].end = (-1).into();
+    assert!(broken.validate().is_err(), "a gap ending before it begins");
     let mut broken = valid.clone();
     broken.frames[0].module = 9.into();
     assert!(broken.validate().is_err(), "a frame of no module");

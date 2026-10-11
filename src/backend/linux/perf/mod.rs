@@ -225,10 +225,11 @@ impl Events {
             })
     }
 
-    /// Stops every event sampling.
-    pub fn disable(&self) {
+    /// Starts or stops every event, and every event a thread inherited
+    /// from one, counting and sampling.
+    pub fn enable(&self, on: bool) {
         for fd in self.rings.iter().map(sys::Ring::fd).chain(&self.followers) {
-            let _ = sys::enable(fd, false);
+            let _ = sys::enable(fd, on);
         }
     }
 }

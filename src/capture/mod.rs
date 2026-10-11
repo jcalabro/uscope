@@ -33,7 +33,7 @@ pub struct CaptureFormat;
 
 /// What a capture's tables mean: bump it with any change to what is
 /// stored.
-pub const CAPTURE_REVISION: u32 = 4;
+pub const CAPTURE_REVISION: u32 = 5;
 
 impl Format for CaptureFormat {
     type Kind = CaptureTable;
@@ -91,6 +91,7 @@ pub struct Capture {
     pub markers: Vec<Marker>,
     pub tasks: Vec<Task>,
     pub task_waits: Vec<TaskWait>,
+    pub gaps: Vec<Gap>,
 }
 
 /// The limits a capture is read within.
@@ -200,6 +201,7 @@ impl Capture {
         put!(markers, Markers);
         put!(tasks, Tasks);
         put!(task_waits, TaskWaits);
+        put!(gaps, Gaps);
         tables.seal(TargetDescription::X86_64)
     }
 
@@ -235,6 +237,7 @@ impl Capture {
             markers: rows_of(table(CaptureTable::Markers)),
             tasks: rows_of(table(CaptureTable::Tasks)),
             task_waits: rows_of(table(CaptureTable::TaskWaits)),
+            gaps: rows_of(table(CaptureTable::Gaps)),
         };
         capture.validate().map_err(ImageError::Malformed)?;
         Ok(capture)
@@ -433,6 +436,9 @@ impl Capture {
             index(plot.thread.get(), self.threads.len(), "a plot's thread")?;
         }
         for marker in &self.markers {
+            if MarkerKind::from_number(marker.kind).is_none() {
+                return Err(format!("a marker has unknown kind {}", marker.kind));
+            }
             index(marker.thread.get(), self.threads.len(), "a marker's thread")?;
             index(marker.site.get(), self.sites.len(), "a marker's site")?;
             string(marker.text.get(), "a marker's text")?;
@@ -446,6 +452,21 @@ impl Capture {
             index(wait.task.get(), self.tasks.len(), "a wait's task")?;
             index(wait.stack.get(), self.stacks.len(), "a wait's stack")?;
             string(wait.state.get(), "a wait's state")?;
+        }
+        for gap in &self.gaps {
+            if GapReason::from_number(gap.reason).is_none() {
+                return Err(format!("a gap has unknown reason {}", gap.reason));
+            }
+            if gap.end.get() < gap.start.get() {
+                return Err("a gap ends before it begins".into());
+            }
+        }
+        if self
+            .gaps
+            .windows(2)
+            .any(|pair| pair[1].start.get() < pair[0].end.get())
+        {
+            return Err("gaps overlap or are out of time order".into());
         }
         Ok(())
     }

@@ -96,6 +96,13 @@ export function Timeline() {
         }
       }
     }
+    // Spans not sampled cover every lane.
+    context.fillStyle = token("--line");
+    context.globalAlpha = 0.7;
+    for (const [from, to] of summary.gaps) {
+      const x = (plot * from) / span;
+      context.fillRect(x, 0, Math.max((plot * (to - from)) / span, 1), height);
+    }
     context.globalAlpha = 1;
     const shown = dragging
       ? [Math.min(dragging.from, dragging.to), Math.max(dragging.from, dragging.to)]
@@ -109,7 +116,7 @@ export function Timeline() {
       context.fillRect(to, 0, plot - to, height);
       context.globalAlpha = 1;
     }
-  }, [answer.data, threads, plot, height, span, buckets, selected, range, dragging]);
+  }, [answer.data, threads, plot, height, span, buckets, selected, range, dragging, summary.gaps]);
 
   const time = (event: React.PointerEvent) => {
     const bounds = event.currentTarget.getBoundingClientRect();

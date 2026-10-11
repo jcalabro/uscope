@@ -12,7 +12,9 @@ use super::calls::Branch;
 use super::frame_pointers::{CallSites, call_sites};
 use crate::backend::perf::{self, decode};
 use crate::capture::builder::LineInput;
-use crate::capture::records::{AccountKind, FrameKind, Mapping, NONE, Truncation, role_number};
+use crate::capture::records::{
+    AccountKind, FrameKind, GapReason, Mapping, NONE, Truncation, role_number,
+};
 use crate::capture::{Capture, CaptureBuilder};
 use crate::debug_info::{DebugFileSearch, DebugInfo};
 use crate::unwind::UnwindModule;
@@ -84,6 +86,14 @@ pub struct Processor {
     /// Each thread off its CPU since a switch: its row, when it left, and
     /// whether it was preempted.
     switched_out: BTreeMap<u32, (u32, u64, bool)>,
+    /// Where each gap in sampling began, in time order, and where the
+    /// last one ended: a recording that ends paused ends there.
+    gaps: Vec<u64>,
+    gaps_end: u64,
+    /// The CPU time of this thread when the processor began, and what
+    /// loading images has taken of it since.
+    began: std::time::Duration,
+    loading: std::time::Duration,
 }
 
 impl Processor {
@@ -108,6 +118,10 @@ impl Processor {
             chain: Vec::new(),
             frames: Vec::new(),
             switched_out: BTreeMap::new(),
+            gaps: Vec::new(),
+            gaps_end: 0,
+            began: thread_cpu(),
+            loading: std::time::Duration::ZERO,
         }
     }
 
@@ -288,9 +302,13 @@ impl Processor {
                 if out {
                     self.switched_out.insert(tid, (thread, time, preempted));
                 } else if let Some((thread, left, preempted)) = self.switched_out.remove(&tid) {
-                    let duration = time.saturating_sub(left);
-                    self.builder
-                        .off_cpu(thread, left.cast_signed(), duration, preempted);
+                    let back = time.min(self.next_gap(left));
+                    self.builder.off_cpu(
+                        thread,
+                        left.cast_signed(),
+                        back.saturating_sub(left),
+                        preempted,
+                    );
                 }
                 // A thread that comes back unseen leaving left before the
                 // recording could see it, so when is unknown.
@@ -398,6 +416,13 @@ impl Processor {
     /// Adds the image of a module whose file holds `data`, if it could be
     /// read.
     fn add_image(&mut self, path: &std::path::Path, data: Option<Vec<u8>>) -> usize {
+        let began = thread_cpu();
+        let image = self.load_image(path, data);
+        self.loading += thread_cpu().saturating_sub(began);
+        image
+    }
+
+    fn load_image(&mut self, path: &std::path::Path, data: Option<Vec<u8>>) -> usize {
         let id = ModuleImageId::new(u32::try_from(self.images.len()).unwrap_or(u32::MAX));
         let build_id = data.as_ref().and_then(|data| {
             object::File::parse(data.as_slice())
@@ -520,12 +545,49 @@ impl Processor {
     }
 
     /// Ends each interval of a thread still off its CPU where the
-    /// recording has reached.
+    /// recording has reached, and charges the CPU time recording took.
     fn still_off(&self, builder: &mut CaptureBuilder) {
         for &(thread, left, preempted) in self.switched_out.values() {
-            let duration = self.latest.saturating_sub(left);
-            builder.off_cpu(thread, left.cast_signed(), duration, preempted);
+            let back = self.latest.min(self.next_gap(left));
+            builder.off_cpu(
+                thread,
+                left.cast_signed(),
+                back.saturating_sub(left),
+                preempted,
+            );
         }
+        let nanoseconds = |time: std::time::Duration| u64::try_from(time.as_nanos()).unwrap_or(0);
+        for (kind, total) in [
+            (
+                AccountKind::RecorderCpu,
+                thread_cpu().saturating_sub(self.began),
+            ),
+            (AccountKind::RecorderLoading, self.loading),
+        ] {
+            let charged = builder.account(kind as u32);
+            builder.count(kind as u32, nanoseconds(total).saturating_sub(charged));
+        }
+    }
+
+    /// Records that every event was off from `start` to `end`. A thread
+    /// that left its CPU before a gap may have come back unseen in it, so
+    /// its interval ends where the gap begins.
+    pub fn gap(&mut self, start: u64, end: u64) {
+        self.gaps.push(start);
+        self.gaps_end = self.gaps_end.max(end);
+        self.builder
+            .gap(start.cast_signed(), end.cast_signed(), GapReason::Budget);
+    }
+
+    /// Where the first gap after `time` began, or the end of time.
+    fn next_gap(&self, time: u64) -> u64 {
+        let next = self.gaps.partition_point(|start| *start <= time);
+        self.gaps.get(next).copied().unwrap_or(u64::MAX)
+    }
+
+    /// The CPU time loading images has taken.
+    pub const fn loading(&self) -> std::time::Duration {
+        self.loading
     }
 
     /// Gives each frame not yet symbolized its lines, and the capture its
@@ -533,7 +595,8 @@ impl Processor {
     fn symbolize_new(&mut self) {
         let start = self.first.unwrap_or(0);
         self.builder.setting("start", &start.to_string());
-        self.builder.setting("end", &self.latest.to_string());
+        let end = self.latest.max(self.gaps_end);
+        self.builder.setting("end", &end.to_string());
         let images: BTreeMap<u32, usize> = self
             .images
             .iter()
@@ -704,4 +767,17 @@ pub fn truncation_counts(capture: &Capture) -> Vec<(Truncation, u64)> {
         })
         .filter(|(_, count)| *count > 0)
         .collect()
+}
+
+/// The CPU time this thread has taken.
+pub fn thread_cpu() -> std::time::Duration {
+    nix::time::clock_gettime(nix::time::ClockId::CLOCK_THREAD_CPUTIME_ID).map_or(
+        std::time::Duration::ZERO,
+        |time| {
+            std::time::Duration::new(
+                u64::try_from(time.tv_sec()).unwrap_or(0),
+                u32::try_from(time.tv_nsec()).unwrap_or(0),
+            )
+        },
+    )
 }

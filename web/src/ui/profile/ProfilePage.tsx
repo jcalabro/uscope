@@ -277,6 +277,8 @@ function ProfileFoot({ summary }: { summary: ProfileSummary }) {
   const setting = (name: string) => summary.settings.find((each) => each.name === name)?.value;
   const source = setting("source");
   const stack = setting("stack bytes");
+  const paused = summary.gaps.reduce((sum, [from, to]) => sum + (to - from), 0);
+  const span = Math.max(summary.duration, 1);
   return (
     <div className="profile-foot" data-testid="accounting">
       <span>{formatWeight(summary.weight, summary.unit)} sampled</span>
@@ -292,6 +294,23 @@ function ProfileFoot({ summary }: { summary: ProfileSummary }) {
       >
         truncated {formatPercent(truncated, summary.samples)}
       </span>
+      {summary.recorderCpu > 0 ? (
+        <span
+          title={`${formatDuration(summary.recorderCpu)} of CPU time recording, ${formatDuration(summary.recorderLoading)} of it reading debug information`}
+        >
+          uscope {formatPercent(summary.recorderCpu, span)} of a CPU
+        </span>
+      ) : null}
+      {summary.gaps.length > 0 ? (
+        <span
+          className="warn"
+          title={summary.budgetChanges
+            .map((change) => `${formatDuration(change.time)}: ${change.text}`)
+            .join("\n")}
+        >
+          paused {formatPercent(paused, span)} for the budget
+        </span>
+      ) : null}
     </div>
   );
 }

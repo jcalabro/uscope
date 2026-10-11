@@ -2,6 +2,7 @@
 //! time, from outside the program, into a capture that can be saved,
 //! loaded, and queried.
 
+pub mod budget;
 mod calls;
 mod frame_pointers;
 mod record;
@@ -16,7 +17,7 @@ pub use crate::analysis::{
 use std::path::{Path, PathBuf};
 
 use crate::backend::perf;
-use crate::capture::records::{FrameKind, NONE, Truncation};
+use crate::capture::records::{AccountKind, FrameKind, MarkerKind, NONE, Truncation};
 use crate::capture::{Capture, file};
 
 /// How much a recording costs the program, and how much it sees.
@@ -49,6 +50,16 @@ impl Preset {
     #[must_use]
     pub const fn off_cpu(self) -> bool {
         !matches!(self, Self::Production)
+    }
+
+    /// The CPU time uscope may spend recording: in production, one
+    /// percent of a CPU; elsewhere, whatever it takes.
+    #[must_use]
+    pub const fn budget(self) -> Option<budget::Budget> {
+        match self {
+            Self::Production => Some(budget::Budget::PRODUCTION),
+            Self::Development | Self::Maximum => None,
+        }
     }
 
     /// How much stack each sample copies.
@@ -112,7 +123,7 @@ impl std::fmt::Display for SampleSource {
 }
 
 /// How to record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecordOptions {
     pub source: SampleSource,
     pub stack: StackCopy,
@@ -125,6 +136,9 @@ pub struct RecordOptions {
     pub max_events: usize,
     /// Whether to record each interval a thread spends off its CPU.
     pub off_cpu: bool,
+    /// The CPU time uscope may spend recording, which it holds to by
+    /// sampling less of each period: none bounds it.
+    pub budget: Option<budget::Budget>,
     /// Directories searched for separate debug files.
     pub debug_directories: Vec<PathBuf>,
 }
@@ -141,6 +155,7 @@ impl RecordOptions {
             ring_pages: 128,
             max_events: 16_384,
             off_cpu: preset.off_cpu(),
+            budget: preset.budget(),
             debug_directories: Vec::new(),
         }
     }
@@ -491,6 +506,44 @@ impl Profile {
     #[must_use]
     pub fn off_cpu_lanes(&self, query: &Query, buckets: usize) -> Vec<OffCpuLane> {
         crate::analysis::off_cpu(&self.capture, query, buckets)
+    }
+
+    /// Each span the recording did not sample, as its start and end, in
+    /// time order.
+    #[must_use]
+    pub fn gaps(&self) -> Vec<(i64, i64)> {
+        self.capture
+            .gaps
+            .iter()
+            .map(|gap| (gap.start.get(), gap.end.get()))
+            .collect()
+    }
+
+    /// Each time the budget changed how much was sampled, and what it says.
+    #[must_use]
+    pub fn budget_changes(&self) -> Vec<(i64, String)> {
+        let capture = &self.capture;
+        capture
+            .markers
+            .iter()
+            .filter(|marker| marker.kind == MarkerKind::Budget as u8)
+            .map(|marker| {
+                (
+                    marker.time.get(),
+                    capture.string(marker.text.get()).to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// Nanoseconds of CPU time uscope spent recording, and the part of it
+    /// spent reading programs' debug information.
+    #[must_use]
+    pub fn recorder_cpu(&self) -> (u64, u64) {
+        (
+            self.capture.account(AccountKind::RecorderCpu as u32),
+            self.capture.account(AccountKind::RecorderLoading as u32),
+        )
     }
 
     /// Every interval a thread spent off its CPU, by thread and then time.

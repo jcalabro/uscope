@@ -449,6 +449,21 @@ fn summary(entry: &Entry) -> ProfileSummary {
             .collect(),
         lost: profile.lost_samples(),
         throttles: profile.throttles(),
+        recorder_cpu: profile.recorder_cpu().0,
+        recorder_loading: profile.recorder_cpu().1,
+        gaps: profile
+            .gaps()
+            .into_iter()
+            .map(|(from, to)| [from - start, to - start])
+            .collect(),
+        budget_changes: profile
+            .budget_changes()
+            .into_iter()
+            .map(|(time, text)| protocol::ProfileMarker {
+                time: time - start,
+                text,
+            })
+            .collect(),
         truncations: profile
             .truncations()
             .into_iter()

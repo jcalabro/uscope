@@ -88,7 +88,10 @@ test("a profile is explored, and its address opens the same view", async ({
   await expect(page.getByRole("button", { name: /^Remove .* – / })).toBeVisible();
 });
 
-test("each thread's lane says how long it was off its CPU", async ({ page, uscope }, info) => {
+test("each thread's lane says how long it was off its CPU, and the footer what recording cost", async ({
+  page,
+  uscope,
+}, info) => {
   const file = info.outputPath("off-cpu.usprof");
   execFileSync(
     path.join(root, "target", "debug", "uscope"),
@@ -108,6 +111,7 @@ test("each thread's lane says how long it was off its CPU", async ({ page, uscop
   for (const spinner of await spinners.all()) {
     await expect(spinner).toHaveAttribute("title", /, (?!0 ns)[\d.]+ \S+ preempted$/);
   }
+  await expect(page.getByTestId("accounting")).toContainText(/uscope [\d.]+% of a CPU/);
 });
 
 test("a program recorded from the page grows live, stops, and saves", async ({ page, uscope }) => {
