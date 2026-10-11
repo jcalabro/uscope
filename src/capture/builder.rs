@@ -225,6 +225,25 @@ impl CaptureBuilder {
         self.frame(FrameKind::Truncated, module, reason as u64, 0)
     }
 
+    /// The frame of a future a suspended task awaits, named by what it
+    /// waits for.
+    pub fn awaited(&mut self, text: &str) -> u32 {
+        let name = self.string(text);
+        let frame = self.frame(FrameKind::Awaited, NONE, u64::from(name), 0);
+        if !self.symbolized(frame) {
+            let line = LineInput {
+                function: text,
+                file: None,
+                line: 0,
+                column: 0,
+                declared: None,
+                role: 0,
+            };
+            self.symbolize(frame, NONE, &[line]);
+        }
+        frame
+    }
+
     /// The stack node of `frame` called from `parent`.
     pub fn child(&mut self, parent: u32, frame: u32) -> u32 {
         if let Some(&stack) = self.stack_index.get(&(parent, frame)) {

@@ -234,6 +234,39 @@ A task's logical stack needs the frames from its dispatch inward. With
 frame pointers, so build async Rust with `-C force-frame-pointers=yes` to
 profile it in production.
 
+## Where tasks wait
+
+A task that waits runs no code, so no CPU sample sees it. `--task-snapshots
+SECONDS` stops the program that often, as the debugger's attach does, lists
+every task of its runtimes, reads each waiting task's stack, and lets the
+program go on. A goroutine's stack is the one it parked on; a suspended
+tokio task's is its chain of awaits, from the future it awaits out to its
+root:
+
+```
+awaiting tokio::sync::oneshot::Receiver<u64>
+app::waiting::{closure#0}
+app::serve::{closure#0}
+```
+
+Each wait stands for the time since the snapshot before, so a task's waits
+add up to how long it waited, to within a snapshot. Running tasks are left
+out, as the CPU samples show them, and so are the runtime's own, such as
+Go's garbage collector's workers. Each stop pauses every thread of the
+program, and the report says for how long:
+
+```
+9 task snapshots held the program stopped for 0.013 s, 1.5 ms each, to read where its tasks wait.
+```
+
+A pause reads the program's shared libraries' debug information again,
+which uscope's image cache shortens, so a program that loads many pauses
+longer: 1.5 ms is a static Go program's, and 5 ms a small tokio program's.
+Sampling is off during a pause, which the profile records as a gap. Task
+snapshots are off unless asked for, and need the same permission to trace
+the program as the debugger does. A snapshot that fails, or misses tasks
+it could not read, says why in the report.
+
 ## Exploring a profile in the browser
 
 ```sh

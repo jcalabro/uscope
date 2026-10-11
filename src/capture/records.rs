@@ -181,6 +181,10 @@ pub enum FrameKind {
     TaskRoot = 2,
     /// The runtime's scheduler, standing for every frame below a task.
     Runtime = 3,
+    /// The future a suspended task awaits, which runs no code: the address
+    /// is the string that names it, and its one line says what it waits
+    /// for.
+    Awaited = 4,
 }
 
 impl FrameKind {
@@ -190,6 +194,7 @@ impl FrameKind {
             1 => Some(Self::Truncated),
             2 => Some(Self::TaskRoot),
             3 => Some(Self::Runtime),
+            4 => Some(Self::Awaited),
             _ => None,
         }
     }
@@ -220,10 +225,15 @@ pub enum Truncation {
     /// A runtime switched stacks, and neither the kernel's chain nor the
     /// copy reaches the frames it switched from.
     StackSwitch = 9,
+    /// A suspended task's chain of awaits could not be followed further.
+    AwaitChainEnded = 10,
+    /// Unwinding a task's stack could not read what it needed: a register,
+    /// memory, or unwind information it could interpret.
+    Unreadable = 11,
 }
 
 impl Truncation {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::NoUnwindInfo,
         Self::FramePointerNotKept,
         Self::StackCopyExhausted,
@@ -233,6 +243,8 @@ impl Truncation {
         Self::InvalidCaller,
         Self::NoStack,
         Self::StackSwitch,
+        Self::AwaitChainEnded,
+        Self::Unreadable,
     ];
 
     pub fn from_number(number: u64) -> Option<Self> {
@@ -251,6 +263,8 @@ impl Truncation {
             Self::InvalidCaller => "invalid caller",
             Self::NoStack => "no stack",
             Self::StackSwitch => "frames before a stack switch not captured",
+            Self::AwaitChainEnded => "chain of awaits ended",
+            Self::Unreadable => "unwinding could not read the stack",
         }
     }
 }
@@ -420,6 +434,12 @@ pub enum AccountKind {
     RecorderCpu = 14,
     /// The part of it spent reading programs' debug information.
     RecorderLoading = 15,
+    /// Nanoseconds task snapshots held the program stopped.
+    SnapshotPause = 16,
+    /// Task snapshots taken.
+    Snapshots = 17,
+    /// Task snapshots that failed, and tasks a snapshot could not read.
+    SnapshotFailures = 18,
 }
 
 /// A count of something the views must show.
@@ -508,12 +528,16 @@ pub enum MarkerKind {
     /// The budget changed how much of each period is sampled; the text
     /// says to what, and why.
     Budget = 1,
+    /// A task snapshot failed, or could not read some tasks; the text
+    /// says why.
+    TaskSnapshot = 2,
 }
 
 impl MarkerKind {
     pub const fn from_number(number: u8) -> Option<Self> {
         match number {
             1 => Some(Self::Budget),
+            2 => Some(Self::TaskSnapshot),
             _ => None,
         }
     }
@@ -540,12 +564,16 @@ pub struct Gap {
 pub enum GapReason {
     /// To hold uscope's own CPU time to its budget.
     Budget = 1,
+    /// A task snapshot held the program stopped.
+    TaskSnapshot = 2,
 }
 
 impl GapReason {
+    #[must_use]
     pub const fn from_number(number: u8) -> Option<Self> {
         match number {
             1 => Some(Self::Budget),
+            2 => Some(Self::TaskSnapshot),
             _ => None,
         }
     }

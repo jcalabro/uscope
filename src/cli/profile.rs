@@ -8,10 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use super::format::plural;
 use anyhow::{Context, Result};
 use uscope::profiler::budget::Budget;
 use uscope::profiler::{
-    Preset, Profile, RecordOptions, SampleSource, Save, StackCopy, StackView, Watch,
+    GapReason, Preset, Profile, RecordOptions, SampleSource, Save, StackCopy, StackView, Watch,
 };
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -64,6 +65,11 @@ pub struct RecordArgs {
     /// Stop recording after SECONDS; a started program is then killed.
     #[arg(long, value_name = "SECONDS")]
     duration: Option<f64>,
+    /// Stop the program every SECONDS to read where its tasks, such as
+    /// goroutines and tokio tasks, wait. Each stop pauses the program, and
+    /// the report says for how long.
+    #[arg(long, value_name = "SECONDS")]
+    task_snapshots: Option<f64>,
     /// Keep only the last SECONDS of the recording. SIGUSR2 saves the
     /// window as it is to FILE-1.usprof, FILE-2.usprof, and so on, as the
     /// recording goes on; FILE gets the last window.
@@ -115,7 +121,8 @@ pub fn run_report(args: &ReportArgs) -> std::process::ExitCode {
     }
 }
 
-fn record(args: &RecordArgs) -> Result<i32> {
+/// The recording options `args` choose.
+fn options(args: &RecordArgs) -> Result<RecordOptions> {
     let mut options = RecordOptions::preset(match args.preset {
         PresetArg::Prod => Preset::Production,
         PresetArg::Dev => Preset::Development,
@@ -145,9 +152,19 @@ fn record(args: &RecordArgs) -> Result<i32> {
             ..Budget::PRODUCTION
         });
     }
+    if let Some(seconds) = args.task_snapshots {
+        let every = Duration::try_from_secs_f64(seconds).context("--task-snapshots")?;
+        anyhow::ensure!(!every.is_zero(), "--task-snapshots is a number of seconds");
+        options.task_snapshots = Some(every);
+    }
     if let Some(seconds) = args.window {
         options.window = Some(Duration::try_from_secs_f64(seconds).context("--window")?);
     }
+    Ok(options)
+}
+
+fn record(args: &RecordArgs) -> Result<i32> {
+    let options = options(args)?;
     let stop = Arc::new(AtomicBool::new(false));
     let trigger = Arc::new(AtomicBool::new(false));
     // Ctrl-C reaches a started program too, which ends as it chooses; an
@@ -384,7 +401,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             seconds(loading)
         )?;
     }
-    let gaps = profile.gaps();
+    let gaps = profile.paused(GapReason::Budget);
     if !gaps.is_empty() {
         let paused: u64 = gaps
             .iter()
@@ -406,6 +423,27 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
         writeln!(
             out,
             "That is more than --preset prod allows, which holds uscope to 1% of a CPU."
+        )?;
+    }
+    let (snapshots, held, _) = profile.task_snapshots();
+    if snapshots > 0 {
+        writeln!(
+            out,
+            "{} held the program stopped for {:.3} s, {:.1} ms each, to read where its tasks wait.",
+            plural(snapshots, "task snapshot"),
+            seconds(held),
+            held as f64 / 1e6 / snapshots as f64,
+        )?;
+    }
+    let problems = profile.task_snapshot_problems();
+    if let Some((_, first)) = problems.first() {
+        writeln!(
+            out,
+            "Task snapshots missed tasks {}: {first}.",
+            match problems.len() {
+                1 => "once".to_owned(),
+                times => format!("{times} times; the first time"),
+            }
         )?;
     }
     Ok(())

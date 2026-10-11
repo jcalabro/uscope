@@ -2306,7 +2306,7 @@ pub fn awaited(image: Option<&ModuleImage>, ty: uscope::TypeReference) -> String
     let name = image
         .filter(|image| image.id() == ty.image)
         .and_then(|image| image.type_info(ty))
-        .map_or_else(|| "a future".to_owned(), super::value::qualified_name);
+        .map_or_else(|| "a future".to_owned(), uscope::TypeInfo::qualified_name);
     format!("awaiting {name}")
 }
 

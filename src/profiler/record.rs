@@ -10,10 +10,11 @@ use foldhash::HashMap;
 
 use super::calls::Branch;
 use super::frame_pointers::{CallSites, call_sites};
+use super::tasks::{Snapshot, WaitFrame};
 use crate::backend::perf::{self, decode};
 use crate::capture::builder::LineInput;
 use crate::capture::records::{
-    AccountKind, FrameKind, GapReason, Mapping, NONE, Truncation, role_number,
+    AccountKind, FrameKind, GapReason, Mapping, MarkerKind, NONE, Truncation, role_number,
 };
 use crate::capture::{Capture, CaptureBuilder};
 use crate::debug_info::{DebugFileSearch, DebugInfo};
@@ -626,14 +627,89 @@ impl Processor {
         }
     }
 
-    /// Records that every event was off from `start` to `end`. A thread
-    /// that left its CPU before a gap may have come back unseen in it, so
-    /// its interval ends where the gap begins.
-    pub fn gap(&mut self, start: u64, end: u64) {
+    /// Records that every event was off from `start` to `end`, and why. A
+    /// thread that left its CPU before a gap may have come back unseen in
+    /// it, so its interval ends where the gap begins.
+    pub fn gap(&mut self, start: u64, end: u64, reason: GapReason) {
         self.gaps.push(start);
         self.gaps_end = self.gaps_end.max(end);
         self.builder
-            .gap(start.cast_signed(), end.cast_signed(), GapReason::Budget);
+            .gap(start.cast_signed(), end.cast_signed(), reason);
+    }
+
+    /// Records a task snapshot that held the program stopped from `start`
+    /// to `end`: each waiting task's stack, standing for `weight`
+    /// nanoseconds of waiting.
+    pub fn task_snapshot(
+        &mut self,
+        pid: u32,
+        (start, end): (u64, u64),
+        weight: u64,
+        snapshot: &Snapshot,
+    ) {
+        self.gap(start, end, GapReason::TaskSnapshot);
+        self.builder.count(AccountKind::Snapshots as u32, 1);
+        self.builder
+            .count(AccountKind::SnapshotPause as u32, end.saturating_sub(start));
+        if let Some(first) = snapshot.problems.first() {
+            let more = snapshot.problems.len() - 1;
+            let text = match more {
+                0 => first.clone(),
+                _ => format!("{first}, and {more} more"),
+            };
+            self.snapshot_failed(start, &text);
+            let more = u64::try_from(more).unwrap_or(u64::MAX);
+            self.builder
+                .count(AccountKind::SnapshotFailures as u32, more);
+        }
+        let time = start.cast_signed();
+        for task in &snapshot.waiting {
+            self.frames.clear();
+            for frame in &task.frames {
+                let id = match frame {
+                    WaitFrame::Code { address, role } => self.code_frame(pid, *address, *role),
+                    WaitFrame::Awaited(text) => self.builder.awaited(text),
+                    WaitFrame::Truncated(reason) => self.builder.truncation(*reason, NONE),
+                };
+                self.frames.push(id);
+            }
+            let stack = self.builder.stack(&self.frames);
+            let row = self.builder.task(task.noun, task.number, time);
+            if task.labels.is_some() {
+                self.builder
+                    .describe_task(row, NONE, task.labels.as_deref());
+            }
+            self.builder
+                .task_wait(row, time, weight, stack, &task.state);
+        }
+    }
+
+    /// Records that a task snapshot at `time` failed, or missed tasks, and
+    /// why.
+    pub fn snapshot_failed(&mut self, time: u64, why: &str) {
+        record!("record: {why}");
+        self.builder.count(AccountKind::SnapshotFailures as u32, 1);
+        self.builder
+            .marker(time.cast_signed(), MarkerKind::TaskSnapshot, why);
+    }
+
+    /// The frame of the code at `address` in process `pid`.
+    fn code_frame(&mut self, pid: u32, address: u64, role: u8) -> u32 {
+        let owner = self.processes.get(&pid).and_then(|process| {
+            process
+                .mapped
+                .iter()
+                .find(|mapped| mapped.start <= address && address < mapped.end)
+                .copied()
+        });
+        let (module, address, role) = owner.map_or((NONE, address, 0), |owner| {
+            (
+                self.images[owner.image].module,
+                address.wrapping_sub(owner.loaded.load_bias),
+                role,
+            )
+        });
+        self.builder.frame(FrameKind::Native, module, address, role)
     }
 
     /// Where the first gap after `time` began, or the end of time.

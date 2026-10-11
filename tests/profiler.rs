@@ -1006,3 +1006,155 @@ fn a_program_killed_by_a_signal_keeps_its_profile() {
     assert_eq!(stacks.len(), 1);
     assert_eq!(stacks[0].functions[..2], ["fault", "main"]);
 }
+
+/// Task snapshots find each goroutine where it waits: three parked on a
+/// channel receive, each weighted by the time since the snapshot before,
+/// while the program goes on and no sample falls in a snapshot's pause.
+#[test]
+fn task_snapshots_find_each_goroutine_where_it_waits() {
+    let (reader, mut writer) = std::io::pipe().expect("pipe");
+    let mut command = Command::new(Scenario::fixture("profile-go-waits"));
+    command
+        .stdin(reader)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let options = RecordOptions {
+        task_snapshots: Some(Duration::from_millis(50)),
+        ..RecordOptions::default()
+    };
+    let stop = AtomicBool::new(false);
+    let mut released = false;
+    // The program waits until two snapshots have seen every receiver.
+    let recording = record_watched(
+        command,
+        &options,
+        &mut Watch {
+            every: Duration::from_millis(20),
+            publish: &mut |profile| {
+                if !released && receiving(&profile).len() >= 2 {
+                    writer.write_all(b"x").expect("release the program");
+                    released = true;
+                }
+            },
+            stop: &stop,
+            save: None,
+        },
+    )
+    .expect("record");
+    assert!(recording.status.success(), "{}", recording.status);
+    let profile = &recording.profile;
+    let (taken, paused, failed) = profile.task_snapshots();
+    assert!(
+        taken >= 2 && paused > 0 && failed == 0,
+        "{taken} {paused} {failed}"
+    );
+    assert!(receiving(profile).len() >= 2, "{:#?}", profile.task_waits());
+    for wait in profile.task_waits() {
+        if wait
+            .functions
+            .iter()
+            .any(|function| function == "main.receive")
+        {
+            assert_eq!(wait.state, "chan receive", "{wait:?}");
+            let ends = (wait.functions.first(), wait.functions.last());
+            assert_eq!(
+                ends,
+                (
+                    Some(&"runtime.gopark".into()),
+                    Some(&"runtime.goexit".into())
+                ),
+                "{wait:?}"
+            );
+            assert!(wait.weight > 0, "{wait:?}");
+            assert_eq!(wait.ending, StackEnding::Complete, "{wait:?}");
+        }
+    }
+    let gaps = profile.gaps();
+    let inside = |time: i64| gaps.iter().any(|(start, end)| *start < time && time < *end);
+    if let Some(stack) = profile.stacks().iter().find(|stack| inside(stack.time)) {
+        panic!("{stack:?} was sampled in a snapshot's pause: {gaps:?}");
+    }
+}
+
+/// The times of the snapshots that found three distinct goroutines waiting
+/// to receive in `main.receive`.
+fn receiving(profile: &Profile) -> Vec<i64> {
+    let mut found: std::collections::BTreeMap<i64, std::collections::BTreeSet<u64>> =
+        std::collections::BTreeMap::new();
+    for wait in profile.task_waits() {
+        if wait
+            .functions
+            .iter()
+            .any(|function| function == "main.receive")
+        {
+            found.entry(wait.time).or_default().insert(wait.task);
+        }
+    }
+    found
+        .into_iter()
+        .filter(|(_, tasks)| tasks.len() == 3)
+        .map(|(time, _)| time)
+        .collect()
+}
+
+/// A task snapshot reads a suspended tokio task's chain of awaits: the
+/// future it awaits, then each async function out to its root.
+#[test]
+fn task_snapshots_follow_a_tokio_tasks_awaits() {
+    let (reader, mut writer) = std::io::pipe().expect("pipe");
+    let mut command = Command::new(Scenario::fixture("tokio-cancel-o0"));
+    command
+        .arg("hold")
+        .stdin(reader)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let options = RecordOptions {
+        task_snapshots: Some(Duration::from_millis(50)),
+        ..RecordOptions::default()
+    };
+    let stop = AtomicBool::new(false);
+    let mut released = false;
+    let at_gate = |profile: &Profile| {
+        profile
+            .task_waits()
+            .into_iter()
+            .filter(|wait| {
+                wait.functions
+                    .iter()
+                    .any(|function| function == "cancel::waiting::{closure#0}")
+            })
+            .collect::<Vec<_>>()
+    };
+    let recording = record_watched(
+        command,
+        &options,
+        &mut Watch {
+            every: Duration::from_millis(20),
+            publish: &mut |profile| {
+                if !released && !at_gate(&profile).is_empty() {
+                    writer.write_all(b"\n").expect("release the program");
+                    released = true;
+                }
+            },
+            stop: &stop,
+            save: None,
+        },
+    )
+    .expect("record");
+    assert!(recording.status.success(), "{}", recording.status);
+    let waits = at_gate(&recording.profile);
+    assert!(!waits.is_empty());
+    for wait in waits {
+        assert_eq!(
+            wait.functions,
+            [
+                "awaiting tokio::sync::oneshot::Receiver<u64>",
+                "cancel::waiting::{closure#0}",
+                "cancel::alone::{closure#0}",
+            ],
+            "{wait:?}"
+        );
+        assert_eq!(wait.ending, StackEnding::Complete, "{wait:?}");
+        assert!(wait.weight > 0, "{wait:?}");
+    }
+}

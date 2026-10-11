@@ -487,6 +487,15 @@ pub fn launch(
             drop((pid_write, go_read));
             let mut child = spawned?;
             let _ = executing.send(());
+            // A task snapshot traces the child from this process, which any
+            // wait for it here would take the stops of: wait for its exit
+            // alone, then reap it.
+            let exit = super::native::pidfd_open(nix::unistd::Pid::from_raw(
+                i32::try_from(child.id()).unwrap_or(i32::MAX),
+            ));
+            if let Ok(exit) = &exit {
+                sys::wait_readable(exit);
+            }
             child.wait()
         })
         .map_err(LaunchError::Spawn)?;

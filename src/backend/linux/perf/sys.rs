@@ -269,6 +269,20 @@ pub fn readable(fd: &OwnedFd) -> bool {
     result > 0 && poll.revents & libc::POLLIN != 0
 }
 
+/// Waits until `fd` is readable, as a process's descriptor is once it
+/// has exited.
+pub fn wait_readable(fd: &OwnedFd) {
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one initialized entry, for a call that waits without end.
+    while unsafe { libc::poll(&raw mut poll, 1, -1) } < 0
+        && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+    {}
+}
+
 /// Waits until one of `rings` has data past its watermark, or `timeout`.
 pub fn poll(rings: &[Ring], timeout: std::time::Duration) {
     let mut fds: Vec<libc::pollfd> = rings

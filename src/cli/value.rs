@@ -1054,35 +1054,6 @@ fn watched_scalar(type_info: &TypeInfo, image: Option<&ModuleImage>) -> Option<W
     None
 }
 
-/// A type's name with the path its producer's name leaves out, as in
-/// `std::vector<int, std::allocator<int> >`. Go and Zig names already
-/// carry their packages and modules.
-pub fn qualified_name(type_info: &TypeInfo) -> String {
-    let Some(identity) = type_info.identity.as_deref() else {
-        return type_info.name.to_string();
-    };
-    let spells_path = identity.path.first().is_none_or(|first| {
-        type_info
-            .name
-            .strip_prefix(first.as_ref())
-            .is_some_and(|rest| rest.starts_with("::"))
-    });
-    if spells_path
-        || !matches!(
-            identity.language,
-            uscope::SourceLanguage::C | uscope::SourceLanguage::Cpp | uscope::SourceLanguage::Rust
-        )
-    {
-        return type_info.name.to_string();
-    }
-    let mut name = String::new();
-    for segment in identity.path.iter() {
-        let _ = write!(name, "{segment}::");
-    }
-    name.push_str(&type_info.name);
-    name
-}
-
 /// Renders a type's definition, as `ptype` does: a record's or union's
 /// members, an enumeration's enumerators, or the name of any other type,
 /// then the type's template or generic arguments.
@@ -1097,7 +1068,7 @@ pub fn type_definition(
     let name_of = |reference: uscope::TypeReference| {
         info_of(reference).map_or_else(|| "<unknown>".to_owned(), |info| info.name.to_string())
     };
-    let name = qualified_name(type_info);
+    let name = type_info.qualified_name();
     let members = |keyword: &str, members: &[uscope::RecordMember]| {
         let mut output = format!("type = {keyword} {name} {{\n");
         for member in members {
@@ -1155,9 +1126,8 @@ pub fn type_definition(
             .arguments
             .iter()
             .map(|argument| match argument {
-                uscope::TypeArgument::Type(reference) => {
-                    info_of(*reference).map_or_else(|| "<unknown>".to_owned(), qualified_name)
-                }
+                uscope::TypeArgument::Type(reference) => info_of(*reference)
+                    .map_or_else(|| "<unknown>".to_owned(), uscope::TypeInfo::qualified_name),
                 uscope::TypeArgument::Value(IntegerValue::Signed(value)) => value.to_string(),
                 uscope::TypeArgument::Value(IntegerValue::Unsigned(value)) => value.to_string(),
                 uscope::TypeArgument::Unknown(text) => text.to_string(),

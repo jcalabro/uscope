@@ -13,8 +13,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{oneshot, watch};
 use uscope::profiler::{
-    Granularity, KeyKind, Keys, Preset, Profile, Query, RecordOptions, SampleSource, Transform,
-    Watch, record_watched,
+    GapReason, Granularity, KeyKind, Keys, Preset, Profile, Query, RecordOptions, SampleSource,
+    Transform, Watch, record_watched,
 };
 
 use super::protocol::{
@@ -464,7 +464,7 @@ fn summary(entry: &Entry) -> ProfileSummary {
         recorder_cpu: profile.recorder_cpu().0,
         recorder_loading: profile.recorder_cpu().1,
         gaps: profile
-            .gaps()
+            .paused(GapReason::Budget)
             .into_iter()
             .map(|(from, to)| [from - start, to - start])
             .collect(),

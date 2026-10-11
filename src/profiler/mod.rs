@@ -7,7 +7,9 @@ mod calls;
 mod frame_pointers;
 mod record;
 mod session;
+mod tasks;
 
+pub use crate::capture::records::GapReason;
 pub use session::{Attachment, Recording, Save, Watch, record, record_attached, record_watched};
 
 pub use crate::analysis::{
@@ -142,6 +144,9 @@ pub struct RecordOptions {
     /// Keeps only what happened in the last span this long, which a
     /// trigger saves: a recording's memory then holds no more.
     pub window: Option<std::time::Duration>,
+    /// How often to stop the program, through the debugger's attach, to
+    /// read where its tasks wait: none never does.
+    pub task_snapshots: Option<std::time::Duration>,
     /// Directories searched for separate debug files.
     pub debug_directories: Vec<PathBuf>,
 }
@@ -160,6 +165,7 @@ impl RecordOptions {
             off_cpu: preset.off_cpu(),
             budget: preset.budget(),
             window: None,
+            task_snapshots: None,
             debug_directories: Vec::new(),
         }
     }
@@ -225,6 +231,22 @@ pub struct SampledStack {
     pub weight: u64,
     /// Function names, innermost first, each inlined function a frame of
     /// its own; a frame without symbols is its module's address.
+    pub functions: Vec<String>,
+    pub ending: StackEnding,
+}
+
+/// Where a task waited at a task snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskWaitStack {
+    /// What its runtime calls a task, and its number.
+    pub noun: String,
+    pub task: u64,
+    pub time: i64,
+    /// The nanoseconds of waiting it stands for: since the snapshot before.
+    pub weight: u64,
+    /// The runtime's words for what it waits for, or its state.
+    pub state: String,
+    /// Function names, innermost first, as a sample's are.
     pub functions: Vec<String>,
     pub ending: StackEnding,
 }
@@ -523,14 +545,35 @@ impl Profile {
             .collect()
     }
 
+    /// Each span sampling paused for `reason`, in time order.
+    #[must_use]
+    pub fn paused(&self, reason: GapReason) -> Vec<(i64, i64)> {
+        self.capture
+            .gaps
+            .iter()
+            .filter(|gap| gap.reason == reason as u8)
+            .map(|gap| (gap.start.get(), gap.end.get()))
+            .collect()
+    }
+
     /// Each time the budget changed how much was sampled, and what it says.
     #[must_use]
     pub fn budget_changes(&self) -> Vec<(i64, String)> {
+        self.markers(MarkerKind::Budget)
+    }
+
+    /// Each time a task snapshot failed or missed tasks, and why.
+    #[must_use]
+    pub fn task_snapshot_problems(&self) -> Vec<(i64, String)> {
+        self.markers(MarkerKind::TaskSnapshot)
+    }
+
+    fn markers(&self, kind: MarkerKind) -> Vec<(i64, String)> {
         let capture = &self.capture;
         capture
             .markers
             .iter()
-            .filter(|marker| marker.kind == MarkerKind::Budget as u8)
+            .filter(|marker| marker.kind == kind as u8)
             .map(|marker| {
                 (
                     marker.time.get(),
@@ -575,6 +618,7 @@ impl Profile {
     }
 
     /// Every sample's stack, by thread and then time.
+    #[must_use]
     pub fn stacks(&self) -> Vec<SampledStack> {
         let capture = &self.capture;
         let mut stacks = Vec::with_capacity(capture.samples.len());
@@ -583,25 +627,7 @@ impl Profile {
             let tid = thread.tid.get();
             let pid = capture.processes[thread.process.get() as usize].pid.get();
             for sample in capture.thread_samples(range) {
-                let mut functions = Vec::new();
-                let mut ending = StackEnding::Complete;
-                for frame in capture.stack_frames(sample.stack.get()) {
-                    let record = &capture.frames[frame as usize];
-                    if record.kind == FrameKind::Truncated as u8 {
-                        let reason = Truncation::from_number(record.address.get())
-                            .map_or("unknown", Truncation::describe);
-                        ending = StackEnding::Truncated(reason.to_owned());
-                        continue;
-                    }
-                    let lines = capture.frame_lines(frame);
-                    if lines.is_empty() {
-                        functions.push(self.address_name(frame));
-                    }
-                    for line in lines {
-                        let function = &capture.functions[line.function.get() as usize];
-                        functions.push(capture.string(function.name.get()).to_owned());
-                    }
-                }
+                let (functions, ending) = self.names(sample.stack.get());
                 stacks.push(SampledStack {
                     pid,
                     tid,
@@ -613,6 +639,66 @@ impl Profile {
             }
         }
         stacks
+    }
+
+    /// Every wait of a task snapshot, in time order.
+    #[must_use]
+    pub fn task_waits(&self) -> Vec<TaskWaitStack> {
+        let capture = &self.capture;
+        capture
+            .task_waits
+            .iter()
+            .map(|wait| {
+                let task = &capture.tasks[wait.task.get() as usize];
+                let (functions, ending) = self.names(wait.stack.get());
+                TaskWaitStack {
+                    noun: capture.string(task.runtime.get()).to_owned(),
+                    task: task.number.get(),
+                    time: wait.time.get(),
+                    weight: wait.weight.get(),
+                    state: capture.string(wait.state.get()).to_owned(),
+                    functions,
+                    ending,
+                }
+            })
+            .collect()
+    }
+
+    /// How many task snapshots were taken, how many nanoseconds they held
+    /// the program stopped, and how many failed, or failed to read a task.
+    #[must_use]
+    pub fn task_snapshots(&self) -> (u64, u64, u64) {
+        let account = |kind: AccountKind| self.capture.account(kind as u32);
+        (
+            account(AccountKind::Snapshots),
+            account(AccountKind::SnapshotPause),
+            account(AccountKind::SnapshotFailures),
+        )
+    }
+
+    /// A stack's function names, innermost first, and how it ends.
+    fn names(&self, stack: u32) -> (Vec<String>, StackEnding) {
+        let capture = &self.capture;
+        let mut functions = Vec::new();
+        let mut ending = StackEnding::Complete;
+        for frame in capture.stack_frames(stack) {
+            let record = &capture.frames[frame as usize];
+            if record.kind == FrameKind::Truncated as u8 {
+                let reason = Truncation::from_number(record.address.get())
+                    .map_or("unknown", Truncation::describe);
+                ending = StackEnding::Truncated(reason.to_owned());
+                continue;
+            }
+            let lines = capture.frame_lines(frame);
+            if lines.is_empty() {
+                functions.push(self.address_name(frame));
+            }
+            for line in lines {
+                let function = &capture.functions[line.function.get() as usize];
+                functions.push(capture.string(function.name.get()).to_owned());
+            }
+        }
+        (functions, ending)
     }
 
     /// A frame without symbols, as `module+0xoffset`.

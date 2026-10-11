@@ -10,11 +10,12 @@ use std::time::Duration;
 use super::budget::{Budget, Controller, Observation, STEPS};
 use super::calls::{self, Calls};
 use super::record::{self, Sites};
+use super::tasks::{Snapshot, Snapshotter};
 use super::{
     DEEP_STACK_COPY, Profile, RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource, StackCopy,
 };
 use crate::backend::perf;
-use crate::capture::records::MarkerKind;
+use crate::capture::records::{GapReason, MarkerKind};
 
 /// A recording and how its program ended.
 #[derive(Debug)]
@@ -108,7 +109,7 @@ pub fn record_watched(
     );
     // A program that failed to execute ends the recording with why, below,
     // without having been published as started.
-    let started = executed.recv().is_ok();
+    let started = executed.recv().is_ok().then_some(pid);
     drive(
         &mut processor,
         &mut events,
@@ -179,7 +180,7 @@ pub fn record_attached(
         &mut events,
         watch,
         options,
-        true,
+        Some(pid),
         || process.exited(),
         || {
             record!("record: stopping, detaching from {pid}");
@@ -239,6 +240,13 @@ fn settings(
             ),
         ),
         (
+            "task snapshots",
+            options.task_snapshots.map_or_else(
+                || "off".into(),
+                |every| format!("every {:.3} s", every.as_secs_f64()),
+            ),
+        ),
+        (
             "budget",
             options.budget.map_or_else(
                 || "none".into(),
@@ -251,22 +259,27 @@ fn settings(
 }
 
 /// Drains `events` into `processor` until `ended`, publishing and saving
-/// as `watch` asks, and holding to the budget and window of `options`,
-/// once the program has started. When `watch` stops the recording, `stop`
-/// ends it at once when it says so, or else waits for `ended`.
+/// as `watch` asks, and holding to the budget, window, and snapshots of
+/// `options`, once the program `started` names has started. When `watch`
+/// stops the recording, `stop` ends it at once when it says so, or else
+/// waits for `ended`.
 fn drive(
     processor: &mut record::Processor,
     events: &mut perf::Events,
     watch: &mut Watch<'_>,
     options: &RecordOptions,
-    started: bool,
+    started: Option<u32>,
     mut ended: impl FnMut() -> bool,
     mut stop: impl FnMut() -> bool,
 ) {
     let mut pacer = options
         .budget
-        .filter(|_| started)
+        .filter(|_| started.is_some())
         .map(|budget| Pacer::new(budget, monotonic(), processor));
+    let mut snapshots = started
+        .zip(options.task_snapshots)
+        .map(|(pid, every)| Snapshots::new(pid, every, options));
+    let started = started.is_some();
     // A window moves by eighths of itself.
     let marks = options.window.map(|window| {
         processor.keep_window(window);
@@ -309,6 +322,10 @@ fn drive(
         if finished {
             break;
         }
+        if let Some(snapshots) = &mut snapshots {
+            let sampling = pacer.as_ref().is_none_or(Pacer::sampling);
+            snapshots.when_due(processor, events, sampling);
+        }
         if let Some(every) = marks
             && marked.elapsed() >= every
         {
@@ -339,6 +356,94 @@ fn drive(
         pacer.finish(monotonic(), processor);
     }
     processor.counts(events.counts());
+}
+
+/// Takes a task snapshot every so often, once the program's debug
+/// information is read, with every event off while it holds the program
+/// stopped.
+struct Snapshots {
+    pid: u32,
+    every: Duration,
+    loading: Option<std::thread::JoinHandle<Result<Snapshotter, RecordError>>>,
+    snapshotter: Option<Snapshotter>,
+    next: std::time::Instant,
+    /// When the last snapshot, or the recording, began.
+    previous: u64,
+}
+
+impl Snapshots {
+    fn new(pid: u32, every: Duration, options: &RecordOptions) -> Self {
+        let debug_files = crate::DebugFileOptions {
+            directories: options.debug_directories.clone(),
+            ..crate::DebugFileOptions::default()
+        };
+        // Read beside the recording, which drains on meanwhile.
+        let program = PathBuf::from(format!("/proc/{pid}/exe"));
+        let loading = std::thread::Builder::new()
+            .name("uscope-snapshot-load".into())
+            .spawn(move || Snapshotter::new(pid, &program, &debug_files))
+            .ok();
+        Self {
+            pid,
+            every,
+            loading,
+            snapshotter: None,
+            next: std::time::Instant::now() + every,
+            previous: monotonic(),
+        }
+    }
+
+    /// Takes a snapshot when one is due, leaving the events as `sampling`
+    /// says they were.
+    fn when_due(
+        &mut self,
+        processor: &mut record::Processor,
+        events: &perf::Events,
+        sampling: bool,
+    ) {
+        if std::time::Instant::now() < self.next {
+            return;
+        }
+        if let Some(loading) = self.loading.take_if(|loading| loading.is_finished()) {
+            match loading.join() {
+                Ok(Ok(snapshotter)) => self.snapshotter = Some(snapshotter),
+                Ok(Err(error)) => {
+                    processor.snapshot_failed(
+                        monotonic(),
+                        &format!("task snapshots cannot read the program: {error}"),
+                    );
+                }
+                Err(_) => processor.snapshot_failed(
+                    monotonic(),
+                    "task snapshots cannot read the program: reading it panicked",
+                ),
+            }
+        }
+        let Some(snapshotter) = &self.snapshotter else {
+            return;
+        };
+        if sampling {
+            events.enable(false);
+        }
+        let start = monotonic();
+        let taken = snapshotter.take();
+        let end = monotonic();
+        if sampling {
+            events.enable(true);
+        }
+        self.next = std::time::Instant::now() + self.every;
+        match taken {
+            Ok(snapshot) => {
+                let weight = start.saturating_sub(self.previous);
+                processor.task_snapshot(self.pid, (start, end), weight, &snapshot);
+                self.previous = start;
+            }
+            Err(error) => {
+                processor.task_snapshot(self.pid, (start, end), 0, &Snapshot::default());
+                processor.snapshot_failed(start, &format!("a task snapshot failed: {error}"));
+            }
+        }
+    }
 }
 
 /// Samples a share of each budget period, in one span at a random offset
@@ -376,6 +481,11 @@ impl Pacer {
         }
     }
 
+    /// Whether sampling is on.
+    const fn sampling(&self) -> bool {
+        self.on_since.is_some()
+    }
+
     /// Turns sampling on or off as the schedule says at `now`, and says
     /// how long until it next changes.
     fn pace(
@@ -393,7 +503,7 @@ impl Pacer {
         let (from, until) = self.window;
         let wanted = from <= now && now < until;
         if wanted && let Some(paused) = self.paused_since.take() {
-            processor.gap(paused, monotonic());
+            processor.gap(paused, monotonic(), GapReason::Budget);
             events.enable(true);
             self.on_since = Some(monotonic());
         } else if !wanted && let Some(on) = self.on_since.take() {
@@ -450,7 +560,7 @@ impl Pacer {
     /// Ends the recording at `now`: a pause it ends in is a gap to the end.
     fn finish(self, now: u64, processor: &mut record::Processor) {
         if let Some(paused) = self.paused_since {
-            processor.gap(paused, now);
+            processor.gap(paused, now, GapReason::Budget);
         }
     }
 }

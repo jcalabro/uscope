@@ -998,6 +998,38 @@ pub struct TypeInfo {
     pub identity: Option<Arc<TypeIdentity>>,
 }
 
+impl TypeInfo {
+    /// The type's name with the path its producer's name leaves out, as in
+    /// `std::vector<int, std::allocator<int> >`. Go and Zig names already
+    /// carry their packages and modules.
+    #[must_use]
+    pub fn qualified_name(&self) -> String {
+        let Some(identity) = self.identity.as_deref() else {
+            return self.name.to_string();
+        };
+        let spells_path = identity.path.first().is_none_or(|first| {
+            self.name
+                .strip_prefix(first.as_ref())
+                .is_some_and(|rest| rest.starts_with("::"))
+        });
+        if spells_path
+            || !matches!(
+                identity.language,
+                SourceLanguage::C | SourceLanguage::Cpp | SourceLanguage::Rust
+            )
+        {
+            return self.name.to_string();
+        }
+        let mut name = String::new();
+        for segment in identity.path.iter() {
+            name.push_str(segment);
+            name.push_str("::");
+        }
+        name.push_str(&self.name);
+        name
+    }
+}
+
 /// The source language of the unit that defines a type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]

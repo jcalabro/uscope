@@ -2251,6 +2251,8 @@ build_go_fixture "$go_fixtures_dir/stacks" "$output_dir/stacks-go-o2"
 build_go_fixture "$go_fixtures_dir/spin" "$output_dir/spin-go-o0" \
     "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/spin" "$output_dir/spin-go-o2"
+# Goroutines a profiler's task snapshots find waiting.
+build_go_fixture "$go_fixtures_dir/waits" "$output_dir/profile-go-waits"
 # The profiler's goroutine stacks, optimized and not, PIE and not.
 build_go_fixture "$go_fixtures_dir/profile" "$output_dir/profile-go-o2"
 build_go_fixture "$go_fixtures_dir/profile" "$output_dir/profile-go-o0" \
