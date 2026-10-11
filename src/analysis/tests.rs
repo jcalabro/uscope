@@ -247,7 +247,10 @@ proptest! {
         }
         prop_assert_eq!(totals, expected_totals);
 
-        let costs: BTreeMap<String, (u64, u64)> = functions(&capture, &keys, &query)
+        let costs = functions(&capture, &keys, &query);
+        prop_assert_eq!(costs.weight, expected_weight);
+        let costs: BTreeMap<String, (u64, u64)> = costs
+            .rows
             .into_iter()
             .map(|cost| (keys.name(cost.key), (cost.own, cost.total)))
             .collect();

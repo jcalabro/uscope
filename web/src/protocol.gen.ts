@@ -8,9 +8,9 @@ export type Envelope = {
 /**
  * Chosen by the tab; the answer carries it back.
  */
-id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" });
+id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" } | { "method": "profile", "params": ProfileRef } | { "method": "profileTree", "params": ProfileQuery } | { "method": "profileFunctions", "params": ProfileQuery } | { "method": "profileTimeline", "params": ProfileTimelineQuery });
 
-export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" };
+export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" } | { "method": "profile", "params": ProfileRef } | { "method": "profileTree", "params": ProfileQuery } | { "method": "profileFunctions", "params": ProfileQuery } | { "method": "profileTimeline", "params": ProfileTimelineQuery };
 
 export type SetName = { name: string, };
 
@@ -149,7 +149,7 @@ export type Input = { text: string,
  */
 eof: boolean, };
 
-export type ServerMessage = { "type": "hello" } & Hello | { "type": "state" } & State | { "type": "result", id: number, result: unknown, } | { "type": "error", id: number, error: ErrorBody, } | { "type": "output" } & Output | { "type": "presence" } & Presence | { "type": "notice" } & Notice;
+export type ServerMessage = { "type": "hello" } & Hello | { "type": "state" } & State | { "type": "result", id: number, result: unknown, } | { "type": "error", id: number, error: ErrorBody, } | { "type": "output" } & Output | { "type": "presence" } & Presence | { "type": "notice" } & Notice | { "type": "profiles" } & ProfileList;
 
 export type Hello = { version: number, 
 /**
@@ -786,3 +786,152 @@ path: string | null, };
 export type Datum = { "t": "bool", b: boolean, } | { "t": "int", i: number, } | { "t": "big", big: string, } | { "t": "float", f: string, } | { "t": "text", s: string, } | { "t": "enum", name: string | null, value: Datum, } | { "t": "sum", variant: string, value: Datum | null, } | { "t": "record", members: Array<[string, Datum]>, } | { "t": "list", items: Array<Datum>, } | { "t": "numbers", kind: NumberKind, offset: number, count: number, } | { "t": "bytes", offset: number, length: number, } | { "t": "entries", entries: Array<[Datum, Datum]>, } | { "t": "null" };
 
 export type NumberKind = "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "i64" | "u64" | "f32" | "f64";
+
+export type ProfileList = { profiles: Array<ProfileInfo>, };
+
+export type ProfileInfo = { 
+/**
+ * Derived from the profile's bytes, so a link names the same profile
+ * whenever a server serves it.
+ */
+id: string, 
+/**
+ * The file it was read from.
+ */
+name: string, };
+
+export type ProfileRef = { profile: string, };
+
+export type ProfileQuery = { profile: string, 
+/**
+ * Samples taken in `[start, end)`, in nanoseconds from the profile's
+ * start, or all.
+ */
+range?: [number, number] | null, 
+/**
+ * Samples of these threads, by row, or of all.
+ */
+threads?: Array<number> | null, 
+/**
+ * Applied in order, to keys by the names views show.
+ */
+transforms: Array<ProfileTransform>, 
+/**
+ * Paths from the innermost frame out: a tree of callers.
+ */
+invert: boolean, 
+/**
+ * The frames threads ran, rather than each async task's own stack.
+ */
+native: boolean, granularity: ProfileGranularity, };
+
+export type ProfileTransform = { op: TransformOp, name: string, };
+
+export type TransformOp = "focus" | "merge" | "drop" | "collapse";
+
+export type ProfileGranularity = "function" | "physical" | "line" | "address";
+
+export type ProfileTimelineQuery = { 
+/**
+ * Slices of the query's range, or of the whole profile.
+ */
+buckets: number, profile: string, 
+/**
+ * Samples taken in `[start, end)`, in nanoseconds from the profile's
+ * start, or all.
+ */
+range?: [number, number] | null, 
+/**
+ * Samples of these threads, by row, or of all.
+ */
+threads?: Array<number> | null, 
+/**
+ * Applied in order, to keys by the names views show.
+ */
+transforms: Array<ProfileTransform>, 
+/**
+ * Paths from the innermost frame out: a tree of callers.
+ */
+invert: boolean, 
+/**
+ * The frames threads ran, rather than each async task's own stack.
+ */
+native: boolean, granularity: ProfileGranularity, };
+
+export type ProfileSummary = { id: string, name: string, 
+/**
+ * The program recorded.
+ */
+program: string | null, 
+/**
+ * What a sample weighs: `nanoseconds` of CPU time, or `executions`.
+ */
+unit: string, samples: number, weight: number, 
+/**
+ * Nanoseconds from the first sample to the last.
+ */
+duration: number, threads: Array<ProfileThread>, 
+/**
+ * Samples the kernel dropped.
+ */
+lost: number, 
+/**
+ * Times the kernel throttled sampling.
+ */
+throttles: number, 
+/**
+ * Stacks that ended short of their outermost frame, by reason.
+ */
+truncations: Array<ProfileCount>, 
+/**
+ * How the profile was recorded, by setting.
+ */
+settings: Array<ProfileSetting>, };
+
+export type ProfileThread = { row: number, pid: number, tid: number, name: string | null, samples: number, weight: number, };
+
+export type ProfileCount = { what: string, count: number, };
+
+export type ProfileSetting = { name: string, value: string, };
+
+export type ProfileTree = { nodes: number, 
+/**
+ * The weight of every sample the query kept.
+ */
+weight: number, samples: number, keys: Array<ProfileKey>, };
+
+export type ProfileKey = { 
+/**
+ * How views name it, which transforms take.
+ */
+name: string, kind: ProfileKeyKind, 
+/**
+ * The module's file name.
+ */
+module: string | null, 
+/**
+ * Where it is in the source.
+ */
+file: string | null, line: number | null, };
+
+export type ProfileKeyKind = "function" | "line" | "address" | "truncation" | "task";
+
+export type ProfileFunctions = { weight: number, 
+/**
+ * Most own weight first.
+ */
+rows: Array<ProfileCost>, keys: Array<ProfileKey>, };
+
+export type ProfileCost = { 
+/**
+ * An index into `keys`.
+ */
+key: number, own: number, total: number, };
+
+export type ProfileTimeline = { 
+/**
+ * The range sliced, in nanoseconds from the profile's start.
+ */
+range: [number, number], lanes: Array<ProfileLane>, };
+
+export type ProfileLane = { thread: number, weights: Array<number>, };

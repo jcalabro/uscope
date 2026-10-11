@@ -65,10 +65,12 @@ pub struct CallTree {
 }
 
 impl CallTree {
+    #[must_use]
     pub const fn len(&self) -> usize {
         self.key.len()
     }
 
+    #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.key.is_empty()
     }
@@ -299,14 +301,23 @@ pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree 
     tree
 }
 
-/// What each key costs under `query`, most own weight first.
-pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Vec<Cost> {
+/// What each key costs under a query, most own weight first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Costs {
+    pub rows: Vec<Cost>,
+    /// The weight of every sample selected and kept.
+    pub weight: u64,
+}
+
+/// What each key costs under `query`.
+pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Costs {
     let (weights, _) = select(capture, query);
     let mut paths = Paths::new(capture, keys, query);
     let mut own = vec![0_u64; keys.count()];
     let mut total = vec![0_u64; keys.count()];
     // The stack that last counted a key, so recursion counts once.
     let mut counted = vec![u32::MAX; keys.count()];
+    let mut kept = 0;
     for (stack, &weight) in weights.iter().enumerate() {
         if weight == 0 {
             continue;
@@ -314,6 +325,7 @@ pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Vec<Cost>
         let Some(path) = paths.of(index(stack)) else {
             continue;
         };
+        kept += weight;
         let innermost = if query.invert {
             path.first()
         } else {
@@ -338,7 +350,10 @@ pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Vec<Cost>
         })
         .collect();
     costs.sort_by(|a, b| (b.own, b.total, a.key).cmp(&(a.own, a.total, b.key)));
-    costs
+    Costs {
+        rows: costs,
+        weight: kept,
+    }
 }
 
 /// How many kept samples, and their weight, fall in each of `buckets`

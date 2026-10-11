@@ -90,6 +90,35 @@ A task's logical stack needs the frames from its dispatch inward. With
 frame pointers, so build async Rust with `-C force-frame-pointers=yes` to
 profile it in production.
 
+## Exploring a profile in the browser
+
+```sh
+uscope web app.usprof
+```
+
+`uscope web` serves a profile when its argument is one, and prints a link
+that opens it. The page has three views of the same query:
+
+- **Flame graph**: callers on top and callees below, each frame as wide as
+  its samples. Clicking a frame zooms to it, and the search box highlights
+  matching frames and says what share of the samples they hold.
+- **Call tree**: the same tree as rows, opened down its heaviest path.
+- **Functions**: each function's own and total cost. Selecting one shows
+  its callers and its callees, merged from every place it is called.
+
+The timeline above the views has a lane for each thread, showing when its
+samples were taken. Dragging across it selects a time range, and choosing
+a thread's name selects that thread. A selected function can be focused
+(only samples through it, rooted at it), merged into its callers, dropped
+with every sample through it, or have its recursion collapsed. These
+transforms apply in order and show as chips that remove them. The view
+can be inverted to show callers, switched from async stacks to native
+ones, and grouped by function, line, or instruction. The footer always
+shows samples lost, throttled, and truncated.
+
+Everything the page shows is in its address, so a reload or a shared link
+opens the same view of the same profile.
+
 ## Profile files
 
 A profile is a file of sealed parts followed by an index of them. A file

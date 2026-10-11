@@ -10,6 +10,7 @@ mod access;
 mod drawing;
 mod inspecting;
 mod lowlevel;
+mod profiles;
 mod running;
 mod sessions;
 mod terminal;

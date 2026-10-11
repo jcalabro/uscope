@@ -136,6 +136,15 @@ pub enum Request {
     /// Reads the session's view files, and the renderers beside them,
     /// again.
     ReloadViews,
+    /// What a profile holds: its threads, span, and accounts.
+    Profile(ProfileRef),
+    /// A profile's call tree under a query; its columns go in the binary
+    /// frame before the answer.
+    ProfileTree(ProfileQuery),
+    /// What each function costs under a query.
+    ProfileFunctions(ProfileQuery),
+    /// How a query's samples fall over time, per thread.
+    ProfileTimeline(ProfileTimelineQuery),
 }
 
 /// A stop, which must be current.
@@ -626,6 +635,228 @@ pub enum ServerMessage {
     Presence(Presence),
     /// Something another participant did.
     Notice(Notice),
+    /// The profiles the server serves, sent on connecting and whenever
+    /// they change.
+    Profiles(ProfileList),
+}
+
+/// The profiles a server serves, which belong to no debugging session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileList {
+    pub profiles: Vec<ProfileInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileInfo {
+    /// Derived from the profile's bytes, so a link names the same profile
+    /// whenever a server serves it.
+    pub id: String,
+    /// The file it was read from.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileRef {
+    pub profile: String,
+}
+
+/// Which of a profile's samples, seen how.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileQuery {
+    pub profile: String,
+    /// Samples taken in `[start, end)`, in nanoseconds from the profile's
+    /// start, or all.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub range: Option<[i64; 2]>,
+    /// Samples of these threads, by row, or of all.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub threads: Option<Vec<u32>>,
+    /// Applied in order, to keys by the names views show.
+    #[serde(default)]
+    pub transforms: Vec<ProfileTransform>,
+    /// Paths from the innermost frame out: a tree of callers.
+    #[serde(default)]
+    pub invert: bool,
+    /// The frames threads ran, rather than each async task's own stack.
+    #[serde(default)]
+    pub native: bool,
+    #[serde(default)]
+    pub granularity: ProfileGranularity,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileTransform {
+    pub op: TransformOp,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum TransformOp {
+    /// Keeps samples through the function, rooted at it.
+    Focus,
+    /// Removes the function, giving its cost to its callers.
+    Merge,
+    /// Removes the samples through the function.
+    Drop,
+    /// Merges the function's calls of itself.
+    Collapse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum ProfileGranularity {
+    /// Each function, inlined ones too.
+    #[default]
+    Function,
+    /// Each function as compiled, its inlined functions in it.
+    Physical,
+    /// Each source line of each function.
+    Line,
+    /// Each instruction.
+    Address,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileTimelineQuery {
+    #[serde(flatten)]
+    pub query: ProfileQuery,
+    /// Slices of the query's range, or of the whole profile.
+    pub buckets: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileSummary {
+    pub id: String,
+    pub name: String,
+    /// The program recorded.
+    pub program: Option<String>,
+    /// What a sample weighs: `nanoseconds` of CPU time, or `executions`.
+    pub unit: String,
+    pub samples: u64,
+    pub weight: u64,
+    /// Nanoseconds from the first sample to the last.
+    pub duration: i64,
+    pub threads: Vec<ProfileThread>,
+    /// Samples the kernel dropped.
+    pub lost: u64,
+    /// Times the kernel throttled sampling.
+    pub throttles: u64,
+    /// Stacks that ended short of their outermost frame, by reason.
+    pub truncations: Vec<ProfileCount>,
+    /// How the profile was recorded, by setting.
+    pub settings: Vec<ProfileSetting>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileThread {
+    pub row: u32,
+    pub pid: u32,
+    pub tid: u32,
+    pub name: Option<String>,
+    pub samples: u64,
+    pub weight: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileCount {
+    pub what: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileSetting {
+    pub name: String,
+    pub value: String,
+}
+
+/// A call tree: the binary frame before it holds, for each node in
+/// depth-first order, its own weight and total weight as `f64`s, then its
+/// key, an index into `keys`, and depth as `u32`s, column by column.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileTree {
+    pub nodes: u32,
+    /// The weight of every sample the query kept.
+    pub weight: u64,
+    pub samples: u64,
+    pub keys: Vec<ProfileKey>,
+}
+
+/// What a node or row stands for.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileKey {
+    /// How views name it, which transforms take.
+    pub name: String,
+    pub kind: ProfileKeyKind,
+    /// The module's file name.
+    pub module: Option<String>,
+    /// Where it is in the source.
+    pub file: Option<String>,
+    pub line: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum ProfileKeyKind {
+    Function,
+    Line,
+    /// Code no symbols describe.
+    Address,
+    /// Where a stack ended early.
+    Truncation,
+    /// An async task's root.
+    Task,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileFunctions {
+    pub weight: u64,
+    /// Most own weight first.
+    pub rows: Vec<ProfileCost>,
+    pub keys: Vec<ProfileKey>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileCost {
+    /// An index into `keys`.
+    pub key: u32,
+    pub own: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileTimeline {
+    /// The range sliced, in nanoseconds from the profile's start.
+    pub range: [i64; 2],
+    pub lanes: Vec<ProfileLane>,
+}
+
+/// One thread's weight in each slice.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProfileLane {
+    pub thread: u32,
+    pub weights: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1577,6 +1808,25 @@ mod tests {
         DrawInput::decl,
         Datum::decl,
         NumberKind::decl,
+        ProfileList::decl,
+        ProfileInfo::decl,
+        ProfileRef::decl,
+        ProfileQuery::decl,
+        ProfileTransform::decl,
+        TransformOp::decl,
+        ProfileGranularity::decl,
+        ProfileTimelineQuery::decl,
+        ProfileSummary::decl,
+        ProfileThread::decl,
+        ProfileCount::decl,
+        ProfileSetting::decl,
+        ProfileTree::decl,
+        ProfileKey::decl,
+        ProfileKeyKind::decl,
+        ProfileFunctions::decl,
+        ProfileCost::decl,
+        ProfileTimeline::decl,
+        ProfileLane::decl,
     ];
 
     /// Writes every message type as TypeScript.

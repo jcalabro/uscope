@@ -5,8 +5,8 @@
 //! slow one, such as loading a large program, never holds up the state,
 //! output, or other answers the tab is waiting for.
 //!
-//! Every message is JSON text but one: a drawing's numbers and bytes go in
-//! a binary frame just before its answer, the request's id as 8 bytes,
+//! Every message is JSON text but one: a drawing's numbers and bytes, and a
+//! profile's call tree, go in a binary frame just before its answer, the request's id as 8 bytes,
 //! little-endian, then the bytes.
 
 use std::sync::Arc;
@@ -15,15 +15,24 @@ use axum::body::Bytes;
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
 use tokio::sync::{broadcast, mpsc};
 
-use super::protocol::{self, Envelope, ErrorBody, ErrorKind, Hello, Role, ServerMessage};
+use super::profiles::{self, Profiles};
+use super::protocol::{
+    self, Envelope, ErrorBody, ErrorKind, Hello, ProfileList, Role, ServerMessage,
+};
 use super::session::Session;
 
 /// Answers waiting to be sent; a tab that stops reading slows only its own
 /// requests.
 const PENDING_ANSWERS: usize = 64;
 
-pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
+pub async fn serve(
+    mut socket: WebSocket,
+    session: Arc<Session>,
+    profiles: Arc<Profiles>,
+    role: Role,
+) {
     let mut joined = session.join(role);
+    let mut listed = profiles.subscribe();
     let connection = joined.connection;
     let hello = ServerMessage::Hello(Hello {
         version: protocol::VERSION,
@@ -33,7 +42,8 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
         cwd: session.cwd().display().to_string(),
     });
     let state = ServerMessage::State(Arc::clone(&joined.state.borrow_and_update()));
-    let mut opening = vec![encode(&hello), encode(&state)];
+    let list = ServerMessage::Profiles(ProfileList::clone(&listed.borrow_and_update()));
+    let mut opening = vec![encode(&hello), encode(&state), encode(&list)];
     opening.extend(joined.history.iter().map(|text| Utf8Bytes::from(&**text)));
     for text in opening {
         if socket.send(Message::Text(text)).await.is_err() {
@@ -50,7 +60,7 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
             biased;
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(text))) => {
-                    dispatch(&session, connection, role, text.as_str(), answers.clone());
+                    dispatch(&session, &profiles, connection, role, text.as_str(), answers.clone());
                     continue;
                 }
                 Some(Ok(Message::Binary(_))) => Message::Text(encode(&error(0, ErrorKind::Invalid, "messages are JSON text"))),
@@ -63,6 +73,13 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
                 }
                 let state = Arc::clone(&joined.state.borrow_and_update());
                 Message::Text(encode(&ServerMessage::State(state)))
+            }
+            changed = listed.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let list = ProfileList::clone(&listed.borrow_and_update());
+                Message::Text(encode(&ServerMessage::Profiles(list)))
             }
             Some(answer) = pending.recv() => answer,
             message = joined.messages.recv() => match message {
@@ -81,6 +98,7 @@ pub async fn serve(mut socket: WebSocket, session: Arc<Session>, role: Role) {
 
 fn dispatch(
     session: &Arc<Session>,
+    profiles: &Arc<Profiles>,
     connection: u32,
     role: Role,
     text: &str,
@@ -101,10 +119,12 @@ fn dispatch(
         }
     };
     let session = Arc::clone(session);
+    let profiles = Arc::clone(profiles);
     tokio::spawn(async move {
         let id = envelope.id;
         let answered = match envelope.request {
             protocol::Request::Draw(draw) => session.draw(&draw).await,
+            request if profiles::is_profile_request(&request) => profiles.handle(request).await,
             request => session
                 .handle(connection, role, request)
                 .await

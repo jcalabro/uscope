@@ -8,11 +8,16 @@ import { useConnection, useModel } from "../store";
 /** `/`: wherever the session is. */
 export function Home() {
   const state = useModel((model) => model.state);
+  const profile = useModel((model) => model.profiles.at(-1)?.id);
   if (!state) {
     return <div className="page muted">Connecting to uscope…</div>;
   }
   if (state.session) {
     return <Navigate to="/s/$session" params={{ session: state.session }} replace />;
+  }
+  // A server started on a profile, and debugging nothing, shows it.
+  if (profile && !state.busy) {
+    return <Navigate to="/profile/$profile" params={{ profile }} replace />;
   }
   // The program uscope started with is loading; its session comes next.
   if (state.busy) {

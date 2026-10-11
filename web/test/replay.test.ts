@@ -6,7 +6,7 @@ import { Connection, type TransportHandlers } from "../src/connection";
 import { initialModel, type Model, type ModelEvent, reduce } from "../src/model";
 import type { ServerMessage } from "../src/protocol";
 import { shown } from "../src/ui/Status";
-import { received, transcript, transcriptNames } from "./transcripts";
+import { binaries, received, transcript, transcriptNames } from "./transcripts";
 
 function replay(messages: ServerMessage[]): Model[] {
   const models: Model[] = [];
@@ -120,6 +120,7 @@ describe("the picker replacing a session", () => {
 describe("the connection, driven by recorded traffic", () => {
   it.each(transcriptNames())("%s: each request gets its own answer", async (name) => {
     const lines = transcript(name);
+    const frames = binaries(name);
     const events: ModelEvent[] = [];
     const { connection, sent, transport } = await openConnection((event) => events.push(event));
     const ask = connection.request.bind(connection) as (
@@ -142,6 +143,12 @@ describe("the connection, driven by recorded traffic", () => {
             (error: Error) => ({ error: error.message }),
           ),
         );
+      } else if ("binary" in line) {
+        const bytes = frames.get(line.binary.id) ?? new Uint8Array();
+        const frame = new Uint8Array(8 + bytes.length);
+        new DataView(frame.buffer).setBigUint64(0, BigInt(local.get(line.binary.id) ?? 0), true);
+        frame.set(bytes, 8);
+        transport.binary?.(frame.buffer);
       } else if (line.message.type === "result" || line.message.type === "error") {
         transport.message(JSON.stringify({ ...line.message, id: local.get(line.message.id) }));
       } else {
@@ -149,18 +156,24 @@ describe("the connection, driven by recorded traffic", () => {
       }
     }
     for (const line of lines) {
-      if (line.to === "page" && line.message.type === "result") {
-        expect(await answers.get(line.message.id)).toEqual({ ok: line.message.result });
-      } else if (line.to === "page" && line.message.type === "error") {
+      if (line.to !== "page" || !("message" in line)) {
+        continue;
+      }
+      if (line.message.type === "result") {
+        // An answer's bytes come with it.
+        const payload = frames.get(line.message.id);
+        const result = payload
+          ? { ...(line.message.result as object), payload }
+          : line.message.result;
+        expect(await answers.get(line.message.id)).toEqual({ ok: result });
+      } else if (line.message.type === "error") {
         expect(await answers.get(line.message.id)).toEqual({ error: line.message.error.message });
       }
     }
     // Answers never reach the model; everything else does, in order.
     const forwarded = events.flatMap((event) => (event.type === "message" ? [event.message] : []));
-    const expected = lines.flatMap((line) =>
-      line.to === "page" && line.message.type !== "result" && line.message.type !== "error"
-        ? [line.message]
-        : [],
+    const expected = received(name).filter(
+      (message) => message.type !== "result" && message.type !== "error",
     );
     expect(forwarded).toEqual(expected);
   });

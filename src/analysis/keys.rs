@@ -2,7 +2,7 @@
 
 use foldhash::HashMap;
 
-use super::index;
+use super::{CallTree, Costs, Query, index};
 use crate::CodeRole;
 use crate::capture::Capture;
 use crate::capture::records::{FrameKind, NONE, Truncation, role_of};
@@ -51,7 +51,7 @@ pub struct Keys<'a> {
 }
 
 impl<'a> Keys<'a> {
-    pub fn new(capture: &'a Capture, granularity: Granularity) -> Self {
+    pub(crate) fn new(capture: &'a Capture, granularity: Granularity) -> Self {
         let mut kinds = Vec::new();
         let mut known: HashMap<KeyKind, u32> = HashMap::default();
         let mut key = |kind: KeyKind| {
@@ -143,31 +143,37 @@ impl<'a> Keys<'a> {
         }
     }
 
+    #[must_use]
     pub const fn granularity(&self) -> Granularity {
         self.granularity
     }
 
     /// How many keys there are.
+    #[must_use]
     pub const fn count(&self) -> usize {
         self.kinds.len()
     }
 
     /// A frame's keys, innermost first.
+    #[must_use]
     pub fn frame(&self, frame: u32) -> &[u32] {
         let frame = frame as usize;
         &self.flat[self.starts[frame] as usize..self.starts[frame + 1] as usize]
     }
 
+    #[must_use]
     pub fn kind(&self, key: u32) -> KeyKind {
         self.kinds[key as usize]
     }
 
     /// The role of a key's code.
+    #[must_use]
     pub fn role(&self, key: u32) -> CodeRole {
         self.roles[key as usize]
     }
 
     /// The root of a task whose outermost code of its own is `key`'s.
+    #[must_use]
     pub fn task(&self, key: u32) -> Option<u32> {
         Some(self.tasks[key as usize]).filter(|task| *task != NONE)
     }
@@ -180,14 +186,56 @@ impl<'a> Keys<'a> {
             .map(index)
     }
 
+    /// Every key a view names `name`.
+    #[must_use]
+    pub fn named(&self, name: &str) -> Vec<u32> {
+        (0..index(self.count()))
+            .filter(|key| self.name(*key) == name)
+            .collect()
+    }
+
+    /// The call tree of the samples `query` selects.
+    #[must_use]
+    pub fn aggregate(&self, query: &Query) -> CallTree {
+        super::aggregate(self.capture, self, query)
+    }
+
+    /// What each key costs under `query`, most own weight first.
+    #[must_use]
+    pub fn functions(&self, query: &Query) -> Costs {
+        super::functions(self.capture, self, query)
+    }
+
+    /// The weight of kept samples in each of `buckets` slices of the
+    /// query's range, per selected thread with any.
+    #[must_use]
+    pub fn density(&self, query: &Query, buckets: usize) -> Vec<(u32, Vec<u64>)> {
+        super::density(self.capture, self, query, buckets)
+    }
+
     /// How a view names a key: a function's name, an address by module and
     /// offset, or a truncation's reason.
     pub fn name(&self, key: u32) -> String {
         let capture = self.capture;
         match self.kind(key) {
-            KeyKind::Function { function } | KeyKind::Line { function, .. } => capture
+            KeyKind::Function { function } => capture
                 .string(capture.functions[function as usize].name.get())
                 .to_owned(),
+            KeyKind::Line {
+                function,
+                file,
+                line,
+            } => {
+                let name = capture.string(capture.functions[function as usize].name.get());
+                match file {
+                    NONE => format!("{name}:{line}"),
+                    file => {
+                        let path = capture.string(file);
+                        let file = path.rsplit('/').next().unwrap_or(path);
+                        format!("{name} {file}:{line}")
+                    }
+                }
+            }
             KeyKind::Address { frame } => self.address_name(frame),
             KeyKind::Task { function, frame } => {
                 let root = match function {
@@ -211,6 +259,7 @@ impl<'a> Keys<'a> {
 
     /// The source file and line a key names, if any: a line's own, or where
     /// a function is declared.
+    #[must_use]
     pub fn location(&self, key: u32) -> Option<(&'a str, u32)> {
         let capture = self.capture;
         let (file, line) = match self.kind(key) {
@@ -231,6 +280,7 @@ impl<'a> Keys<'a> {
     }
 
     /// The module a key's code belongs to, by its file name.
+    #[must_use]
     pub fn module(&self, key: u32) -> Option<&'a str> {
         let capture = self.capture;
         let module = match self.kind(key) {

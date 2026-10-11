@@ -2,7 +2,7 @@
 // `reduce` is pure, so every behavior here is tested by replaying real
 // server traffic (test/replay.test.ts).
 
-import type { Hello, Notice, Person, ServerMessage, State, Stream } from "./protocol";
+import type { Hello, Notice, Person, ProfileInfo, ServerMessage, State, Stream } from "./protocol";
 
 /** How the page is connected. */
 export type Link =
@@ -37,6 +37,8 @@ export interface Model {
   /** The next piece's sequence number. */
   outputSeq: number;
   notices: Note[];
+  /** The profiles the server serves, whatever it debugs. */
+  profiles: ProfileInfo[];
 }
 
 /** The most output a tab keeps; older pieces are dropped first. */
@@ -54,6 +56,7 @@ export const initialModel: Model = {
   outputBytes: 0,
   outputSeq: 0,
   notices: [],
+  profiles: [],
 };
 
 export type ModelEvent =
@@ -86,6 +89,8 @@ export function reduce(model: Model, event: ModelEvent): Model {
       const notices = [...model.notices, { ...notice, at: event.at }].slice(-NOTICE_LIMIT);
       return { ...model, notices };
     }
+    case "profiles":
+      return { ...model, profiles: message.profiles };
     case "result":
     case "error":
       // Answers go to the request that asked; the connection routes them.

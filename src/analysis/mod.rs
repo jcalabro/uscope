@@ -9,19 +9,13 @@
 //! without symbols stands for itself, and a truncation for its reason.
 //! Each is a dense key.
 
-#![expect(
-    dead_code,
-    unused_imports,
-    reason = "the web's views read the rest, from P2.3"
-)]
-
 pub mod keys;
 pub mod query;
 #[cfg(test)]
 mod tests;
 
 pub use keys::{Granularity, KeyKind, Keys};
-pub use query::{CallTree, Cost, Query, Transform, aggregate, density, functions};
+pub use query::{CallTree, Cost, Costs, Query, Transform, aggregate, density, functions};
 
 /// A position in a capture's tables, which validation keeps within `u32`.
 fn index(position: usize) -> u32 {

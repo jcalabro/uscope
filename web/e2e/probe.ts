@@ -29,7 +29,7 @@ try {
   page.on("pageerror", (error) => console.error(`page error: ${error.stack ?? error.message}`));
   page.on("console", (message) => console.log(`console.${message.type()}: ${message.text()}`));
   await page.goto(server.link);
-  await page.waitForURL(/\/s\//);
+  await page.waitForURL(/\/(s|profile)\//);
   for (const [index, step] of steps.entries()) {
     const [kind, ...rest] = step.split(":");
     const argument = rest.join(":");

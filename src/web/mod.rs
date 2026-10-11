@@ -14,6 +14,7 @@ mod frame;
 mod inspect;
 mod lowlevel;
 mod picker;
+mod profiles;
 mod protocol;
 mod session;
 pub mod terminal;
@@ -50,10 +51,12 @@ const MAX_MESSAGE: usize = 1024 * 1024;
 Common forms:
   uscope web                       choose what to debug in the page
   uscope web EXECUTABLE [-- ARGS]  load a program, which runs at the first continue
+  uscope web PROFILE.usprof        explore a profile `uscope record` wrote
   uscope web --attach PID
   uscope web --core CORE [EXECUTABLE]")]
 pub struct WebArgs {
-    /// Executable to launch, or the one that wrote --core.
+    /// Executable to launch, or the one that wrote --core, or a profile to
+    /// explore.
     #[arg(value_name = "EXECUTABLE")]
     executable: Option<PathBuf>,
 
@@ -146,6 +149,7 @@ pub struct WebArgs {
 
 struct App {
     session: Arc<Session>,
+    profiles: Arc<profiles::Profiles>,
     origins: Origins,
     port: u16,
     public: Option<auth::PublicUrl>,
@@ -194,7 +198,8 @@ pub async fn run(args: &WebArgs) -> Result<()> {
     // Ctrl+C is caught from here on. One that comes while the program starts
     // ends the server once it has, so nothing is left half launched.
     let terminated = crate::dap::termination();
-    let start = start_from(args);
+    let profiles = profiles::Profiles::new();
+    let (start, profile) = what_to_serve(args, &profiles)?;
     let listener = bind(args).await?;
     let address = listener.local_addr().context("the listening address")?;
     let origins = Origins::new(address, args.allow_origins.clone(), args.public_url.clone());
@@ -213,13 +218,17 @@ pub async fn run(args: &WebArgs) -> Result<()> {
     session.resume_attached(args.resume);
     let app = Arc::new(App {
         session: Arc::clone(&session),
+        profiles,
         origins,
         port: address.port(),
         public: args.public_url.clone(),
     });
 
     // Before any debugger exists: see `terminal`.
-    let link = session.join_link(Role::Control, "/");
+    let link = session.join_link(
+        Role::Control,
+        &profile.map_or_else(|| "/".to_owned(), |id| format!("/profile/{id}")),
+    );
     let keys = if terminal::interactive() {
         match terminal::start_opener() {
             Ok(opener) => Some(terminal::Keys::listen(link.clone(), opener)?),
@@ -299,6 +308,44 @@ pub async fn run(args: &WebArgs) -> Result<()> {
     served
 }
 
+/// What to debug, or the profile to serve, by its id: the executable
+/// argument may name either.
+fn what_to_serve(
+    args: &WebArgs,
+    profiles: &profiles::Profiles,
+) -> Result<(Option<Start>, Option<String>)> {
+    let profile = match &args.executable {
+        Some(path) if args.core.is_none() => open_profile(profiles, path)?,
+        _ => None,
+    };
+    Ok(if profile.is_some() {
+        (None, profile)
+    } else {
+        (start_from(args), None)
+    })
+}
+
+/// Serves `path` when it is a profile, returning its id; a program is not.
+fn open_profile(profiles: &profiles::Profiles, path: &std::path::Path) -> Result<Option<String>> {
+    // Only a regular file is read here: a program may be one that blocks
+    // its reader, such as a FIFO, which the page is served while loading.
+    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return Ok(None);
+    }
+    let mut magic = [0; 8];
+    let is_profile = std::fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut magic))
+        .is_ok_and(|()| uscope::profiler::Profile::is_profile(&magic));
+    if !is_profile {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let id = profiles
+        .add(path, &bytes)
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(Some(id))
+}
+
 fn start_from(args: &WebArgs) -> Option<Start> {
     if let Some(pid) = args.attach {
         return Some(Start::Attach(ProcessId::new(pid)));
@@ -352,9 +399,10 @@ async fn socket(
         return (StatusCode::FORBIDDEN, "join with a link first").into_response();
     };
     let session = Arc::clone(&app.session);
+    let profiles = Arc::clone(&app.profiles);
     upgrade
         .max_message_size(MAX_MESSAGE)
-        .on_upgrade(move |socket| connection::serve(socket, session, role))
+        .on_upgrade(move |socket| connection::serve(socket, session, profiles, role))
 }
 
 /// Trades a join link's token for the cookie that carries it.

@@ -41,6 +41,8 @@ pub struct Web {
     pub base: String,
     /// `--public-url`'s host and origin, which a proxy's requests carry.
     pub public: Option<(String, String)>,
+    /// Where the printed link opens, when not the root.
+    pub link_to: Option<String>,
     transcript: Transcript,
     recording: Option<PathBuf>,
     started: Instant,
@@ -97,7 +99,9 @@ impl Web {
         });
         let link = link.expect("a link");
         let serving = serving.expect("the address it serves at");
-        let (front, token) = link.split_once("join#").expect("a join link");
+        let (joining, token) = link.rsplit_once('#').expect("a join link");
+        let (front, to) = joining.rsplit_once("join").expect("a join link");
+        let link_to = to.strip_prefix("?to=").map(str::to_owned);
         let (public, base) = if front == format!("http://{serving}/") {
             (None, "/".to_owned())
         } else {
@@ -115,6 +119,7 @@ impl Web {
             control_token: token.to_owned(),
             base,
             public,
+            link_to,
             transcript,
             recording,
             started,
@@ -438,16 +443,27 @@ impl Client {
     /// Draws a value: the `draw` answer and the bytes of the binary frame
     /// sent before it.
     pub async fn draw(&mut self, params: Value) -> Result<(Value, Vec<u8>), (String, String)> {
-        let id = self.next_id;
-        let drawing = self.request("draw", params).await?;
-        let index = self.binary.iter().position(|(frame, _)| *frame == id);
-        let bytes = index.map_or_else(Vec::new, |index| self.binary.remove(index).1);
+        let (drawing, bytes) = self.with_bytes("draw", params).await?;
         assert_eq!(
             drawing["bytes"].as_u64(),
             Some(bytes.len() as u64),
             "the binary frame holds the bytes the drawing counts"
         );
         Ok((drawing, bytes))
+    }
+
+    /// Sends a request whose answer may follow a binary frame: the answer,
+    /// and the frame's bytes, or none.
+    pub async fn with_bytes(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<(Value, Vec<u8>), (String, String)> {
+        let id = self.next_id;
+        let answer = self.request(method, params).await?;
+        let index = self.binary.iter().position(|(frame, _)| *frame == id);
+        let bytes = index.map_or_else(Vec::new, |index| self.binary.remove(index).1);
+        Ok((answer, bytes))
     }
 
     /// Sends a request that must succeed.

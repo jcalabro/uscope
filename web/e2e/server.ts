@@ -160,8 +160,9 @@ export function expectErrors(...errors: (string | RegExp)[]): void {
   expectedErrors.set(test.info().testId, errors);
 }
 
-/** Opens the join link and waits until the page shows the session. */
+/** Opens the join link and waits until the page shows the session, or
+ * the profile it links to. */
 export async function join(page: Page, link: string): Promise<void> {
   await page.goto(link);
-  await page.waitForURL(/\/(s\/[0-9a-f]+|pick)(\/|\?|$)/);
+  await page.waitForURL(/\/(s\/[0-9a-f]+|pick|profile\/[0-9a-f]+)(\/|\?|$)/);
 }

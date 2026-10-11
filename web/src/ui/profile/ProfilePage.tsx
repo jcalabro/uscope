@@ -1,0 +1,229 @@
+import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { useCallback, useMemo } from "react";
+import {
+  type ProfileLook,
+  type ProfileView,
+  parseRange,
+  parseTransform,
+  queryOf,
+  untransformed,
+  withLook,
+} from "../../profile/look";
+import { formatDuration, formatPercent, formatWeight } from "../../profile/paint";
+import type { ProfileGranularity, ProfileSummary } from "../../protocol";
+import { ProfileContext, type ProfileFocus, useAnswer, useProfile } from "./context";
+import { FlameView } from "./FlameView";
+import { FunctionsView } from "./FunctionsView";
+import { Timeline } from "./Timeline";
+import { TreeView } from "./TreeView";
+
+/** `/profile/$profile`: one profile, explored. */
+export function ProfilePage() {
+  const { profile } = useParams({ from: "/profile/$profile" });
+  const look = useSearch({ from: "/profile/$profile" });
+  const navigate = useNavigate();
+  const summary = useAnswer("profile", { profile });
+  const setLook = useCallback(
+    (change: (look: ProfileLook) => ProfileLook, push = false) =>
+      void navigate({
+        to: "/profile/$profile",
+        params: { profile },
+        search: change(look),
+        replace: !push,
+      }),
+    [navigate, profile, look],
+  );
+  const focus = useMemo<ProfileFocus | null>(
+    () =>
+      summary.data
+        ? { profile, summary: summary.data, look, query: queryOf(profile, look), setLook }
+        : null,
+    [profile, summary.data, look, setLook],
+  );
+
+  if (summary.error) {
+    return (
+      <div className="page">
+        <div className="card" style={{ width: "min(560px, 100%)" }} data-testid="profile-missing">
+          <div className="card-head">
+            <h1>No such profile</h1>
+          </div>
+          <div className="card-body">
+            <p style={{ margin: 0 }}>{summary.error.message}.</p>
+            <p className="muted" style={{ margin: 0 }}>
+              Serve it with <code>uscope web PROFILE.usprof</code>.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (!focus) {
+    return <div className="page muted">Reading the profile…</div>;
+  }
+  const view = look.view ?? "flame";
+  return (
+    <ProfileContext.Provider value={focus}>
+      <div className="profile" data-testid="profile">
+        <ProfileHead />
+        <Timeline />
+        <div className="profile-view">
+          {view === "functions" ? (
+            <FunctionsView />
+          ) : view === "tree" ? (
+            <TreeView />
+          ) : (
+            <FlameView />
+          )}
+        </div>
+        <ProfileFoot summary={focus.summary} />
+      </div>
+    </ProfileContext.Provider>
+  );
+}
+
+const VIEWS: { view: ProfileView; label: string }[] = [
+  { view: "flame", label: "Flame graph" },
+  { view: "tree", label: "Call tree" },
+  { view: "functions", label: "Functions" },
+];
+
+const GRANULARITIES: { by: ProfileGranularity; label: string }[] = [
+  { by: "function", label: "functions" },
+  { by: "physical", label: "functions, inlines folded" },
+  { by: "line", label: "lines" },
+  { by: "address", label: "instructions" },
+];
+
+/** The profile's name, the views, and everything the query holds, each
+ * removable where it shows. */
+function ProfileHead() {
+  const { summary, look, setLook } = useProfile();
+  const range = look.range ? parseRange(look.range) : null;
+  const program = summary.program?.slice(summary.program.lastIndexOf("/") + 1);
+  return (
+    <div className="profile-head">
+      <div className="profile-title">
+        <span className="program" title={summary.program ?? undefined}>
+          {program ?? summary.name}
+        </span>
+        <span className="muted">
+          {summary.name} · {formatDuration(summary.duration)} ·{" "}
+          {summary.samples.toLocaleString("en-US")} samples
+        </span>
+      </div>
+      <div className="segmented">
+        {VIEWS.map(({ view, label }) => (
+          <button
+            key={view}
+            type="button"
+            aria-pressed={(look.view ?? "flame") === view}
+            onClick={() =>
+              setLook((look) => withLook(look, "view", view === "flame" ? undefined : view), true)
+            }
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="profile-query">
+        {range ? (
+          <Chip
+            label={`${formatDuration(range[0])} – ${formatDuration(range[1])}`}
+            title="Samples in this time range"
+            remove={() => setLook((look) => withLook(look, "range", undefined))}
+          />
+        ) : null}
+        {look.th ? (
+          <Chip
+            label={`${look.th.length} ${look.th.length === 1 ? "thread" : "threads"}`}
+            title="Samples of these threads"
+            remove={() => setLook((look) => withLook(look, "th", undefined))}
+          />
+        ) : null}
+        {(look.tf ?? []).map((entry, index) => {
+          const transform = parseTransform(entry);
+          return transform ? (
+            <Chip
+              key={entry}
+              label={`${transform.op} ${transform.name}`}
+              title="Remove this transform and those after it"
+              remove={() => setLook((look) => untransformed(look, index), true)}
+            />
+          ) : null;
+        })}
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={look.invert === "1"}
+            onChange={(event) =>
+              setLook((look) => withLook(look, "invert", event.target.checked ? "1" : undefined))
+            }
+          />
+          Inverted
+        </label>
+        <label className="check" title="Show each async task's frames as a stack of its own">
+          <input
+            type="checkbox"
+            checked={look.native !== "1"}
+            onChange={(event) =>
+              setLook((look) => withLook(look, "native", event.target.checked ? undefined : "1"))
+            }
+          />
+          Async stacks
+        </label>
+        <select
+          className="input profile-by"
+          aria-label="Frames by"
+          value={look.by ?? "function"}
+          onChange={(event) => {
+            const by = event.target.value as ProfileGranularity;
+            setLook((look) => withLook(look, "by", by === "function" ? undefined : by));
+          }}
+        >
+          {GRANULARITIES.map(({ by, label }) => (
+            <option key={by} value={by}>
+              by {label}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
+function Chip({ label, title, remove }: { label: string; title: string; remove: () => void }) {
+  return (
+    <span className="chip profile-chip" title={title}>
+      {label}
+      <button type="button" aria-label={`Remove ${label}`} onClick={remove}>
+        ×
+      </button>
+    </span>
+  );
+}
+
+/** What the profile cannot show, always in view. */
+function ProfileFoot({ summary }: { summary: ProfileSummary }) {
+  const truncated = summary.truncations.reduce((sum, each) => sum + each.count, 0);
+  const setting = (name: string) => summary.settings.find((each) => each.name === name)?.value;
+  const source = setting("source");
+  const stack = setting("stack bytes");
+  return (
+    <div className="profile-foot" data-testid="accounting">
+      <span>{formatWeight(summary.weight, summary.unit)} sampled</span>
+      {source ? <span>{source}</span> : null}
+      {stack ? <span>{stack} B of stack copied</span> : null}
+      <span className={summary.lost > 0 ? "warn" : undefined}>lost {summary.lost}</span>
+      <span className={summary.throttles > 0 ? "warn" : undefined}>
+        throttled {summary.throttles}
+      </span>
+      <span
+        className={truncated > 0 ? "warn" : undefined}
+        title={summary.truncations.map((each) => `${each.what}: ${each.count}`).join("\n")}
+      >
+        truncated {formatPercent(truncated, summary.samples)}
+      </span>
+    </div>
+  );
+}

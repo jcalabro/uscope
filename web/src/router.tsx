@@ -10,8 +10,10 @@ import {
 } from "@tanstack/react-router";
 import { base } from "./base";
 import { parseSearch, stringifySearch, validateLook } from "./focus";
+import { validateProfileLook } from "./profile/look";
 import { Picker, pickerSearch } from "./ui/Picker";
 import { Home, Join, SessionPage } from "./ui/pages";
+import { ProfilePage } from "./ui/profile/ProfilePage";
 import { Shell } from "./ui/Shell";
 import { Workspace } from "./ui/Workspace";
 
@@ -68,10 +70,20 @@ const taskRoute = createRoute({
   component: Workspace,
 });
 
+/** A profile the server serves, which belongs to no session: its id
+ * names its bytes, so the link opens it wherever it is served. */
+const profileRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/profile/$profile",
+  validateSearch: validateProfileLook,
+  component: ProfilePage,
+});
+
 const routeTree = rootRoute.addChildren([
   homeRoute,
   joinRoute,
   pickRoute,
+  profileRoute,
   sessionRoute.addChildren([sessionIndexRoute, liveRoute, stopRoute, taskRoute]),
 ]);
 

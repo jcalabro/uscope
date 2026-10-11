@@ -25,7 +25,8 @@ and Ada.
   happen.
 - **Profiling.** `uscope record` samples where a program spends its time
   from outside it, with stacks that are exact or say why they stop, and
-  `uscope report` summarizes the profile.
+  async tasks shown as stacks of their own. `uscope report` summarizes a
+  profile, and `uscope web` explores it in the browser.
 - **Honest output.** When a value is optimized out or memory cannot be read,
   uscope says so instead of guessing.
 

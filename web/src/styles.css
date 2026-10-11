@@ -2598,3 +2598,232 @@ kbd {
 .menu-item:focus {
   background: var(--select-bg);
 }
+
+/* ---------- profiles ---------- */
+
+.profile {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  min-height: 0;
+  background: var(--surface);
+}
+
+.profile-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.profile-head .segmented {
+  margin-left: 0;
+}
+
+.profile-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.profile-title .program {
+  font: 600 13px var(--mono);
+}
+
+.profile-query {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+
+.profile-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: default;
+}
+
+.profile-chip button {
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.profile-chip button:hover {
+  color: var(--ink);
+}
+
+.profile-query .profile-by {
+  width: auto;
+  padding: 3px 6px;
+}
+
+.profile-search {
+  width: 220px;
+  margin-left: auto;
+  padding: 2px 7px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.profile-timeline {
+  display: flex;
+  max-height: 160px;
+  overflow: auto;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.lane-names {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+}
+
+.lane-name {
+  height: 18px;
+  padding: 0 8px;
+  overflow: hidden;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  font: 11px / 18px var(--mono);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.lane-name.selected {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.lane-name .dim {
+  color: var(--ink-3);
+}
+
+.lanes {
+  flex: none;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.profile-view {
+  display: grid;
+  min-height: 0;
+}
+
+.profile-view > .pane {
+  min-height: 0;
+}
+
+.flame {
+  position: relative;
+}
+
+.flame canvas {
+  display: block;
+  cursor: pointer;
+}
+
+.flame-tip {
+  position: absolute;
+  z-index: 5;
+  max-width: 320px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.profile-details {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 4px 10px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.profile-details .name {
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-rows {
+  position: relative;
+}
+
+.tree-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  cursor: pointer;
+}
+
+.tree-row:hover {
+  background: var(--surface-2);
+}
+
+.tree-row .percent {
+  flex: none;
+  width: 56px;
+  text-align: right;
+}
+
+.tree-row .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.profile-functions {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.profile-functions:has(> :only-child) {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.profile-sandwich {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-height: 0;
+  border-top: 1px solid var(--line-strong);
+}
+
+.profile-sandwich > .pane:first-child {
+  border-right: 1px solid var(--line);
+}
+
+.profile-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font: 11px var(--mono);
+}
+
+.profile-foot .warn {
+  color: var(--changed);
+}

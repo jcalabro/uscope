@@ -60,6 +60,11 @@ export interface Results {
   renderer: P.RendererSource;
   renderers: P.RendererList;
   reloadViews: null;
+  profile: P.ProfileSummary;
+  /** With the call tree's columns. */
+  profileTree: P.ProfileTree & { payload?: Uint8Array };
+  profileFunctions: P.ProfileFunctions;
+  profileTimeline: P.ProfileTimeline;
 }
 
 // Fails to compile when a method has no entry in Results, or Results names

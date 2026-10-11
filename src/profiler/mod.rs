@@ -4,6 +4,8 @@
 
 mod record;
 
+pub use crate::analysis::{CallTree, Cost, Costs, Granularity, KeyKind, Keys, Query, Transform};
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -55,6 +57,15 @@ pub enum SampleSource {
     /// Each execution of the first instruction of the function a symbol of
     /// the program names. The program runs without address randomization.
     Function { symbol: String },
+}
+
+impl std::fmt::Display for SampleSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Clock { rate } => write!(f, "CPU time at {rate} Hz"),
+            Self::Function { symbol } => write!(f, "each call of {symbol}"),
+        }
+    }
 }
 
 /// How to record.
@@ -187,7 +198,7 @@ pub fn record(command: Command, options: &RecordOptions) -> Result<Recording, Re
     builder.setting("program", &program.to_string_lossy());
     builder.setting("pid", &pid.to_string());
     builder.setting("ring pages", &ring_pages.to_string());
-    builder.setting("source", &format!("{:?}", options.source));
+    builder.setting("source", &options.source.to_string());
     let weight = match options.source {
         SampleSource::Clock { .. } => "nanoseconds",
         SampleSource::Function { .. } => "executions",
@@ -213,10 +224,10 @@ fn monotonic() -> u64 {
 }
 
 /// The query of every sample, seen as `view` shows stacks.
-fn query(view: StackView) -> crate::analysis::Query {
-    crate::analysis::Query {
+fn query(view: StackView) -> Query {
+    Query {
         logical: view == StackView::Logical,
-        ..crate::analysis::Query::default()
+        ..Query::default()
     }
 }
 
@@ -310,6 +321,19 @@ pub enum StackView {
     Native,
 }
 
+/// A thread a profile sampled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileThread {
+    /// The thread's row, by which a [`Query`] selects it.
+    pub row: u32,
+    pub pid: u32,
+    pub tid: u32,
+    /// The name it last had, if the kernel reported one.
+    pub name: Option<String>,
+    pub samples: u64,
+    pub weight: u64,
+}
+
 /// A function called from its parent's node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallNode {
@@ -333,9 +357,19 @@ pub struct ReadProfile {
 impl Profile {
     /// Reads a profile file.
     pub fn read(path: &Path) -> Result<ReadProfile, ProfileFileError> {
-        let bytes = std::fs::read(path)?;
+        Self::from_bytes(&std::fs::read(path)?)
+    }
+
+    /// Whether `bytes` begin as a profile file does.
+    #[must_use]
+    pub fn is_profile(bytes: &[u8]) -> bool {
+        bytes.starts_with(&file::FILE_MAGIC)
+    }
+
+    /// Reads the bytes of a profile file.
+    pub fn from_bytes(bytes: &[u8]) -> Result<ReadProfile, ProfileFileError> {
         let read =
-            file::read(&bytes).map_err(|error| ProfileFileError::Invalid(error.to_string()))?;
+            file::read(bytes).map_err(|error| ProfileFileError::Invalid(error.to_string()))?;
         Ok(ReadProfile {
             profile: Self {
                 capture: read.capture,
@@ -362,6 +396,22 @@ impl Profile {
         self.capture.setting(key)
     }
 
+    /// Every setting the recording recorded, by key.
+    #[must_use]
+    pub fn settings(&self) -> Vec<(&str, &str)> {
+        let capture = &self.capture;
+        capture
+            .settings
+            .iter()
+            .map(|setting| {
+                (
+                    capture.string(setting.key.get()),
+                    capture.string(setting.value.get()),
+                )
+            })
+            .collect()
+    }
+
     /// The first and last times the recording saw, in nanoseconds of
     /// `CLOCK_MONOTONIC`.
     #[must_use]
@@ -380,12 +430,51 @@ impl Profile {
             .sum()
     }
 
+    /// The keys frames stand for at `granularity`, through which every
+    /// query of the profile runs.
+    #[must_use]
+    pub fn keys(&self, granularity: Granularity) -> Keys<'_> {
+        Keys::new(&self.capture, granularity)
+    }
+
+    /// Each thread that was sampled, by its row, which queries name.
+    #[must_use]
+    pub fn threads(&self) -> Vec<ProfileThread> {
+        let capture = &self.capture;
+        capture
+            .sample_ranges
+            .iter()
+            .map(|range| {
+                let row = range.thread.get();
+                let thread = &capture.threads[row as usize];
+                let samples = capture.thread_samples(range);
+                ProfileThread {
+                    row,
+                    pid: capture.processes[thread.process.get() as usize].pid.get(),
+                    tid: thread.tid.get(),
+                    name: Some(capture.string(thread.name.get()))
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned),
+                    samples: samples.len() as u64,
+                    weight: samples.iter().map(|sample| sample.weight.get()).sum(),
+                }
+            })
+            .collect()
+    }
+
+    /// How many times the kernel throttled sampling.
+    #[must_use]
+    pub fn throttles(&self) -> u64 {
+        self.capture
+            .account(crate::capture::records::AccountKind::Throttles as u32)
+    }
+
     /// What each function costs, most expensive first.
     #[must_use]
     pub fn top(&self, view: StackView) -> Vec<FunctionCost> {
-        let keys =
-            crate::analysis::Keys::new(&self.capture, crate::analysis::Granularity::Function);
-        crate::analysis::functions(&self.capture, &keys, &query(view))
+        let keys = self.keys(Granularity::Function);
+        keys.functions(&query(view))
+            .rows
             .into_iter()
             .map(|cost| FunctionCost {
                 name: keys.name(cost.key),
@@ -399,9 +488,8 @@ impl Profile {
     /// their children.
     #[must_use]
     pub fn call_tree(&self, view: StackView) -> Vec<CallNode> {
-        let keys =
-            crate::analysis::Keys::new(&self.capture, crate::analysis::Granularity::Function);
-        let tree = crate::analysis::aggregate(&self.capture, &keys, &query(view));
+        let keys = self.keys(Granularity::Function);
+        let tree = keys.aggregate(&query(view));
         (0..tree.len())
             .map(|node| CallNode {
                 parent: (tree.parent[node] != NONE).then_some(tree.parent[node] as usize),
